@@ -472,6 +472,28 @@ export function defaultProposedAgentName(agentCommand: string, host: string): st
   return `${inferRuntimeLabel(agentCommand)} on ${host}`.slice(0, 80)
 }
 
+export function defaultAgentCommandForEnvironment(env: NodeJS.ProcessEnv = process.env): string {
+  if (hasAnyEnvPrefix(env, "CODEX_")) {
+    return "codex acp"
+  }
+  if (
+    hasAnyEnvPrefix(env, "CLAUDE_") ||
+    env.CLAUDECODE ||
+    env.CLAUDE_CODE ||
+    env.CLAUDE_CODE_ENTRYPOINT
+  ) {
+    return "claude acp"
+  }
+  if (hasAnyEnvPrefix(env, "HERMES_")) {
+    return "hermes acp"
+  }
+  return "npx -y @agentclientprotocol/claude-agent-acp"
+}
+
+function hasAnyEnvPrefix(env: NodeJS.ProcessEnv, prefix: string): boolean {
+  return Object.keys(env).some((key) => key.startsWith(prefix))
+}
+
 async function main() {
   const parsed = parseBridgeArgs(process.argv.slice(2))
   try {
@@ -505,7 +527,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
 
   const agentCommand =
     getFlag(parsed.flags, "agent-command", process.env.ZERO_CHAT_AGENT_COMMAND) ??
-    "npx -y @agentclientprotocol/claude-agent-acp"
+    defaultAgentCommandForEnvironment()
   const skillPath = getFlag(parsed.flags, "skill-path", process.env.ZERO_CHAT_SKILL_PATH)
   const installMode =
     getFlag(parsed.flags, "install-mode", process.env.ZERO_CHAT_BRIDGE_INSTALL_MODE) ?? "unknown"
