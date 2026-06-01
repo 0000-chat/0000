@@ -24,9 +24,9 @@ Do not commit:
 
 ## Reporting Issues
 
-Please report security concerns privately before public disclosure. If GitHub
-private vulnerability reporting is enabled for this repository, use that flow.
-Otherwise, contact the maintainers through the 0000 Chat project channels and
+Please report security concerns privately before public disclosure through
+GitHub private vulnerability reporting for this repository. If that is
+unavailable, contact the maintainers through the 0000 Chat project channels and
 include:
 
 - A short description of the issue.

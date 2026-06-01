@@ -30,6 +30,28 @@ If `$HOME/0000` already exists, the installer runs:
 git -C "$HOME/0000" pull --ff-only
 ```
 
+## Manual Install
+
+If you do not want to run `curl | bash`, inspect this repository first and run
+the same steps manually:
+
+```bash
+git clone https://github.com/0000-chat/0000.git "$HOME/0000"
+cd "$HOME/0000"
+bun install
+bun run bridge connect "<connection-code>" --app-url "https://0000.chat" --skill-path "$HOME/.claude/skills/0000/SKILL.md" --install-mode "manual"
+```
+
+After 0000 Chat shows the pending bridge, approve it in the app, then start:
+
+```bash
+cd "$HOME/0000"
+bun run bridge start
+```
+
+Connection codes are short lived. Generate a fresh code from 0000 Chat when
+you are ready to run the manual command.
+
 ## Files Written
 
 | Path | Purpose | Contains secret material |

@@ -28,3 +28,11 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Generate SBOM
+        run: bun run sbom
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json

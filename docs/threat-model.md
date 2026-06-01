@@ -18,6 +18,8 @@ agent process while still using 0000 Chat as the coordination surface.
   local agent work according to its own permissions and approval model.
 - The public bridge repo is separate from the private 0000 Chat app/backend.
 
+For a more direct capability breakdown, see [Permissions](permissions.md).
+
 ## Main Risks
 
 - A stolen bridge token could let another process impersonate the bridge.
@@ -44,4 +46,3 @@ agent process while still using 0000 Chat as the coordination surface.
 - Stop the bridge process at any time.
 - Delete local pairing state under `$HOME/.0000`.
 - Use the app's bridge/device settings to approve or remove bridge access.
-
