@@ -45,11 +45,48 @@ describe("bridge session cwd safety", () => {
 
     expect(contexts[0]?.cwd).toBe("/Users/alice/private-project")
   })
+
+  test("uses configured agent names instead of runtime labels for run start events", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@zed-industries/codex-acp@latest"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "codex:codex-acp",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.events[0]?.[0]?.normalizedPayload).toMatchObject({
+      text: "Agent started this run.",
+    })
+  })
 })
 
 function fakeCloudClient() {
+  const events: Array<Array<{ normalizedPayload?: unknown }>> = []
   return {
-    appendEvents: async <TResponse = Record<string, unknown>>() => ({}) as TResponse,
+    events,
+    appendEvents: async <TResponse = Record<string, unknown>>(
+      input: Array<{ normalizedPayload?: unknown }>,
+    ) => {
+      events.push(input)
+      return {} as TResponse
+    },
     markResult: async <TResponse = Record<string, unknown>>() => ({}) as TResponse,
   }
 }
