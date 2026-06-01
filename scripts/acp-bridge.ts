@@ -21,6 +21,7 @@ import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./herm
 import {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
+  DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
@@ -29,6 +30,7 @@ import type { BridgeRuntimeProfile } from "./hermes-bridge/runtime-profiles"
 export {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
+  DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
@@ -1024,7 +1026,7 @@ function normalizeCommand(command?: string): BridgeCommandName {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "npx -y @agentclientprotocol/claude-agent-acp"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: ${DEFAULT_BRIDGE_LOG_URL})\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: ${DEFAULT_BRIDGE_LOG_URL})\n\n`
 }
 
 function getStatusPath(flags: FlagMap): string {

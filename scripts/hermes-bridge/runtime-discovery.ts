@@ -7,7 +7,7 @@ import {
   profileIdForCommand,
   synthesizeLegacyHermesProfile,
 } from "./runtime-profiles"
-import { DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
+import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
 
 export type CommandResult = { ok: boolean; stdout: string; stderr?: string }
 export type AcpProbeResult = { ok: true } | { ok: false; reason: string }
@@ -27,7 +27,12 @@ const BUILT_INS: Array<{
 }> = [
   { kind: "hermes", label: "Hermes", command: ["hermes", "acp"], binary: "hermes" },
   { kind: "codex", label: "Codex", command: DEFAULT_CODEX_ACP_COMMAND.split(" "), binary: "npx" },
-  { kind: "claude-code", label: "Claude Code", command: ["claude", "acp"], binary: "claude" },
+  {
+    kind: "claude-code",
+    label: "Claude Code",
+    command: DEFAULT_CLAUDE_CODE_ACP_COMMAND.split(" "),
+    binary: "npx",
+  },
   { kind: "openclaw", label: "OpenClaw", command: ["openclaw", "acp"], binary: "openclaw" },
 ]
 
@@ -121,7 +126,9 @@ async function profileForBuiltIn(
       id:
         builtIn.kind === "hermes"
           ? "hermes:default"
-          : profileIdForCommand(builtIn.kind, builtIn.command),
+          : builtIn.kind === "claude-code"
+            ? "claude-code:claude-agent-acp"
+            : profileIdForCommand(builtIn.kind, builtIn.command),
       kind: builtIn.kind,
       label: builtIn.label,
       command: builtIn.command,

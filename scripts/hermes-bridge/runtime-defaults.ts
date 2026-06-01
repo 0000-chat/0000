@@ -1,4 +1,6 @@
 export const DEFAULT_CODEX_ACP_COMMAND = "npx --yes @zed-industries/codex-acp@latest"
+export const DEFAULT_CLAUDE_CODE_ACP_COMMAND =
+  "npx --yes @agentclientprotocol/claude-agent-acp@latest"
 
 export function inferRuntimeId(agentCommand: string): string {
   const normalized = agentCommand.toLowerCase()
@@ -42,12 +44,12 @@ export function defaultAgentCommandForEnvironment(env: NodeJS.ProcessEnv = proce
     env.CLAUDE_CODE ||
     env.CLAUDE_CODE_ENTRYPOINT
   ) {
-    return "claude acp"
+    return DEFAULT_CLAUDE_CODE_ACP_COMMAND
   }
   if (hasAnyEnvPrefix(env, "HERMES_")) {
     return "hermes acp"
   }
-  return "npx -y @agentclientprotocol/claude-agent-acp"
+  return DEFAULT_CLAUDE_CODE_ACP_COMMAND
 }
 
 function hasAnyEnvPrefix(env: NodeJS.ProcessEnv, prefix: string): boolean {
