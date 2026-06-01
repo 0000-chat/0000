@@ -29,6 +29,12 @@ export type NormalizedBridgeEvent = {
 
 type JsonRecord = Record<string, unknown>
 
+type NormalizedAvailableCommand = {
+  name: string
+  description?: string
+  inputHint?: string
+}
+
 const MAX_EVENT_STRING_LENGTH = 12_000
 const MAX_EVENT_ARRAY_LENGTH = 50
 const MAX_EVENT_OBJECT_KEYS = 80
@@ -167,6 +173,15 @@ function normalizeSessionUpdatePart(kind: string, update: JsonRecord): BridgeMes
     }
   }
 
+  if (kind === "available_commands_update") {
+    return {
+      type: "event",
+      text: "Available commands updated",
+      json: { availableCommands: normalizeAvailableCommandsFromUpdate(update) },
+      status: "streaming",
+    }
+  }
+
   const text = truncateEventText(extractTextFromAcpUpdate(update))
   return text
     ? { type: "event", text, json: truncateEventValue(update), status: "streaming" }
@@ -184,6 +199,40 @@ function normalizeEventPayload(kind: string, record: JsonRecord): unknown {
   }
 
   return truncateEventValue(record)
+}
+
+function normalizeAvailableCommandsFromUpdate(update: JsonRecord): NormalizedAvailableCommand[] {
+  const commands =
+    arrayFromUnknown(update.availableCommands) ??
+    arrayFromUnknown(update.available_commands) ??
+    arrayFromUnknown(update.commands) ??
+    []
+
+  return commands
+    .map((command) => normalizeAvailableCommand(command))
+    .filter((command): command is NormalizedAvailableCommand => command !== undefined)
+}
+
+function normalizeAvailableCommand(command: unknown): NormalizedAvailableCommand | undefined {
+  const record = maybeRecord(command)
+  if (!record) {
+    return undefined
+  }
+  const name = normalizeCommandName(readString(record.name) ?? readString(record.command))
+  if (!name) {
+    return undefined
+  }
+  const input = maybeRecord(record.input)
+  return removeUndefinedValues({
+    name,
+    description: readString(record.description),
+    inputHint: readString(input?.hint),
+  }) as NormalizedAvailableCommand
+}
+
+function normalizeCommandName(value: string | undefined): string | undefined {
+  const name = value?.trim().replace(/^\/+/, "")
+  return name ? name : undefined
 }
 
 function compactToolEvent(update: JsonRecord): JsonRecord {
@@ -283,6 +332,10 @@ function asRecord(value: unknown): JsonRecord {
 
 function maybeRecord(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" ? (value as JsonRecord) : undefined
+}
+
+function arrayFromUnknown(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined
 }
 
 function readString(value: unknown): string | undefined {
