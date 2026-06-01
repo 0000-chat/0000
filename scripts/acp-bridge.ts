@@ -827,7 +827,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           buildAgentToolsMcpServers({
             agentSessionId: sessionKey,
             appUrl: registration.appUrl,
-            agentToolsUrl: registration.bridgeApiUrl ?? registration.appUrl,
+            agentToolsUrl: registration.appUrl,
             bridgeToken: registration.bridgeToken,
             deviceId: registration.deviceId,
             threadId,
