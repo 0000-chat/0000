@@ -53,6 +53,7 @@ type AgentToolMcpEnv = {
   bridgeToken: string
   deviceId: string
   threadId?: string
+  toolBaseUrl?: string
 }
 type AgentToolFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -303,6 +304,7 @@ export function buildAgentToolMcpEnv(env: NodeJS.ProcessEnv): AgentToolMcpEnv {
     deviceId: requiredEnv(env, "ZERO_CHAT_BRIDGE_DEVICE_ID"),
     agentSessionId: requiredEnv(env, "ZERO_CHAT_AGENT_SESSION_ID"),
     threadId: optionalEnv(env, "ZERO_CHAT_THREAD_ID"),
+    toolBaseUrl: optionalEnv(env, "ZERO_CHAT_AGENT_TOOLS_URL"),
   }
 }
 
@@ -312,7 +314,7 @@ export async function invokeAgentToolOverHttp(
   input: unknown,
   fetchImpl: AgentToolFetch = fetch,
 ): Promise<unknown> {
-  const response = await fetchImpl(buildEndpoint(env.appUrl, "/api/agent-tools/invoke"), {
+  const response = await fetchImpl(buildEndpoint(env.toolBaseUrl ?? env.appUrl, "/api/agent-tools/invoke"), {
     method: "POST",
     headers: {
       authorization: `Bearer ${env.bridgeToken}`,

@@ -102,6 +102,7 @@ describe("agent tools MCP server helpers", () => {
       buildAgentToolMcpEnv({
         ZERO_CHAT_AGENT_SESSION_ID: "agent_session_1",
         ZERO_CHAT_APP_URL: "https://chat.example.test/app",
+        ZERO_CHAT_AGENT_TOOLS_URL: "https://bridge.example.test",
         ZERO_CHAT_BRIDGE_DEVICE_ID: "device_123",
         ZERO_CHAT_BRIDGE_TOKEN: "secret-token",
         ZERO_CHAT_THREAD_ID: "thread_abc",
@@ -112,6 +113,7 @@ describe("agent tools MCP server helpers", () => {
       bridgeToken: "secret-token",
       deviceId: "device_123",
       threadId: "thread_abc",
+      toolBaseUrl: "https://bridge.example.test",
     })
     expect(() => buildAgentToolMcpEnv({})).toThrow(/ZERO_CHAT_APP_URL/)
   })
@@ -127,6 +129,7 @@ describe("agent tools MCP server helpers", () => {
           bridgeToken: "secret-token",
           deviceId: "device_123",
           threadId: "thread_abc",
+          toolBaseUrl: "https://bridge.example.test",
         },
         "databases.create",
         { name: "Customers" },
@@ -140,7 +143,7 @@ describe("agent tools MCP server helpers", () => {
       ),
     ).resolves.toEqual({ ok: true, result: { slug: "customers" } })
 
-    expect(requests[0]?.url).toBe("https://chat.example.test/api/agent-tools/invoke")
+    expect(requests[0]?.url).toBe("https://bridge.example.test/api/agent-tools/invoke")
     expect(requests[0]?.headers.get("authorization")).toBe("Bearer secret-token")
     expect(await requests[0]?.json()).toEqual({
       agentSessionId: "agent_session_1",

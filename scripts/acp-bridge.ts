@@ -188,6 +188,7 @@ export type HermesProfileSummary = {
 type AgentToolsMcpServerInput = {
   agentSessionId: string
   appUrl: string
+  agentToolsUrl?: string
   bridgeToken: string
   deviceId: string
   threadId?: string
@@ -443,6 +444,9 @@ export function buildAgentToolsMcpServers(input: AgentToolsMcpServerInput): Herm
       env: [
         { name: "ZERO_CHAT_AGENT_SESSION_ID", value: input.agentSessionId },
         { name: "ZERO_CHAT_APP_URL", value: input.appUrl },
+        ...(input.agentToolsUrl
+          ? [{ name: "ZERO_CHAT_AGENT_TOOLS_URL", value: input.agentToolsUrl }]
+          : []),
         { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: input.deviceId },
         ...(input.threadId ? [{ name: "ZERO_CHAT_THREAD_ID", value: input.threadId }] : []),
         { name: "ZERO_CHAT_BRIDGE_TOKEN", value: input.bridgeToken },
@@ -823,6 +827,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           buildAgentToolsMcpServers({
             agentSessionId: sessionKey,
             appUrl: registration.appUrl,
+            agentToolsUrl: registration.bridgeApiUrl ?? registration.appUrl,
             bridgeToken: registration.bridgeToken,
             deviceId: registration.deviceId,
             threadId,

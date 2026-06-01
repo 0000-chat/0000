@@ -7,6 +7,7 @@ import {
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
+  buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getConvexUrl,
@@ -49,6 +50,35 @@ describe("bridge Convex URL resolution", () => {
         {},
       ),
     ).toBe("https://uncommon-starfish-672.convex.cloud")
+  })
+})
+
+describe("bridge MCP helper configuration", () => {
+  test("uses bridge API URL for agent tool invocation while preserving app URL", () => {
+    expect(
+      buildAgentToolsMcpServers({
+        agentSessionId: "agent_session_1",
+        agentToolsUrl: "https://example-123.convex.site",
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-a",
+        deviceId: "bridge_a",
+        threadId: "thread_1",
+      }),
+    ).toEqual([
+      {
+        args: ["scripts/agent-tools-mcp.ts"],
+        command: "bun",
+        env: [
+          { name: "ZERO_CHAT_AGENT_SESSION_ID", value: "agent_session_1" },
+          { name: "ZERO_CHAT_APP_URL", value: "https://0000.chat" },
+          { name: "ZERO_CHAT_AGENT_TOOLS_URL", value: "https://example-123.convex.site" },
+          { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: "bridge_a" },
+          { name: "ZERO_CHAT_THREAD_ID", value: "thread_1" },
+          { name: "ZERO_CHAT_BRIDGE_TOKEN", value: "token-a" },
+        ],
+        name: "0000-chat",
+      },
+    ])
   })
 })
 
