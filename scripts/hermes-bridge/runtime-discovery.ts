@@ -127,7 +127,7 @@ async function profileForBuiltIn(
         builtIn.kind === "hermes"
           ? "hermes:default"
           : builtIn.kind === "claude-code"
-            ? "claude-code:claude-agent-acp"
+            ? "claude-code:claude-acp"
             : profileIdForCommand(builtIn.kind, builtIn.command),
       kind: builtIn.kind,
       label: builtIn.label,
