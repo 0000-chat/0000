@@ -4,11 +4,14 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getConvexUrl,
+  normalizeBridgeConfigFile,
+  upsertBridgeRegistration,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge"
@@ -46,6 +49,112 @@ describe("bridge Convex URL resolution", () => {
         {},
       ),
     ).toBe("https://uncommon-starfish-672.convex.cloud")
+  })
+})
+
+describe("bridge multi-organization config", () => {
+  test("normalizes legacy single-device bridge configs into one registration", () => {
+    expect(
+      normalizeBridgeConfigFile({
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-a",
+        deviceId: "bridge_a",
+        deviceName: "Laptop",
+        pairedAt: "2026-06-01T00:00:00.000Z",
+      }),
+    ).toEqual({
+      version: 2,
+      registrations: [
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "token-a",
+          deviceId: "bridge_a",
+          deviceName: "Laptop",
+          pairedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    })
+  })
+
+  test("upserts bridge registrations without deleting other organizations", () => {
+    const original = normalizeBridgeConfigFile({
+      version: 2,
+      registrations: [
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "token-a",
+          deviceId: "bridge_a",
+          deviceName: "Org A",
+          pairedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    })
+
+    const appended = upsertBridgeRegistration(original, {
+      appUrl: "https://0000.chat",
+      bridgeToken: "token-b",
+      deviceId: "bridge_b",
+      deviceName: "Org B",
+      pairedAt: "2026-06-01T00:01:00.000Z",
+    })
+    const replaced = upsertBridgeRegistration(appended, {
+      appUrl: "https://0000.chat",
+      bridgeToken: "token-b2",
+      deviceId: "bridge_b",
+      deviceName: "Org B renamed",
+      pairedAt: "2026-06-01T00:02:00.000Z",
+    })
+
+    expect(appended.registrations.map((registration) => registration.deviceId)).toEqual([
+      "bridge_a",
+      "bridge_b",
+    ])
+    expect(replaced.registrations).toEqual([
+      original.registrations[0],
+      {
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-b2",
+        deviceId: "bridge_b",
+        deviceName: "Org B renamed",
+        pairedAt: "2026-06-01T00:02:00.000Z",
+      },
+    ])
+  })
+
+  test("renders multi-registration status without leaking secrets", () => {
+    const output = describeStatus(
+      {
+        connected: true,
+        activeSessions: ["session-a"],
+        recentErrors: ["Bearer secret-token failed"],
+        registrations: [
+          {
+            appUrl: "https://0000.chat",
+            connected: true,
+            deviceId: "bridge_a",
+            deviceName: "Org A laptop",
+            activeSessions: ["session-a"],
+            inFlightCommands: [{ id: "queue-a", startedAt: "2026-06-01T00:00:00.000Z" }],
+            recentErrors: ["authorization: secret-value"],
+          },
+          {
+            appUrl: "https://0000.chat",
+            connected: false,
+            deviceId: "bridge_b",
+            deviceName: "Org B laptop",
+            activeSessions: [],
+            recentErrors: [],
+          },
+        ],
+      },
+      true,
+    )
+
+    expect(output).toContain("registered links: 2")
+    expect(output).toContain("Org A laptop")
+    expect(output).toContain("Org B laptop")
+    expect(output).not.toContain("secret-token")
+    expect(output).not.toContain("secret-value")
   })
 })
 

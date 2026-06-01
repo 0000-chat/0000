@@ -66,7 +66,7 @@ export type ParsedBridgeArgs = {
   flags: FlagMap
 }
 
-export type BridgeConfig = {
+export type BridgeRegistration = {
   deviceId: string
   bridgeToken: string
   appUrl: string
@@ -75,6 +75,15 @@ export type BridgeConfig = {
   bridgeApiUrl?: string
   logIngestUrl?: string
 }
+
+export type BridgeConfig = BridgeRegistration
+
+export type MultiBridgeConfig = {
+  version: 2
+  registrations: BridgeRegistration[]
+}
+
+type BridgeConfigFile = BridgeConfig | MultiBridgeConfig
 
 type PairResponse = {
   deviceId?: unknown
@@ -149,6 +158,23 @@ export type BridgeStatus = {
   }>
   setupSummary?: Record<string, unknown>
   recentErrors: string[]
+  registrations?: BridgeRegistrationStatus[]
+}
+
+export type BridgeRegistrationStatus = {
+  deviceId: string
+  appUrl: string
+  deviceName?: string
+  connected: boolean
+  lastStartedAt?: string
+  lastHeartbeatAt?: string
+  lastPollAt?: string
+  maxInFlight?: number
+  activeSessions: string[]
+  activeQueueItemIds?: string[]
+  inFlightCommands?: BridgeStatus["inFlightCommands"]
+  sessionQueues?: BridgeStatus["sessionQueues"]
+  recentErrors: string[]
 }
 
 export type HermesProfileSummary = {
@@ -200,6 +226,58 @@ export type BridgeLoopIterationInput = {
   cleanupStaleClaims?: typeof cleanupStaleClaims
   claimCommands?: typeof claimCommands
   writeStatus?: typeof writeStatus
+}
+
+export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
+  const record = recordFromUnknown(raw)
+  if (!record) {
+    throw new Error("Bridge config must be an object")
+  }
+  if (record.version === 2) {
+    const registrations = Array.isArray(record.registrations)
+      ? record.registrations.map(normalizeBridgeRegistration)
+      : []
+    if (registrations.length === 0) {
+      throw new Error("Bridge config has no registrations")
+    }
+    return { version: 2, registrations }
+  }
+  return { version: 2, registrations: [normalizeBridgeRegistration(record)] }
+}
+
+export function upsertBridgeRegistration(
+  config: MultiBridgeConfig,
+  registration: BridgeRegistration,
+): MultiBridgeConfig {
+  const registrations = [...config.registrations]
+  const existingIndex = registrations.findIndex((entry) => entry.deviceId === registration.deviceId)
+  if (existingIndex >= 0) {
+    registrations[existingIndex] = registration
+  } else {
+    registrations.push(registration)
+  }
+  return { version: 2, registrations }
+}
+
+function normalizeBridgeRegistration(raw: unknown): BridgeRegistration {
+  const record = recordFromUnknown(raw)
+  if (!record) {
+    throw new Error("Bridge registration must be an object")
+  }
+  const deviceId = readString(record.deviceId, "deviceId")
+  const bridgeToken = readString(record.bridgeToken, "bridgeToken")
+  const appUrl = readString(record.appUrl, "appUrl")
+  const deviceName = readString(record.deviceName, "deviceName")
+  const pairedAt = readString(record.pairedAt, "pairedAt")
+  return compact({
+    appUrl,
+    bridgeApiUrl: stringFromUnknown(record.bridgeApiUrl),
+    bridgeToken,
+    deviceId,
+    deviceName,
+    logIngestUrl: stringFromUnknown(record.logIngestUrl),
+    pairedAt,
+  })
 }
 
 export function parseBridgeArgs(argv: string[]): ParsedBridgeArgs {
@@ -377,6 +455,29 @@ export function buildAgentToolsMcpServers(input: AgentToolsMcpServerInput): Herm
 export function describeStatus(status: BridgeStatus, configExists: boolean): string {
   const lines = ["0000 Chat ACP bridge status"]
   lines.push(`paired: ${configExists ? "yes" : "no"}`)
+  if (status.registrations) {
+    lines.push(`registered links: ${status.registrations.length}`)
+    for (const registration of status.registrations) {
+      lines.push(`  - ${registration.deviceName ?? registration.deviceId}`)
+      lines.push(`    device: ${registration.deviceId}`)
+      lines.push(`    app: ${registration.appUrl}`)
+      lines.push(`    connected: ${registration.connected ? "yes" : "no"}`)
+      lines.push(`    active sessions: ${registration.activeSessions.length}`)
+      lines.push(`    in-flight commands: ${registration.inFlightCommands?.length ?? 0}`)
+      if (registration.lastHeartbeatAt) {
+        lines.push(`    last heartbeat: ${registration.lastHeartbeatAt}`)
+      }
+      if (registration.lastPollAt) {
+        lines.push(`    last queue poll: ${registration.lastPollAt}`)
+      }
+      if (registration.recentErrors.length > 0) {
+        lines.push("    recent errors:")
+        for (const error of registration.recentErrors.slice(-3)) {
+          lines.push(`      - ${redactForOutput(error)}`)
+        }
+      }
+    }
+  }
   if (status.deviceId) {
     lines.push(`device: ${status.deviceId}`)
   }
@@ -558,13 +659,21 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   }
 
   const configPath = getConfigPath(parsed.flags)
-  await writeBridgeConfigFile(configPath, config)
+  const updatedConfig = await appendBridgeRegistration(configPath, config)
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
     appUrl,
     connected: false,
     activeSessions: [],
     recentErrors: [],
+    registrations: updatedConfig.registrations.map((registration) => ({
+      deviceId: registration.deviceId,
+      appUrl: registration.appUrl,
+      deviceName: registration.deviceName,
+      connected: false,
+      activeSessions: [],
+      recentErrors: [],
+    })),
     setupSummary: compact({
       agentCommand,
       bridgeVersion: BRIDGE_VERSION,
@@ -624,13 +733,21 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
     config.logIngestUrl = logIngestUrl
   }
 
-  await writeBridgeConfigFile(configPath, config)
+  const updatedConfig = await appendBridgeRegistration(configPath, config)
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
     appUrl,
     connected: false,
     activeSessions: [],
     recentErrors: [],
+    registrations: updatedConfig.registrations.map((registration) => ({
+      deviceId: registration.deviceId,
+      appUrl: registration.appUrl,
+      deviceName: registration.deviceName,
+      connected: false,
+      activeSessions: [],
+      recentErrors: [],
+    })),
   })
   writeStdout(`Paired bridge device ${deviceId}.\nConfig: ${configPath}\n`)
 }
@@ -639,7 +756,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const configPath = getConfigPath(parsed.flags)
   const statusPath = getStatusPath(parsed.flags)
   await ensureSecureBridgeConfigFile(configPath)
-  const config = await readJsonFile<BridgeConfig>(configPath)
+  await readBridgeConfigFile(configPath)
   const pollMs = Number(getFlag(parsed.flags, "poll-ms", String(DEFAULT_POLL_MS)))
   const maxInFlight = getMaxInFlight(parsed.flags)
   const agentCommand =
@@ -652,144 +769,258 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags)
   const allowRemoteCwd = getAllowRemoteCwd(parsed.flags)
   const logUrl = getBridgeLogUrl(parsed.flags, process.env)
-  const log = createWorkerBridgeLogger({
-    bridgeToken: config.bridgeToken,
-    deviceId: config.deviceId,
-    logUrl,
-  })
   const hermesProfiles = await discoverHermesProfiles().catch(() => [])
   const runtimeProfiles = await discoverBridgeRuntimeProfiles({
     baseAgentCommand: agentCommand,
     customCommands: customRuntimeCommands,
   }).catch(() => [])
-  const manager = new BridgeSessionManager({
-    cloudClient: createCloudClient(config),
-    deviceId: config.deviceId,
-    agentCommand,
-    runtimeProfiles,
-    requestTimeoutMs,
-    resumeEnabled,
-    idleSessionTtlMs,
-    createMcpServers: ({ sessionKey, threadId }) =>
-      buildAgentToolsMcpServers({
-        agentSessionId: sessionKey,
-        appUrl: config.appUrl,
-        bridgeToken: config.bridgeToken,
-        deviceId: config.deviceId,
-        threadId,
-      }),
-    log,
-    allowRemoteCwd,
-  })
-  const wakeSignal = createBridgeWakeSignal({
-    config,
-    convexUrl: getConvexUrl(parsed.flags, config),
-    limit: maxInFlight,
-    log,
-  })
-  const status: BridgeStatus = {
-    deviceId: config.deviceId,
-    appUrl: config.appUrl,
-    connected: true,
-    lastStartedAt: new Date().toISOString(),
-    maxInFlight,
-    acpResumeEnabled: resumeEnabled,
-    acpIdleTtlMs: idleSessionTtlMs,
-    hermesProfiles,
-    runtimeProfiles,
-    activeSessions: [],
-    activeQueueItemIds: [],
-    inFlightCommands: [],
-    sessionQueues: [],
-    recentErrors: [],
+
+  type RuntimeContext = {
+    config: BridgeRegistration
+    inFlightCommands: Map<string, Promise<void>>
+    inFlightCommandMetadata: Map<string, InFlightCommandMetadata>
+    lastStaleCleanupAt: number
+    log: FlushableBridgeLogger
+    manager: BridgeSessionManager
+    status: BridgeStatus
+    wakeSignal: BridgeWakeSignal
   }
 
-  await writeStatus(statusPath, status)
-  log({
-    level: "info",
-    event: "bridge.start",
-    deviceId: config.deviceId,
-    activeSessionCount: 0,
-    acpResumeEnabled: resumeEnabled,
-    acpIdleTtlMs: idleSessionTtlMs,
-  })
-  writeStdout(buildStartupSecuritySummary({ allowRemoteCwd, configPath, logUrl }))
-  writeStdout(`Started bridge ${config.deviceId}. Press Ctrl+C to stop.\n`)
-
-  const inFlightCommands = new Map<string, Promise<void>>()
-  const inFlightCommandMetadata = new Map<
-    string,
-    {
-      id: string
-      type?: string
-      threadId?: string
-      sessionId?: string
-      agentSessionId?: string
-      startedAt: string
-    }
-  >()
-  let lastStaleCleanupAt = 0
+  const contexts = new Map<string, RuntimeContext>()
   let stopping = false
 
-  const syncBridgeStatus = () => {
-    syncBridgeRuntimeStatus(status, manager, maxInFlight, inFlightCommands, inFlightCommandMetadata)
+  const aggregateStatus = () => buildAggregateBridgeStatus(Array.from(contexts.values()), maxInFlight)
+  const persistAggregateStatus = async () => {
+    await writeStatus(statusPath, aggregateStatus())
   }
-  const recordLoopError = async (error: unknown) => {
+  const totalInFlight = () =>
+    Array.from(contexts.values()).reduce(
+      (count, context) => count + context.inFlightCommands.size,
+      0,
+    )
+  const ensureContexts = async () => {
+    const latestConfig = await readBridgeConfigFile(configPath)
+    const activeIds = new Set(latestConfig.registrations.map((registration) => registration.deviceId))
+    for (const registration of latestConfig.registrations) {
+      if (contexts.has(registration.deviceId)) {
+        contexts.get(registration.deviceId)!.config = registration
+        continue
+      }
+      const log = createWorkerBridgeLogger({
+        bridgeToken: registration.bridgeToken,
+        deviceId: registration.deviceId,
+        logUrl,
+      })
+      const manager = new BridgeSessionManager({
+        cloudClient: createCloudClient(registration),
+        deviceId: registration.deviceId,
+        agentCommand,
+        runtimeProfiles,
+        requestTimeoutMs,
+        resumeEnabled,
+        idleSessionTtlMs,
+        createMcpServers: ({ sessionKey, threadId }) =>
+          buildAgentToolsMcpServers({
+            agentSessionId: sessionKey,
+            appUrl: registration.appUrl,
+            bridgeToken: registration.bridgeToken,
+            deviceId: registration.deviceId,
+            threadId,
+          }),
+        log,
+        allowRemoteCwd,
+      })
+      const wakeSignal = createBridgeWakeSignal({
+        config: registration,
+        convexUrl: getConvexUrl(parsed.flags, registration),
+        limit: maxInFlight,
+        log,
+      })
+      const status: BridgeStatus = {
+        deviceId: registration.deviceId,
+        appUrl: registration.appUrl,
+        connected: true,
+        lastStartedAt: new Date().toISOString(),
+        maxInFlight,
+        acpResumeEnabled: resumeEnabled,
+        acpIdleTtlMs: idleSessionTtlMs,
+        hermesProfiles,
+        runtimeProfiles,
+        activeSessions: [],
+        activeQueueItemIds: [],
+        inFlightCommands: [],
+        sessionQueues: [],
+        recentErrors: [],
+      }
+      const context: RuntimeContext = {
+        config: registration,
+        inFlightCommands: new Map(),
+        inFlightCommandMetadata: new Map(),
+        lastStaleCleanupAt: 0,
+        log,
+        manager,
+        status,
+        wakeSignal,
+      }
+      contexts.set(registration.deviceId, context)
+      log({
+        level: "info",
+        event: "bridge.start",
+        deviceId: registration.deviceId,
+        activeSessionCount: 0,
+        acpResumeEnabled: resumeEnabled,
+        acpIdleTtlMs: idleSessionTtlMs,
+      })
+    }
+    for (const [deviceId, context] of contexts) {
+      if (activeIds.has(deviceId) || context.inFlightCommands.size > 0) {
+        continue
+      }
+      context.status.connected = false
+      await context.wakeSignal.close()
+      await context.manager.close()
+      await context.log.flush()
+      contexts.delete(deviceId)
+    }
+    await persistAggregateStatus()
+  }
+  const waitForAnyWakeSignal = async () => {
+    const signals = Array.from(contexts.values()).map((context) => context.wakeSignal)
+    if (signals.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs))
+      return
+    }
+    await Promise.race(signals.map((signal) => signal.wait(pollMs)))
+  }
+
+  await ensureContexts()
+  writeStdout(buildStartupSecuritySummary({ allowRemoteCwd, configPath, logUrl }))
+  writeStdout(
+    `Started bridge for ${contexts.size} registered link${contexts.size === 1 ? "" : "s"}. Press Ctrl+C to stop.\n`,
+  )
+
+  const recordLoopError = (context: RuntimeContext) => async (error: unknown) => {
     const message = redactForOutput(error instanceof Error ? error.message : String(error))
-    status.recentErrors.push(message)
-    status.recentErrors = status.recentErrors.slice(-10)
-    log({
+    context.status.recentErrors.push(message)
+    context.status.recentErrors = context.status.recentErrors.slice(-10)
+    context.log({
       level: "error",
       event: "bridge.loop.error",
-      deviceId: config.deviceId,
-      activeSessionCount: manager.getStatus().activeSessions.length,
+      deviceId: context.config.deviceId,
+      activeSessionCount: context.manager.getStatus().activeSessions.length,
       error: message,
     })
-    syncBridgeStatus()
-    await writeStatus(statusPath, status)
+    syncBridgeRuntimeStatus(
+      context.status,
+      context.manager,
+      maxInFlight,
+      context.inFlightCommands,
+      context.inFlightCommandMetadata,
+    )
+    await persistAggregateStatus()
   }
   const stop = async () => {
     if (stopping) {
       return
     }
     stopping = true
-    status.connected = false
-    syncBridgeStatus()
-    await writeStatus(statusPath, status)
-    log({
-      level: "info",
-      event: "bridge.stop",
-      deviceId: config.deviceId,
-      activeSessionCount: manager.getStatus().activeSessions.length,
-    })
-    await wakeSignal.close()
-    await manager.close()
-    await Promise.allSettled(inFlightCommands.values())
-    await log.flush()
+    for (const context of contexts.values()) {
+      context.status.connected = false
+      syncBridgeRuntimeStatus(
+        context.status,
+        context.manager,
+        maxInFlight,
+        context.inFlightCommands,
+        context.inFlightCommandMetadata,
+      )
+      context.log({
+        level: "info",
+        event: "bridge.stop",
+        deviceId: context.config.deviceId,
+        activeSessionCount: context.manager.getStatus().activeSessions.length,
+      })
+      await context.wakeSignal.close()
+      await context.manager.close()
+      await Promise.allSettled(context.inFlightCommands.values())
+      await context.log.flush()
+    }
+    await persistAggregateStatus()
   }
 
   process.once("SIGINT", () => void stop())
   process.once("SIGTERM", () => void stop())
 
   while (!stopping) {
-    await runBridgeLoopIteration({
-      config,
-      agentCommand,
-      runtimeCommands: customRuntimeCommands,
-      status,
-      maxInFlight,
-      manager,
-      inFlightCommands,
-      inFlightCommandMetadata,
-      lastStaleCleanupAt,
-      setLastStaleCleanupAt: (value) => {
-        lastStaleCleanupAt = value
-      },
-      log,
-      recordLoopError,
-      statusPath,
-    })
-    await wakeSignal.wait(pollMs)
+    await ensureContexts()
+    for (const context of contexts.values()) {
+      const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight())
+      const effectiveMaxInFlight = context.inFlightCommands.size + availableProcessSlots
+      await runBridgeLoopIteration({
+        config: context.config,
+        agentCommand,
+        runtimeCommands: customRuntimeCommands,
+        status: context.status,
+        maxInFlight: effectiveMaxInFlight,
+        manager: context.manager,
+        inFlightCommands: context.inFlightCommands,
+        inFlightCommandMetadata: context.inFlightCommandMetadata,
+        lastStaleCleanupAt: context.lastStaleCleanupAt,
+        setLastStaleCleanupAt: (value) => {
+          context.lastStaleCleanupAt = value
+        },
+        log: context.log,
+        recordLoopError: recordLoopError(context),
+        statusPath,
+        writeStatus: persistAggregateStatus,
+      })
+    }
+    await waitForAnyWakeSignal()
+  }
+}
+
+function buildAggregateBridgeStatus(
+  contexts: Array<{
+    config: BridgeRegistration
+    status: BridgeStatus
+  }>,
+  maxInFlight: number,
+): BridgeStatus {
+  const first = contexts[0]
+  const registrations = contexts.map(({ config, status }) => ({
+    deviceId: config.deviceId,
+    appUrl: config.appUrl,
+    deviceName: config.deviceName,
+    connected: status.connected,
+    lastStartedAt: status.lastStartedAt,
+    lastHeartbeatAt: status.lastHeartbeatAt,
+    lastPollAt: status.lastPollAt,
+    maxInFlight: status.maxInFlight,
+    activeSessions: status.activeSessions,
+    activeQueueItemIds: status.activeQueueItemIds,
+    inFlightCommands: status.inFlightCommands,
+    sessionQueues: status.sessionQueues,
+    recentErrors: status.recentErrors,
+  }))
+  return {
+    deviceId: first?.config.deviceId,
+    appUrl: first?.config.appUrl,
+    connected: registrations.some((registration) => registration.connected),
+    lastStartedAt: first?.status.lastStartedAt,
+    lastHeartbeatAt: first?.status.lastHeartbeatAt,
+    lastPollAt: first?.status.lastPollAt,
+    maxInFlight,
+    acpResumeEnabled: first?.status.acpResumeEnabled,
+    acpIdleTtlMs: first?.status.acpIdleTtlMs,
+    hermesProfiles: first?.status.hermesProfiles,
+    runtimeProfiles: first?.status.runtimeProfiles,
+    activeSessions: registrations.flatMap((registration) => registration.activeSessions),
+    activeQueueItemIds: registrations.flatMap(
+      (registration) => registration.activeQueueItemIds ?? [],
+    ),
+    inFlightCommands: registrations.flatMap((registration) => registration.inFlightCommands ?? []),
+    sessionQueues: registrations.flatMap((registration) => registration.sessionQueues ?? []),
+    recentErrors: registrations.flatMap((registration) => registration.recentErrors).slice(-10),
+    registrations,
   }
 }
 
@@ -1023,9 +1254,18 @@ async function showStatus(parsed: ParsedBridgeArgs) {
     : { connected: false, activeSessions: [], recentErrors: [] }
 
   if (configExists && !existingStatus.deviceId) {
-    const config = await readJsonFile<BridgeConfig>(configPath)
-    existingStatus.deviceId = config.deviceId
-    existingStatus.appUrl = config.appUrl
+    const config = await readBridgeConfigFile(configPath)
+    const first = config.registrations[0]
+    existingStatus.deviceId = first?.deviceId
+    existingStatus.appUrl = first?.appUrl
+    existingStatus.registrations = config.registrations.map((registration) => ({
+      deviceId: registration.deviceId,
+      appUrl: registration.appUrl,
+      deviceName: registration.deviceName,
+      connected: false,
+      activeSessions: [],
+      recentErrors: [],
+    }))
   }
 
   writeStdout(describeStatus(existingStatus, configExists))
@@ -1324,6 +1564,22 @@ async function readJsonFile<T>(path: string): Promise<T> {
   return JSON.parse(content) as T
 }
 
+async function readBridgeConfigFile(path: string): Promise<MultiBridgeConfig> {
+  return normalizeBridgeConfigFile(await readJsonFile<BridgeConfigFile>(path))
+}
+
+async function appendBridgeRegistration(
+  path: string,
+  registration: BridgeRegistration,
+): Promise<MultiBridgeConfig> {
+  const existing = existsSync(path)
+    ? await readBridgeConfigFile(path)
+    : ({ version: 2, registrations: [] } satisfies MultiBridgeConfig)
+  const next = upsertBridgeRegistration(existing, registration)
+  await writeBridgeConfigFile(path, next)
+  return next
+}
+
 export async function ensureSecureBridgeConfigFile(path: string): Promise<void> {
   if (!existsSync(path)) {
     return
@@ -1396,6 +1652,12 @@ async function writeStatus(path: string, status: BridgeStatus): Promise<void> {
 
 function compact<T extends Record<string, unknown>>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
 }
 
 function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
