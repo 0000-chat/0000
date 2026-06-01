@@ -6,6 +6,14 @@ This repo contains the public bridge runtime only. It does not include the
 private 0000 Chat app, Convex schema, generated Convex client, or production
 secrets.
 
+Useful trust and operations docs:
+
+- [Install details](INSTALL.md)
+- [Network behavior](docs/network.md)
+- [Threat model](docs/threat-model.md)
+- [Security policy](SECURITY.md)
+- [Agent contributor guide](AGENTS.md)
+
 ## Install From A Connection Code
 
 In 0000 Chat, generate an agent connection code from Agents settings. Then
