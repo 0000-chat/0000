@@ -934,14 +934,6 @@ function displayNameForSessionStart(session: BridgeSessionRecord): string {
   if (agentName) {
     return agentName
   }
-  const runtimeLabel = session.runtimeProfile?.label?.trim()
-  if (runtimeLabel) {
-    return runtimeLabel
-  }
-  const hermesProfileName = session.hermesProfileName?.trim()
-  if (hermesProfileName) {
-    return hermesProfileName
-  }
   return "Agent"
 }
 
