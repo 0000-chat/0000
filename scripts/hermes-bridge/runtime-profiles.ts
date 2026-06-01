@@ -3,12 +3,19 @@ import { splitCommand } from "./acp-session"
 export type BridgeRuntimeKind = "hermes" | "codex" | "claude-code" | "openclaw" | "unknown-acp"
 export type BridgeRuntimeProfileStatus = "available" | "unavailable"
 
+export type BridgeRuntimeAvailableCommand = {
+  name: string
+  description?: string
+  inputHint?: string
+}
+
 export type BridgeRuntimeProfile = {
   id: string
   kind: BridgeRuntimeKind
   label: string
   command: string[]
   status: BridgeRuntimeProfileStatus
+  availableCommands?: BridgeRuntimeAvailableCommand[]
   defaultCwd?: string
   hermesProfileName?: string
   diagnostics?: {

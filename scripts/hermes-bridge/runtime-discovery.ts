@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import {
+  type BridgeRuntimeAvailableCommand,
   type BridgeRuntimeKind,
   type BridgeRuntimeProfile,
   dedupeRuntimeProfiles,
@@ -15,6 +16,7 @@ export type AcpProbeResult = { ok: true } | { ok: false; reason: string }
 export type RuntimeDiscoveryInput = {
   baseAgentCommand: string | string[] | undefined
   customCommands?: string[][]
+  discoverAcpCommands?: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>
   probeAcpCommand?: (command: string[]) => Promise<AcpProbeResult>
   runCommand?: (command: string[]) => Promise<CommandResult>
 }
@@ -41,10 +43,11 @@ export async function discoverRuntimeProfiles(
 ): Promise<BridgeRuntimeProfile[]> {
   const runCommand = input.runCommand ?? runLocalCommand
   const probeAcpCommand = input.probeAcpCommand ?? probeLocalAcpCommand
+  const discoverAcpCommands = input.discoverAcpCommands ?? discoverLocalAcpCommands
   const profiles: BridgeRuntimeProfile[] = []
   const legacyProfile = synthesizeLegacyHermesProfile(input.baseAgentCommand)
   if (legacyProfile) {
-    profiles.push(await withAcpProbe(legacyProfile, probeAcpCommand))
+    profiles.push(await withAcpDetails(legacyProfile, probeAcpCommand, discoverAcpCommands))
   }
 
   for (const builtIn of BUILT_INS) {
@@ -52,7 +55,9 @@ export async function discoverRuntimeProfiles(
     if (!command) {
       continue
     }
-    profiles.push(await profileForBuiltIn({ ...builtIn, command }, runCommand, probeAcpCommand))
+    profiles.push(
+      await profileForBuiltIn({ ...builtIn, command }, runCommand, probeAcpCommand, discoverAcpCommands),
+    )
   }
 
   for (const command of input.customCommands ?? []) {
@@ -65,7 +70,7 @@ export async function discoverRuntimeProfiles(
       continue
     }
     profiles.push(
-      await withAcpProbe(
+      await withAcpDetails(
         {
           id: profileIdForCommand("unknown-acp", command),
           kind: "unknown-acp",
@@ -75,6 +80,7 @@ export async function discoverRuntimeProfiles(
           capabilities: { sessionMcpServers: true },
         },
         probeAcpCommand,
+        discoverAcpCommands,
       ),
     )
   }
@@ -100,6 +106,7 @@ async function profileForBuiltIn(
   builtIn: { kind: BridgeRuntimeKind; label: string; command: string[]; binary: string },
   runCommand: (command: string[]) => Promise<CommandResult>,
   probeAcpCommand: (command: string[]) => Promise<AcpProbeResult>,
+  discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
 ): Promise<BridgeRuntimeProfile> {
   if (builtIn.kind === "codex") {
     const version = await runCommand(["codex", "--version"])
@@ -111,7 +118,7 @@ async function profileForBuiltIn(
           .map((line) => line.trim())
           .filter(Boolean).length
       : 0
-    return await withAcpProbe(
+    return await withAcpDetails(
       {
         id: "codex:codex-acp",
         kind: "codex",
@@ -132,10 +139,11 @@ async function profileForBuiltIn(
         },
       },
       probeAcpCommand,
+      discoverAcpCommands,
     )
   }
 
-  return await withAcpProbe(
+  return await withAcpDetails(
     {
       id:
         builtIn.kind === "hermes"
@@ -150,17 +158,21 @@ async function profileForBuiltIn(
       capabilities: { sessionMcpServers: true },
     },
     probeAcpCommand,
+    discoverAcpCommands,
   )
 }
 
-async function withAcpProbe(
+async function withAcpDetails(
   profile: BridgeRuntimeProfile,
   probeAcpCommand: (command: string[]) => Promise<AcpProbeResult>,
+  discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
 ): Promise<BridgeRuntimeProfile> {
   const probe = await probeAcpCommand(profile.command)
   if (probe.ok) {
+    const availableCommands = await discoverAcpCommands(profile.command).catch(() => [])
     return {
       ...profile,
+      ...(availableCommands.length > 0 ? { availableCommands } : {}),
       diagnostics: { ...profile.diagnostics, acp: "supported" },
       status: "available",
     }
@@ -242,11 +254,136 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
   })
 }
 
+export function discoverLocalAcpCommands(
+  command: string[],
+): Promise<BridgeRuntimeAvailableCommand[]> {
+  return new Promise((resolve) => {
+    const child = spawn(command[0] ?? "", command.slice(1), {
+      env: { ...process.env, TERM: process.env.TERM === "dumb" ? "xterm-256color" : process.env.TERM },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let settled = false
+    let stdout = ""
+    const settle = (commands: BridgeRuntimeAvailableCommand[]) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timeout)
+      child.kill("SIGTERM")
+      resolve(commands)
+    }
+    const timeout = setTimeout(() => settle([]), 5000)
+    const write = (message: unknown) => {
+      child.stdin?.write(`${JSON.stringify(message)}\n`)
+    }
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk)
+      const lines = stdout.split(/\r?\n/)
+      stdout = lines.pop() ?? ""
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue
+        }
+        try {
+          const message = JSON.parse(line) as {
+            id?: unknown
+            method?: unknown
+            params?: unknown
+            result?: unknown
+          }
+          if (message.id === 1 && message.result !== undefined) {
+            write({
+              jsonrpc: "2.0",
+              id: 2,
+              method: "session/new",
+              params: { cwd: process.cwd(), mcpServers: [] },
+            })
+            continue
+          }
+          const commands = commandsFromSessionUpdate(message)
+          if (commands.length > 0) {
+            settle(commands)
+            return
+          }
+        } catch {
+          // Ignore non-JSON banners and keep waiting for ACP messages.
+        }
+      }
+    })
+    child.on("error", () => settle([]))
+    child.on("close", () => settle([]))
+    write({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: 1,
+        clientInfo: { name: "0000-chat-command-discovery", version: "0.1.0" },
+        sessionId: randomUUID(),
+      },
+    })
+  })
+}
+
+function commandsFromSessionUpdate(message: {
+  method?: unknown
+  params?: unknown
+}): BridgeRuntimeAvailableCommand[] {
+  if (message.method !== "session/update") {
+    return []
+  }
+  const params = recordFromUnknown(message.params)
+  const update = recordFromUnknown(params.update)
+  if (update.sessionUpdate !== "available_commands_update") {
+    return []
+  }
+  return normalizeAvailableCommands(arrayFromUnknown(update.availableCommands)) ?? []
+}
+
 function firstLine(value: string): string | undefined {
   return value
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find(Boolean)
+}
+
+function normalizeAvailableCommands(
+  commands: unknown[] | undefined,
+): BridgeRuntimeAvailableCommand[] | undefined {
+  if (!commands) {
+    return undefined
+  }
+  return commands
+    .map((command) => {
+      const record = recordFromUnknown(command)
+      const input = recordFromUnknown(record.input)
+      const name = stringFromUnknown(record.name)?.trim().replace(/^\/+/, "")
+      if (!name) {
+        return undefined
+      }
+      const normalized: BridgeRuntimeAvailableCommand = { name }
+      const description = stringFromUnknown(record.description)
+      const inputHint = stringFromUnknown(record.inputHint) ?? stringFromUnknown(input.hint)
+      if (description) normalized.description = description
+      if (inputHint) normalized.inputHint = inputHint
+      return normalized
+    })
+    .filter((command): command is BridgeRuntimeAvailableCommand => command !== undefined)
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
+function arrayFromUnknown(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined
 }
 
 export function runLocalCommand(command: string[]): Promise<CommandResult> {
