@@ -139,7 +139,7 @@ export class HermesAcpSession {
       return this.sessionId
     }
     if (this.command.length === 0) {
-      throw new Error("Hermes ACP command cannot be empty")
+      throw new Error("ACP runtime command cannot be empty")
     }
 
     this.closed = false
@@ -150,7 +150,7 @@ export class HermesAcpSession {
 
     const initializeResult = await this.request("initialize", {
       protocolVersion: 1,
-      clientInfo: { name: "0000-chat-hermes-bridge", version: "0.1.0" },
+      clientInfo: { name: "0000-chat-acp-bridge", version: "0.1.0" },
     })
     this.capabilities = extractCapabilities(initializeResult)
 
@@ -178,7 +178,7 @@ export class HermesAcpSession {
     options: HermesAcpPromptOptions = {},
   ): Promise<HermesAcpPromptResult> {
     if (text.length === 0) {
-      throw new Error("Cannot send an empty Hermes ACP user message")
+      throw new Error("Cannot send an empty ACP runtime user message")
     }
     const sessionId = await this.start()
     if (this.externalContinuityFallback && !this.externalContinuityFallbackNotified) {
@@ -317,7 +317,7 @@ export class HermesAcpSession {
   private request(method: string, params: unknown): Promise<unknown> {
     const child = this.child
     if (!child || this.closed) {
-      return Promise.reject(new HermesAcpProcessError("Hermes ACP process is not running"))
+      return Promise.reject(new HermesAcpProcessError("ACP runtime process is not running"))
     }
 
     const id = this.nextId
@@ -376,7 +376,7 @@ export class HermesAcpSession {
       }
       const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`
       void this.failAllPending(
-        new HermesAcpProcessError(`Hermes ACP process exited with ${reason}`),
+        new HermesAcpProcessError(`ACP runtime process exited with ${reason}`),
       )
     })
   }

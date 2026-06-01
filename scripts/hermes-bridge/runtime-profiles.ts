@@ -55,12 +55,16 @@ export function profileIdForCommand(kind: BridgeRuntimeKind, command: string[]):
 
 export function synthesizeLegacyHermesProfile(
   command: string | string[] | undefined,
-): BridgeRuntimeProfile {
+): BridgeRuntimeProfile | undefined {
+  const normalizedCommand = normalizeCommand(command, "hermes acp")
+  if (!normalizedCommand.some((part) => part.toLowerCase().includes("hermes"))) {
+    return undefined
+  }
   return {
     id: "hermes:default",
     kind: "hermes",
     label: "Hermes",
-    command: normalizeCommand(command, "hermes acp"),
+    command: normalizedCommand,
     status: "available",
     capabilities: {
       sessionMcpServers: true,

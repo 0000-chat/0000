@@ -38,7 +38,7 @@ bun run bridge start
 By default the bridge starts `hermes acp`. You can connect other ACP runtimes:
 
 ```bash
-bun run bridge start --runtime-command "codex acp"
+bun run bridge start --runtime-command "npx --yes @zed-industries/codex-acp@latest"
 bun run bridge start --runtime-command "npx -y @agentclientprotocol/claude-agent-acp"
 ```
 
