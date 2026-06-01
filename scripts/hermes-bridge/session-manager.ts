@@ -67,6 +67,8 @@ type BridgeSessionRecord = {
   threadId: string
   cwd?: string
   acp: ManagedAcpSession
+  runtimeProfile?: BridgeRuntimeProfile
+  hermesProfileName?: string
   generation: number
   idleTimer?: ReturnType<typeof setTimeout>
   lastUsedAt: number
@@ -327,7 +329,11 @@ export class BridgeSessionManager {
       source: "bridge",
       eventType: "message_started",
       payload: { queueId: item.id, queueType: normalizeType(item) },
-      part: { type: "event", text: "Sarah started this run.", status: "streaming" },
+      part: {
+        type: "event",
+        text: `${displayNameForSessionStart(session)} started this run.`,
+        status: "streaming",
+      },
     })
     let result: HermesAcpPromptResult
     try {
@@ -549,6 +555,8 @@ export class BridgeSessionManager {
           }
         },
       }),
+      runtimeProfile,
+      hermesProfileName: item.hermesProfileName,
     }
     this.sessions.set(sessionKey, record)
     return record
@@ -911,6 +919,18 @@ function toBridgeEvent(
 
 function normalizeType(item: BridgeSessionQueueItem): string {
   return item.type ?? item.kind ?? "unknown"
+}
+
+function displayNameForSessionStart(session: BridgeSessionRecord): string {
+  const runtimeLabel = session.runtimeProfile?.label?.trim()
+  if (runtimeLabel) {
+    return runtimeLabel
+  }
+  const hermesProfileName = session.hermesProfileName?.trim()
+  if (hermesProfileName) {
+    return hermesProfileName
+  }
+  return "Agent"
 }
 
 function isApprovalResponseType(type: string): boolean {
