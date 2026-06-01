@@ -30,3 +30,4 @@ bun run sbom
 
 The SBOM is written to `sbom.cdx.json`.
 
+Runtime command examples should pin package versions instead of using `@latest`.

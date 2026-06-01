@@ -59,4 +59,27 @@ describe("bridge log privacy", () => {
     expect(serializedStderr).not.toContain("secret-token")
     expect(serializedStderr).not.toContain("raw prompt")
   })
+
+  test("does not forward logs remotely unless a log URL is configured", async () => {
+    let deliveryCount = 0
+    const logger = createWorkerBridgeLogger({
+      bridgeToken: "worker-token",
+      deviceId: "bridge-1",
+      fetch: (async () => {
+        deliveryCount += 1
+        return new Response(null, { status: 204 })
+      }) as unknown as typeof fetch,
+      flushIntervalMs: 10_000,
+      stderr: {
+        write() {
+          return true
+        },
+      } as unknown as NodeJS.WritableStream,
+    })
+
+    logger({ event: "bridge.audit", level: "info", message: "local only" })
+    await logger.flush()
+
+    expect(deliveryCount).toBe(0)
+  })
 })

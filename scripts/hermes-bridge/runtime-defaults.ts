@@ -1,6 +1,6 @@
-export const DEFAULT_CODEX_ACP_COMMAND = "npx --yes @zed-industries/codex-acp@latest"
+export const DEFAULT_CODEX_ACP_COMMAND = "npx --yes @zed-industries/codex-acp@0.15.0"
 export const DEFAULT_CLAUDE_CODE_ACP_COMMAND =
-  "npx --yes @agentclientprotocol/claude-agent-acp@latest"
+  "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0"
 
 export function inferRuntimeId(agentCommand: string): string {
   const normalized = agentCommand.toLowerCase()

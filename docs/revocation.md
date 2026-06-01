@@ -26,6 +26,12 @@ rm -f "$HOME/.0000/bridge-status.json"
 Deleting `bridge.json` removes the local bridge token. Reconnecting later
 requires a new connection code from 0000 Chat.
 
+The file is expected to be owner-only readable and writable:
+
+```bash
+chmod 600 "$HOME/.0000/bridge.json"
+```
+
 ## Full Local Removal
 
 To remove the public bridge checkout and Claude-compatible reconnect skill too:
@@ -37,4 +43,3 @@ rm -rf "$HOME/.claude/skills/0000"
 
 If another service manager starts the bridge, remove or disable that service as
 well.
-

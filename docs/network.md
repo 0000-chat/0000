@@ -12,7 +12,7 @@ app code or generated backend clients.
 | `/api/agent-bridge/validate` | Bridge to app | Validate bridge token and device id | Bridge bearer token |
 | `/api/agent-bridge/claim` | Bridge to app | Claim queued work for this bridge | Bridge bearer token |
 | `/api/agent-bridge/events` | Bridge to app | Post normalized agent events and results | Bridge bearer token |
-| `/api/agent-bridge/logs` | Bridge to app | Forward sanitized operational logs | Bridge bearer token |
+| `/api/agent-bridge/logs` | Bridge to app | Forward sanitized operational logs when log forwarding is explicitly configured | Bridge bearer token |
 
 The app URL is provided during pairing. Production installs use
 `https://0000.chat`.
@@ -24,12 +24,18 @@ The bridge sends the minimum data needed to run queued agent work:
 - Bridge device id and bearer token.
 - Runtime profile metadata such as runtime name and command.
 - Queue item ids and status updates.
-- Agent event payloads returned by the local ACP runtime.
-- Sanitized operational logs for bridge health and debugging.
+- Agent event payloads returned by the local ACP runtime, including agent
+  transcript events, tool calls, and tool results that the runtime emits.
+- Sanitized operational logs for bridge health and debugging, only when
+  `--log-url` or `ZERO_CHAT_BRIDGE_LOG_URL` is configured.
+
+The bridge token is also passed to the selected ACP runtime when configuring
+0000 MCP helper tools, so the runtime can call bridge-authenticated app tools.
+Only run runtimes you trust with that local bearer token.
 
 ## Data Not Sent Intentionally
 
-The bridge should not send:
+The bridge does not independently scan and upload:
 
 - Local environment variables other than explicit bridge configuration.
 - API keys, auth headers, cookies, or provider credentials.
@@ -39,5 +45,6 @@ The bridge should not send:
 
 Agent runtimes may receive prompts that ask them to inspect or edit local files.
 Those actions are controlled by the local agent runtime and its approval model,
-not by hidden bridge code.
-
+not by hidden bridge code. If the selected runtime includes secrets, local file
+contents, or credentials in its normal transcript or tool-result events, those
+events can be sent back to 0000 Chat as part of agent execution.

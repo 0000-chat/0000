@@ -94,6 +94,7 @@ export type BridgeSessionManagerOptions = {
   ) => HermesAcpMcpServer[]
   createSession?: (context: BridgeSessionContext) => ManagedAcpSession
   idleSessionTtlMs?: number
+  allowRemoteCwd?: boolean
   resumeEnabled?: boolean
   log?: BridgeLogger
 }
@@ -140,6 +141,7 @@ export class BridgeSessionManager {
   ) => HermesAcpMcpServer[]
   private readonly log?: BridgeLogger
   private readonly idleSessionTtlMs: number
+  private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
   private readonly createSession: (context: BridgeSessionContext) => ManagedAcpSession
   private readonly sessions = new Map<string, BridgeSessionRecord>()
@@ -162,6 +164,7 @@ export class BridgeSessionManager {
     this.requestTimeoutMs = options.requestTimeoutMs
     this.log = options.log
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
+    this.allowRemoteCwd = options.allowRemoteCwd === true
     this.resumeEnabled = options.resumeEnabled === true
     this.createMcpServers = options.createMcpServers ?? (() => [])
     this.createSession =
@@ -531,10 +534,11 @@ export class BridgeSessionManager {
     const agentCommand = runtimeProfile
       ? runtimeProfile.command
       : resolveHermesProfileAgentCommand(this.agentCommand, item.hermesProfileName)
+    const cwd = this.allowRemoteCwd ? item.cwd : undefined
     const record: BridgeSessionRecord = {
       sessionKey,
       threadId,
-      cwd: item.cwd,
+      cwd,
       agentName: normalizeAgentName(item.agentName),
       generation,
       lastUsedAt: Date.now(),
@@ -544,7 +548,7 @@ export class BridgeSessionManager {
         runtimeProfile,
         sessionKey,
         threadId,
-        cwd: item.cwd,
+        cwd,
         hermesProfileName: item.hermesProfileName,
         initialSessionId: item.externalSessionId,
         mcpServers: this.createMcpServers({ cwd: item.cwd, sessionKey, threadId }),

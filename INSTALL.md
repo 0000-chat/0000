@@ -12,22 +12,28 @@ curl -fsSL https://0000.chat/api/agent-connections/install.sh?code=<code> | bash
 The generated script is intentionally small and predictable:
 
 1. Installs Bun if `bun` is not already available.
-2. Clones or updates this repository at `$HOME/0000`.
+2. Clones or updates this repository at `$HOME/0000` to the release tag chosen
+   by the installer.
 3. Runs `bun install`.
 4. Runs `bun run bridge connect <code> --app-url https://0000.chat`.
 5. Writes a local agent skill so the coding agent knows how to reconnect.
 6. Registers a pending bridge connection for human approval in 0000 Chat.
 
-The repository clone command is:
+The repository clone command is currently:
 
 ```bash
-git clone https://github.com/0000-chat/0000.git "$HOME/0000"
+BRIDGE_REF="v0.1.2"
+git clone --branch "$BRIDGE_REF" --depth 1 https://github.com/0000-chat/0000.git "$HOME/0000"
 ```
 
-If `$HOME/0000` already exists, the installer runs:
+If `$HOME/0000` already exists, the installer refuses to overwrite local
+checkout changes, then fetches and checks out the same release tag:
 
 ```bash
-git -C "$HOME/0000" pull --ff-only
+git -C "$HOME/0000" diff --quiet
+git -C "$HOME/0000" diff --cached --quiet
+git -C "$HOME/0000" fetch --tags --force origin "$BRIDGE_REF"
+git -C "$HOME/0000" checkout --detach "$BRIDGE_REF"
 ```
 
 ## Manual Install
@@ -36,7 +42,7 @@ If you do not want to run `curl | bash`, inspect this repository first and run
 the same steps manually:
 
 ```bash
-git clone https://github.com/0000-chat/0000.git "$HOME/0000"
+git clone --branch "v0.1.2" --depth 1 https://github.com/0000-chat/0000.git "$HOME/0000"
 cd "$HOME/0000"
 bun install
 bun run bridge connect "<connection-code>" --app-url "https://0000.chat" --skill-path "$HOME/.claude/skills/0000/SKILL.md" --install-mode "manual"
@@ -61,15 +67,34 @@ you are ready to run the manual command.
 | `$HOME/.0000/bridge-status.json` | Local status and heartbeat metadata | No token, but may contain host/runtime details |
 | `$HOME/.claude/skills/0000/SKILL.md` | Reconnect instructions for Claude-compatible agents | No token |
 
+`bridge.json` and `bridge-status.json` are written with owner-only `0600`
+permissions. The bridge repairs the `bridge.json` mode on startup if the file
+already exists.
+
 ## Updating
 
 ```bash
 cd "$HOME/0000"
-git pull --ff-only
+git fetch --tags --force origin "v0.1.2"
+git checkout --detach "v0.1.2"
 bun install
 ```
 
 Restart the bridge after updating if it is running as a long-lived process.
+
+## Safer Runtime Defaults
+
+The built-in Codex and Claude ACP runtime command examples use pinned package
+versions instead of `@latest`. ACP runtime sessions ignore remote queue-provided
+working directories by default. To opt in for trusted automation, start the
+bridge with:
+
+```bash
+bun run bridge start --allow-remote-cwd
+```
+
+Remote bridge log forwarding is also off by default. To opt in, pass
+`--log-url <url>` or set `ZERO_CHAT_BRIDGE_LOG_URL`.
 
 ## Uninstalling
 
