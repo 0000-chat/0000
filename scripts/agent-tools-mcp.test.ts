@@ -19,6 +19,7 @@ describe("agent tools MCP server helpers", () => {
       "threads.list",
       "threads.read",
       "messages.search",
+      "settings.setDefaultApprovalLevel",
       "spaces.list",
       "spaces.get",
       "spaces.create",
@@ -64,6 +65,9 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("spaces.archive")
     expect(buildAgentToolGuideText()).toContain("threads.current")
     expect(buildAgentToolGuideText()).toContain("call threads.current first")
+    expect(buildAgentToolGuideText()).toContain("settings.setDefaultApprovalLevel")
+    expect(buildAgentToolGuideText()).toContain("trusted local automation")
+    expect(buildAgentToolGuideText()).toContain("in-thread approval")
     expect(buildAgentToolGuideText()).toContain("autoArchiveInactiveThreadsAfterHours")
     expect(buildAgentToolGuideText()).toContain("apps.create")
     expect(buildAgentToolGuideText()).toContain("brand-new app")

@@ -23,6 +23,7 @@ Use the 0000-chat MCP tools for 0000 Chat data and actions:
 - userPrompts.requestChoice (ask the user a structured multiple-choice question; use this instead of printing a lettered list when you need the multiple-choice UI or decision-needed thread icon)
 - threads.current (exact current thread/session; prefer this for continue/resume/remember prompts), threads.list, threads.read
 - messages.search
+- settings.setDefaultApprovalLevel (use only when the user explicitly asks to change their default approval mode, such as enabling trusted local automation; it requires in-thread approval unless this thread already has full permissions)
 - spaces.list, spaces.get, spaces.create, spaces.update, spaces.archive, spaces.unarchive (spaces.create/update accept autoArchiveInactiveThreadsAfterHours; null disables automatic thread archiving)
 - apps.list, apps.get, apps.validateOpenUi
 - apps.create, apps.createRevision, apps.generateFromRevision, apps.listGenerations, apps.update, apps.archive
@@ -41,7 +42,7 @@ When asked to remind, schedule, run something later, run something every N minut
 
 For elliptical follow-ups like "continue", "finish it", "what were you doing", or "resume from before", call threads.current first. Do not infer the active thread by listing recent threads unless threads.current is unavailable or explicitly returns no current thread.
 
-Read tools are scoped to the signed-in user's accessible 0000 Chat data. Write tools run directly when the current thread has full permissions enabled; otherwise they may return an approval-needed response. When approval is needed, tell the user approval is needed and wait for the app flow.
+Read tools are scoped to the signed-in user's accessible 0000 Chat data. Write tools run directly when the current thread has full permissions enabled; otherwise they may return an approval-needed response. The settings.setDefaultApprovalLevel tool is a special trust-boundary tool for trusted local automation and should only be called after an explicit user request; outside an already-full-permissions thread, it must produce in-thread approval. When approval is needed, tell the user approval is needed and wait for the app flow.
 
 Never request raw Convex credentials, user cookies, or direct database access. Do not treat 0000 Chat data as local files.`
 }
