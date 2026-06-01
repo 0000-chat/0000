@@ -1257,7 +1257,7 @@ function createBridgeWakeSignal(input: {
   log: FlushableBridgeLogger
 }): BridgeWakeSignal {
   input.log({
-    level: "warn",
+    level: input.convexUrl ? "info" : "warn",
     event: "bridge.subscription.disabled",
     deviceId: input.config.deviceId,
     reason: input.convexUrl
