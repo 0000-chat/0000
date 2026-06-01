@@ -62,3 +62,5 @@ rm -rf "$HOME/.claude/skills/0000"
 Removing `$HOME/.0000` deletes the local pairing token. A future reconnect will
 need a new connection code from 0000 Chat.
 
+For revocation options that separate app access from local cleanup, see
+[Revoking Bridge Access](docs/revocation.md).

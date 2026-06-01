@@ -338,11 +338,12 @@ export function deriveConvexCloudUrl(appUrl: string): string | undefined {
 
 export function getConvexUrl(
   flags: FlagMap,
-  config: Pick<BridgeConfig, "appUrl">,
+  config: Pick<BridgeConfig, "appUrl" | "bridgeApiUrl">,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   return (
     getFlag(flags, "convex-url", env.ZERO_CHAT_BRIDGE_CONVEX_URL) ??
+    (config.bridgeApiUrl ? deriveConvexCloudUrl(config.bridgeApiUrl) : undefined) ??
     deriveConvexCloudUrl(config.appUrl)
   )
 }

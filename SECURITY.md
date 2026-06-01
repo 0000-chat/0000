@@ -43,3 +43,8 @@ include:
 - Review install scripts for least privilege and predictable paths.
 - Run `bun test` and `bun run typecheck` before merging bridge changes.
 
+## Revocation
+
+Users can revoke bridge access by removing the bridge device in 0000 Chat,
+stopping the local bridge process, and deleting `$HOME/.0000/bridge.json`.
+See [Revoking Bridge Access](docs/revocation.md).

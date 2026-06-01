@@ -11,6 +11,7 @@ Useful trust and operations docs:
 - [Install details](INSTALL.md)
 - [Network behavior](docs/network.md)
 - [Threat model](docs/threat-model.md)
+- [Revoking bridge access](docs/revocation.md)
 - [Security policy](SECURITY.md)
 - [Agent contributor guide](AGENTS.md)
 
