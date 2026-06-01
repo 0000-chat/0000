@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process"
 import { homedir, hostname } from "node:os"
 import { dirname, join } from "node:path"
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 
@@ -47,12 +47,13 @@ const DEFAULT_POLL_MS = 2000
 const DEFAULT_HEARTBEAT_MS = 15_000
 const DEFAULT_MAX_IN_FLIGHT_COMMANDS = 2
 const DEFAULT_AGENT_COMMAND = "hermes acp"
-const DEFAULT_BRIDGE_LOG_URL = "https://0000.chat/api/agent-bridge/logs"
 const DEFAULT_ACP_RESUME_ENABLED = false
 const DEFAULT_ACP_IDLE_TTL_MS = 0
+const DEFAULT_ALLOW_REMOTE_CWD = false
 const DEFAULT_AGENT_CONNECTION_REGISTER_PATH = "/api/agent-connections/register"
 const DEFAULT_AGENT_SKILL_PATH = join(homedir(), ".claude", "skills", "0000", "SKILL.md")
-const BRIDGE_VERSION = "0.1.0"
+const BRIDGE_VERSION = "0.1.2"
+const BRIDGE_LOCAL_STATE_MODE = 0o600
 
 export type BridgeCommandName = "connect" | "pair" | "start" | "status" | "help"
 
@@ -318,6 +319,14 @@ export function getMaxInFlight(flags: FlagMap, env: NodeJS.ProcessEnv = process.
   return Math.max(2, maxInFlight)
 }
 
+export function getAllowRemoteCwd(flags: FlagMap, env: NodeJS.ProcessEnv = process.env): boolean {
+  const rawValue = getFlag(flags, "allow-remote-cwd", env.ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD)
+  if (rawValue === undefined) {
+    return DEFAULT_ALLOW_REMOTE_CWD
+  }
+  return rawValue === "1" || rawValue === "true" || rawValue === "yes"
+}
+
 export function deriveConvexCloudUrl(appUrl: string): string | undefined {
   const url = new URL(appUrl)
   if (url.hostname.endsWith(".convex.cloud")) {
@@ -543,14 +552,13 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   if (bridgeApiUrl) {
     config.bridgeApiUrl = bridgeApiUrl
   }
-  const logIngestUrl =
-    getFlag(parsed.flags, "log-url") ?? stringFromUnknown(response.logIngestUrl ?? response.logUrl)
+  const logIngestUrl = getFlag(parsed.flags, "log-url")
   if (logIngestUrl) {
     config.logIngestUrl = logIngestUrl
   }
 
   const configPath = getConfigPath(parsed.flags)
-  await writeJsonFile(configPath, config)
+  await writeBridgeConfigFile(configPath, config)
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
     appUrl,
@@ -611,13 +619,12 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
   if (bridgeApiUrl) {
     config.bridgeApiUrl = bridgeApiUrl
   }
-  const logIngestUrl =
-    getFlag(parsed.flags, "log-url") ?? stringFromUnknown(response.logIngestUrl ?? response.logUrl)
+  const logIngestUrl = getFlag(parsed.flags, "log-url")
   if (logIngestUrl) {
     config.logIngestUrl = logIngestUrl
   }
 
-  await writeJsonFile(configPath, config)
+  await writeBridgeConfigFile(configPath, config)
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
     appUrl,
@@ -631,6 +638,7 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
 async function startBridge(parsed: ParsedBridgeArgs) {
   const configPath = getConfigPath(parsed.flags)
   const statusPath = getStatusPath(parsed.flags)
+  await ensureSecureBridgeConfigFile(configPath)
   const config = await readJsonFile<BridgeConfig>(configPath)
   const pollMs = Number(getFlag(parsed.flags, "poll-ms", String(DEFAULT_POLL_MS)))
   const maxInFlight = getMaxInFlight(parsed.flags)
@@ -642,10 +650,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const requestTimeoutMs = getRequestTimeoutMs(parsed.flags)
   const resumeEnabled = getAcpResumeEnabled(parsed.flags)
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags)
+  const allowRemoteCwd = getAllowRemoteCwd(parsed.flags)
+  const logUrl = getBridgeLogUrl(parsed.flags, process.env)
   const log = createWorkerBridgeLogger({
     bridgeToken: config.bridgeToken,
     deviceId: config.deviceId,
-    logUrl: getBridgeLogUrl(parsed.flags, config),
+    logUrl,
   })
   const hermesProfiles = await discoverHermesProfiles().catch(() => [])
   const runtimeProfiles = await discoverBridgeRuntimeProfiles({
@@ -669,6 +679,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         threadId,
       }),
     log,
+    allowRemoteCwd,
   })
   const wakeSignal = createBridgeWakeSignal({
     config,
@@ -702,6 +713,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     acpResumeEnabled: resumeEnabled,
     acpIdleTtlMs: idleSessionTtlMs,
   })
+  writeStdout(buildStartupSecuritySummary({ allowRemoteCwd, configPath, logUrl }))
   writeStdout(`Started bridge ${config.deviceId}. Press Ctrl+C to stop.\n`)
 
   const inFlightCommands = new Map<string, Promise<void>>()
@@ -1026,8 +1038,23 @@ function normalizeCommand(command?: string): BridgeCommandName {
   return "help"
 }
 
+export function buildStartupSecuritySummary(input: {
+  allowRemoteCwd: boolean
+  configPath: string
+  logUrl?: string
+}): string {
+  return [
+    "Security defaults:",
+    `  config permissions: owner-only 0600 (${input.configPath})`,
+    `  remote cwd from 0000 Chat: ${input.allowRemoteCwd ? "enabled" : "ignored"}`,
+    `  remote bridge log forwarding: ${input.logUrl ? `enabled (${input.logUrl})` : "disabled"}`,
+    "  package-backed runtime defaults: pinned versions",
+    "",
+  ].join("\n")
+}
+
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: ${DEFAULT_BRIDGE_LOG_URL})\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
 }
 
 function getStatusPath(flags: FlagMap): string {
@@ -1238,16 +1265,8 @@ function createCloudClient(config: BridgeConfig): ConvexBridgeCloudClient {
   })
 }
 
-function getBridgeLogUrl(
-  flags: FlagMap,
-  config: Pick<BridgeConfig, "logIngestUrl">,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  return (
-    getFlag(flags, "log-url", env.ZERO_CHAT_BRIDGE_LOG_URL) ??
-    config.logIngestUrl ??
-    DEFAULT_BRIDGE_LOG_URL
-  )
+function getBridgeLogUrl(flags: FlagMap, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return getFlag(flags, "log-url", env.ZERO_CHAT_BRIDGE_LOG_URL)
 }
 
 function createBridgeWakeSignal(input: {
@@ -1305,11 +1324,35 @@ async function readJsonFile<T>(path: string): Promise<T> {
   return JSON.parse(content) as T
 }
 
-async function writeJsonFile(path: string, value: unknown): Promise<void> {
+export async function ensureSecureBridgeConfigFile(path: string): Promise<void> {
+  if (!existsSync(path)) {
+    return
+  }
+  await chmod(path, BRIDGE_LOCAL_STATE_MODE)
+}
+
+export async function writeBridgeConfigFile(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const tempPath = `${path}.${randomUUID()}.tmp`
-  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8")
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: BRIDGE_LOCAL_STATE_MODE,
+  })
+  await chmod(tempPath, BRIDGE_LOCAL_STATE_MODE)
   await rename(tempPath, path)
+  await chmod(path, BRIDGE_LOCAL_STATE_MODE)
+}
+
+export async function writeBridgeStatusFile(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const tempPath = `${path}.${randomUUID()}.tmp`
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: BRIDGE_LOCAL_STATE_MODE,
+  })
+  await chmod(tempPath, BRIDGE_LOCAL_STATE_MODE)
+  await rename(tempPath, path)
+  await chmod(path, BRIDGE_LOCAL_STATE_MODE)
 }
 
 async function writeAgentConnectionSkill(
@@ -1348,7 +1391,7 @@ Never reveal bridge tokens, auth headers, API keys, or raw connection codes in c
 }
 
 async function writeStatus(path: string, status: BridgeStatus): Promise<void> {
-  await writeJsonFile(path, status)
+  await writeBridgeStatusFile(path, status)
 }
 
 function compact<T extends Record<string, unknown>>(record: T): T {

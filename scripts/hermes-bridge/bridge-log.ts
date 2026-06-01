@@ -148,8 +148,7 @@ export function createWorkerBridgeLogger(
   const queuedEvents: Record<string, unknown>[] = []
   const logUrl =
     clean(options.logUrl) ??
-    clean(env.ZERO_CHAT_BRIDGE_LOG_URL) ??
-    "https://0000.chat/api/agent-bridge/logs"
+    clean(env.ZERO_CHAT_BRIDGE_LOG_URL)
   const maxBatchSize = options.maxBatchSize ?? 25
   const flushIntervalMs = options.flushIntervalMs ?? 1_000
   let flushTimer: ReturnType<typeof setTimeout> | undefined
@@ -162,7 +161,7 @@ export function createWorkerBridgeLogger(
   }
 
   const deliver = (events: Record<string, unknown>[]) => {
-    if (events.length === 0 || !fetcher) {
+    if (events.length === 0 || !fetcher || !logUrl) {
       return
     }
     pendingDeliveries.push(

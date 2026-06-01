@@ -50,12 +50,16 @@ bun run bridge start
 By default the bridge starts `hermes acp`. You can connect other ACP runtimes:
 
 ```bash
-bun run bridge start --runtime-command "npx --yes @zed-industries/codex-acp@latest"
-bun run bridge start --runtime-command "npx -y @agentclientprotocol/claude-agent-acp"
+bun run bridge start --runtime-command "npx --yes @zed-industries/codex-acp@0.15.0"
+bun run bridge start --runtime-command "npx -y @agentclientprotocol/claude-agent-acp@0.39.0"
 ```
 
 You can provide multiple runtime commands. 0000 Chat will surface them as
 available bridge profiles.
+
+By default, package-backed runtime commands use pinned package versions. ACP
+runtime sessions ignore remote queue-provided working directories unless you
+start with `--allow-remote-cwd` or `ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD=1`.
 
 ## Files Written Locally
 
@@ -65,6 +69,9 @@ The bridge keeps its local pairing state under:
 ~/.0000/bridge.json
 ~/.0000/bridge-status.json
 ```
+
+`bridge.json` and `bridge-status.json` are written with owner-only `0600`
+permissions. The bridge repairs the `bridge.json` mode when it starts.
 
 The default Claude skill install path used by connection-code setup is:
 
