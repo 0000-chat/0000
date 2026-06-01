@@ -25,6 +25,7 @@ export type BridgeSessionQueueItem = {
   approvalLevel?: "ask" | "full_permissions"
   externalRequestId?: string
   externalSessionId?: string
+  agentName?: string
   bridgeProfileId?: string
   hermesProfileName?: string
 }
@@ -67,6 +68,7 @@ type BridgeSessionRecord = {
   threadId: string
   cwd?: string
   acp: ManagedAcpSession
+  agentName?: string
   runtimeProfile?: BridgeRuntimeProfile
   hermesProfileName?: string
   generation: number
@@ -519,6 +521,7 @@ export class BridgeSessionManager {
     const sessionKey = sessionKeyForItem(item) ?? threadId
     const existing = this.sessions.get(sessionKey)
     if (existing) {
+      existing.agentName = normalizeAgentName(item.agentName) ?? existing.agentName
       return existing
     }
 
@@ -532,6 +535,7 @@ export class BridgeSessionManager {
       sessionKey,
       threadId,
       cwd: item.cwd,
+      agentName: normalizeAgentName(item.agentName),
       generation,
       lastUsedAt: Date.now(),
       acp: this.createSession({
@@ -922,6 +926,10 @@ function normalizeType(item: BridgeSessionQueueItem): string {
 }
 
 function displayNameForSessionStart(session: BridgeSessionRecord): string {
+  const agentName = normalizeAgentName(session.agentName)
+  if (agentName) {
+    return agentName
+  }
   const runtimeLabel = session.runtimeProfile?.label?.trim()
   if (runtimeLabel) {
     return runtimeLabel
@@ -931,6 +939,11 @@ function displayNameForSessionStart(session: BridgeSessionRecord): string {
     return hermesProfileName
   }
   return "Agent"
+}
+
+function normalizeAgentName(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed || undefined
 }
 
 function isApprovalResponseType(type: string): boolean {
