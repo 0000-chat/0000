@@ -48,11 +48,11 @@ export async function discoverRuntimeProfiles(
   }
 
   for (const builtIn of BUILT_INS) {
-    const exists = await runCommand(["command", "-v", builtIn.binary])
-    if (!exists.ok) {
+    const command = await resolveBuiltInCommand(builtIn, runCommand)
+    if (!command) {
       continue
     }
-    profiles.push(await profileForBuiltIn(builtIn, runCommand, probeAcpCommand))
+    profiles.push(await profileForBuiltIn({ ...builtIn, command }, runCommand, probeAcpCommand))
   }
 
   for (const command of input.customCommands ?? []) {
@@ -80,6 +80,20 @@ export async function discoverRuntimeProfiles(
   }
 
   return dedupeRuntimeProfiles(profiles)
+}
+
+async function resolveBuiltInCommand(
+  builtIn: { command: string[]; binary: string },
+  runCommand: (command: string[]) => Promise<CommandResult>,
+): Promise<string[] | undefined> {
+  const candidates = builtIn.binary === "npx" ? ["npx", "bunx"] : [builtIn.binary]
+  for (const binary of candidates) {
+    const exists = await runCommand(["command", "-v", binary])
+    if (exists.ok) {
+      return [binary, ...builtIn.command.slice(1)]
+    }
+  }
+  return undefined
 }
 
 async function profileForBuiltIn(
