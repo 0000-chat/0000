@@ -82,6 +82,8 @@ type EventWriteOutcome = { ok: true; count: number } | { ok: false; count: numbe
 
 const EVENT_BATCH_MAX_SIZE = 25
 const EVENT_BATCH_FLUSH_MS = 300
+const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250
+const APPROVAL_RESPONSE_SESSION_POLL_MS = 10
 
 export type BridgeSessionManagerOptions = {
   cloudClient: BridgeSessionCloudClient
@@ -453,7 +455,10 @@ export class BridgeSessionManager {
 
   private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
     const key = sessionKeyForItem(item)
-    const session = key ? this.sessions.get(key) : undefined
+    let session = key ? this.sessions.get(key) : undefined
+    if (!session && key && this.sessionQueueState.has(key)) {
+      session = await this.waitForSession(key)
+    }
     if (!session) {
       throw new Error(`approval response ${item.id} does not match an active ACP session`)
     }
@@ -483,6 +488,24 @@ export class BridgeSessionManager {
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
     await this.cloudClient.markResult(item.id, { ok: true, approved })
+  }
+
+  private async waitForSession(sessionKey: string): Promise<BridgeSessionRecord | undefined> {
+    const deadline = Date.now() + APPROVAL_RESPONSE_SESSION_WAIT_MS
+    while (Date.now() < deadline) {
+      const session = this.sessions.get(sessionKey)
+      if (session) {
+        return session
+      }
+      const queueState = this.sessionQueueState.get(sessionKey)
+      const hasQueuedPrompt =
+        (queueState?.pendingQueueItemIds.length ?? 0) > 0 || Boolean(queueState?.runningQueueItemId)
+      if (!hasQueuedPrompt) {
+        return undefined
+      }
+      await new Promise((resolve) => setTimeout(resolve, APPROVAL_RESPONSE_SESSION_POLL_MS))
+    }
+    return this.sessions.get(sessionKey)
   }
 
   private async handleStartSession(item: BridgeSessionQueueItem): Promise<void> {
