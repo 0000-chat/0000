@@ -11,6 +11,7 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "threads.list",
   "threads.read",
   "messages.search",
+  "settings.setDefaultApprovalLevel",
   "spaces.list",
   "spaces.get",
   "spaces.create",
@@ -76,6 +77,9 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     limit: z.number().optional(),
     query: z.string(),
     threadId: z.string().optional(),
+  },
+  "settings.setDefaultApprovalLevel": {
+    approvalLevel: z.enum(["ask", "full_permissions"]).optional(),
   },
   "spaces.list": { includeArchived: z.boolean().optional(), limit: z.number().optional() },
   "spaces.get": { includeArchived: z.boolean().optional(), spaceIdOrSlug: z.string() },
@@ -244,6 +248,8 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "threads.list": "List recent 0000 Chat threads visible to this agent session.",
   "threads.read": "Read one 0000 Chat thread and its cached messages.",
   "messages.search": "Search cached 0000 Chat messages.",
+  "settings.setDefaultApprovalLevel":
+    "Set the user's default approval mode. Use full_permissions only when the user explicitly asks to enable trusted local automation; this tool requires in-thread approval unless the current thread already has full permissions.",
   "spaces.list": "List spaces in 0000 Chat.",
   "spaces.get": "Read one 0000 Chat space by id or slug.",
   "spaces.create":
