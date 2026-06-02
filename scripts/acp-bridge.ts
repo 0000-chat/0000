@@ -208,7 +208,13 @@ export type BridgeUpdateStatus =
 
 export type BridgeUpdateState = {
   status: BridgeUpdateStatus
-  currentVersion?: string
+  available: boolean
+  channel: string
+  currentVersion: string
+  latestVersion?: string
+  lastCheckedAt: number
+  lastUpdatedAt?: number
+  required: boolean
   targetVersion?: string
   requestedAt?: number
   startedAt?: number
@@ -218,7 +224,25 @@ export type BridgeUpdateState = {
 
 export type BridgeDevHotReloadStatus = {
   enabled: boolean
-  reason?: string
+  lastRestartReason?: string
+  pendingRestart: boolean
+}
+
+function buildBridgeUpdateState(
+  status: BridgeUpdateStatus,
+  now: number,
+  patch: Partial<BridgeUpdateState> = {},
+): BridgeUpdateState {
+  return {
+    available: false,
+    channel: "stable",
+    currentVersion: BRIDGE_VERSION,
+    lastCheckedAt: now,
+    latestVersion: BRIDGE_VERSION,
+    required: false,
+    status,
+    ...patch,
+  }
 }
 
 export type BridgeControlCommandName = "updateWhenIdle" | "restartWhenIdle"
@@ -908,19 +932,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
         connected: true,
-        lifecycle: "running",
-        updateState: {
-          status: "upToDate",
-          currentVersion: BRIDGE_VERSION,
-        },
-        devHotReload: process.env.ZERO_CHAT_DEV_HOT_RELOAD
-          ? {
-              enabled: true,
-              reason: process.env.ZERO_CHAT_DEV_HOT_RELOAD_REASON,
-            }
-          : {
-              enabled: false,
-            },
+	        lifecycle: "running",
+	        updateState: buildBridgeUpdateState("upToDate", Date.now()),
+	        devHotReload: process.env.ZERO_CHAT_DEV_HOT_RELOAD
+	          ? {
+	              enabled: true,
+	              lastRestartReason: process.env.ZERO_CHAT_DEV_HOT_RELOAD_REASON,
+	              pendingRestart: false,
+	            }
+	          : {
+	              enabled: false,
+	              pendingRestart: false,
+	            },
         lastStartedAt: new Date().toISOString(),
         maxInFlight,
         acpResumeEnabled: resumeEnabled,
@@ -1163,22 +1186,18 @@ async function applyPendingBridgeControlCommand(
   const idleDecision = shouldRestartBridgeForDevHotReload(status)
   if (!idleDecision.ready) {
     status.lifecycle = "draining"
-    status.updateState = {
-      status: "waitingForIdle",
-      currentVersion: BRIDGE_VERSION,
-      requestedAt: command.requestedAt,
-    }
+	    status.updateState = buildBridgeUpdateState("waitingForIdle", now(), {
+	      requestedAt: command.requestedAt,
+	    })
     return { restartRequested: false }
   }
 
   if (command.command === "updateWhenIdle") {
     status.lifecycle = "updating"
-    status.updateState = {
-      status: "installing",
-      currentVersion: BRIDGE_VERSION,
-      requestedAt: command.requestedAt,
-      startedAt: now(),
-    }
+	    status.updateState = buildBridgeUpdateState("installing", now(), {
+	      requestedAt: command.requestedAt,
+	      startedAt: now(),
+	    })
     status.pendingControlCommand = undefined
     try {
       const launchUpdater = input.launchUpdater ?? launchBridgeUpdater
@@ -1190,24 +1209,20 @@ async function applyPendingBridgeControlCommand(
       })
     } catch (error) {
       status.lifecycle = "error"
-      status.updateState = {
-        status: "failed",
-        currentVersion: BRIDGE_VERSION,
-        requestedAt: command.requestedAt,
-        error: error instanceof Error ? error.message : String(error),
-      }
+	      status.updateState = buildBridgeUpdateState("failed", now(), {
+	        requestedAt: command.requestedAt,
+	        error: error instanceof Error ? error.message : String(error),
+	      })
       return { restartRequested: false }
     }
     return { restartRequested: true }
   }
 
   status.lifecycle = "restarting"
-  status.updateState = {
-    status: "restarting",
-    currentVersion: BRIDGE_VERSION,
-    requestedAt: command.requestedAt,
-    startedAt: now(),
-  }
+	  status.updateState = buildBridgeUpdateState("restarting", now(), {
+	    requestedAt: command.requestedAt,
+	    startedAt: now(),
+	  })
   status.pendingControlCommand = undefined
   return { restartRequested: true }
 }
@@ -1466,18 +1481,17 @@ function syncBridgeRuntimeStatus(
 ): void {
   const managerStatus = manager.getStatus()
   status.lifecycle ??= "running"
-  status.updateState ??= {
-    status: "upToDate",
-    currentVersion: BRIDGE_VERSION,
-  }
-  status.devHotReload ??= process.env.ZERO_CHAT_DEV_HOT_RELOAD
-    ? {
-        enabled: true,
-        reason: process.env.ZERO_CHAT_DEV_HOT_RELOAD_REASON,
-      }
-    : {
-        enabled: false,
-      }
+	  status.updateState ??= buildBridgeUpdateState("upToDate", Date.now())
+	  status.devHotReload ??= process.env.ZERO_CHAT_DEV_HOT_RELOAD
+	    ? {
+	        enabled: true,
+	        lastRestartReason: process.env.ZERO_CHAT_DEV_HOT_RELOAD_REASON,
+	        pendingRestart: false,
+	      }
+	    : {
+	        enabled: false,
+	        pendingRestart: false,
+	      }
   status.maxInFlight = maxInFlight
   status.activeSessions = managerStatus.activeSessions
   status.sessionQueues = managerStatus.sessions

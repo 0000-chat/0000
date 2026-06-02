@@ -20,6 +20,24 @@ type UpdateState = {
   updateState?: Record<string, unknown>
 }
 
+function buildUpdaterUpdateState(
+  status: string,
+  currentVersion: string | undefined,
+  patch: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const now = Date.now()
+  return {
+    available: false,
+    channel: "stable",
+    currentVersion,
+    lastCheckedAt: now,
+    latestVersion: currentVersion,
+    required: false,
+    status,
+    ...patch,
+  }
+}
+
 async function main() {
   const args = parseUpdaterArgs(process.argv.slice(2))
   await runBridgeUpdate(args)
@@ -60,11 +78,9 @@ export async function runBridgeUpdate(args: UpdaterArgs): Promise<void> {
   await waitForParentExit(args.parentPid)
   await writeUpdaterStatus(args.statusPath, {
     lifecycle: "updating",
-    updateState: {
-      status: "installing",
-      currentVersion: args.currentVersion,
+    updateState: buildUpdaterUpdateState("installing", args.currentVersion, {
       startedAt: Date.now(),
-    },
+    }),
   })
 
   try {
@@ -78,21 +94,17 @@ export async function runBridgeUpdate(args: UpdaterArgs): Promise<void> {
     }
     await writeUpdaterStatus(args.statusPath, {
       lifecycle: "restarting",
-      updateState: {
-        status: targetTag ? "updated" : "upToDate",
-        currentVersion: args.currentVersion,
+      updateState: buildUpdaterUpdateState(targetTag ? "updated" : "upToDate", args.currentVersion, {
         targetVersion: targetTag?.replace(/^v/, ""),
         completedAt: Date.now(),
-      },
+      }),
     })
   } catch (error) {
     await writeUpdaterStatus(args.statusPath, {
       lifecycle: "error",
-      updateState: {
-        status: "failed",
-        currentVersion: args.currentVersion,
+      updateState: buildUpdaterUpdateState("failed", args.currentVersion, {
         error: error instanceof Error ? error.message : String(error),
-      },
+      }),
     })
     throw error
   }
