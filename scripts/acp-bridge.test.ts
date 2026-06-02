@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { chmod, mkdtemp, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  BRIDGE_VERSION,
   buildHeartbeatStatusPayload,
   type BridgeStatus,
   describeStatus,
@@ -20,6 +22,11 @@ import {
   writeBridgeStatusFile,
 } from "./acp-bridge"
 import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./hermes-bridge/runtime-defaults"
+
+test("bridge version matches package metadata", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+  expect(BRIDGE_VERSION).toBe(packageJson.version)
+})
 
 describe("bridge Convex URL resolution", () => {
   test("derives a Convex cloud URL from a Convex site URL", () => {
@@ -313,7 +320,7 @@ describe("bridge lifecycle control", () => {
     expect(status.updateState?.status).toBe("installing")
     expect(launches).toEqual([
       expect.objectContaining({
-        currentVersion: "0.1.2",
+        currentVersion: BRIDGE_VERSION,
         requestedAt: 123,
         statusPath: "/tmp/bridge-status.json",
       }),
