@@ -554,6 +554,7 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
+    this.assertRuntimeSelectionIsUnambiguous(item)
     const sessionKey = sessionKeyForItem(item) ?? threadId
     const existing = this.sessions.get(sessionKey)
     if (existing) {
@@ -629,6 +630,25 @@ export class BridgeSessionManager {
       return session.hermesProfileName === item.hermesProfileName
     }
     return true
+  }
+
+  private assertRuntimeSelectionIsUnambiguous(item: BridgeSessionQueueItem): void {
+    const type = normalizeType(item)
+    if (type !== "prompt" && type !== "start-session") {
+      return
+    }
+    if (item.bridgeProfileId || item.hermesProfileName) {
+      return
+    }
+    const availableProfiles = this.runtimeProfiles.filter((profile) => profile.status === "available")
+    if (availableProfiles.length <= 1) {
+      return
+    }
+    throw new Error(
+      `Bridge runtime profile is required for ${type} queue item ${item.id} because this bridge has multiple available runtime profiles: ${availableProfiles
+        .map((profile) => profile.id)
+        .join(", ")}`,
+    )
   }
 
   private resolveRuntimeProfileForItem(
