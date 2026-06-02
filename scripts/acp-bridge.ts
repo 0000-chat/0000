@@ -159,6 +159,10 @@ export type BridgeStatus = {
   sessionQueues?: Array<{
     sessionKey: string
     threadId: string
+    runtimeProfileId?: string
+    runtimeLabel?: string
+    runtimeKind?: string
+    hermesProfileName?: string
     queueDepth: number
     runningQueueItemId?: string
     lastUsedAt?: number
@@ -1460,8 +1464,12 @@ export function bridgeHeartbeatSignature(
     maxInFlight: status.maxInFlight,
     sessionQueues: (status.sessionQueues ?? [])
       .map((session) => ({
+        hermesProfileName: session.hermesProfileName,
         queueDepth: session.queueDepth,
         runningQueueItemId: session.runningQueueItemId,
+        runtimeKind: session.runtimeKind,
+        runtimeLabel: session.runtimeLabel,
+        runtimeProfileId: session.runtimeProfileId,
         sessionKey: session.sessionKey,
         threadId: session.threadId,
       }))

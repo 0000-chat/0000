@@ -45,6 +45,7 @@ export const bridgeLogEventNames = [
   "bridge.queue_item.start",
   "bridge.session.idle_close",
   "bridge.session.ready",
+  "bridge.session.runtime_profile_changed",
   "bridge.start",
   "bridge.stop",
   "bridge.subscription.disabled",

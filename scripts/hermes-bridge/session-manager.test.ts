@@ -76,6 +76,86 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("recreates an ACP session when an explicit runtime profile changes", async () => {
+    const cloud = fakeCloudClient()
+    const contexts: BridgeSessionContext[] = []
+    const closedProfiles: Array<string | undefined> = []
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context)
+        return {
+          close: async () => {
+            closedProfiles.push(context.bridgeProfileId)
+          },
+          cancel: async () => {},
+          sendUserMessage: async () => ({
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: context.bridgeProfileId ?? "unknown",
+          }),
+        }
+      },
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
+          id: "claude-code:claude-acp",
+          kind: "claude-code",
+          label: "Claude Code",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      bridgeProfileId: "codex:codex-acp",
+      id: "queue-codex",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      bridgeProfileId: "claude-code:claude-acp",
+      id: "queue-claude",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(contexts.map((context) => context.bridgeProfileId)).toEqual([
+      "codex:codex-acp",
+      "claude-code:claude-acp",
+    ])
+    expect(contexts.map((context) => context.agentCommand)).toEqual([
+      ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+      ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
+    ])
+    expect(closedProfiles).toContain("codex:codex-acp")
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-claude",
+      result: { ok: true, text: "claude-code:claude-acp" },
+    })
+    expect(manager.getStatus().sessions).toEqual([
+      expect.objectContaining({
+        runtimeKind: "claude-code",
+        runtimeLabel: "Claude Code",
+        runtimeProfileId: "claude-code:claude-acp",
+      }),
+    ])
+  })
+
   test("waits for a starting ACP session before handling an approval response", async () => {
     const promptStarted = deferred<void>()
     const finishPrompt = deferred<void>()
