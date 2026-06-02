@@ -10,7 +10,9 @@
     "bridge:start": "bun scripts/acp-bridge.ts start",
     "sbom": "bun scripts/generate-sbom.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "observability:check": "bun scripts/observability-check.ts",
+    "quality": "bun test && bun run typecheck && bun run observability:check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
