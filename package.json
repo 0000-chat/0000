@@ -7,7 +7,9 @@
   "scripts": {
     "bridge": "bun scripts/acp-bridge.ts",
     "bridge:connect": "bun scripts/acp-bridge.ts connect",
+    "bridge:dev": "bun scripts/bridge-dev-supervisor.ts",
     "bridge:start": "bun scripts/acp-bridge.ts start",
+    "bridge:update": "bun scripts/bridge-updater.ts",
     "sbom": "bun scripts/generate-sbom.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",

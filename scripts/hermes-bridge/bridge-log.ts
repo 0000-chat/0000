@@ -26,6 +26,7 @@ export const bridgeLogEventNames = [
   "agent.turn.started",
   "bridge.audit",
   "bridge.axiom_delivery.failed",
+  "bridge.control_command.received",
   "bridge.events.append_failed",
   "bridge.events.append_single_failed",
   "bridge.events.appended",
