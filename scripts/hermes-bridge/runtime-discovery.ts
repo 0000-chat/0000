@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import { homedir } from "node:os"
 import {
   type BridgeRuntimeAvailableCommand,
   type BridgeRuntimeKind,
@@ -19,6 +20,23 @@ export type RuntimeDiscoveryInput = {
   discoverAcpCommands?: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>
   probeAcpCommand?: (command: string[]) => Promise<AcpProbeResult>
   runCommand?: (command: string[]) => Promise<CommandResult>
+}
+
+export function runtimeDiscoveryEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const home = baseEnv.HOME ?? homedir()
+  const pathParts = [
+    `${home}/.volta/bin`,
+    `${home}/.bun/bin`,
+    `${home}/.local/bin`,
+    baseEnv.PATH,
+  ].filter(Boolean)
+  return {
+    ...baseEnv,
+    PATH: pathParts.join(":"),
+    TERM: baseEnv.TERM === "dumb" || !baseEnv.TERM ? "xterm-256color" : baseEnv.TERM,
+  }
 }
 
 const BUILT_INS: Array<{
@@ -187,7 +205,7 @@ async function withAcpDetails(
 export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult> {
   return new Promise((resolve) => {
     const child = spawn(command[0] ?? "", command.slice(1), {
-      env: { ...process.env, TERM: process.env.TERM === "dumb" ? "xterm-256color" : process.env.TERM },
+      env: runtimeDiscoveryEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     })
     let settled = false
@@ -259,7 +277,7 @@ export function discoverLocalAcpCommands(
 ): Promise<BridgeRuntimeAvailableCommand[]> {
   return new Promise((resolve) => {
     const child = spawn(command[0] ?? "", command.slice(1), {
-      env: { ...process.env, TERM: process.env.TERM === "dumb" ? "xterm-256color" : process.env.TERM },
+      env: runtimeDiscoveryEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     })
     let settled = false
@@ -389,7 +407,7 @@ function stringFromUnknown(value: unknown): string | undefined {
 export function runLocalCommand(command: string[]): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = spawn(command[0] ?? "", command.slice(1), {
-      env: process.env,
+      env: runtimeDiscoveryEnv(),
       shell: command[0] === "command",
       stdio: ["ignore", "pipe", "pipe"],
     })
