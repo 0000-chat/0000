@@ -292,8 +292,9 @@ describe("bridge lifecycle control", () => {
     expect(status.updateState?.status).toBe("waitingForIdle")
   })
 
-  test("reports update requests as unsupported until a supervised updater is installed", async () => {
+  test("launches the updater when the app asks an idle bridge to update", async () => {
     const status = createLoopStatus()
+    const launches: unknown[] = []
 
     const result = await runBridgeLoopIteration({
       ...createLoopInput(status),
@@ -301,16 +302,55 @@ describe("bridge lifecycle control", () => {
         ok: true,
         control: { command: { command: "updateWhenIdle", requestedAt: 123 } },
       }),
+      launchUpdater: async (input) => {
+        launches.push(input)
+      },
+      writeStatus: async () => {},
+    })
+
+    expect(result.restartRequested).toBe(true)
+    expect(status.lifecycle).toBe("updating")
+    expect(status.updateState?.status).toBe("installing")
+    expect(launches).toEqual([
+      expect.objectContaining({
+        currentVersion: "0.1.2",
+        requestedAt: 123,
+        statusPath: "/tmp/bridge-status.json",
+      }),
+    ])
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      lifecycle: "updating",
+      updateState: { status: "installing" },
+    })
+  })
+
+  test("waits for idle work before launching an update", async () => {
+    const status = createLoopStatus()
+    const inFlightCommands = new Map<string, Promise<void>>()
+    const inFlightCommandMetadata = new Map()
+    inFlightCommands.set("queue-a", new Promise(() => {}))
+    inFlightCommandMetadata.set("queue-a", {
+      id: "queue-a",
+      startedAt: "2026-06-01T00:00:00.000Z",
+    })
+
+    const result = await runBridgeLoopIteration({
+      ...createLoopInput(status),
+      inFlightCommands,
+      inFlightCommandMetadata,
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: { command: { command: "updateWhenIdle", requestedAt: 123 } },
+      }),
+      launchUpdater: async () => {
+        throw new Error("should not launch while busy")
+      },
       writeStatus: async () => {},
     })
 
     expect(result.restartRequested).toBe(false)
-    expect(status.lifecycle).toBe("running")
-    expect(status.updateState?.status).toBe("unsupported")
-    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
-      lifecycle: "running",
-      updateState: { status: "unsupported" },
-    })
+    expect(status.lifecycle).toBe("draining")
+    expect(status.updateState?.status).toBe("waitingForIdle")
   })
 })
 
@@ -355,5 +395,6 @@ function createLoopInput(status: ReturnType<typeof createLoopStatus>) {
     heartbeatIntervalMs: 0,
     cleanupStaleClaims: async () => ({ released: 0, inspected: 0 }),
     claimCommands: async () => [],
+    launchUpdater: async () => {},
   }
 }

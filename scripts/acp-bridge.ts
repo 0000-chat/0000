@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process"
 import { homedir, hostname } from "node:os"
 import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { randomUUID } from "node:crypto"
@@ -28,6 +29,7 @@ import {
 } from "./hermes-bridge/runtime-defaults"
 import type { BridgeRuntimeProfile } from "./hermes-bridge/runtime-profiles"
 import { shouldRestartBridgeForDevHotReload } from "./hermes-bridge/dev-hot-reload"
+import { buildRestartCommandArgs } from "./bridge-updater"
 export {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -276,10 +278,18 @@ export type BridgeLoopIterationInput = {
   cleanupStaleClaims?: typeof cleanupStaleClaims
   claimCommands?: typeof claimCommands
   writeStatus?: typeof writeStatus
+  launchUpdater?: typeof launchBridgeUpdater
 }
 
 export type BridgeLoopIterationResult = {
   restartRequested: boolean
+}
+
+export type BridgeUpdaterLaunchInput = {
+  currentVersion: string
+  requestedAt?: number
+  restartCommand: string[]
+  statusPath: string
 }
 
 export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
@@ -1115,24 +1125,38 @@ function normalizeControlCommand(command?: BridgeControlCommandState): BridgeCon
   }
 }
 
-function applyPendingBridgeControlCommand(
+async function launchBridgeUpdater(input: BridgeUpdaterLaunchInput): Promise<void> {
+  const updaterPath = join(dirname(fileURLToPath(import.meta.url)), "bridge-updater.ts")
+  const args = [
+    updaterPath,
+    "--repo-path",
+    process.cwd(),
+    "--status-path",
+    input.statusPath,
+    "--current-version",
+    input.currentVersion,
+    "--parent-pid",
+    String(process.pid),
+    ...buildRestartCommandArgs(input.restartCommand),
+  ]
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    stdio: "ignore",
+  })
+  child.unref()
+}
+
+function getBridgeRestartCommand(): string[] {
+  return [process.execPath, ...process.argv.slice(1)]
+}
+
+async function applyPendingBridgeControlCommand(
   status: BridgeStatus,
   now: () => number,
-): BridgeLoopIterationResult {
+  input: Pick<BridgeLoopIterationInput, "launchUpdater" | "statusPath">,
+): Promise<BridgeLoopIterationResult> {
   const command = normalizeControlCommand(status.pendingControlCommand)
   if (!command) {
-    return { restartRequested: false }
-  }
-
-  if (command.command === "updateWhenIdle") {
-    status.lifecycle = "running"
-    status.updateState = {
-      status: "unsupported",
-      currentVersion: BRIDGE_VERSION,
-      requestedAt: command.requestedAt,
-      error: "Automatic bridge updates require a supervised updater.",
-    }
-    status.pendingControlCommand = undefined
     return { restartRequested: false }
   }
 
@@ -1145,6 +1169,36 @@ function applyPendingBridgeControlCommand(
       requestedAt: command.requestedAt,
     }
     return { restartRequested: false }
+  }
+
+  if (command.command === "updateWhenIdle") {
+    status.lifecycle = "updating"
+    status.updateState = {
+      status: "installing",
+      currentVersion: BRIDGE_VERSION,
+      requestedAt: command.requestedAt,
+      startedAt: now(),
+    }
+    status.pendingControlCommand = undefined
+    try {
+      const launchUpdater = input.launchUpdater ?? launchBridgeUpdater
+      await launchUpdater({
+        currentVersion: BRIDGE_VERSION,
+        requestedAt: command.requestedAt,
+        restartCommand: getBridgeRestartCommand(),
+        statusPath: input.statusPath,
+      })
+    } catch (error) {
+      status.lifecycle = "error"
+      status.updateState = {
+        status: "failed",
+        currentVersion: BRIDGE_VERSION,
+        requestedAt: command.requestedAt,
+        error: error instanceof Error ? error.message : String(error),
+      }
+      return { restartRequested: false }
+    }
+    return { restartRequested: true }
   }
 
   status.lifecycle = "restarting"
@@ -1225,7 +1279,7 @@ export async function runBridgeLoopIteration(
 
   try {
     syncBridgeStatus()
-    let restartResult = applyPendingBridgeControlCommand(input.status, currentTime)
+    let restartResult = await applyPendingBridgeControlCommand(input.status, currentTime, input)
     const heartbeatNow = currentTime()
     const heartbeatSignature = bridgeHeartbeatSignature(input.status)
     if (
@@ -1253,7 +1307,7 @@ export async function runBridgeLoopIteration(
         const controlCommand = normalizeControlCommand(heartbeatResult.control.command)
         if (controlCommand) {
           input.status.pendingControlCommand = controlCommand
-          restartResult = applyPendingBridgeControlCommand(input.status, currentTime)
+          restartResult = await applyPendingBridgeControlCommand(input.status, currentTime, input)
           input.log({
             level: "info",
             event: "bridge.control_command.received",
