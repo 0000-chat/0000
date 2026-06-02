@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  buildHeartbeatStatusPayload,
+  type BridgeStatus,
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
@@ -12,6 +14,7 @@ import {
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
@@ -240,3 +243,117 @@ describe("bridge security defaults", () => {
     ).toContain("remote bridge log forwarding: disabled")
   })
 })
+
+describe("bridge lifecycle control", () => {
+  test("requests a deterministic restart when the app asks an idle bridge to restart", async () => {
+    const status = createLoopStatus()
+    const writes: unknown[] = []
+
+    const result = await runBridgeLoopIteration({
+      ...createLoopInput(status),
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: { command: { command: "restartWhenIdle", requestedAt: 123 } },
+      }),
+      writeStatus: async (_path, value) => {
+        writes.push(value)
+      },
+    })
+
+    expect(result.restartRequested).toBe(true)
+    expect(status.lifecycle).toBe("restarting")
+    expect(status.updateState?.status).toBe("restarting")
+    expect(writes.length).toBeGreaterThan(0)
+  })
+
+  test("drains instead of restarting while bridge work is still active", async () => {
+    const status = createLoopStatus()
+    const inFlightCommands = new Map<string, Promise<void>>()
+    const inFlightCommandMetadata = new Map()
+    inFlightCommands.set("queue-a", new Promise(() => {}))
+    inFlightCommandMetadata.set("queue-a", {
+      id: "queue-a",
+      startedAt: "2026-06-01T00:00:00.000Z",
+    })
+
+    const result = await runBridgeLoopIteration({
+      ...createLoopInput(status),
+      inFlightCommands,
+      inFlightCommandMetadata,
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: { command: { command: "restartWhenIdle", requestedAt: 123 } },
+      }),
+      writeStatus: async () => {},
+    })
+
+    expect(result.restartRequested).toBe(false)
+    expect(status.lifecycle).toBe("draining")
+    expect(status.updateState?.status).toBe("waitingForIdle")
+  })
+
+  test("reports update requests as unsupported until a supervised updater is installed", async () => {
+    const status = createLoopStatus()
+
+    const result = await runBridgeLoopIteration({
+      ...createLoopInput(status),
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: { command: { command: "updateWhenIdle", requestedAt: 123 } },
+      }),
+      writeStatus: async () => {},
+    })
+
+    expect(result.restartRequested).toBe(false)
+    expect(status.lifecycle).toBe("running")
+    expect(status.updateState?.status).toBe("unsupported")
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      lifecycle: "running",
+      updateState: { status: "unsupported" },
+    })
+  })
+})
+
+function createLoopStatus(): BridgeStatus {
+  return {
+    deviceId: "bridge-a",
+    appUrl: "https://0000.chat",
+    connected: true,
+    activeSessions: [],
+    activeQueueItemIds: [],
+    inFlightCommands: [],
+    sessionQueues: [],
+    recentErrors: [],
+  }
+}
+
+function createLoopInput(status: ReturnType<typeof createLoopStatus>) {
+  return {
+    config: {
+      appUrl: "https://0000.chat",
+      bridgeToken: "token-a",
+      deviceId: "bridge-a",
+      deviceName: "Bridge A",
+      pairedAt: "2026-06-01T00:00:00.000Z",
+    },
+    status,
+    maxInFlight: 1,
+    manager: {
+      getStatus: () => ({ activeSessions: [], sessions: [] }),
+      handleQueueItem: async () => {},
+    },
+    inFlightCommands: new Map<string, Promise<void>>(),
+    inFlightCommandMetadata: new Map(),
+    lastStaleCleanupAt: 0,
+    setLastStaleCleanupAt: () => {},
+    log: Object.assign(() => {}, { flush: async () => {} }),
+    recordLoopError: async (error: unknown) => {
+      throw error
+    },
+    statusPath: "/tmp/bridge-status.json",
+    now: () => Date.parse("2026-06-01T00:00:00.000Z"),
+    heartbeatIntervalMs: 0,
+    cleanupStaleClaims: async () => ({ released: 0, inspected: 0 }),
+    claimCommands: async () => [],
+  }
+}

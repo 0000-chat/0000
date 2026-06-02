@@ -27,6 +27,7 @@ import {
   inferRuntimeLabel,
 } from "./hermes-bridge/runtime-defaults"
 import type { BridgeRuntimeProfile } from "./hermes-bridge/runtime-profiles"
+import { shouldRestartBridgeForDevHotReload } from "./hermes-bridge/dev-hot-reload"
 export {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -128,6 +129,10 @@ export type BridgeStatus = {
   deviceId?: string
   appUrl?: string
   connected: boolean
+  lifecycle?: BridgeLifecycleStatus
+  updateState?: BridgeUpdateState
+  devHotReload?: BridgeDevHotReloadStatus
+  pendingControlCommand?: BridgeControlCommandState
   lastStartedAt?: string
   lastHeartbeatAt?: string
   lastHeartbeatSignature?: string
@@ -166,6 +171,10 @@ export type BridgeRegistrationStatus = {
   appUrl: string
   deviceName?: string
   connected: boolean
+  lifecycle?: BridgeLifecycleStatus
+  updateState?: BridgeUpdateState
+  devHotReload?: BridgeDevHotReloadStatus
+  pendingControlCommand?: BridgeControlCommandState
   lastStartedAt?: string
   lastHeartbeatAt?: string
   lastPollAt?: string
@@ -175,6 +184,46 @@ export type BridgeRegistrationStatus = {
   inFlightCommands?: BridgeStatus["inFlightCommands"]
   sessionQueues?: BridgeStatus["sessionQueues"]
   recentErrors: string[]
+}
+
+export type BridgeLifecycleStatus =
+  | "running"
+  | "draining"
+  | "restartPending"
+  | "updating"
+  | "restarting"
+  | "error"
+
+export type BridgeUpdateStatus =
+  | "upToDate"
+  | "available"
+  | "waitingForIdle"
+  | "installing"
+  | "restarting"
+  | "updated"
+  | "failed"
+  | "unsupported"
+
+export type BridgeUpdateState = {
+  status: BridgeUpdateStatus
+  currentVersion?: string
+  targetVersion?: string
+  requestedAt?: number
+  startedAt?: number
+  completedAt?: number
+  error?: string
+}
+
+export type BridgeDevHotReloadStatus = {
+  enabled: boolean
+  reason?: string
+}
+
+export type BridgeControlCommandName = "updateWhenIdle" | "restartWhenIdle"
+
+export type BridgeControlCommandState = {
+  command: BridgeControlCommandName
+  requestedAt?: number
 }
 
 export type HermesProfileSummary = {
@@ -227,6 +276,10 @@ export type BridgeLoopIterationInput = {
   cleanupStaleClaims?: typeof cleanupStaleClaims
   claimCommands?: typeof claimCommands
   writeStatus?: typeof writeStatus
+}
+
+export type BridgeLoopIterationResult = {
+  restartRequested: boolean
 }
 
 export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
@@ -845,6 +898,19 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
         connected: true,
+        lifecycle: "running",
+        updateState: {
+          status: "upToDate",
+          currentVersion: BRIDGE_VERSION,
+        },
+        devHotReload: process.env.ZERO_CHAT_DEV_HOT_RELOAD
+          ? {
+              enabled: true,
+              reason: process.env.ZERO_CHAT_DEV_HOT_RELOAD_REASON,
+            }
+          : {
+              enabled: false,
+            },
         lastStartedAt: new Date().toISOString(),
         maxInFlight,
         acpResumeEnabled: resumeEnabled,
@@ -960,7 +1026,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     for (const context of contexts.values()) {
       const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight())
       const effectiveMaxInFlight = context.inFlightCommands.size + availableProcessSlots
-      await runBridgeLoopIteration({
+      const result = await runBridgeLoopIteration({
         config: context.config,
         agentCommand,
         runtimeCommands: customRuntimeCommands,
@@ -978,6 +1044,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         statusPath,
         writeStatus: persistAggregateStatus,
       })
+      if (result.restartRequested) {
+        await stop()
+        break
+      }
     }
     await waitForAnyWakeSignal()
   }
@@ -996,6 +1066,9 @@ function buildAggregateBridgeStatus(
     appUrl: config.appUrl,
     deviceName: config.deviceName,
     connected: status.connected,
+    lifecycle: status.lifecycle,
+    updateState: status.updateState,
+    devHotReload: status.devHotReload,
     lastStartedAt: status.lastStartedAt,
     lastHeartbeatAt: status.lastHeartbeatAt,
     lastPollAt: status.lastPollAt,
@@ -1010,6 +1083,9 @@ function buildAggregateBridgeStatus(
     deviceId: first?.config.deviceId,
     appUrl: first?.config.appUrl,
     connected: registrations.some((registration) => registration.connected),
+    lifecycle: first?.status.lifecycle,
+    updateState: first?.status.updateState,
+    devHotReload: first?.status.devHotReload,
     lastStartedAt: first?.status.lastStartedAt,
     lastHeartbeatAt: first?.status.lastHeartbeatAt,
     lastPollAt: first?.status.lastPollAt,
@@ -1029,7 +1105,62 @@ function buildAggregateBridgeStatus(
   }
 }
 
-export async function runBridgeLoopIteration(input: BridgeLoopIterationInput): Promise<void> {
+function normalizeControlCommand(command?: BridgeControlCommandState): BridgeControlCommandState | undefined {
+  if (command?.command !== "restartWhenIdle" && command?.command !== "updateWhenIdle") {
+    return undefined
+  }
+  return {
+    command: command.command,
+    requestedAt: typeof command.requestedAt === "number" ? command.requestedAt : undefined,
+  }
+}
+
+function applyPendingBridgeControlCommand(
+  status: BridgeStatus,
+  now: () => number,
+): BridgeLoopIterationResult {
+  const command = normalizeControlCommand(status.pendingControlCommand)
+  if (!command) {
+    return { restartRequested: false }
+  }
+
+  if (command.command === "updateWhenIdle") {
+    status.lifecycle = "running"
+    status.updateState = {
+      status: "unsupported",
+      currentVersion: BRIDGE_VERSION,
+      requestedAt: command.requestedAt,
+      error: "Automatic bridge updates require a supervised updater.",
+    }
+    status.pendingControlCommand = undefined
+    return { restartRequested: false }
+  }
+
+  const idleDecision = shouldRestartBridgeForDevHotReload(status)
+  if (!idleDecision.ready) {
+    status.lifecycle = "draining"
+    status.updateState = {
+      status: "waitingForIdle",
+      currentVersion: BRIDGE_VERSION,
+      requestedAt: command.requestedAt,
+    }
+    return { restartRequested: false }
+  }
+
+  status.lifecycle = "restarting"
+  status.updateState = {
+    status: "restarting",
+    currentVersion: BRIDGE_VERSION,
+    requestedAt: command.requestedAt,
+    startedAt: now(),
+  }
+  status.pendingControlCommand = undefined
+  return { restartRequested: true }
+}
+
+export async function runBridgeLoopIteration(
+  input: BridgeLoopIterationInput,
+): Promise<BridgeLoopIterationResult> {
   const heartbeat = input.sendHeartbeat ?? sendHeartbeat
   const discoverProfiles = input.discoverHermesProfiles ?? discoverHermesProfiles
   const discoverRuntimeProfiles = input.discoverRuntimeProfiles ?? discoverBridgeRuntimeProfiles
@@ -1094,6 +1225,7 @@ export async function runBridgeLoopIteration(input: BridgeLoopIterationInput): P
 
   try {
     syncBridgeStatus()
+    let restartResult = applyPendingBridgeControlCommand(input.status, currentTime)
     const heartbeatNow = currentTime()
     const heartbeatSignature = bridgeHeartbeatSignature(input.status)
     if (
@@ -1115,29 +1247,47 @@ export async function runBridgeLoopIteration(input: BridgeLoopIterationInput): P
         })
       } else if (
         heartbeatResult.control?.refreshHermesProfiles ||
-        heartbeatResult.control?.refreshRuntimeProfiles
+        heartbeatResult.control?.refreshRuntimeProfiles ||
+        heartbeatResult.control?.command
       ) {
-        try {
-          input.status.hermesProfiles = await discoverProfiles()
-          input.status.runtimeProfiles = await discoverRuntimeProfiles({
-            baseAgentCommand: input.agentCommand ?? DEFAULT_AGENT_COMMAND,
-            customCommands: input.runtimeCommands,
-          })
-          const refreshedAt = new Date(currentTime()).toISOString()
-          input.status.lastHermesProfileRefreshAt = refreshedAt
-          input.status.lastRuntimeProfileRefreshAt = refreshedAt
+        const controlCommand = normalizeControlCommand(heartbeatResult.control.command)
+        if (controlCommand) {
+          input.status.pendingControlCommand = controlCommand
+          restartResult = applyPendingBridgeControlCommand(input.status, currentTime)
           input.log({
             level: "info",
-            event: "bridge.hermes_profiles.refresh",
+            event: "bridge.control_command.received",
             deviceId: input.config.deviceId,
-            profileCount: input.status.hermesProfiles.length,
+            command: controlCommand.command,
+            restartRequested: restartResult.restartRequested,
           })
-          await persistStatus(input.statusPath, input.status)
-          const refreshHeartbeatResult = await heartbeat(input.config, input.status)
-          if (!refreshHeartbeatResult.ok) {
-            const message = redactForOutput(refreshHeartbeatResult.error.message)
-            input.status.recentErrors.push(message)
-            input.status.recentErrors = input.status.recentErrors.slice(-10)
+        }
+        try {
+          if (
+            heartbeatResult.control.refreshHermesProfiles ||
+            heartbeatResult.control.refreshRuntimeProfiles
+          ) {
+            input.status.hermesProfiles = await discoverProfiles()
+            input.status.runtimeProfiles = await discoverRuntimeProfiles({
+              baseAgentCommand: input.agentCommand ?? DEFAULT_AGENT_COMMAND,
+              customCommands: input.runtimeCommands,
+            })
+            const refreshedAt = new Date(currentTime()).toISOString()
+            input.status.lastHermesProfileRefreshAt = refreshedAt
+            input.status.lastRuntimeProfileRefreshAt = refreshedAt
+            input.log({
+              level: "info",
+              event: "bridge.hermes_profiles.refresh",
+              deviceId: input.config.deviceId,
+              profileCount: input.status.hermesProfiles.length,
+            })
+            await persistStatus(input.statusPath, input.status)
+            const refreshHeartbeatResult = await heartbeat(input.config, input.status)
+            if (!refreshHeartbeatResult.ok) {
+              const message = redactForOutput(refreshHeartbeatResult.error.message)
+              input.status.recentErrors.push(message)
+              input.status.recentErrors = input.status.recentErrors.slice(-10)
+            }
           }
         } catch (error) {
           const message = redactForOutput(error instanceof Error ? error.message : String(error))
@@ -1151,6 +1301,11 @@ export async function runBridgeLoopIteration(input: BridgeLoopIterationInput): P
           })
         }
       }
+    }
+    if (restartResult.restartRequested) {
+      syncBridgeStatus()
+      await persistStatus(input.statusPath, input.status)
+      return restartResult
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size
     if (availableSlots > 0) {
@@ -1187,6 +1342,7 @@ export async function runBridgeLoopIteration(input: BridgeLoopIterationInput): P
   } catch (error) {
     await input.recordLoopError(error)
   }
+  return { restartRequested: false }
 }
 
 export function shouldSendBridgeHeartbeat(
@@ -1208,12 +1364,21 @@ export function shouldSendBridgeHeartbeat(
 export function bridgeHeartbeatSignature(
   status: Pick<
     BridgeStatus,
-    "activeQueueItemIds" | "connected" | "inFlightCommands" | "maxInFlight" | "sessionQueues"
+    | "activeQueueItemIds"
+    | "connected"
+    | "devHotReload"
+    | "inFlightCommands"
+    | "lifecycle"
+    | "maxInFlight"
+    | "pendingControlCommand"
+    | "sessionQueues"
+    | "updateState"
   >,
 ): string {
   return JSON.stringify({
     activeQueueItemIds: [...(status.activeQueueItemIds ?? [])].sort(),
     connected: status.connected,
+    devHotReload: status.devHotReload,
     inFlightCommands: (status.inFlightCommands ?? [])
       .map((command) => ({
         agentSessionId: command.agentSessionId,
@@ -1232,6 +1397,9 @@ export function bridgeHeartbeatSignature(
         threadId: session.threadId,
       }))
       .sort((left, right) => left.sessionKey.localeCompare(right.sessionKey)),
+    lifecycle: status.lifecycle,
+    pendingControlCommand: status.pendingControlCommand,
+    updateState: status.updateState,
   })
 }
 
@@ -1243,6 +1411,19 @@ function syncBridgeRuntimeStatus(
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>,
 ): void {
   const managerStatus = manager.getStatus()
+  status.lifecycle ??= "running"
+  status.updateState ??= {
+    status: "upToDate",
+    currentVersion: BRIDGE_VERSION,
+  }
+  status.devHotReload ??= process.env.ZERO_CHAT_DEV_HOT_RELOAD
+    ? {
+        enabled: true,
+        reason: process.env.ZERO_CHAT_DEV_HOT_RELOAD_REASON,
+      }
+    : {
+        enabled: false,
+      }
   status.maxInFlight = maxInFlight
   status.activeSessions = managerStatus.activeSessions
   status.sessionQueues = managerStatus.sessions
@@ -1331,6 +1512,7 @@ type BridgeHeartbeatSendResult =
   | { ok: false; error: BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 } }
 
 type BridgeControlResponse = {
+  command?: BridgeControlCommandState
   refreshHermesProfiles?: {
     requestedAt?: unknown
   }
@@ -1342,6 +1524,9 @@ type BridgeControlResponse = {
 export function buildHeartbeatStatusPayload(status: BridgeStatus) {
   return {
     connected: status.connected,
+    lifecycle: status.lifecycle ?? "running",
+    updateState: status.updateState ?? { status: "upToDate", currentVersion: BRIDGE_VERSION },
+    devHotReload: status.devHotReload,
     activeSessions: status.activeSessions,
     activeQueueItemIds: status.activeQueueItemIds ?? [],
     inFlightCommands: status.inFlightCommands ?? [],

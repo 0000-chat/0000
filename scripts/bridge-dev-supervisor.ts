@@ -77,6 +77,9 @@ class BridgeDevSupervisor {
     })
     this.child.once("exit", () => {
       this.child = null
+      if (!this.stopped && !this.restarting) {
+        this.startBridge("bridge process exited")
+      }
     })
   }
 
