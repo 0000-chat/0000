@@ -154,6 +154,8 @@ export type BridgeStatus = {
     threadId?: string
     sessionId?: string
     agentSessionId?: string
+    bridgeProfileId?: string
+    hermesProfileName?: string
     startedAt: string
   }>
   sessionQueues?: Array<{
@@ -279,6 +281,8 @@ type InFlightCommandMetadata = {
   threadId?: string
   sessionId?: string
   agentSessionId?: string
+  bridgeProfileId?: string
+  hermesProfileName?: string
   startedAt: string
 }
 
@@ -1259,6 +1263,8 @@ export async function runBridgeLoopIteration(
       threadId: command.threadId,
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
+      bridgeProfileId: command.bridgeProfileId,
+      hermesProfileName: command.hermesProfileName,
       startedAt: new Date(currentTime()).toISOString(),
     })
     input.log({
@@ -1270,6 +1276,8 @@ export async function runBridgeLoopIteration(
       threadId: command.threadId,
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
+      bridgeProfileId: command.bridgeProfileId,
+      hermesProfileName: command.hermesProfileName,
       activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
     })
     const task = input.manager
@@ -1288,6 +1296,8 @@ export async function runBridgeLoopIteration(
           threadId: command.threadId,
           sessionId: command.sessionId,
           agentSessionId: command.agentSessionId,
+          bridgeProfileId: command.bridgeProfileId,
+          hermesProfileName: command.hermesProfileName,
           activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
         })
         void persistStatus(input.statusPath, input.status)
@@ -1455,6 +1465,8 @@ export function bridgeHeartbeatSignature(
     inFlightCommands: (status.inFlightCommands ?? [])
       .map((command) => ({
         agentSessionId: command.agentSessionId,
+        bridgeProfileId: command.bridgeProfileId,
+        hermesProfileName: command.hermesProfileName,
         id: command.id,
         sessionId: command.sessionId,
         threadId: command.threadId,
