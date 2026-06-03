@@ -1907,7 +1907,7 @@ Use this skill whenever the user asks you to work through 0000, reconnect to 000
 2. Start the bridge with:
 
 \`\`\`bash
-bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)}
+bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)} --allow-remote-cwd
 \`\`\`
 
 3. If the bridge config is missing, ask the human to generate a new 0000 agent connection code, then run:
