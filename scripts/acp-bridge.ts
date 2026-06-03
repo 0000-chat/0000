@@ -1938,7 +1938,7 @@ function recordFromUnknown(value: unknown): Record<string, unknown> | undefined 
     : undefined
 }
 
-function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
+export function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined
   }
@@ -1954,8 +1954,12 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
+    bridgeProfileId: stringFromUnknown(record.bridgeProfileId),
+    hermesProfileName: stringFromUnknown(record.hermesProfileName),
     cwd: stringFromUnknown(record.cwd),
     prompt: stringFromUnknown(record.prompt),
+    agentName: stringFromUnknown(record.agentName),
+    externalSessionId: stringFromUnknown(record.externalSessionId),
     systemPrompt: stringFromUnknown(record.systemPrompt),
     approvalId: stringFromUnknown(record.approvalId),
     approvalOutcome: stringFromUnknown(record.approvalOutcome),
