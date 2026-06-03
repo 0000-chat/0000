@@ -268,6 +268,7 @@ describe("bridge security defaults", () => {
 
   test("keeps remote cwd disabled unless explicitly enabled", () => {
     expect(getAllowRemoteCwd({}, {})).toBe(false)
+    expect(getAllowRemoteCwd({ "allow-remote-cwd": true }, {})).toBe(true)
     expect(getAllowRemoteCwd({ "allow-remote-cwd": "true" }, {})).toBe(true)
     expect(getAllowRemoteCwd({}, { ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD: "1" })).toBe(true)
   })
