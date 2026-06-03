@@ -16,6 +16,7 @@ import {
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  normalizeQueueCommand,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
@@ -60,6 +61,36 @@ describe("bridge Convex URL resolution", () => {
         {},
       ),
     ).toBe("https://uncommon-starfish-672.convex.cloud")
+  })
+})
+
+describe("bridge queue command normalization", () => {
+  test("preserves runtime selection fields from claim responses", () => {
+    expect(
+      normalizeQueueCommand({
+        agentName: "Claude Code",
+        agentSessionId: "session_123",
+        bridgeProfileId: "claude-code:claude-acp",
+        cwd: "/home/dev",
+        externalSessionId: "acp-session-123",
+        hermesProfileName: "writer",
+        id: "queue_123",
+        kind: "prompt",
+        prompt: "hello",
+        threadId: "thread_123",
+      }),
+    ).toMatchObject({
+      agentName: "Claude Code",
+      agentSessionId: "session_123",
+      bridgeProfileId: "claude-code:claude-acp",
+      cwd: "/home/dev",
+      externalSessionId: "acp-session-123",
+      hermesProfileName: "writer",
+      id: "queue_123",
+      prompt: "hello",
+      threadId: "thread_123",
+      type: "prompt",
+    })
   })
 })
 
