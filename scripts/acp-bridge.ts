@@ -494,6 +494,9 @@ export function getMaxInFlight(flags: FlagMap, env: NodeJS.ProcessEnv = process.
 }
 
 export function getAllowRemoteCwd(flags: FlagMap, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (flags["allow-remote-cwd"] === true) {
+    return true
+  }
   const rawValue = getFlag(flags, "allow-remote-cwd", env.ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD)
   if (rawValue === undefined) {
     return DEFAULT_ALLOW_REMOTE_CWD
