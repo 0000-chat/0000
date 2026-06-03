@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdtemp, stat } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -7,11 +7,13 @@ import {
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
+  buildAgentConnectionSkillContent,
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  repairBridgeConfigFiles,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
@@ -185,6 +187,71 @@ describe("bridge multi-organization config", () => {
     expect(output).toContain("Org B laptop")
     expect(output).not.toContain("secret-token")
     expect(output).not.toContain("secret-value")
+  })
+
+  test("repairs legacy bridge configs by merging registrations with a backup", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-"))
+    const targetPath = join(dir, "bridge.json")
+    const sourcePath = join(dir, "legacy-bridge.json")
+
+    await writeBridgeConfigFile(targetPath, {
+      version: 2,
+      registrations: [
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "token-current",
+          deviceId: "bridge_current",
+          deviceName: "Current org",
+          pairedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    })
+    await writeBridgeConfigFile(sourcePath, {
+      appUrl: "https://example-123.convex.site",
+      bridgeToken: "token-legacy",
+      deviceId: "bridge_legacy",
+      deviceName: "Legacy org",
+      pairedAt: "2026-05-21T00:00:00.000Z",
+    })
+
+    const result = await repairBridgeConfigFiles({
+      now: () => new Date("2026-06-03T08:16:45.000Z"),
+      sourcePaths: [sourcePath],
+      targetPath,
+    })
+
+    const repaired = JSON.parse(await readFile(targetPath, "utf8"))
+    expect(result).toMatchObject({
+      backupPath: `${targetPath}.backup-20260603T081645Z`,
+      importedRegistrationCount: 1,
+      previousRegistrationCount: 1,
+      registrationCount: 2,
+      targetPath,
+    })
+    expect((await stat(result.backupPath!)).mode & 0o777).toBe(0o600)
+    expect(repaired.registrations.map((registration: { deviceId: string }) => registration.deviceId)).toEqual([
+      "bridge_current",
+      "bridge_legacy",
+    ])
+    expect(repaired.registrations[1]).toMatchObject({
+      appUrl: "https://0000.chat",
+      bridgeApiUrl: "https://example-123.convex.site",
+      deviceId: "bridge_legacy",
+    })
+  })
+
+  test("agent skill tells agents to append organizations instead of reinstalling", () => {
+    const content = buildAgentConnectionSkillContent({
+      agentCommand: "hermes acp",
+      appUrl: "https://0000.chat",
+      configPath: "/home/alice/.0000/bridge.json",
+      skillPath: "/home/alice/.claude/skills/0000/SKILL.md",
+    })
+
+    expect(content).toContain("multiple 0000 organizations")
+    expect(content).toContain("connect-org <code>")
+    expect(content).toContain("Do not delete, recreate, overwrite, or move the bridge config")
+    expect(content).toContain("repair-config")
   })
 })
 
