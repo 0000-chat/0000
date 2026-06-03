@@ -273,6 +273,14 @@ describe("bridge security defaults", () => {
     expect(getAllowRemoteCwd({}, { ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD: "1" })).toBe(true)
   })
 
+  test("writes reconnect skill with remote cwd enabled", () => {
+    const source = readFileSync(new URL("./acp-bridge.ts", import.meta.url), "utf8")
+
+    expect(source).toContain(
+      "bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)} --allow-remote-cwd",
+    )
+  })
+
   test("prints startup security defaults", () => {
     expect(
       buildStartupSecuritySummary({
