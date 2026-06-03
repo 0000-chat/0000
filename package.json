@@ -1,13 +1,15 @@
 {
   "name": "@0000-chat/0000",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "description": "Local ACP bridge for connecting external coding agents to 0000 Chat.",
   "type": "module",
   "packageManager": "bun@1.3.9",
   "scripts": {
     "bridge": "bun scripts/acp-bridge.ts",
     "bridge:connect": "bun scripts/acp-bridge.ts connect",
+    "bridge:dev": "bun scripts/bridge-dev-supervisor.ts",
     "bridge:start": "bun scripts/acp-bridge.ts start",
+    "bridge:update": "bun scripts/bridge-updater.ts",
     "sbom": "bun scripts/generate-sbom.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",

@@ -106,6 +106,10 @@ export type BridgeSessionManagerStatus = {
   sessions: Array<{
     sessionKey: string
     threadId: string
+    runtimeProfileId?: string
+    runtimeLabel?: string
+    runtimeKind?: string
+    hermesProfileName?: string
     queueDepth: number
     runningQueueItemId?: string
     lastUsedAt: number
@@ -192,6 +196,10 @@ export class BridgeSessionManager {
         return {
           sessionKey: session.sessionKey,
           threadId: session.threadId,
+          runtimeProfileId: session.runtimeProfile?.id,
+          runtimeLabel: session.runtimeProfile?.label,
+          runtimeKind: session.runtimeProfile?.kind,
+          hermesProfileName: session.hermesProfileName,
           queueDepth:
             (queueState?.pendingQueueItemIds.length ?? 0) +
             (queueState?.runningQueueItemId ? 1 : 0),
@@ -212,6 +220,8 @@ export class BridgeSessionManager {
       threadId: item.threadId,
       sessionId: item.sessionId,
       agentSessionId: item.agentSessionId,
+      bridgeProfileId: item.bridgeProfileId,
+      hermesProfileName: item.hermesProfileName,
     })
     try {
       if (type === "ping") {
@@ -328,7 +338,7 @@ export class BridgeSessionManager {
       autoApprovePermissionRequests?: boolean
     } = {},
   ): Promise<void> {
-    const session = this.ensureSession(item)
+    const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.clearIdleTimer(session)
     this.enqueueEventWrite(session, {
@@ -509,7 +519,7 @@ export class BridgeSessionManager {
   }
 
   private async handleStartSession(item: BridgeSessionQueueItem): Promise<void> {
-    const session = this.ensureSession(item)
+    const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
     await this.cloudClient.markResult(item.id, {
@@ -539,16 +549,32 @@ export class BridgeSessionManager {
     await session.acp.close()
   }
 
-  private ensureSession(item: BridgeSessionQueueItem): BridgeSessionRecord {
+  private async ensureSession(item: BridgeSessionQueueItem): Promise<BridgeSessionRecord> {
     const threadId = item.threadId ?? item.sessionId
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
+    this.assertRuntimeSelectionIsUnambiguous(item)
     const sessionKey = sessionKeyForItem(item) ?? threadId
     const existing = this.sessions.get(sessionKey)
     if (existing) {
       existing.agentName = normalizeAgentName(item.agentName) ?? existing.agentName
-      return existing
+      if (!this.sessionMatchesExplicitRuntimeRequest(existing, item)) {
+        this.writeLog({
+          level: "warn",
+          event: "bridge.session.runtime_profile_changed",
+          queueId: item.id,
+          threadId,
+          agentSessionId: sessionKey,
+          previousBridgeProfileId: existing.runtimeProfile?.id,
+          requestedBridgeProfileId: item.bridgeProfileId,
+          previousHermesProfileName: existing.hermesProfileName,
+          requestedHermesProfileName: item.hermesProfileName,
+        })
+        await this.closeSession(sessionKey)
+      } else {
+        return existing
+      }
     }
 
     const generation = this.nextGeneration
@@ -591,6 +617,38 @@ export class BridgeSessionManager {
     }
     this.sessions.set(sessionKey, record)
     return record
+  }
+
+  private sessionMatchesExplicitRuntimeRequest(
+    session: BridgeSessionRecord,
+    item: BridgeSessionQueueItem,
+  ): boolean {
+    if (item.bridgeProfileId) {
+      return session.runtimeProfile?.id === item.bridgeProfileId
+    }
+    if (item.hermesProfileName) {
+      return session.hermesProfileName === item.hermesProfileName
+    }
+    return true
+  }
+
+  private assertRuntimeSelectionIsUnambiguous(item: BridgeSessionQueueItem): void {
+    const type = normalizeType(item)
+    if (type !== "prompt" && type !== "start-session") {
+      return
+    }
+    if (item.bridgeProfileId || item.hermesProfileName) {
+      return
+    }
+    const availableProfiles = this.runtimeProfiles.filter((profile) => profile.status === "available")
+    if (availableProfiles.length <= 1) {
+      return
+    }
+    throw new Error(
+      `Bridge runtime profile is required for ${type} queue item ${item.id} because this bridge has multiple available runtime profiles: ${availableProfiles
+        .map((profile) => profile.id)
+        .join(", ")}`,
+    )
   }
 
   private resolveRuntimeProfileForItem(
