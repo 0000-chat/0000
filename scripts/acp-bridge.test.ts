@@ -126,6 +126,18 @@ describe("bridge MCP helper configuration", () => {
 })
 
 describe("bridge multi-organization config", () => {
+  test("accepts an empty multi-organization config before the first registration is appended", () => {
+    expect(
+      normalizeBridgeConfigFile({
+        version: 2,
+        registrations: [],
+      }),
+    ).toEqual({
+      version: 2,
+      registrations: [],
+    })
+  })
+
   test("normalizes legacy single-device bridge configs into one registration", () => {
     expect(
       normalizeBridgeConfigFile({
