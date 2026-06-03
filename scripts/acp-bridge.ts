@@ -2,8 +2,8 @@
 import { spawn } from "node:child_process"
 import { homedir, hostname } from "node:os"
 import { dirname, join } from "node:path"
+import { chmod, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 
@@ -55,10 +55,17 @@ const DEFAULT_ACP_IDLE_TTL_MS = 0
 const DEFAULT_ALLOW_REMOTE_CWD = false
 const DEFAULT_AGENT_CONNECTION_REGISTER_PATH = "/api/agent-connections/register"
 const DEFAULT_AGENT_SKILL_PATH = join(homedir(), ".claude", "skills", "0000", "SKILL.md")
-export const BRIDGE_VERSION = "0.1.4"
+export const BRIDGE_VERSION = "0.1.5"
 const BRIDGE_LOCAL_STATE_MODE = 0o600
 
-export type BridgeCommandName = "connect" | "pair" | "start" | "status" | "help"
+export type BridgeCommandName =
+  | "connect"
+  | "connect-org"
+  | "pair"
+  | "repair-config"
+  | "start"
+  | "status"
+  | "help"
 
 type FlagValue = string | true | string[]
 type FlagMap = Record<string, FlagValue>
@@ -672,10 +679,12 @@ export function splitCommand(command: string): string[] {
 async function main() {
   const parsed = parseBridgeArgs(process.argv.slice(2))
   try {
-    if (parsed.command === "connect") {
+    if (parsed.command === "connect" || parsed.command === "connect-org") {
       await connectBridge(parsed)
     } else if (parsed.command === "pair") {
       await pairBridge(parsed)
+    } else if (parsed.command === "repair-config") {
+      await repairBridgeConfig(parsed)
     } else if (parsed.command === "start") {
       await startBridge(parsed)
     } else if (parsed.command === "status") {
@@ -761,6 +770,9 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   }
 
   const configPath = getConfigPath(parsed.flags)
+  const previousRegistrationCount = existsSync(configPath)
+    ? (await readBridgeConfigFile(configPath)).registrations.length
+    : 0
   const updatedConfig = await appendBridgeRegistration(configPath, config)
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
@@ -787,7 +799,14 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   })
 
   writeStdout(
-    `Connected pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`,
+    [
+      `Connected organization registration ${deviceId}.`,
+      `Config: ${configPath}`,
+      `Registrations: ${previousRegistrationCount} -> ${updatedConfig.registrations.length}`,
+      "Existing organization registrations were preserved.",
+      "Open 0000 Chat to approve this agent before it can run work.",
+      "",
+    ].join("\n"),
   )
 }
 
@@ -852,6 +871,28 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
     })),
   })
   writeStdout(`Paired bridge device ${deviceId}.\nConfig: ${configPath}\n`)
+}
+
+async function repairBridgeConfig(parsed: ParsedBridgeArgs) {
+  const configPath = getConfigPath(parsed.flags)
+  const sourcePaths = getRepeatedFlags(parsed.flags, "source-config")
+  const result = await repairBridgeConfigFiles({
+    appUrl: getFlag(parsed.flags, "app-url", process.env.ZERO_CHAT_APP_URL) ?? "https://0000.chat",
+    sourcePaths:
+      sourcePaths.length > 0 ? sourcePaths : [join(homedir(), ".0000-chat", "bridge.json")],
+    targetPath: configPath,
+  })
+
+  writeStdout(
+    [
+      `Repaired bridge config: ${result.targetPath}`,
+      `Registrations: ${result.previousRegistrationCount} -> ${result.registrationCount}`,
+      `Imported registrations: ${result.importedRegistrationCount}`,
+      result.backupPath ? `Backup: ${result.backupPath}` : "Backup: not needed",
+      "Existing organization registrations were preserved.",
+      "",
+    ].join("\n"),
+  )
 }
 
 async function startBridge(parsed: ParsedBridgeArgs) {
@@ -1549,7 +1590,14 @@ async function showStatus(parsed: ParsedBridgeArgs) {
 }
 
 function normalizeCommand(command?: string): BridgeCommandName {
-  if (command === "connect" || command === "pair" || command === "start" || command === "status") {
+  if (
+    command === "connect" ||
+    command === "connect-org" ||
+    command === "pair" ||
+    command === "repair-config" ||
+    command === "start" ||
+    command === "status"
+  ) {
     return command
   }
   return "help"
@@ -1571,7 +1619,7 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect-org <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts repair-config [--source-config <path>] [--app-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nMulti-organization behavior:\n  connect-org and connect append this organization to ${DEFAULT_CONFIG_PATH}.\n  Existing organization registrations are preserved; do not delete or recreate bridge.json.\n  repair-config merges legacy bridge config files into the current multi-org config with a backup.\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect, connect-org, or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect-org/connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect-org/connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
 }
 
 function getStatusPath(flags: FlagMap): string {
@@ -1849,6 +1897,89 @@ async function readBridgeConfigFile(path: string): Promise<MultiBridgeConfig> {
   return normalizeBridgeConfigFile(await readJsonFile<BridgeConfigFile>(path))
 }
 
+export type BridgeConfigRepairResult = {
+  backupPath?: string
+  importedRegistrationCount: number
+  previousRegistrationCount: number
+  registrationCount: number
+  sourcePaths: string[]
+  targetPath: string
+}
+
+export async function repairBridgeConfigFiles(input: {
+  appUrl?: string
+  now?: () => Date
+  sourcePaths: string[]
+  targetPath: string
+}): Promise<BridgeConfigRepairResult> {
+  const existing = existsSync(input.targetPath)
+    ? await readBridgeConfigFile(input.targetPath)
+    : ({ version: 2, registrations: [] } satisfies MultiBridgeConfig)
+  let next = existing
+  let importedRegistrationCount = 0
+
+  for (const sourcePath of input.sourcePaths) {
+    if (!existsSync(sourcePath) || sourcePath === input.targetPath) {
+      continue
+    }
+    const source = await readBridgeConfigFile(sourcePath)
+    for (const registration of source.registrations) {
+      const before = next.registrations.length
+      next = upsertBridgeRegistration(
+        next,
+        normalizeImportedBridgeRegistration(registration, input.appUrl),
+      )
+      if (next.registrations.length > before) {
+        importedRegistrationCount += 1
+      }
+    }
+  }
+
+  const changed = JSON.stringify(existing) !== JSON.stringify(next)
+  let backupPath: string | undefined
+  if (changed) {
+    if (existsSync(input.targetPath)) {
+      backupPath = `${input.targetPath}.backup-${formatBackupTimestamp(input.now?.() ?? new Date())}`
+      await copyFile(input.targetPath, backupPath)
+      await chmod(backupPath, BRIDGE_LOCAL_STATE_MODE)
+    }
+    await writeBridgeConfigFile(input.targetPath, next)
+  } else {
+    await ensureSecureBridgeConfigFile(input.targetPath)
+  }
+
+  return {
+    backupPath,
+    importedRegistrationCount,
+    previousRegistrationCount: existing.registrations.length,
+    registrationCount: next.registrations.length,
+    sourcePaths: input.sourcePaths,
+    targetPath: input.targetPath,
+  }
+}
+
+function normalizeImportedBridgeRegistration(
+  registration: BridgeRegistration,
+  appUrl = "https://0000.chat",
+): BridgeRegistration {
+  if (registration.bridgeApiUrl || !isConvexDeploymentUrl(registration.appUrl)) {
+    return registration
+  }
+  return {
+    ...registration,
+    appUrl,
+    bridgeApiUrl: registration.appUrl,
+  }
+}
+
+function isConvexDeploymentUrl(value: string): boolean {
+  return /^https:\/\/[^/]+\.convex\.(?:site|cloud)$/.test(value)
+}
+
+function formatBackupTimestamp(value: Date): string {
+  return value.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")
+}
+
 async function appendBridgeRegistration(
   path: string,
   registration: BridgeRegistration,
@@ -1897,9 +2028,20 @@ async function writeAgentConnectionSkill(
   input: { agentCommand: string; appUrl: string; configPath: string; skillPath: string },
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  const content = `# 0000 Agent Bridge
+  await writeFile(path, buildAgentConnectionSkillContent(input), "utf8")
+}
+
+export function buildAgentConnectionSkillContent(input: {
+  agentCommand: string
+  appUrl: string
+  configPath: string
+  skillPath: string
+}): string {
+  return `# 0000 Agent Bridge
 
 Use this skill whenever the user asks you to work through 0000, reconnect to 0000, or diagnose the local 0000 bridge.
+
+The bridge can be connected to multiple 0000 organizations on the same machine. If the bridge config already exists, preserve it and append the new organization registration.
 
 ## Start or Reconnect
 
@@ -1910,10 +2052,18 @@ Use this skill whenever the user asks you to work through 0000, reconnect to 000
 bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)} --allow-remote-cwd
 \`\`\`
 
-3. If the bridge config is missing, ask the human to generate a new 0000 agent connection code, then run:
+3. To connect this same bridge to another 0000 organization, ask the human to generate a new 0000 agent connection code, then run:
 
 \`\`\`bash
-bun scripts/acp-bridge.ts connect <code> --app-url ${JSON.stringify(input.appUrl)} --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
+bun scripts/acp-bridge.ts connect-org <code> --app-url ${JSON.stringify(input.appUrl)} --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
+\`\`\`
+
+Do not delete, recreate, overwrite, or move the bridge config when connecting another organization. The connect-org command appends a registration and preserves existing organizations.
+
+4. If an older bridge config exists in another local path, merge it before reconnecting:
+
+\`\`\`bash
+bun scripts/acp-bridge.ts repair-config
 \`\`\`
 
 ## Local State
@@ -1924,7 +2074,6 @@ bun scripts/acp-bridge.ts connect <code> --app-url ${JSON.stringify(input.appUrl
 
 Never reveal bridge tokens, auth headers, API keys, or raw connection codes in chat. Summarize setup results in plain language and tell the human whether approval is still pending.
 `
-  await writeFile(path, content, "utf8")
 }
 
 async function writeStatus(path: string, status: BridgeStatus): Promise<void> {
