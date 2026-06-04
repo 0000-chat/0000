@@ -2027,7 +2027,9 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined
   }
-  const record = raw as Record<string, unknown>
+  const rawRecord = raw as Record<string, unknown>
+  const payload = recordFromUnknown(rawRecord.payload)
+  const record = { ...(payload ?? {}), ...rawRecord }
   const id = stringFromUnknown(record.id)
   const type = stringFromUnknown(record.type ?? record.kind)
   if (!id || !isQueueCommandType(type)) {
@@ -2059,8 +2061,23 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     mailboxConversationId: stringFromUnknown(record.mailboxConversationId),
     organizationId: stringFromUnknown(record.organizationId),
     runtimeConfig: stringRecordFromUnknown(record.runtimeConfig),
+    runtimeOptions: runtimeOptionsFromUnknown(record.runtimeOptions),
     traceId: stringFromUnknown(record.traceId),
   }
+}
+
+function runtimeOptionsFromUnknown(
+  value: unknown,
+): BridgeQueueCommand["runtimeOptions"] | undefined {
+  const record = recordFromUnknown(value)
+  if (!record) {
+    return undefined
+  }
+  const runtimeOptions = compact({
+    modelId: stringFromUnknown(record.modelId),
+    thinkingLevel: stringFromUnknown(record.thinkingLevel),
+  })
+  return Object.keys(runtimeOptions).length > 0 ? runtimeOptions : undefined
 }
 
 function isQueueCommandType(value: string | undefined): value is BridgeQueueCommand["type"] {
