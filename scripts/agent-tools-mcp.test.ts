@@ -20,6 +20,8 @@ describe("agent tools MCP server helpers", () => {
       "threads.read",
       "messages.search",
       "settings.setDefaultApprovalLevel",
+      "agents.list",
+      "agents.sendMailboxMessage",
       "spaces.list",
       "spaces.get",
       "spaces.create",
@@ -52,6 +54,11 @@ describe("agent tools MCP server helpers", () => {
       "databases.updateRow",
       "databases.deleteRow",
       "secrets.put",
+      "secrets.listAvailable",
+      "scripts.createDraft",
+      "scripts.updateDraft",
+      "scripts.search",
+      "scripts.read",
     ])
   })
 
@@ -68,6 +75,9 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("settings.setDefaultApprovalLevel")
     expect(buildAgentToolGuideText()).toContain("trusted local automation")
     expect(buildAgentToolGuideText()).toContain("in-thread approval")
+    expect(buildAgentToolGuideText()).toContain("agents.list")
+    expect(buildAgentToolGuideText()).toContain("agent-to-agent handoffs")
+    expect(buildAgentToolGuideText()).toContain("agents.sendMailboxMessage")
     expect(buildAgentToolGuideText()).toContain("autoArchiveInactiveThreadsAfterHours")
     expect(buildAgentToolGuideText()).toContain("apps.create")
     expect(buildAgentToolGuideText()).toContain("brand-new app")
@@ -84,6 +94,8 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("re-read those records on refresh")
     expect(buildAgentToolGuideText()).toContain("secrets.put")
     expect(buildAgentToolGuideText()).toContain("Secret values are encrypted by 0000 Chat")
+    expect(buildAgentToolGuideText()).toContain("secrets.listAvailable")
+    expect(buildAgentToolGuideText()).toContain("scripts.createDraft")
     expect(buildAgentToolGuideText()).toContain("Never request raw Convex credentials")
 
     expect(
