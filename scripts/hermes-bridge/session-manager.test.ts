@@ -14,6 +14,7 @@ describe("bridge session cwd safety", () => {
     })
 
     await manager.handleQueueItem({
+      claimId: "claim-1",
       cwd: "/Users/alice/private-project",
       id: "queue-1",
       prompt: "hello",
@@ -36,6 +37,7 @@ describe("bridge session cwd safety", () => {
     })
 
     await manager.handleQueueItem({
+      claimId: "claim-1",
       cwd: "/Users/alice/private-project",
       id: "queue-1",
       prompt: "hello",
@@ -65,6 +67,7 @@ describe("bridge session cwd safety", () => {
 
     await manager.handleQueueItem({
       bridgeProfileId: "codex:codex-acp",
+      claimId: "claim-1",
       id: "queue-1",
       prompt: "hello",
       threadId: "thread-1",
@@ -120,6 +123,7 @@ describe("bridge session cwd safety", () => {
     await manager.handleQueueItem({
       agentSessionId: "agent-session-1",
       bridgeProfileId: "codex:codex-acp",
+      claimId: "claim-codex",
       id: "queue-codex",
       prompt: "hello",
       threadId: "thread-1",
@@ -128,6 +132,7 @@ describe("bridge session cwd safety", () => {
     await manager.handleQueueItem({
       agentSessionId: "agent-session-1",
       bridgeProfileId: "claude-code:claude-acp",
+      claimId: "claim-claude",
       id: "queue-claude",
       prompt: "hello",
       threadId: "thread-1",
@@ -184,6 +189,7 @@ describe("bridge session cwd safety", () => {
     })
 
     const prompt = manager.handleQueueItem({
+      claimId: "claim-prompt",
       id: "queue-prompt",
       prompt: "hello",
       threadId: "thread-1",
@@ -192,6 +198,7 @@ describe("bridge session cwd safety", () => {
 
     await manager.handleQueueItem({
       approvalOutcome: "approved",
+      claimId: "claim-approval",
       externalRequestId: "request-1",
       id: "queue-approval",
       threadId: "thread-1",
@@ -230,6 +237,7 @@ describe("bridge session cwd safety", () => {
     })
 
     await manager.handleQueueItem({
+      claimId: "claim-prompt",
       id: "queue-prompt",
       prompt: "hello",
       threadId: "thread-1",
@@ -237,6 +245,7 @@ describe("bridge session cwd safety", () => {
     })
     await manager.handleQueueItem({
       approvalOutcome: "option-a",
+      claimId: "claim-choice",
       id: "queue-choice",
       threadId: "thread-1",
       type: "choice-response",
@@ -283,6 +292,7 @@ describe("bridge session cwd safety", () => {
 
     await manager.handleQueueItem({
       agentSessionId: "agent-session-1",
+      claimId: "claim-prompt",
       id: "queue-prompt",
       prompt: "hello",
       threadId: "thread-1",
@@ -293,6 +303,7 @@ describe("bridge session cwd safety", () => {
     await manager.handleQueueItem({
       agentSessionId: "agent-session-1",
       approvalOutcome: "option-a",
+      claimId: "claim-choice",
       id: "queue-choice",
       threadId: "thread-1",
       type: "choice-response",
@@ -335,6 +346,7 @@ describe("bridge session cwd safety", () => {
 
     const prompt = manager.handleQueueItem({
       agentSessionId: "agent-session-1",
+      claimId: "claim-prompt",
       id: "queue-prompt",
       prompt: "hello",
       threadId: "thread-1",
@@ -345,6 +357,7 @@ describe("bridge session cwd safety", () => {
     const choice = manager.handleQueueItem({
       agentSessionId: "agent-session-1",
       approvalOutcome: "option-a",
+      claimId: "claim-choice",
       id: "queue-choice",
       threadId: "thread-1",
       type: "choice-response",
@@ -393,6 +406,7 @@ describe("bridge session cwd safety", () => {
     })
 
     await manager.handleQueueItem({
+      claimId: "claim-prompt",
       id: "queue-prompt",
       prompt: "hello",
       threadId: "thread-1",
@@ -437,7 +451,7 @@ describe("bridge session cwd safety", () => {
 
 function fakeCloudClient() {
   const events: Array<Array<{ normalizedPayload?: unknown }>> = []
-  const results: Array<{ id: string; result: unknown }> = []
+  const results: Array<{ claimId: string; id: string; result: unknown }> = []
   return {
     events,
     results,
@@ -447,8 +461,15 @@ function fakeCloudClient() {
       events.push(input)
       return {} as TResponse
     },
-    markResult: async <TResponse = Record<string, unknown>>(id: string, result: unknown) => {
-      results.push({ id, result })
+    markResult: async <TResponse = Record<string, unknown>>(
+      id: string,
+      result: unknown,
+      claimId?: string,
+    ) => {
+      if (!claimId) {
+        throw new Error("claimId is required")
+      }
+      results.push({ claimId, id, result })
       return {} as TResponse
     },
   }

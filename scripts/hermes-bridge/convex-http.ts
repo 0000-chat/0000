@@ -161,13 +161,20 @@ export class ConvexBridgeCloudClient {
   async markResult<TResponse = Record<string, unknown>>(
     commandId: string,
     result: BridgeQueueResult,
+    claimId?: string,
   ): Promise<TResponse> {
     if (commandId.length === 0) {
       throw new Error("commandId is required")
     }
+    const resultClaimId = typeof result.claimId === "string" ? result.claimId : undefined
+    const resolvedClaimId = claimId ?? resultClaimId
+    if (!resolvedClaimId) {
+      throw new Error("claimId is required")
+    }
 
     return await this.post<TResponse>(this.paths.queueResult, {
       deviceId: this.deviceId,
+      claimId: resolvedClaimId,
       commandId,
       result,
     })

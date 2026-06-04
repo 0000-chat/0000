@@ -8,6 +8,7 @@ import { existsSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 
 import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./hermes-bridge/convex-http"
+import { ConvexBridgeHostAdapter } from "./hermes-bridge/host-adapter"
 import {
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
@@ -1567,11 +1568,13 @@ async function claimCommands(
   config: BridgeConfig,
   limit = DEFAULT_MAX_IN_FLIGHT_COMMANDS,
 ): Promise<BridgeQueueCommand[]> {
-  const response = await createCloudClient(config).claimWork<QueueClaimResponse>({ limit })
-  const rawCommands = Array.isArray(response.commands)
-    ? response.commands
-    : response.command
-      ? [response.command]
+  const adapter = new ConvexBridgeHostAdapter(createCloudClient(config))
+  const response = await adapter.claimWork({ limit })
+  const rawResponse = response.raw as QueueClaimResponse
+  const rawCommands = Array.isArray(rawResponse.commands)
+    ? rawResponse.commands
+    : rawResponse.command
+      ? [rawResponse.command]
       : []
   return rawCommands.map(normalizeQueueCommand).filter((command) => command !== undefined)
 }
@@ -1936,9 +1939,10 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!id || !isQueueCommandType(type)) {
     return undefined
   }
-  return {
-    id,
-    type,
+	  return {
+	    id,
+	    claimId: stringFromUnknown(record.claimId),
+	    type,
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),

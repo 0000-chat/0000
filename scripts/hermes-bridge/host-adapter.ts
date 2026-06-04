@@ -1,0 +1,215 @@
+import type {
+  BridgeEventInput,
+  BridgeHeartbeatInput,
+  BridgeQueueClaimInput,
+  BridgeQueueCommand,
+  BridgeQueuePollInput,
+  BridgeQueueResult,
+} from "./convex-http"
+
+export type BridgeClaimLease = {
+  claimId: string
+  hostIssuedAt?: number
+  leaseUntil?: number
+}
+
+export type BridgeHostWorkItem = {
+  agentSessionId?: string
+  claimId?: string
+  command: BridgeQueueCommand
+  effectiveSessionCap?: number
+  hostIssuedAt?: number
+  id: string
+  kind?: string
+  leaseUntil?: number
+  runtimeConfig?: unknown
+  targetResourceState?: string
+  threadId?: string
+}
+
+export type BridgeClaimWorkResult = {
+  raw: Record<string, unknown>
+  workItems: BridgeHostWorkItem[]
+}
+
+export type BridgeAppendEventsResult = Record<string, unknown>
+export type BridgeAppendDiagnosticsResult = Record<string, unknown>
+
+export type BridgeDiagnosticInput = {
+  details?: unknown
+  message: string
+  reasonCode: string
+  traceId?: string
+}
+
+export type BridgeCompleteWorkInput = {
+  claimId?: string
+  result: BridgeQueueResult
+  workItem: BridgeHostWorkItem
+}
+
+export type BridgeReleaseWorkInput = {
+  claimId?: string
+  reason: string
+  retryable?: boolean
+  workItem: BridgeHostWorkItem
+}
+
+export type BridgeAnswerInteractionInput = {
+  approved: boolean
+  claimId: string
+  externalRequestId?: string
+  interactionId: string
+  reason?: string
+  threadId: string
+}
+
+export interface BridgeHostAdapter {
+  appendDiagnostics(input: { diagnostics: BridgeDiagnosticInput[] }): Promise<BridgeAppendDiagnosticsResult>
+  appendEvents(input: { events: BridgeEventInput[] }): Promise<BridgeAppendEventsResult>
+  answerInteraction(input: BridgeAnswerInteractionInput): Promise<Record<string, unknown>>
+  claimWork(input?: BridgeQueueClaimInput): Promise<BridgeClaimWorkResult>
+  completeWork(input: BridgeCompleteWorkInput): Promise<Record<string, unknown>>
+  heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>>
+  pollQueue(input?: BridgeQueuePollInput): Promise<Record<string, unknown>>
+  releaseWork(input: BridgeReleaseWorkInput): Promise<Record<string, unknown>>
+}
+
+type ConvexBridgeTransport = {
+  appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>
+  claimWork(input?: BridgeQueueClaimInput): Promise<Record<string, unknown>>
+  cleanupStaleClaims(input?: Record<string, unknown>): Promise<Record<string, unknown>>
+  heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>>
+  markResult(
+    commandId: string,
+    result: BridgeQueueResult,
+    claimId?: string,
+  ): Promise<Record<string, unknown>>
+  pollQueue(input?: BridgeQueuePollInput): Promise<Record<string, unknown>>
+}
+
+export class ConvexBridgeHostAdapter implements BridgeHostAdapter {
+  constructor(private readonly transport: Partial<ConvexBridgeTransport>) {}
+
+  async heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>> {
+    return await required(this.transport.heartbeat, "heartbeat")(input)
+  }
+
+  async pollQueue(input: BridgeQueuePollInput = {}): Promise<Record<string, unknown>> {
+    return await required(this.transport.pollQueue, "pollQueue")(input)
+  }
+
+  async claimWork(input: BridgeQueueClaimInput = {}): Promise<BridgeClaimWorkResult> {
+    const raw = await required(this.transport.claimWork, "claimWork")(input)
+    return {
+      raw,
+      workItems: queueCommandsFromClaimResponse(raw).map(toHostWorkItem),
+    }
+  }
+
+  async appendEvents(input: { events: BridgeEventInput[] }): Promise<BridgeAppendEventsResult> {
+    return await required(this.transport.appendEvents, "appendEvents")(input.events)
+  }
+
+  async appendDiagnostics(input: {
+    diagnostics: BridgeDiagnosticInput[]
+  }): Promise<BridgeAppendDiagnosticsResult> {
+    if (input.diagnostics.length === 0) {
+      return {}
+    }
+    return await this.appendEvents({
+      events: input.diagnostics.map((diagnostic, index) => ({
+        eventType: "bridge.diagnostic",
+        rawPayload: diagnostic,
+        sequence: index + 1,
+        source: "bridge",
+        threadId: diagnostic.traceId ?? "bridge-diagnostics",
+      })),
+    })
+  }
+
+  async completeWork(input: BridgeCompleteWorkInput): Promise<Record<string, unknown>> {
+    return await this.markResult(input.workItem, {
+      ...input.result,
+      claimId: input.claimId ?? input.workItem.claimId,
+    })
+  }
+
+  async releaseWork(input: BridgeReleaseWorkInput): Promise<Record<string, unknown>> {
+    return await this.markResult(input.workItem, {
+      claimId: input.claimId ?? input.workItem.claimId,
+      error: input.reason,
+      ok: false,
+      retryable: input.retryable ?? true,
+    })
+  }
+
+  async answerInteraction(input: BridgeAnswerInteractionInput): Promise<Record<string, unknown>> {
+    return await this.markResult(
+      {
+        id: input.interactionId,
+      },
+      {
+        approved: input.approved,
+        claimId: input.claimId,
+        externalRequestId: input.externalRequestId,
+        ok: true,
+        reason: input.reason,
+      },
+    )
+  }
+
+  private async markResult(
+    workItem: Pick<BridgeHostWorkItem, "id">,
+    result: BridgeQueueResult,
+  ): Promise<Record<string, unknown>> {
+    const claimId = typeof result.claimId === "string" ? result.claimId : undefined
+    return await required(this.transport.markResult, "markResult")(workItem.id, result, claimId)
+  }
+}
+
+function queueCommandsFromClaimResponse(response: Record<string, unknown>): BridgeQueueCommand[] {
+  const commands = response.commands
+  if (Array.isArray(commands)) {
+    return commands.filter(isBridgeQueueCommand)
+  }
+  return isBridgeQueueCommand(response.command) ? [response.command] : []
+}
+
+function toHostWorkItem(command: BridgeQueueCommand): BridgeHostWorkItem {
+  return {
+    agentSessionId: stringFromUnknown(command.agentSessionId),
+    claimId: stringFromUnknown(command.claimId),
+    command,
+    effectiveSessionCap: numberFromUnknown(command.effectiveSessionCap),
+    hostIssuedAt: numberFromUnknown(command.hostIssuedAt),
+    id: command.id,
+    kind: stringFromUnknown(command.kind ?? command.type),
+    leaseUntil: numberFromUnknown(command.leaseUntil),
+    runtimeConfig: command.runtimeConfig,
+    targetResourceState: stringFromUnknown(command.targetResourceState),
+    threadId: stringFromUnknown(command.threadId),
+  }
+}
+
+function isBridgeQueueCommand(value: unknown): value is BridgeQueueCommand {
+  return Boolean(value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string")
+}
+
+function required<TFunction extends (...args: never[]) => unknown>(
+  fn: TFunction | undefined,
+  name: string,
+): TFunction {
+  if (!fn) {
+    throw new Error(`Bridge host adapter transport is missing ${name}`)
+  }
+  return fn
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}

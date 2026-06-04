@@ -4,12 +4,13 @@ import {
   HermesAcpSession,
 } from "./acp-session"
 import { type BridgeLogEntry, type BridgeLogger, redactLogValue } from "./bridge-log"
-import type { BridgeEventInput, ConvexBridgeCloudClient } from "./convex-http"
+import type { BridgeEventInput } from "./convex-http"
 import type { NormalizedBridgeEvent } from "./event-normalizer"
 import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
 
 export type BridgeSessionQueueItem = {
   id: string
+  claimId?: string
   type?: string
   kind?: string
   threadId?: string
@@ -76,7 +77,14 @@ type BridgeSessionRecord = {
   lastUsedAt: number
 }
 
-type BridgeSessionCloudClient = Pick<ConvexBridgeCloudClient, "appendEvents" | "markResult">
+type BridgeSessionCloudClient = {
+  appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>
+  markResult(
+    commandId: string,
+    result: Record<string, unknown>,
+    claimId?: string,
+  ): Promise<Record<string, unknown>>
+}
 
 type EventWriteOutcome = { ok: true; count: number } | { ok: false; count: number; error: Error }
 
@@ -225,7 +233,7 @@ export class BridgeSessionManager {
     })
     try {
       if (type === "ping") {
-        await this.cloudClient.markResult(item.id, { ok: true, kind: "pong" })
+        await this.markQueueResult(item, { ok: true, kind: "pong" })
         this.writeQueueCompleteLog(item, type)
         return
       }
@@ -256,7 +264,7 @@ export class BridgeSessionManager {
         return
       }
 
-      await this.cloudClient.markResult(item.id, {
+      await this.markQueueResult(item, {
         ok: false,
         error: `unsupported command type: ${type}`,
       })
@@ -279,8 +287,8 @@ export class BridgeSessionManager {
       }
       await this.drainEventWrites()
       const terminal = isTerminalQueueItemError(type, message)
-      await this.cloudClient.markResult(
-        item.id,
+      await this.markQueueResult(
+        item,
         terminal
           ? {
               ok: false,
@@ -400,7 +408,7 @@ export class BridgeSessionManager {
       })
     }
     await this.drainEventWrites()
-    await this.cloudClient.markResult(item.id, {
+    await this.markQueueResult(item, {
       ok: true,
       agentSessionId: session.sessionKey,
       acpSessionId: result.sessionId,
@@ -540,7 +548,7 @@ export class BridgeSessionManager {
     }
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
-    await this.cloudClient.markResult(item.id, { ok: true, approved })
+    await this.markQueueResult(item, { ok: true, approved })
   }
 
   private async waitForSession(sessionKey: string): Promise<BridgeSessionRecord | undefined> {
@@ -565,7 +573,7 @@ export class BridgeSessionManager {
     const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
-    await this.cloudClient.markResult(item.id, {
+    await this.markQueueResult(item, {
       ok: true,
       started: true,
       agentSessionId: session.sessionKey,
@@ -578,7 +586,18 @@ export class BridgeSessionManager {
     if (session) {
       await session.acp.cancel()
     }
-    await this.cloudClient.markResult(item.id, { ok: true, cancelled: Boolean(session) })
+    await this.markQueueResult(item, { ok: true, cancelled: Boolean(session) })
+  }
+
+  private async markQueueResult(
+    item: BridgeSessionQueueItem,
+    result: Record<string, unknown>,
+  ): Promise<void> {
+    await this.cloudClient.markResult(
+      item.id,
+      item.claimId ? { ...result, claimId: item.claimId } : result,
+      item.claimId,
+    )
   }
 
   private async closeSession(sessionKey: string): Promise<void> {
