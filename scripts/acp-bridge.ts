@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto"
 
 import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./hermes-bridge/convex-http"
 import { ConvexBridgeHostAdapter } from "./hermes-bridge/host-adapter"
+import { openBridgeSupervisor, type BridgeSupervisor } from "./hermes-bridge/bridge-supervisor"
 import {
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
@@ -42,6 +43,7 @@ export {
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json")
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json")
+const DEFAULT_JOURNAL_DIR = join(homedir(), ".0000", "bridge-journals")
 const DEFAULT_PAIR_PATH = "/api/agent-bridge/pair"
 const DEFAULT_CLAIM_PATH = "/api/agent-bridge/queue/claim"
 const DEFAULT_CLEANUP_STALE_PATH = "/api/agent-bridge/queue/cleanup-stale"
@@ -171,6 +173,11 @@ export type BridgeStatus = {
   setupSummary?: Record<string, unknown>
   recentErrors: string[]
   registrations?: BridgeRegistrationStatus[]
+  localJournal?: {
+    status: "healthy" | "hard_failed"
+    reasonCode?: string
+    message?: string
+  }
 }
 
 export type BridgeRegistrationStatus = {
@@ -306,6 +313,7 @@ export type BridgeLoopIterationInput = {
   discoverRuntimeProfiles?: typeof discoverBridgeRuntimeProfiles
   cleanupStaleClaims?: typeof cleanupStaleClaims
   claimCommands?: typeof claimCommands
+  canClaimWork?: () => boolean
   writeStatus?: typeof writeStatus
   launchUpdater?: typeof launchBridgeUpdater
 }
@@ -876,9 +884,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     inFlightCommands: Map<string, Promise<void>>
     inFlightCommandMetadata: Map<string, InFlightCommandMetadata>
     lastStaleCleanupAt: number
+    lastJournalHealthSignature: string
     log: FlushableBridgeLogger
     manager: BridgeSessionManager
     status: BridgeStatus
+    supervisor: BridgeSupervisor
     wakeSignal: BridgeWakeSignal
   }
 
@@ -907,8 +917,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         deviceId: registration.deviceId,
         logUrl,
       })
+      const cloudClient = createCloudClient(registration)
+      const hostAdapter = new ConvexBridgeHostAdapter(cloudClient)
+      const supervisor = openBridgeSupervisor({
+        bridgeDeviceId: registration.deviceId,
+        host: hostAdapter,
+        journalPath: getBridgeJournalPath(parsed.flags, registration.deviceId),
+      })
+      await supervisor.publishHealthDiagnostic({ bridgeDeviceId: registration.deviceId })
+      await supervisor.replayOutboxBeforeClaiming()
       const manager = new BridgeSessionManager({
-        cloudClient: createCloudClient(registration),
+        cloudClient,
         deviceId: registration.deviceId,
         agentCommand,
         runtimeProfiles,
@@ -926,6 +945,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           }),
         log,
         allowRemoteCwd,
+        supervisor,
       })
       const wakeSignal = createBridgeWakeSignal({
         config: registration,
@@ -960,15 +980,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         inFlightCommands: [],
         sessionQueues: [],
         recentErrors: [],
+        localJournal: bridgeSupervisorHealthStatus(supervisor),
       }
       const context: RuntimeContext = {
         config: registration,
         inFlightCommands: new Map(),
         inFlightCommandMetadata: new Map(),
+        lastJournalHealthSignature: bridgeSupervisorHealthSignature(supervisor),
         lastStaleCleanupAt: 0,
         log,
         manager,
         status,
+        supervisor,
         wakeSignal,
       }
       contexts.set(registration.deviceId, context)
@@ -988,6 +1011,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       context.status.connected = false
       await context.wakeSignal.close()
       await context.manager.close()
+      context.supervisor.close()
       await context.log.flush()
       contexts.delete(deviceId)
     }
@@ -1042,6 +1066,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         context.inFlightCommands,
         context.inFlightCommandMetadata,
       )
+      context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
       context.log({
         level: "info",
         event: "bridge.stop",
@@ -1050,6 +1075,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       })
       await context.wakeSignal.close()
       await context.manager.close()
+      context.supervisor.close()
       await Promise.allSettled(context.inFlightCommands.values())
       await context.log.flush()
     }
@@ -1064,6 +1090,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     for (const context of contexts.values()) {
       const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight())
       const effectiveMaxInFlight = context.inFlightCommands.size + availableProcessSlots
+      context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+      await publishBridgeSupervisorHealthIfChanged(context)
+      for (const watchdog of context.supervisor.checkWatchdogs()) {
+        context.log({
+          level: "warn",
+          event: "bridge.watchdog.timeout",
+          deviceId: context.config.deviceId,
+          queueId: watchdog.queueItemId,
+          reason: watchdog.reasonCode,
+        })
+      }
       const result = await runBridgeLoopIteration({
         config: context.config,
         agentCommand,
@@ -1080,6 +1117,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         log: context.log,
         recordLoopError: recordLoopError(context),
         statusPath,
+        canClaimWork: () => context.supervisor.canClaimWork(),
         writeStatus: persistAggregateStatus,
       })
       if (result.restartRequested) {
@@ -1383,6 +1421,17 @@ export async function runBridgeLoopIteration(
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size
     if (availableSlots > 0) {
+      if (input.canClaimWork && !input.canClaimWork()) {
+        input.log({
+          level: "warn",
+          event: "bridge.queue.claim_skipped",
+          deviceId: input.config.deviceId,
+          reason: "local_journal_hard_failed",
+        })
+        syncBridgeStatus()
+        await persistStatus(input.statusPath, input.status)
+        return { restartRequested: false }
+      }
       const now = currentTime()
       if (now - input.lastStaleCleanupAt >= 60_000) {
         input.setLastStaleCleanupAt(now)
@@ -1557,11 +1606,56 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
 }
 
 function getStatusPath(flags: FlagMap): string {
   return getFlag(flags, "status-file", process.env.ZERO_CHAT_BRIDGE_STATUS) ?? DEFAULT_STATUS_PATH
+}
+
+function getBridgeJournalPath(flags: FlagMap, deviceId: string): string {
+  const explicit = getFlag(flags, "journal-file", process.env.ZERO_CHAT_BRIDGE_JOURNAL)
+  if (explicit) {
+    return explicit
+  }
+  return join(DEFAULT_JOURNAL_DIR, `${sanitizeFileSegment(deviceId)}.sqlite`)
+}
+
+function sanitizeFileSegment(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "")
+  return sanitized.length > 0 ? sanitized : "bridge"
+}
+
+function bridgeSupervisorHealthStatus(supervisor: BridgeSupervisor): NonNullable<BridgeStatus["localJournal"]> {
+  const health = supervisor.getHealth()
+  if (health.status === "healthy") {
+    return { status: "healthy" }
+  }
+  return {
+    status: "hard_failed",
+    reasonCode: health.reasonCode,
+    message: health.message,
+  }
+}
+
+function bridgeSupervisorHealthSignature(supervisor: BridgeSupervisor): string {
+  return JSON.stringify(bridgeSupervisorHealthStatus(supervisor))
+}
+
+async function publishBridgeSupervisorHealthIfChanged(context: {
+  config: BridgeRegistration
+  lastJournalHealthSignature: string
+  status: BridgeStatus
+  supervisor: BridgeSupervisor
+}): Promise<void> {
+  const signature = bridgeSupervisorHealthSignature(context.supervisor)
+  if (signature === context.lastJournalHealthSignature) {
+    return
+  }
+  context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+  await context.supervisor.publishHealthDiagnostic({ bridgeDeviceId: context.config.deviceId })
+  context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+  context.lastJournalHealthSignature = bridgeSupervisorHealthSignature(context.supervisor)
 }
 
 async function claimCommands(
@@ -1939,20 +2033,31 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!id || !isQueueCommandType(type)) {
     return undefined
   }
-	  return {
-	    id,
-	    claimId: stringFromUnknown(record.claimId),
-	    type,
+  return {
+    id,
+    claimId: stringFromUnknown(record.claimId),
+    type,
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
     cwd: stringFromUnknown(record.cwd),
     prompt: stringFromUnknown(record.prompt),
+    threadHistory: stringFromUnknown(record.threadHistory),
     systemPrompt: stringFromUnknown(record.systemPrompt),
     approvalId: stringFromUnknown(record.approvalId),
     approvalOutcome: stringFromUnknown(record.approvalOutcome),
     approvalReason: stringFromUnknown(record.approvalReason),
+    approvalLevel:
+      record.approvalLevel === "ask" || record.approvalLevel === "full_permissions"
+        ? record.approvalLevel
+        : undefined,
     externalRequestId: stringFromUnknown(record.externalRequestId),
+    externalSessionId: stringFromUnknown(record.externalSessionId),
+    agentName: stringFromUnknown(record.agentName),
+    bridgeProfileId: stringFromUnknown(record.bridgeProfileId),
+    hermesProfileName: stringFromUnknown(record.hermesProfileName),
+    organizationId: stringFromUnknown(record.organizationId),
+    traceId: stringFromUnknown(record.traceId),
   }
 }
 

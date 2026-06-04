@@ -12,6 +12,7 @@ import {
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
@@ -253,3 +254,63 @@ describe("bridge security defaults", () => {
     ).toContain("remote bridge log forwarding: disabled")
   })
 })
+
+describe("bridge supervisor claim gating", () => {
+  test("skips queue claims when local journal health is hard-failed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    let claimed = false
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => false,
+      claimCommands: async () => {
+        claimed = true
+        return []
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(claimed).toBe(false)
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue.claim_skipped",
+        reason: "local_journal_hard_failed",
+      }),
+    )
+  })
+})
+
+function bridgeRegistration() {
+  return {
+    appUrl: "https://app.example.com",
+    bridgeApiUrl: "https://app.example.com/api/agent-bridge",
+    bridgeToken: "secret",
+    deviceId: "device-1",
+    deviceName: "dev box",
+    pairedAt: "2026-06-04T00:00:00.000Z",
+  }
+}

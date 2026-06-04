@@ -38,6 +38,7 @@ export const bridgeLogEventNames = [
   "bridge.hermes_profiles.refresh_error",
   "bridge.log_delivery.failed",
   "bridge.loop.error",
+  "bridge.queue.claim_skipped",
   "bridge.queue.claimed",
   "bridge.queue.cleanup_stale",
   "bridge.queue_item.complete",
@@ -51,6 +52,7 @@ export const bridgeLogEventNames = [
   "bridge.start",
   "bridge.stop",
   "bridge.subscription.disabled",
+  "bridge.watchdog.timeout",
 ] as const
 
 export type BridgeLogEventName = (typeof bridgeLogEventNames)[number]

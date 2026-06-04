@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
+import { BridgeSupervisor } from "./bridge-supervisor"
 import { BridgeSessionManager, type BridgeSessionContext } from "./session-manager"
 
 describe("bridge session cwd safety", () => {
@@ -76,6 +77,47 @@ describe("bridge session cwd safety", () => {
 
     expect(cloud.events[0]?.[0]?.normalizedPayload).toMatchObject({
       text: "Agent started this run.",
+    })
+  })
+
+  test("mirrors prompt lifecycle into the shadow supervisor", async () => {
+    const supervisor = new BridgeSupervisor()
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent({
+            eventType: "choice",
+            externalEventId: "choice-1",
+            part: { type: "choice", status: "streaming" },
+            payload: {},
+            source: "hermes_acp",
+          })
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          }
+        },
+      }),
+      supervisor,
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(supervisor.getTurnState("queue-1")).toMatchObject({
+      checkpoint: "completed",
+      claimId: "claim-1",
+      queueItemId: "queue-1",
     })
   })
 

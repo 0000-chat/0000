@@ -7,6 +7,7 @@ import { type BridgeLogEntry, type BridgeLogger, redactLogValue } from "./bridge
 import type { BridgeEventInput } from "./convex-http"
 import type { NormalizedBridgeEvent } from "./event-normalizer"
 import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
+import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
 
 export type BridgeSessionQueueItem = {
   id: string
@@ -26,6 +27,8 @@ export type BridgeSessionQueueItem = {
   approvalLevel?: "ask" | "full_permissions"
   externalRequestId?: string
   externalSessionId?: string
+  organizationId?: string
+  traceId?: string
   agentName?: string
   bridgeProfileId?: string
   hermesProfileName?: string
@@ -107,6 +110,7 @@ export type BridgeSessionManagerOptions = {
   allowRemoteCwd?: boolean
   resumeEnabled?: boolean
   log?: BridgeLogger
+  supervisor?: BridgeSupervisor
 }
 
 export type BridgeSessionManagerStatus = {
@@ -154,6 +158,7 @@ export class BridgeSessionManager {
     context: Pick<BridgeSessionContext, "cwd" | "sessionKey" | "threadId">,
   ) => HermesAcpMcpServer[]
   private readonly log?: BridgeLogger
+  private readonly supervisor?: BridgeSupervisor
   private readonly idleSessionTtlMs: number
   private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
@@ -177,6 +182,7 @@ export class BridgeSessionManager {
     this.runtimeProfiles = options.runtimeProfiles ?? []
     this.requestTimeoutMs = options.requestTimeoutMs
     this.log = options.log
+    this.supervisor = options.supervisor
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
     this.allowRemoteCwd = options.allowRemoteCwd === true
     this.resumeEnabled = options.resumeEnabled === true
@@ -220,6 +226,8 @@ export class BridgeSessionManager {
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
     const type = normalizeType(item)
+    this.supervisor?.recordQueued(this.supervisorWorkItem(item))
+    this.supervisor?.recordClaimed(this.supervisorWorkItem(item))
     this.writeLog({
       level: "info",
       event: "bridge.queue_item.start",
@@ -253,13 +261,19 @@ export class BridgeSessionManager {
       }
 
       if (type === "cancel") {
+        this.supervisor?.recordCancelling(this.supervisorWorkItem(item))
         await this.handleCancel(item)
+        this.supervisor?.recordCancelled(this.supervisorWorkItem(item))
         this.writeQueueCompleteLog(item, type)
         return
       }
 
       if (isApprovalResponseType(type)) {
         await this.handleApprovalResponse(item, type)
+        this.supervisor?.recordInteractionAnswered(
+          this.supervisorWorkItem(item),
+          item.externalRequestId ?? item.approvalId ?? item.id,
+        )
         this.writeQueueCompleteLog(item, type)
         return
       }
@@ -285,6 +299,7 @@ export class BridgeSessionManager {
       if (type === "prompt") {
         this.writeAgentTurnLog("agent.turn.failed", item, type, message)
       }
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), message)
       await this.drainEventWrites()
       const terminal = isTerminalQueueItemError(type, message)
       await this.markQueueResult(
@@ -350,6 +365,7 @@ export class BridgeSessionManager {
     const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.clearIdleTimer(session)
+    this.supervisor?.recordPromptPersisted(this.supervisorWorkItem(item, session))
     this.enqueueEventWrite(session, {
       externalEventId: `${item.id}:message_started`,
       source: "bridge",
@@ -363,6 +379,7 @@ export class BridgeSessionManager {
     })
     let result: HermesAcpPromptResult
     try {
+      this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session))
       result = await session.acp.sendUserMessage(prompt, options)
     } catch (error) {
       await this.closeSession(session.sessionKey)
@@ -418,6 +435,7 @@ export class BridgeSessionManager {
       result: result.rawResult,
       ...options.resultMetadata,
     })
+    this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session))
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
     this.writeLog({
@@ -664,6 +682,15 @@ export class BridgeSessionManager {
         mcpServers: this.createMcpServers({ cwd: item.cwd, sessionKey, threadId }),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
+            this.supervisor?.recordProviderEvent(this.supervisorWorkItem(item, record), {
+              eventType: event.eventType,
+            })
+            if (event.part?.type === "approval_request" || event.part?.type === "choice") {
+              this.supervisor?.recordWaitingForInteraction(
+                this.supervisorWorkItem(item, record),
+                event.externalEventId ?? item.externalRequestId ?? item.approvalId ?? item.id,
+              )
+            }
             this.enqueueEventWrite(record, event)
           }
         },
@@ -977,6 +1004,33 @@ export class BridgeSessionManager {
       agentSessionId: item.agentSessionId,
       error,
     })
+  }
+
+  private supervisorWorkItem(
+    item: BridgeSessionQueueItem,
+    session?: BridgeSessionRecord,
+  ): BridgeSupervisorWorkItem {
+    return {
+      agentId:
+        item.bridgeProfileId ??
+        item.hermesProfileName ??
+        item.agentName ??
+        session?.runtimeProfile?.id ??
+        "default-agent",
+      agentName: item.agentName,
+      bridgeDeviceId: this.deviceId,
+      bridgeProfileId: item.bridgeProfileId,
+      claimId: item.claimId,
+      hermesProfileName: item.hermesProfileName,
+      id: item.id,
+      organizationId: item.organizationId,
+      runtimeProfileId: item.bridgeProfileId ?? session?.runtimeProfile?.id,
+      sessionId: item.sessionId,
+      threadId: item.threadId ?? item.sessionId ?? session?.threadId,
+      traceId: item.traceId,
+      type: item.type,
+      kind: item.kind,
+    }
   }
 
   private writeLog(entry: BridgeLogEntry): void {
