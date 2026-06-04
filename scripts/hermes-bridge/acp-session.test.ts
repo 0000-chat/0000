@@ -3,7 +3,12 @@ import { EventEmitter } from "node:events"
 import { PassThrough, Writable } from "node:stream"
 import { describe, expect, test } from "bun:test"
 
-import { HermesAcpSession, type JsonRpcMessage } from "./acp-session"
+import {
+  HermesAcpRuntimeAdapter,
+  HermesAcpSession,
+  type JsonRpcMessage,
+  resolveRuntimeConfigApplication,
+} from "./acp-session"
 
 describe("ACP final text extraction", () => {
   test("withholds Codex ACP text when the turn has no classified thought events", async () => {
@@ -62,6 +67,81 @@ describe("ACP final text extraction", () => {
 
     expect(result.text).toBe("normal answer")
     expect(result.finalText?.withheld).toBe(false)
+  })
+})
+
+describe("ACP runtime adapter boundary", () => {
+  test("wraps runtime operations in tagged adapter results", async () => {
+    const adapter = new HermesAcpRuntimeAdapter({
+      createSession: () =>
+        new HermesAcpSession({
+          agentCommand: "hermes acp",
+          spawnProcess: createFakeAcpProcess({ updates: [] }),
+        }),
+    })
+
+    const created = await adapter.createSession({ agentCommand: "hermes acp" })
+    expect(created).toMatchObject({
+      ok: true,
+      capabilityUsed: "createSession",
+      nativeMethod: "session/new",
+    })
+    if (!created.ok) {
+      throw new Error("expected session creation to succeed")
+    }
+
+    const prompt = await adapter.sendPrompt(created.session, "hello")
+    expect(prompt).toMatchObject({
+      ok: true,
+      capabilityUsed: "sendPrompt",
+      nativeMethod: "session/prompt",
+    })
+
+    const closed = await adapter.closeSession(created.session)
+    expect(closed).toMatchObject({
+      ok: true,
+      capabilityUsed: "closeSession",
+      nativeMethod: "process.kill",
+    })
+  })
+
+  test("reports unsupported interaction responses through adapter result tags", async () => {
+    const adapter = new HermesAcpRuntimeAdapter()
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      spawnProcess: createFakeAcpProcess({ updates: [] }),
+    })
+
+    const result = await adapter.sendInteractionResponse(session, {
+      approved: true,
+      externalRequestId: "missing",
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      capabilityUsed: "sendInteractionResponse",
+      diagnosticReasonCode: "permission_response_unmatched",
+    })
+  })
+
+  test("applies runtime config fallback when an option disappears at claim time", async () => {
+    expect(
+      resolveRuntimeConfigApplication({
+        requested: { model: "gpt-5.5", thoughtLevel: "high" },
+        supportedOptions: { model: ["gpt-5.5"], thoughtLevel: ["medium"] },
+      }),
+    ).toEqual({
+      applied: { model: "gpt-5.5" },
+      diagnostics: [
+        {
+          option: "thoughtLevel",
+          reasonCode: "runtime_config_option_unavailable",
+          value: "high",
+        },
+      ],
+      ok: true,
+      policy: "omit_unavailable",
+    })
   })
 })
 

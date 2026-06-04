@@ -2,6 +2,7 @@ import {
   type HermesAcpMcpServer,
   type HermesAcpPromptResult,
   HermesAcpSession,
+  resolveRuntimeConfigApplication,
 } from "./acp-session"
 import { type BridgeLogEntry, type BridgeLogger, redactLogValue } from "./bridge-log"
 import type { BridgeEventInput } from "./convex-http"
@@ -28,6 +29,8 @@ export type BridgeSessionQueueItem = {
   externalRequestId?: string
   externalSessionId?: string
   organizationId?: string
+  mailboxConversationId?: string
+  runtimeConfig?: Record<string, string | undefined>
   traceId?: string
   agentName?: string
   bridgeProfileId?: string
@@ -76,6 +79,9 @@ type BridgeSessionRecord = {
   runtimeProfile?: BridgeRuntimeProfile
   hermesProfileName?: string
   generation: number
+  providerSessionKey: string
+  scopeConversationId: string
+  scopeKeyWithoutAgent: string
   idleTimer?: ReturnType<typeof setTimeout>
   lastUsedAt: number
 }
@@ -338,7 +344,7 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
-    const sessionKey = sessionKeyForItem(item) ?? threadId
+    const sessionKey = this.sessionKeyForItem(item) ?? threadId
     const prompt = item.prompt
     const threadHistory = normalizeThreadHistory(item.threadHistory)
     const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
@@ -360,9 +366,20 @@ export class BridgeSessionManager {
       threadHistory?: string
       autoApprovePermissionRequests?: boolean
       resultMetadata?: Record<string, unknown>
+      sessionKey?: string
     } = {},
   ): Promise<void> {
-    const session = await this.ensureSession(item)
+    const session = options.sessionKey
+      ? this.sessions.get(options.sessionKey)
+      : await this.ensureSession(item)
+    if (!session) {
+      throw new Error(`ACP session ${options.sessionKey} is no longer active`)
+    }
+    const {
+      resultMetadata: baseResultMetadata,
+      sessionKey: _resolvedSessionKey,
+      ...acpPromptOptions
+    } = options
     session.lastUsedAt = Date.now()
     this.clearIdleTimer(session)
     this.supervisor?.recordPromptPersisted(this.supervisorWorkItem(item, session))
@@ -378,9 +395,19 @@ export class BridgeSessionManager {
       },
     })
     let result: HermesAcpPromptResult
+    const runtimeConfigApplication = applyRuntimeConfigFallback(item, session.runtimeProfile)
+    const resultMetadata =
+      runtimeConfigApplication === undefined
+        ? baseResultMetadata
+        : {
+            ...baseResultMetadata,
+            runtimeConfigApplied: runtimeConfigApplication.applied,
+            runtimeConfigDiagnostics: runtimeConfigApplication.diagnostics,
+            runtimeConfigPolicy: runtimeConfigApplication.policy,
+          }
     try {
       this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session))
-      result = await session.acp.sendUserMessage(prompt, options)
+      result = await session.acp.sendUserMessage(prompt, acpPromptOptions)
     } catch (error) {
       await this.closeSession(session.sessionKey)
       throw error
@@ -413,7 +440,7 @@ export class BridgeSessionManager {
         queueType: normalizeType(item),
         threadId: session.threadId,
         sessionId: item.sessionId,
-        agentSessionId: session.sessionKey,
+        agentSessionId: session.providerSessionKey,
         acpSessionId: result.sessionId,
         answerChunkCount: result.finalText.answerChunkCount,
         answerTextLength: result.finalText.answerTextLength,
@@ -427,13 +454,13 @@ export class BridgeSessionManager {
     await this.drainEventWrites()
     await this.markQueueResult(item, {
       ok: true,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
       acpSessionId: result.sessionId,
       acpCapabilities: result.capabilities,
       stopReason: result.stopReason,
       text: result.text,
       result: result.rawResult,
-      ...options.resultMetadata,
+      ...resultMetadata,
     })
     this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session))
     session.lastUsedAt = Date.now()
@@ -445,7 +472,7 @@ export class BridgeSessionManager {
       queueType: normalizeType(item),
       threadId: session.threadId,
       sessionId: item.sessionId,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
       acpSessionId: result.sessionId,
     })
   }
@@ -512,13 +539,18 @@ export class BridgeSessionManager {
   }
 
   private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
-    const key = sessionKeyForItem(item)
+    const key = this.findSessionKeyForItem(item)
     if (type === "choice-response") {
       const choiceId = item.approvalOutcome?.trim()
       if (!choiceId) {
         throw new Error(`choice response ${item.id} is missing choice id`)
       }
       const threadId = item.threadId ?? item.sessionId
+      if (!key && hasExplicitRuntimeScope(item)) {
+        throw new Error(
+          `choice response ${item.id} does not match an active ACP session for the requested runtime`,
+        )
+      }
       const sessionKey = key ?? threadId
       if (!sessionKey) {
         throw new Error(`choice response ${item.id} is missing threadId`)
@@ -539,6 +571,7 @@ export class BridgeSessionManager {
         this.handlePromptNow(item, `Selected choice: ${choiceId}`, {
           systemPrompt,
           threadHistory,
+          sessionKey: key,
           resultMetadata: { choiceId },
         }),
       )
@@ -594,12 +627,12 @@ export class BridgeSessionManager {
     await this.markQueueResult(item, {
       ok: true,
       started: true,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
     })
   }
 
   private async handleCancel(item: BridgeSessionQueueItem): Promise<void> {
-    const key = sessionKeyForItem(item)
+    const key = this.findSessionKeyForItem(item)
     const session = key ? this.sessions.get(key) : undefined
     if (session) {
       await session.acp.cancel()
@@ -634,7 +667,9 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
-    const sessionKey = sessionKeyForItem(item) ?? threadId
+    const sessionKey = this.sessionKeyForItem(item) ?? threadId
+    const providerSessionKey = providerSessionKeyForItem(item) ?? threadId
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
     const existing = this.sessions.get(sessionKey)
     if (existing) {
       existing.agentName = normalizeAgentName(item.agentName) ?? existing.agentName
@@ -669,6 +704,9 @@ export class BridgeSessionManager {
       cwd,
       agentName: normalizeAgentName(item.agentName),
       generation,
+      providerSessionKey,
+      scopeConversationId: item.mailboxConversationId ?? threadId,
+      scopeKeyWithoutAgent,
       lastUsedAt: Date.now(),
       acp: this.createSession({
         agentCommand,
@@ -703,6 +741,7 @@ export class BridgeSessionManager {
       runtimeProfile,
       hermesProfileName: item.hermesProfileName,
     }
+    await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey)
     this.sessions.set(sessionKey, record)
     return record
   }
@@ -711,6 +750,13 @@ export class BridgeSessionManager {
     session: BridgeSessionRecord,
     item: BridgeSessionQueueItem,
   ): boolean {
+    const requestedCwd = this.allowRemoteCwd ? item.cwd : undefined
+    if (
+      session.runtimeProfile?.identityRules?.cwdBoundSessions &&
+      session.cwd !== requestedCwd
+    ) {
+      return false
+    }
     if (item.bridgeProfileId) {
       return session.runtimeProfile?.id === item.bridgeProfileId
     }
@@ -783,7 +829,7 @@ export class BridgeSessionManager {
       level: "info",
       event: "bridge.session.idle_close",
       threadId: session.threadId,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
     })
     await this.closeSession(sessionKey)
   }
@@ -802,7 +848,7 @@ export class BridgeSessionManager {
   ): void {
     const queueId = this.sessionQueueState.get(record.sessionKey)?.runningQueueItemId
     const base = {
-      agentSessionId: record.sessionKey,
+      agentSessionId: record.providerSessionKey,
       queueId,
       threadId: record.threadId,
       timelineSequence: sequence,
@@ -849,7 +895,7 @@ export class BridgeSessionManager {
     const message = String(redactLogValue(error.message))
     this.enqueueBridgeEvent({
       threadId: record.threadId,
-      agentSessionId: record.sessionKey,
+      agentSessionId: record.providerSessionKey,
       eventType: "bridge_error",
       sequence,
       rawPayload: { message },
@@ -1033,6 +1079,94 @@ export class BridgeSessionManager {
     }
   }
 
+  private sessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
+    const providerSessionKey = providerSessionKeyForItem(item)
+    if (!providerSessionKey) {
+      return undefined
+    }
+    const threadId = item.threadId ?? item.sessionId ?? "unknown-thread"
+    return [
+      item.organizationId ?? "unknown-org",
+      this.deviceId ?? "unknown-device",
+      item.bridgeProfileId ?? item.hermesProfileName ?? item.agentName ?? "unknown-agent",
+      item.mailboxConversationId ?? threadId,
+      providerSessionKey,
+    ]
+      .map(encodeSessionKeyPart)
+      .join(":")
+  }
+
+  private findSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
+    const exact = this.sessionKeyForItem(item)
+    if (exact && (this.sessions.has(exact) || this.sessionQueueState.has(exact))) {
+      return exact
+    }
+    if (hasExplicitRuntimeScope(item)) {
+      return undefined
+    }
+
+    const providerSessionKey = providerSessionKeyForItem(item)
+    const threadId = item.threadId ?? item.sessionId
+    if (!providerSessionKey || !threadId) {
+      return exact
+    }
+
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
+    const scopeMatch = this.latestSessionMatching(
+      (session) => session.scopeKeyWithoutAgent === scopeKeyWithoutAgent,
+    )
+    if (scopeMatch) {
+      return scopeMatch.sessionKey
+    }
+
+    const providerThreadMatches = Array.from(this.sessions.values()).filter(
+      (session) =>
+        session.providerSessionKey === providerSessionKey &&
+        session.scopeConversationId === (item.mailboxConversationId ?? threadId),
+    )
+    if (providerThreadMatches.length > 1) {
+      throw new Error(
+        `queue item ${item.id} matches multiple active ACP sessions; include organization and runtime scope`,
+      )
+    }
+    return providerThreadMatches[0]?.sessionKey
+  }
+
+  private latestSessionMatching(
+    predicate: (session: BridgeSessionRecord) => boolean,
+  ): BridgeSessionRecord | undefined {
+    return Array.from(this.sessions.values())
+      .filter(predicate)
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0]
+  }
+
+  private scopeKeyWithoutAgentForItem(
+    item: BridgeSessionQueueItem,
+    providerSessionKey: string,
+    threadId: string,
+  ): string {
+    return [
+      item.organizationId ?? "unknown-org",
+      this.deviceId ?? "unknown-device",
+      item.mailboxConversationId ?? threadId,
+      providerSessionKey,
+    ]
+      .map(encodeSessionKeyPart)
+      .join(":")
+  }
+
+  private async closeReplacedRuntimeSessions(
+    scopeKeyWithoutAgent: string,
+    nextSessionKey: string,
+  ): Promise<void> {
+    const replaced = Array.from(this.sessions.values()).filter(
+      (session) =>
+        session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
+        session.sessionKey !== nextSessionKey,
+    )
+    await Promise.all(replaced.map((session) => this.closeSession(session.sessionKey)))
+  }
+
   private writeLog(entry: BridgeLogEntry): void {
     this.log?.(redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry)
   }
@@ -1090,7 +1224,7 @@ function toBridgeEvent(
   const shouldRedactPayload = event.eventType === "bridge_error" || event.part?.type === "error"
   return {
     threadId: record.threadId,
-    agentSessionId: record.sessionKey,
+    agentSessionId: record.providerSessionKey,
     eventType: event.eventType,
     sequence,
     rawPayload: shouldRedactPayload ? redactLogValue(event.payload) : event.payload,
@@ -1145,8 +1279,29 @@ function normalizeThreadHistory(threadHistory: string | undefined): string | und
   return normalized ? normalized : undefined
 }
 
-function sessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
+function providerSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
   return item.agentSessionId ?? item.sessionId ?? item.threadId
+}
+
+function hasExplicitRuntimeScope(item: BridgeSessionQueueItem): boolean {
+  return Boolean(item.bridgeProfileId ?? item.hermesProfileName)
+}
+
+function applyRuntimeConfigFallback(
+  item: BridgeSessionQueueItem,
+  profile: BridgeRuntimeProfile | undefined,
+): ReturnType<typeof resolveRuntimeConfigApplication> | undefined {
+  if (!item.runtimeConfig || !profile?.runtimeConfigOptions) {
+    return undefined
+  }
+  return resolveRuntimeConfigApplication({
+    requested: item.runtimeConfig,
+    supportedOptions: profile.runtimeConfigOptions,
+  })
+}
+
+function encodeSessionKeyPart(value: string): string {
+  return encodeURIComponent(value)
 }
 
 function readToolLogFields(value: unknown): { toolCallId?: string; toolName: string } {

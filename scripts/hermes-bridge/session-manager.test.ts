@@ -203,6 +203,182 @@ describe("bridge session cwd safety", () => {
     ])
   })
 
+  test("recreates cwd-bound runtime sessions when the queue cwd changes", async () => {
+    const contexts: BridgeSessionContext[] = []
+    const closedCwds: Array<string | undefined> = []
+    const manager = new BridgeSessionManager({
+      allowRemoteCwd: true,
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context)
+        return {
+          close: async () => {
+            closedCwds.push(context.cwd)
+          },
+          cancel: async () => {},
+          sendUserMessage: async () => ({
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: context.cwd ?? "none",
+          }),
+        }
+      },
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          identityRules: { cwdBoundSessions: true, cwdSwitchPolicy: "new_session_required" },
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:default",
+      claimId: "claim-1",
+      cwd: "/repo/a",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:default",
+      claimId: "claim-2",
+      id: "queue-2",
+      prompt: "hello again",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(contexts.map((context) => context.cwd)).toEqual(["/repo/a", undefined])
+    expect(closedCwds).toEqual(["/repo/a"])
+  })
+
+  test("scopes runtime session keys by organization, device, runtime, and thread", async () => {
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: () => fakeSession(),
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["openclaw", "acp"],
+          id: "openclaw:gateway",
+          identityRules: { appIdentityFromMeta: false, scopeSessionKeyByThread: true },
+          kind: "openclaw",
+          label: "OpenClaw",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "openclaw:gateway",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "openclaw:gateway",
+      claimId: "claim-2",
+      id: "queue-2",
+      organizationId: "org-2",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    const sessions = manager.getStatus().activeSessions
+    expect(sessions).toHaveLength(2)
+    expect(new Set(sessions).size).toBe(2)
+    expect(sessions.every((key) => key.includes("provider-session"))).toBe(true)
+  })
+
+  test("returns provider session ids instead of internal scoped session keys", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: { agentSessionId: "provider-session", ok: true },
+    })
+  })
+
+  test("applies runtime config fallback metadata before prompt delivery", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          runtimeConfigOptions: { model: ["gpt-5.5"], thoughtLevel: ["medium"] },
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      runtimeConfig: { model: "gpt-5.5", thoughtLevel: "high" },
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results.at(-1)?.result).toMatchObject({
+      runtimeConfigApplied: { model: "gpt-5.5" },
+      runtimeConfigDiagnostics: [
+        {
+          option: "thoughtLevel",
+          reasonCode: "runtime_config_option_unavailable",
+          value: "high",
+        },
+      ],
+    })
+  })
+
   test("waits for a starting ACP session before handling an approval response", async () => {
     const promptStarted = deferred<void>()
     const finishPrompt = deferred<void>()
@@ -300,6 +476,265 @@ describe("bridge session cwd safety", () => {
     })
     expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
       text: "continued after choice",
+    })
+  })
+
+  test("routes sparse choice responses to runtime-scoped active sessions", async () => {
+    const prompts: string[] = []
+    const cloud = fakeCloudClient()
+    let sessionCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => {
+        sessionCount += 1
+        return {
+          close: async () => {},
+          cancel: async () => {},
+          sendUserMessage: async (prompt) => {
+            prompts.push(prompt)
+            return {
+              events: [],
+              rawResult: { ok: true },
+              sessionId: "session-1",
+              text: prompt === "Selected choice: option-a" ? "continued after choice" : "ready",
+            }
+          },
+        }
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      approvalOutcome: "option-a",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      threadId: "thread-1",
+      type: "choice-response",
+    })
+
+    expect(prompts).toEqual(["hello", "Selected choice: option-a"])
+    expect(sessionCount).toBe(1)
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-choice",
+      result: { agentSessionId: "provider-session", choiceId: "option-a", ok: true },
+    })
+  })
+
+  test("rejects ambiguous sparse choice responses across scoped sessions", async () => {
+    const prompts: string[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt)
+          return {
+            events: [],
+            rawResult: { ok: true },
+            sessionId: "session-1",
+            text: "ready",
+          }
+        },
+      }),
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-org-1",
+      id: "queue-org-1",
+      organizationId: "org-1",
+      prompt: "hello org 1",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-org-2",
+      id: "queue-org-2",
+      organizationId: "org-2",
+      prompt: "hello org 2",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      approvalOutcome: "option-a",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      threadId: "thread-1",
+      type: "choice-response",
+    })
+
+    expect(prompts).toEqual(["hello org 1", "hello org 2"])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-choice",
+      result: {
+        error: expect.stringContaining("matches multiple active ACP sessions"),
+        ok: false,
+      },
+    })
+  })
+
+  test("does not route sparse choice responses by substring-matched thread ids", async () => {
+    const contexts: BridgeSessionContext[] = []
+    const prompts: string[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context)
+        return {
+          close: async () => {},
+          cancel: async () => {},
+          sendUserMessage: async (prompt) => {
+            prompts.push(prompt)
+            return {
+              events: [],
+              rawResult: { ok: true },
+              sessionId: "session-1",
+              text: "ready",
+            }
+          },
+        }
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello thread 10",
+      threadId: "thread-10",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      approvalOutcome: "option-a",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      threadId: "thread-1",
+      type: "choice-response",
+    })
+
+    expect(contexts.map((context) => context.threadId)).toEqual(["thread-10", "thread-1"])
+    expect(prompts).toEqual(["hello thread 10", "Selected choice: option-a"])
+  })
+
+  test("does not fallback explicit runtime choice responses to another active runtime", async () => {
+    const prompts: string[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt)
+          return {
+            events: [],
+            rawResult: { ok: true },
+            sessionId: "session-1",
+            text: "ready",
+          }
+        },
+      }),
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["openclaw", "acp"],
+          id: "openclaw:gateway",
+          kind: "openclaw",
+          label: "OpenClaw",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "openclaw:gateway",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      approvalOutcome: "option-a",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      threadId: "thread-1",
+      type: "choice-response",
+    })
+
+    expect(prompts).toEqual(["hello"])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-choice",
+      result: {
+        error: expect.stringContaining("does not match an active ACP session"),
+        ok: false,
+      },
     })
   })
 

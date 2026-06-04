@@ -13,6 +13,9 @@ export function inferRuntimeId(agentCommand: string): string {
   if (normalized.includes("codex")) {
     return "codex"
   }
+  if (normalized.includes("openclaw")) {
+    return "openclaw"
+  }
   return "custom-acp"
 }
 
@@ -26,6 +29,9 @@ export function inferRuntimeLabel(agentCommand: string): string {
   }
   if (runtimeId === "codex") {
     return "Codex"
+  }
+  if (runtimeId === "openclaw") {
+    return "OpenClaw"
   }
   return "Custom ACP"
 }

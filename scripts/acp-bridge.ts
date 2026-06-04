@@ -2056,7 +2056,9 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     agentName: stringFromUnknown(record.agentName),
     bridgeProfileId: stringFromUnknown(record.bridgeProfileId),
     hermesProfileName: stringFromUnknown(record.hermesProfileName),
+    mailboxConversationId: stringFromUnknown(record.mailboxConversationId),
     organizationId: stringFromUnknown(record.organizationId),
+    runtimeConfig: stringRecordFromUnknown(record.runtimeConfig),
     traceId: stringFromUnknown(record.traceId),
   }
 }
@@ -2087,6 +2089,16 @@ function redactForOutput(value: string): string {
 
 function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function stringRecordFromUnknown(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, entry]) => [key, stringFromUnknown(entry)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== undefined)
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 function sleep(ms: number): Promise<void> {

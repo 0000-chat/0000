@@ -54,6 +54,56 @@ export type HermesAcpPromptOptions = {
   autoApprovePermissionRequests?: boolean
 }
 
+export type AcpAdapterCapabilityUsed =
+  | "probeRuntime"
+  | "createSession"
+  | "loadSession"
+  | "sendPrompt"
+  | "cancelTurn"
+  | "closeSession"
+  | "sendInteractionResponse"
+  | "applyRuntimeConfig"
+  | "restoreRuntimeConfig"
+
+export type AcpAdapterResult<T = {}> =
+  | ({
+      ok: true
+      capabilityUsed: AcpAdapterCapabilityUsed
+      nativeMethod?: string
+      diagnosticReasonCode?: string
+    } & T)
+  | {
+      ok: false
+      capabilityUsed: AcpAdapterCapabilityUsed
+      nativeMethod?: string
+      diagnosticReasonCode: string
+      error: Error
+    }
+
+export type RuntimeConfigApplicationInput = {
+  requested: Record<string, string | undefined>
+  supportedOptions: Record<string, string[] | undefined>
+}
+
+export type RuntimeConfigApplicationResult = {
+  applied: Record<string, string>
+  diagnostics: Array<{ option: string; reasonCode: string; value: string }>
+  ok: true
+  policy: "omit_unavailable"
+}
+
+export type AcpRuntimeAdapterSessionFactory = (
+  options: HermesAcpSessionOptions,
+) => HermesAcpSession
+
+export type AcpRuntimeAdapterCreateSessionInput = HermesAcpSessionOptions
+
+export type AcpRuntimeAdapterInteractionResponse = {
+  approved: boolean
+  externalRequestId: string
+  reason?: string
+}
+
 export type HermesAcpSessionOptions = {
   agentCommand?: string | string[]
   cwd?: string
@@ -509,6 +559,185 @@ export class HermesAcpSession {
       await this.onEvent?.(event)
     }
     await this.onError?.(error)
+  }
+}
+
+export class HermesAcpRuntimeAdapter {
+  private readonly createRuntimeSession: AcpRuntimeAdapterSessionFactory
+
+  constructor(options: { createSession?: AcpRuntimeAdapterSessionFactory } = {}) {
+    this.createRuntimeSession = options.createSession ?? ((input) => new HermesAcpSession(input))
+  }
+
+  async probeRuntime(
+    input: HermesAcpSessionOptions = {},
+  ): Promise<AcpAdapterResult<{ capabilities?: HermesAcpRuntimeCapabilities }>> {
+    const session = this.createRuntimeSession(input)
+    try {
+      await session.start()
+      const capabilities = session.capabilities
+      await session.close()
+      return {
+        ok: true,
+        capabilityUsed: "probeRuntime",
+        nativeMethod: "initialize",
+        capabilities,
+      }
+    } catch (error) {
+      return adapterError("probeRuntime", "acp_session_create_failed", error, "initialize")
+    }
+  }
+
+  async createSession(
+    input: AcpRuntimeAdapterCreateSessionInput,
+  ): Promise<AcpAdapterResult<{ session: HermesAcpSession; sessionId: string }>> {
+    const session = this.createRuntimeSession(input)
+    try {
+      const sessionId = await session.start()
+      return {
+        ok: true,
+        capabilityUsed: "createSession",
+        nativeMethod: "session/new",
+        session,
+        sessionId,
+      }
+    } catch (error) {
+      return adapterError("createSession", "acp_session_create_failed", error, "session/new")
+    }
+  }
+
+  async loadSession(
+    input: AcpRuntimeAdapterCreateSessionInput & { initialSessionId: string },
+  ): Promise<AcpAdapterResult<{ session: HermesAcpSession; sessionId: string }>> {
+    const session = this.createRuntimeSession({ ...input, resumeEnabled: true })
+    try {
+      const sessionId = await session.start()
+      return {
+        ok: true,
+        capabilityUsed: "loadSession",
+        nativeMethod: "session/load",
+        session,
+        sessionId,
+      }
+    } catch (error) {
+      return adapterError("loadSession", "acp_session_resume_failed", error, "session/load")
+    }
+  }
+
+  async sendPrompt(
+    session: HermesAcpSession,
+    text: string,
+    options: HermesAcpPromptOptions = {},
+  ): Promise<AcpAdapterResult<{ result: HermesAcpPromptResult }>> {
+    try {
+      const result = await session.sendUserMessage(text, options)
+      return { ok: true, capabilityUsed: "sendPrompt", nativeMethod: "session/prompt", result }
+    } catch (error) {
+      return adapterError("sendPrompt", "prompt_send_failed", error, "session/prompt")
+    }
+  }
+
+  async cancelTurn(session: HermesAcpSession): Promise<AcpAdapterResult> {
+    try {
+      await session.cancel()
+      return { ok: true, capabilityUsed: "cancelTurn", nativeMethod: "session/cancel" }
+    } catch (error) {
+      return adapterError("cancelTurn", "cancel_not_acknowledged", error, "session/cancel")
+    }
+  }
+
+  async closeSession(session: HermesAcpSession): Promise<AcpAdapterResult> {
+    const nativeMethod = session.capabilities?.supportsSessionClose ? "session/close" : "process.kill"
+    try {
+      await session.close()
+      return { ok: true, capabilityUsed: "closeSession", nativeMethod }
+    } catch (error) {
+      return adapterError("closeSession", "session_close_failed", error, nativeMethod)
+    }
+  }
+
+  async sendInteractionResponse(
+    session: HermesAcpSession,
+    response: AcpRuntimeAdapterInteractionResponse,
+  ): Promise<AcpAdapterResult<{ delivered: boolean }>> {
+    try {
+      const delivered = await session.respondToPermissionRequest(response.externalRequestId, response)
+      if (!delivered) {
+        return {
+          ok: false,
+          capabilityUsed: "sendInteractionResponse",
+          nativeMethod: "permission/response",
+          diagnosticReasonCode: "permission_response_unmatched",
+          error: new Error(`No pending ACP interaction matched ${response.externalRequestId}`),
+        }
+      }
+      return {
+        ok: true,
+        capabilityUsed: "sendInteractionResponse",
+        nativeMethod: "permission/response",
+        delivered,
+      }
+    } catch (error) {
+      return adapterError(
+        "sendInteractionResponse",
+        "interaction_delivery_failed",
+        error,
+        "permission/response",
+      )
+    }
+  }
+
+  async applyRuntimeConfig(
+    input: RuntimeConfigApplicationInput,
+  ): Promise<AcpAdapterResult<{ application: RuntimeConfigApplicationResult }>> {
+    return {
+      ok: true,
+      capabilityUsed: "applyRuntimeConfig",
+      nativeMethod: "adapter/runtime-config",
+      application: resolveRuntimeConfigApplication(input),
+    }
+  }
+
+  async restoreRuntimeConfig(): Promise<AcpAdapterResult> {
+    return {
+      ok: true,
+      capabilityUsed: "restoreRuntimeConfig",
+      nativeMethod: "adapter/runtime-config",
+    }
+  }
+}
+
+export function resolveRuntimeConfigApplication(
+  input: RuntimeConfigApplicationInput,
+): RuntimeConfigApplicationResult {
+  const applied: Record<string, string> = {}
+  const diagnostics: RuntimeConfigApplicationResult["diagnostics"] = []
+  for (const [option, value] of Object.entries(input.requested)) {
+    if (!value) {
+      continue
+    }
+    const supported = input.supportedOptions[option]
+    if (supported?.includes(value)) {
+      applied[option] = value
+      continue
+    }
+    diagnostics.push({ option, reasonCode: "runtime_config_option_unavailable", value })
+  }
+  return { applied, diagnostics, ok: true, policy: "omit_unavailable" }
+}
+
+function adapterError<T = {}>(
+  capabilityUsed: AcpAdapterCapabilityUsed,
+  diagnosticReasonCode: string,
+  error: unknown,
+  nativeMethod?: string,
+): AcpAdapterResult<T> {
+  return {
+    ok: false,
+    capabilityUsed,
+    nativeMethod,
+    diagnosticReasonCode,
+    error: error instanceof Error ? error : new Error(String(error)),
   }
 }
 

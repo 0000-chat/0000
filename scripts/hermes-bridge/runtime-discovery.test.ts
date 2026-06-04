@@ -1,9 +1,44 @@
 import { describe, expect, test } from "bun:test"
-import { discoverRuntimeProfiles } from "./runtime-discovery"
+import { capabilitiesFromInitializeResult, discoverRuntimeProfiles } from "./runtime-discovery"
 
 const noDiscoveredCommands = async () => []
 
 describe("runtime discovery", () => {
+  test("extracts runtime nuance capabilities from ACP initialize results", () => {
+    expect(
+      capabilitiesFromInitializeResult({
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: { cancel: {}, close: {}, resume: {} },
+        },
+        runtimeCapabilities: {
+          maxSessions: 4,
+          runtimeConfigOptions: {
+            model: ["gpt-5.5"],
+            thoughtLevel: ["medium", "high"],
+          },
+          sharedGatewayKey: true,
+          sessionIsolation: "unverified",
+          structuredInteractions: true,
+        },
+      }),
+    ).toEqual({
+      maxSessions: 4,
+      models: ["gpt-5.5"],
+      runtimeConfigOptions: {
+        model: ["gpt-5.5"],
+        thoughtLevel: ["medium", "high"],
+      },
+      sessionIsolation: "unverified",
+      sharedGatewayKey: true,
+      supportsCancel: true,
+      supportsClose: true,
+      supportsResume: true,
+      supportsStructuredInteractions: true,
+      thoughtLevels: ["medium", "high"],
+    })
+  })
+
   test("discovers Codex with context-mode diagnostics", async () => {
     const profiles = await discoverRuntimeProfiles({
       baseAgentCommand: "hermes acp",
@@ -11,7 +46,14 @@ describe("runtime discovery", () => {
         { name: "status", description: "Show session status" },
         { name: "plan", description: "Create a plan", inputHint: "task" },
       ],
-      probeAcpCommand: async () => ({ ok: true }),
+      probeAcpCommand: async () => ({
+        ok: true,
+        capabilities: {
+          models: ["gpt-5.5", "gpt-5.4"],
+          thoughtLevels: ["medium", "high"],
+          supportsCancel: true,
+        },
+      }),
       runCommand: async (command) => {
         const key = command.join(" ")
         if (key === "command -v npx") {
@@ -44,13 +86,29 @@ describe("runtime discovery", () => {
       { name: "status", description: "Show session status" },
       { name: "plan", description: "Create a plan", inputHint: "task" },
     ])
+    expect(codex).toMatchObject({
+      models: ["gpt-5.5", "gpt-5.4"],
+      thoughtLevels: ["medium", "high"],
+      capabilityProvenance: {
+        modelSelection: { source: "native" },
+        thoughtLevelSelection: { source: "native" },
+        cancelTurn: { nativeMethod: "session/cancel", source: "native" },
+      },
+    })
   })
 
   test("discovers Claude Code through the ACP adapter", async () => {
     const profiles = await discoverRuntimeProfiles({
       baseAgentCommand: "hermes acp",
       discoverAcpCommands: noDiscoveredCommands,
-      probeAcpCommand: async () => ({ ok: true }),
+      probeAcpCommand: async () => ({
+        ok: true,
+        capabilities: {
+          supportsClose: false,
+          supportsResume: false,
+          supportsStructuredInteractions: true,
+        },
+      }),
       runCommand: async (command) => {
         const key = command.join(" ")
         if (key === "command -v npx") {
@@ -66,6 +124,17 @@ describe("runtime discovery", () => {
       command: ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
       diagnostics: { acp: "supported" },
       capabilities: { sessionMcpServers: true },
+      capabilityProvenance: {
+        closeSession: {
+          diagnosticReasonCode: "session_close_unsupported",
+          source: "unsupported",
+        },
+        resumeSession: {
+          diagnosticReasonCode: "session_resume_failed",
+          source: "fallback",
+        },
+        structuredInteractions: { source: "native" },
+      },
     })
     expect(profiles.some((profile) => profile.command.join(" ") === "claude acp")).toBe(false)
   })
@@ -175,6 +244,66 @@ describe("runtime discovery", () => {
       command: ["my-agent", "acp"],
       status: "available",
       capabilities: { sessionMcpServers: true },
+    })
+  })
+
+  test("publishes Hermes cwd-bound session behavior and max session limits", async () => {
+    const profiles = await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      discoverAcpCommands: noDiscoveredCommands,
+      probeAcpCommand: async () => ({
+        ok: true,
+        capabilities: { cwdBoundSessions: true, maxSessions: 3, supportsResume: true },
+      }),
+      runCommand: async (command) => {
+        if (command.join(" ") === "command -v hermes") {
+          return { ok: true, stdout: "/usr/bin/hermes\n" }
+        }
+        return { ok: false, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(profiles.find((profile) => profile.kind === "hermes")).toMatchObject({
+      maxSessions: 3,
+      identityRules: {
+        cwdBoundSessions: true,
+        cwdSwitchPolicy: "new_session_required",
+      },
+      capabilityProvenance: {
+        maxSessions: { source: "native", value: 3 },
+        resumeSession: { source: "native" },
+      },
+    })
+  })
+
+  test("degrades OpenClaw shared gateway profiles without proven session isolation", async () => {
+    const profiles = await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      discoverAcpCommands: noDiscoveredCommands,
+      probeAcpCommand: async () => ({
+        ok: true,
+        capabilities: { sharedGatewayKey: true, sessionIsolation: "unverified" },
+      }),
+      runCommand: async (command) => {
+        if (command.join(" ") === "command -v openclaw") {
+          return { ok: true, stdout: "/usr/bin/openclaw\n" }
+        }
+        return { ok: false, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(profiles.find((profile) => profile.kind === "openclaw")).toMatchObject({
+      diagnostics: { reason: "runtime_isolation_unverified" },
+      identityRules: {
+        appIdentityFromMeta: false,
+        scopeSessionKeyByThread: true,
+      },
+      capabilityProvenance: {
+        sessionIsolation: {
+          diagnosticReasonCode: "runtime_isolation_unverified",
+          source: "fallback",
+        },
+      },
     })
   })
 })
