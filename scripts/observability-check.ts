@@ -1,4 +1,4 @@
-import { registeredBridgeLogEvents } from "./hermes-bridge/bridge-log";
+import { registeredBridgeLogEvents } from "./acp-bridge/bridge-log";
 
 const requiredBridgeLogEvents = [
   "bridge.start",

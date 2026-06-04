@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { createWorkerBridgeLogger, redactLogValue } from "./hermes-bridge/bridge-log"
+import { createWorkerBridgeLogger, redactLogValue } from "./acp-bridge/bridge-log"
 
 describe("bridge log privacy", () => {
   test("redacts sensitive object fields and nested prompt content", () => {

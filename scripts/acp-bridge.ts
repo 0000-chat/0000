@@ -7,20 +7,20 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 
-import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./hermes-bridge/convex-http"
-import { ConvexBridgeHostAdapter } from "./hermes-bridge/host-adapter"
-import { openBridgeSupervisor, type BridgeSupervisor } from "./hermes-bridge/bridge-supervisor"
+import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./acp-bridge/convex-http"
+import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter"
+import { openBridgeSupervisor, type BridgeSupervisor } from "./acp-bridge/bridge-supervisor"
 import {
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
   redactLogValue,
-} from "./hermes-bridge/bridge-log"
+} from "./acp-bridge/bridge-log"
 import {
   DEFAULT_ACP_REQUEST_TIMEOUT_MS,
   type HermesAcpMcpServer,
-} from "./hermes-bridge/acp-session"
-import { BridgeSessionManager, type BridgeSessionQueueItem } from "./hermes-bridge/session-manager"
-import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./hermes-bridge/runtime-discovery"
+} from "./acp-bridge/acp-session"
+import { BridgeSessionManager, type BridgeSessionQueueItem } from "./acp-bridge/session-manager"
+import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./acp-bridge/runtime-discovery"
 import {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -28,9 +28,9 @@ import {
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
-} from "./hermes-bridge/runtime-defaults"
-import type { BridgeRuntimeProfile } from "./hermes-bridge/runtime-profiles"
-import { shouldRestartBridgeForDevHotReload } from "./hermes-bridge/dev-hot-reload"
+} from "./acp-bridge/runtime-defaults"
+import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles"
+import { shouldRestartBridgeForDevHotReload } from "./acp-bridge/dev-hot-reload"
 import { buildRestartCommandArgs } from "./bridge-updater"
 export {
   defaultAgentCommandForEnvironment,
@@ -39,7 +39,7 @@ export {
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
-} from "./hermes-bridge/runtime-defaults"
+} from "./acp-bridge/runtime-defaults"
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json")
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json")

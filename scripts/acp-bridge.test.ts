@@ -21,7 +21,7 @@ import {
   defaultAgentCommandForEnvironment,
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
-} from "./hermes-bridge/runtime-defaults"
+} from "./acp-bridge/runtime-defaults"
 
 describe("bridge Convex URL resolution", () => {
   test("derives a Convex cloud URL from a Convex site URL", () => {
