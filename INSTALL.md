@@ -73,6 +73,22 @@ already exists.
 
 ## Updating
 
+0000 Chat can ask a running bridge to update from the bridge devices settings.
+When the bridge receives `updateWhenIdle`, it waits until no ACP work is
+running, starts a short-lived updater helper, exits, and lets the helper:
+
+1. Refuse to update if the local checkout has uncommitted changes.
+2. Fetch immutable release tags from `origin`.
+3. Check out the newest stable tag newer than the running bridge version.
+4. Run `bun install`.
+5. Restart the same bridge command.
+
+The updater only uses stable tags like `v0.1.2`; prerelease or malformed tags
+are ignored. If there is no newer tag, it restarts the bridge without changing
+the checkout.
+
+Manual updates use the same tag-based model:
+
 ```bash
 cd "$HOME/0000"
 git fetch --tags --force origin "v0.1.2"
@@ -80,7 +96,8 @@ git checkout --detach "v0.1.2"
 bun install
 ```
 
-Restart the bridge after updating if it is running as a long-lived process.
+Restart the bridge after manually updating if it is running as a long-lived
+process.
 
 ## Safer Runtime Defaults
 

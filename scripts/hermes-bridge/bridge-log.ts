@@ -16,9 +16,54 @@ const ACP_SESSION_ERROR_PATTERN =
 
 export type BridgeLogLevel = "debug" | "info" | "warn" | "error"
 
+export const bridgeLogEventNames = [
+  "agent.reasoning.chunk",
+  "agent.final_text.withheld",
+  "agent.tool.completed",
+  "agent.tool.failed",
+  "agent.tool.requested",
+  "agent.turn.completed",
+  "agent.turn.failed",
+  "agent.turn.started",
+  "bridge.audit",
+  "bridge.axiom_delivery.failed",
+  "bridge.control_command.received",
+  "bridge.choice_response.continuation",
+  "bridge.events.append_failed",
+  "bridge.events.append_single_failed",
+  "bridge.events.appended",
+  "bridge.events.appended_single",
+  "bridge.heartbeat.transient_error",
+  "bridge.hermes_profiles.refresh",
+  "bridge.hermes_profiles.refresh_error",
+  "bridge.log_delivery.failed",
+  "bridge.loop.error",
+  "bridge.queue.claimed",
+  "bridge.queue.cleanup_stale",
+  "bridge.queue_item.complete",
+  "bridge.queue_item.error",
+  "bridge.queue_item.in_flight",
+  "bridge.queue_item.settled",
+  "bridge.queue_item.start",
+  "bridge.session.idle_close",
+  "bridge.session.ready",
+  "bridge.session.runtime_profile_changed",
+  "bridge.start",
+  "bridge.stop",
+  "bridge.subscription.disabled",
+] as const
+
+export type BridgeLogEventName = (typeof bridgeLogEventNames)[number]
+
+export const registeredBridgeLogEvents = new Set<string>(bridgeLogEventNames)
+
+export function isBridgeLogEventName(value: string): value is BridgeLogEventName {
+  return registeredBridgeLogEvents.has(value)
+}
+
 export type BridgeLogEntry = {
   level: BridgeLogLevel
-  event: string
+  event: BridgeLogEventName
   message?: string
   deviceId?: string
   threadId?: string

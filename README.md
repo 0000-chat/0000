@@ -45,6 +45,18 @@ cd "$HOME/0000"
 bun run bridge start
 ```
 
+For local bridge development, run the dev supervisor instead:
+
+```bash
+bun run bridge:dev -- --agent-command "/home/ubuntu/.local/bin/hermes acp"
+```
+
+The supervisor watches `scripts/acp-bridge.ts` and `scripts/hermes-bridge/**`.
+When those files change, it waits until `~/.0000/bridge-status.json` reports no
+in-flight commands or running session queues, then restarts the bridge. Idle ACP
+sessions do not block a restart. This is a developer-only workflow; customer
+installs should use `bun run bridge start`.
+
 ## Runtime Commands
 
 By default the bridge starts `hermes acp`. You can connect other ACP runtimes:

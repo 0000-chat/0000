@@ -106,6 +106,10 @@ export type BridgeSessionManagerStatus = {
   sessions: Array<{
     sessionKey: string
     threadId: string
+    runtimeProfileId?: string
+    runtimeLabel?: string
+    runtimeKind?: string
+    hermesProfileName?: string
     queueDepth: number
     runningQueueItemId?: string
     lastUsedAt: number
@@ -192,6 +196,10 @@ export class BridgeSessionManager {
         return {
           sessionKey: session.sessionKey,
           threadId: session.threadId,
+          runtimeProfileId: session.runtimeProfile?.id,
+          runtimeLabel: session.runtimeProfile?.label,
+          runtimeKind: session.runtimeProfile?.kind,
+          hermesProfileName: session.hermesProfileName,
           queueDepth:
             (queueState?.pendingQueueItemIds.length ?? 0) +
             (queueState?.runningQueueItemId ? 1 : 0),
@@ -212,6 +220,8 @@ export class BridgeSessionManager {
       threadId: item.threadId,
       sessionId: item.sessionId,
       agentSessionId: item.agentSessionId,
+      bridgeProfileId: item.bridgeProfileId,
+      hermesProfileName: item.hermesProfileName,
     })
     try {
       if (type === "ping") {
@@ -326,9 +336,10 @@ export class BridgeSessionManager {
       systemPrompt?: string
       threadHistory?: string
       autoApprovePermissionRequests?: boolean
+      resultMetadata?: Record<string, unknown>
     } = {},
   ): Promise<void> {
-    const session = this.ensureSession(item)
+    const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.clearIdleTimer(session)
     this.enqueueEventWrite(session, {
@@ -357,6 +368,7 @@ export class BridgeSessionManager {
       source: "bridge",
       eventType: "message_completed",
       payload: {
+        finalText: result.finalText,
         queueId: item.id,
         stopReason: result.stopReason,
         text: result.text,
@@ -364,10 +376,29 @@ export class BridgeSessionManager {
       part: {
         type: "event",
         text: result.text,
-        json: { stopReason: result.stopReason },
+        json: { finalText: result.finalText, stopReason: result.stopReason },
         status: "complete",
       },
     })
+    if (result.finalText?.withheld) {
+      this.writeLog({
+        level: "warn",
+        event: "agent.final_text.withheld",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.sessionKey,
+        acpSessionId: result.sessionId,
+        answerChunkCount: result.finalText.answerChunkCount,
+        answerTextLength: result.finalText.answerTextLength,
+        reason: result.finalText.reason,
+        runtimeId: result.finalText.runtimeId,
+        thoughtChunkCount: result.finalText.thoughtChunkCount,
+        toolEventCount: result.finalText.toolEventCount,
+        trustedFinalResultText: result.finalText.trustedFinalResultText,
+      })
+    }
     await this.drainEventWrites()
     await this.cloudClient.markResult(item.id, {
       ok: true,
@@ -377,6 +408,7 @@ export class BridgeSessionManager {
       stopReason: result.stopReason,
       text: result.text,
       result: result.rawResult,
+      ...options.resultMetadata,
     })
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
@@ -455,23 +487,44 @@ export class BridgeSessionManager {
 
   private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
     const key = sessionKeyForItem(item)
+    if (type === "choice-response") {
+      const choiceId = item.approvalOutcome?.trim()
+      if (!choiceId) {
+        throw new Error(`choice response ${item.id} is missing choice id`)
+      }
+      const threadId = item.threadId ?? item.sessionId
+      const sessionKey = key ?? threadId
+      if (!sessionKey) {
+        throw new Error(`choice response ${item.id} is missing threadId`)
+      }
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
+      const threadHistory = normalizeThreadHistory(item.threadHistory)
+      this.writeLog({
+        level: "info",
+        event: "bridge.choice_response.continuation",
+        queueId: item.id,
+        queueType: type,
+        threadId,
+        agentSessionId: key,
+        hasActiveSession: this.sessions.has(sessionKey),
+        hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
+      })
+      await this.runSerializedPrompt(sessionKey, item.id, () =>
+        this.handlePromptNow(item, `Selected choice: ${choiceId}`, {
+          systemPrompt,
+          threadHistory,
+          resultMetadata: { choiceId },
+        }),
+      )
+      return
+    }
+
     let session = key ? this.sessions.get(key) : undefined
     if (!session && key && this.sessionQueueState.has(key)) {
       session = await this.waitForSession(key)
     }
     if (!session) {
       throw new Error(`approval response ${item.id} does not match an active ACP session`)
-    }
-    if (type === "choice-response") {
-      const choiceId = item.approvalOutcome?.trim()
-      if (!choiceId) {
-        throw new Error(`choice response ${item.id} is missing choice id`)
-      }
-      await session.acp.sendUserMessage(`Selected choice: ${choiceId}`)
-      session.lastUsedAt = Date.now()
-      this.scheduleIdleClose(session)
-      await this.cloudClient.markResult(item.id, { ok: true, choiceId })
-      return
     }
     const externalRequestId = item.externalRequestId ?? item.approvalId
     if (!externalRequestId) {
@@ -509,7 +562,7 @@ export class BridgeSessionManager {
   }
 
   private async handleStartSession(item: BridgeSessionQueueItem): Promise<void> {
-    const session = this.ensureSession(item)
+    const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
     await this.cloudClient.markResult(item.id, {
@@ -539,7 +592,7 @@ export class BridgeSessionManager {
     await session.acp.close()
   }
 
-  private ensureSession(item: BridgeSessionQueueItem): BridgeSessionRecord {
+  private async ensureSession(item: BridgeSessionQueueItem): Promise<BridgeSessionRecord> {
     const threadId = item.threadId ?? item.sessionId
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
@@ -548,7 +601,22 @@ export class BridgeSessionManager {
     const existing = this.sessions.get(sessionKey)
     if (existing) {
       existing.agentName = normalizeAgentName(item.agentName) ?? existing.agentName
-      return existing
+      if (!this.sessionMatchesExplicitRuntimeRequest(existing, item)) {
+        this.writeLog({
+          level: "warn",
+          event: "bridge.session.runtime_profile_changed",
+          queueId: item.id,
+          threadId,
+          agentSessionId: sessionKey,
+          previousBridgeProfileId: existing.runtimeProfile?.id,
+          requestedBridgeProfileId: item.bridgeProfileId,
+          previousHermesProfileName: existing.hermesProfileName,
+          requestedHermesProfileName: item.hermesProfileName,
+        })
+        await this.closeSession(sessionKey)
+      } else {
+        return existing
+      }
     }
 
     const generation = this.nextGeneration
@@ -591,6 +659,19 @@ export class BridgeSessionManager {
     }
     this.sessions.set(sessionKey, record)
     return record
+  }
+
+  private sessionMatchesExplicitRuntimeRequest(
+    session: BridgeSessionRecord,
+    item: BridgeSessionQueueItem,
+  ): boolean {
+    if (item.bridgeProfileId) {
+      return session.runtimeProfile?.id === item.bridgeProfileId
+    }
+    if (item.hermesProfileName) {
+      return session.hermesProfileName === item.hermesProfileName
+    }
+    return true
   }
 
   private resolveRuntimeProfileForItem(

@@ -16,7 +16,11 @@ import {
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge"
-import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./hermes-bridge/runtime-defaults"
+import {
+  defaultAgentCommandForEnvironment,
+  DEFAULT_CLAUDE_CODE_ACP_COMMAND,
+  DEFAULT_CODEX_ACP_COMMAND,
+} from "./hermes-bridge/runtime-defaults"
 
 describe("bridge Convex URL resolution", () => {
   test("derives a Convex cloud URL from a Convex site URL", () => {
@@ -194,6 +198,15 @@ describe("bridge security defaults", () => {
     expect(DEFAULT_CLAUDE_CODE_ACP_COMMAND).toBe(
       "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
     )
+  })
+
+  test("prefers Claude Code defaults when Claude and Codex environments are both present", () => {
+    expect(
+      defaultAgentCommandForEnvironment({
+        CLAUDE_CODE: "1",
+        CODEX_SANDBOX: "danger-full-access",
+      } as NodeJS.ProcessEnv),
+    ).toBe(DEFAULT_CLAUDE_CODE_ACP_COMMAND)
   })
 
   test("writes bridge config files with owner-only permissions", async () => {

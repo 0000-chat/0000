@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import {
   type BridgeRuntimeAvailableCommand,
   type BridgeRuntimeKind,
@@ -186,7 +188,7 @@ async function withAcpDetails(
 
 export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult> {
   return new Promise((resolve) => {
-    const child = spawn(command[0] ?? "", command.slice(1), {
+    const child = spawnAcpCommand(command, {
       env: { ...process.env, TERM: process.env.TERM === "dumb" ? "xterm-256color" : process.env.TERM },
       stdio: ["pipe", "pipe", "pipe"],
     })
@@ -204,7 +206,7 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
     }
     const timeout = setTimeout(() => {
       settle({ ok: false, reason: "ACP initialize probe timed out" })
-    }, 3000)
+    }, 10_000)
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk)
       for (const line of stdout.split(/\r?\n/)) {
@@ -258,7 +260,7 @@ export function discoverLocalAcpCommands(
   command: string[],
 ): Promise<BridgeRuntimeAvailableCommand[]> {
   return new Promise((resolve) => {
-    const child = spawn(command[0] ?? "", command.slice(1), {
+    const child = spawnAcpCommand(command, {
       env: { ...process.env, TERM: process.env.TERM === "dumb" ? "xterm-256color" : process.env.TERM },
       stdio: ["pipe", "pipe", "pipe"],
     })
@@ -421,4 +423,20 @@ export function runLocalCommand(command: string[]): Promise<CommandResult> {
       settle({ ok: code === 0, stdout, stderr })
     })
   })
+}
+
+function spawnAcpCommand(
+  command: string[],
+  options: Parameters<typeof spawn>[2],
+): ReturnType<typeof spawn> {
+  const executable = command[0] ?? ""
+  const args = command.slice(1)
+  if (process.versions.bun) {
+    return spawn(
+      "node",
+      [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), executable, ...args],
+      options,
+    )
+  }
+  return spawn(executable, args, options)
 }

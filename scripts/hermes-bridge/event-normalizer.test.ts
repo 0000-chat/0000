@@ -59,3 +59,78 @@ test("ignores malformed ACP command entries without dropping the update", () => 
     availableCommands: [{ description: "Plan the work", name: "plan" }],
   })
 })
+
+test("normalizes ACP agent message chunks as text", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          content: { text: "answer chunk", type: "text" },
+          sessionUpdate: "agent_message_chunk",
+        },
+      },
+    },
+    14,
+  )
+
+  assert.equal(event.eventType, "agent_message_chunk")
+  assert.deepEqual(event.part, {
+    status: "streaming",
+    text: "answer chunk",
+    type: "text",
+  })
+})
+
+test("normalizes ACP thought chunks as hidden thinking by default", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          content: { text: "private reasoning", type: "text" },
+          sessionUpdate: "agent_thought_chunk",
+        },
+      },
+    },
+    15,
+  )
+
+  assert.equal(event.eventType, "agent_thought_chunk")
+  assert.deepEqual(event.part, {
+    reasoningVisibility: "hidden",
+    status: "streaming",
+    text: "private reasoning",
+    type: "thinking",
+  })
+})
+
+test("preserves user-visible ACP thought summaries", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          content: { text: "safe summary", type: "text" },
+          reasoningVisibility: "user_visible_summary",
+          sessionUpdate: "agent_thought_chunk",
+        },
+      },
+    },
+    16,
+  )
+
+  assert.equal(event.eventType, "agent_thought_chunk")
+  assert.deepEqual(event.part, {
+    reasoningVisibility: "user_visible_summary",
+    status: "streaming",
+    text: "safe summary",
+    type: "thinking",
+  })
+})

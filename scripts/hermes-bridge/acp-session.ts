@@ -34,6 +34,18 @@ export type HermesAcpPromptResult = {
   text: string
   events: NormalizedBridgeEvent[]
   capabilities?: HermesAcpRuntimeCapabilities
+  finalText?: HermesAcpFinalTextDiagnostics
+}
+
+export type HermesAcpFinalTextDiagnostics = {
+  answerChunkCount: number
+  answerTextLength: number
+  reason?: "codex_unclassified_message_chunks"
+  runtimeId: "codex" | "other"
+  thoughtChunkCount: number
+  toolEventCount: number
+  trustedFinalResultText: boolean
+  withheld: boolean
 }
 
 export type HermesAcpPromptOptions = {
@@ -209,16 +221,21 @@ export class HermesAcpSession {
       }
     }
     const events = this.promptEvents.slice(eventStart)
+    const stopReason = extractStopReason(rawResult)
+    const finalText = extractFinalText({
+      command: this.command,
+      events,
+      rawResult,
+      stopReason,
+    })
     return {
       sessionId,
       rawResult,
-      stopReason: extractStopReason(rawResult),
-      text: events
-        .filter((event) => event.source === "hermes_acp" && event.part?.type === "text")
-        .map((event) => event.part?.text ?? "")
-        .join(""),
+      stopReason,
+      text: finalText.text,
       events,
       capabilities: this.capabilities,
+      finalText: finalText.diagnostics,
     }
   }
 
@@ -708,6 +725,65 @@ function extractStopReason(result: unknown): string | undefined {
   }
   const record = result as Record<string, unknown>
   return readString(record.stopReason)
+}
+
+function extractFinalText(input: {
+  command: string[]
+  events: NormalizedBridgeEvent[]
+  rawResult: unknown
+  stopReason?: string
+}): { diagnostics: HermesAcpFinalTextDiagnostics; text: string } {
+  const answerEvents = input.events.filter(
+    (event) => event.source === "hermes_acp" && event.part?.type === "text",
+  )
+  const answerText = answerEvents.map((event) => event.part?.text ?? "").join("")
+  const thoughtEvents = input.events.filter(
+    (event) =>
+      event.source === "hermes_acp" &&
+      (event.eventType === "agent_thought_chunk" || event.part?.type === "thinking"),
+  )
+  const toolEventCount = input.events.filter(
+    (event) => event.part?.type === "tool_call" || event.part?.type === "tool_result",
+  ).length
+  const runtimeId = isCodexAcpCommand(input.command) ? "codex" : "other"
+  const trustedFinalText = extractTrustedFinalResultText(input.rawResult)
+  const trustedFinalResultText = trustedFinalText !== undefined
+  const shouldWithhold =
+    runtimeId === "codex" &&
+    !trustedFinalResultText &&
+    thoughtEvents.length === 0 &&
+    answerText.length > 0
+  const diagnostics: HermesAcpFinalTextDiagnostics = {
+    answerChunkCount: answerEvents.length,
+    answerTextLength: answerText.length,
+    runtimeId,
+    thoughtChunkCount: thoughtEvents.length,
+    toolEventCount,
+    trustedFinalResultText,
+    withheld: shouldWithhold,
+  }
+  if (shouldWithhold) {
+    diagnostics.reason = "codex_unclassified_message_chunks"
+    return { diagnostics, text: "" }
+  }
+  return { diagnostics, text: trustedFinalText ?? answerText }
+}
+
+function isCodexAcpCommand(command: string[]): boolean {
+  return command.some((part) => part.toLowerCase().includes("codex-acp"))
+}
+
+function extractTrustedFinalResultText(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") {
+    return undefined
+  }
+  const record = result as Record<string, unknown>
+  return (
+    readString(record.text) ??
+    readString(record.finalText) ??
+    readString(record.outputText) ??
+    readString(record.message)
+  )
 }
 
 function readString(value: unknown): string | undefined {
