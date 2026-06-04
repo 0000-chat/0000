@@ -13,6 +13,9 @@ export function inferRuntimeId(agentCommand: string): string {
   if (normalized.includes("codex")) {
     return "codex"
   }
+  if (normalized.includes("openclaw")) {
+    return "openclaw"
+  }
   return "custom-acp"
 }
 
@@ -27,6 +30,9 @@ export function inferRuntimeLabel(agentCommand: string): string {
   if (runtimeId === "codex") {
     return "Codex"
   }
+  if (runtimeId === "openclaw") {
+    return "OpenClaw"
+  }
   return "Custom ACP"
 }
 
@@ -35,9 +41,6 @@ export function defaultProposedAgentName(agentCommand: string, host: string): st
 }
 
 export function defaultAgentCommandForEnvironment(env: NodeJS.ProcessEnv = process.env): string {
-  if (hasAnyEnvPrefix(env, "CODEX_")) {
-    return DEFAULT_CODEX_ACP_COMMAND
-  }
   if (
     hasAnyEnvPrefix(env, "CLAUDE_") ||
     env.CLAUDECODE ||
@@ -45,6 +48,9 @@ export function defaultAgentCommandForEnvironment(env: NodeJS.ProcessEnv = proce
     env.CLAUDE_CODE_ENTRYPOINT
   ) {
     return DEFAULT_CLAUDE_CODE_ACP_COMMAND
+  }
+  if (hasAnyEnvPrefix(env, "CODEX_")) {
+    return DEFAULT_CODEX_ACP_COMMAND
   }
   if (hasAnyEnvPrefix(env, "HERMES_")) {
     return "hermes acp"

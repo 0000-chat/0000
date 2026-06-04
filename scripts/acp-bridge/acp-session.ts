@@ -34,12 +34,74 @@ export type HermesAcpPromptResult = {
   text: string
   events: NormalizedBridgeEvent[]
   capabilities?: HermesAcpRuntimeCapabilities
+  finalText?: HermesAcpFinalTextDiagnostics
+}
+
+export type HermesAcpFinalTextDiagnostics = {
+  answerChunkCount: number
+  answerTextLength: number
+  reason?: "codex_unclassified_message_chunks"
+  runtimeId: "codex" | "other"
+  thoughtChunkCount: number
+  toolEventCount: number
+  trustedFinalResultText: boolean
+  withheld: boolean
 }
 
 export type HermesAcpPromptOptions = {
   systemPrompt?: string
   threadHistory?: string
   autoApprovePermissionRequests?: boolean
+}
+
+export type AcpAdapterCapabilityUsed =
+  | "probeRuntime"
+  | "createSession"
+  | "loadSession"
+  | "sendPrompt"
+  | "cancelTurn"
+  | "closeSession"
+  | "sendInteractionResponse"
+  | "applyRuntimeConfig"
+  | "restoreRuntimeConfig"
+
+export type AcpAdapterResult<T = {}> =
+  | ({
+      ok: true
+      capabilityUsed: AcpAdapterCapabilityUsed
+      nativeMethod?: string
+      diagnosticReasonCode?: string
+    } & T)
+  | {
+      ok: false
+      capabilityUsed: AcpAdapterCapabilityUsed
+      nativeMethod?: string
+      diagnosticReasonCode: string
+      error: Error
+    }
+
+export type RuntimeConfigApplicationInput = {
+  requested: Record<string, string | undefined>
+  supportedOptions: Record<string, string[] | undefined>
+}
+
+export type RuntimeConfigApplicationResult = {
+  applied: Record<string, string>
+  diagnostics: Array<{ option: string; reasonCode: string; value: string }>
+  ok: true
+  policy: "omit_unavailable"
+}
+
+export type AcpRuntimeAdapterSessionFactory = (
+  options: HermesAcpSessionOptions,
+) => HermesAcpSession
+
+export type AcpRuntimeAdapterCreateSessionInput = HermesAcpSessionOptions
+
+export type AcpRuntimeAdapterInteractionResponse = {
+  approved: boolean
+  externalRequestId: string
+  reason?: string
 }
 
 export type HermesAcpSessionOptions = {
@@ -113,6 +175,8 @@ export class HermesAcpSession {
   private autoApprovePermissionRequests = false
   private lifecyclePhase: "starting" | "loading" | "livePrompt" | "idle" | "closing" | "closed" =
     "closed"
+  private externalContinuityAttempted = false
+  private externalContinuityLoaded = false
   private externalContinuityFallback = false
   private externalContinuityFallbackNotified = false
   private closed = false
@@ -209,16 +273,21 @@ export class HermesAcpSession {
       }
     }
     const events = this.promptEvents.slice(eventStart)
+    const stopReason = extractStopReason(rawResult)
+    const finalText = extractFinalText({
+      command: this.command,
+      events,
+      rawResult,
+      stopReason,
+    })
     return {
       sessionId,
       rawResult,
-      stopReason: extractStopReason(rawResult),
-      text: events
-        .filter((event) => event.source === "hermes_acp" && event.part?.type === "text")
-        .map((event) => event.part?.text ?? "")
-        .join(""),
+      stopReason,
+      text: finalText.text,
       events,
       capabilities: this.capabilities,
+      finalText: finalText.diagnostics,
     }
   }
 
@@ -250,6 +319,14 @@ export class HermesAcpSession {
 
   hasPendingPermissionRequests(): boolean {
     return this.pendingPermissionRequests.size > 0
+  }
+
+  getExternalContinuityState(): { attempted: boolean; fallback: boolean; loaded: boolean } {
+    return {
+      attempted: this.externalContinuityAttempted,
+      fallback: this.externalContinuityFallback,
+      loaded: this.externalContinuityLoaded,
+    }
   }
 
   async close(): Promise<void> {
@@ -292,10 +369,12 @@ export class HermesAcpSession {
 
     for (const method of methods) {
       this.lifecyclePhase = "loading"
+      this.externalContinuityAttempted = true
       try {
         const loaded = await this.request(method, { sessionId: this.initialSessionId })
         this.sessionId = extractSessionId(loaded, this.initialSessionId)
         this.started = true
+        this.externalContinuityLoaded = true
         this.lifecyclePhase = "idle"
         return this.sessionId
       } catch (error) {
@@ -492,6 +571,185 @@ export class HermesAcpSession {
       await this.onEvent?.(event)
     }
     await this.onError?.(error)
+  }
+}
+
+export class HermesAcpRuntimeAdapter {
+  private readonly createRuntimeSession: AcpRuntimeAdapterSessionFactory
+
+  constructor(options: { createSession?: AcpRuntimeAdapterSessionFactory } = {}) {
+    this.createRuntimeSession = options.createSession ?? ((input) => new HermesAcpSession(input))
+  }
+
+  async probeRuntime(
+    input: HermesAcpSessionOptions = {},
+  ): Promise<AcpAdapterResult<{ capabilities?: HermesAcpRuntimeCapabilities }>> {
+    const session = this.createRuntimeSession(input)
+    try {
+      await session.start()
+      const capabilities = session.capabilities
+      await session.close()
+      return {
+        ok: true,
+        capabilityUsed: "probeRuntime",
+        nativeMethod: "initialize",
+        capabilities,
+      }
+    } catch (error) {
+      return adapterError("probeRuntime", "acp_session_create_failed", error, "initialize")
+    }
+  }
+
+  async createSession(
+    input: AcpRuntimeAdapterCreateSessionInput,
+  ): Promise<AcpAdapterResult<{ session: HermesAcpSession; sessionId: string }>> {
+    const session = this.createRuntimeSession(input)
+    try {
+      const sessionId = await session.start()
+      return {
+        ok: true,
+        capabilityUsed: "createSession",
+        nativeMethod: "session/new",
+        session,
+        sessionId,
+      }
+    } catch (error) {
+      return adapterError("createSession", "acp_session_create_failed", error, "session/new")
+    }
+  }
+
+  async loadSession(
+    input: AcpRuntimeAdapterCreateSessionInput & { initialSessionId: string },
+  ): Promise<AcpAdapterResult<{ session: HermesAcpSession; sessionId: string }>> {
+    const session = this.createRuntimeSession({ ...input, resumeEnabled: true })
+    try {
+      const sessionId = await session.start()
+      return {
+        ok: true,
+        capabilityUsed: "loadSession",
+        nativeMethod: "session/load",
+        session,
+        sessionId,
+      }
+    } catch (error) {
+      return adapterError("loadSession", "acp_session_resume_failed", error, "session/load")
+    }
+  }
+
+  async sendPrompt(
+    session: HermesAcpSession,
+    text: string,
+    options: HermesAcpPromptOptions = {},
+  ): Promise<AcpAdapterResult<{ result: HermesAcpPromptResult }>> {
+    try {
+      const result = await session.sendUserMessage(text, options)
+      return { ok: true, capabilityUsed: "sendPrompt", nativeMethod: "session/prompt", result }
+    } catch (error) {
+      return adapterError("sendPrompt", "prompt_send_failed", error, "session/prompt")
+    }
+  }
+
+  async cancelTurn(session: HermesAcpSession): Promise<AcpAdapterResult> {
+    try {
+      await session.cancel()
+      return { ok: true, capabilityUsed: "cancelTurn", nativeMethod: "session/cancel" }
+    } catch (error) {
+      return adapterError("cancelTurn", "cancel_not_acknowledged", error, "session/cancel")
+    }
+  }
+
+  async closeSession(session: HermesAcpSession): Promise<AcpAdapterResult> {
+    const nativeMethod = session.capabilities?.supportsSessionClose ? "session/close" : "process.kill"
+    try {
+      await session.close()
+      return { ok: true, capabilityUsed: "closeSession", nativeMethod }
+    } catch (error) {
+      return adapterError("closeSession", "session_close_failed", error, nativeMethod)
+    }
+  }
+
+  async sendInteractionResponse(
+    session: HermesAcpSession,
+    response: AcpRuntimeAdapterInteractionResponse,
+  ): Promise<AcpAdapterResult<{ delivered: boolean }>> {
+    try {
+      const delivered = await session.respondToPermissionRequest(response.externalRequestId, response)
+      if (!delivered) {
+        return {
+          ok: false,
+          capabilityUsed: "sendInteractionResponse",
+          nativeMethod: "permission/response",
+          diagnosticReasonCode: "permission_response_unmatched",
+          error: new Error(`No pending ACP interaction matched ${response.externalRequestId}`),
+        }
+      }
+      return {
+        ok: true,
+        capabilityUsed: "sendInteractionResponse",
+        nativeMethod: "permission/response",
+        delivered,
+      }
+    } catch (error) {
+      return adapterError(
+        "sendInteractionResponse",
+        "interaction_delivery_failed",
+        error,
+        "permission/response",
+      )
+    }
+  }
+
+  async applyRuntimeConfig(
+    input: RuntimeConfigApplicationInput,
+  ): Promise<AcpAdapterResult<{ application: RuntimeConfigApplicationResult }>> {
+    return {
+      ok: true,
+      capabilityUsed: "applyRuntimeConfig",
+      nativeMethod: "adapter/runtime-config",
+      application: resolveRuntimeConfigApplication(input),
+    }
+  }
+
+  async restoreRuntimeConfig(): Promise<AcpAdapterResult> {
+    return {
+      ok: true,
+      capabilityUsed: "restoreRuntimeConfig",
+      nativeMethod: "adapter/runtime-config",
+    }
+  }
+}
+
+export function resolveRuntimeConfigApplication(
+  input: RuntimeConfigApplicationInput,
+): RuntimeConfigApplicationResult {
+  const applied: Record<string, string> = {}
+  const diagnostics: RuntimeConfigApplicationResult["diagnostics"] = []
+  for (const [option, value] of Object.entries(input.requested)) {
+    if (!value) {
+      continue
+    }
+    const supported = input.supportedOptions[option]
+    if (supported?.includes(value)) {
+      applied[option] = value
+      continue
+    }
+    diagnostics.push({ option, reasonCode: "runtime_config_option_unavailable", value })
+  }
+  return { applied, diagnostics, ok: true, policy: "omit_unavailable" }
+}
+
+function adapterError<T = {}>(
+  capabilityUsed: AcpAdapterCapabilityUsed,
+  diagnosticReasonCode: string,
+  error: unknown,
+  nativeMethod?: string,
+): AcpAdapterResult<T> {
+  return {
+    ok: false,
+    capabilityUsed,
+    nativeMethod,
+    diagnosticReasonCode,
+    error: error instanceof Error ? error : new Error(String(error)),
   }
 }
 
@@ -708,6 +966,65 @@ function extractStopReason(result: unknown): string | undefined {
   }
   const record = result as Record<string, unknown>
   return readString(record.stopReason)
+}
+
+function extractFinalText(input: {
+  command: string[]
+  events: NormalizedBridgeEvent[]
+  rawResult: unknown
+  stopReason?: string
+}): { diagnostics: HermesAcpFinalTextDiagnostics; text: string } {
+  const answerEvents = input.events.filter(
+    (event) => event.source === "hermes_acp" && event.part?.type === "text",
+  )
+  const answerText = answerEvents.map((event) => event.part?.text ?? "").join("")
+  const thoughtEvents = input.events.filter(
+    (event) =>
+      event.source === "hermes_acp" &&
+      (event.eventType === "agent_thought_chunk" || event.part?.type === "thinking"),
+  )
+  const toolEventCount = input.events.filter(
+    (event) => event.part?.type === "tool_call" || event.part?.type === "tool_result",
+  ).length
+  const runtimeId = isCodexAcpCommand(input.command) ? "codex" : "other"
+  const trustedFinalText = extractTrustedFinalResultText(input.rawResult)
+  const trustedFinalResultText = trustedFinalText !== undefined
+  const shouldWithhold =
+    runtimeId === "codex" &&
+    !trustedFinalResultText &&
+    thoughtEvents.length === 0 &&
+    answerText.length > 0
+  const diagnostics: HermesAcpFinalTextDiagnostics = {
+    answerChunkCount: answerEvents.length,
+    answerTextLength: answerText.length,
+    runtimeId,
+    thoughtChunkCount: thoughtEvents.length,
+    toolEventCount,
+    trustedFinalResultText,
+    withheld: shouldWithhold,
+  }
+  if (shouldWithhold) {
+    diagnostics.reason = "codex_unclassified_message_chunks"
+    return { diagnostics, text: "" }
+  }
+  return { diagnostics, text: trustedFinalText ?? answerText }
+}
+
+function isCodexAcpCommand(command: string[]): boolean {
+  return command.some((part) => part.toLowerCase().includes("codex-acp"))
+}
+
+function extractTrustedFinalResultText(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") {
+    return undefined
+  }
+  const record = result as Record<string, unknown>
+  return (
+    readString(record.text) ??
+    readString(record.finalText) ??
+    readString(record.outputText) ??
+    readString(record.message)
+  )
 }
 
 function readString(value: unknown): string | undefined {

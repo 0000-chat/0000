@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 
-import { bridgeLogEventNames, isBridgeLogEventName } from "./hermes-bridge/bridge-log"
+import { bridgeLogEventNames, isBridgeLogEventName } from "./acp-bridge/bridge-log"
 
 type CheckOptions = {
   files?: string[]
@@ -13,12 +13,15 @@ const eventLiteralPattern = /\bevent:\s*"([^"]+)"/g
 const writeAgentTurnEventPattern = /\bwriteAgentTurnLog\(\s*"([^"]+)"/g
 const sensitiveLogFieldPattern =
   /\b(?:authorization|bridgeToken|token|secret|password|apiKey|api_key|x-api-key|x_api_key|accessToken|refreshToken|prompt)\s*:/
-const allowedSensitiveFiles = new Set(["scripts/hermes-bridge/bridge-log.ts"])
+const allowedSensitiveFiles = new Set(["scripts/acp-bridge/bridge-log.ts"])
 
 export function listBridgeSourceFiles() {
   const rgFiles = spawnSync("rg", ["--files", "scripts"], { encoding: "utf8" })
   if (rgFiles.status === 0) {
-    return rgFiles.stdout.trim().split("\n").filter((filename) => filename.endsWith(".ts"))
+    return rgFiles.stdout
+      .trim()
+      .split("\n")
+      .filter((filename) => filename.endsWith(".ts"))
   }
   const reason = rgFiles.error?.message || rgFiles.stderr || `exit ${rgFiles.status ?? 1}`
   throw new Error(`could not list bridge source files: ${reason}`)
@@ -34,7 +37,9 @@ export function checkBridgeObservability(options: CheckOptions = {}) {
     const source = readFile(filename)
 
     for (const match of source.matchAll(rawConsolePattern)) {
-      reports.push(`${filename} uses raw ${match[0].replace(/\s*\($/, "")}; use BridgeLogger or an explicit stdout/stderr writer boundary`)
+      reports.push(
+        `${filename} uses raw ${match[0].replace(/\s*\($/, "")}; use BridgeLogger or an explicit stdout/stderr writer boundary`,
+      )
     }
 
     for (const eventName of findEventNames(source)) {
@@ -46,7 +51,9 @@ export function checkBridgeObservability(options: CheckOptions = {}) {
     if (!allowedSensitiveFiles.has(filename)) {
       for (const logWindow of findEventObjectWindows(source)) {
         if (sensitiveLogFieldPattern.test(logWindow)) {
-          reports.push(`${filename} contains sensitive log-like field names; redact through bridge-log.ts before emitting`)
+          reports.push(
+            `${filename} contains sensitive log-like field names; redact through bridge-log.ts before emitting`,
+          )
           break
         }
       }
@@ -81,5 +88,7 @@ if (import.meta.main) {
   if (reports.length > 0) {
     process.exit(1)
   }
-  process.stdout.write(`bridge observability check passed (${bridgeLogEventNames.length} registered events)\n`)
+  process.stdout.write(
+    `bridge observability check passed (${bridgeLogEventNames.length} registered events)\n`,
+  )
 }

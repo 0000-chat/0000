@@ -2,6 +2,7 @@ import { splitCommand } from "./acp-session"
 
 export type BridgeRuntimeKind = "hermes" | "codex" | "claude-code" | "openclaw" | "unknown-acp"
 export type BridgeRuntimeProfileStatus = "available" | "unavailable"
+export type BridgeRuntimeCapabilitySource = "native" | "adapter" | "fallback" | "unsupported"
 
 export type BridgeRuntimeAvailableCommand = {
   name: string
@@ -18,6 +19,26 @@ export type BridgeRuntimeProfile = {
   availableCommands?: BridgeRuntimeAvailableCommand[]
   defaultCwd?: string
   hermesProfileName?: string
+  models?: string[]
+  thoughtLevels?: string[]
+  modes?: string[]
+  maxSessions?: number
+  identityRules?: {
+    appIdentityFromMeta?: boolean
+    cwdBoundSessions?: boolean
+    cwdSwitchPolicy?: "new_session_required" | "explicit_switch_required" | "blocked"
+    scopeSessionKeyByThread?: boolean
+  }
+  runtimeConfigOptions?: Record<string, string[]>
+  capabilityProvenance?: Record<
+    string,
+    {
+      diagnosticReasonCode?: string
+      nativeMethod?: string
+      source: BridgeRuntimeCapabilitySource
+      value?: unknown
+    }
+  >
   diagnostics?: {
     acp?: "supported" | "unsupported" | "unknown"
     contextMode?: "available" | "missing" | "unknown"
@@ -33,6 +54,10 @@ export type BridgeRuntimeProfile = {
     nativeMcp?: boolean
     sessionMcpServers?: boolean
     resumableSessions?: boolean
+    isolatedSessions?: boolean
+    supportsCancel?: boolean
+    supportsClose?: boolean
+    supportsStructuredInteractions?: boolean
   }
 }
 
@@ -73,6 +98,14 @@ export function synthesizeLegacyHermesProfile(
     label: "Hermes",
     command: normalizedCommand,
     status: "available",
+    identityRules: {
+      cwdBoundSessions: true,
+      cwdSwitchPolicy: "new_session_required",
+      scopeSessionKeyByThread: true,
+    },
+    capabilityProvenance: {
+      sessionIsolation: { source: "adapter" },
+    },
     capabilities: {
       sessionMcpServers: true,
     },

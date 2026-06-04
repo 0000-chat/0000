@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import {
   type BridgeRuntimeAvailableCommand,
+  type BridgeRuntimeCapabilitySource,
   type BridgeRuntimeKind,
   type BridgeRuntimeProfile,
   dedupeRuntimeProfiles,
@@ -12,7 +15,23 @@ import {
 import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
 
 export type CommandResult = { ok: boolean; stdout: string; stderr?: string }
-export type AcpProbeResult = { ok: true } | { ok: false; reason: string }
+export type AcpProbeCapabilities = {
+  cwdBoundSessions?: boolean
+  maxSessions?: number
+  models?: string[]
+  modes?: string[]
+  runtimeConfigOptions?: Record<string, string[]>
+  sessionIsolation?: "verified" | "unverified"
+  sharedGatewayKey?: boolean
+  supportsCancel?: boolean
+  supportsClose?: boolean
+  supportsResume?: boolean
+  supportsStructuredInteractions?: boolean
+  thoughtLevels?: string[]
+}
+export type AcpProbeResult =
+  | { ok: true; capabilities?: AcpProbeCapabilities }
+  | { ok: false; reason: string }
 
 export type RuntimeDiscoveryInput = {
   baseAgentCommand: string | string[] | undefined
@@ -188,10 +207,11 @@ async function withAcpDetails(
   const probe = await probeAcpCommand(profile.command)
   if (probe.ok) {
     const availableCommands = await discoverAcpCommands(profile.command).catch(() => [])
+    const probedProfile = applyProbeCapabilities(profile, probe.capabilities)
     return {
-      ...profile,
+      ...probedProfile,
       ...(availableCommands.length > 0 ? { availableCommands } : {}),
-      diagnostics: { ...profile.diagnostics, acp: "supported" },
+      diagnostics: { ...probedProfile.diagnostics, acp: "supported" },
       status: "available",
     }
   }
@@ -202,9 +222,145 @@ async function withAcpDetails(
   }
 }
 
+function applyProbeCapabilities(
+  profile: BridgeRuntimeProfile,
+  capabilities: AcpProbeCapabilities | undefined,
+): BridgeRuntimeProfile {
+  const provenance = { ...profile.capabilityProvenance }
+  const profileCapabilities = { ...profile.capabilities }
+  const diagnostics = { ...profile.diagnostics }
+  const identityRules = { ...profile.identityRules }
+  let maxSessions = profile.maxSessions
+
+  const mark = (
+    key: string,
+    source: BridgeRuntimeCapabilitySource,
+    input: { diagnosticReasonCode?: string; nativeMethod?: string; value?: unknown } = {},
+  ) => {
+    provenance[key] = { source, ...input }
+  }
+
+  if (capabilities?.models && capabilities.models.length > 0) {
+    mark("modelSelection", "native")
+  }
+  if (capabilities?.thoughtLevels && capabilities.thoughtLevels.length > 0) {
+    mark("thoughtLevelSelection", "native")
+  }
+  if (capabilities?.modes && capabilities.modes.length > 0) {
+    mark("modeSelection", "native")
+  }
+  if (typeof capabilities?.maxSessions === "number") {
+    maxSessions = capabilities.maxSessions
+    mark("maxSessions", "native", { value: capabilities.maxSessions })
+  }
+
+  applyBooleanCapability({
+    key: "cancelTurn",
+    nativeMethod: "session/cancel",
+    present: capabilities?.supportsCancel,
+    provenance: mark,
+    unsupportedReason: "cancel_not_acknowledged",
+  })
+  applyBooleanCapability({
+    key: "closeSession",
+    nativeMethod: "session/close",
+    present: capabilities?.supportsClose,
+    provenance: mark,
+    unsupportedReason: "session_close_unsupported",
+  })
+  applyBooleanCapability({
+    key: "resumeSession",
+    nativeMethod: "session/load",
+    present: capabilities?.supportsResume,
+    provenance: mark,
+    unsupportedReason: "session_resume_failed",
+    unsupportedSource: "fallback",
+  })
+  applyBooleanCapability({
+    key: "structuredInteractions",
+    nativeMethod: "permission/response",
+    present: capabilities?.supportsStructuredInteractions,
+    provenance: mark,
+    unsupportedReason: "capability_missing",
+  })
+
+  if (capabilities?.supportsCancel !== undefined) {
+    profileCapabilities.supportsCancel = capabilities.supportsCancel
+  }
+  if (capabilities?.supportsClose !== undefined) {
+    profileCapabilities.supportsClose = capabilities.supportsClose
+  }
+  if (capabilities?.supportsResume !== undefined) {
+    profileCapabilities.resumableSessions = capabilities.supportsResume
+  }
+  if (capabilities?.supportsStructuredInteractions !== undefined) {
+    profileCapabilities.supportsStructuredInteractions = capabilities.supportsStructuredInteractions
+  }
+
+  if (profile.kind === "hermes" || capabilities?.cwdBoundSessions) {
+    identityRules.cwdBoundSessions = capabilities?.cwdBoundSessions ?? profile.kind === "hermes"
+    identityRules.cwdSwitchPolicy = "new_session_required"
+    identityRules.scopeSessionKeyByThread = true
+  }
+
+  if (profile.kind === "openclaw") {
+    identityRules.appIdentityFromMeta = false
+    identityRules.scopeSessionKeyByThread = true
+    if (capabilities?.sharedGatewayKey && capabilities.sessionIsolation !== "verified") {
+      diagnostics.reason = "runtime_isolation_unverified"
+      profileCapabilities.isolatedSessions = false
+      mark("sessionIsolation", "fallback", {
+        diagnosticReasonCode: "runtime_isolation_unverified",
+      })
+    } else if (capabilities?.sessionIsolation === "verified") {
+      profileCapabilities.isolatedSessions = true
+      mark("sessionIsolation", "native")
+    }
+  } else if (capabilities?.sessionIsolation === "verified") {
+    profileCapabilities.isolatedSessions = true
+    mark("sessionIsolation", "native")
+  }
+
+  return {
+    ...profile,
+    ...(capabilities?.models ? { models: capabilities.models } : {}),
+    ...(capabilities?.thoughtLevels ? { thoughtLevels: capabilities.thoughtLevels } : {}),
+    ...(capabilities?.modes ? { modes: capabilities.modes } : {}),
+    ...(maxSessions !== undefined ? { maxSessions } : {}),
+    ...(capabilities?.runtimeConfigOptions
+      ? { runtimeConfigOptions: capabilities.runtimeConfigOptions }
+      : {}),
+    capabilities: profileCapabilities,
+    capabilityProvenance: provenance,
+    diagnostics,
+    identityRules,
+  }
+}
+
+function applyBooleanCapability(input: {
+  key: string
+  nativeMethod: string
+  present: boolean | undefined
+  provenance: (
+    key: string,
+    source: BridgeRuntimeCapabilitySource,
+    detail?: { diagnosticReasonCode?: string; nativeMethod?: string; value?: unknown },
+  ) => void
+  unsupportedReason: string
+  unsupportedSource?: BridgeRuntimeCapabilitySource
+}) {
+  if (input.present === true) {
+    input.provenance(input.key, "native", { nativeMethod: input.nativeMethod })
+  } else if (input.present === false) {
+    input.provenance(input.key, input.unsupportedSource ?? "unsupported", {
+      diagnosticReasonCode: input.unsupportedReason,
+    })
+  }
+}
+
 export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult> {
   return new Promise((resolve) => {
-    const child = spawn(command[0] ?? "", command.slice(1), {
+    const child = spawnAcpCommand(command, {
       env: runtimeDiscoveryEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     })
@@ -222,7 +378,7 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
     }
     const timeout = setTimeout(() => {
       settle({ ok: false, reason: "ACP initialize probe timed out" })
-    }, 3000)
+    }, 10_000)
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk)
       for (const line of stdout.split(/\r?\n/)) {
@@ -232,7 +388,7 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
         try {
           const message = JSON.parse(line) as { id?: unknown; result?: unknown; error?: unknown }
           if (message.id === 1 && message.result !== undefined) {
-            settle({ ok: true })
+            settle({ ok: true, capabilities: capabilitiesFromInitializeResult(message.result) })
             return
           }
           if (message.id === 1 && message.error !== undefined) {
@@ -272,11 +428,92 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
   })
 }
 
+export function capabilitiesFromInitializeResult(
+  result: unknown,
+): AcpProbeCapabilities | undefined {
+  const record = recordFromUnknown(result)
+  const agentCapabilities = recordFromUnknown(record.agentCapabilities)
+  const runtimeCapabilities = recordFromUnknown(
+    record.runtimeCapabilities ?? record.capabilities ?? agentCapabilities.runtimeCapabilities,
+  )
+  const sessionCapabilities = recordFromUnknown(
+    agentCapabilities.sessionCapabilities ?? runtimeCapabilities.sessionCapabilities,
+  )
+  const runtimeConfigOptions = runtimeConfigOptionsFromUnknown(
+    record.runtimeConfigOptions ??
+      runtimeCapabilities.runtimeConfigOptions ??
+      runtimeCapabilities.configOptions,
+  )
+  const capabilities: AcpProbeCapabilities = {}
+  const models =
+    stringArrayFromUnknown(runtimeCapabilities.models) ??
+    stringArrayFromUnknown(record.models) ??
+    runtimeConfigOptions?.model
+  const thoughtLevels =
+    stringArrayFromUnknown(runtimeCapabilities.thoughtLevels) ??
+    stringArrayFromUnknown(runtimeCapabilities.thinkingLevels) ??
+    stringArrayFromUnknown(record.thoughtLevels) ??
+    runtimeConfigOptions?.thoughtLevel
+  const modes =
+    stringArrayFromUnknown(runtimeCapabilities.modes) ??
+    stringArrayFromUnknown(record.modes) ??
+    runtimeConfigOptions?.mode
+  if (models) capabilities.models = models
+  if (thoughtLevels) capabilities.thoughtLevels = thoughtLevels
+  if (modes) capabilities.modes = modes
+  if (runtimeConfigOptions) capabilities.runtimeConfigOptions = runtimeConfigOptions
+
+  const maxSessions = numberFromUnknown(
+    runtimeCapabilities.maxSessions ?? record.maxSessions ?? agentCapabilities.maxSessions,
+  )
+  if (maxSessions !== undefined) capabilities.maxSessions = maxSessions
+
+  const supportsCancel = booleanFromUnknown(runtimeCapabilities.supportsCancel)
+  capabilities.supportsCancel =
+    supportsCancel ?? (Object.hasOwn(sessionCapabilities, "cancel") ? true : undefined)
+
+  const supportsClose = booleanFromUnknown(runtimeCapabilities.supportsClose)
+  capabilities.supportsClose =
+    supportsClose ?? (Object.hasOwn(sessionCapabilities, "close") ? true : undefined)
+
+  const supportsResume =
+    booleanFromUnknown(runtimeCapabilities.supportsResume) ??
+    booleanFromUnknown(agentCapabilities.loadSession)
+  capabilities.supportsResume =
+    supportsResume ??
+    (Object.hasOwn(sessionCapabilities, "resume") || Object.hasOwn(sessionCapabilities, "load")
+      ? true
+      : undefined)
+
+  const supportsStructuredInteractions = booleanFromUnknown(
+    runtimeCapabilities.supportsStructuredInteractions ??
+      runtimeCapabilities.structuredInteractions ??
+      agentCapabilities.structuredInteractions,
+  )
+  if (supportsStructuredInteractions !== undefined) {
+    capabilities.supportsStructuredInteractions = supportsStructuredInteractions
+  }
+
+  const cwdBoundSessions = booleanFromUnknown(
+    runtimeCapabilities.cwdBoundSessions ?? agentCapabilities.cwdBoundSessions,
+  )
+  if (cwdBoundSessions !== undefined) capabilities.cwdBoundSessions = cwdBoundSessions
+
+  const sharedGatewayKey = booleanFromUnknown(runtimeCapabilities.sharedGatewayKey)
+  if (sharedGatewayKey !== undefined) capabilities.sharedGatewayKey = sharedGatewayKey
+  const sessionIsolation = stringFromUnknown(runtimeCapabilities.sessionIsolation)
+  if (sessionIsolation === "verified" || sessionIsolation === "unverified") {
+    capabilities.sessionIsolation = sessionIsolation
+  }
+
+  return Object.keys(capabilities).length > 0 ? capabilities : undefined
+}
+
 export function discoverLocalAcpCommands(
   command: string[],
 ): Promise<BridgeRuntimeAvailableCommand[]> {
   return new Promise((resolve) => {
-    const child = spawn(command[0] ?? "", command.slice(1), {
+    const child = spawnAcpCommand(command, {
       env: runtimeDiscoveryEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     })
@@ -404,6 +641,33 @@ function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined
 }
 
+function stringArrayFromUnknown(value: unknown): string[] | undefined {
+  const array = arrayFromUnknown(value)
+  if (!array) {
+    return undefined
+  }
+  const strings = array.filter(
+    (entry): entry is string => typeof entry === "string" && entry.length > 0,
+  )
+  return strings.length > 0 ? strings : undefined
+}
+
+function booleanFromUnknown(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function runtimeConfigOptionsFromUnknown(value: unknown): Record<string, string[]> | undefined {
+  const record = recordFromUnknown(value)
+  const entries = Object.entries(record)
+    .map(([key, entry]) => [key, stringArrayFromUnknown(entry)] as const)
+    .filter((entry): entry is readonly [string, string[]] => entry[1] !== undefined)
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
 export function runLocalCommand(command: string[]): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = spawn(command[0] ?? "", command.slice(1), {
@@ -439,4 +703,20 @@ export function runLocalCommand(command: string[]): Promise<CommandResult> {
       settle({ ok: code === 0, stdout, stderr })
     })
   })
+}
+
+function spawnAcpCommand(
+  command: string[],
+  options: Parameters<typeof spawn>[2],
+): ReturnType<typeof spawn> {
+  const executable = command[0] ?? ""
+  const args = command.slice(1)
+  if (process.versions.bun) {
+    return spawn(
+      "node",
+      [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), executable, ...args],
+      options,
+    )
+  }
+  return spawn(executable, args, options)
 }

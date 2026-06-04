@@ -18,6 +18,7 @@ export type BridgeLogLevel = "debug" | "info" | "warn" | "error"
 
 export const bridgeLogEventNames = [
   "agent.reasoning.chunk",
+  "agent.final_text.withheld",
   "agent.tool.completed",
   "agent.tool.failed",
   "agent.tool.requested",
@@ -27,6 +28,7 @@ export const bridgeLogEventNames = [
   "bridge.audit",
   "bridge.axiom_delivery.failed",
   "bridge.control_command.received",
+  "bridge.choice_response.continuation",
   "bridge.events.append_failed",
   "bridge.events.append_single_failed",
   "bridge.events.appended",
@@ -36,6 +38,7 @@ export const bridgeLogEventNames = [
   "bridge.hermes_profiles.refresh_error",
   "bridge.log_delivery.failed",
   "bridge.loop.error",
+  "bridge.queue.claim_skipped",
   "bridge.queue.claimed",
   "bridge.queue.cleanup_stale",
   "bridge.queue_item.complete",
@@ -49,11 +52,12 @@ export const bridgeLogEventNames = [
   "bridge.start",
   "bridge.stop",
   "bridge.subscription.disabled",
+  "bridge.watchdog.timeout",
 ] as const
 
 export type BridgeLogEventName = (typeof bridgeLogEventNames)[number]
 
-const registeredBridgeLogEvents = new Set<string>(bridgeLogEventNames)
+export const registeredBridgeLogEvents = new Set<string>(bridgeLogEventNames)
 
 export function isBridgeLogEventName(value: string): value is BridgeLogEventName {
   return registeredBridgeLogEvents.has(value)

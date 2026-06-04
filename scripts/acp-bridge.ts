@@ -2,23 +2,25 @@
 import { spawn } from "node:child_process"
 import { homedir, hostname } from "node:os"
 import { dirname, join } from "node:path"
-import { chmod, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 
-import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./hermes-bridge/convex-http"
+import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./acp-bridge/convex-http"
+import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter"
+import { openBridgeSupervisor, type BridgeSupervisor } from "./acp-bridge/bridge-supervisor"
 import {
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
   redactLogValue,
-} from "./hermes-bridge/bridge-log"
+} from "./acp-bridge/bridge-log"
 import {
   DEFAULT_ACP_REQUEST_TIMEOUT_MS,
   type HermesAcpMcpServer,
-} from "./hermes-bridge/acp-session"
-import { BridgeSessionManager, type BridgeSessionQueueItem } from "./hermes-bridge/session-manager"
-import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./hermes-bridge/runtime-discovery"
+} from "./acp-bridge/acp-session"
+import { BridgeSessionManager, type BridgeSessionQueueItem } from "./acp-bridge/session-manager"
+import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./acp-bridge/runtime-discovery"
 import {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -26,9 +28,9 @@ import {
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
-} from "./hermes-bridge/runtime-defaults"
-import type { BridgeRuntimeProfile } from "./hermes-bridge/runtime-profiles"
-import { shouldRestartBridgeForDevHotReload } from "./hermes-bridge/dev-hot-reload"
+} from "./acp-bridge/runtime-defaults"
+import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles"
+import { shouldRestartBridgeForDevHotReload } from "./acp-bridge/dev-hot-reload"
 import { buildRestartCommandArgs } from "./bridge-updater"
 export {
   defaultAgentCommandForEnvironment,
@@ -37,10 +39,11 @@ export {
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
-} from "./hermes-bridge/runtime-defaults"
+} from "./acp-bridge/runtime-defaults"
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json")
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json")
+const DEFAULT_JOURNAL_DIR = join(homedir(), ".0000", "bridge-journals")
 const DEFAULT_PAIR_PATH = "/api/agent-bridge/pair"
 const DEFAULT_CLAIM_PATH = "/api/agent-bridge/queue/claim"
 const DEFAULT_CLEANUP_STALE_PATH = "/api/agent-bridge/queue/cleanup-stale"
@@ -58,14 +61,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(homedir(), ".claude", "skills", "0000", "S
 export const BRIDGE_VERSION = "0.1.6"
 const BRIDGE_LOCAL_STATE_MODE = 0o600
 
-export type BridgeCommandName =
-  | "connect"
-  | "connect-org"
-  | "pair"
-  | "repair-config"
-  | "start"
-  | "status"
-  | "help"
+export type BridgeCommandName = "connect" | "pair" | "start" | "status" | "help"
 
 type FlagValue = string | true | string[]
 type FlagMap = Record<string, FlagValue>
@@ -161,8 +157,6 @@ export type BridgeStatus = {
     threadId?: string
     sessionId?: string
     agentSessionId?: string
-    bridgeProfileId?: string
-    hermesProfileName?: string
     startedAt: string
   }>
   sessionQueues?: Array<{
@@ -179,6 +173,11 @@ export type BridgeStatus = {
   setupSummary?: Record<string, unknown>
   recentErrors: string[]
   registrations?: BridgeRegistrationStatus[]
+  localJournal?: {
+    status: "healthy" | "hard_failed"
+    reasonCode?: string
+    message?: string
+  }
 }
 
 export type BridgeRegistrationStatus = {
@@ -288,8 +287,6 @@ type InFlightCommandMetadata = {
   threadId?: string
   sessionId?: string
   agentSessionId?: string
-  bridgeProfileId?: string
-  hermesProfileName?: string
   startedAt: string
 }
 
@@ -316,6 +313,7 @@ export type BridgeLoopIterationInput = {
   discoverRuntimeProfiles?: typeof discoverBridgeRuntimeProfiles
   cleanupStaleClaims?: typeof cleanupStaleClaims
   claimCommands?: typeof claimCommands
+  canClaimWork?: () => boolean
   writeStatus?: typeof writeStatus
   launchUpdater?: typeof launchBridgeUpdater
 }
@@ -340,6 +338,9 @@ export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
     const registrations = Array.isArray(record.registrations)
       ? record.registrations.map(normalizeBridgeRegistration)
       : []
+    if (registrations.length === 0) {
+      throw new Error("Bridge config has no registrations")
+    }
     return { version: 2, registrations }
   }
   return { version: 2, registrations: [normalizeBridgeRegistration(record)] }
@@ -498,9 +499,6 @@ export function getMaxInFlight(flags: FlagMap, env: NodeJS.ProcessEnv = process.
 }
 
 export function getAllowRemoteCwd(flags: FlagMap, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (flags["allow-remote-cwd"] === true) {
-    return true
-  }
   const rawValue = getFlag(flags, "allow-remote-cwd", env.ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD)
   if (rawValue === undefined) {
     return DEFAULT_ALLOW_REMOTE_CWD
@@ -676,12 +674,10 @@ export function splitCommand(command: string): string[] {
 async function main() {
   const parsed = parseBridgeArgs(process.argv.slice(2))
   try {
-    if (parsed.command === "connect" || parsed.command === "connect-org") {
+    if (parsed.command === "connect") {
       await connectBridge(parsed)
     } else if (parsed.command === "pair") {
       await pairBridge(parsed)
-    } else if (parsed.command === "repair-config") {
-      await repairBridgeConfig(parsed)
     } else if (parsed.command === "start") {
       await startBridge(parsed)
     } else if (parsed.command === "status") {
@@ -767,9 +763,6 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   }
 
   const configPath = getConfigPath(parsed.flags)
-  const previousRegistrationCount = existsSync(configPath)
-    ? (await readBridgeConfigFile(configPath)).registrations.length
-    : 0
   const updatedConfig = await appendBridgeRegistration(configPath, config)
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
@@ -796,14 +789,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   })
 
   writeStdout(
-    [
-      `Connected organization registration ${deviceId}.`,
-      `Config: ${configPath}`,
-      `Registrations: ${previousRegistrationCount} -> ${updatedConfig.registrations.length}`,
-      "Existing organization registrations were preserved.",
-      "Open 0000 Chat to approve this agent before it can run work.",
-      "",
-    ].join("\n"),
+    `Connected pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`,
   )
 }
 
@@ -870,28 +856,6 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
   writeStdout(`Paired bridge device ${deviceId}.\nConfig: ${configPath}\n`)
 }
 
-async function repairBridgeConfig(parsed: ParsedBridgeArgs) {
-  const configPath = getConfigPath(parsed.flags)
-  const sourcePaths = getRepeatedFlags(parsed.flags, "source-config")
-  const result = await repairBridgeConfigFiles({
-    appUrl: getFlag(parsed.flags, "app-url", process.env.ZERO_CHAT_APP_URL) ?? "https://0000.chat",
-    sourcePaths:
-      sourcePaths.length > 0 ? sourcePaths : [join(homedir(), ".0000-chat", "bridge.json")],
-    targetPath: configPath,
-  })
-
-  writeStdout(
-    [
-      `Repaired bridge config: ${result.targetPath}`,
-      `Registrations: ${result.previousRegistrationCount} -> ${result.registrationCount}`,
-      `Imported registrations: ${result.importedRegistrationCount}`,
-      result.backupPath ? `Backup: ${result.backupPath}` : "Backup: not needed",
-      "Existing organization registrations were preserved.",
-      "",
-    ].join("\n"),
-  )
-}
-
 async function startBridge(parsed: ParsedBridgeArgs) {
   const configPath = getConfigPath(parsed.flags)
   const statusPath = getStatusPath(parsed.flags)
@@ -920,9 +884,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     inFlightCommands: Map<string, Promise<void>>
     inFlightCommandMetadata: Map<string, InFlightCommandMetadata>
     lastStaleCleanupAt: number
+    lastJournalHealthSignature: string
     log: FlushableBridgeLogger
     manager: BridgeSessionManager
     status: BridgeStatus
+    supervisor: BridgeSupervisor
     wakeSignal: BridgeWakeSignal
   }
 
@@ -951,8 +917,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         deviceId: registration.deviceId,
         logUrl,
       })
+      const cloudClient = createCloudClient(registration)
+      const hostAdapter = new ConvexBridgeHostAdapter(cloudClient)
+      const supervisor = openBridgeSupervisor({
+        bridgeDeviceId: registration.deviceId,
+        host: hostAdapter,
+        journalPath: getBridgeJournalPath(parsed.flags, registration.deviceId),
+      })
+      await supervisor.publishHealthDiagnostic({ bridgeDeviceId: registration.deviceId })
+      await supervisor.replayOutboxBeforeClaiming()
       const manager = new BridgeSessionManager({
-        cloudClient: createCloudClient(registration),
+        cloudClient,
         deviceId: registration.deviceId,
         agentCommand,
         runtimeProfiles,
@@ -970,6 +945,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           }),
         log,
         allowRemoteCwd,
+        supervisor,
       })
       const wakeSignal = createBridgeWakeSignal({
         config: registration,
@@ -1004,15 +980,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         inFlightCommands: [],
         sessionQueues: [],
         recentErrors: [],
+        localJournal: bridgeSupervisorHealthStatus(supervisor),
       }
       const context: RuntimeContext = {
         config: registration,
         inFlightCommands: new Map(),
         inFlightCommandMetadata: new Map(),
+        lastJournalHealthSignature: bridgeSupervisorHealthSignature(supervisor),
         lastStaleCleanupAt: 0,
         log,
         manager,
         status,
+        supervisor,
         wakeSignal,
       }
       contexts.set(registration.deviceId, context)
@@ -1032,6 +1011,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       context.status.connected = false
       await context.wakeSignal.close()
       await context.manager.close()
+      context.supervisor.close()
       await context.log.flush()
       contexts.delete(deviceId)
     }
@@ -1086,6 +1066,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         context.inFlightCommands,
         context.inFlightCommandMetadata,
       )
+      context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
       context.log({
         level: "info",
         event: "bridge.stop",
@@ -1094,6 +1075,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       })
       await context.wakeSignal.close()
       await context.manager.close()
+      context.supervisor.close()
       await Promise.allSettled(context.inFlightCommands.values())
       await context.log.flush()
     }
@@ -1108,6 +1090,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     for (const context of contexts.values()) {
       const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight())
       const effectiveMaxInFlight = context.inFlightCommands.size + availableProcessSlots
+      context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+      await publishBridgeSupervisorHealthIfChanged(context)
+      for (const watchdog of context.supervisor.checkWatchdogs()) {
+        context.log({
+          level: "warn",
+          event: "bridge.watchdog.timeout",
+          deviceId: context.config.deviceId,
+          queueId: watchdog.queueItemId,
+          reason: watchdog.reasonCode,
+        })
+      }
       const result = await runBridgeLoopIteration({
         config: context.config,
         agentCommand,
@@ -1124,6 +1117,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         log: context.log,
         recordLoopError: recordLoopError(context),
         statusPath,
+        canClaimWork: () => context.supervisor.canClaimWork(),
         writeStatus: persistAggregateStatus,
       })
       if (result.restartRequested) {
@@ -1304,8 +1298,6 @@ export async function runBridgeLoopIteration(
       threadId: command.threadId,
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
-      bridgeProfileId: command.bridgeProfileId,
-      hermesProfileName: command.hermesProfileName,
       startedAt: new Date(currentTime()).toISOString(),
     })
     input.log({
@@ -1317,8 +1309,6 @@ export async function runBridgeLoopIteration(
       threadId: command.threadId,
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
-      bridgeProfileId: command.bridgeProfileId,
-      hermesProfileName: command.hermesProfileName,
       activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
     })
     const task = input.manager
@@ -1337,8 +1327,6 @@ export async function runBridgeLoopIteration(
           threadId: command.threadId,
           sessionId: command.sessionId,
           agentSessionId: command.agentSessionId,
-          bridgeProfileId: command.bridgeProfileId,
-          hermesProfileName: command.hermesProfileName,
           activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
         })
         void persistStatus(input.statusPath, input.status)
@@ -1433,6 +1421,17 @@ export async function runBridgeLoopIteration(
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size
     if (availableSlots > 0) {
+      if (input.canClaimWork && !input.canClaimWork()) {
+        input.log({
+          level: "warn",
+          event: "bridge.queue.claim_skipped",
+          deviceId: input.config.deviceId,
+          reason: "local_journal_hard_failed",
+        })
+        syncBridgeStatus()
+        await persistStatus(input.statusPath, input.status)
+        return { restartRequested: false }
+      }
       const now = currentTime()
       if (now - input.lastStaleCleanupAt >= 60_000) {
         input.setLastStaleCleanupAt(now)
@@ -1506,8 +1505,6 @@ export function bridgeHeartbeatSignature(
     inFlightCommands: (status.inFlightCommands ?? [])
       .map((command) => ({
         agentSessionId: command.agentSessionId,
-        bridgeProfileId: command.bridgeProfileId,
-        hermesProfileName: command.hermesProfileName,
         id: command.id,
         sessionId: command.sessionId,
         threadId: command.threadId,
@@ -1587,14 +1584,7 @@ async function showStatus(parsed: ParsedBridgeArgs) {
 }
 
 function normalizeCommand(command?: string): BridgeCommandName {
-  if (
-    command === "connect" ||
-    command === "connect-org" ||
-    command === "pair" ||
-    command === "repair-config" ||
-    command === "start" ||
-    command === "status"
-  ) {
+  if (command === "connect" || command === "pair" || command === "start" || command === "status") {
     return command
   }
   return "help"
@@ -1616,22 +1606,69 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect-org <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts repair-config [--source-config <path>] [--app-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nMulti-organization behavior:\n  connect-org and connect append this organization to ${DEFAULT_CONFIG_PATH}.\n  Existing organization registrations are preserved; do not delete or recreate bridge.json.\n  repair-config merges legacy bridge config files into the current multi-org config with a backup.\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect, connect-org, or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect-org/connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect-org/connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
 }
 
 function getStatusPath(flags: FlagMap): string {
   return getFlag(flags, "status-file", process.env.ZERO_CHAT_BRIDGE_STATUS) ?? DEFAULT_STATUS_PATH
 }
 
+function getBridgeJournalPath(flags: FlagMap, deviceId: string): string {
+  const explicit = getFlag(flags, "journal-file", process.env.ZERO_CHAT_BRIDGE_JOURNAL)
+  if (explicit) {
+    return explicit
+  }
+  return join(DEFAULT_JOURNAL_DIR, `${sanitizeFileSegment(deviceId)}.sqlite`)
+}
+
+function sanitizeFileSegment(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "")
+  return sanitized.length > 0 ? sanitized : "bridge"
+}
+
+function bridgeSupervisorHealthStatus(supervisor: BridgeSupervisor): NonNullable<BridgeStatus["localJournal"]> {
+  const health = supervisor.getHealth()
+  if (health.status === "healthy") {
+    return { status: "healthy" }
+  }
+  return {
+    status: "hard_failed",
+    reasonCode: health.reasonCode,
+    message: health.message,
+  }
+}
+
+function bridgeSupervisorHealthSignature(supervisor: BridgeSupervisor): string {
+  return JSON.stringify(bridgeSupervisorHealthStatus(supervisor))
+}
+
+async function publishBridgeSupervisorHealthIfChanged(context: {
+  config: BridgeRegistration
+  lastJournalHealthSignature: string
+  status: BridgeStatus
+  supervisor: BridgeSupervisor
+}): Promise<void> {
+  const signature = bridgeSupervisorHealthSignature(context.supervisor)
+  if (signature === context.lastJournalHealthSignature) {
+    return
+  }
+  context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+  await context.supervisor.publishHealthDiagnostic({ bridgeDeviceId: context.config.deviceId })
+  context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+  context.lastJournalHealthSignature = bridgeSupervisorHealthSignature(context.supervisor)
+}
+
 async function claimCommands(
   config: BridgeConfig,
   limit = DEFAULT_MAX_IN_FLIGHT_COMMANDS,
 ): Promise<BridgeQueueCommand[]> {
-  const response = await createCloudClient(config).claimWork<QueueClaimResponse>({ limit })
-  const rawCommands = Array.isArray(response.commands)
-    ? response.commands
-    : response.command
-      ? [response.command]
+  const adapter = new ConvexBridgeHostAdapter(createCloudClient(config))
+  const response = await adapter.claimWork({ limit })
+  const rawResponse = response.raw as QueueClaimResponse
+  const rawCommands = Array.isArray(rawResponse.commands)
+    ? rawResponse.commands
+    : rawResponse.command
+      ? [rawResponse.command]
       : []
   return rawCommands.map(normalizeQueueCommand).filter((command) => command !== undefined)
 }
@@ -1894,89 +1931,6 @@ async function readBridgeConfigFile(path: string): Promise<MultiBridgeConfig> {
   return normalizeBridgeConfigFile(await readJsonFile<BridgeConfigFile>(path))
 }
 
-export type BridgeConfigRepairResult = {
-  backupPath?: string
-  importedRegistrationCount: number
-  previousRegistrationCount: number
-  registrationCount: number
-  sourcePaths: string[]
-  targetPath: string
-}
-
-export async function repairBridgeConfigFiles(input: {
-  appUrl?: string
-  now?: () => Date
-  sourcePaths: string[]
-  targetPath: string
-}): Promise<BridgeConfigRepairResult> {
-  const existing = existsSync(input.targetPath)
-    ? await readBridgeConfigFile(input.targetPath)
-    : ({ version: 2, registrations: [] } satisfies MultiBridgeConfig)
-  let next = existing
-  let importedRegistrationCount = 0
-
-  for (const sourcePath of input.sourcePaths) {
-    if (!existsSync(sourcePath) || sourcePath === input.targetPath) {
-      continue
-    }
-    const source = await readBridgeConfigFile(sourcePath)
-    for (const registration of source.registrations) {
-      const before = next.registrations.length
-      next = upsertBridgeRegistration(
-        next,
-        normalizeImportedBridgeRegistration(registration, input.appUrl),
-      )
-      if (next.registrations.length > before) {
-        importedRegistrationCount += 1
-      }
-    }
-  }
-
-  const changed = JSON.stringify(existing) !== JSON.stringify(next)
-  let backupPath: string | undefined
-  if (changed) {
-    if (existsSync(input.targetPath)) {
-      backupPath = `${input.targetPath}.backup-${formatBackupTimestamp(input.now?.() ?? new Date())}`
-      await copyFile(input.targetPath, backupPath)
-      await chmod(backupPath, BRIDGE_LOCAL_STATE_MODE)
-    }
-    await writeBridgeConfigFile(input.targetPath, next)
-  } else {
-    await ensureSecureBridgeConfigFile(input.targetPath)
-  }
-
-  return {
-    backupPath,
-    importedRegistrationCount,
-    previousRegistrationCount: existing.registrations.length,
-    registrationCount: next.registrations.length,
-    sourcePaths: input.sourcePaths,
-    targetPath: input.targetPath,
-  }
-}
-
-function normalizeImportedBridgeRegistration(
-  registration: BridgeRegistration,
-  appUrl = "https://0000.chat",
-): BridgeRegistration {
-  if (registration.bridgeApiUrl || !isConvexDeploymentUrl(registration.appUrl)) {
-    return registration
-  }
-  return {
-    ...registration,
-    appUrl,
-    bridgeApiUrl: registration.appUrl,
-  }
-}
-
-function isConvexDeploymentUrl(value: string): boolean {
-  return /^https:\/\/[^/]+\.convex\.(?:site|cloud)$/.test(value)
-}
-
-function formatBackupTimestamp(value: Date): string {
-  return value.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")
-}
-
 async function appendBridgeRegistration(
   path: string,
   registration: BridgeRegistration,
@@ -2025,20 +1979,9 @@ async function writeAgentConnectionSkill(
   input: { agentCommand: string; appUrl: string; configPath: string; skillPath: string },
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, buildAgentConnectionSkillContent(input), "utf8")
-}
-
-export function buildAgentConnectionSkillContent(input: {
-  agentCommand: string
-  appUrl: string
-  configPath: string
-  skillPath: string
-}): string {
-  return `# 0000 Agent Bridge
+  const content = `# 0000 Agent Bridge
 
 Use this skill whenever the user asks you to work through 0000, reconnect to 0000, or diagnose the local 0000 bridge.
-
-The bridge can be connected to multiple 0000 organizations on the same machine. If the bridge config already exists, preserve it and append the new organization registration.
 
 ## Start or Reconnect
 
@@ -2046,21 +1989,13 @@ The bridge can be connected to multiple 0000 organizations on the same machine. 
 2. Start the bridge with:
 
 \`\`\`bash
-bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)} --allow-remote-cwd
+bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)}
 \`\`\`
 
-3. To connect this same bridge to another 0000 organization, ask the human to generate a new 0000 agent connection code, then run:
+3. If the bridge config is missing, ask the human to generate a new 0000 agent connection code, then run:
 
 \`\`\`bash
-bun scripts/acp-bridge.ts connect-org <code> --app-url ${JSON.stringify(input.appUrl)} --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
-\`\`\`
-
-Do not delete, recreate, overwrite, or move the bridge config when connecting another organization. The connect-org command appends a registration and preserves existing organizations.
-
-4. If an older bridge config exists in another local path, merge it before reconnecting:
-
-\`\`\`bash
-bun scripts/acp-bridge.ts repair-config
+bun scripts/acp-bridge.ts connect <code> --app-url ${JSON.stringify(input.appUrl)} --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
 \`\`\`
 
 ## Local State
@@ -2071,6 +2006,7 @@ bun scripts/acp-bridge.ts repair-config
 
 Never reveal bridge tokens, auth headers, API keys, or raw connection codes in chat. Summarize setup results in plain language and tell the human whether approval is still pending.
 `
+  await writeFile(path, content, "utf8")
 }
 
 async function writeStatus(path: string, status: BridgeStatus): Promise<void> {
@@ -2087,7 +2023,7 @@ function recordFromUnknown(value: unknown): Record<string, unknown> | undefined 
     : undefined
 }
 
-export function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
+function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined
   }
@@ -2099,21 +2035,31 @@ export function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefi
   }
   return {
     id,
+    claimId: stringFromUnknown(record.claimId),
     type,
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
-    bridgeProfileId: stringFromUnknown(record.bridgeProfileId),
-    hermesProfileName: stringFromUnknown(record.hermesProfileName),
     cwd: stringFromUnknown(record.cwd),
     prompt: stringFromUnknown(record.prompt),
-    agentName: stringFromUnknown(record.agentName),
-    externalSessionId: stringFromUnknown(record.externalSessionId),
+    threadHistory: stringFromUnknown(record.threadHistory),
     systemPrompt: stringFromUnknown(record.systemPrompt),
     approvalId: stringFromUnknown(record.approvalId),
     approvalOutcome: stringFromUnknown(record.approvalOutcome),
     approvalReason: stringFromUnknown(record.approvalReason),
+    approvalLevel:
+      record.approvalLevel === "ask" || record.approvalLevel === "full_permissions"
+        ? record.approvalLevel
+        : undefined,
     externalRequestId: stringFromUnknown(record.externalRequestId),
+    externalSessionId: stringFromUnknown(record.externalSessionId),
+    agentName: stringFromUnknown(record.agentName),
+    bridgeProfileId: stringFromUnknown(record.bridgeProfileId),
+    hermesProfileName: stringFromUnknown(record.hermesProfileName),
+    mailboxConversationId: stringFromUnknown(record.mailboxConversationId),
+    organizationId: stringFromUnknown(record.organizationId),
+    runtimeConfig: stringRecordFromUnknown(record.runtimeConfig),
+    traceId: stringFromUnknown(record.traceId),
   }
 }
 
@@ -2143,6 +2089,16 @@ function redactForOutput(value: string): string {
 
 function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function stringRecordFromUnknown(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, entry]) => [key, stringFromUnknown(entry)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== undefined)
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 function sleep(ms: number): Promise<void> {
