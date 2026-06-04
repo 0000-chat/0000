@@ -57,6 +57,15 @@ describe("bridge supervisor shadow mode", () => {
     expect(supervisor.getTurnState("queue-1")?.checkpoint).toBe("cancelled")
   })
 
+  test("records steering transitions before replacement prompts", () => {
+    const supervisor = new BridgeSupervisor({ journal: journalAtTempPath() })
+
+    supervisor.recordClaimed(baseWork())
+    supervisor.recordSteering(baseWork())
+
+    expect(supervisor.getTurnState("queue-1")?.checkpoint).toBe("steering")
+  })
+
   test("fails an active turn after provider silence timeout", () => {
     let now = 1_000
     const journal = journalAtTempPath()

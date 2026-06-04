@@ -175,6 +175,8 @@ export class HermesAcpSession {
   private autoApprovePermissionRequests = false
   private lifecyclePhase: "starting" | "loading" | "livePrompt" | "idle" | "closing" | "closed" =
     "closed"
+  private externalContinuityAttempted = false
+  private externalContinuityLoaded = false
   private externalContinuityFallback = false
   private externalContinuityFallbackNotified = false
   private closed = false
@@ -319,6 +321,14 @@ export class HermesAcpSession {
     return this.pendingPermissionRequests.size > 0
   }
 
+  getExternalContinuityState(): { attempted: boolean; fallback: boolean; loaded: boolean } {
+    return {
+      attempted: this.externalContinuityAttempted,
+      fallback: this.externalContinuityFallback,
+      loaded: this.externalContinuityLoaded,
+    }
+  }
+
   async close(): Promise<void> {
     this.lifecyclePhase = "closing"
     if (this.sessionId && this.capabilities?.supportsSessionClose && this.child && !this.closed) {
@@ -359,10 +369,12 @@ export class HermesAcpSession {
 
     for (const method of methods) {
       this.lifecyclePhase = "loading"
+      this.externalContinuityAttempted = true
       try {
         const loaded = await this.request(method, { sessionId: this.initialSessionId })
         this.sessionId = extractSessionId(loaded, this.initialSessionId)
         this.started = true
+        this.externalContinuityLoaded = true
         this.lifecyclePhase = "idle"
         return this.sessionId
       } catch (error) {

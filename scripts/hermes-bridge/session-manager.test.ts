@@ -853,6 +853,373 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("cancel-session acknowledged by ACP produces a terminal cancelled event", async () => {
+    let cancelCount = 0
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {
+          cancelCount += 1
+          return true
+        },
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ready",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+
+    expect(cancelCount).toBe(1)
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-cancel",
+      result: { cancelled: true, ok: true, stopReason: "cancelled", terminal: true },
+    })
+    expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
+      status: "complete",
+      text: "Run cancelled.",
+      type: "event",
+    })
+  })
+
+  test("cancel-session reports cancel_not_acknowledged when ACP cannot cancel", async () => {
+    const cloud = fakeCloudClient()
+    const supervisor = new BridgeSupervisor()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => false,
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ready",
+        }),
+      }),
+      supervisor,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-cancel",
+      result: { error: "cancel_not_acknowledged", ok: false, terminal: true },
+    })
+    expect(supervisor.getTurnState("queue-cancel")?.checkpoint).toBe("failed")
+  })
+
+  test("steer-session cancels the active turn and sends replacement instructions on the same session", async () => {
+    const prompts: string[] = []
+    let cancelCount = 0
+    let sessionCount = 0
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => {
+        sessionCount += 1
+        return {
+          close: async () => {},
+          cancel: async () => {
+            cancelCount += 1
+            return true
+          },
+          sendUserMessage: async (prompt) => {
+            prompts.push(prompt)
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: prompt === "Try a smaller patch" ? "steered" : "ready",
+            }
+          },
+        }
+      },
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Try a smaller patch",
+      threadId: "thread-1",
+      type: "steer-session",
+    })
+
+    expect(sessionCount).toBe(1)
+    expect(cancelCount).toBe(1)
+    expect(prompts).toEqual(["hello", "Try a smaller patch"])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-steer",
+      result: { ok: true, steered: true, text: "steered" },
+    })
+  })
+
+  test("steer-session records failed when ACP cannot stop the active turn", async () => {
+    const cloud = fakeCloudClient()
+    const supervisor = new BridgeSupervisor()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => false,
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ready",
+        }),
+      }),
+      supervisor,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Try a smaller patch",
+      threadId: "thread-1",
+      type: "steer-session",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-steer",
+      result: { error: "session_replacement_required", ok: false, terminal: true },
+    })
+    expect(supervisor.getTurnState("queue-steer")?.checkpoint).toBe("failed")
+  })
+
+  test("close-session closes an idle native ACP session", async () => {
+    let closeCount = 0
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {
+          closeCount += 1
+        },
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ready",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-close",
+      id: "queue-close",
+      threadId: "thread-1",
+      type: "close-session",
+    })
+
+    expect(closeCount).toBe(1)
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-close",
+      result: { closed: true, ok: true },
+    })
+    expect(manager.getStatus().activeSessions).toEqual([])
+  })
+
+  test("revive-session uses native load context when an external session id is available", async () => {
+    const contexts: BridgeSessionContext[] = []
+    const cloud = fakeCloudClient()
+    let startCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context)
+        return {
+          ...fakeSession(),
+          getExternalContinuityState: () => ({
+            attempted: true,
+            fallback: false,
+            loaded: true,
+          }),
+          start: async () => {
+            startCount += 1
+            return "external-session-1"
+          },
+        }
+      },
+      resumeEnabled: true,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-revive",
+      externalSessionId: "external-session-1",
+      id: "queue-revive",
+      threadId: "thread-1",
+      type: "revive-session",
+    })
+
+    expect(contexts[0]?.initialSessionId).toBe("external-session-1")
+    expect(startCount).toBe(1)
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-revive",
+      result: { ok: true, revived: true, reviveMode: "native-load" },
+    })
+  })
+
+  test("revive-session reuses an active session without claiming native load", async () => {
+    const contexts: BridgeSessionContext[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context)
+        return fakeSession()
+      },
+      resumeEnabled: true,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-revive",
+      externalSessionId: "external-session-1",
+      id: "queue-revive",
+      threadId: "thread-1",
+      type: "revive-session",
+    })
+
+    expect(contexts).toHaveLength(1)
+    expect(contexts[0]?.initialSessionId).toBeUndefined()
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-revive",
+      result: { ok: true, revived: true, reviveMode: "thread-history" },
+    })
+  })
+
+  test("revive-session closes a newly created session when native start fails", async () => {
+    const cloud = fakeCloudClient()
+    let closeCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        ...fakeSession(),
+        close: async () => {
+          closeCount += 1
+        },
+        start: async () => {
+          throw new Error("load failed")
+        },
+      }),
+      resumeEnabled: true,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-revive",
+      externalSessionId: "external-session-1",
+      id: "queue-revive",
+      threadId: "thread-1",
+      type: "revive-session",
+    })
+
+    expect(closeCount).toBe(1)
+    expect(manager.getStatus().activeSessions).toEqual([])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-revive",
+      result: { error: "load failed", ok: false },
+    })
+  })
+
+  test("revive-session falls back to thread history when native resume is disabled", async () => {
+    const contexts: BridgeSessionContext[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context)
+        return fakeSession()
+      },
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-revive",
+      externalSessionId: "external-session-1",
+      id: "queue-revive",
+      threadId: "thread-1",
+      type: "revive-session",
+    })
+
+    expect(contexts[0]?.initialSessionId).toBeUndefined()
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-revive",
+      result: { ok: true, revived: true, reviveMode: "thread-history" },
+    })
+  })
+
   test("logs redacted diagnostics when Codex final text is withheld", async () => {
     const cloud = fakeCloudClient()
     const logs: Array<Record<string, unknown>> = []

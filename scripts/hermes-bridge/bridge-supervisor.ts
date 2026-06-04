@@ -15,6 +15,7 @@ export type BridgeTurnCheckpoint =
   | "active"
   | "waiting_for_interaction"
   | "cancelling"
+  | "steering"
   | "cancelled"
   | "completed"
   | "failed"
@@ -163,6 +164,10 @@ export class BridgeSupervisor {
 
   recordCancelling(item: BridgeSupervisorWorkItem): void {
     this.transition(item, "cancelling")
+  }
+
+  recordSteering(item: BridgeSupervisorWorkItem): void {
+    this.transition(item, "steering")
   }
 
   recordCancelled(item: BridgeSupervisorWorkItem): void {

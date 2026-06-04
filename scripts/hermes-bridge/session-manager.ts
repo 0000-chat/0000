@@ -39,6 +39,7 @@ export type BridgeSessionQueueItem = {
 
 export type ManagedAcpSession = {
   readonly sessionId?: string
+  start?(): Promise<string>
   sendUserMessage(
     text: string,
     options?: {
@@ -47,13 +48,18 @@ export type ManagedAcpSession = {
       autoApprovePermissionRequests?: boolean
     },
   ): Promise<HermesAcpPromptResult>
-  cancel(): Promise<void>
+  cancel(): Promise<boolean | void>
   close(): Promise<void>
   respondToPermissionRequest?(
     externalRequestId: string,
     response: { approved: boolean; reason?: string },
   ): Promise<boolean>
   hasPendingPermissionRequests?(): boolean
+  getExternalContinuityState?(): {
+    attempted: boolean
+    fallback: boolean
+    loaded: boolean
+  }
 }
 
 export type BridgeSessionContext = {
@@ -266,10 +272,32 @@ export class BridgeSessionManager {
         return
       }
 
-      if (type === "cancel") {
+      if (type === "cancel" || type === "cancel-session") {
         this.supervisor?.recordCancelling(this.supervisorWorkItem(item))
-        await this.handleCancel(item)
-        this.supervisor?.recordCancelled(this.supervisorWorkItem(item))
+        const cancelled = await this.handleCancel(item)
+        if (cancelled) {
+          this.supervisor?.recordCancelled(this.supervisorWorkItem(item))
+        } else {
+          this.supervisor?.recordFailed(this.supervisorWorkItem(item), "cancel_not_acknowledged")
+        }
+        this.writeQueueCompleteLog(item, type)
+        return
+      }
+
+      if (type === "close-session") {
+        await this.handleCloseSession(item)
+        this.writeQueueCompleteLog(item, type)
+        return
+      }
+
+      if (type === "steer-session") {
+        await this.handleSteerSession(item)
+        this.writeQueueCompleteLog(item, type)
+        return
+      }
+
+      if (type === "revive-session") {
+        await this.handleReviveSession(item)
         this.writeQueueCompleteLog(item, type)
         return
       }
@@ -631,13 +659,124 @@ export class BridgeSessionManager {
     })
   }
 
-  private async handleCancel(item: BridgeSessionQueueItem): Promise<void> {
+  private async handleCancel(item: BridgeSessionQueueItem): Promise<boolean> {
     const key = this.findSessionKeyForItem(item)
     const session = key ? this.sessions.get(key) : undefined
-    if (session) {
-      await session.acp.cancel()
+    if (!session) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "cancel_not_acknowledged",
+        terminal: true,
+      })
+      return false
     }
-    await this.markQueueResult(item, { ok: true, cancelled: Boolean(session) })
+    const acknowledged = (await session.acp.cancel()) !== false
+    if (!acknowledged) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "cancel_not_acknowledged",
+        terminal: true,
+      })
+      return false
+    }
+    this.enqueueEventWrite(session, {
+      externalEventId: `${item.id}:message_cancelled`,
+      source: "bridge",
+      eventType: "message_cancelled",
+      payload: { queueId: item.id, queueType: normalizeType(item), stopReason: "cancelled" },
+      part: {
+        type: "event",
+        text: "Run cancelled.",
+        status: "complete",
+      },
+    })
+    await this.drainEventWrites()
+    await this.markQueueResult(item, {
+      ok: true,
+      cancelled: true,
+      stopReason: "cancelled",
+      terminal: true,
+    })
+    return true
+  }
+
+  private async handleCloseSession(item: BridgeSessionQueueItem): Promise<void> {
+    const key = this.findSessionKeyForItem(item)
+    const closed = Boolean(key && this.sessions.has(key))
+    if (key) {
+      await this.closeSession(key)
+    }
+    await this.markQueueResult(item, { ok: true, closed })
+  }
+
+  private async handleSteerSession(item: BridgeSessionQueueItem): Promise<void> {
+    const instruction = item.prompt?.trim()
+    if (!instruction) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "steer_empty_instruction",
+        terminal: true,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), "steer_empty_instruction")
+      return
+    }
+    const key = this.findSessionKeyForItem(item)
+    const session = key ? this.sessions.get(key) : undefined
+    if (!key || !session) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "session_replacement_required",
+        terminal: true,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), "session_replacement_required")
+      return
+    }
+    this.supervisor?.recordSteering(this.supervisorWorkItem(item, session))
+    const acknowledged = (await session.acp.cancel()) !== false
+    if (!acknowledged) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "session_replacement_required",
+        terminal: true,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "session_replacement_required")
+      return
+    }
+    await this.handlePromptNow(item, instruction, {
+      sessionKey: key,
+      resultMetadata: { steered: true },
+    })
+  }
+
+  private async handleReviveSession(item: BridgeSessionQueueItem): Promise<void> {
+    const existingSessionKey = this.findSessionKeyForItem(item)
+    const existingSession = existingSessionKey ? this.sessions.get(existingSessionKey) : undefined
+    const session = await this.ensureSession(item)
+    const createdForRevive =
+      !existingSession ||
+      existingSession.sessionKey !== session.sessionKey ||
+      existingSession.generation !== session.generation
+    if (createdForRevive && this.resumeEnabled && item.externalSessionId && session.acp.start) {
+      try {
+        await session.acp.start()
+      } catch (error) {
+        await this.closeSession(session.sessionKey)
+        throw error
+      }
+    }
+    const nativeLoad =
+      createdForRevive &&
+      this.resumeEnabled &&
+      Boolean(item.externalSessionId) &&
+      session.acp.getExternalContinuityState?.().loaded === true
+    session.lastUsedAt = Date.now()
+    this.scheduleIdleClose(session)
+    await this.markQueueResult(item, {
+      ok: true,
+      revived: true,
+      reviveMode: nativeLoad ? "native-load" : "thread-history",
+      agentSessionId: session.providerSessionKey,
+    })
   }
 
   private async markQueueResult(
@@ -716,7 +855,7 @@ export class BridgeSessionManager {
         threadId,
         cwd,
         hermesProfileName: item.hermesProfileName,
-        initialSessionId: item.externalSessionId,
+        initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
         mcpServers: this.createMcpServers({ cwd: item.cwd, sessionKey, threadId }),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
