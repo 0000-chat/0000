@@ -12,6 +12,8 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "threads.read",
   "messages.search",
   "settings.setDefaultApprovalLevel",
+  "agents.list",
+  "agents.sendMailboxMessage",
   "spaces.list",
   "spaces.get",
   "spaces.create",
@@ -44,6 +46,11 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "databases.updateRow",
   "databases.deleteRow",
   "secrets.put",
+  "secrets.listAvailable",
+  "scripts.createDraft",
+  "scripts.updateDraft",
+  "scripts.search",
+  "scripts.read",
 ] as const
 
 type AgentToolMcpToolName = (typeof AGENT_TOOL_MCP_TOOL_NAMES)[number]
@@ -81,6 +88,12 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   },
   "settings.setDefaultApprovalLevel": {
     approvalLevel: z.enum(["ask", "full_permissions"]).optional(),
+  },
+  "agents.list": { limit: z.number().optional(), query: z.string().optional() },
+  "agents.sendMailboxMessage": {
+    body: z.string(),
+    subject: z.string(),
+    toAgentIdOrSlug: z.string(),
   },
   "spaces.list": { includeArchived: z.boolean().optional(), limit: z.number().optional() },
   "spaces.get": { includeArchived: z.boolean().optional(), spaceIdOrSlug: z.string() },
@@ -239,6 +252,33 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     scope: z.enum(["user", "organization"]),
     value: z.string(),
   },
+  "secrets.listAvailable": {
+    query: z.string().optional(),
+    scopes: z.array(z.enum(["user", "organization"])).optional(),
+  },
+  "scripts.createDraft": {
+    code: z.string(),
+    description: z.string(),
+    kind: z.enum(["agent_skill", "app_script", "automation"]),
+    manifest: z.record(z.string(), z.unknown()),
+    name: z.string(),
+    slug: z.string().optional(),
+    spaceId: z.string().optional(),
+  },
+  "scripts.updateDraft": {
+    code: z.string().optional(),
+    description: z.string().optional(),
+    manifest: z.record(z.string(), z.unknown()).optional(),
+    name: z.string().optional(),
+    scriptId: z.string(),
+    slug: z.string().optional(),
+  },
+  "scripts.search": {
+    query: z.string().optional(),
+  },
+  "scripts.read": {
+    scriptId: z.string(),
+  },
 }
 
 const toolDescriptions: Record<AgentToolMcpToolName, string> = {
@@ -251,6 +291,10 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "messages.search": "Search cached 0000 Chat messages.",
   "settings.setDefaultApprovalLevel":
     "Set the user's default approval mode. Use full_permissions only when the user explicitly asks to enable trusted local automation; this tool requires in-thread approval unless the current thread already has full permissions.",
+  "agents.list":
+    "List mailbox-capable agents in the current organization so you can address agent-to-agent handoffs by id or slug.",
+  "agents.sendMailboxMessage":
+    "Send a one-off mailbox message from the current agent to another agent in the same organization. This records the handoff but does not automatically start a new ACP session.",
   "spaces.list": "List spaces in 0000 Chat.",
   "spaces.get": "Read one 0000 Chat space by id or slug.",
   "spaces.create":
@@ -295,6 +339,12 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
     "Archive a record in a 0000 Chat dynamic database table, or permanently delete it when permanent is true.",
   "secrets.put":
     "Encrypt and store a 0000 Chat user or organization secret. The value is sent to 0000 Chat for encrypted storage and is redacted from approvals and tool logs.",
+  "secrets.listAvailable":
+    "List metadata for secrets available to generated scripts without revealing values.",
+  "scripts.createDraft": "Create a reusable generated script draft and first version.",
+  "scripts.updateDraft": "Update a reusable generated script draft by creating a new draft version.",
+  "scripts.search": "Search reusable generated script artifacts in the current organization.",
+  "scripts.read": "Read one reusable generated script artifact and its current version.",
 }
 
 export function buildAgentToolMcpEnv(env: NodeJS.ProcessEnv): AgentToolMcpEnv {
