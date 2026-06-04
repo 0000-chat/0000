@@ -203,6 +203,92 @@ describe("bridge session cwd safety", () => {
     ])
   })
 
+  test("rejects session-creating work without a profile when multiple runtimes are available", async () => {
+    const cloud = fakeCloudClient()
+    const contexts: BridgeSessionContext[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context)
+        return fakeSession()
+      },
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
+          id: "claude-code:claude-acp",
+          kind: "claude-code",
+          label: "Claude Code",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-missing-profile",
+      id: "queue-missing-profile",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(contexts).toEqual([])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-missing-profile",
+      result: {
+        ok: false,
+        error: expect.stringContaining("Bridge runtime profile is required"),
+      },
+    })
+  })
+
+  test("keeps legacy default runtime fallback when only one runtime is available", async () => {
+    const contexts: BridgeSessionContext[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context)
+        return fakeSession()
+      },
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-single-profile",
+      id: "queue-single-profile",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(contexts[0]?.bridgeProfileId).toBeUndefined()
+    expect(contexts[0]?.runtimeProfile?.id).toBe("codex:codex-acp")
+    expect(contexts[0]?.agentCommand).toEqual([
+      "npx",
+      "--yes",
+      "@zed-industries/codex-acp@0.15.0",
+    ])
+  })
+
   test("recreates cwd-bound runtime sessions when the queue cwd changes", async () => {
     const contexts: BridgeSessionContext[] = []
     const closedCwds: Array<string | undefined> = []

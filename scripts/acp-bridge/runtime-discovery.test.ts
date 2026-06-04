@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { capabilitiesFromInitializeResult, discoverRuntimeProfiles } from "./runtime-discovery"
+import {
+  capabilitiesFromInitializeResult,
+  discoverRuntimeProfiles,
+  runtimeDiscoveryEnv,
+} from "./runtime-discovery"
 
 const noDiscoveredCommands = async () => []
 
@@ -37,6 +41,18 @@ describe("runtime discovery", () => {
       supportsStructuredInteractions: true,
       thoughtLevels: ["medium", "high"],
     })
+  })
+
+  test("adds common user tool directories to child process PATH", () => {
+    const env = runtimeDiscoveryEnv({ HOME: "/home/dev", PATH: "/usr/bin", TERM: "dumb" })
+
+    expect(env.PATH?.split(":").slice(0, 4)).toEqual([
+      "/home/dev/.volta/bin",
+      "/home/dev/.bun/bin",
+      "/home/dev/.local/bin",
+      "/usr/bin",
+    ])
+    expect(env.TERM).toBe("xterm-256color")
   })
 
   test("discovers Codex with context-mode diagnostics", async () => {

@@ -922,6 +922,12 @@ export class BridgeSessionManager {
     if (item.hermesProfileName) {
       return undefined
     }
+    const availableProfiles = this.runtimeProfiles.filter((profile) => profile.status === "available")
+    if (availableProfiles.length > 1) {
+      throw new Error(
+        "Bridge runtime profile is required when multiple ACP runtimes are available",
+      )
+    }
     return findRuntimeProfile(this.runtimeProfiles, undefined)
   }
 
