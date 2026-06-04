@@ -52,6 +52,7 @@ export type HermesAcpPromptOptions = {
   systemPrompt?: string
   threadHistory?: string
   autoApprovePermissionRequests?: boolean
+  runtimeConfig?: Record<string, string>
 }
 
 export type AcpAdapterCapabilityUsed =
@@ -181,6 +182,7 @@ export class HermesAcpSession {
   private externalContinuityFallbackNotified = false
   private closed = false
   private started = false
+  private currentConfigOptions = new Map<string, string>()
   sessionId?: string
   capabilities?: HermesAcpRuntimeCapabilities
 
@@ -231,6 +233,7 @@ export class HermesAcpSession {
       cwd: this.cwd ?? process.cwd(),
       mcpServers: this.mcpServers,
     })
+    this.storeConfigOptions(result)
     this.sessionId = extractSessionId(result)
     this.started = true
     this.lifecyclePhase = "idle"
@@ -257,6 +260,10 @@ export class HermesAcpSession {
     const eventStart = this.promptEvents.length
     const previousAutoApprove = this.autoApprovePermissionRequests
     this.autoApprovePermissionRequests = options.autoApprovePermissionRequests === true
+    const restoreRuntimeConfig = await this.applyRuntimeConfigOverrides(
+      sessionId,
+      options.runtimeConfig,
+    )
     let rawResult: unknown
     try {
       rawResult = await this.request("session/prompt", {
@@ -268,6 +275,7 @@ export class HermesAcpSession {
       })
     } finally {
       this.autoApprovePermissionRequests = previousAutoApprove
+      await restoreRuntimeConfig()
       if (!this.closed) {
         this.lifecyclePhase = "idle"
       }
@@ -391,6 +399,76 @@ export class HermesAcpSession {
     }
 
     return undefined
+  }
+
+  private async applyRuntimeConfigOverrides(
+    sessionId: string,
+    runtimeConfig: Record<string, string> | undefined,
+  ): Promise<() => Promise<void>> {
+    const entries = Object.entries(runtimeConfig ?? {}).filter(([, value]) => value.length > 0)
+    if (entries.length === 0) {
+      return async () => {}
+    }
+
+    const previousValues = new Map<string, string | undefined>()
+    for (const [configId, value] of entries) {
+      const previous = this.currentConfigOptions.get(configId)
+      previousValues.set(configId, previous)
+      if (previous === value) {
+        continue
+      }
+      await this.setRuntimeConfigOption(sessionId, configId, value)
+    }
+
+    return async () => {
+      for (const [configId, value] of previousValues.entries()) {
+        if (value === undefined || this.currentConfigOptions.get(configId) === value) {
+          continue
+        }
+        try {
+          await this.setRuntimeConfigOption(sessionId, configId, value)
+        } catch (error) {
+          void this.onError?.(
+            error instanceof Error
+              ? new Error(`ACP session/set_config_option restore failed: ${error.message}`)
+              : new Error(`ACP session/set_config_option restore failed: ${String(error)}`),
+          )
+        }
+      }
+    }
+  }
+
+  private async setRuntimeConfigOption(
+    sessionId: string,
+    configId: string,
+    value: string,
+  ): Promise<void> {
+    try {
+      const result = await this.request("session/set_config_option", { configId, sessionId, value })
+      this.storeConfigOptions(result)
+      if (!this.currentConfigOptions.has(configId)) {
+        this.currentConfigOptions.set(configId, value)
+      }
+    } catch (error) {
+      void this.onError?.(
+        error instanceof Error
+          ? new Error(`ACP session/set_config_option failed: ${error.message}`)
+          : new Error(`ACP session/set_config_option failed: ${String(error)}`),
+      )
+    }
+  }
+
+  private storeConfigOptions(result: unknown): void {
+    const record = recordFromUnknown(result)
+    const configOptions = Array.isArray(record.configOptions) ? record.configOptions : []
+    for (const option of configOptions) {
+      const optionRecord = recordFromUnknown(option)
+      const id = readString(optionRecord.id)
+      const currentValue = readString(optionRecord.currentValue)
+      if (id && currentValue) {
+        this.currentConfigOptions.set(id, currentValue)
+      }
+    }
   }
 
   private request(method: string, params: unknown): Promise<unknown> {

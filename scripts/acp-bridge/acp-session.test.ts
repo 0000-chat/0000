@@ -143,10 +143,61 @@ describe("ACP runtime adapter boundary", () => {
       policy: "omit_unavailable",
     })
   })
+
+  test("sets ACP session config options around a prompt", async () => {
+    const requests: JsonRpcMessage[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      spawnProcess: createFakeAcpProcess({
+        configOptions: [
+          { currentValue: "default-model", id: "model" },
+          { currentValue: "medium", id: "thoughtLevel" },
+        ],
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.sendUserMessage("hello", {
+      runtimeConfig: { model: "gpt-5.5", thoughtLevel: "high" },
+    })
+
+    expect(requests.map((request) => request.method)).toEqual([
+      "initialize",
+      "session/new",
+      "session/set_config_option",
+      "session/set_config_option",
+      "session/prompt",
+      "session/set_config_option",
+      "session/set_config_option",
+    ])
+    expect(requests[2]?.params).toMatchObject({
+      configId: "model",
+      sessionId: "session-1",
+      value: "gpt-5.5",
+    })
+    expect(requests[3]?.params).toMatchObject({
+      configId: "thoughtLevel",
+      sessionId: "session-1",
+      value: "high",
+    })
+    expect(requests[5]?.params).toMatchObject({
+      configId: "model",
+      sessionId: "session-1",
+      value: "default-model",
+    })
+    expect(requests[6]?.params).toMatchObject({
+      configId: "thoughtLevel",
+      sessionId: "session-1",
+      value: "medium",
+    })
+  })
 })
 
 function createFakeAcpProcess(options: {
+  configOptions?: Array<{ currentValue: string; id: string }>
   promptResult?: unknown
+  requests?: JsonRpcMessage[]
   updates: Array<Record<string, unknown>>
 }): () => ChildProcessWithoutNullStreams {
   return () => {
@@ -159,7 +210,9 @@ function createFakeAcpProcess(options: {
             if (!line.trim()) {
               continue
             }
-            handleRequest(JSON.parse(line) as JsonRpcMessage, stdout, options)
+            const message = JSON.parse(line) as JsonRpcMessage
+            options.requests?.push(message)
+            handleRequest(message, stdout, options)
           }
           callback()
         } catch (error) {
@@ -179,7 +232,11 @@ function createFakeAcpProcess(options: {
 function handleRequest(
   message: JsonRpcMessage,
   stdout: PassThrough,
-  options: { promptResult?: unknown; updates: Array<Record<string, unknown>> },
+  options: {
+    configOptions?: Array<{ currentValue: string; id: string }>
+    promptResult?: unknown
+    updates: Array<Record<string, unknown>>
+  },
 ) {
   if (message.method === "initialize") {
     writeJson(stdout, {
@@ -191,7 +248,31 @@ function handleRequest(
   }
 
   if (message.method === "session/new") {
-    writeJson(stdout, { id: message.id, jsonrpc: "2.0", result: { sessionId: "session-1" } })
+    writeJson(stdout, {
+      id: message.id,
+      jsonrpc: "2.0",
+      result: { configOptions: options.configOptions, sessionId: "session-1" },
+    })
+    return
+  }
+
+  if (message.method === "session/set_config_option") {
+    const params =
+      message.params && typeof message.params === "object" && !Array.isArray(message.params)
+        ? (message.params as Record<string, unknown>)
+        : {}
+    const configId = typeof params.configId === "string" ? params.configId : undefined
+    const value = typeof params.value === "string" ? params.value : undefined
+    if (configId && value) {
+      options.configOptions = (options.configOptions ?? []).map((option) =>
+        option.id === configId ? { ...option, currentValue: value } : option,
+      )
+    }
+    writeJson(stdout, {
+      id: message.id,
+      jsonrpc: "2.0",
+      result: { configOptions: options.configOptions },
+    })
     return
   }
 
