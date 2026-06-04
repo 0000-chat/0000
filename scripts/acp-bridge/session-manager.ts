@@ -2,14 +2,17 @@ import {
   type HermesAcpMcpServer,
   type HermesAcpPromptResult,
   HermesAcpSession,
+  resolveRuntimeConfigApplication,
 } from "./acp-session"
 import { type BridgeLogEntry, type BridgeLogger, redactLogValue } from "./bridge-log"
-import type { BridgeEventInput, ConvexBridgeCloudClient } from "./convex-http"
+import type { BridgeEventInput } from "./convex-http"
 import type { NormalizedBridgeEvent } from "./event-normalizer"
 import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
+import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
 
 export type BridgeSessionQueueItem = {
   id: string
+  claimId?: string
   type?: string
   kind?: string
   threadId?: string
@@ -25,6 +28,10 @@ export type BridgeSessionQueueItem = {
   approvalLevel?: "ask" | "full_permissions"
   externalRequestId?: string
   externalSessionId?: string
+  organizationId?: string
+  mailboxConversationId?: string
+  runtimeConfig?: Record<string, string | undefined>
+  traceId?: string
   agentName?: string
   bridgeProfileId?: string
   hermesProfileName?: string
@@ -32,6 +39,7 @@ export type BridgeSessionQueueItem = {
 
 export type ManagedAcpSession = {
   readonly sessionId?: string
+  start?(): Promise<string>
   sendUserMessage(
     text: string,
     options?: {
@@ -40,13 +48,18 @@ export type ManagedAcpSession = {
       autoApprovePermissionRequests?: boolean
     },
   ): Promise<HermesAcpPromptResult>
-  cancel(): Promise<void>
+  cancel(): Promise<boolean | void>
   close(): Promise<void>
   respondToPermissionRequest?(
     externalRequestId: string,
     response: { approved: boolean; reason?: string },
   ): Promise<boolean>
   hasPendingPermissionRequests?(): boolean
+  getExternalContinuityState?(): {
+    attempted: boolean
+    fallback: boolean
+    loaded: boolean
+  }
 }
 
 export type BridgeSessionContext = {
@@ -72,11 +85,21 @@ type BridgeSessionRecord = {
   runtimeProfile?: BridgeRuntimeProfile
   hermesProfileName?: string
   generation: number
+  providerSessionKey: string
+  scopeConversationId: string
+  scopeKeyWithoutAgent: string
   idleTimer?: ReturnType<typeof setTimeout>
   lastUsedAt: number
 }
 
-type BridgeSessionCloudClient = Pick<ConvexBridgeCloudClient, "appendEvents" | "markResult">
+type BridgeSessionCloudClient = {
+  appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>
+  markResult(
+    commandId: string,
+    result: Record<string, unknown>,
+    claimId?: string,
+  ): Promise<Record<string, unknown>>
+}
 
 type EventWriteOutcome = { ok: true; count: number } | { ok: false; count: number; error: Error }
 
@@ -99,6 +122,7 @@ export type BridgeSessionManagerOptions = {
   allowRemoteCwd?: boolean
   resumeEnabled?: boolean
   log?: BridgeLogger
+  supervisor?: BridgeSupervisor
 }
 
 export type BridgeSessionManagerStatus = {
@@ -146,6 +170,7 @@ export class BridgeSessionManager {
     context: Pick<BridgeSessionContext, "cwd" | "sessionKey" | "threadId">,
   ) => HermesAcpMcpServer[]
   private readonly log?: BridgeLogger
+  private readonly supervisor?: BridgeSupervisor
   private readonly idleSessionTtlMs: number
   private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
@@ -169,6 +194,7 @@ export class BridgeSessionManager {
     this.runtimeProfiles = options.runtimeProfiles ?? []
     this.requestTimeoutMs = options.requestTimeoutMs
     this.log = options.log
+    this.supervisor = options.supervisor
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
     this.allowRemoteCwd = options.allowRemoteCwd === true
     this.resumeEnabled = options.resumeEnabled === true
@@ -212,6 +238,8 @@ export class BridgeSessionManager {
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
     const type = normalizeType(item)
+    this.supervisor?.recordQueued(this.supervisorWorkItem(item))
+    this.supervisor?.recordClaimed(this.supervisorWorkItem(item))
     this.writeLog({
       level: "info",
       event: "bridge.queue_item.start",
@@ -225,7 +253,7 @@ export class BridgeSessionManager {
     })
     try {
       if (type === "ping") {
-        await this.cloudClient.markResult(item.id, { ok: true, kind: "pong" })
+        await this.markQueueResult(item, { ok: true, kind: "pong" })
         this.writeQueueCompleteLog(item, type)
         return
       }
@@ -244,19 +272,47 @@ export class BridgeSessionManager {
         return
       }
 
-      if (type === "cancel") {
-        await this.handleCancel(item)
+      if (type === "cancel" || type === "cancel-session") {
+        this.supervisor?.recordCancelling(this.supervisorWorkItem(item))
+        const cancelled = await this.handleCancel(item)
+        if (cancelled) {
+          this.supervisor?.recordCancelled(this.supervisorWorkItem(item))
+        } else {
+          this.supervisor?.recordFailed(this.supervisorWorkItem(item), "cancel_not_acknowledged")
+        }
+        this.writeQueueCompleteLog(item, type)
+        return
+      }
+
+      if (type === "close-session") {
+        await this.handleCloseSession(item)
+        this.writeQueueCompleteLog(item, type)
+        return
+      }
+
+      if (type === "steer-session") {
+        await this.handleSteerSession(item)
+        this.writeQueueCompleteLog(item, type)
+        return
+      }
+
+      if (type === "revive-session") {
+        await this.handleReviveSession(item)
         this.writeQueueCompleteLog(item, type)
         return
       }
 
       if (isApprovalResponseType(type)) {
         await this.handleApprovalResponse(item, type)
+        this.supervisor?.recordInteractionAnswered(
+          this.supervisorWorkItem(item),
+          item.externalRequestId ?? item.approvalId ?? item.id,
+        )
         this.writeQueueCompleteLog(item, type)
         return
       }
 
-      await this.cloudClient.markResult(item.id, {
+      await this.markQueueResult(item, {
         ok: false,
         error: `unsupported command type: ${type}`,
       })
@@ -277,10 +333,11 @@ export class BridgeSessionManager {
       if (type === "prompt") {
         this.writeAgentTurnLog("agent.turn.failed", item, type, message)
       }
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), message)
       await this.drainEventWrites()
       const terminal = isTerminalQueueItemError(type, message)
-      await this.cloudClient.markResult(
-        item.id,
+      await this.markQueueResult(
+        item,
         terminal
           ? {
               ok: false,
@@ -315,7 +372,7 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
-    const sessionKey = sessionKeyForItem(item) ?? threadId
+    const sessionKey = this.sessionKeyForItem(item) ?? threadId
     const prompt = item.prompt
     const threadHistory = normalizeThreadHistory(item.threadHistory)
     const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
@@ -336,11 +393,24 @@ export class BridgeSessionManager {
       systemPrompt?: string
       threadHistory?: string
       autoApprovePermissionRequests?: boolean
+      resultMetadata?: Record<string, unknown>
+      sessionKey?: string
     } = {},
   ): Promise<void> {
-    const session = await this.ensureSession(item)
+    const session = options.sessionKey
+      ? this.sessions.get(options.sessionKey)
+      : await this.ensureSession(item)
+    if (!session) {
+      throw new Error(`ACP session ${options.sessionKey} is no longer active`)
+    }
+    const {
+      resultMetadata: baseResultMetadata,
+      sessionKey: _resolvedSessionKey,
+      ...acpPromptOptions
+    } = options
     session.lastUsedAt = Date.now()
     this.clearIdleTimer(session)
+    this.supervisor?.recordPromptPersisted(this.supervisorWorkItem(item, session))
     this.enqueueEventWrite(session, {
       externalEventId: `${item.id}:message_started`,
       source: "bridge",
@@ -353,8 +423,19 @@ export class BridgeSessionManager {
       },
     })
     let result: HermesAcpPromptResult
+    const runtimeConfigApplication = applyRuntimeConfigFallback(item, session.runtimeProfile)
+    const resultMetadata =
+      runtimeConfigApplication === undefined
+        ? baseResultMetadata
+        : {
+            ...baseResultMetadata,
+            runtimeConfigApplied: runtimeConfigApplication.applied,
+            runtimeConfigDiagnostics: runtimeConfigApplication.diagnostics,
+            runtimeConfigPolicy: runtimeConfigApplication.policy,
+          }
     try {
-      result = await session.acp.sendUserMessage(prompt, options)
+      this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session))
+      result = await session.acp.sendUserMessage(prompt, acpPromptOptions)
     } catch (error) {
       await this.closeSession(session.sessionKey)
       throw error
@@ -367,6 +448,7 @@ export class BridgeSessionManager {
       source: "bridge",
       eventType: "message_completed",
       payload: {
+        finalText: result.finalText,
         queueId: item.id,
         stopReason: result.stopReason,
         text: result.text,
@@ -374,20 +456,41 @@ export class BridgeSessionManager {
       part: {
         type: "event",
         text: result.text,
-        json: { stopReason: result.stopReason },
+        json: { finalText: result.finalText, stopReason: result.stopReason },
         status: "complete",
       },
     })
+    if (result.finalText?.withheld) {
+      this.writeLog({
+        level: "warn",
+        event: "agent.final_text.withheld",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.providerSessionKey,
+        acpSessionId: result.sessionId,
+        answerChunkCount: result.finalText.answerChunkCount,
+        answerTextLength: result.finalText.answerTextLength,
+        reason: result.finalText.reason,
+        runtimeId: result.finalText.runtimeId,
+        thoughtChunkCount: result.finalText.thoughtChunkCount,
+        toolEventCount: result.finalText.toolEventCount,
+        trustedFinalResultText: result.finalText.trustedFinalResultText,
+      })
+    }
     await this.drainEventWrites()
-    await this.cloudClient.markResult(item.id, {
+    await this.markQueueResult(item, {
       ok: true,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
       acpSessionId: result.sessionId,
       acpCapabilities: result.capabilities,
       stopReason: result.stopReason,
       text: result.text,
       result: result.rawResult,
+      ...resultMetadata,
     })
+    this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session))
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
     this.writeLog({
@@ -397,7 +500,7 @@ export class BridgeSessionManager {
       queueType: normalizeType(item),
       threadId: session.threadId,
       sessionId: item.sessionId,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
       acpSessionId: result.sessionId,
     })
   }
@@ -464,24 +567,51 @@ export class BridgeSessionManager {
   }
 
   private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
-    const key = sessionKeyForItem(item)
+    const key = this.findSessionKeyForItem(item)
+    if (type === "choice-response") {
+      const choiceId = item.approvalOutcome?.trim()
+      if (!choiceId) {
+        throw new Error(`choice response ${item.id} is missing choice id`)
+      }
+      const threadId = item.threadId ?? item.sessionId
+      if (!key && hasExplicitRuntimeScope(item)) {
+        throw new Error(
+          `choice response ${item.id} does not match an active ACP session for the requested runtime`,
+        )
+      }
+      const sessionKey = key ?? threadId
+      if (!sessionKey) {
+        throw new Error(`choice response ${item.id} is missing threadId`)
+      }
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
+      const threadHistory = normalizeThreadHistory(item.threadHistory)
+      this.writeLog({
+        level: "info",
+        event: "bridge.choice_response.continuation",
+        queueId: item.id,
+        queueType: type,
+        threadId,
+        agentSessionId: key,
+        hasActiveSession: this.sessions.has(sessionKey),
+        hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
+      })
+      await this.runSerializedPrompt(sessionKey, item.id, () =>
+        this.handlePromptNow(item, `Selected choice: ${choiceId}`, {
+          systemPrompt,
+          threadHistory,
+          sessionKey: key,
+          resultMetadata: { choiceId },
+        }),
+      )
+      return
+    }
+
     let session = key ? this.sessions.get(key) : undefined
     if (!session && key && this.sessionQueueState.has(key)) {
       session = await this.waitForSession(key)
     }
     if (!session) {
       throw new Error(`approval response ${item.id} does not match an active ACP session`)
-    }
-    if (type === "choice-response") {
-      const choiceId = item.approvalOutcome?.trim()
-      if (!choiceId) {
-        throw new Error(`choice response ${item.id} is missing choice id`)
-      }
-      await session.acp.sendUserMessage(`Selected choice: ${choiceId}`)
-      session.lastUsedAt = Date.now()
-      this.scheduleIdleClose(session)
-      await this.cloudClient.markResult(item.id, { ok: true, choiceId })
-      return
     }
     const externalRequestId = item.externalRequestId ?? item.approvalId
     if (!externalRequestId) {
@@ -497,7 +627,7 @@ export class BridgeSessionManager {
     }
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
-    await this.cloudClient.markResult(item.id, { ok: true, approved })
+    await this.markQueueResult(item, { ok: true, approved })
   }
 
   private async waitForSession(sessionKey: string): Promise<BridgeSessionRecord | undefined> {
@@ -522,20 +652,142 @@ export class BridgeSessionManager {
     const session = await this.ensureSession(item)
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
-    await this.cloudClient.markResult(item.id, {
+    await this.markQueueResult(item, {
       ok: true,
       started: true,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
     })
   }
 
-  private async handleCancel(item: BridgeSessionQueueItem): Promise<void> {
-    const key = sessionKeyForItem(item)
+  private async handleCancel(item: BridgeSessionQueueItem): Promise<boolean> {
+    const key = this.findSessionKeyForItem(item)
     const session = key ? this.sessions.get(key) : undefined
-    if (session) {
-      await session.acp.cancel()
+    if (!session) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "cancel_not_acknowledged",
+        terminal: true,
+      })
+      return false
     }
-    await this.cloudClient.markResult(item.id, { ok: true, cancelled: Boolean(session) })
+    const acknowledged = (await session.acp.cancel()) !== false
+    if (!acknowledged) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "cancel_not_acknowledged",
+        terminal: true,
+      })
+      return false
+    }
+    this.enqueueEventWrite(session, {
+      externalEventId: `${item.id}:message_cancelled`,
+      source: "bridge",
+      eventType: "message_cancelled",
+      payload: { queueId: item.id, queueType: normalizeType(item), stopReason: "cancelled" },
+      part: {
+        type: "event",
+        text: "Run cancelled.",
+        status: "complete",
+      },
+    })
+    await this.drainEventWrites()
+    await this.markQueueResult(item, {
+      ok: true,
+      cancelled: true,
+      stopReason: "cancelled",
+      terminal: true,
+    })
+    return true
+  }
+
+  private async handleCloseSession(item: BridgeSessionQueueItem): Promise<void> {
+    const key = this.findSessionKeyForItem(item)
+    const closed = Boolean(key && this.sessions.has(key))
+    if (key) {
+      await this.closeSession(key)
+    }
+    await this.markQueueResult(item, { ok: true, closed })
+  }
+
+  private async handleSteerSession(item: BridgeSessionQueueItem): Promise<void> {
+    const instruction = item.prompt?.trim()
+    if (!instruction) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "steer_empty_instruction",
+        terminal: true,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), "steer_empty_instruction")
+      return
+    }
+    const key = this.findSessionKeyForItem(item)
+    const session = key ? this.sessions.get(key) : undefined
+    if (!key || !session) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "session_replacement_required",
+        terminal: true,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), "session_replacement_required")
+      return
+    }
+    this.supervisor?.recordSteering(this.supervisorWorkItem(item, session))
+    const acknowledged = (await session.acp.cancel()) !== false
+    if (!acknowledged) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "session_replacement_required",
+        terminal: true,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "session_replacement_required")
+      return
+    }
+    await this.handlePromptNow(item, instruction, {
+      sessionKey: key,
+      resultMetadata: { steered: true },
+    })
+  }
+
+  private async handleReviveSession(item: BridgeSessionQueueItem): Promise<void> {
+    const existingSessionKey = this.findSessionKeyForItem(item)
+    const existingSession = existingSessionKey ? this.sessions.get(existingSessionKey) : undefined
+    const session = await this.ensureSession(item)
+    const createdForRevive =
+      !existingSession ||
+      existingSession.sessionKey !== session.sessionKey ||
+      existingSession.generation !== session.generation
+    if (createdForRevive && this.resumeEnabled && item.externalSessionId && session.acp.start) {
+      try {
+        await session.acp.start()
+      } catch (error) {
+        await this.closeSession(session.sessionKey)
+        throw error
+      }
+    }
+    const nativeLoad =
+      createdForRevive &&
+      this.resumeEnabled &&
+      Boolean(item.externalSessionId) &&
+      session.acp.getExternalContinuityState?.().loaded === true
+    session.lastUsedAt = Date.now()
+    this.scheduleIdleClose(session)
+    await this.markQueueResult(item, {
+      ok: true,
+      revived: true,
+      reviveMode: nativeLoad ? "native-load" : "thread-history",
+      agentSessionId: session.providerSessionKey,
+    })
+  }
+
+  private async markQueueResult(
+    item: BridgeSessionQueueItem,
+    result: Record<string, unknown>,
+  ): Promise<void> {
+    await this.cloudClient.markResult(
+      item.id,
+      item.claimId ? { ...result, claimId: item.claimId } : result,
+      item.claimId,
+    )
   }
 
   private async closeSession(sessionKey: string): Promise<void> {
@@ -554,8 +806,9 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
-    this.assertRuntimeSelectionIsUnambiguous(item)
-    const sessionKey = sessionKeyForItem(item) ?? threadId
+    const sessionKey = this.sessionKeyForItem(item) ?? threadId
+    const providerSessionKey = providerSessionKeyForItem(item) ?? threadId
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
     const existing = this.sessions.get(sessionKey)
     if (existing) {
       existing.agentName = normalizeAgentName(item.agentName) ?? existing.agentName
@@ -590,6 +843,9 @@ export class BridgeSessionManager {
       cwd,
       agentName: normalizeAgentName(item.agentName),
       generation,
+      providerSessionKey,
+      scopeConversationId: item.mailboxConversationId ?? threadId,
+      scopeKeyWithoutAgent,
       lastUsedAt: Date.now(),
       acp: this.createSession({
         agentCommand,
@@ -599,10 +855,19 @@ export class BridgeSessionManager {
         threadId,
         cwd,
         hermesProfileName: item.hermesProfileName,
-        initialSessionId: item.externalSessionId,
+        initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
         mcpServers: this.createMcpServers({ cwd: item.cwd, sessionKey, threadId }),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
+            this.supervisor?.recordProviderEvent(this.supervisorWorkItem(item, record), {
+              eventType: event.eventType,
+            })
+            if (event.part?.type === "approval_request" || event.part?.type === "choice") {
+              this.supervisor?.recordWaitingForInteraction(
+                this.supervisorWorkItem(item, record),
+                event.externalEventId ?? item.externalRequestId ?? item.approvalId ?? item.id,
+              )
+            }
             this.enqueueEventWrite(record, event)
           }
         },
@@ -615,6 +880,7 @@ export class BridgeSessionManager {
       runtimeProfile,
       hermesProfileName: item.hermesProfileName,
     }
+    await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey)
     this.sessions.set(sessionKey, record)
     return record
   }
@@ -623,6 +889,13 @@ export class BridgeSessionManager {
     session: BridgeSessionRecord,
     item: BridgeSessionQueueItem,
   ): boolean {
+    const requestedCwd = this.allowRemoteCwd ? item.cwd : undefined
+    if (
+      session.runtimeProfile?.identityRules?.cwdBoundSessions &&
+      session.cwd !== requestedCwd
+    ) {
+      return false
+    }
     if (item.bridgeProfileId) {
       return session.runtimeProfile?.id === item.bridgeProfileId
     }
@@ -630,25 +903,6 @@ export class BridgeSessionManager {
       return session.hermesProfileName === item.hermesProfileName
     }
     return true
-  }
-
-  private assertRuntimeSelectionIsUnambiguous(item: BridgeSessionQueueItem): void {
-    const type = normalizeType(item)
-    if (type !== "prompt" && type !== "start-session") {
-      return
-    }
-    if (item.bridgeProfileId || item.hermesProfileName) {
-      return
-    }
-    const availableProfiles = this.runtimeProfiles.filter((profile) => profile.status === "available")
-    if (availableProfiles.length <= 1) {
-      return
-    }
-    throw new Error(
-      `Bridge runtime profile is required for ${type} queue item ${item.id} because this bridge has multiple available runtime profiles: ${availableProfiles
-        .map((profile) => profile.id)
-        .join(", ")}`,
-    )
   }
 
   private resolveRuntimeProfileForItem(
@@ -667,6 +921,12 @@ export class BridgeSessionManager {
     }
     if (item.hermesProfileName) {
       return undefined
+    }
+    const availableProfiles = this.runtimeProfiles.filter((profile) => profile.status === "available")
+    if (availableProfiles.length > 1) {
+      throw new Error(
+        "Bridge runtime profile is required when multiple ACP runtimes are available",
+      )
     }
     return findRuntimeProfile(this.runtimeProfiles, undefined)
   }
@@ -714,7 +974,7 @@ export class BridgeSessionManager {
       level: "info",
       event: "bridge.session.idle_close",
       threadId: session.threadId,
-      agentSessionId: session.sessionKey,
+      agentSessionId: session.providerSessionKey,
     })
     await this.closeSession(sessionKey)
   }
@@ -733,7 +993,7 @@ export class BridgeSessionManager {
   ): void {
     const queueId = this.sessionQueueState.get(record.sessionKey)?.runningQueueItemId
     const base = {
-      agentSessionId: record.sessionKey,
+      agentSessionId: record.providerSessionKey,
       queueId,
       threadId: record.threadId,
       timelineSequence: sequence,
@@ -780,7 +1040,7 @@ export class BridgeSessionManager {
     const message = String(redactLogValue(error.message))
     this.enqueueBridgeEvent({
       threadId: record.threadId,
-      agentSessionId: record.sessionKey,
+      agentSessionId: record.providerSessionKey,
       eventType: "bridge_error",
       sequence,
       rawPayload: { message },
@@ -937,6 +1197,121 @@ export class BridgeSessionManager {
     })
   }
 
+  private supervisorWorkItem(
+    item: BridgeSessionQueueItem,
+    session?: BridgeSessionRecord,
+  ): BridgeSupervisorWorkItem {
+    return {
+      agentId:
+        item.bridgeProfileId ??
+        item.hermesProfileName ??
+        item.agentName ??
+        session?.runtimeProfile?.id ??
+        "default-agent",
+      agentName: item.agentName,
+      bridgeDeviceId: this.deviceId,
+      bridgeProfileId: item.bridgeProfileId,
+      claimId: item.claimId,
+      hermesProfileName: item.hermesProfileName,
+      id: item.id,
+      organizationId: item.organizationId,
+      runtimeProfileId: item.bridgeProfileId ?? session?.runtimeProfile?.id,
+      sessionId: item.sessionId,
+      threadId: item.threadId ?? item.sessionId ?? session?.threadId,
+      traceId: item.traceId,
+      type: item.type,
+      kind: item.kind,
+    }
+  }
+
+  private sessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
+    const providerSessionKey = providerSessionKeyForItem(item)
+    if (!providerSessionKey) {
+      return undefined
+    }
+    const threadId = item.threadId ?? item.sessionId ?? "unknown-thread"
+    return [
+      item.organizationId ?? "unknown-org",
+      this.deviceId ?? "unknown-device",
+      item.bridgeProfileId ?? item.hermesProfileName ?? item.agentName ?? "unknown-agent",
+      item.mailboxConversationId ?? threadId,
+      providerSessionKey,
+    ]
+      .map(encodeSessionKeyPart)
+      .join(":")
+  }
+
+  private findSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
+    const exact = this.sessionKeyForItem(item)
+    if (exact && (this.sessions.has(exact) || this.sessionQueueState.has(exact))) {
+      return exact
+    }
+    if (hasExplicitRuntimeScope(item)) {
+      return undefined
+    }
+
+    const providerSessionKey = providerSessionKeyForItem(item)
+    const threadId = item.threadId ?? item.sessionId
+    if (!providerSessionKey || !threadId) {
+      return exact
+    }
+
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
+    const scopeMatch = this.latestSessionMatching(
+      (session) => session.scopeKeyWithoutAgent === scopeKeyWithoutAgent,
+    )
+    if (scopeMatch) {
+      return scopeMatch.sessionKey
+    }
+
+    const providerThreadMatches = Array.from(this.sessions.values()).filter(
+      (session) =>
+        session.providerSessionKey === providerSessionKey &&
+        session.scopeConversationId === (item.mailboxConversationId ?? threadId),
+    )
+    if (providerThreadMatches.length > 1) {
+      throw new Error(
+        `queue item ${item.id} matches multiple active ACP sessions; include organization and runtime scope`,
+      )
+    }
+    return providerThreadMatches[0]?.sessionKey
+  }
+
+  private latestSessionMatching(
+    predicate: (session: BridgeSessionRecord) => boolean,
+  ): BridgeSessionRecord | undefined {
+    return Array.from(this.sessions.values())
+      .filter(predicate)
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0]
+  }
+
+  private scopeKeyWithoutAgentForItem(
+    item: BridgeSessionQueueItem,
+    providerSessionKey: string,
+    threadId: string,
+  ): string {
+    return [
+      item.organizationId ?? "unknown-org",
+      this.deviceId ?? "unknown-device",
+      item.mailboxConversationId ?? threadId,
+      providerSessionKey,
+    ]
+      .map(encodeSessionKeyPart)
+      .join(":")
+  }
+
+  private async closeReplacedRuntimeSessions(
+    scopeKeyWithoutAgent: string,
+    nextSessionKey: string,
+  ): Promise<void> {
+    const replaced = Array.from(this.sessions.values()).filter(
+      (session) =>
+        session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
+        session.sessionKey !== nextSessionKey,
+    )
+    await Promise.all(replaced.map((session) => this.closeSession(session.sessionKey)))
+  }
+
   private writeLog(entry: BridgeLogEntry): void {
     this.log?.(redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry)
   }
@@ -994,7 +1369,7 @@ function toBridgeEvent(
   const shouldRedactPayload = event.eventType === "bridge_error" || event.part?.type === "error"
   return {
     threadId: record.threadId,
-    agentSessionId: record.sessionKey,
+    agentSessionId: record.providerSessionKey,
     eventType: event.eventType,
     sequence,
     rawPayload: shouldRedactPayload ? redactLogValue(event.payload) : event.payload,
@@ -1049,8 +1424,29 @@ function normalizeThreadHistory(threadHistory: string | undefined): string | und
   return normalized ? normalized : undefined
 }
 
-function sessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
+function providerSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
   return item.agentSessionId ?? item.sessionId ?? item.threadId
+}
+
+function hasExplicitRuntimeScope(item: BridgeSessionQueueItem): boolean {
+  return Boolean(item.bridgeProfileId ?? item.hermesProfileName)
+}
+
+function applyRuntimeConfigFallback(
+  item: BridgeSessionQueueItem,
+  profile: BridgeRuntimeProfile | undefined,
+): ReturnType<typeof resolveRuntimeConfigApplication> | undefined {
+  if (!item.runtimeConfig || !profile?.runtimeConfigOptions) {
+    return undefined
+  }
+  return resolveRuntimeConfigApplication({
+    requested: item.runtimeConfig,
+    supportedOptions: profile.runtimeConfigOptions,
+  })
+}
+
+function encodeSessionKeyPart(value: string): string {
+  return encodeURIComponent(value)
 }
 
 function readToolLogFields(value: unknown): { toolCallId?: string; toolName: string } {

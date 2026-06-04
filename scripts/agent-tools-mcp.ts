@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod/v4"
 
-import { buildZeroChatMcpGuideText } from "./hermes-bridge/zero-chat-policy"
+import { buildZeroChatMcpGuideText } from "./acp-bridge/zero-chat-policy"
 
 export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "userPrompts.requestChoice",

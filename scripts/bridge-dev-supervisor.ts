@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import {
   shouldRestartBridgeForDevHotReload,
   type DevHotReloadStatus,
-} from "./hermes-bridge/dev-hot-reload"
+} from "./acp-bridge/dev-hot-reload"
 
 type SupervisorConfig = {
   command: string[]
@@ -18,7 +18,7 @@ type SupervisorConfig = {
 }
 
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json")
-const DEFAULT_WATCH_PATHS = ["scripts/acp-bridge.ts", "scripts/hermes-bridge"]
+const DEFAULT_WATCH_PATHS = ["scripts/acp-bridge.ts", "scripts/acp-bridge"]
 
 async function main() {
   const config = parseArgs(process.argv.slice(2))

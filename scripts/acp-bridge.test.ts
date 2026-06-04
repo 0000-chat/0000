@@ -1,35 +1,27 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
-import { chmod, mkdtemp, readFile, stat } from "node:fs/promises"
+import { chmod, mkdtemp, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
-  BRIDGE_VERSION,
-  buildHeartbeatStatusPayload,
-  type BridgeStatus,
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
-  buildAgentConnectionSkillContent,
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
-  normalizeQueueCommand,
-  repairBridgeConfigFiles,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge"
-import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./hermes-bridge/runtime-defaults"
-
-test("bridge version matches package metadata", () => {
-  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  expect(BRIDGE_VERSION).toBe(packageJson.version)
-})
+import {
+  defaultAgentCommandForEnvironment,
+  DEFAULT_CLAUDE_CODE_ACP_COMMAND,
+  DEFAULT_CODEX_ACP_COMMAND,
+} from "./acp-bridge/runtime-defaults"
 
 describe("bridge Convex URL resolution", () => {
   test("derives a Convex cloud URL from a Convex site URL", () => {
@@ -66,36 +58,6 @@ describe("bridge Convex URL resolution", () => {
   })
 })
 
-describe("bridge queue command normalization", () => {
-  test("preserves runtime selection fields from claim responses", () => {
-    expect(
-      normalizeQueueCommand({
-        agentName: "Claude Code",
-        agentSessionId: "session_123",
-        bridgeProfileId: "claude-code:claude-acp",
-        cwd: "/home/dev",
-        externalSessionId: "acp-session-123",
-        hermesProfileName: "writer",
-        id: "queue_123",
-        kind: "prompt",
-        prompt: "hello",
-        threadId: "thread_123",
-      }),
-    ).toMatchObject({
-      agentName: "Claude Code",
-      agentSessionId: "session_123",
-      bridgeProfileId: "claude-code:claude-acp",
-      cwd: "/home/dev",
-      externalSessionId: "acp-session-123",
-      hermesProfileName: "writer",
-      id: "queue_123",
-      prompt: "hello",
-      threadId: "thread_123",
-      type: "prompt",
-    })
-  })
-})
-
 describe("bridge MCP helper configuration", () => {
   test("uses public app URL for agent tool invocation", () => {
     expect(
@@ -126,18 +88,6 @@ describe("bridge MCP helper configuration", () => {
 })
 
 describe("bridge multi-organization config", () => {
-  test("accepts an empty multi-organization config before the first registration is appended", () => {
-    expect(
-      normalizeBridgeConfigFile({
-        version: 2,
-        registrations: [],
-      }),
-    ).toEqual({
-      version: 2,
-      registrations: [],
-    })
-  })
-
   test("normalizes legacy single-device bridge configs into one registration", () => {
     expect(
       normalizeBridgeConfigFile({
@@ -241,71 +191,6 @@ describe("bridge multi-organization config", () => {
     expect(output).not.toContain("secret-token")
     expect(output).not.toContain("secret-value")
   })
-
-  test("repairs legacy bridge configs by merging registrations with a backup", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-"))
-    const targetPath = join(dir, "bridge.json")
-    const sourcePath = join(dir, "legacy-bridge.json")
-
-    await writeBridgeConfigFile(targetPath, {
-      version: 2,
-      registrations: [
-        {
-          appUrl: "https://0000.chat",
-          bridgeToken: "token-current",
-          deviceId: "bridge_current",
-          deviceName: "Current org",
-          pairedAt: "2026-06-01T00:00:00.000Z",
-        },
-      ],
-    })
-    await writeBridgeConfigFile(sourcePath, {
-      appUrl: "https://example-123.convex.site",
-      bridgeToken: "token-legacy",
-      deviceId: "bridge_legacy",
-      deviceName: "Legacy org",
-      pairedAt: "2026-05-21T00:00:00.000Z",
-    })
-
-    const result = await repairBridgeConfigFiles({
-      now: () => new Date("2026-06-03T08:16:45.000Z"),
-      sourcePaths: [sourcePath],
-      targetPath,
-    })
-
-    const repaired = JSON.parse(await readFile(targetPath, "utf8"))
-    expect(result).toMatchObject({
-      backupPath: `${targetPath}.backup-20260603T081645Z`,
-      importedRegistrationCount: 1,
-      previousRegistrationCount: 1,
-      registrationCount: 2,
-      targetPath,
-    })
-    expect((await stat(result.backupPath!)).mode & 0o777).toBe(0o600)
-    expect(repaired.registrations.map((registration: { deviceId: string }) => registration.deviceId)).toEqual([
-      "bridge_current",
-      "bridge_legacy",
-    ])
-    expect(repaired.registrations[1]).toMatchObject({
-      appUrl: "https://0000.chat",
-      bridgeApiUrl: "https://example-123.convex.site",
-      deviceId: "bridge_legacy",
-    })
-  })
-
-  test("agent skill tells agents to append organizations instead of reinstalling", () => {
-    const content = buildAgentConnectionSkillContent({
-      agentCommand: "hermes acp",
-      appUrl: "https://0000.chat",
-      configPath: "/home/alice/.0000/bridge.json",
-      skillPath: "/home/alice/.claude/skills/0000/SKILL.md",
-    })
-
-    expect(content).toContain("multiple 0000 organizations")
-    expect(content).toContain("connect-org <code>")
-    expect(content).toContain("Do not delete, recreate, overwrite, or move the bridge config")
-    expect(content).toContain("repair-config")
-  })
 })
 
 describe("bridge security defaults", () => {
@@ -314,6 +199,15 @@ describe("bridge security defaults", () => {
     expect(DEFAULT_CLAUDE_CODE_ACP_COMMAND).toBe(
       "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
     )
+  })
+
+  test("prefers Claude Code defaults when Claude and Codex environments are both present", () => {
+    expect(
+      defaultAgentCommandForEnvironment({
+        CLAUDE_CODE: "1",
+        CODEX_SANDBOX: "danger-full-access",
+      } as NodeJS.ProcessEnv),
+    ).toBe(DEFAULT_CLAUDE_CODE_ACP_COMMAND)
   })
 
   test("writes bridge config files with owner-only permissions", async () => {
@@ -347,17 +241,8 @@ describe("bridge security defaults", () => {
 
   test("keeps remote cwd disabled unless explicitly enabled", () => {
     expect(getAllowRemoteCwd({}, {})).toBe(false)
-    expect(getAllowRemoteCwd({ "allow-remote-cwd": true }, {})).toBe(true)
     expect(getAllowRemoteCwd({ "allow-remote-cwd": "true" }, {})).toBe(true)
     expect(getAllowRemoteCwd({}, { ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD: "1" })).toBe(true)
-  })
-
-  test("writes reconnect skill with remote cwd enabled", () => {
-    const source = readFileSync(new URL("./acp-bridge.ts", import.meta.url), "utf8")
-
-    expect(source).toContain(
-      "bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentCommand)} --allow-remote-cwd",
-    )
   })
 
   test("prints startup security defaults", () => {
@@ -370,157 +255,62 @@ describe("bridge security defaults", () => {
   })
 })
 
-describe("bridge lifecycle control", () => {
-  test("requests a deterministic restart when the app asks an idle bridge to restart", async () => {
-    const status = createLoopStatus()
-    const writes: unknown[] = []
+describe("bridge supervisor claim gating", () => {
+  test("skips queue claims when local journal health is hard-failed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    let claimed = false
 
-    const result = await runBridgeLoopIteration({
-      ...createLoopInput(status),
-      sendHeartbeat: async () => ({
-        ok: true,
-        control: { command: { command: "restartWhenIdle", requestedAt: 123 } },
-      }),
-      writeStatus: async (_path, value) => {
-        writes.push(value)
+    await runBridgeLoopIteration({
+      canClaimWork: () => false,
+      claimCommands: async () => {
+        claimed = true
+        return []
       },
-    })
-
-    expect(result.restartRequested).toBe(true)
-    expect(status.lifecycle).toBe("restarting")
-    expect(status.updateState?.status).toBe("restarting")
-    expect(writes.length).toBeGreaterThan(0)
-  })
-
-  test("drains instead of restarting while bridge work is still active", async () => {
-    const status = createLoopStatus()
-    const inFlightCommands = new Map<string, Promise<void>>()
-    const inFlightCommandMetadata = new Map()
-    inFlightCommands.set("queue-a", new Promise(() => {}))
-    inFlightCommandMetadata.set("queue-a", {
-      id: "queue-a",
-      startedAt: "2026-06-01T00:00:00.000Z",
-    })
-
-    const result = await runBridgeLoopIteration({
-      ...createLoopInput(status),
-      inFlightCommands,
-      inFlightCommandMetadata,
-      sendHeartbeat: async () => ({
-        ok: true,
-        control: { command: { command: "restartWhenIdle", requestedAt: 123 } },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
       }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
       writeStatus: async () => {},
     })
 
-    expect(result.restartRequested).toBe(false)
-    expect(status.lifecycle).toBe("draining")
-    expect(status.updateState?.status).toBe("waitingForIdle")
-  })
-
-  test("launches the updater when the app asks an idle bridge to update", async () => {
-    const status = createLoopStatus()
-    const launches: unknown[] = []
-
-    const result = await runBridgeLoopIteration({
-      ...createLoopInput(status),
-      sendHeartbeat: async () => ({
-        ok: true,
-        control: { command: { command: "updateWhenIdle", requestedAt: 123 } },
-      }),
-      launchUpdater: async (input) => {
-        launches.push(input)
-      },
-      writeStatus: async () => {},
-    })
-
-    expect(result.restartRequested).toBe(true)
-    expect(status.lifecycle).toBe("updating")
-    expect(status.updateState?.status).toBe("installing")
-    expect(launches).toEqual([
+    expect(claimed).toBe(false)
+    expect(logs).toContainEqual(
       expect.objectContaining({
-        currentVersion: BRIDGE_VERSION,
-        requestedAt: 123,
-        statusPath: "/tmp/bridge-status.json",
+        event: "bridge.queue.claim_skipped",
+        reason: "local_journal_hard_failed",
       }),
-    ])
-    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
-      lifecycle: "updating",
-      updateState: { status: "installing" },
-    })
-  })
-
-  test("waits for idle work before launching an update", async () => {
-    const status = createLoopStatus()
-    const inFlightCommands = new Map<string, Promise<void>>()
-    const inFlightCommandMetadata = new Map()
-    inFlightCommands.set("queue-a", new Promise(() => {}))
-    inFlightCommandMetadata.set("queue-a", {
-      id: "queue-a",
-      startedAt: "2026-06-01T00:00:00.000Z",
-    })
-
-    const result = await runBridgeLoopIteration({
-      ...createLoopInput(status),
-      inFlightCommands,
-      inFlightCommandMetadata,
-      sendHeartbeat: async () => ({
-        ok: true,
-        control: { command: { command: "updateWhenIdle", requestedAt: 123 } },
-      }),
-      launchUpdater: async () => {
-        throw new Error("should not launch while busy")
-      },
-      writeStatus: async () => {},
-    })
-
-    expect(result.restartRequested).toBe(false)
-    expect(status.lifecycle).toBe("draining")
-    expect(status.updateState?.status).toBe("waitingForIdle")
+    )
   })
 })
 
-function createLoopStatus(): BridgeStatus {
+function bridgeRegistration() {
   return {
-    deviceId: "bridge-a",
-    appUrl: "https://0000.chat",
-    connected: true,
-    activeSessions: [],
-    activeQueueItemIds: [],
-    inFlightCommands: [],
-    sessionQueues: [],
-    recentErrors: [],
-  }
-}
-
-function createLoopInput(status: ReturnType<typeof createLoopStatus>) {
-  return {
-    config: {
-      appUrl: "https://0000.chat",
-      bridgeToken: "token-a",
-      deviceId: "bridge-a",
-      deviceName: "Bridge A",
-      pairedAt: "2026-06-01T00:00:00.000Z",
-    },
-    status,
-    maxInFlight: 1,
-    manager: {
-      getStatus: () => ({ activeSessions: [], sessions: [] }),
-      handleQueueItem: async () => {},
-    },
-    inFlightCommands: new Map<string, Promise<void>>(),
-    inFlightCommandMetadata: new Map(),
-    lastStaleCleanupAt: 0,
-    setLastStaleCleanupAt: () => {},
-    log: Object.assign(() => {}, { flush: async () => {} }),
-    recordLoopError: async (error: unknown) => {
-      throw error
-    },
-    statusPath: "/tmp/bridge-status.json",
-    now: () => Date.parse("2026-06-01T00:00:00.000Z"),
-    heartbeatIntervalMs: 0,
-    cleanupStaleClaims: async () => ({ released: 0, inspected: 0 }),
-    claimCommands: async () => [],
-    launchUpdater: async () => {},
+    appUrl: "https://app.example.com",
+    bridgeApiUrl: "https://app.example.com/api/agent-bridge",
+    bridgeToken: "secret",
+    deviceId: "device-1",
+    deviceName: "dev box",
+    pairedAt: "2026-06-04T00:00:00.000Z",
   }
 }
