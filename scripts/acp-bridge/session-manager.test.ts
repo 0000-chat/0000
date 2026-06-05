@@ -4,6 +4,39 @@ import { BridgeSupervisor } from "./bridge-supervisor"
 import { BridgeSessionManager, type BridgeSessionContext } from "./session-manager"
 
 describe("bridge session cwd safety", () => {
+  test("does not let a stuck ACP close block manager shutdown forever", async () => {
+    const closeStarted = deferred<void>()
+    const manager = new BridgeSessionManager({
+      closeTimeoutMs: 5,
+      cloudClient: fakeCloudClient(),
+      createSession: () => ({
+        close: async () => {
+          closeStarted.resolve()
+          await new Promise<void>(() => {})
+        },
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    await manager.close()
+    await closeStarted.promise
+    expect(manager.getStatus().activeSessions).toEqual([])
+  })
+
   test("ignores remote queue cwd by default", async () => {
     const contexts: BridgeSessionContext[] = []
     const manager = new BridgeSessionManager({

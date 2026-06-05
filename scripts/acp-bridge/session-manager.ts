@@ -107,6 +107,7 @@ const EVENT_BATCH_MAX_SIZE = 25
 const EVENT_BATCH_FLUSH_MS = 300
 const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250
 const APPROVAL_RESPONSE_SESSION_POLL_MS = 10
+const DEFAULT_CLOSE_TIMEOUT_MS = 5_000
 
 export type BridgeSessionManagerOptions = {
   cloudClient: BridgeSessionCloudClient
@@ -123,6 +124,7 @@ export type BridgeSessionManagerOptions = {
   resumeEnabled?: boolean
   log?: BridgeLogger
   supervisor?: BridgeSupervisor
+  closeTimeoutMs?: number
 }
 
 export type BridgeSessionManagerStatus = {
@@ -174,6 +176,7 @@ export class BridgeSessionManager {
   private readonly idleSessionTtlMs: number
   private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
+  private readonly closeTimeoutMs: number
   private readonly createSession: (context: BridgeSessionContext) => ManagedAcpSession
   private readonly sessions = new Map<string, BridgeSessionRecord>()
   private readonly promptQueues = new Map<string, Promise<void>>()
@@ -198,6 +201,7 @@ export class BridgeSessionManager {
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
     this.allowRemoteCwd = options.allowRemoteCwd === true
     this.resumeEnabled = options.resumeEnabled === true
+    this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS
     this.createMcpServers = options.createMcpServers ?? (() => [])
     this.createSession =
       options.createSession ??
@@ -359,7 +363,7 @@ export class BridgeSessionManager {
     await Promise.all(
       sessions.map((session) => {
         this.clearIdleTimer(session)
-        return session.acp.close()
+        return this.closeAcpSession(session)
       }),
     )
   }
@@ -798,7 +802,23 @@ export class BridgeSessionManager {
     this.sessions.delete(sessionKey)
     this.clearIdleTimer(session)
     await this.drainEventWrites()
-    await session.acp.close()
+    await this.closeAcpSession(session)
+  }
+
+  private async closeAcpSession(session: BridgeSessionRecord): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        session.acp.close(),
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, this.closeTimeoutMs)
+        }),
+      ])
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+    }
   }
 
   private async ensureSession(item: BridgeSessionQueueItem): Promise<BridgeSessionRecord> {
