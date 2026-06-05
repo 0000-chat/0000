@@ -172,6 +172,7 @@ export type BridgeStatus = {
   }>
   setupSummary?: Record<string, unknown>
   recentErrors: string[]
+  registrationFailure?: BridgeRegistrationFailure
   registrations?: BridgeRegistrationStatus[]
   localJournal?: {
     status: "healthy" | "hard_failed"
@@ -198,6 +199,14 @@ export type BridgeRegistrationStatus = {
   inFlightCommands?: BridgeStatus["inFlightCommands"]
   sessionQueues?: BridgeStatus["sessionQueues"]
   recentErrors: string[]
+  registrationFailure?: BridgeRegistrationFailure
+}
+
+export type BridgeRegistrationFailure = {
+  kind: "auth_failed"
+  reasonCode: "bridge_credentials_invalid" | "bridge_device_not_paired"
+  message: string
+  detectedAt: string
 }
 
 export type BridgeLifecycleStatus =
@@ -566,6 +575,11 @@ export function describeStatus(status: BridgeStatus, configExists: boolean): str
       lines.push(`    device: ${registration.deviceId}`)
       lines.push(`    app: ${registration.appUrl}`)
       lines.push(`    connected: ${registration.connected ? "yes" : "no"}`)
+      if (registration.registrationFailure) {
+        lines.push(
+          `    registration failure: ${registration.registrationFailure.reasonCode} (${registration.registrationFailure.message})`,
+        )
+      }
       lines.push(`    active sessions: ${registration.activeSessions.length}`)
       lines.push(`    in-flight commands: ${registration.inFlightCommands?.length ?? 0}`)
       if (registration.lastHeartbeatAt) {
@@ -1154,6 +1168,7 @@ function buildAggregateBridgeStatus(
     inFlightCommands: status.inFlightCommands,
     sessionQueues: status.sessionQueues,
     recentErrors: status.recentErrors,
+    registrationFailure: status.registrationFailure,
   }))
   return {
     deviceId: first?.config.deviceId,
@@ -1178,6 +1193,7 @@ function buildAggregateBridgeStatus(
     sessionQueues: registrations.flatMap((registration) => registration.sessionQueues ?? []),
     recentErrors: registrations.flatMap((registration) => registration.recentErrors).slice(-10),
     registrations,
+    registrationFailure: first?.status.registrationFailure,
   }
 }
 
@@ -1337,6 +1353,17 @@ export async function runBridgeLoopIteration(
 
   try {
     syncBridgeStatus()
+    if (input.status.registrationFailure) {
+      input.status.connected = false
+      input.log({
+        level: "warn",
+        event: "bridge.registration.claim_skipped",
+        deviceId: input.config.deviceId,
+        reason: input.status.registrationFailure.reasonCode,
+      })
+      await persistStatus(input.statusPath, input.status)
+      return { restartRequested: false }
+    }
     let restartResult = await applyPendingBridgeControlCommand(input.status, currentTime, input)
     const heartbeatNow = currentTime()
     const heartbeatSignature = bridgeHeartbeatSignature(input.status)
@@ -1463,9 +1490,53 @@ export async function runBridgeLoopIteration(
     syncBridgeStatus()
     await persistStatus(input.statusPath, input.status)
   } catch (error) {
+    const registrationFailure = buildBridgeRegistrationFailure(error, currentTime())
+    if (registrationFailure) {
+      input.status.connected = false
+      input.status.registrationFailure = registrationFailure
+      input.status.recentErrors.push(registrationFailure.message)
+      input.status.recentErrors = input.status.recentErrors.slice(-10)
+      input.log({
+        level: "error",
+        event: "bridge.registration.disabled",
+        deviceId: input.config.deviceId,
+        reason: registrationFailure.reasonCode,
+        error: registrationFailure.message,
+      })
+      syncBridgeStatus()
+      await persistStatus(input.statusPath, input.status)
+      return { restartRequested: false }
+    }
     await input.recordLoopError(error)
   }
   return { restartRequested: false }
+}
+
+export function buildBridgeRegistrationFailure(
+  error: unknown,
+  now: number = Date.now(),
+): BridgeRegistrationFailure | undefined {
+  if (!(error instanceof BridgeCloudHttpError)) {
+    return undefined
+  }
+  const message = redactForOutput(error.message)
+  if (error.status === 401 || /Bridge device credentials are invalid/i.test(error.responseBody)) {
+    return {
+      kind: "auth_failed",
+      reasonCode: "bridge_credentials_invalid",
+      message,
+      detectedAt: new Date(now).toISOString(),
+    }
+  }
+  if (/Bridge device is not paired/i.test(error.responseBody)) {
+    return {
+      kind: "auth_failed",
+      reasonCode: "bridge_device_not_paired",
+      message,
+      detectedAt: new Date(now).toISOString(),
+    }
+  }
+  return undefined
 }
 
 export function shouldSendBridgeHeartbeat(

@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  buildBridgeRegistrationFailure,
+  type BridgeStatus,
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
@@ -17,6 +19,7 @@ import {
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge"
+import { BridgeCloudHttpError } from "./acp-bridge/convex-http"
 import {
   defaultAgentCommandForEnvironment,
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
@@ -178,6 +181,12 @@ describe("bridge multi-organization config", () => {
             deviceId: "bridge_b",
             deviceName: "Org B laptop",
             activeSessions: [],
+            registrationFailure: {
+              detectedAt: "2026-06-01T00:05:00.000Z",
+              kind: "auth_failed",
+              message: "Bridge device is not paired",
+              reasonCode: "bridge_device_not_paired",
+            },
             recentErrors: [],
           },
         ],
@@ -188,6 +197,7 @@ describe("bridge multi-organization config", () => {
     expect(output).toContain("registered links: 2")
     expect(output).toContain("Org A laptop")
     expect(output).toContain("Org B laptop")
+    expect(output).toContain("registration failure: bridge_device_not_paired")
     expect(output).not.toContain("secret-token")
     expect(output).not.toContain("secret-value")
   })
@@ -256,6 +266,97 @@ describe("bridge security defaults", () => {
 })
 
 describe("bridge supervisor claim gating", () => {
+  test("classifies stale bridge registrations as hard auth failures", () => {
+    const notPaired = buildBridgeRegistrationFailure(
+      new BridgeCloudHttpError(
+        "POST",
+        "https://example.test/api/agent-bridge/queue/claim",
+        400,
+        '{"error":"Uncaught Error: Bridge device is not paired"}',
+      ),
+      Date.UTC(2026, 5, 5, 10, 0, 0),
+    )
+    const invalidCredentials = buildBridgeRegistrationFailure(
+      new BridgeCloudHttpError(
+        "POST",
+        "https://example.test/api/agent-bridge/heartbeat",
+        401,
+        '{"error":"Uncaught Error: Bridge device credentials are invalid"}',
+      ),
+      Date.UTC(2026, 5, 5, 10, 1, 0),
+    )
+
+    expect(notPaired).toEqual(
+      expect.objectContaining({
+        detectedAt: "2026-06-05T10:00:00.000Z",
+        reasonCode: "bridge_device_not_paired",
+      }),
+    )
+    expect(invalidCredentials).toEqual(
+      expect.objectContaining({
+        detectedAt: "2026-06-05T10:01:00.000Z",
+        reasonCode: "bridge_credentials_invalid",
+      }),
+    )
+  })
+
+  test("disables stale bridge registrations instead of retrying queue claims", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    }
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => {
+        throw new BridgeCloudHttpError(
+          "POST",
+          "https://example.test/api/agent-bridge/queue/claim",
+          400,
+          '{"error":"Uncaught Error: Bridge device is not paired"}',
+        )
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(status.connected).toBe(false)
+    expect(status.registrationFailure).toEqual(
+      expect.objectContaining({
+        detectedAt: "2026-06-05T10:02:00.000Z",
+        reasonCode: "bridge_device_not_paired",
+      }),
+    )
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.registration.disabled",
+        reason: "bridge_device_not_paired",
+      }),
+    )
+  })
+
   test("skips queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
     const logs: Array<Record<string, unknown>> = []

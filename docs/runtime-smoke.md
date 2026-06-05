@@ -57,6 +57,30 @@ For machine-readable output:
 bun run bridge:smoke-runtimes -- --json
 ```
 
+## Cloud Registration Smoke
+
+Use the cloud smoke check when you need to verify that the bridge registrations
+in `~/.0000/bridge.json` can authenticate, heartbeat, and poll the 0000 bridge
+queue endpoint:
+
+```bash
+bun run bridge:smoke-cloud
+```
+
+The default cloud smoke is intentionally non-claiming. It does not take queued
+work. When you are deliberately running a live bridge smoke window and want to
+prove the claim endpoint too, pass:
+
+```bash
+bun run bridge:smoke-cloud -- --include-claim
+```
+
+Rows that fail with `bridge_credentials_invalid` or
+`bridge_device_not_paired` usually mean the local config contains a stale
+registration from an older pairing. Reconnect that organization or remove the
+stale registration from the local bridge config before running long-lived
+bridge workers.
+
 ## Evidence Boundaries
 
 This smoke check proves local ACP runtime initialization. It does not by itself
