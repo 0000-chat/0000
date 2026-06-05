@@ -12,6 +12,7 @@ Useful trust and operations docs:
 - [Configure the bridge](docs/configure.md)
 - [Update the bridge](docs/update.md)
 - [Runtime support](docs/runtime-support.md)
+- [Lifecycle contract](docs/lifecycle.md)
 - [Diagnostics](docs/diagnostics.md)
 - [Privacy](docs/privacy.md)
 - [Host adapter contract](docs/host-adapter.md)
