@@ -1355,12 +1355,6 @@ export async function runBridgeLoopIteration(
     syncBridgeStatus()
     if (input.status.registrationFailure) {
       input.status.connected = false
-      input.log({
-        level: "warn",
-        event: "bridge.registration.claim_skipped",
-        deviceId: input.config.deviceId,
-        reason: input.status.registrationFailure.reasonCode,
-      })
       await persistStatus(input.statusPath, input.status)
       return { restartRequested: false }
     }

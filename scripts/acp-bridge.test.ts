@@ -357,6 +357,58 @@ describe("bridge supervisor claim gating", () => {
     )
   })
 
+  test("does not spam claim skipped logs after a registration is disabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: false,
+      recentErrors: [],
+      registrationFailure: {
+        detectedAt: "2026-06-05T10:02:00.000Z",
+        kind: "auth_failed",
+        message: "Bridge device credentials are invalid",
+        reasonCode: "bridge_credentials_invalid",
+      },
+    }
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => {
+        throw new Error("claim should not run for disabled registrations")
+      },
+      cleanupStaleClaims: async () => {
+        throw new Error("cleanup should not run for disabled registrations")
+      },
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 3, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => {
+        throw new Error("heartbeat should not run for disabled registrations")
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(logs).toEqual([])
+    expect(status.connected).toBe(false)
+    expect(status.registrationFailure?.reasonCode).toBe("bridge_credentials_invalid")
+  })
+
   test("skips queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
     const logs: Array<Record<string, unknown>> = []
