@@ -403,6 +403,66 @@ describe("bridge supervisor claim gating", () => {
       }),
     )
   })
+
+  test("dispatches claimed lifecycle queue commands", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const handled: Array<Record<string, unknown>> = []
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          claimId: "claim-1",
+          id: "queue-cancel-1",
+          kind: "cancel-session",
+          threadId: "thread-1",
+          type: "cancel-session",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>)
+        },
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-cancel-1",
+        type: "cancel-session",
+      }),
+    ])
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.in_flight",
+        queueId: "queue-cancel-1",
+        queueType: "cancel-session",
+      }),
+    )
+  })
 })
 
 function bridgeRegistration() {

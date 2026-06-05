@@ -2155,11 +2155,16 @@ function isQueueCommandType(value: string | undefined): value is BridgeQueueComm
   return (
     value === "prompt" ||
     value === "cancel" ||
+    value === "cancel-session" ||
+    value === "close-session" ||
     value === "approval" ||
     value === "approval-response" ||
     value === "choice-response" ||
     value === "permission-response" ||
-    value === "ping"
+    value === "ping" ||
+    value === "revive-session" ||
+    value === "start-session" ||
+    value === "steer-session"
   )
 }
 
