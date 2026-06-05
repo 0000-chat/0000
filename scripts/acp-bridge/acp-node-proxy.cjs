@@ -10,6 +10,7 @@ if (!command) {
 
 const child = spawn(command, args, {
   cwd: process.cwd(),
+  detached: process.platform !== "win32",
   env: process.env,
   stdio: ["pipe", "pipe", "pipe"],
 })
@@ -23,13 +24,39 @@ child.on("error", (error) => {
   process.exit(1)
 })
 
-child.on("exit", (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal)
+child.on("exit", (code, signal) => process.exit(exitCodeForSignal(code, signal)))
+
+process.on("SIGINT", () => terminateChild("SIGINT"))
+process.on("SIGTERM", () => terminateChild("SIGTERM"))
+
+function terminateChild(signal) {
+  if (!child.pid) {
+    process.exit(exitCodeForSignal(null, signal))
     return
   }
-  process.exit(code ?? 0)
-})
 
-process.on("SIGINT", () => child.kill("SIGINT"))
-process.on("SIGTERM", () => child.kill("SIGTERM"))
+  try {
+    if (process.platform === "win32") {
+      child.kill(signal)
+    } else {
+      process.kill(-child.pid, signal)
+    }
+  } catch {
+    // The child may have already exited between timeout settlement and cleanup.
+  }
+
+  setTimeout(() => process.exit(exitCodeForSignal(null, signal)), 1000).unref()
+}
+
+function exitCodeForSignal(code, signal) {
+  if (code !== null && code !== undefined) {
+    return code
+  }
+  if (signal === "SIGINT") {
+    return 130
+  }
+  if (signal === "SIGTERM") {
+    return 143
+  }
+  return 1
+}

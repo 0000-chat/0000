@@ -373,7 +373,7 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
       }
       settled = true
       clearTimeout(timeout)
-      child.kill("SIGTERM")
+      terminateSpawnedAcpCommand(child)
       resolve(result)
     }
     const timeout = setTimeout(() => {
@@ -525,7 +525,7 @@ export function discoverLocalAcpCommands(
       }
       settled = true
       clearTimeout(timeout)
-      child.kill("SIGTERM")
+      terminateSpawnedAcpCommand(child)
       resolve(commands)
     }
     const timeout = setTimeout(() => settle([]), 5000)
@@ -687,7 +687,7 @@ export function runLocalCommand(command: string[]): Promise<CommandResult> {
       resolve(result)
     }
     const timeout = setTimeout(() => {
-      child.kill("SIGTERM")
+      terminateSpawnedAcpCommand(child)
       settle({ ok: false, stdout, stderr: "Command timed out" })
     }, 3000)
     child.stdout?.on("data", (chunk) => {
@@ -705,18 +705,68 @@ export function runLocalCommand(command: string[]): Promise<CommandResult> {
   })
 }
 
+const activeAcpDiscoveryChildren = new Set<ReturnType<typeof spawn>>()
+
 function spawnAcpCommand(
   command: string[],
   options: Parameters<typeof spawn>[2],
 ): ReturnType<typeof spawn> {
   const executable = command[0] ?? ""
   const args = command.slice(1)
-  if (process.versions.bun) {
-    return spawn(
-      "node",
-      [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), executable, ...args],
-      options,
-    )
+  const child = process.versions.bun
+    ? spawn(
+        "node",
+        [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), executable, ...args],
+        { ...options, detached: process.platform !== "win32" },
+      )
+    : spawn(executable, args, options)
+  activeAcpDiscoveryChildren.add(child)
+  child.once("close", () => activeAcpDiscoveryChildren.delete(child))
+  return child
+}
+
+export function terminateActiveAcpDiscoveryChildren(): void {
+  for (const child of activeAcpDiscoveryChildren) {
+    terminateSpawnedAcpCommand(child)
   }
-  return spawn(executable, args, options)
+}
+
+function terminateSpawnedAcpCommand(child: ReturnType<typeof spawn>): void {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+  if (child.pid) {
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-child.pid, "SIGTERM")
+      } catch {
+        // Fall through to direct process signals below.
+      }
+    }
+    try {
+      process.kill(child.pid, "SIGTERM")
+    } catch {
+      // Fall through to ChildProcess.kill; Node may still have a live handle.
+    }
+  }
+  child.kill("SIGTERM")
+
+  setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+      return
+    }
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-child.pid, "SIGKILL")
+      } catch {
+        // The process group exited between the graceful signal and fallback.
+      }
+    }
+    try {
+      process.kill(child.pid, "SIGKILL")
+    } catch {
+      // The process exited between the graceful signal and fallback.
+    }
+    child.kill("SIGKILL")
+  }, 1000).unref()
 }

@@ -11,6 +11,7 @@ Useful trust and operations docs:
 - [Install details](INSTALL.md)
 - [Network behavior](docs/network.md)
 - [Permissions](docs/permissions.md)
+- [ACP runtime smoke checks](docs/runtime-smoke.md)
 - [Threat model](docs/threat-model.md)
 - [Dependencies](docs/dependencies.md)
 - [Release process](docs/release-process.md)
