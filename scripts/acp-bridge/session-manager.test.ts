@@ -125,6 +125,7 @@ describe("bridge session cwd safety", () => {
     const cloud = fakeCloudClient()
     const contexts: BridgeSessionContext[] = []
     const closedProfiles: Array<string | undefined> = []
+    const logs: Array<Record<string, unknown>> = []
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: (context) => {
@@ -142,6 +143,7 @@ describe("bridge session cwd safety", () => {
           }),
         }
       },
+      log: (entry) => logs.push(entry as Record<string, unknown>),
       runtimeProfiles: [
         {
           capabilities: {},
@@ -190,6 +192,14 @@ describe("bridge session cwd safety", () => {
       ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
     ])
     expect(closedProfiles).toContain("codex:codex-acp")
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        bridgeProfileId: "codex:codex-acp",
+        event: "bridge.lifecycle.replacement_session",
+        sessionId: "agent-session-1",
+        threadId: "thread-1",
+      }),
+    )
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-claude",
       result: { ok: true, text: "claude-code:claude-acp" },
@@ -827,6 +837,7 @@ describe("bridge session cwd safety", () => {
   test("choice response resumes after the original ACP session idles closed", async () => {
     const prompts: string[] = []
     const closedSessions: string[] = []
+    const logs: Array<Record<string, unknown>> = []
     let sessionCount = 0
     const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
@@ -851,6 +862,7 @@ describe("bridge session cwd safety", () => {
           },
         }
       },
+      log: (entry) => logs.push(entry as Record<string, unknown>),
     })
 
     await manager.handleQueueItem({
@@ -873,6 +885,14 @@ describe("bridge session cwd safety", () => {
     })
 
     expect(closedSessions).toContain("session-1")
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        agentSessionId: "agent-session-1",
+        event: "bridge.lifecycle.idle_close",
+        providerSessionId: "agent-session-1",
+        threadId: "thread-1",
+      }),
+    )
     expect(sessionCount).toBe(2)
     expect(prompts).toEqual(["hello", "Selected choice: option-a"])
     expect(cloud.results.at(-1)).toMatchObject({

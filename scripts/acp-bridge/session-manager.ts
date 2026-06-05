@@ -972,9 +972,11 @@ export class BridgeSessionManager {
     }
     this.writeLog({
       level: "info",
-      event: "bridge.session.idle_close",
+      event: "bridge.lifecycle.idle_close",
       threadId: session.threadId,
       agentSessionId: session.providerSessionKey,
+      providerSessionId: session.providerSessionKey,
+      acpSessionId: session.acp.sessionId,
     })
     await this.closeSession(sessionKey)
   }
@@ -1309,7 +1311,22 @@ export class BridgeSessionManager {
         session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
         session.sessionKey !== nextSessionKey,
     )
-    await Promise.all(replaced.map((session) => this.closeSession(session.sessionKey)))
+    await Promise.all(
+      replaced.map(async (session) => {
+        this.writeLog({
+          level: "info",
+          event: "bridge.lifecycle.replacement_session",
+          threadId: session.threadId,
+          sessionId: session.providerSessionKey,
+          agentSessionId: session.sessionKey,
+          replacementAgentSessionId: nextSessionKey,
+          bridgeProfileId: session.runtimeProfile?.id,
+          hermesProfileName: session.hermesProfileName,
+          reason: "runtime_profile_changed",
+        })
+        await this.closeSession(session.sessionKey)
+      }),
+    )
   }
 
   private writeLog(entry: BridgeLogEntry): void {
