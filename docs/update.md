@@ -1,0 +1,45 @@
+# Update The Bridge
+
+The bridge is distributed as source. Installed machines update by fetching this
+repository and running the updater or normal package install flow.
+
+## Normal Update
+
+From the bridge checkout:
+
+```bash
+cd "$HOME/0000"
+git fetch --tags origin
+bun run bridge:update
+```
+
+The updater is responsible for moving between compatible source releases and
+preserving local pairing files under `~/.0000/`.
+
+## Manual Update
+
+For development or recovery:
+
+```bash
+cd "$HOME/0000"
+git fetch origin
+git pull --ff-only
+bun install
+bun test
+```
+
+Do not delete `~/.0000/bridge.json` unless you intentionally want to unpair the
+machine.
+
+## Compatibility
+
+The bridge reports a contract version and capability flags to the host. Hosts
+should use those flags for old/new bridge negotiation instead of relying on
+product rollout feature flags. Unknown capabilities must be ignored by older
+hosts, and missing capabilities must degrade to explicit unsupported behavior.
+
+## Update Required
+
+When a host requires a newer bridge contract, it should stop assigning new work
+to the old bridge, surface a clear update-required diagnostic, and keep existing
+local pairing state valid so the user can update in place.
