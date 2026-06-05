@@ -58,7 +58,7 @@ const DEFAULT_ACP_IDLE_TTL_MS = 0
 const DEFAULT_ALLOW_REMOTE_CWD = false
 const DEFAULT_AGENT_CONNECTION_REGISTER_PATH = "/api/agent-connections/register"
 const DEFAULT_AGENT_SKILL_PATH = join(homedir(), ".claude", "skills", "0000", "SKILL.md")
-export const BRIDGE_VERSION = "0.1.6"
+export const BRIDGE_VERSION = "0.1.7"
 const BRIDGE_LOCAL_STATE_MODE = 0o600
 
 export type BridgeCommandName = "connect" | "pair" | "start" | "status" | "help"
@@ -2098,7 +2098,9 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined
   }
-  const record = raw as Record<string, unknown>
+  const rawRecord = raw as Record<string, unknown>
+  const payload = recordFromUnknown(rawRecord.payload)
+  const record = { ...(payload ?? {}), ...rawRecord }
   const id = stringFromUnknown(record.id)
   const type = stringFromUnknown(record.type ?? record.kind)
   if (!id || !isQueueCommandType(type)) {
@@ -2130,8 +2132,23 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     mailboxConversationId: stringFromUnknown(record.mailboxConversationId),
     organizationId: stringFromUnknown(record.organizationId),
     runtimeConfig: stringRecordFromUnknown(record.runtimeConfig),
+    runtimeOptions: runtimeOptionsFromUnknown(record.runtimeOptions),
     traceId: stringFromUnknown(record.traceId),
   }
+}
+
+function runtimeOptionsFromUnknown(
+  value: unknown,
+): BridgeQueueCommand["runtimeOptions"] | undefined {
+  const record = recordFromUnknown(value)
+  if (!record) {
+    return undefined
+  }
+  const runtimeOptions = compact({
+    modelId: stringFromUnknown(record.modelId),
+    thinkingLevel: stringFromUnknown(record.thinkingLevel),
+  })
+  return Object.keys(runtimeOptions).length > 0 ? runtimeOptions : undefined
 }
 
 function isQueueCommandType(value: string | undefined): value is BridgeQueueCommand["type"] {

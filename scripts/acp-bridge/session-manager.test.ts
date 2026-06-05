@@ -508,6 +508,57 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("maps per-message runtime options into ACP runtime config before prompt delivery", async () => {
+    const promptOptions: Array<Record<string, unknown> | undefined> = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (_prompt, options) => {
+          promptOptions.push(options)
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          }
+        },
+      }),
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          runtimeConfigOptions: { model: ["gpt-5.5"], thoughtLevel: ["high", "medium"] },
+          status: "available",
+        },
+      ],
+    })
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      runtimeOptions: { modelId: "gpt-5.5", thinkingLevel: "high" },
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(promptOptions.at(-1)?.runtimeConfig).toEqual({
+      model: "gpt-5.5",
+      thoughtLevel: "high",
+    })
+    expect(cloud.results.at(-1)?.result).toMatchObject({
+      runtimeConfigApplied: { model: "gpt-5.5", thoughtLevel: "high" },
+      runtimeConfigDiagnostics: [],
+    })
+  })
+
   test("waits for a starting ACP session before handling an approval response", async () => {
     const promptStarted = deferred<void>()
     const finishPrompt = deferred<void>()

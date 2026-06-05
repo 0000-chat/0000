@@ -1,6 +1,7 @@
 import {
   type HermesAcpMcpServer,
   type HermesAcpPromptResult,
+  type RuntimeConfigApplicationResult,
   HermesAcpSession,
   resolveRuntimeConfigApplication,
 } from "./acp-session"
@@ -22,6 +23,10 @@ export type BridgeSessionQueueItem = {
   prompt?: string
   threadHistory?: string
   systemPrompt?: string
+  runtimeOptions?: {
+    modelId?: string
+    thinkingLevel?: string
+  }
   approvalId?: string
   approvalOutcome?: string
   approvalReason?: string
@@ -46,6 +51,7 @@ export type ManagedAcpSession = {
       systemPrompt?: string
       threadHistory?: string
       autoApprovePermissionRequests?: boolean
+      runtimeConfig?: Record<string, string>
     },
   ): Promise<HermesAcpPromptResult>
   cancel(): Promise<boolean | void>
@@ -439,7 +445,10 @@ export class BridgeSessionManager {
           }
     try {
       this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session))
-      result = await session.acp.sendUserMessage(prompt, acpPromptOptions)
+      result = await session.acp.sendUserMessage(prompt, {
+        ...acpPromptOptions,
+        runtimeConfig: runtimeConfigApplication?.applied,
+      })
     } catch (error) {
       await this.closeSession(session.sessionKey)
       throw error
@@ -1472,14 +1481,54 @@ function hasExplicitRuntimeScope(item: BridgeSessionQueueItem): boolean {
 function applyRuntimeConfigFallback(
   item: BridgeSessionQueueItem,
   profile: BridgeRuntimeProfile | undefined,
-): ReturnType<typeof resolveRuntimeConfigApplication> | undefined {
-  if (!item.runtimeConfig || !profile?.runtimeConfigOptions) {
+): RuntimeConfigApplicationResult | undefined {
+  const requested = requestedRuntimeConfigForItem(item, profile)
+  if (!requested || !profile?.runtimeConfigOptions) {
     return undefined
   }
   return resolveRuntimeConfigApplication({
-    requested: item.runtimeConfig,
+    requested,
     supportedOptions: profile.runtimeConfigOptions,
   })
+}
+
+function requestedRuntimeConfigForItem(
+  item: BridgeSessionQueueItem,
+  profile: BridgeRuntimeProfile | undefined,
+): Record<string, string | undefined> | undefined {
+  const requested: Record<string, string | undefined> = { ...(item.runtimeConfig ?? {}) }
+  const modelId = normalizeRuntimeOptionValue(item.runtimeOptions?.modelId)
+  if (modelId) {
+    requested.model = modelId
+  }
+  const thinkingLevel = normalizeRuntimeOptionValue(item.runtimeOptions?.thinkingLevel)
+  const thinkingConfigId = thinkingLevel
+    ? findRuntimeConfigOptionId(profile?.runtimeConfigOptions, [
+        "thoughtLevel",
+        "thought_level",
+        "thinkingLevel",
+        "reasoningLevel",
+      ])
+    : undefined
+  if (thinkingConfigId) {
+    requested[thinkingConfigId] = thinkingLevel
+  }
+  return Object.keys(requested).length > 0 ? requested : undefined
+}
+
+function findRuntimeConfigOptionId(
+  supportedOptions: Record<string, string[]> | undefined,
+  candidates: string[],
+): string | undefined {
+  if (!supportedOptions) {
+    return undefined
+  }
+  return candidates.find((candidate) => supportedOptions[candidate] !== undefined)
+}
+
+function normalizeRuntimeOptionValue(value: string | undefined): string | undefined {
+  const normalized = value?.trim()
+  return normalized ? normalized : undefined
 }
 
 function encodeSessionKeyPart(value: string): string {
