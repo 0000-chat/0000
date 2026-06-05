@@ -215,11 +215,29 @@ async function withAcpDetails(
       status: "available",
     }
   }
+  const failureDiagnostics = diagnosticsForProbeFailure(profile, probe.reason)
   return {
     ...profile,
-    diagnostics: { ...profile.diagnostics, acp: "unsupported", reason: probe.reason },
+    diagnostics: { ...profile.diagnostics, acp: "unsupported", ...failureDiagnostics },
     status: "unavailable",
   }
+}
+
+function diagnosticsForProbeFailure(
+  profile: BridgeRuntimeProfile,
+  reason: string,
+): { reason: string; detail?: string } {
+  if (
+    profile.kind === "openclaw" &&
+    /gateway token missing|gateway\\.remote\\.token|unauthorized/i.test(reason)
+  ) {
+    return {
+      reason: "openclaw_gateway_token_missing",
+      detail:
+        "OpenClaw gateway auth is enabled, but the ACP client has no matching gateway.remote.token. Set gateway.remote.token to match gateway.auth.token, or pass --token/--token-file in a custom OpenClaw ACP command.",
+    }
+  }
+  return { reason }
 }
 
 function applyProbeCapabilities(

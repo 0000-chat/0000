@@ -23,6 +23,20 @@ Rows are classified as:
 - `blocked`: the expected runtime binary or custom profile was not discovered on
   this machine.
 
+## OpenClaw Gateway Auth
+
+OpenClaw ACP connects through the local OpenClaw gateway. When gateway auth is
+enabled, `openclaw acp` must have a client token that matches the gateway auth
+token. If the smoke matrix reports `openclaw_gateway_token_missing`, configure
+OpenClaw so `gateway.remote.token` matches `gateway.auth.token`, or register a
+custom runtime command that passes `--token` or `--token-file`.
+
+To repair a local OpenClaw install, prefer OpenClaw's own configuration helpers
+instead of copying tokens into bridge config. For example, use
+`openclaw config get gateway.auth.token` and
+`openclaw config set gateway.remote.token ...` locally, without pasting the
+token into logs, shell history, issue trackers, or chat threads.
+
 By default the command probes only ACP initialization and runtime capabilities.
 This keeps the smoke check bounded and avoids long-lived handles in package
 adapter runtimes. To also attempt ACP available-command discovery, run:
@@ -51,13 +65,21 @@ deliver a thread message, stop a running turn, steer a session, or complete
 mailbox delegation. Use the 0000 app's bridge diagnostics and the runtime smoke
 check together when debugging an end-to-end bridge issue.
 
-On the OVH bridge machine on 2026-06-05, the local smoke matrix showed:
+On the OVH bridge machine on 2026-06-05, the local smoke matrix initially showed:
 
 - Hermes ACP: `pass`
 - Codex ACP: `pass`
 - Claude Code ACP: `pass`
-- OpenClaw ACP: `fail`, with ACP initialize timing out or returning
-  `ECONNREFUSED 127.0.0.1:18789`
+- OpenClaw ACP: `fail` before gateway setup, then
+  `openclaw_gateway_token_missing` after the gateway was running but the ACP
+  client token was not configured.
 
-Treat OpenClaw as unproven until its local gateway is running and ACP initialize
-returns successfully.
+After configuring `gateway.remote.token`, the same machine reported:
+
+- Hermes ACP: `pass`
+- Codex ACP: `pass`
+- Claude Code ACP: `pass`
+- OpenClaw ACP: `pass`
+
+Treat OpenClaw as unproven until its local gateway is running, gateway client
+auth is configured, and ACP initialize returns successfully.
