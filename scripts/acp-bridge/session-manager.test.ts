@@ -1132,6 +1132,49 @@ describe("bridge session cwd safety", () => {
     expect(supervisor.getTurnState("queue-cancel")?.checkpoint).toBe("failed")
   })
 
+  test("cancel-session reports terminal failure when ACP cancel throws", async () => {
+    const cloud = fakeCloudClient()
+    const supervisor = new BridgeSupervisor()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {
+          throw new Error("session/cancel rejected")
+        },
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ready",
+        }),
+      }),
+      supervisor,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-cancel",
+      result: { error: "cancel_not_acknowledged", ok: false, terminal: true },
+    })
+    expect(supervisor.getTurnState("queue-cancel")?.checkpoint).toBe("failed")
+  })
+
   test("steer-session cancels the active turn and sends replacement instructions on the same session", async () => {
     const prompts: string[] = []
     let cancelCount = 0

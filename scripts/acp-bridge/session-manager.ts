@@ -683,7 +683,12 @@ export class BridgeSessionManager {
       })
       return false
     }
-    const acknowledged = (await session.acp.cancel()) !== false
+    let acknowledged: boolean
+    try {
+      acknowledged = (await session.acp.cancel()) !== false
+    } catch {
+      acknowledged = false
+    }
     if (!acknowledged) {
       await this.markQueueResult(item, {
         ok: false,
@@ -745,7 +750,12 @@ export class BridgeSessionManager {
       return
     }
     this.supervisor?.recordSteering(this.supervisorWorkItem(item, session))
-    const acknowledged = (await session.acp.cancel()) !== false
+    let acknowledged: boolean
+    try {
+      acknowledged = (await session.acp.cancel()) !== false
+    } catch {
+      acknowledged = false
+    }
     if (!acknowledged) {
       await this.markQueueResult(item, {
         ok: false,
