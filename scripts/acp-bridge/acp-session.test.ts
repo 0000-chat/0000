@@ -121,6 +121,24 @@ describe("ACP runtime adapter boundary", () => {
     expect(requests[1]?.params).toMatchObject({ mcpServers: [] })
   })
 
+  test("preserves safe ACP error kind diagnostics without exposing raw error payloads", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "claude acp",
+      spawnProcess: createFakeAcpProcess({
+        promptError: {
+          code: -32603,
+          data: { errorKind: "authentication_failed" },
+          message: "Internal error: Failed to authenticate. API Error: 401 Invalid authentication credentials",
+        },
+        updates: [],
+      }),
+    })
+
+    await expect(session.sendUserMessage("hello")).rejects.toThrow(
+      "ACP session/prompt failed: provider_login_failed (code -32603)",
+    )
+  })
+
   test("force-kills the ACP process when graceful termination does not exit", async () => {
     const kills: Array<NodeJS.Signals | undefined> = []
     const session = new HermesAcpSession({
@@ -281,6 +299,7 @@ function createFakeAcpProcess(options: {
   emitExitOnKill?: boolean
   failSessionNewWithMcpServers?: boolean
   kills?: Array<NodeJS.Signals | undefined>
+  promptError?: { code: number; data?: Record<string, unknown>; message: string }
   promptResult?: unknown
   requests?: JsonRpcMessage[]
   updates: Array<Record<string, unknown>>
@@ -329,6 +348,7 @@ function handleRequest(
   options: {
     configOptions?: Array<{ currentValue: string; id: string }>
     failSessionNewWithMcpServers?: boolean
+    promptError?: { code: number; data?: Record<string, unknown>; message: string }
     promptResult?: unknown
     updates: Array<Record<string, unknown>>
   },
@@ -388,6 +408,14 @@ function handleRequest(
   }
 
   if (message.method === "session/prompt") {
+    if (options.promptError) {
+      writeJson(stdout, {
+        error: options.promptError,
+        id: message.id,
+        jsonrpc: "2.0",
+      })
+      return
+    }
     for (const update of options.updates) {
       writeJson(stdout, {
         jsonrpc: "2.0",

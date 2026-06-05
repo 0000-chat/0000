@@ -153,6 +153,21 @@ export class HermesAcpProcessError extends Error {
   }
 }
 
+export class HermesAcpJsonRpcError extends Error {
+  readonly code?: number
+  readonly errorKind?: string
+  readonly method: string
+
+  constructor(method: string, error: unknown) {
+    const diagnostic = formatAcpJsonRpcError(error)
+    super(`ACP ${method} failed: ${diagnostic}`)
+    this.name = "HermesAcpJsonRpcError"
+    this.method = method
+    this.code = readJsonRpcErrorCode(error)
+    this.errorKind = readJsonRpcErrorKind(error)
+  }
+}
+
 export class HermesAcpSession {
   readonly command: string[]
   readonly cwd?: string
@@ -573,13 +588,13 @@ export class HermesAcpSession {
       this.pending.set(id, {
         method,
         timeout,
-        resolve: (message) => {
-          if (message.error) {
-            reject(new Error(`ACP ${method} failed: ${JSON.stringify(message.error)}`))
-            return
-          }
-          resolve(message.result)
-        },
+	        resolve: (message) => {
+	          if (message.error) {
+	            reject(new HermesAcpJsonRpcError(method, message.error))
+	            return
+	          }
+	          resolve(message.result)
+	        },
         reject,
       })
 
@@ -1186,6 +1201,61 @@ function extractTrustedFinalResultText(result: unknown): string | undefined {
     readString(record.outputText) ??
     readString(record.message)
   )
+}
+
+function formatAcpJsonRpcError(error: unknown): string {
+  const errorKind = normalizeJsonRpcErrorKind(readJsonRpcErrorKind(error))
+  const code = readJsonRpcErrorCode(error)
+  if (errorKind) {
+    return code === undefined ? errorKind : `${errorKind} (code ${code})`
+  }
+  const message = readJsonRpcErrorMessage(error)
+  if (message) {
+    return code === undefined ? message : `${message} (code ${code})`
+  }
+  return code === undefined ? "json_rpc_error" : `json_rpc_error (code ${code})`
+}
+
+function normalizeJsonRpcErrorKind(errorKind: string | undefined): string | undefined {
+  if (errorKind === "authentication_failed") {
+    return "provider_login_failed"
+  }
+  return errorKind
+}
+
+function readJsonRpcErrorCode(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined
+  }
+  const code = (error as Record<string, unknown>).code
+  return typeof code === "number" && Number.isFinite(code) ? code : undefined
+}
+
+function readJsonRpcErrorKind(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined
+  }
+  const record = error as Record<string, unknown>
+  const directKind = readString(record.errorKind)
+  if (directKind) {
+    return directKind
+  }
+  const data = record.data
+  if (!data || typeof data !== "object") {
+    return undefined
+  }
+  return readString((data as Record<string, unknown>).errorKind)
+}
+
+function readJsonRpcErrorMessage(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined
+  }
+  const message = readString((error as Record<string, unknown>).message)
+  if (!message) {
+    return undefined
+  }
+  return message.length > 160 ? `${message.slice(0, 157)}...` : message
 }
 
 function readString(value: unknown): string | undefined {

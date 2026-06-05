@@ -13,6 +13,8 @@ const API_KEY_HEADER_PATTERN =
   /(?<!["'])(\bx[-_]api[-_]key\b\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,}\]]+)/gi
 const ACP_SESSION_ERROR_PATTERN =
   /(ACP\s+session\/(?:new|prompt|cancel)\s+(?:failed|did not return [^:]+):)[\s\S]*/gi
+const SAFE_ACP_SESSION_ERROR_PATTERN =
+  /^ACP\s+session\/(?:new|prompt|cancel)\s+(?:failed|did not return [^:]+):\s+[a-z][a-z0-9_]*(?:\s+\(code\s+-?\d+\))?$/i
 
 export type BridgeLogLevel = "debug" | "info" | "warn" | "error"
 
@@ -284,6 +286,9 @@ function clean(value: string | undefined) {
 }
 
 function redactString(value: string): string {
+  if (SAFE_ACP_SESSION_ERROR_PATTERN.test(value)) {
+    return value
+  }
   return value
     .replace(ACP_SESSION_ERROR_PATTERN, `$1 ${REDACTED}`)
     .replace(AUTHORIZATION_HEADER_PATTERN, (_match, prefix: string) => `${prefix}${REDACTED}`)
