@@ -92,15 +92,15 @@ export class ConvexBridgeHostAdapter implements BridgeHostAdapter {
   constructor(private readonly transport: Partial<ConvexBridgeTransport>) {}
 
   async heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>> {
-    return await required(this.transport.heartbeat, "heartbeat")(input)
+    return await this.callTransport("heartbeat", input)
   }
 
   async pollQueue(input: BridgeQueuePollInput = {}): Promise<Record<string, unknown>> {
-    return await required(this.transport.pollQueue, "pollQueue")(input)
+    return await this.callTransport("pollQueue", input)
   }
 
   async claimWork(input: BridgeQueueClaimInput = {}): Promise<BridgeClaimWorkResult> {
-    const raw = await required(this.transport.claimWork, "claimWork")(input)
+    const raw = await this.callTransport("claimWork", input)
     return {
       raw,
       workItems: queueCommandsFromClaimResponse(raw).map(toHostWorkItem),
@@ -108,7 +108,7 @@ export class ConvexBridgeHostAdapter implements BridgeHostAdapter {
   }
 
   async appendEvents(input: { events: BridgeEventInput[] }): Promise<BridgeAppendEventsResult> {
-    return await required(this.transport.appendEvents, "appendEvents")(input.events)
+    return await this.callTransport("appendEvents", input.events)
   }
 
   async appendDiagnostics(input: {
@@ -164,7 +164,18 @@ export class ConvexBridgeHostAdapter implements BridgeHostAdapter {
     result: BridgeQueueResult,
   ): Promise<Record<string, unknown>> {
     const claimId = typeof result.claimId === "string" ? result.claimId : undefined
-    return await required(this.transport.markResult, "markResult")(workItem.id, result, claimId)
+    return await this.callTransport("markResult", workItem.id, result, claimId)
+  }
+
+  private async callTransport(
+    method: keyof ConvexBridgeTransport,
+    ...args: unknown[]
+  ): Promise<Record<string, unknown>> {
+    const fn = required(this.transport[method], method)
+    return await (fn as (...values: unknown[]) => Promise<Record<string, unknown>>).apply(
+      this.transport,
+      args,
+    )
   }
 }
 
@@ -198,10 +209,10 @@ function isBridgeQueueCommand(value: unknown): value is BridgeQueueCommand {
 
 function required<TFunction extends (...args: never[]) => unknown>(
   fn: TFunction | undefined,
-  name: string,
+  name: string | number | symbol,
 ): TFunction {
   if (!fn) {
-    throw new Error(`Bridge host adapter transport is missing ${name}`)
+    throw new Error(`Bridge host adapter transport is missing ${String(name)}`)
   }
   return fn
 }
