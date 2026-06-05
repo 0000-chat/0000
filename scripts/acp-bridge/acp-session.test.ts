@@ -4,6 +4,7 @@ import { PassThrough, Writable } from "node:stream"
 import { describe, expect, test } from "bun:test"
 
 import {
+  DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
   HermesAcpRuntimeAdapter,
   HermesAcpSession,
   type JsonRpcMessage,
@@ -71,6 +72,87 @@ describe("ACP final text extraction", () => {
 })
 
 describe("ACP runtime adapter boundary", () => {
+  test("lets the node proxy run its process-group kill fallback before bridge escalation", () => {
+    expect(DEFAULT_ACP_PROCESS_EXIT_GRACE_MS).toBeGreaterThan(1000)
+  })
+
+  test("retries session creation with an empty MCP server list when a runtime rejects configured MCP servers", async () => {
+    const requests: JsonRpcMessage[] = []
+    const errors: string[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      mcpServers: [{ args: ["serve"], command: "/bin/0000-mcp", name: "0000" }],
+      onError: (error) => {
+        errors.push(error.message)
+      },
+      spawnProcess: createFakeAcpProcess({
+        failSessionNewWithMcpServers: true,
+        requests,
+        updates: [],
+      }),
+    })
+
+    await expect(session.start()).resolves.toBe("session-1")
+
+    expect(requests.map((request) => request.method)).toEqual([
+      "initialize",
+      "session/new",
+      "session/new",
+    ])
+    expect(requests[1]?.params).toMatchObject({ mcpServers: expect.any(Array) })
+    expect(requests[2]?.params).toMatchObject({ mcpServers: [] })
+    expect(errors).toContain(
+      "ACP session/new rejected configured MCP servers; retrying with an empty MCP server list",
+    )
+  })
+
+  test("sends an empty MCP server list when no client MCP servers are configured", async () => {
+    const requests: JsonRpcMessage[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      spawnProcess: createFakeAcpProcess({
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.start()
+
+    expect(requests[1]?.params).toMatchObject({ mcpServers: [] })
+  })
+
+  test("force-kills the ACP process when graceful termination does not exit", async () => {
+    const kills: Array<NodeJS.Signals | undefined> = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      processExitGraceMs: 1,
+      spawnProcess: createFakeAcpProcess({ kills, updates: [] }),
+    })
+
+    await session.start()
+    await session.close()
+
+    expect(kills).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  test("does not force-kill the ACP process when graceful termination exits", async () => {
+    const kills: Array<NodeJS.Signals | undefined> = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      processExitGraceMs: 50,
+      spawnProcess: createFakeAcpProcess({
+        emitExitOnKill: true,
+        kills,
+        updates: [],
+      }),
+    })
+
+    await session.start()
+    await session.close()
+
+    expect(kills).toEqual(["SIGTERM"])
+  })
+
   test("wraps runtime operations in tagged adapter results", async () => {
     const adapter = new HermesAcpRuntimeAdapter({
       createSession: () =>
@@ -196,6 +278,9 @@ describe("ACP runtime adapter boundary", () => {
 
 function createFakeAcpProcess(options: {
   configOptions?: Array<{ currentValue: string; id: string }>
+  emitExitOnKill?: boolean
+  failSessionNewWithMcpServers?: boolean
+  kills?: Array<NodeJS.Signals | undefined>
   promptResult?: unknown
   requests?: JsonRpcMessage[]
   updates: Array<Record<string, unknown>>
@@ -220,12 +305,21 @@ function createFakeAcpProcess(options: {
         }
       },
     })
-    return Object.assign(new EventEmitter(), {
-      kill: () => true,
+    const process = Object.assign(new EventEmitter(), {
+      kill: (signal?: NodeJS.Signals) => {
+        options.kills?.push(signal)
+        if (options.emitExitOnKill) {
+          queueMicrotask(() => {
+            process.emit("exit", signal === "SIGKILL" ? 137 : 0, signal ?? null)
+          })
+        }
+        return true
+      },
       stderr,
       stdin,
       stdout,
     }) as unknown as ChildProcessWithoutNullStreams
+    return process
   }
 }
 
@@ -234,6 +328,7 @@ function handleRequest(
   stdout: PassThrough,
   options: {
     configOptions?: Array<{ currentValue: string; id: string }>
+    failSessionNewWithMcpServers?: boolean
     promptResult?: unknown
     updates: Array<Record<string, unknown>>
   },
@@ -248,6 +343,22 @@ function handleRequest(
   }
 
   if (message.method === "session/new") {
+    const params =
+      message.params && typeof message.params === "object" && !Array.isArray(message.params)
+        ? (message.params as Record<string, unknown>)
+        : {}
+    if (
+      options.failSessionNewWithMcpServers &&
+      Array.isArray(params.mcpServers) &&
+      params.mcpServers.length > 0
+    ) {
+      writeJson(stdout, {
+        error: { code: -32602, message: "mcpServers are not supported" },
+        id: message.id,
+        jsonrpc: "2.0",
+      })
+      return
+    }
     writeJson(stdout, {
       id: message.id,
       jsonrpc: "2.0",

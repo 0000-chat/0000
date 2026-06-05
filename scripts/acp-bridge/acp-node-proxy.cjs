@@ -45,7 +45,18 @@ function terminateChild(signal) {
     // The child may have already exited between timeout settlement and cleanup.
   }
 
-  setTimeout(() => process.exit(exitCodeForSignal(null, signal)), 1000).unref()
+  setTimeout(() => {
+    try {
+      if (process.platform === "win32") {
+        child.kill("SIGKILL")
+      } else {
+        process.kill(-child.pid, "SIGKILL")
+      }
+    } catch {
+      // The child may have exited after the graceful signal.
+    }
+    process.exit(exitCodeForSignal(null, signal))
+  }, 1000).unref()
 }
 
 function exitCodeForSignal(code, signal) {
