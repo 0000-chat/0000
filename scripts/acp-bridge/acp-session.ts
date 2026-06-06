@@ -1169,6 +1169,7 @@ function extractFinalText(input: {
     runtimeId === "codex" &&
     !trustedFinalResultText &&
     thoughtEvents.length === 0 &&
+    toolEventCount > 0 &&
     answerText.length > 0
   const diagnostics: HermesAcpFinalTextDiagnostics = {
     answerChunkCount: answerEvents.length,

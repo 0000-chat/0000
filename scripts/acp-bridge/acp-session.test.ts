@@ -12,12 +12,39 @@ import {
 } from "./acp-session"
 
 describe("ACP final text extraction", () => {
-  test("withholds Codex ACP text when the turn has no classified thought events", async () => {
+  test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
+      spawnProcess: createFakeAcpProcess({
+        updates: [
+          { content: { text: "ACP", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " smoke", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " ok", type: "text" }, sessionUpdate: "agent_message_chunk" },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.text).toBe("ACP smoke ok")
+    expect(result.finalText).toMatchObject({
+      answerChunkCount: 3,
+      answerTextLength: 12,
+      runtimeId: "codex",
+      thoughtChunkCount: 0,
+      toolEventCount: 0,
+      trustedFinalResultText: false,
+      withheld: false,
+    })
+  })
+
+  test("withholds Codex ACP text when tool activity has no classified thought events", async () => {
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
       spawnProcess: createFakeAcpProcess({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
           { content: { text: "\nfinal answer", type: "text" }, sessionUpdate: "agent_message_chunk" },
         ],
       }),
