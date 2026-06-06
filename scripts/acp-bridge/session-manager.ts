@@ -493,7 +493,6 @@ export class BridgeSessionManager {
     }
     if (
       normalizeType(item) === "steer-session" &&
-      result.finalText?.withheld &&
       result.text.trim().length === 0
     ) {
       await this.markQueueResult(item, {

@@ -1590,6 +1590,46 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("steer-session terminalizes when the replacement response is empty", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => true,
+        sendUserMessage: async (prompt) => ({
+          events: [],
+          finalText: undefined,
+          rawResult: {},
+          sessionId: "session-1",
+          text: prompt === "Try a smaller patch" ? "" : "ready",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Try a smaller patch",
+      threadId: "thread-1",
+      type: "steer-session",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-steer",
+      result: { error: "steer_reprompt_failed", ok: false, terminal: true },
+    })
+  })
+
   test("steer-session records failed when ACP cannot stop the active turn", async () => {
     const cloud = fakeCloudClient()
     const supervisor = new BridgeSupervisor()
