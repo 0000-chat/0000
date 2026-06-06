@@ -21,7 +21,7 @@ const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json")
 const DEFAULT_WATCH_PATHS = ["scripts/acp-bridge.ts", "scripts/acp-bridge"]
 
 async function main() {
-  const config = parseArgs(process.argv.slice(2))
+  const config = parseArgs(getSupervisorArgv(process.argv))
   const supervisor = new BridgeDevSupervisor(config)
   await supervisor.run()
 }
@@ -127,11 +127,22 @@ class BridgeDevSupervisor {
   }
 }
 
-function parseArgs(argv: string[]): SupervisorConfig {
+export function getSupervisorArgv(argv: string[]): string[] {
+  const firstUserArg = argv[1]
+  if (firstUserArg?.endsWith("bridge-dev-supervisor.ts")) {
+    return argv.slice(2)
+  }
+  return argv.slice(1)
+}
+
+export function parseArgs(argv: string[]): SupervisorConfig {
   const bridgeSeparator = argv.indexOf("--")
   const supervisorArgs = bridgeSeparator === -1 ? argv : argv.slice(0, bridgeSeparator)
+  const implicitCommand = bridgeSeparator === -1 && Boolean(argv[0]) && !argv[0]!.startsWith("--")
   const command =
-    bridgeSeparator === -1 || bridgeSeparator === argv.length - 1
+    implicitCommand
+      ? argv
+      : bridgeSeparator === -1 || bridgeSeparator === argv.length - 1
       ? ["bun", "scripts/acp-bridge.ts", "start"]
       : argv.slice(bridgeSeparator + 1)
 

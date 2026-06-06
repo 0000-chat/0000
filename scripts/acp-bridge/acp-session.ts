@@ -110,6 +110,7 @@ export type HermesAcpSessionOptions = {
   cwd?: string
   initialSessionId?: string
   mcpServers?: HermesAcpMcpServer[]
+  processExitGraceMs?: number
   requestTimeoutMs?: number
   resumeEnabled?: boolean
   onEvent?: (event: NormalizedBridgeEvent) => void | Promise<void>
@@ -141,6 +142,7 @@ type PendingPermissionRequest = {
 }
 
 export const DEFAULT_ACP_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
+export const DEFAULT_ACP_PROCESS_EXIT_GRACE_MS = 2_500
 
 export const HIDDEN_ZERO_CHAT_SYSTEM_PROMPT = buildZeroChatHiddenSystemPrompt()
 
@@ -151,11 +153,27 @@ export class HermesAcpProcessError extends Error {
   }
 }
 
+export class HermesAcpJsonRpcError extends Error {
+  readonly code?: number
+  readonly errorKind?: string
+  readonly method: string
+
+  constructor(method: string, error: unknown) {
+    const diagnostic = formatAcpJsonRpcError(error)
+    super(`ACP ${method} failed: ${diagnostic}`)
+    this.name = "HermesAcpJsonRpcError"
+    this.method = method
+    this.code = readJsonRpcErrorCode(error)
+    this.errorKind = readJsonRpcErrorKind(error)
+  }
+}
+
 export class HermesAcpSession {
   readonly command: string[]
   readonly cwd?: string
   readonly initialSessionId?: string
   readonly mcpServers: HermesAcpMcpServer[]
+  readonly processExitGraceMs: number
   readonly requestTimeoutMs: number
   readonly resumeEnabled: boolean
 
@@ -193,6 +211,7 @@ export class HermesAcpSession {
     this.cwd = options.cwd
     this.initialSessionId = options.initialSessionId
     this.mcpServers = options.mcpServers ?? []
+    this.processExitGraceMs = options.processExitGraceMs ?? DEFAULT_ACP_PROCESS_EXIT_GRACE_MS
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_ACP_REQUEST_TIMEOUT_MS
     this.resumeEnabled = options.resumeEnabled === true
     this.onEvent = options.onEvent
@@ -229,10 +248,7 @@ export class HermesAcpSession {
     }
 
     this.lifecyclePhase = "starting"
-    const result = await this.request("session/new", {
-      cwd: this.cwd ?? process.cwd(),
-      mcpServers: this.mcpServers,
-    })
+    const result = await this.createNewSession()
     this.storeConfigOptions(result)
     this.sessionId = extractSessionId(result)
     this.started = true
@@ -359,8 +375,90 @@ export class HermesAcpSession {
       this.pending.delete(id)
     }
     this.pendingPermissionRequests.clear()
-    this.child?.kill()
+    await this.terminateChildProcess()
     this.lifecyclePhase = "closed"
+  }
+
+  private async createNewSession(): Promise<unknown> {
+    const params = this.buildSessionNewParams("configured")
+    try {
+      return await this.request("session/new", params)
+    } catch (error) {
+      if (this.mcpServers.length > 0) {
+        void this.onError?.(
+          new Error(
+            "ACP session/new rejected configured MCP servers; retrying with an empty MCP server list",
+          ),
+        )
+        try {
+          return await this.request("session/new", this.buildSessionNewParams("empty"))
+        } catch {
+          void this.onError?.(
+            new Error(
+              "ACP session/new rejected empty MCP server list; retrying without MCP server field",
+            ),
+          )
+          return await this.request("session/new", this.buildSessionNewParams("omitted"))
+        }
+      }
+      void this.onError?.(
+        new Error("ACP session/new rejected empty MCP server list; retrying without MCP server field"),
+      )
+      try {
+        return await this.request("session/new", this.buildSessionNewParams("omitted"))
+      } catch {
+        throw error
+      }
+    }
+  }
+
+  private buildSessionNewParams(
+    mcpMode: "configured" | "empty" | "omitted",
+  ): { cwd: string; mcpServers?: HermesAcpMcpServer[] } {
+    const params: { cwd: string; mcpServers?: HermesAcpMcpServer[] } = {
+      cwd: this.cwd ?? process.cwd(),
+    }
+    if (mcpMode === "configured") {
+      params.mcpServers = this.mcpServers
+    } else if (mcpMode === "empty") {
+      params.mcpServers = []
+    }
+    return params
+  }
+
+  private async terminateChildProcess(): Promise<void> {
+    const child = this.child
+    if (!child) {
+      return
+    }
+    await new Promise<void>((resolve) => {
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const finish = () => {
+        if (settled) {
+          return
+        }
+        settled = true
+        if (timer) {
+          clearTimeout(timer)
+        }
+        child.off("exit", finish)
+        child.off("close", finish)
+        resolve()
+      }
+      child.once("exit", finish)
+      child.once("close", finish)
+      child.kill("SIGTERM")
+      timer = setTimeout(() => {
+        if (!settled) {
+          child.kill("SIGKILL")
+          finish()
+        }
+      }, this.processExitGraceMs)
+    })
+    if (this.child === child) {
+      this.child = undefined
+    }
   }
 
   private async tryExternalSessionContinuity(): Promise<string | undefined> {
@@ -490,13 +588,13 @@ export class HermesAcpSession {
       this.pending.set(id, {
         method,
         timeout,
-        resolve: (message) => {
-          if (message.error) {
-            reject(new Error(`ACP ${method} failed: ${JSON.stringify(message.error)}`))
-            return
-          }
-          resolve(message.result)
-        },
+	        resolve: (message) => {
+	          if (message.error) {
+	            reject(new HermesAcpJsonRpcError(method, message.error))
+	            return
+	          }
+	          resolve(message.result)
+	        },
         reject,
       })
 
@@ -1071,6 +1169,7 @@ function extractFinalText(input: {
     runtimeId === "codex" &&
     !trustedFinalResultText &&
     thoughtEvents.length === 0 &&
+    toolEventCount > 0 &&
     answerText.length > 0
   const diagnostics: HermesAcpFinalTextDiagnostics = {
     answerChunkCount: answerEvents.length,
@@ -1103,6 +1202,61 @@ function extractTrustedFinalResultText(result: unknown): string | undefined {
     readString(record.outputText) ??
     readString(record.message)
   )
+}
+
+function formatAcpJsonRpcError(error: unknown): string {
+  const errorKind = normalizeJsonRpcErrorKind(readJsonRpcErrorKind(error))
+  const code = readJsonRpcErrorCode(error)
+  if (errorKind) {
+    return code === undefined ? errorKind : `${errorKind} (code ${code})`
+  }
+  const message = readJsonRpcErrorMessage(error)
+  if (message) {
+    return code === undefined ? message : `${message} (code ${code})`
+  }
+  return code === undefined ? "json_rpc_error" : `json_rpc_error (code ${code})`
+}
+
+function normalizeJsonRpcErrorKind(errorKind: string | undefined): string | undefined {
+  if (errorKind === "authentication_failed") {
+    return "provider_login_failed"
+  }
+  return errorKind
+}
+
+function readJsonRpcErrorCode(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined
+  }
+  const code = (error as Record<string, unknown>).code
+  return typeof code === "number" && Number.isFinite(code) ? code : undefined
+}
+
+function readJsonRpcErrorKind(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined
+  }
+  const record = error as Record<string, unknown>
+  const directKind = readString(record.errorKind)
+  if (directKind) {
+    return directKind
+  }
+  const data = record.data
+  if (!data || typeof data !== "object") {
+    return undefined
+  }
+  return readString((data as Record<string, unknown>).errorKind)
+}
+
+function readJsonRpcErrorMessage(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined
+  }
+  const message = readString((error as Record<string, unknown>).message)
+  if (!message) {
+    return undefined
+  }
+  return message.length > 160 ? `${message.slice(0, 157)}...` : message
 }
 
 function readString(value: unknown): string | undefined {

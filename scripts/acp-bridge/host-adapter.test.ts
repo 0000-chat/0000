@@ -74,6 +74,23 @@ describe("bridge host adapter boundary", () => {
     ])
   })
 
+  test("preserves transport method context for Convex client methods", async () => {
+    class ContextSensitiveTransport {
+      private readonly ok = true
+
+      async claimWork() {
+        if (!this.ok) {
+          throw new Error("missing method context")
+        }
+        return { commands: [] }
+      }
+    }
+
+    const adapter = new ConvexBridgeHostAdapter(new ContextSensitiveTransport())
+
+    await expect(adapter.claimWork()).resolves.toEqual({ raw: { commands: [] }, workItems: [] })
+  })
+
   test("normalizes claimed Convex commands into host work items", async () => {
     const adapter = new ConvexBridgeHostAdapter({
       claimWork: async () => ({

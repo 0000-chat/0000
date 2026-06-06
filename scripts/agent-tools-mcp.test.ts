@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   AGENT_TOOL_MCP_TOOL_NAMES,
+  AGENT_TOOL_MCP_INPUT_SCHEMAS,
   AGENT_TOOL_GUIDE_RESOURCE,
   AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
   buildAgentToolMcpEnv,
@@ -107,6 +108,29 @@ describe("agent tools MCP server helpers", () => {
         threadId: "thread_abc",
       }),
     ).toContain("currentThreadId: thread_abc")
+  })
+
+  test("keeps the public mailbox tool schema aligned with conversation replies", () => {
+    const schema = AGENT_TOOL_MCP_INPUT_SCHEMAS["agents.sendMailboxMessage"]
+
+    expect(schema.safeParse({
+      body: "Can you take this follow-up?",
+      maxHops: 2,
+      parentMailboxMessageId: "mailbox_message_123",
+      responsePolicy: "reply-requested",
+      subject: "Delegated task",
+      toAgentIdOrSlug: "codex",
+    }).success).toBe(true)
+
+    expect(schema.safeParse({
+      body: "Please archive this when done.",
+      responsePolicy: "not-a-policy",
+      subject: "Bad policy",
+      toAgentIdOrSlug: "codex",
+    }).success).toBe(false)
+
+    expect(buildAgentToolGuideText()).toContain("reply-requested")
+    expect(buildAgentToolGuideText()).toContain("parentMailboxMessageId")
   })
 
   test("loads required bridge and session environment", () => {

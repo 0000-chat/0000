@@ -322,4 +322,36 @@ describe("runtime discovery", () => {
       },
     })
   })
+
+  test("reports actionable OpenClaw gateway token diagnostics", async () => {
+    const profiles = await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      discoverAcpCommands: noDiscoveredCommands,
+      probeAcpCommand: async (command) => {
+        if (command.join(" ") === "openclaw acp") {
+          return {
+            ok: false,
+            reason:
+              "gateway connect failed: GatewayClientRequestError: unauthorized: gateway token missing (set gateway.remote.token to match gateway.auth.token)",
+          }
+        }
+        return { ok: true, capabilities: {} }
+      },
+      runCommand: async (command) => {
+        if (command.join(" ") === "command -v openclaw") {
+          return { ok: true, stdout: "/usr/bin/openclaw\n" }
+        }
+        return { ok: false, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(profiles.find((profile) => profile.kind === "openclaw")).toMatchObject({
+      diagnostics: {
+        acp: "unsupported",
+        reason: "openclaw_gateway_token_missing",
+        detail: expect.stringContaining("gateway.remote.token"),
+      },
+      status: "unavailable",
+    })
+  })
 })

@@ -92,6 +92,9 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "agents.list": { limit: z.number().optional(), query: z.string().optional() },
   "agents.sendMailboxMessage": {
     body: z.string(),
+    maxHops: z.number().optional(),
+    parentMailboxMessageId: z.string().optional(),
+    responsePolicy: z.enum(["fire-and-forget", "reply-allowed", "reply-requested"]).optional(),
     subject: z.string(),
     toAgentIdOrSlug: z.string(),
   },
@@ -281,6 +284,10 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   },
 }
 
+export const AGENT_TOOL_MCP_INPUT_SCHEMAS = Object.fromEntries(
+  AGENT_TOOL_MCP_TOOL_NAMES.map((toolName) => [toolName, z.object(toolSchemas[toolName])]),
+) as Record<AgentToolMcpToolName, z.ZodObject<z.ZodRawShape>>
+
 const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "userPrompts.requestChoice":
     "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
@@ -294,7 +301,7 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "agents.list":
     "List mailbox-capable agents in the current organization so you can address agent-to-agent handoffs by id or slug.",
   "agents.sendMailboxMessage":
-    "Send a one-off mailbox message from the current agent to another agent in the same organization. This records the handoff but does not automatically start a new ACP session.",
+    "Send a mailbox message from the current agent to another agent in the same organization. Use responsePolicy='fire-and-forget' for one-off handoffs, 'reply-allowed' when the recipient may answer, and 'reply-requested' when a reply is desired. Replies must pass parentMailboxMessageId and stay within maxHops; this records the handoff but does not automatically start another ACP session.",
   "spaces.list": "List spaces in 0000 Chat.",
   "spaces.get": "Read one 0000 Chat space by id or slug.",
   "spaces.create":

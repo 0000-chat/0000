@@ -4,6 +4,39 @@ import { BridgeSupervisor } from "./bridge-supervisor"
 import { BridgeSessionManager, type BridgeSessionContext } from "./session-manager"
 
 describe("bridge session cwd safety", () => {
+  test("does not let a stuck ACP close block manager shutdown forever", async () => {
+    const closeStarted = deferred<void>()
+    const manager = new BridgeSessionManager({
+      closeTimeoutMs: 5,
+      cloudClient: fakeCloudClient(),
+      createSession: () => ({
+        close: async () => {
+          closeStarted.resolve()
+          await new Promise<void>(() => {})
+        },
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    await manager.close()
+    await closeStarted.promise
+    expect(manager.getStatus().activeSessions).toEqual([])
+  })
+
   test("ignores remote queue cwd by default", async () => {
     const contexts: BridgeSessionContext[] = []
     const manager = new BridgeSessionManager({
@@ -47,6 +80,82 @@ describe("bridge session cwd safety", () => {
     })
 
     expect(contexts[0]?.cwd).toBe("/Users/alice/private-project")
+  })
+
+  test("passes the real Convex agent session id into MCP server context", async () => {
+    const mcpContexts: Array<{
+      agentSessionId?: string
+      organizationId?: string
+      sessionKey: string
+      threadId: string
+    }> = []
+    const sessionContexts: BridgeSessionContext[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createMcpServers: (context) => {
+        mcpContexts.push(context)
+        return []
+      },
+      createSession: (context) => {
+        sessionContexts.push(context)
+        return fakeSession()
+      },
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "jd73bbytzzt5af89n710xtvp4n885zn8",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org_123",
+      prompt: "hello",
+      threadId: "kx7fm6pymvpev19va22hr9zkax884mgs",
+      type: "prompt",
+    })
+
+    expect(mcpContexts[0]?.agentSessionId).toBe("jd73bbytzzt5af89n710xtvp4n885zn8")
+    expect(mcpContexts[0]?.organizationId).toBe("org_123")
+    expect(mcpContexts[0]?.sessionKey).not.toBe("jd73bbytzzt5af89n710xtvp4n885zn8")
+    expect(sessionContexts[0]?.agentSessionId).toBe("jd73bbytzzt5af89n710xtvp4n885zn8")
+  })
+
+  test("strict scoped identity rejects missing organization or agent session ids", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      deviceId: "bridge_123",
+      requireScopedIdentity: true,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent_session_1",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      claimId: "claim-2",
+      id: "queue-2",
+      organizationId: "org_123",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-1",
+        result: expect.objectContaining({ error: expect.stringContaining("missing organizationId") }),
+      }),
+    )
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-2",
+        result: expect.objectContaining({ error: expect.stringContaining("missing agentSessionId") }),
+      }),
+    )
   })
 
   test("uses configured agent names instead of runtime labels for run start events", async () => {
@@ -125,6 +234,7 @@ describe("bridge session cwd safety", () => {
     const cloud = fakeCloudClient()
     const contexts: BridgeSessionContext[] = []
     const closedProfiles: Array<string | undefined> = []
+    const logs: Array<Record<string, unknown>> = []
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: (context) => {
@@ -142,6 +252,7 @@ describe("bridge session cwd safety", () => {
           }),
         }
       },
+      log: (entry) => logs.push(entry as Record<string, unknown>),
       runtimeProfiles: [
         {
           capabilities: {},
@@ -190,6 +301,14 @@ describe("bridge session cwd safety", () => {
       ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
     ])
     expect(closedProfiles).toContain("codex:codex-acp")
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        bridgeProfileId: "codex:codex-acp",
+        event: "bridge.lifecycle.replacement_session",
+        sessionId: "agent-session-1",
+        threadId: "thread-1",
+      }),
+    )
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-claude",
       result: { ok: true, text: "claude-code:claude-acp" },
@@ -616,6 +735,51 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("persists ACP continuation output after an input response", async () => {
+    const prompts: string[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt)
+          return {
+            events: [],
+            rawResult: { ok: true },
+            sessionId: "session-1",
+            text: prompt === "Here is the missing detail." ? "continued after input" : "ready",
+          }
+        },
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      claimId: "claim-input",
+      id: "queue-input",
+      prompt: "Here is the missing detail.",
+      threadId: "thread-1",
+      type: "input-response",
+    })
+
+    expect(prompts).toEqual(["hello", "Here is the missing detail."])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-input",
+      result: { inputResponse: true, ok: true, text: "continued after input" },
+    })
+    expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
+      text: "continued after input",
+    })
+  })
+
   test("routes sparse choice responses to runtime-scoped active sessions", async () => {
     const prompts: string[] = []
     const cloud = fakeCloudClient()
@@ -878,6 +1042,7 @@ describe("bridge session cwd safety", () => {
   test("choice response resumes after the original ACP session idles closed", async () => {
     const prompts: string[] = []
     const closedSessions: string[] = []
+    const logs: Array<Record<string, unknown>> = []
     let sessionCount = 0
     const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
@@ -902,6 +1067,7 @@ describe("bridge session cwd safety", () => {
           },
         }
       },
+      log: (entry) => logs.push(entry as Record<string, unknown>),
     })
 
     await manager.handleQueueItem({
@@ -924,6 +1090,14 @@ describe("bridge session cwd safety", () => {
     })
 
     expect(closedSessions).toContain("session-1")
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        agentSessionId: "agent-session-1",
+        event: "bridge.lifecycle.idle_close",
+        providerSessionId: "agent-session-1",
+        threadId: "thread-1",
+      }),
+    )
     expect(sessionCount).toBe(2)
     expect(prompts).toEqual(["hello", "Selected choice: option-a"])
     expect(cloud.results.at(-1)).toMatchObject({
@@ -1038,6 +1212,57 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("cancel-session fences an active prompt and ignores its late final text", async () => {
+    const promptRelease = deferred<void>()
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => true,
+        sendUserMessage: async () => {
+          await promptRelease.promise
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "late text that must not publish",
+          }
+        },
+      }),
+    })
+
+    const promptRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe("queue-prompt"),
+    )
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+    promptRelease.resolve()
+    await promptRun
+
+    expect(cloud.results.find((result) => result.id === "queue-cancel")).toMatchObject({
+      result: { cancelled: true, ok: true, stopReason: "cancelled", terminal: true },
+    })
+    expect(cloud.results.find((result) => result.id === "queue-prompt")).toMatchObject({
+      result: { cancelled: true, ignoredLateResult: true, ok: false, terminal: true },
+    })
+    expect(JSON.stringify(cloud.events)).not.toContain("late text that must not publish")
+  })
+
   test("cancel-session reports cancel_not_acknowledged when ACP cannot cancel", async () => {
     const cloud = fakeCloudClient()
     const supervisor = new BridgeSupervisor()
@@ -1046,6 +1271,109 @@ describe("bridge session cwd safety", () => {
       createSession: () => ({
         close: async () => {},
         cancel: async () => false,
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ready",
+        }),
+      }),
+      supervisor,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-cancel",
+      result: { error: "cancel_not_acknowledged", ok: false, terminal: true },
+    })
+    expect(supervisor.getTurnState("queue-cancel")?.checkpoint).toBe("failed")
+  })
+
+  test("cancel-session force-closes an active turn when ACP does not acknowledge cancel", async () => {
+    const promptRelease = deferred<void>()
+    const cloud = fakeCloudClient()
+    let closeCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {
+          closeCount += 1
+        },
+        cancel: async () => false,
+        sendUserMessage: async () => {
+          await promptRelease.promise
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "late after forced close",
+          }
+        },
+      }),
+    })
+
+    const promptRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe("queue-prompt"),
+    )
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+    promptRelease.resolve()
+    await promptRun
+
+    expect(closeCount).toBe(1)
+    expect(cloud.results.find((result) => result.id === "queue-cancel")).toMatchObject({
+      result: {
+        cancelled: true,
+        forced: true,
+        ok: true,
+        stopReason: "cancelled",
+        terminal: true,
+      },
+    })
+    expect(cloud.results.find((result) => result.id === "queue-prompt")).toMatchObject({
+      result: { cancelled: true, ignoredLateResult: true, ok: false, terminal: true },
+    })
+    expect(JSON.stringify(cloud.events)).not.toContain("late after forced close")
+  })
+
+  test("cancel-session reports terminal failure when ACP cancel throws", async () => {
+    const cloud = fakeCloudClient()
+    const supervisor = new BridgeSupervisor()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {
+          throw new Error("session/cancel rejected")
+        },
         sendUserMessage: async () => ({
           events: [],
           rawResult: {},
@@ -1133,6 +1461,135 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("steer-session replaces the ACP session when an active turn is still running", async () => {
+    const activePromptRelease = deferred<void>()
+    const prompts: string[] = []
+    let cancelCount = 0
+    let closeCount = 0
+    let sessionCount = 0
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => {
+        sessionCount += 1
+        const currentSession = sessionCount
+        return {
+          close: async () => {
+            closeCount += 1
+          },
+          cancel: async () => {
+            cancelCount += 1
+            return true
+          },
+          sendUserMessage: async (prompt) => {
+            prompts.push(`${currentSession}:${prompt}`)
+            if (currentSession === 1) {
+              await activePromptRelease.promise
+              return {
+                events: [],
+                rawResult: {},
+                sessionId: "session-1",
+                text: "late original",
+              }
+            }
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-2",
+              text: "steered",
+            }
+          },
+        }
+      },
+    })
+
+    const promptRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe("queue-prompt"),
+    )
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Try a smaller patch",
+      threadId: "thread-1",
+      type: "steer-session",
+    })
+    activePromptRelease.resolve()
+    await promptRun
+
+    expect(sessionCount).toBe(2)
+    expect(cancelCount).toBe(1)
+    expect(closeCount).toBe(1)
+    expect(prompts).toEqual(["1:hello", "2:Try a smaller patch"])
+    expect(cloud.results.find((result) => result.id === "queue-steer")).toMatchObject({
+      result: { ok: true, steered: true, text: "steered" },
+    })
+    expect(cloud.results.find((result) => result.id === "queue-prompt")).toMatchObject({
+      result: { cancelled: true, ignoredLateResult: true, ok: false, terminal: true },
+    })
+    expect(JSON.stringify(cloud.events)).not.toContain("late original")
+  })
+
+  test("steer-session terminalizes when the replacement response has withheld final text", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => true,
+        sendUserMessage: async (prompt) => ({
+          events: [],
+          finalText:
+            prompt === "Try a smaller patch"
+              ? {
+                  answerChunkCount: 0,
+                  answerTextLength: 0,
+                  reason: "codex_unclassified_message_chunks",
+                  runtimeId: "codex",
+                  thoughtChunkCount: 0,
+                  toolEventCount: 1,
+                  trustedFinalResultText: false,
+                  withheld: true,
+                }
+              : undefined,
+          rawResult: {},
+          sessionId: "session-1",
+          text: prompt === "Try a smaller patch" ? "" : "ready",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Try a smaller patch",
+      threadId: "thread-1",
+      type: "steer-session",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-steer",
+      result: { error: "steer_reprompt_failed", ok: false, terminal: true },
+    })
+  })
+
   test("steer-session records failed when ACP cannot stop the active turn", async () => {
     const cloud = fakeCloudClient()
     const supervisor = new BridgeSupervisor()
@@ -1173,6 +1630,73 @@ describe("bridge session cwd safety", () => {
       result: { error: "session_replacement_required", ok: false, terminal: true },
     })
     expect(supervisor.getTurnState("queue-steer")?.checkpoint).toBe("failed")
+  })
+
+  test("steer-session replaces an active ACP session when cancel is not acknowledged", async () => {
+    const activePromptRelease = deferred<void>()
+    const prompts: string[] = []
+    let sessionCount = 0
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => {
+        sessionCount += 1
+        const currentSession = sessionCount
+        return {
+          close: async () => {},
+          cancel: async () => false,
+          sendUserMessage: async (prompt) => {
+            prompts.push(`${currentSession}:${prompt}`)
+            if (currentSession === 1) {
+              await activePromptRelease.promise
+              return {
+                events: [],
+                rawResult: {},
+                sessionId: "session-1",
+                text: "late original",
+              }
+            }
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-2",
+              text: "steered",
+            }
+          },
+        }
+      },
+    })
+
+    const promptRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe("queue-prompt"),
+    )
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Try a smaller patch",
+      threadId: "thread-1",
+      type: "steer-session",
+    })
+    activePromptRelease.resolve()
+    await promptRun
+
+    expect(sessionCount).toBe(2)
+    expect(prompts).toEqual(["1:hello", "2:Try a smaller patch"])
+    expect(cloud.results.find((result) => result.id === "queue-steer")).toMatchObject({
+      result: { ok: true, replacementSession: true, steered: true, text: "steered" },
+    })
+    expect(cloud.results.find((result) => result.id === "queue-prompt")).toMatchObject({
+      result: { cancelled: true, ignoredLateResult: true, ok: false, terminal: true },
+    })
   })
 
   test("close-session closes an idle native ACP session", async () => {
@@ -1477,4 +2001,18 @@ function deferred<T>() {
     reject = promiseReject
   })
   return { promise, reject, resolve }
+}
+
+async function eventually(assertion: () => void): Promise<void> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      assertion()
+      return
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 1))
+    }
+  }
+  throw lastError
 }

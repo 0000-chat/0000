@@ -4,6 +4,9 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  buildBridgeDoctorReport,
+  buildBridgeRegistrationFailure,
+  type BridgeStatus,
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
@@ -17,6 +20,8 @@ import {
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge"
+import { BridgeCloudHttpError } from "./acp-bridge/convex-http"
+import { openBridgeJournal } from "./acp-bridge/sqlite-journal"
 import {
   defaultAgentCommandForEnvironment,
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
@@ -84,6 +89,20 @@ describe("bridge MCP helper configuration", () => {
         name: "0000-chat",
       },
     ])
+  })
+
+  test("rejects bridge-scoped session keys for agent tool invocation", () => {
+    expect(() =>
+      buildAgentToolsMcpServers({
+        agentSessionId:
+          "unknown-org:bridge_a9624a953a17eb66246fde28:hermes%3Adefault:kx7:jd73",
+        agentToolsUrl: "https://0000.chat",
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-a",
+        deviceId: "bridge_a",
+        threadId: "thread_1",
+      }),
+    ).toThrow("bridge-scoped session key")
   })
 })
 
@@ -178,6 +197,12 @@ describe("bridge multi-organization config", () => {
             deviceId: "bridge_b",
             deviceName: "Org B laptop",
             activeSessions: [],
+            registrationFailure: {
+              detectedAt: "2026-06-01T00:05:00.000Z",
+              kind: "auth_failed",
+              message: "Bridge device is not paired",
+              reasonCode: "bridge_device_not_paired",
+            },
             recentErrors: [],
           },
         ],
@@ -188,6 +213,7 @@ describe("bridge multi-organization config", () => {
     expect(output).toContain("registered links: 2")
     expect(output).toContain("Org A laptop")
     expect(output).toContain("Org B laptop")
+    expect(output).toContain("registration failure: bridge_device_not_paired")
     expect(output).not.toContain("secret-token")
     expect(output).not.toContain("secret-value")
   })
@@ -255,7 +281,211 @@ describe("bridge security defaults", () => {
   })
 })
 
+describe("bridge doctor", () => {
+  test("builds a redacted trace-scoped local debug bundle from the SQLite journal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-doctor-"))
+    const journalPath = join(dir, "bridge.sqlite")
+    const journal = openBridgeJournal({ path: journalPath })
+    const { sessionId } = journal.recordClaimBeforePrompt({
+      agentId: "agent-1",
+      bridgeDeviceId: "device-1",
+      claimId: "claim-1",
+      organizationId: "org-1",
+      payload: { prompt: "secret prompt content", safe: "queue metadata" },
+      queueItemId: "queue-1",
+      runtimeProfileId: "codex:default",
+      threadId: "thread-1",
+      traceId: "trace-1",
+    })
+    journal.recordOutboxEvent({
+      agentId: "agent-1",
+      bridgeDeviceId: "device-1",
+      eventType: "result.send",
+      organizationId: "org-1",
+      payload: { content: "secret result content", status: "completed" },
+      queueItemId: "queue-2",
+      runtimeProfileId: "codex:default",
+      threadId: "thread-1",
+      traceId: "trace-2",
+    })
+    journal.appendDiagnostic({
+      details: { prompt: "secret diagnostic content", safe: "diagnostic metadata" },
+      message: "secret diagnostic message",
+      reasonCode: "prompt_send_ambiguous",
+      traceId: "trace-1",
+    })
+    journal.close()
+
+    const report = await buildBridgeDoctorReport(
+      {
+        command: "doctor",
+        flags: { "journal-file": journalPath, trace: "trace-1" },
+        positionals: [],
+      },
+      { ZERO_CHAT_BRIDGE_CONFIG: join(dir, "missing-config.json") },
+      () => 1_799_000_000_000,
+    )
+    const serialized = JSON.stringify(report)
+
+    expect(report.generatedAt).toBe("2027-01-03T18:13:20.000Z")
+    expect(report.localJournal.status).toBe("healthy")
+    expect(report.localJournal.path).toBe(journalPath)
+    expect(report.traceId).toBe("trace-1")
+    expect(report.snapshot.pendingOutbox).toHaveLength(1)
+    expect(report.snapshot.pendingOutbox[0]).toMatchObject({ queueItemId: "queue-1", sessionId })
+    expect(report.snapshot.diagnostics).toHaveLength(1)
+    expect(serialized).toContain("diagnostic metadata")
+    expect(serialized).not.toContain("secret prompt content")
+    expect(serialized).not.toContain("secret result content")
+    expect(serialized).not.toContain("secret diagnostic content")
+    expect(serialized).not.toContain("secret diagnostic message")
+  })
+})
+
 describe("bridge supervisor claim gating", () => {
+  test("classifies stale bridge registrations as hard auth failures", () => {
+    const notPaired = buildBridgeRegistrationFailure(
+      new BridgeCloudHttpError(
+        "POST",
+        "https://example.test/api/agent-bridge/queue/claim",
+        400,
+        '{"error":"Uncaught Error: Bridge device is not paired"}',
+      ),
+      Date.UTC(2026, 5, 5, 10, 0, 0),
+    )
+    const invalidCredentials = buildBridgeRegistrationFailure(
+      new BridgeCloudHttpError(
+        "POST",
+        "https://example.test/api/agent-bridge/heartbeat",
+        401,
+        '{"error":"Uncaught Error: Bridge device credentials are invalid"}',
+      ),
+      Date.UTC(2026, 5, 5, 10, 1, 0),
+    )
+
+    expect(notPaired).toEqual(
+      expect.objectContaining({
+        detectedAt: "2026-06-05T10:00:00.000Z",
+        reasonCode: "bridge_device_not_paired",
+      }),
+    )
+    expect(invalidCredentials).toEqual(
+      expect.objectContaining({
+        detectedAt: "2026-06-05T10:01:00.000Z",
+        reasonCode: "bridge_credentials_invalid",
+      }),
+    )
+  })
+
+  test("disables stale bridge registrations instead of retrying queue claims", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    }
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => {
+        throw new BridgeCloudHttpError(
+          "POST",
+          "https://example.test/api/agent-bridge/queue/claim",
+          400,
+          '{"error":"Uncaught Error: Bridge device is not paired"}',
+        )
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(status.connected).toBe(false)
+    expect(status.registrationFailure).toEqual(
+      expect.objectContaining({
+        detectedAt: "2026-06-05T10:02:00.000Z",
+        reasonCode: "bridge_device_not_paired",
+      }),
+    )
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.registration.disabled",
+        reason: "bridge_device_not_paired",
+      }),
+    )
+  })
+
+  test("does not spam claim skipped logs after a registration is disabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: false,
+      recentErrors: [],
+      registrationFailure: {
+        detectedAt: "2026-06-05T10:02:00.000Z",
+        kind: "auth_failed",
+        message: "Bridge device credentials are invalid",
+        reasonCode: "bridge_credentials_invalid",
+      },
+    }
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => {
+        throw new Error("claim should not run for disabled registrations")
+      },
+      cleanupStaleClaims: async () => {
+        throw new Error("cleanup should not run for disabled registrations")
+      },
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 3, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => {
+        throw new Error("heartbeat should not run for disabled registrations")
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(logs).toEqual([])
+    expect(status.connected).toBe(false)
+    expect(status.registrationFailure?.reasonCode).toBe("bridge_credentials_invalid")
+  })
+
   test("skips queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
     const logs: Array<Record<string, unknown>> = []
@@ -299,6 +529,66 @@ describe("bridge supervisor claim gating", () => {
       expect.objectContaining({
         event: "bridge.queue.claim_skipped",
         reason: "local_journal_hard_failed",
+      }),
+    )
+  })
+
+  test("dispatches claimed lifecycle queue commands", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const handled: Array<Record<string, unknown>> = []
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          claimId: "claim-1",
+          id: "queue-cancel-1",
+          kind: "cancel-session",
+          threadId: "thread-1",
+          type: "cancel-session",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>)
+        },
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-cancel-1",
+        type: "cancel-session",
+      }),
+    ])
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.in_flight",
+        queueId: "queue-cancel-1",
+        queueType: "cancel-session",
       }),
     )
   })

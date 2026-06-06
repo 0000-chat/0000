@@ -13,6 +13,8 @@ const API_KEY_HEADER_PATTERN =
   /(?<!["'])(\bx[-_]api[-_]key\b\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,}\]]+)/gi
 const ACP_SESSION_ERROR_PATTERN =
   /(ACP\s+session\/(?:new|prompt|cancel)\s+(?:failed|did not return [^:]+):)[\s\S]*/gi
+const SAFE_ACP_SESSION_ERROR_PATTERN =
+  /^ACP\s+session\/(?:new|prompt|cancel)\s+(?:failed|did not return [^:]+):\s+[a-z][a-z0-9_]*(?:\s+\(code\s+-?\d+\))?$/i
 
 export type BridgeLogLevel = "debug" | "info" | "warn" | "error"
 
@@ -29,6 +31,7 @@ export const bridgeLogEventNames = [
   "bridge.axiom_delivery.failed",
   "bridge.control_command.received",
   "bridge.choice_response.continuation",
+  "bridge.input_response.continuation",
   "bridge.events.append_failed",
   "bridge.events.append_single_failed",
   "bridge.events.appended",
@@ -41,12 +44,16 @@ export const bridgeLogEventNames = [
   "bridge.queue.claim_skipped",
   "bridge.queue.claimed",
   "bridge.queue.cleanup_stale",
+  "bridge.registration.claim_skipped",
+  "bridge.registration.disabled",
   "bridge.queue_item.complete",
   "bridge.queue_item.error",
   "bridge.queue_item.in_flight",
   "bridge.queue_item.settled",
   "bridge.queue_item.start",
-  "bridge.session.idle_close",
+  "bridge.lifecycle.idle_close",
+  "bridge.lifecycle.late_prompt_result_ignored",
+  "bridge.lifecycle.replacement_session",
   "bridge.session.ready",
   "bridge.session.runtime_profile_changed",
   "bridge.start",
@@ -281,6 +288,9 @@ function clean(value: string | undefined) {
 }
 
 function redactString(value: string): string {
+  if (SAFE_ACP_SESSION_ERROR_PATTERN.test(value)) {
+    return value
+  }
   return value
     .replace(ACP_SESSION_ERROR_PATTERN, `$1 ${REDACTED}`)
     .replace(AUTHORIZATION_HEADER_PATTERN, (_match, prefix: string) => `${prefix}${REDACTED}`)

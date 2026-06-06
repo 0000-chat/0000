@@ -4,6 +4,7 @@ import { PassThrough, Writable } from "node:stream"
 import { describe, expect, test } from "bun:test"
 
 import {
+  DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
   HermesAcpRuntimeAdapter,
   HermesAcpSession,
   type JsonRpcMessage,
@@ -11,12 +12,39 @@ import {
 } from "./acp-session"
 
 describe("ACP final text extraction", () => {
-  test("withholds Codex ACP text when the turn has no classified thought events", async () => {
+  test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
+      spawnProcess: createFakeAcpProcess({
+        updates: [
+          { content: { text: "ACP", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " smoke", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " ok", type: "text" }, sessionUpdate: "agent_message_chunk" },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.text).toBe("ACP smoke ok")
+    expect(result.finalText).toMatchObject({
+      answerChunkCount: 3,
+      answerTextLength: 12,
+      runtimeId: "codex",
+      thoughtChunkCount: 0,
+      toolEventCount: 0,
+      trustedFinalResultText: false,
+      withheld: false,
+    })
+  })
+
+  test("withholds Codex ACP text when tool activity has no classified thought events", async () => {
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
       spawnProcess: createFakeAcpProcess({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
           { content: { text: "\nfinal answer", type: "text" }, sessionUpdate: "agent_message_chunk" },
         ],
       }),
@@ -71,6 +99,105 @@ describe("ACP final text extraction", () => {
 })
 
 describe("ACP runtime adapter boundary", () => {
+  test("lets the node proxy run its process-group kill fallback before bridge escalation", () => {
+    expect(DEFAULT_ACP_PROCESS_EXIT_GRACE_MS).toBeGreaterThan(1000)
+  })
+
+  test("retries session creation with an empty MCP server list when a runtime rejects configured MCP servers", async () => {
+    const requests: JsonRpcMessage[] = []
+    const errors: string[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      mcpServers: [{ args: ["serve"], command: "/bin/0000-mcp", name: "0000" }],
+      onError: (error) => {
+        errors.push(error.message)
+      },
+      spawnProcess: createFakeAcpProcess({
+        failSessionNewWithMcpServers: true,
+        requests,
+        updates: [],
+      }),
+    })
+
+    await expect(session.start()).resolves.toBe("session-1")
+
+    expect(requests.map((request) => request.method)).toEqual([
+      "initialize",
+      "session/new",
+      "session/new",
+    ])
+    expect(requests[1]?.params).toMatchObject({ mcpServers: expect.any(Array) })
+    expect(requests[2]?.params).toMatchObject({ mcpServers: [] })
+    expect(errors).toContain(
+      "ACP session/new rejected configured MCP servers; retrying with an empty MCP server list",
+    )
+  })
+
+  test("sends an empty MCP server list when no client MCP servers are configured", async () => {
+    const requests: JsonRpcMessage[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      spawnProcess: createFakeAcpProcess({
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.start()
+
+    expect(requests[1]?.params).toMatchObject({ mcpServers: [] })
+  })
+
+  test("preserves safe ACP error kind diagnostics without exposing raw error payloads", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "claude acp",
+      spawnProcess: createFakeAcpProcess({
+        promptError: {
+          code: -32603,
+          data: { errorKind: "authentication_failed" },
+          message: "Internal error: Failed to authenticate. API Error: 401 Invalid authentication credentials",
+        },
+        updates: [],
+      }),
+    })
+
+    await expect(session.sendUserMessage("hello")).rejects.toThrow(
+      "ACP session/prompt failed: provider_login_failed (code -32603)",
+    )
+  })
+
+  test("force-kills the ACP process when graceful termination does not exit", async () => {
+    const kills: Array<NodeJS.Signals | undefined> = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      processExitGraceMs: 1,
+      spawnProcess: createFakeAcpProcess({ kills, updates: [] }),
+    })
+
+    await session.start()
+    await session.close()
+
+    expect(kills).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  test("does not force-kill the ACP process when graceful termination exits", async () => {
+    const kills: Array<NodeJS.Signals | undefined> = []
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      processExitGraceMs: 50,
+      spawnProcess: createFakeAcpProcess({
+        emitExitOnKill: true,
+        kills,
+        updates: [],
+      }),
+    })
+
+    await session.start()
+    await session.close()
+
+    expect(kills).toEqual(["SIGTERM"])
+  })
+
   test("wraps runtime operations in tagged adapter results", async () => {
     const adapter = new HermesAcpRuntimeAdapter({
       createSession: () =>
@@ -196,6 +323,10 @@ describe("ACP runtime adapter boundary", () => {
 
 function createFakeAcpProcess(options: {
   configOptions?: Array<{ currentValue: string; id: string }>
+  emitExitOnKill?: boolean
+  failSessionNewWithMcpServers?: boolean
+  kills?: Array<NodeJS.Signals | undefined>
+  promptError?: { code: number; data?: Record<string, unknown>; message: string }
   promptResult?: unknown
   requests?: JsonRpcMessage[]
   updates: Array<Record<string, unknown>>
@@ -220,12 +351,21 @@ function createFakeAcpProcess(options: {
         }
       },
     })
-    return Object.assign(new EventEmitter(), {
-      kill: () => true,
+    const process = Object.assign(new EventEmitter(), {
+      kill: (signal?: NodeJS.Signals) => {
+        options.kills?.push(signal)
+        if (options.emitExitOnKill) {
+          queueMicrotask(() => {
+            process.emit("exit", signal === "SIGKILL" ? 137 : 0, signal ?? null)
+          })
+        }
+        return true
+      },
       stderr,
       stdin,
       stdout,
     }) as unknown as ChildProcessWithoutNullStreams
+    return process
   }
 }
 
@@ -234,6 +374,8 @@ function handleRequest(
   stdout: PassThrough,
   options: {
     configOptions?: Array<{ currentValue: string; id: string }>
+    failSessionNewWithMcpServers?: boolean
+    promptError?: { code: number; data?: Record<string, unknown>; message: string }
     promptResult?: unknown
     updates: Array<Record<string, unknown>>
   },
@@ -248,6 +390,22 @@ function handleRequest(
   }
 
   if (message.method === "session/new") {
+    const params =
+      message.params && typeof message.params === "object" && !Array.isArray(message.params)
+        ? (message.params as Record<string, unknown>)
+        : {}
+    if (
+      options.failSessionNewWithMcpServers &&
+      Array.isArray(params.mcpServers) &&
+      params.mcpServers.length > 0
+    ) {
+      writeJson(stdout, {
+        error: { code: -32602, message: "mcpServers are not supported" },
+        id: message.id,
+        jsonrpc: "2.0",
+      })
+      return
+    }
     writeJson(stdout, {
       id: message.id,
       jsonrpc: "2.0",
@@ -277,6 +435,14 @@ function handleRequest(
   }
 
   if (message.method === "session/prompt") {
+    if (options.promptError) {
+      writeJson(stdout, {
+        error: options.promptError,
+        id: message.id,
+        jsonrpc: "2.0",
+      })
+      return
+    }
     for (const update of options.updates) {
       writeJson(stdout, {
         jsonrpc: "2.0",

@@ -60,6 +60,12 @@ describe("bridge log privacy", () => {
     expect(serializedStderr).not.toContain("raw prompt")
   })
 
+  test("preserves safe provider failure diagnostics", () => {
+    expect(redactLogValue("ACP session/prompt failed: provider_login_failed (code -32603)")).toBe(
+      "ACP session/prompt failed: provider_login_failed (code -32603)",
+    )
+  })
+
   test("does not forward logs remotely unless a log URL is configured", async () => {
     let deliveryCount = 0
     const logger = createWorkerBridgeLogger({
