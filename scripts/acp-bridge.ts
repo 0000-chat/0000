@@ -2154,6 +2154,7 @@ function isQueueCommandType(value: string | undefined): value is BridgeQueueComm
     value === "approval" ||
     value === "approval-response" ||
     value === "choice-response" ||
+    value === "input-response" ||
     value === "permission-response" ||
     value === "ping" ||
     value === "revive-session" ||

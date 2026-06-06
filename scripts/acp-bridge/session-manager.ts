@@ -581,6 +581,44 @@ export class BridgeSessionManager {
 
   private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
     const key = this.findSessionKeyForItem(item)
+    if (type === "input-response") {
+      const responseText = item.prompt?.trim()
+      if (!responseText) {
+        throw new Error(`input response ${item.id} is missing response text`)
+      }
+      const threadId = item.threadId ?? item.sessionId
+      if (!key && hasExplicitRuntimeScope(item)) {
+        throw new Error(
+          `input response ${item.id} does not match an active ACP session for the requested runtime`,
+        )
+      }
+      const sessionKey = key ?? threadId
+      if (!sessionKey) {
+        throw new Error(`input response ${item.id} is missing threadId`)
+      }
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
+      const threadHistory = normalizeThreadHistory(item.threadHistory)
+      this.writeLog({
+        level: "info",
+        event: "bridge.input_response.continuation",
+        queueId: item.id,
+        queueType: type,
+        threadId,
+        agentSessionId: key,
+        hasActiveSession: this.sessions.has(sessionKey),
+        hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
+      })
+      await this.runSerializedPrompt(sessionKey, item.id, () =>
+        this.handlePromptNow(item, responseText, {
+          systemPrompt,
+          threadHistory,
+          sessionKey: key,
+          resultMetadata: { inputResponse: true },
+        }),
+      )
+      return
+    }
+
     if (type === "choice-response") {
       const choiceId = item.approvalOutcome?.trim()
       if (!choiceId) {
@@ -1456,7 +1494,10 @@ function normalizeAgentName(value: string | undefined): string | undefined {
 
 function isApprovalResponseType(type: string): boolean {
   return (
-    type === "approval-response" || type === "permission-response" || type === "choice-response"
+    type === "approval-response" ||
+    type === "permission-response" ||
+    type === "choice-response" ||
+    type === "input-response"
   )
 }
 

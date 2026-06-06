@@ -659,6 +659,51 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("persists ACP continuation output after an input response", async () => {
+    const prompts: string[] = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt)
+          return {
+            events: [],
+            rawResult: { ok: true },
+            sessionId: "session-1",
+            text: prompt === "Here is the missing detail." ? "continued after input" : "ready",
+          }
+        },
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      claimId: "claim-input",
+      id: "queue-input",
+      prompt: "Here is the missing detail.",
+      threadId: "thread-1",
+      type: "input-response",
+    })
+
+    expect(prompts).toEqual(["hello", "Here is the missing detail."])
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-input",
+      result: { inputResponse: true, ok: true, text: "continued after input" },
+    })
+    expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
+      text: "continued after input",
+    })
+  })
+
   test("routes sparse choice responses to runtime-scoped active sessions", async () => {
     const prompts: string[] = []
     const cloud = fakeCloudClient()
