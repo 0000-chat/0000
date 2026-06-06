@@ -55,3 +55,21 @@ payloads in diagnostics.
 5. Compare host log forwarding records with local bridge logs.
 6. Reproduce locally with `bun run bridge:smoke-runtimes` or a focused custom ACP
    command.
+
+## Local Doctor Bundle
+
+Run the local doctor command when Convex, the ACP runtime, or the network may be
+unavailable:
+
+```bash
+bun scripts/acp-bridge.ts doctor --trace <trace-id>
+```
+
+The command prints a redacted JSON bundle with bridge version, local config
+summary, status-file presence, journal health, pending outbox rows, and local
+diagnostics. Use `--device-id <bridge-device-id>` when the config has multiple
+organizations, or `--journal-file <path>` when inspecting a copied SQLite file.
+
+The doctor output is designed to be safe for coding-agent debugging. It keeps
+ids, status, event types, reason codes, timestamps, and redacted metadata, but
+does not print raw prompts, message content, bridge tokens, or provider output.

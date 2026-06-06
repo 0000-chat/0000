@@ -31,6 +31,7 @@ import {
 } from "./acp-bridge/runtime-defaults"
 import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles"
 import { shouldRestartBridgeForDevHotReload } from "./acp-bridge/dev-hot-reload"
+import { openBridgeJournal } from "./acp-bridge/sqlite-journal"
 import { buildRestartCommandArgs } from "./bridge-updater"
 export {
   defaultAgentCommandForEnvironment,
@@ -61,7 +62,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(homedir(), ".claude", "skills", "0000", "S
 export const BRIDGE_VERSION = "0.1.7"
 const BRIDGE_LOCAL_STATE_MODE = 0o600
 
-export type BridgeCommandName = "connect" | "pair" | "start" | "status" | "help"
+export type BridgeCommandName = "connect" | "doctor" | "pair" | "start" | "status" | "help"
 
 type FlagValue = string | true | string[]
 type FlagMap = Record<string, FlagValue>
@@ -179,6 +180,36 @@ export type BridgeStatus = {
     reasonCode?: string
     message?: string
   }
+}
+
+export type BridgeDoctorReport = {
+  bridgeVersion: string
+  config: {
+    exists: boolean
+    path: string
+    registrations: Array<{
+      appUrl: string
+      deviceId: string
+      deviceName?: string
+    }>
+    error?: string
+  }
+  generatedAt: string
+  localJournal: {
+    path?: string
+    reasonCode?: string
+    message?: string
+    status: "healthy" | "unavailable"
+  }
+  snapshot: {
+    diagnostics: Array<Record<string, unknown>>
+    pendingOutbox: Array<Record<string, unknown>>
+  }
+  statusFile: {
+    exists: boolean
+    path: string
+  }
+  traceId?: string
 }
 
 export type BridgeRegistrationStatus = {
@@ -696,6 +727,8 @@ async function main() {
       await startBridge(parsed)
     } else if (parsed.command === "status") {
       await showStatus(parsed)
+    } else if (parsed.command === "doctor") {
+      await showDoctor(parsed)
     } else {
       writeStdout(helpText())
     }
@@ -1648,8 +1681,116 @@ async function showStatus(parsed: ParsedBridgeArgs) {
   writeStdout(describeStatus(existingStatus, configExists))
 }
 
+export async function buildBridgeDoctorReport(
+  parsed: ParsedBridgeArgs,
+  env: NodeJS.ProcessEnv = process.env,
+  now: () => number = Date.now,
+): Promise<BridgeDoctorReport> {
+  const configPath = getConfigPath(parsed.flags, env)
+  const statusPath = getStatusPath(parsed.flags, env)
+  const traceId = getFlag(parsed.flags, "trace")
+  const configExists = existsSync(configPath)
+  let registrations: BridgeDoctorReport["config"]["registrations"] = []
+  let configError: string | undefined
+
+  if (configExists) {
+    try {
+      registrations = (await readBridgeConfigFile(configPath)).registrations.map((registration) => ({
+        appUrl: registration.appUrl,
+        deviceId: registration.deviceId,
+        deviceName: registration.deviceName,
+      }))
+    } catch (error) {
+      configError = redactForOutput(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const explicitJournalPath = getFlag(parsed.flags, "journal-file", env.ZERO_CHAT_BRIDGE_JOURNAL)
+  const requestedDeviceId = getFlag(parsed.flags, "device-id")
+  const selectedRegistration = requestedDeviceId
+    ? registrations.find((registration) => registration.deviceId === requestedDeviceId)
+    : registrations[0]
+  const journalPath = explicitJournalPath
+    ?? (selectedRegistration ? getBridgeJournalPath(parsed.flags, selectedRegistration.deviceId, env) : undefined)
+  const report: BridgeDoctorReport = {
+    bridgeVersion: BRIDGE_VERSION,
+    config: {
+      error: configError,
+      exists: configExists,
+      path: configPath,
+      registrations,
+    },
+    generatedAt: new Date(now()).toISOString(),
+    localJournal: journalPath
+      ? { path: journalPath, status: "unavailable" }
+      : {
+          message: "No journal path available. Pass --journal-file or pair this bridge first.",
+          reasonCode: "journal_path_unavailable",
+          status: "unavailable",
+        },
+    snapshot: {
+      diagnostics: [],
+      pendingOutbox: [],
+    },
+    statusFile: {
+      exists: existsSync(statusPath),
+      path: statusPath,
+    },
+    traceId,
+  }
+
+  if (!journalPath) {
+    return report
+  }
+
+  try {
+    const journal = openBridgeJournal({ path: journalPath })
+    try {
+      report.localJournal = { path: journalPath, status: "healthy" }
+      report.snapshot = filterDoctorSnapshot(journal.buildDoctorSnapshot(), traceId)
+    } finally {
+      journal.close()
+    }
+  } catch (error) {
+    report.localJournal = {
+      message: redactForOutput(error instanceof Error ? error.message : String(error)),
+      path: journalPath,
+      reasonCode: "local_persistence_unavailable",
+      status: "unavailable",
+    }
+  }
+
+  return report
+}
+
+async function showDoctor(parsed: ParsedBridgeArgs) {
+  const report = await buildBridgeDoctorReport(parsed)
+  writeStdout(`${JSON.stringify(report, null, 2)}\n`)
+}
+
+function filterDoctorSnapshot(
+  snapshot: Record<string, unknown>,
+  traceId: string | undefined,
+): BridgeDoctorReport["snapshot"] {
+  const diagnostics = arrayOfRecords(snapshot.diagnostics)
+  const pendingOutbox = arrayOfRecords(snapshot.pendingOutbox)
+  if (!traceId) {
+    return { diagnostics, pendingOutbox }
+  }
+  return {
+    diagnostics: diagnostics.filter((entry) => entry.traceId === traceId),
+    pendingOutbox: pendingOutbox.filter((entry) => entry.traceId === traceId),
+  }
+}
+
 function normalizeCommand(command?: string): BridgeCommandName {
-  if (command === "connect" || command === "pair" || command === "start" || command === "status") {
+  if (
+    command === "connect"
+    || command === "doctor"
+    || command === "pair"
+    || command === "start"
+    || command === "status"
+  ) {
     return command
   }
   return "help"
@@ -1671,15 +1812,19 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: false)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
 }
 
-function getStatusPath(flags: FlagMap): string {
-  return getFlag(flags, "status-file", process.env.ZERO_CHAT_BRIDGE_STATUS) ?? DEFAULT_STATUS_PATH
+function getStatusPath(flags: FlagMap, env: NodeJS.ProcessEnv = process.env): string {
+  return getFlag(flags, "status-file", env.ZERO_CHAT_BRIDGE_STATUS) ?? DEFAULT_STATUS_PATH
 }
 
-function getBridgeJournalPath(flags: FlagMap, deviceId: string): string {
-  const explicit = getFlag(flags, "journal-file", process.env.ZERO_CHAT_BRIDGE_JOURNAL)
+function getBridgeJournalPath(
+  flags: FlagMap,
+  deviceId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicit = getFlag(flags, "journal-file", env.ZERO_CHAT_BRIDGE_JOURNAL)
   if (explicit) {
     return explicit
   }
@@ -2086,6 +2231,12 @@ function recordFromUnknown(value: unknown): Record<string, unknown> | undefined 
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined
+}
+
+function arrayOfRecords(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is Record<string, unknown> => recordFromUnknown(entry) !== undefined)
+    : []
 }
 
 function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {

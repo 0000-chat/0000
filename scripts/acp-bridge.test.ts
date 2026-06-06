@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
   type BridgeStatus,
   describeStatus,
@@ -20,6 +21,7 @@ import {
   writeBridgeStatusFile,
 } from "./acp-bridge"
 import { BridgeCloudHttpError } from "./acp-bridge/convex-http"
+import { openBridgeJournal } from "./acp-bridge/sqlite-journal"
 import {
   defaultAgentCommandForEnvironment,
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
@@ -262,6 +264,67 @@ describe("bridge security defaults", () => {
         configPath: "/home/alice/.0000/bridge.json",
       }),
     ).toContain("remote bridge log forwarding: disabled")
+  })
+})
+
+describe("bridge doctor", () => {
+  test("builds a redacted trace-scoped local debug bundle from the SQLite journal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-doctor-"))
+    const journalPath = join(dir, "bridge.sqlite")
+    const journal = openBridgeJournal({ path: journalPath })
+    const { sessionId } = journal.recordClaimBeforePrompt({
+      agentId: "agent-1",
+      bridgeDeviceId: "device-1",
+      claimId: "claim-1",
+      organizationId: "org-1",
+      payload: { prompt: "secret prompt content", safe: "queue metadata" },
+      queueItemId: "queue-1",
+      runtimeProfileId: "codex:default",
+      threadId: "thread-1",
+      traceId: "trace-1",
+    })
+    journal.recordOutboxEvent({
+      agentId: "agent-1",
+      bridgeDeviceId: "device-1",
+      eventType: "result.send",
+      organizationId: "org-1",
+      payload: { content: "secret result content", status: "completed" },
+      queueItemId: "queue-2",
+      runtimeProfileId: "codex:default",
+      threadId: "thread-1",
+      traceId: "trace-2",
+    })
+    journal.appendDiagnostic({
+      details: { prompt: "secret diagnostic content", safe: "diagnostic metadata" },
+      message: "secret diagnostic message",
+      reasonCode: "prompt_send_ambiguous",
+      traceId: "trace-1",
+    })
+    journal.close()
+
+    const report = await buildBridgeDoctorReport(
+      {
+        command: "doctor",
+        flags: { "journal-file": journalPath, trace: "trace-1" },
+        positionals: [],
+      },
+      { ZERO_CHAT_BRIDGE_CONFIG: join(dir, "missing-config.json") },
+      () => 1_799_000_000_000,
+    )
+    const serialized = JSON.stringify(report)
+
+    expect(report.generatedAt).toBe("2027-01-03T18:13:20.000Z")
+    expect(report.localJournal.status).toBe("healthy")
+    expect(report.localJournal.path).toBe(journalPath)
+    expect(report.traceId).toBe("trace-1")
+    expect(report.snapshot.pendingOutbox).toHaveLength(1)
+    expect(report.snapshot.pendingOutbox[0]).toMatchObject({ queueItemId: "queue-1", sessionId })
+    expect(report.snapshot.diagnostics).toHaveLength(1)
+    expect(serialized).toContain("diagnostic metadata")
+    expect(serialized).not.toContain("secret prompt content")
+    expect(serialized).not.toContain("secret result content")
+    expect(serialized).not.toContain("secret diagnostic content")
+    expect(serialized).not.toContain("secret diagnostic message")
   })
 })
 

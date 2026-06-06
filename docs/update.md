@@ -3,15 +3,12 @@
 The bridge is distributed as source. Installed machines update by fetching this
 repository and running the updater or normal package install flow.
 
-## Normal Update
+## Bridge-Managed Update
 
-From the bridge checkout:
-
-```bash
-cd "$HOME/0000"
-git fetch --tags origin
-bun run bridge:update
-```
+0000 Chat can ask a running bridge to update itself from the bridge devices
+settings. That internal helper is launched by the bridge with the repository
+path and restart command; external users do not run `bun run bridge:update`
+directly.
 
 The updater is responsible for moving between compatible source releases and
 preserving local pairing files under `~/.0000/`.
@@ -22,8 +19,8 @@ For development or recovery:
 
 ```bash
 cd "$HOME/0000"
-git fetch origin
-git pull --ff-only
+git fetch --tags --force origin "v0.1.7"
+git checkout --detach "v0.1.7"
 bun install
 bun test
 ```
