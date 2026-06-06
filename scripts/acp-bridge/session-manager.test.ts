@@ -82,6 +82,82 @@ describe("bridge session cwd safety", () => {
     expect(contexts[0]?.cwd).toBe("/Users/alice/private-project")
   })
 
+  test("passes the real Convex agent session id into MCP server context", async () => {
+    const mcpContexts: Array<{
+      agentSessionId?: string
+      organizationId?: string
+      sessionKey: string
+      threadId: string
+    }> = []
+    const sessionContexts: BridgeSessionContext[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createMcpServers: (context) => {
+        mcpContexts.push(context)
+        return []
+      },
+      createSession: (context) => {
+        sessionContexts.push(context)
+        return fakeSession()
+      },
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "jd73bbytzzt5af89n710xtvp4n885zn8",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org_123",
+      prompt: "hello",
+      threadId: "kx7fm6pymvpev19va22hr9zkax884mgs",
+      type: "prompt",
+    })
+
+    expect(mcpContexts[0]?.agentSessionId).toBe("jd73bbytzzt5af89n710xtvp4n885zn8")
+    expect(mcpContexts[0]?.organizationId).toBe("org_123")
+    expect(mcpContexts[0]?.sessionKey).not.toBe("jd73bbytzzt5af89n710xtvp4n885zn8")
+    expect(sessionContexts[0]?.agentSessionId).toBe("jd73bbytzzt5af89n710xtvp4n885zn8")
+  })
+
+  test("strict scoped identity rejects missing organization or agent session ids", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      deviceId: "bridge_123",
+      requireScopedIdentity: true,
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent_session_1",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      claimId: "claim-2",
+      id: "queue-2",
+      organizationId: "org_123",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-1",
+        result: expect.objectContaining({ error: expect.stringContaining("missing organizationId") }),
+      }),
+    )
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-2",
+        result: expect.objectContaining({ error: expect.stringContaining("missing agentSessionId") }),
+      }),
+    )
+  })
+
   test("uses configured agent names instead of runtime labels for run start events", async () => {
     const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({

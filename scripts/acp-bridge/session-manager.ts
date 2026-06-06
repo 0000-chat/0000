@@ -70,6 +70,7 @@ export type ManagedAcpSession = {
 
 export type BridgeSessionContext = {
   agentCommand?: string | string[]
+  agentSessionId?: string
   bridgeProfileId?: string
   runtimeProfile?: BridgeRuntimeProfile
   sessionKey: string
@@ -78,6 +79,7 @@ export type BridgeSessionContext = {
   hermesProfileName?: string
   mcpServers: HermesAcpMcpServer[]
   initialSessionId?: string
+  organizationId?: string
   onEvent: (event: NormalizedBridgeEvent) => void
   onError: (error: Error) => void
 }
@@ -122,12 +124,16 @@ export type BridgeSessionManagerOptions = {
   runtimeProfiles?: BridgeRuntimeProfile[]
   requestTimeoutMs?: number
   createMcpServers?: (
-    context: Pick<BridgeSessionContext, "cwd" | "sessionKey" | "threadId">,
+    context: Pick<
+      BridgeSessionContext,
+      "agentSessionId" | "cwd" | "organizationId" | "sessionKey" | "threadId"
+    >,
   ) => HermesAcpMcpServer[]
   createSession?: (context: BridgeSessionContext) => ManagedAcpSession
   idleSessionTtlMs?: number
   allowRemoteCwd?: boolean
   resumeEnabled?: boolean
+  requireScopedIdentity?: boolean
   log?: BridgeLogger
   supervisor?: BridgeSupervisor
   closeTimeoutMs?: number
@@ -175,13 +181,17 @@ export class BridgeSessionManager {
   private readonly runtimeProfiles: BridgeRuntimeProfile[]
   private readonly requestTimeoutMs?: number
   private readonly createMcpServers: (
-    context: Pick<BridgeSessionContext, "cwd" | "sessionKey" | "threadId">,
+    context: Pick<
+      BridgeSessionContext,
+      "agentSessionId" | "cwd" | "organizationId" | "sessionKey" | "threadId"
+    >,
   ) => HermesAcpMcpServer[]
   private readonly log?: BridgeLogger
   private readonly supervisor?: BridgeSupervisor
   private readonly idleSessionTtlMs: number
   private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
+  private readonly requireScopedIdentity: boolean
   private readonly closeTimeoutMs: number
   private readonly createSession: (context: BridgeSessionContext) => ManagedAcpSession
   private readonly sessions = new Map<string, BridgeSessionRecord>()
@@ -208,6 +218,7 @@ export class BridgeSessionManager {
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
     this.allowRemoteCwd = options.allowRemoteCwd === true
     this.resumeEnabled = options.resumeEnabled === true
+    this.requireScopedIdentity = options.requireScopedIdentity === true
     this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS
     this.createMcpServers = options.createMcpServers ?? (() => [])
     this.createSession =
@@ -383,6 +394,7 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
+    this.assertRequiredScopedIdentity(item)
     const sessionKey = this.sessionKeyForItem(item) ?? threadId
     const prompt = item.prompt
     const threadHistory = normalizeThreadHistory(item.threadHistory)
@@ -973,6 +985,7 @@ export class BridgeSessionManager {
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
     }
+    this.assertRequiredScopedIdentity(item)
     const sessionKey = this.sessionKeyForItem(item) ?? threadId
     const providerSessionKey = providerSessionKeyForItem(item) ?? threadId
     const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
@@ -1022,8 +1035,16 @@ export class BridgeSessionManager {
         threadId,
         cwd,
         hermesProfileName: item.hermesProfileName,
+        agentSessionId: item.agentSessionId,
+        organizationId: item.organizationId,
         initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
-        mcpServers: this.createMcpServers({ cwd: item.cwd, sessionKey, threadId }),
+        mcpServers: this.createMcpServers({
+          agentSessionId: item.agentSessionId,
+          cwd: item.cwd,
+          organizationId: item.organizationId,
+          sessionKey,
+          threadId,
+        }),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
             this.supervisor?.recordProviderEvent(this.supervisorWorkItem(item, record), {
@@ -1408,6 +1429,25 @@ export class BridgeSessionManager {
     ]
       .map(encodeSessionKeyPart)
       .join(":")
+  }
+
+  private assertRequiredScopedIdentity(item: BridgeSessionQueueItem): void {
+    if (!this.requireScopedIdentity) {
+      return
+    }
+    if (!item.organizationId) {
+      throw new Error(
+        `queue item ${item.id} is missing organizationId; reconnect the bridge with a fresh agent link`,
+      )
+    }
+    if (!this.deviceId) {
+      throw new Error("bridge device identity is missing; reconnect the bridge")
+    }
+    if (!item.agentSessionId) {
+      throw new Error(
+        `queue item ${item.id} is missing agentSessionId; reconnect the agent from 0000`,
+      )
+    }
   }
 
   private findSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {

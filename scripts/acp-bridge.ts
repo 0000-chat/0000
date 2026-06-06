@@ -577,6 +577,7 @@ export function getConvexUrl(
 }
 
 export function buildAgentToolsMcpServers(input: AgentToolsMcpServerInput): HermesAcpMcpServer[] {
+  assertRealAgentSessionId(input.agentSessionId)
   return [
     {
       args: ["scripts/agent-tools-mcp.ts"],
@@ -594,6 +595,17 @@ export function buildAgentToolsMcpServers(input: AgentToolsMcpServerInput): Herm
       name: "0000-chat",
     },
   ]
+}
+
+function assertRealAgentSessionId(agentSessionId: string): void {
+  if (!agentSessionId.trim()) {
+    throw new Error("agent tool MCP context is missing agentSessionId; reconnect the agent")
+  }
+  if (agentSessionId.includes(":") || agentSessionId.startsWith("unknown-org")) {
+    throw new Error(
+      "agent tool MCP context received a bridge-scoped session key instead of a Convex agent session id; reconnect the agent",
+    )
+  }
 }
 
 export function describeStatus(status: BridgeStatus, configExists: boolean): string {
@@ -981,15 +993,20 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         requestTimeoutMs,
         resumeEnabled,
         idleSessionTtlMs,
-        createMcpServers: ({ sessionKey, threadId }) =>
-          buildAgentToolsMcpServers({
-            agentSessionId: sessionKey,
+        requireScopedIdentity: true,
+        createMcpServers: ({ agentSessionId, threadId }) => {
+          if (!agentSessionId) {
+            throw new Error("agent tool MCP context is missing agentSessionId; reconnect the agent")
+          }
+          return buildAgentToolsMcpServers({
+            agentSessionId,
             appUrl: registration.appUrl,
             agentToolsUrl: registration.appUrl,
             bridgeToken: registration.bridgeToken,
             deviceId: registration.deviceId,
             threadId,
-          }),
+          })
+        },
         log,
         allowRemoteCwd,
         supervisor,

@@ -90,6 +90,20 @@ describe("bridge MCP helper configuration", () => {
       },
     ])
   })
+
+  test("rejects bridge-scoped session keys for agent tool invocation", () => {
+    expect(() =>
+      buildAgentToolsMcpServers({
+        agentSessionId:
+          "unknown-org:bridge_a9624a953a17eb66246fde28:hermes%3Adefault:kx7:jd73",
+        agentToolsUrl: "https://0000.chat",
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-a",
+        deviceId: "bridge_a",
+        threadId: "thread_1",
+      }),
+    ).toThrow("bridge-scoped session key")
+  })
 })
 
 describe("bridge multi-organization config", () => {
