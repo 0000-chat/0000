@@ -190,6 +190,7 @@ export class BridgeSessionManager {
     string,
     { pendingQueueItemIds: string[]; runningQueueItemId?: string }
   >()
+  private readonly cancelledQueueItemIds = new Set<string>()
   private readonly eventBatch: BridgeEventInput[] = []
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = []
   private eventBatchTimer: ReturnType<typeof setTimeout> | undefined
@@ -453,8 +454,46 @@ export class BridgeSessionManager {
       await this.closeSession(session.sessionKey)
       throw error
     }
+    if (this.cancelledQueueItemIds.delete(item.id)) {
+      await this.markQueueResult(item, {
+        ok: false,
+        cancelled: true,
+        ignoredLateResult: true,
+        stopReason: "cancelled",
+        terminal: true,
+      })
+      this.supervisor?.recordCancelled(this.supervisorWorkItem(item, session))
+      this.writeLog({
+        level: "info",
+        event: "bridge.lifecycle.late_prompt_result_ignored",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.providerSessionKey,
+        acpSessionId: result.sessionId,
+        textLength: result.text.length,
+      })
+      return
+    }
     if (!this.isCurrentSessionRecord(session)) {
       throw new Error(`ACP session ${session.sessionKey} was replaced before prompt completed`)
+    }
+    if (
+      normalizeType(item) === "steer-session" &&
+      result.finalText?.withheld &&
+      result.text.trim().length === 0
+    ) {
+      await this.markQueueResult(item, {
+        ok: false,
+        error: "steer_reprompt_failed",
+        terminal: true,
+        finalText: result.finalText,
+        stopReason: result.stopReason,
+      })
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "steer_reprompt_failed")
+      await this.closeSession(session.sessionKey)
+      return
     }
     this.enqueueEventWrite(session, {
       externalEventId: `${item.id}:message_completed`,
@@ -577,6 +616,34 @@ export class BridgeSessionManager {
     if (state && state.pendingQueueItemIds.length === 0 && !state.runningQueueItemId) {
       this.sessionQueueState.delete(sessionKey)
     }
+  }
+
+  private getActiveTurnId(sessionKey: string): string | undefined {
+    return this.sessionQueueState.get(sessionKey)?.runningQueueItemId
+  }
+
+  private markActiveTurnCancelled(sessionKey: string): void {
+    const runningQueueItemId = this.getActiveTurnId(sessionKey)
+    if (runningQueueItemId) {
+      this.cancelledQueueItemIds.add(runningQueueItemId)
+    }
+  }
+
+  private enqueueCancellationEvent(
+    session: BridgeSessionRecord,
+    item: BridgeSessionQueueItem,
+  ): void {
+    this.enqueueEventWrite(session, {
+      externalEventId: `${item.id}:message_cancelled`,
+      source: "bridge",
+      eventType: "message_cancelled",
+      payload: { queueId: item.id, queueType: normalizeType(item), stopReason: "cancelled" },
+      part: {
+        type: "event",
+        text: "Run cancelled.",
+        status: "complete",
+      },
+    })
   }
 
   private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
@@ -713,7 +780,7 @@ export class BridgeSessionManager {
   private async handleCancel(item: BridgeSessionQueueItem): Promise<boolean> {
     const key = this.findSessionKeyForItem(item)
     const session = key ? this.sessions.get(key) : undefined
-    if (!session) {
+    if (!key || !session) {
       await this.markQueueResult(item, {
         ok: false,
         error: "cancel_not_acknowledged",
@@ -721,6 +788,7 @@ export class BridgeSessionManager {
       })
       return false
     }
+    const activeTurnId = this.getActiveTurnId(key)
     let acknowledged: boolean
     try {
       acknowledged = (await session.acp.cancel()) !== false
@@ -728,6 +796,20 @@ export class BridgeSessionManager {
       acknowledged = false
     }
     if (!acknowledged) {
+      if (activeTurnId) {
+        this.cancelledQueueItemIds.add(activeTurnId)
+        this.enqueueCancellationEvent(session, item)
+        await this.drainEventWrites()
+        await this.closeSession(key)
+        await this.markQueueResult(item, {
+          ok: true,
+          cancelled: true,
+          forced: true,
+          stopReason: "cancelled",
+          terminal: true,
+        })
+        return true
+      }
       await this.markQueueResult(item, {
         ok: false,
         error: "cancel_not_acknowledged",
@@ -735,17 +817,8 @@ export class BridgeSessionManager {
       })
       return false
     }
-    this.enqueueEventWrite(session, {
-      externalEventId: `${item.id}:message_cancelled`,
-      source: "bridge",
-      eventType: "message_cancelled",
-      payload: { queueId: item.id, queueType: normalizeType(item), stopReason: "cancelled" },
-      part: {
-        type: "event",
-        text: "Run cancelled.",
-        status: "complete",
-      },
-    })
+    this.markActiveTurnCancelled(key)
+    this.enqueueCancellationEvent(session, item)
     await this.drainEventWrites()
     await this.markQueueResult(item, {
       ok: true,
@@ -788,6 +861,7 @@ export class BridgeSessionManager {
       return
     }
     this.supervisor?.recordSteering(this.supervisorWorkItem(item, session))
+    const activeTurnId = this.getActiveTurnId(key)
     let acknowledged: boolean
     try {
       acknowledged = (await session.acp.cancel()) !== false
@@ -795,12 +869,28 @@ export class BridgeSessionManager {
       acknowledged = false
     }
     if (!acknowledged) {
+      if (activeTurnId) {
+        this.cancelledQueueItemIds.add(activeTurnId)
+        await this.closeSession(key)
+        await this.handlePromptNow(item, instruction, {
+          resultMetadata: { steered: true, replacementSession: true, forcedCancel: true },
+        })
+        return
+      }
       await this.markQueueResult(item, {
         ok: false,
         error: "session_replacement_required",
         terminal: true,
       })
       this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "session_replacement_required")
+      return
+    }
+    if (activeTurnId) {
+      this.cancelledQueueItemIds.add(activeTurnId)
+      await this.closeSession(key)
+      await this.handlePromptNow(item, instruction, {
+        resultMetadata: { steered: true, replacementSession: true },
+      })
       return
     }
     await this.handlePromptNow(item, instruction, {

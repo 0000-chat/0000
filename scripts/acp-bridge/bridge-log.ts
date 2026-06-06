@@ -52,6 +52,7 @@ export const bridgeLogEventNames = [
   "bridge.queue_item.settled",
   "bridge.queue_item.start",
   "bridge.lifecycle.idle_close",
+  "bridge.lifecycle.late_prompt_result_ignored",
   "bridge.lifecycle.replacement_session",
   "bridge.session.ready",
   "bridge.session.runtime_profile_changed",
