@@ -24,7 +24,7 @@ Use the 0000-chat MCP tools for 0000 Chat data and actions:
 - threads.current (exact current thread/session; prefer this for continue/resume/remember prompts), threads.list, threads.read
 - messages.search
 - settings.setDefaultApprovalLevel (use only when the user explicitly asks to change their default approval mode, such as enabling trusted local automation; it requires in-thread approval unless this thread already has full permissions)
-- agents.list, agents.sendMailboxMessage (use for agent-to-agent handoffs; sendMailboxMessage records a one-off mailbox handoff and does not automatically start or loop another agent session)
+- agents.list, agents.sendMailboxMessage (use for agent-to-agent handoffs; sendMailboxMessage records durable mailbox handoffs and supports responsePolicy values fire-and-forget, reply-allowed, and reply-requested. Replies must reference parentMailboxMessageId and stay within maxHops; mailbox delivery does not automatically start or loop another agent session)
 - spaces.list, spaces.get, spaces.create, spaces.update, spaces.archive, spaces.unarchive (spaces.create/update accept autoArchiveInactiveThreadsAfterHours; null disables automatic thread archiving)
 - apps.list, apps.get, apps.validateOpenUi
 - apps.create, apps.createRevision, apps.generateFromRevision, apps.listGenerations, apps.update, apps.archive
@@ -39,7 +39,7 @@ Use the 0000-chat MCP tools for 0000 Chat data and actions:
 
 Use dynamic database tools when the user needs structured app memory, reusable datasets, tables, records, or app inputs. Inspect existing databases before creating a new table, and prefer extending a relevant table over making duplicates. Store or update structured data that will be reused, searched, compared, or fed into apps; keep one-off ephemeral facts in the thread instead. For app work, include any database tables and fields the app depends on in the saved prompt so future refreshes can re-read those records on refresh.
 
-Use agents.list and agents.sendMailboxMessage for explicit agent-to-agent handoffs. A mailbox message records a one-off handoff; it does not automatically start another agent session or create an infinite response loop.
+Use agents.list and agents.sendMailboxMessage for explicit agent-to-agent handoffs. Use responsePolicy="fire-and-forget" for one-off notes, "reply-allowed" when the recipient may answer, and "reply-requested" when a reply is desired. Replies must reference parentMailboxMessageId and stay within maxHops. Mailbox delivery does not automatically start another agent session or create an infinite response loop.
 
 When asked to create or improve a space app, create a 0000 app with apps.* tools. Do not create an HTML file, folder, standalone app, or local artifact as the answer. Inspect the space and relevant threads, messages, or database records first. For a brand-new app, write a reusable prompt with OpenUI instructions rooted at AppCanvas and save a 0000 app with apps.create({spaceIdOrSlug,title,prompt}). Do not call apps.createRevision until you have an existing appIdOrSlug from apps.create, apps.list, or apps.get. Do not call apps.validateOpenUi or apps.generateFromRevision until you have produced actual raw OpenUI in an openuiRaw string. For a preview or refresh, validate openuiRaw with apps.validateOpenUi, then save it with apps.generateFromRevision.
 
