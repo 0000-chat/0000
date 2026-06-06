@@ -13,6 +13,12 @@ type BridgeRegistration = {
   deviceName?: string
 }
 
+type CloudSmokeFlags = {
+  deviceId?: string
+  includeClaim: boolean
+  json: boolean
+}
+
 type SmokeEndpointResult = {
   ok: boolean
   status: "pass" | "fail"
@@ -31,10 +37,14 @@ type SmokeRow = {
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json")
 
 async function main() {
-  const flags = parseFlags(process.argv.slice(2))
-  const configPath = stringFlag(flags, "config") ?? process.env.ZERO_CHAT_BRIDGE_CONFIG ?? DEFAULT_CONFIG_PATH
-  const includeClaim = Boolean(flags["include-claim"])
-  const registrations = await readRegistrations(configPath)
+  const rawFlags = parseFlags(process.argv.slice(2))
+  const flags: CloudSmokeFlags = {
+    deviceId: stringFlag(rawFlags, "device-id"),
+    includeClaim: Boolean(rawFlags["include-claim"]),
+    json: Boolean(rawFlags.json),
+  }
+  const configPath = stringFlag(rawFlags, "config") ?? process.env.ZERO_CHAT_BRIDGE_CONFIG ?? DEFAULT_CONFIG_PATH
+  const registrations = selectRegistrations(await readRegistrations(configPath), flags)
   const rows: SmokeRow[] = []
 
   for (const registration of registrations) {
@@ -59,21 +69,19 @@ async function main() {
       ),
       poll: await probe(() => client.pollQueue({ limit: 1 })),
     }
-    if (includeClaim) {
+    if (flags.includeClaim) {
       row.claim = await probe(() => client.claimWork({ limit: 1 }))
     }
     rows.push(row)
   }
 
   if (flags.json) {
-    writeStdout(`${JSON.stringify({ includeClaim, rows, summary: summarize(rows) }, null, 2)}\n`)
+    writeStdout(`${JSON.stringify({ includeClaim: flags.includeClaim, rows, summary: summarize(rows) }, null, 2)}\n`)
   } else {
-    printTextReport(rows, includeClaim)
+    printTextReport(rows, flags.includeClaim)
   }
 
-  if (rows.some((row) => !row.heartbeat.ok || !row.poll.ok || row.claim?.ok === false)) {
-    process.exitCode = 1
-  }
+  process.exitCode = cloudSmokeExitCode(rows)
 }
 
 function parseFlags(args: string[]): Record<string, string | true> {
@@ -116,6 +124,16 @@ async function readRegistrations(configPath: string): Promise<BridgeRegistration
   )
 }
 
+export function selectRegistrations(
+  registrations: BridgeRegistration[],
+  flags: Pick<CloudSmokeFlags, "deviceId">,
+): BridgeRegistration[] {
+  if (!flags.deviceId) {
+    return registrations
+  }
+  return registrations.filter((registration) => registration.deviceId === flags.deviceId)
+}
+
 async function probe(
   run: () => Promise<unknown>,
 ): Promise<SmokeEndpointResult> {
@@ -154,6 +172,10 @@ function summarize(rows: SmokeRow[]) {
   }
 }
 
+export function cloudSmokeExitCode(rows: SmokeRow[]): 0 | 1 {
+  return rows.some((row) => !row.heartbeat.ok || !row.poll.ok || row.claim?.ok === false) ? 1 : 0
+}
+
 function printTextReport(rows: SmokeRow[], includeClaim: boolean) {
   const summary = summarize(rows)
   writeStdout(`Bridge cloud smoke: ${summary.pass} pass, ${summary.fail} fail, ${summary.total} total\n`)
@@ -188,7 +210,9 @@ function writeStderr(message: string) {
   process.stderr.write(message)
 }
 
-main().catch((error) => {
-  writeStderr(`${normalizeErrorDetail(error)}\n`)
-  process.exit(1)
-})
+if (import.meta.main) {
+  main().catch((error) => {
+    writeStderr(`${normalizeErrorDetail(error)}\n`)
+    process.exit(1)
+  })
+}
