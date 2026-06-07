@@ -39,8 +39,9 @@ describe("bridge session cwd safety", () => {
 
   test("ignores remote queue cwd by default", async () => {
     const contexts: BridgeSessionContext[] = []
+    const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
-      cloudClient: fakeCloudClient(),
+      cloudClient: cloud,
       createSession: (context) => {
         contexts.push(context)
         return fakeSession()
@@ -632,6 +633,146 @@ describe("bridge session cwd safety", () => {
     expect(cloud.results.at(-1)?.result).toMatchObject({
       runtimeConfigApplied: { model: "gpt-5.5", thoughtLevel: "high" },
       runtimeConfigDiagnostics: [],
+    })
+  })
+
+  test("passes system prompt while adapting structured attachments into prompt references", async () => {
+    const prompts: string[] = []
+    const promptOptions: Array<Record<string, unknown> | undefined> = []
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt, options) => {
+          prompts.push(prompt)
+          promptOptions.push(options)
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          }
+        },
+      }),
+    })
+
+    await manager.handleQueueItem({
+      attachments: [
+        {
+          access: {
+            mode: "worker",
+            url: "https://0000.chat/api/attachments/attachments/2026/06/screenshot.png",
+          },
+          bucket: "chat-attachments",
+          checksumSha256: "b".repeat(64),
+          filename: "screenshot.png",
+          mediaType: "image/png",
+          objectKey: "attachments/2026/06/screenshot.png",
+          sizeBytes: 1234,
+          status: "available",
+          storageBackend: "r2",
+          type: "file",
+          url: "https://0000.chat/api/attachments/attachments/2026/06/screenshot.png",
+        },
+        {
+          access: {
+            mode: "worker",
+            url: "https://0000.chat/api/attachments/attachments/2026/06/notes.txt",
+          },
+          bucket: "chat-attachments",
+          checksumSha256: "c".repeat(64),
+          filename: "notes.txt",
+          mediaType: "text/plain",
+          objectKey: "attachments/2026/06/notes.txt",
+          sizeBytes: 42,
+          status: "available",
+          storageBackend: "r2",
+          type: "file",
+          url: "https://0000.chat/api/attachments/attachments/2026/06/notes.txt",
+        },
+      ],
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "Inspect these files.",
+      systemPrompt: "Keep the workspace policy.",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(promptOptions.at(-1)?.systemPrompt).toBe("Keep the workspace policy.")
+    expect(prompts.at(-1)).toContain("Inspect these files.")
+    expect(prompts.at(-1)).toContain("Attached files available to this ACP run:")
+    expect(prompts.at(-1)).toContain("screenshot.png (image/png, 1234 bytes")
+    expect(prompts.at(-1)).toContain("notes.txt (text/plain, 42 bytes")
+    expect(cloud.results.at(-1)?.result).toMatchObject({
+      attachmentCount: 2,
+      attachmentDeliveryMode: "text_references",
+      attachmentTotalBytes: 1276,
+    })
+  })
+
+  test("passes normalized agent attachment parts back in prompt results", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [
+            {
+              eventType: "file",
+              externalEventId: "session-1:1:file",
+              part: {
+                json: {
+                  filename: "agent-output.txt",
+                  mediaType: "text/plain",
+                  sizeBytes: 17,
+                  storageBackend: "r2",
+                  type: "file",
+                  url: "https://0000.chat/api/attachments/attachments/agent/agent-output.txt",
+                },
+                status: "complete",
+                type: "attachment",
+              },
+              payload: {},
+              source: "hermes_acp",
+            },
+          ],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "created a file",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "Create the file.",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results.at(-1)?.result).toMatchObject({
+      ok: true,
+      parts: [
+        {
+          externalPartId: "session-1:1:file:attachment",
+          payload: {
+            filename: "agent-output.txt",
+            mediaType: "text/plain",
+            sizeBytes: 17,
+            storageBackend: "r2",
+            type: "file",
+            url: "https://0000.chat/api/attachments/attachments/agent/agent-output.txt",
+          },
+          type: "attachment",
+        },
+      ],
+      text: "created a file",
     })
   })
 

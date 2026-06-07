@@ -16,6 +16,7 @@ export type BridgeSessionQueueItem = {
   claimId?: string
   type?: string
   kind?: string
+  attachments?: BridgeQueueAttachment[]
   threadId?: string
   sessionId?: string
   agentSessionId?: string
@@ -40,6 +41,25 @@ export type BridgeSessionQueueItem = {
   agentName?: string
   bridgeProfileId?: string
   hermesProfileName?: string
+}
+
+export type BridgeQueueAttachment = {
+  access?: {
+    mode?: string
+    url?: string
+  }
+  bucket?: string
+  checksumSha256?: string
+  createdAt?: string
+  filename?: string
+  key?: string
+  mediaType?: string
+  objectKey?: string
+  sizeBytes?: number
+  status?: string
+  storageBackend?: string
+  type?: string
+  url?: string
 }
 
 export type ManagedAcpSession = {
@@ -396,13 +416,39 @@ export class BridgeSessionManager {
     }
     this.assertRequiredScopedIdentity(item)
     const sessionKey = this.sessionKeyForItem(item) ?? threadId
-    const prompt = item.prompt
+    const attachments = normalizeBridgeAttachments(item.attachments)
+    const prompt = promptWithAttachmentReferences(item.prompt, attachments)
     const threadHistory = normalizeThreadHistory(item.threadHistory)
     const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
     const autoApprovePermissionRequests = item.approvalLevel === "full_permissions"
+    if (attachments.length > 0) {
+      this.writeLog({
+        level: "info",
+        event: "bridge.attachments.received",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId,
+        attachmentCount: attachments.length,
+        attachmentMediaTypes: summarizeAttachmentMediaTypes(attachments),
+        attachmentTotalBytes: attachments.reduce((sum, attachment) => sum + (attachment.sizeBytes ?? 0), 0),
+        deliveryMode: "text_references",
+      })
+    }
     await this.runSerializedPrompt(sessionKey, item.id, () =>
       this.handlePromptNow(item, prompt, {
         autoApprovePermissionRequests,
+        resultMetadata:
+          attachments.length > 0
+            ? {
+                attachmentCount: attachments.length,
+                attachmentDeliveryMode: "text_references",
+                attachmentMediaTypes: summarizeAttachmentMediaTypes(attachments),
+                attachmentTotalBytes: attachments.reduce(
+                  (sum, attachment) => sum + (attachment.sizeBytes ?? 0),
+                  0,
+                ),
+              }
+            : undefined,
         systemPrompt,
         threadHistory,
       }),
@@ -543,6 +589,31 @@ export class BridgeSessionManager {
       })
     }
     await this.drainEventWrites()
+    const attachmentParts = attachmentPartsFromPromptEvents(result.events)
+    if (attachmentParts.length > 0) {
+      this.writeLog({
+        level: "info",
+        event: "agent.attachments.emitted",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.providerSessionKey,
+        acpSessionId: result.sessionId,
+        attachmentCount: attachmentParts.length,
+        attachmentMediaTypes: summarizeAttachmentMediaTypes(
+          attachmentParts.map((part) => part.payload as BridgeQueueAttachment),
+        ),
+        attachmentTotalBytes: attachmentParts.reduce(
+          (sum, part) =>
+            sum +
+            (typeof (part.payload as BridgeQueueAttachment).sizeBytes === "number"
+              ? ((part.payload as BridgeQueueAttachment).sizeBytes ?? 0)
+              : 0),
+          0,
+        ),
+      })
+    }
     await this.markQueueResult(item, {
       ok: true,
       agentSessionId: session.providerSessionKey,
@@ -550,6 +621,7 @@ export class BridgeSessionManager {
       acpCapabilities: result.capabilities,
       stopReason: result.stopReason,
       text: result.text,
+      parts: attachmentParts.length > 0 ? attachmentParts : undefined,
       result: result.rawResult,
       ...resultMetadata,
     })
@@ -1608,6 +1680,26 @@ function normalizeType(item: BridgeSessionQueueItem): string {
   return item.type ?? item.kind ?? "unknown"
 }
 
+function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
+  return events.flatMap((event, index) => {
+    if (event.part?.type !== "attachment" || !isRecord(event.part.json)) {
+      return []
+    }
+    return [
+      {
+        externalPartId: `${event.externalEventId}:attachment`,
+        order: index + 1,
+        payload: event.part.json,
+        type: "attachment",
+      },
+    ]
+  })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function displayNameForSessionStart(session: BridgeSessionRecord): string {
   const agentName = normalizeAgentName(session.agentName)
   if (agentName) {
@@ -1643,6 +1735,42 @@ function isTerminalQueueItemError(type: string, message: string): boolean {
 function normalizeSystemPrompt(systemPrompt: string | undefined): string | undefined {
   const normalized = systemPrompt?.trim()
   return normalized ? normalized : undefined
+}
+
+function normalizeBridgeAttachments(
+  attachments: BridgeQueueAttachment[] | undefined,
+): BridgeQueueAttachment[] {
+  if (!Array.isArray(attachments)) {
+    return []
+  }
+  return attachments.filter((attachment) => {
+    const url = attachment.access?.url ?? attachment.url
+    return typeof url === "string" && url.trim().length > 0
+  })
+}
+
+function promptWithAttachmentReferences(prompt: string, attachments: BridgeQueueAttachment[]) {
+  if (attachments.length === 0) {
+    return prompt
+  }
+  const lines = attachments.map((attachment, index) => {
+    const label = attachment.filename?.trim() || `Attachment ${index + 1}`
+    const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
+    const size = typeof attachment.sizeBytes === "number" ? `, ${attachment.sizeBytes} bytes` : ""
+    const checksum = attachment.checksumSha256 ? `, sha256=${attachment.checksumSha256}` : ""
+    const url = attachment.access?.url ?? attachment.url
+    return `- ${label} (${mediaType}${size}${checksum}): ${url}`
+  })
+  return `${prompt}\n\nAttached files available to this ACP run:\n${lines.join("\n")}`
+}
+
+function summarizeAttachmentMediaTypes(attachments: BridgeQueueAttachment[]) {
+  const counts = new Map<string, number>()
+  for (const attachment of attachments) {
+    const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
+    counts.set(mediaType, (counts.get(mediaType) ?? 0) + 1)
+  }
+  return Array.from(counts.entries()).map(([mediaType, count]) => ({ count, mediaType }))
 }
 
 function normalizeThreadHistory(threadHistory: string | undefined): string | undefined {

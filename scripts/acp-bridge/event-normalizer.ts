@@ -6,6 +6,7 @@ export type BridgeMessagePartType =
   | "tool_result"
   | "choice"
   | "approval_request"
+  | "attachment"
   | "error"
   | "event"
 
@@ -117,6 +118,11 @@ export function extractTextFromAcpUpdate(update: unknown): string | undefined {
 }
 
 function normalizeSessionUpdatePart(kind: string, update: JsonRecord): BridgeMessagePart {
+  const attachment = normalizeAttachmentUpdate(kind, update)
+  if (attachment) {
+    return { type: "attachment", json: attachment, status: "complete" }
+  }
+
   if (kind === "agent_message_chunk" || kind === "user_message_chunk") {
     return {
       type: "text",
@@ -186,6 +192,65 @@ function normalizeSessionUpdatePart(kind: string, update: JsonRecord): BridgeMes
   return text
     ? { type: "event", text, json: truncateEventValue(update), status: "streaming" }
     : { type: "event", json: truncateEventValue(update), status: "streaming" }
+}
+
+function normalizeAttachmentUpdate(kind: string, update: JsonRecord): JsonRecord | undefined {
+  const resource =
+    maybeRecord(update.attachment) ??
+    maybeRecord(update.file) ??
+    maybeRecord(update.image) ??
+    maybeRecord(update.resource) ??
+    maybeRecord(update.artifact) ??
+    update
+  const url =
+    readString(resource.url) ??
+    readString(resource.href) ??
+    readString(resource.src) ??
+    (maybeRecord(resource.access) ? readString(maybeRecord(resource.access)?.url) : undefined)
+  const objectKey =
+    readString(resource.objectKey) ?? readString(resource.key) ?? readString(resource.path)
+  const filename =
+    readString(resource.filename) ?? readString(resource.name) ?? readString(resource.title)
+  const mediaType =
+    readString(resource.mediaType) ?? readString(resource.mimeType) ?? readString(resource.contentType)
+  const attachmentishKind = /(?:attachment|file|image|resource|artifact)/i.test(kind)
+  if (!attachmentishKind && !(filename && (url || objectKey) && mediaType)) {
+    return undefined
+  }
+  if (!url && !objectKey) {
+    return undefined
+  }
+  return removeUndefinedValues({
+    access: normalizeAttachmentAccess(resource.access),
+    bucket: readString(resource.bucket),
+    checksumSha256: readString(resource.checksumSha256),
+    createdAt: readString(resource.createdAt),
+    filename: filename ?? "Attachment",
+    key: readString(resource.key) ?? objectKey,
+    mediaType,
+    objectKey,
+    sizeBytes: readNumber(resource.sizeBytes) ?? readNumber(resource.size),
+    status: readString(resource.status) ?? "available",
+    storageBackend: readString(resource.storageBackend),
+    type: "file",
+    url,
+  })
+}
+
+function normalizeAttachmentAccess(value: unknown): JsonRecord | undefined {
+  const access = maybeRecord(value)
+  if (!access) {
+    return undefined
+  }
+  const url = readString(access.url)
+  if (!url) {
+    return undefined
+  }
+  return removeUndefinedValues({
+    expiresAt: readNumber(access.expiresAt),
+    mode: readString(access.mode),
+    url,
+  })
 }
 
 function extractErrorText(update: JsonRecord): string | undefined {
@@ -344,6 +409,10 @@ function readString(value: unknown): string | undefined {
 
 function readNumberString(value: unknown): string | undefined {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : undefined
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 function truncateEventText(value: string | undefined): string | undefined {
