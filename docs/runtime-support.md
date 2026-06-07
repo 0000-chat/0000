@@ -26,6 +26,13 @@ including:
 - command/tool catalogs
 - runtime-specific diagnostics
 
+For user attachments from 0000 Chat, the bridge sends ACP `resource_link`
+content blocks by default. ACP v1 treats text and resource links as baseline
+prompt content. If a runtime explicitly opts out with
+`_meta["0000.chat/promptResourceLinks"] === false`, the bridge degrades to
+text attachment references that include only metadata and temporary access URLs.
+The bridge does not embed attachment bytes in prompt payloads.
+
 The host UI should show options only when the selected bridge agent reports
 support. Unsupported options must be hidden or disabled with a runtime-specific
 reason.

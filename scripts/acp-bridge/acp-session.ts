@@ -19,6 +19,12 @@ export type JsonRpcMessage = {
 
 export type HermesAcpRuntimeCapabilities = {
   loadSession: boolean
+  promptCapabilities?: {
+    audio: boolean
+    embeddedContext: boolean
+    image: boolean
+  }
+  supportsPromptResourceLinks: boolean
   supportsSessionLoad: boolean
   supportsSessionResume: boolean
   supportsSessionClose: boolean
@@ -35,6 +41,7 @@ export type HermesAcpPromptResult = {
   events: NormalizedBridgeEvent[]
   capabilities?: HermesAcpRuntimeCapabilities
   finalText?: HermesAcpFinalTextDiagnostics
+  attachmentDeliveryMode?: HermesAcpAttachmentDeliveryMode
 }
 
 export type HermesAcpFinalTextDiagnostics = {
@@ -51,8 +58,24 @@ export type HermesAcpFinalTextDiagnostics = {
 export type HermesAcpPromptOptions = {
   systemPrompt?: string
   threadHistory?: string
+  attachmentReferenceText?: string
+  attachments?: HermesAcpPromptAttachment[]
   autoApprovePermissionRequests?: boolean
   runtimeConfig?: Record<string, string>
+}
+
+export type HermesAcpAttachmentDeliveryMode = "resource_links" | "text_references"
+
+export type HermesAcpPromptAttachment = {
+  access?: {
+    mode?: string
+    url?: string
+  }
+  checksumSha256?: string
+  filename?: string
+  mediaType?: string
+  sizeBytes?: number
+  url?: string
 }
 
 export type AcpAdapterCapabilityUsed =
@@ -280,11 +303,26 @@ export class HermesAcpSession {
       sessionId,
       options.runtimeConfig,
     )
+    const attachmentBlocks =
+      this.capabilities?.supportsPromptResourceLinks === false
+        ? []
+        : buildAttachmentResourceLinkBlocks(options.attachments)
+    const attachmentDeliveryMode =
+      attachmentBlocks.length > 0
+        ? "resource_links"
+        : options.attachments && options.attachments.length > 0
+          ? "text_references"
+          : undefined
+    const promptText =
+      attachmentBlocks.length > 0 || !options.attachmentReferenceText
+        ? text
+        : `${text}\n\n${options.attachmentReferenceText}`
     let rawResult: unknown
     try {
       rawResult = await this.request("session/prompt", {
         sessionId,
-        prompt: buildPromptContentBlocks(text, options.systemPrompt, {
+        prompt: buildPromptContentBlocks(promptText, options.systemPrompt, {
+          attachmentBlocks,
           includeContinuityFallbackNote: this.externalContinuityFallback,
           threadHistory: options.threadHistory,
         }),
@@ -312,6 +350,7 @@ export class HermesAcpSession {
       events,
       capabilities: this.capabilities,
       finalText: finalText.diagnostics,
+      attachmentDeliveryMode,
     }
   }
 
@@ -1010,7 +1049,11 @@ function findNonRejectPermissionOption(
 export function buildPromptContentBlocks(
   text: string,
   systemPrompt?: string,
-  continuity?: { includeContinuityFallbackNote?: boolean; threadHistory?: string },
+  continuity?: {
+    attachmentBlocks?: Array<Record<string, unknown>>
+    includeContinuityFallbackNote?: boolean
+    threadHistory?: string
+  },
 ) {
   const normalizedSystemPrompt = systemPrompt?.trim()
   const normalizedThreadHistory = continuity?.threadHistory?.trim()
@@ -1031,7 +1074,36 @@ export function buildPromptContentBlocks(
       text: appSystemPrompt,
     },
     userBlock,
+    ...(continuity?.attachmentBlocks ?? []),
   ]
+}
+
+function buildAttachmentResourceLinkBlocks(
+  attachments: HermesAcpPromptAttachment[] | undefined,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(attachments)) {
+    return []
+  }
+  const blocks: Array<Record<string, unknown>> = []
+  attachments.forEach((attachment, index) => {
+    const uri = (attachment.access?.url ?? attachment.url)?.trim()
+    if (!uri) {
+      return
+    }
+    const name = attachment.filename?.trim() || `Attachment ${index + 1}`
+    const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
+    const block: Record<string, unknown> = {
+      type: "resource_link",
+      uri,
+      name,
+      mimeType: mediaType,
+    }
+    if (typeof attachment.sizeBytes === "number" && Number.isFinite(attachment.sizeBytes)) {
+      block.size = attachment.sizeBytes
+    }
+    blocks.push(block)
+  })
+  return blocks
 }
 
 export function splitCommand(command: string): string[] {
@@ -1124,9 +1196,24 @@ function extractCapabilities(result: unknown): HermesAcpRuntimeCapabilities {
     typeof agentCapabilities.sessionCapabilities === "object"
       ? (agentCapabilities.sessionCapabilities as Record<string, unknown>)
       : {}
+  const agentMeta =
+    agentCapabilities._meta && typeof agentCapabilities._meta === "object"
+      ? (agentCapabilities._meta as Record<string, unknown>)
+      : {}
+  const promptCapabilities =
+    agentCapabilities.promptCapabilities &&
+    typeof agentCapabilities.promptCapabilities === "object"
+      ? (agentCapabilities.promptCapabilities as Record<string, unknown>)
+      : {}
   const loadSession = agentCapabilities.loadSession === true
   return {
     loadSession,
+    promptCapabilities: {
+      audio: promptCapabilities.audio === true,
+      embeddedContext: promptCapabilities.embeddedContext === true,
+      image: promptCapabilities.image === true,
+    },
+    supportsPromptResourceLinks: agentMeta["0000.chat/promptResourceLinks"] !== false,
     supportsSessionLoad: loadSession,
     supportsSessionResume: Object.hasOwn(sessionCapabilities, "resume"),
     supportsSessionClose: Object.hasOwn(sessionCapabilities, "close"),

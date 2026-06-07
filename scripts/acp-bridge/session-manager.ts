@@ -1,4 +1,5 @@
 import {
+  type HermesAcpPromptAttachment,
   type HermesAcpMcpServer,
   type HermesAcpPromptResult,
   type RuntimeConfigApplicationResult,
@@ -70,6 +71,8 @@ export type ManagedAcpSession = {
     options?: {
       systemPrompt?: string
       threadHistory?: string
+      attachmentReferenceText?: string
+      attachments?: HermesAcpPromptAttachment[]
       autoApprovePermissionRequests?: boolean
       runtimeConfig?: Record<string, string>
     },
@@ -410,6 +413,7 @@ export class BridgeSessionManager {
     if (!item.prompt) {
       throw new Error(`prompt command ${item.id} is missing prompt text`)
     }
+    const promptText = item.prompt
     const threadId = item.threadId ?? item.sessionId
     if (!threadId) {
       throw new Error(`queue item ${item.id} is missing threadId`)
@@ -417,7 +421,7 @@ export class BridgeSessionManager {
     this.assertRequiredScopedIdentity(item)
     const sessionKey = this.sessionKeyForItem(item) ?? threadId
     const attachments = normalizeBridgeAttachments(item.attachments)
-    const prompt = promptWithAttachmentReferences(item.prompt, attachments)
+    const attachmentReferenceText = attachmentReferenceTextForPrompt(attachments)
     const threadHistory = normalizeThreadHistory(item.threadHistory)
     const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
     const autoApprovePermissionRequests = item.approvalLevel === "full_permissions"
@@ -431,17 +435,18 @@ export class BridgeSessionManager {
         attachmentCount: attachments.length,
         attachmentMediaTypes: summarizeAttachmentMediaTypes(attachments),
         attachmentTotalBytes: attachments.reduce((sum, attachment) => sum + (attachment.sizeBytes ?? 0), 0),
-        deliveryMode: "text_references",
+        deliveryMode: "pending",
       })
     }
     await this.runSerializedPrompt(sessionKey, item.id, () =>
-      this.handlePromptNow(item, prompt, {
+      this.handlePromptNow(item, promptText, {
+        attachmentReferenceText,
+        attachments,
         autoApprovePermissionRequests,
         resultMetadata:
           attachments.length > 0
             ? {
                 attachmentCount: attachments.length,
-                attachmentDeliveryMode: "text_references",
                 attachmentMediaTypes: summarizeAttachmentMediaTypes(attachments),
                 attachmentTotalBytes: attachments.reduce(
                   (sum, attachment) => sum + (attachment.sizeBytes ?? 0),
@@ -461,6 +466,8 @@ export class BridgeSessionManager {
     options: {
       systemPrompt?: string
       threadHistory?: string
+      attachmentReferenceText?: string
+      attachments?: HermesAcpPromptAttachment[]
       autoApprovePermissionRequests?: boolean
       resultMetadata?: Record<string, unknown>
       sessionKey?: string
@@ -589,6 +596,24 @@ export class BridgeSessionManager {
       })
     }
     await this.drainEventWrites()
+    const finalResultMetadata =
+      result.attachmentDeliveryMode && resultMetadata
+        ? { ...resultMetadata, attachmentDeliveryMode: result.attachmentDeliveryMode }
+        : resultMetadata
+    if (result.attachmentDeliveryMode && baseResultMetadata?.attachmentCount) {
+      this.writeLog({
+        level: "info",
+        event: "bridge.attachments.delivered",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.providerSessionKey,
+        acpSessionId: result.sessionId,
+        attachmentCount: baseResultMetadata.attachmentCount,
+        attachmentDeliveryMode: result.attachmentDeliveryMode,
+      })
+    }
     const attachmentParts = attachmentPartsFromPromptEvents(result.events)
     if (attachmentParts.length > 0) {
       this.writeLog({
@@ -623,7 +648,7 @@ export class BridgeSessionManager {
       text: result.text,
       parts: attachmentParts.length > 0 ? attachmentParts : undefined,
       result: result.rawResult,
-      ...resultMetadata,
+      ...finalResultMetadata,
     })
     this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session))
     session.lastUsedAt = Date.now()
@@ -1749,9 +1774,9 @@ function normalizeBridgeAttachments(
   })
 }
 
-function promptWithAttachmentReferences(prompt: string, attachments: BridgeQueueAttachment[]) {
+function attachmentReferenceTextForPrompt(attachments: BridgeQueueAttachment[]): string | undefined {
   if (attachments.length === 0) {
-    return prompt
+    return undefined
   }
   const lines = attachments.map((attachment, index) => {
     const label = attachment.filename?.trim() || `Attachment ${index + 1}`
@@ -1761,7 +1786,7 @@ function promptWithAttachmentReferences(prompt: string, attachments: BridgeQueue
     const url = attachment.access?.url ?? attachment.url
     return `- ${label} (${mediaType}${size}${checksum}): ${url}`
   })
-  return `${prompt}\n\nAttached files available to this ACP run:\n${lines.join("\n")}`
+  return `Attached files available to this ACP run:\n${lines.join("\n")}`
 }
 
 function summarizeAttachmentMediaTypes(attachments: BridgeQueueAttachment[]) {
