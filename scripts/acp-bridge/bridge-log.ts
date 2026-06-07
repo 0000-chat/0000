@@ -20,6 +20,9 @@ export type BridgeLogLevel = "debug" | "info" | "warn" | "error"
 
 export const bridgeLogEventNames = [
   "agent.attachments.emitted",
+  "agent.attachments.upload_deferred",
+  "agent.attachments.upload_failed",
+  "agent.attachments.upload_resolved",
   "agent.reasoning.chunk",
   "agent.final_text.withheld",
   "agent.tool.completed",

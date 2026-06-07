@@ -6,6 +6,7 @@ export const DEFAULT_BRIDGE_PATHS = {
   queueResult: "/api/agent-bridge/queue/result",
   events: "/api/agent-bridge/events",
   eventPayloads: "/api/agent-event-payloads",
+  agentAttachments: "/api/agent-attachments",
   agentToolsInvoke: "/api/agent-tools/invoke",
 } as const
 
@@ -78,6 +79,31 @@ export type BridgeEventInput = Record<string, unknown> & {
   externalEventId?: string
   externalRequestId?: string
   createdAt?: number
+}
+
+export type AgentAttachmentUploadInput = {
+  threadId: string
+  agentSessionId?: string
+  filename: string
+  mediaType?: string
+  bytes: Uint8Array
+}
+
+export type AgentAttachmentUploadResponse = {
+  file: Record<string, unknown>
+}
+
+export type AgentAttachmentDeleteInput = {
+  threadId: string
+  agentSessionId?: string
+  objectKey: string
+}
+
+export type AgentAttachmentDeleteResponse = {
+  deletedAt?: string
+  key?: string
+  ok?: boolean
+  status?: string
 }
 
 const EVENT_PAYLOAD_INLINE_THRESHOLD_BYTES = 64 * 1024
@@ -192,6 +218,70 @@ export class ConvexBridgeCloudClient {
       deviceId: this.deviceId,
       events: preparedEvents,
     })
+  }
+
+  async uploadAttachment<TResponse = AgentAttachmentUploadResponse>(
+    input: AgentAttachmentUploadInput,
+  ): Promise<TResponse> {
+    if (input.threadId.length === 0) {
+      throw new Error("threadId is required")
+    }
+    if (input.filename.length === 0) {
+      throw new Error("filename is required")
+    }
+
+    const endpoint = buildBridgeEndpoint(this.appUrl, this.paths.agentAttachments)
+    const form = new FormData()
+    form.set("deviceId", this.deviceId)
+    form.set("threadId", input.threadId)
+    if (input.agentSessionId) {
+      form.set("agentSessionId", input.agentSessionId)
+    }
+    const bytes = input.bytes.slice()
+    const blob = new Blob([bytes.buffer], {
+      type: input.mediaType ?? "application/octet-stream",
+    })
+    form.set("file", blob, input.filename)
+
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.bridgeToken}`,
+      },
+      body: form,
+    })
+
+    return await readJsonResponse<TResponse>("POST", endpoint, response)
+  }
+
+  async deleteAttachment<TResponse = AgentAttachmentDeleteResponse>(
+    input: AgentAttachmentDeleteInput,
+  ): Promise<TResponse> {
+    if (input.threadId.length === 0) {
+      throw new Error("threadId is required")
+    }
+    if (input.objectKey.length === 0) {
+      throw new Error("objectKey is required")
+    }
+
+    const endpoint = buildBridgeEndpoint(this.appUrl, this.paths.agentAttachments)
+    const response = await this.fetchImpl(endpoint, {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${this.bridgeToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(
+        compact({
+          agentSessionId: input.agentSessionId,
+          deviceId: this.deviceId,
+          objectKey: input.objectKey,
+          threadId: input.threadId,
+        }),
+      ),
+    })
+
+    return await readJsonResponse<TResponse>("DELETE", endpoint, response)
   }
 
   private async offloadEventPayloads(event: BridgeEventInput): Promise<BridgeEventInput> {

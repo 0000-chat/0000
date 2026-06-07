@@ -789,6 +789,98 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("uploads byte agent attachments before persisting prompt result parts", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [
+            {
+              attachmentUpload: {
+                dataBase64: "YWdlbnQgb3V0cHV0",
+                filename: "agent-output.txt",
+                kind: "base64",
+                mediaType: "text/plain",
+                sizeBytes: 12,
+              },
+              eventType: "file",
+              externalEventId: "session-1:1:file",
+              part: {
+                json: {
+                  candidateKind: "base64",
+                  mediaType: "text/plain",
+                  sizeBytes: 12,
+                  status: "pending_upload",
+                  type: "agent_attachment_upload",
+                },
+                status: "streaming",
+                type: "event",
+              },
+              payload: {
+                candidateKind: "base64",
+                mediaType: "text/plain",
+                sizeBytes: 12,
+                status: "pending_upload",
+                type: "agent_attachment_upload",
+              },
+              source: "hermes_acp",
+            },
+          ],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "created a file",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "Create the file.",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.uploads).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        byteLength: 12,
+        filename: "agent-output.txt",
+        mediaType: "text/plain",
+        threadId: "thread-1",
+      },
+    ])
+    expect(cloud.results.at(-1)?.result).toMatchObject({
+      ok: true,
+      parts: [
+        {
+          externalPartId: "session-1:1:file:attachment",
+          payload: {
+            bucket: "chat-attachments",
+            checksumSha256: "e".repeat(64),
+            createdBy: "agent",
+            filename: "agent-output.txt",
+            key: "attachments/agent-output/thread-1/agent-session-1/agent-output.txt",
+            mediaType: "text/plain",
+            objectKey: "attachments/agent-output/thread-1/agent-session-1/agent-output.txt",
+            sizeBytes: 12,
+            status: "available",
+            storageBackend: "r2",
+            type: "file",
+          },
+          type: "attachment",
+        },
+      ],
+      text: "created a file",
+    })
+    const appendedPayloads = cloud.events.flat().map((event) => event.normalizedPayload)
+    expect(JSON.stringify(appendedPayloads)).not.toContain("YWdlbnQgb3V0cHV0")
+  })
+
   test("waits for a starting ACP session before handling an approval response", async () => {
     const promptStarted = deferred<void>()
     const finishPrompt = deferred<void>()
@@ -2151,14 +2243,53 @@ describe("bridge session cwd safety", () => {
 function fakeCloudClient() {
   const events: Array<Array<{ normalizedPayload?: unknown }>> = []
   const results: Array<{ claimId: string; id: string; result: unknown }> = []
+  const uploads: Array<{
+    agentSessionId?: string
+    byteLength: number
+    filename: string
+    mediaType?: string
+    threadId: string
+  }> = []
   return {
     events,
     results,
+    uploads,
     appendEvents: async <TResponse = Record<string, unknown>>(
       input: Array<{ normalizedPayload?: unknown }>,
     ) => {
       events.push(input)
       return {} as TResponse
+    },
+    uploadAttachment: async <TResponse = { file: Record<string, unknown> }>(input: {
+      agentSessionId?: string
+      bytes: Uint8Array
+      filename: string
+      mediaType?: string
+      threadId: string
+    }) => {
+      uploads.push({
+        agentSessionId: input.agentSessionId,
+        byteLength: input.bytes.byteLength,
+        filename: input.filename,
+        mediaType: input.mediaType,
+        threadId: input.threadId,
+      })
+      const objectKey = `attachments/agent-output/${input.threadId}/${input.agentSessionId ?? "session"}/${input.filename}`
+      return {
+        file: {
+          bucket: "chat-attachments",
+          checksumSha256: "e".repeat(64),
+          createdBy: "agent",
+          filename: input.filename,
+          key: objectKey,
+          mediaType: input.mediaType,
+          objectKey,
+          sizeBytes: input.bytes.byteLength,
+          status: "available",
+          storageBackend: "r2",
+          type: "file",
+        },
+      } as TResponse
     },
     markResult: async <TResponse = Record<string, unknown>>(
       id: string,
