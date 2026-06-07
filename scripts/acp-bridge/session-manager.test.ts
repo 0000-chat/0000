@@ -636,7 +636,7 @@ describe("bridge session cwd safety", () => {
     })
   })
 
-  test("passes system prompt while adapting structured attachments into prompt references", async () => {
+  test("passes system prompt while adapting structured attachments into native prompt references", async () => {
     const prompts: string[] = []
     const promptOptions: Array<Record<string, unknown> | undefined> = []
     const cloud = fakeCloudClient()
@@ -649,6 +649,7 @@ describe("bridge session cwd safety", () => {
           prompts.push(prompt)
           promptOptions.push(options)
           return {
+            attachmentDeliveryMode: "resource_links",
             events: [],
             rawResult: {},
             sessionId: "session-1",
@@ -702,13 +703,25 @@ describe("bridge session cwd safety", () => {
     })
 
     expect(promptOptions.at(-1)?.systemPrompt).toBe("Keep the workspace policy.")
-    expect(prompts.at(-1)).toContain("Inspect these files.")
-    expect(prompts.at(-1)).toContain("Attached files available to this ACP run:")
-    expect(prompts.at(-1)).toContain("screenshot.png (image/png, 1234 bytes")
-    expect(prompts.at(-1)).toContain("notes.txt (text/plain, 42 bytes")
+    expect(prompts.at(-1)).toBe("Inspect these files.")
+    expect(promptOptions.at(-1)?.attachmentReferenceText).toContain(
+      "Attached files available to this ACP run:",
+    )
+    expect(promptOptions.at(-1)?.attachments).toEqual([
+      expect.objectContaining({
+        filename: "screenshot.png",
+        mediaType: "image/png",
+        sizeBytes: 1234,
+      }),
+      expect.objectContaining({
+        filename: "notes.txt",
+        mediaType: "text/plain",
+        sizeBytes: 42,
+      }),
+    ])
     expect(cloud.results.at(-1)?.result).toMatchObject({
       attachmentCount: 2,
-      attachmentDeliveryMode: "text_references",
+      attachmentDeliveryMode: "resource_links",
       attachmentTotalBytes: 1276,
     })
   })

@@ -319,12 +319,111 @@ describe("ACP runtime adapter boundary", () => {
       value: "medium",
     })
   })
+
+  test("sends attachment references as ACP resource link content blocks", async () => {
+    const requests: JsonRpcMessage[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      spawnProcess: createFakeAcpProcess({
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.sendUserMessage("review these", {
+      attachments: [
+        {
+          filename: "diagram.png",
+          mediaType: "image/png",
+          sizeBytes: 1234,
+          url: "https://app.example.test/api/attachments/image",
+        },
+        {
+          filename: "notes.txt",
+          mediaType: "text/plain",
+          sizeBytes: 42,
+          url: "https://app.example.test/api/attachments/file",
+        },
+      ],
+      systemPrompt: "Prefer concise answers.",
+    })
+
+    const promptRequest = requests.find((request) => request.method === "session/prompt")
+    expect(promptRequest?.params).toMatchObject({ sessionId: "session-1" })
+    const params = promptRequest?.params as { prompt?: unknown[] } | undefined
+    expect(params?.prompt).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          _meta: { "0000.chat/role": "system" },
+          text: expect.stringContaining("Prefer concise answers."),
+          type: "text",
+        }),
+        { text: "review these", type: "text" },
+        {
+          mimeType: "image/png",
+          name: "diagram.png",
+          size: 1234,
+          type: "resource_link",
+          uri: "https://app.example.test/api/attachments/image",
+        },
+        {
+          mimeType: "text/plain",
+          name: "notes.txt",
+          size: 42,
+          type: "resource_link",
+          uri: "https://app.example.test/api/attachments/file",
+        },
+      ]),
+    )
+  })
+
+  test("falls back to text attachment references when resource links are disabled", async () => {
+    const requests: JsonRpcMessage[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "legacy acp",
+      spawnProcess: createFakeAcpProcess({
+        initializeResult: {
+          agentCapabilities: {
+            _meta: { "0000.chat/promptResourceLinks": false },
+            sessionCapabilities: {},
+          },
+        },
+        requests,
+        updates: [],
+      }),
+    })
+
+    const result = await session.sendUserMessage("review this", {
+      attachmentReferenceText:
+        "Attached files available to this ACP run:\n- report.pdf (application/pdf, 55 bytes): https://app.example.test/report.pdf",
+      attachments: [
+        {
+          filename: "report.pdf",
+          mediaType: "application/pdf",
+          sizeBytes: 55,
+          url: "https://app.example.test/report.pdf",
+        },
+      ],
+    })
+
+    const promptRequest = requests.find((request) => request.method === "session/prompt")
+    const params = promptRequest?.params as { prompt?: unknown[] } | undefined
+    expect(params?.prompt).toContainEqual({
+      text: "review this\n\nAttached files available to this ACP run:\n- report.pdf (application/pdf, 55 bytes): https://app.example.test/report.pdf",
+      type: "text",
+    })
+    expect(params?.prompt).not.toContainEqual(
+      expect.objectContaining({ type: "resource_link" }),
+    )
+    expect(result.attachmentDeliveryMode).toBe("text_references")
+  })
 })
 
 function createFakeAcpProcess(options: {
   configOptions?: Array<{ currentValue: string; id: string }>
   emitExitOnKill?: boolean
   failSessionNewWithMcpServers?: boolean
+  initializeResult?: unknown
   kills?: Array<NodeJS.Signals | undefined>
   promptError?: { code: number; data?: Record<string, unknown>; message: string }
   promptResult?: unknown
@@ -375,6 +474,7 @@ function handleRequest(
   options: {
     configOptions?: Array<{ currentValue: string; id: string }>
     failSessionNewWithMcpServers?: boolean
+    initializeResult?: unknown
     promptError?: { code: number; data?: Record<string, unknown>; message: string }
     promptResult?: unknown
     updates: Array<Record<string, unknown>>
@@ -384,7 +484,7 @@ function handleRequest(
     writeJson(stdout, {
       id: message.id,
       jsonrpc: "2.0",
-      result: { agentCapabilities: { sessionCapabilities: {} } },
+      result: options.initializeResult ?? { agentCapabilities: { sessionCapabilities: {} } },
     })
     return
   }
