@@ -19,7 +19,11 @@ import {
   DEFAULT_ACP_REQUEST_TIMEOUT_MS,
   type HermesAcpMcpServer,
 } from "./acp-bridge/acp-session"
-import { BridgeSessionManager, type BridgeSessionQueueItem } from "./acp-bridge/session-manager"
+import {
+  type BridgeQueueAttachment,
+  BridgeSessionManager,
+  type BridgeSessionQueueItem,
+} from "./acp-bridge/session-manager"
 import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./acp-bridge/runtime-discovery"
 import {
   defaultAgentCommandForEnvironment,
@@ -2259,6 +2263,47 @@ function arrayOfRecords(value: unknown): Array<Record<string, unknown>> {
     : []
 }
 
+function attachmentFromUnknown(value: unknown): BridgeQueueAttachment | undefined {
+  const record = recordFromUnknown(value)
+  if (!record) {
+    return undefined
+  }
+  const accessRecord = recordFromUnknown(record.access)
+  const access = accessRecord
+    ? compact({
+        mode: stringFromUnknown(accessRecord.mode),
+        url: stringFromUnknown(accessRecord.url),
+      })
+    : undefined
+  const url = stringFromUnknown(record.url)
+  const accessUrl = access?.url
+  if (!url && !accessUrl) {
+    return undefined
+  }
+  return compact({
+    access,
+    bucket: stringFromUnknown(record.bucket),
+    checksumSha256: stringFromUnknown(record.checksumSha256),
+    createdAt: stringFromUnknown(record.createdAt),
+    filename: stringFromUnknown(record.filename),
+    key: stringFromUnknown(record.key),
+    mediaType: stringFromUnknown(record.mediaType),
+    objectKey: stringFromUnknown(record.objectKey),
+    sizeBytes: numberFromUnknown(record.sizeBytes),
+    status: stringFromUnknown(record.status),
+    storageBackend: stringFromUnknown(record.storageBackend),
+    type: stringFromUnknown(record.type),
+    url,
+  })
+}
+
+function attachmentsFromUnknown(value: unknown): BridgeQueueCommand["attachments"] | undefined {
+  const attachments = arrayOfRecords(value)
+    .map((record) => attachmentFromUnknown(record))
+    .filter((attachment): attachment is NonNullable<typeof attachment> => attachment !== undefined)
+  return attachments.length > 0 ? attachments : undefined
+}
+
 function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined
@@ -2275,6 +2320,7 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     id,
     claimId: stringFromUnknown(record.claimId),
     type,
+    attachments: attachmentsFromUnknown(record.attachments),
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
@@ -2348,6 +2394,10 @@ function redactForOutput(value: string): string {
 
 function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
 function stringRecordFromUnknown(value: unknown): Record<string, string> | undefined {

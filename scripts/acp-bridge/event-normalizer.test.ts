@@ -84,6 +84,46 @@ test("normalizes ACP agent message chunks as text", () => {
   })
 })
 
+test("normalizes addressable ACP file resources as attachment parts", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          file: {
+            checksumSha256: "d".repeat(64),
+            filename: "agent-output.txt",
+            mediaType: "text/plain",
+            sizeBytes: 17,
+            storageBackend: "r2",
+            url: "https://0000.chat/api/attachments/attachments/agent/agent-output.txt",
+          },
+          sessionUpdate: "file",
+        },
+      },
+    },
+    15,
+  )
+
+  assert.equal(event.eventType, "file")
+  assert.deepEqual(event.part, {
+    json: {
+      checksumSha256: "d".repeat(64),
+      filename: "agent-output.txt",
+      mediaType: "text/plain",
+      sizeBytes: 17,
+      status: "available",
+      storageBackend: "r2",
+      type: "file",
+      url: "https://0000.chat/api/attachments/attachments/agent/agent-output.txt",
+    },
+    status: "complete",
+    type: "attachment",
+  })
+})
+
 test("normalizes ACP thought chunks as hidden thinking by default", () => {
   const event = normalizeAcpNotification(
     {

@@ -19,6 +19,7 @@ const SAFE_ACP_SESSION_ERROR_PATTERN =
 export type BridgeLogLevel = "debug" | "info" | "warn" | "error"
 
 export const bridgeLogEventNames = [
+  "agent.attachments.emitted",
   "agent.reasoning.chunk",
   "agent.final_text.withheld",
   "agent.tool.completed",
@@ -28,6 +29,7 @@ export const bridgeLogEventNames = [
   "agent.turn.failed",
   "agent.turn.started",
   "bridge.audit",
+  "bridge.attachments.received",
   "bridge.axiom_delivery.failed",
   "bridge.control_command.received",
   "bridge.choice_response.continuation",
