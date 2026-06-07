@@ -59,7 +59,7 @@ const DEFAULT_ACP_IDLE_TTL_MS = 0
 const DEFAULT_ALLOW_REMOTE_CWD = false
 const DEFAULT_AGENT_CONNECTION_REGISTER_PATH = "/api/agent-connections/register"
 const DEFAULT_AGENT_SKILL_PATH = join(homedir(), ".claude", "skills", "0000", "SKILL.md")
-export const BRIDGE_VERSION = "0.1.8"
+export const BRIDGE_VERSION = "0.1.9"
 const BRIDGE_LOCAL_STATE_MODE = 0o600
 
 export type BridgeCommandName = "connect" | "doctor" | "pair" | "start" | "status" | "help"
@@ -1801,6 +1801,9 @@ function filterDoctorSnapshot(
 }
 
 function normalizeCommand(command?: string): BridgeCommandName {
+  if (command === "connect-org") {
+    return "connect"
+  }
   if (
     command === "connect"
     || command === "doctor"
