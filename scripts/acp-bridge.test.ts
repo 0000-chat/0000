@@ -15,6 +15,7 @@ import {
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  parseBridgeArgs,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
@@ -27,6 +28,16 @@ import {
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
 } from "./acp-bridge/runtime-defaults"
+
+describe("bridge command parsing", () => {
+  test("accepts connect-org as a legacy alias for connect", () => {
+    expect(parseBridgeArgs(["connect-org", "CODE", "--app-url", "https://0000.chat"])).toEqual({
+      command: "connect",
+      flags: { "app-url": "https://0000.chat" },
+      positionals: ["CODE"],
+    })
+  })
+})
 
 describe("bridge Convex URL resolution", () => {
   test("derives a Convex cloud URL from a Convex site URL", () => {

@@ -22,7 +22,7 @@ The generated script is intentionally small and predictable:
 The repository clone command is currently:
 
 ```bash
-BRIDGE_REF="v0.1.8"
+BRIDGE_REF="v0.1.9"
 git clone --branch "$BRIDGE_REF" --depth 1 https://github.com/0000-chat/0000.git "$HOME/0000"
 ```
 
@@ -42,7 +42,7 @@ If you do not want to run `curl | bash`, inspect this repository first and run
 the same steps manually:
 
 ```bash
-git clone --branch "v0.1.8" --depth 1 https://github.com/0000-chat/0000.git "$HOME/0000"
+git clone --branch "v0.1.9" --depth 1 https://github.com/0000-chat/0000.git "$HOME/0000"
 cd "$HOME/0000"
 bun install
 bun run bridge connect "<connection-code>" --app-url "https://0000.chat" --skill-path "$HOME/.claude/skills/0000/SKILL.md" --install-mode "manual"
@@ -91,8 +91,8 @@ Manual updates use the same tag-based model:
 
 ```bash
 cd "$HOME/0000"
-git fetch --tags --force origin "v0.1.8"
-git checkout --detach "v0.1.8"
+git fetch --tags --force origin "v0.1.9"
+git checkout --detach "v0.1.9"
 bun install
 ```
 
