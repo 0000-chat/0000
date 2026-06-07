@@ -26,7 +26,24 @@ export type NormalizedBridgeEvent = {
   externalRequestId?: string
   payload: unknown
   part?: BridgeMessagePart
+  attachmentUpload?: BridgeAttachmentUploadCandidate
 }
+
+export type BridgeAttachmentUploadCandidate =
+  | {
+      kind: "base64"
+      dataBase64: string
+      filename: string
+      mediaType?: string
+      sizeBytes?: number
+    }
+  | {
+      kind: "local_file"
+      path: string
+      filename?: string
+      mediaType?: string
+      sizeBytes?: number
+    }
 
 type JsonRecord = Record<string, unknown>
 
@@ -67,6 +84,7 @@ export function normalizeAcpNotification(
     "event"
   const eventType = normalizeAcpEventType(kind)
   const externalEventId = buildExternalEventId(sessionId, sequence, eventType)
+  const attachmentUpload = normalizeAttachmentUploadCandidate(kind, sessionUpdate)
 
   return {
     externalEventId,
@@ -74,8 +92,18 @@ export function normalizeAcpNotification(
     eventType,
     sessionId,
     externalRequestId: readString(record.id) ?? readNumberString(record.id),
-    payload: normalizeEventPayload(kind, record),
-    part: normalizeSessionUpdatePart(kind, sessionUpdate),
+    payload: attachmentUpload
+      ? sanitizeAttachmentUploadPayload(kind, attachmentUpload)
+      : normalizeEventPayload(kind, record),
+    part: attachmentUpload
+      ? {
+          type: "event",
+          text: "Agent emitted an attachment.",
+          json: sanitizeAttachmentUploadPayload(kind, attachmentUpload),
+          status: "streaming",
+        }
+      : normalizeSessionUpdatePart(kind, sessionUpdate),
+    attachmentUpload,
   }
 }
 
@@ -235,6 +263,84 @@ function normalizeAttachmentUpdate(kind: string, update: JsonRecord): JsonRecord
     type: "file",
     url,
   })
+}
+
+function normalizeAttachmentUploadCandidate(
+  kind: string,
+  update: JsonRecord,
+): BridgeAttachmentUploadCandidate | undefined {
+  const resource =
+    maybeRecord(update.attachment) ??
+    maybeRecord(update.file) ??
+    maybeRecord(update.image) ??
+    maybeRecord(update.resource) ??
+    maybeRecord(update.artifact) ??
+    update
+  const attachmentishKind = /(?:attachment|file|image|resource|artifact)/i.test(kind)
+  if (!attachmentishKind) {
+    return undefined
+  }
+
+  const filename =
+    readString(resource.filename) ?? readString(resource.name) ?? readString(resource.title)
+  const mediaType =
+    readString(resource.mediaType) ?? readString(resource.mimeType) ?? readString(resource.contentType)
+  const sizeBytes = readNumber(resource.sizeBytes) ?? readNumber(resource.size)
+  const dataBase64 =
+    readString(resource.dataBase64) ??
+    readString(resource.base64Data) ??
+    readString(resource.contentBase64) ??
+    readString(resource.bytesBase64)
+  if (dataBase64 && filename) {
+    return removeUndefinedValues({
+      kind: "base64",
+      dataBase64,
+      filename,
+      mediaType,
+      sizeBytes,
+    }) as BridgeAttachmentUploadCandidate
+  }
+
+  const localPath =
+    readString(resource.localPath) ??
+    readString(resource.filePath) ??
+    readString(resource.path) ??
+    readString(resource.uri)
+  if (localPath && isLocalAttachmentPath(localPath)) {
+    return removeUndefinedValues({
+      kind: "local_file",
+      path: localPath,
+      filename,
+      mediaType,
+      sizeBytes,
+    }) as BridgeAttachmentUploadCandidate
+  }
+
+  return undefined
+}
+
+function sanitizeAttachmentUploadPayload(
+  kind: string,
+  candidate: BridgeAttachmentUploadCandidate,
+): JsonRecord {
+  return removeUndefinedValues({
+    type: "agent_attachment_upload",
+    candidateKind: candidate.kind,
+    eventKind: kind,
+    filename: candidate.filename,
+    mediaType: candidate.mediaType,
+    sizeBytes: candidate.sizeBytes,
+    status: "pending_upload",
+  })
+}
+
+function isLocalAttachmentPath(value: string): boolean {
+  return (
+    value.startsWith("/") ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith("file://")
+  )
 }
 
 function normalizeAttachmentAccess(value: unknown): JsonRecord | undefined {

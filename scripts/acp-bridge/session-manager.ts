@@ -1,3 +1,7 @@
+import { readFile, stat } from "node:fs/promises"
+import { basename, isAbsolute, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import {
   type HermesAcpPromptAttachment,
   type HermesAcpMcpServer,
@@ -7,8 +11,8 @@ import {
   resolveRuntimeConfigApplication,
 } from "./acp-session"
 import { type BridgeLogEntry, type BridgeLogger, redactLogValue } from "./bridge-log"
-import type { BridgeEventInput } from "./convex-http"
-import type { NormalizedBridgeEvent } from "./event-normalizer"
+import type { AgentAttachmentUploadInput, BridgeEventInput } from "./convex-http"
+import type { BridgeAttachmentUploadCandidate, NormalizedBridgeEvent } from "./event-normalizer"
 import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
 import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
 
@@ -46,12 +50,15 @@ export type BridgeSessionQueueItem = {
 
 export type BridgeQueueAttachment = {
   access?: {
+    expiresAt?: number
     mode?: string
     url?: string
   }
   bucket?: string
   checksumSha256?: string
+  contentHash?: string
   createdAt?: string
+  createdBy?: string
   filename?: string
   key?: string
   mediaType?: string
@@ -59,6 +66,7 @@ export type BridgeQueueAttachment = {
   sizeBytes?: number
   status?: string
   storageBackend?: string
+  threadId?: string
   type?: string
   url?: string
 }
@@ -125,6 +133,7 @@ type BridgeSessionRecord = {
 
 type BridgeSessionCloudClient = {
   appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>
+  uploadAttachment(input: AgentAttachmentUploadInput): Promise<{ file: Record<string, unknown> }>
   markResult(
     commandId: string,
     result: Record<string, unknown>,
@@ -595,6 +604,7 @@ export class BridgeSessionManager {
         trustedFinalResultText: result.finalText.trustedFinalResultText,
       })
     }
+    const attachmentUploadSummary = await this.resolveAgentAttachmentUploads(item, session, result.events)
     await this.drainEventWrites()
     const finalResultMetadata =
       result.attachmentDeliveryMode && resultMetadata
@@ -637,6 +647,25 @@ export class BridgeSessionManager {
               : 0),
           0,
         ),
+      })
+    }
+    if (
+      attachmentUploadSummary.uploadedCount > 0 ||
+      attachmentUploadSummary.failedCount > 0
+    ) {
+      this.writeLog({
+        level: attachmentUploadSummary.failedCount > 0 ? "warn" : "info",
+        event: "agent.attachments.upload_resolved",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.providerSessionKey,
+        acpSessionId: result.sessionId,
+        uploadedCount: attachmentUploadSummary.uploadedCount,
+        failedCount: attachmentUploadSummary.failedCount,
+        attachmentMediaTypes: attachmentUploadSummary.mediaTypes,
+        attachmentTotalBytes: attachmentUploadSummary.totalBytes,
       })
     }
     await this.markQueueResult(item, {
@@ -1152,6 +1181,21 @@ export class BridgeSessionManager {
                 event.externalEventId ?? item.externalRequestId ?? item.approvalId ?? item.id,
               )
             }
+            if (event.attachmentUpload) {
+              this.writeLog({
+                level: "debug",
+                event: "agent.attachments.upload_deferred",
+                threadId: record.threadId,
+                sessionId: item.sessionId,
+                agentSessionId: record.providerSessionKey,
+                queueId: item.id,
+                queueType: normalizeType(item),
+                candidateKind: event.attachmentUpload.kind,
+                mediaType: event.attachmentUpload.mediaType,
+                sizeBytes: event.attachmentUpload.sizeBytes,
+              })
+              return
+            }
             this.enqueueEventWrite(record, event)
           }
         },
@@ -1270,6 +1314,98 @@ export class BridgeSessionManager {
     this.nextSequence += 1
     this.writeBridgeActivityLog(record, event, sequence)
     this.enqueueBridgeEvent(toBridgeEvent(record, event, sequence))
+  }
+
+  private async resolveAgentAttachmentUploads(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+    events: NormalizedBridgeEvent[],
+  ): Promise<{
+    failedCount: number
+    mediaTypes: string[]
+    totalBytes: number
+    uploadedCount: number
+  }> {
+    let failedCount = 0
+    let totalBytes = 0
+    let uploadedCount = 0
+    const mediaTypes = new Set<string>()
+
+    for (const event of events) {
+      if (!event.attachmentUpload) {
+        continue
+      }
+      const candidate = event.attachmentUpload
+      try {
+        const uploadInput = await buildAgentAttachmentUploadInput(
+          candidate,
+          record.threadId,
+          record.providerSessionKey,
+          record.cwd,
+        )
+        const response = await this.cloudClient.uploadAttachment(uploadInput)
+        const file = normalizeUploadedAgentAttachment(response.file)
+        event.part = {
+          type: "attachment",
+          json: file,
+          status: "complete",
+        }
+        event.payload = summarizeResolvedAgentAttachment(file)
+        delete event.attachmentUpload
+        this.enqueueEventWrite(record, event)
+        uploadedCount += 1
+        if (typeof file.mediaType === "string") {
+          mediaTypes.add(file.mediaType)
+        }
+        if (typeof file.sizeBytes === "number") {
+          totalBytes += file.sizeBytes
+        }
+      } catch (error) {
+        failedCount += 1
+        const message = String(redactLogValue(error instanceof Error ? error.message : String(error)))
+        event.part = {
+          type: "attachment",
+          json: removeUndefinedValues({
+            error: "upload_failed",
+            filename: candidate.filename ?? "Attachment",
+            mediaType: candidate.mediaType,
+            sizeBytes: candidate.sizeBytes,
+            status: "error",
+            type: "file",
+          }),
+          status: "error",
+        }
+        event.payload = removeUndefinedValues({
+          type: "agent_attachment_upload_failed",
+          candidateKind: candidate.kind,
+          mediaType: candidate.mediaType,
+          sizeBytes: candidate.sizeBytes,
+          status: "error",
+        })
+        delete event.attachmentUpload
+        this.enqueueEventWrite(record, event)
+        this.writeLog({
+          level: "warn",
+          event: "agent.attachments.upload_failed",
+          queueId: item.id,
+          queueType: normalizeType(item),
+          threadId: record.threadId,
+          sessionId: item.sessionId,
+          agentSessionId: record.providerSessionKey,
+          candidateKind: candidate.kind,
+          mediaType: candidate.mediaType,
+          sizeBytes: candidate.sizeBytes,
+          error: message,
+        })
+      }
+    }
+
+    return {
+      failedCount,
+      mediaTypes: [...mediaTypes].sort(),
+      totalBytes,
+      uploadedCount,
+    }
   }
 
   private writeBridgeActivityLog(
@@ -1721,8 +1857,106 @@ function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
   })
 }
 
+async function buildAgentAttachmentUploadInput(
+  candidate: BridgeAttachmentUploadCandidate,
+  threadId: string,
+  agentSessionId: string | undefined,
+  cwd: string | undefined,
+): Promise<AgentAttachmentUploadInput> {
+  if (candidate.kind === "base64") {
+    return {
+      agentSessionId,
+      bytes: Buffer.from(candidate.dataBase64, "base64"),
+      filename: candidate.filename,
+      mediaType: candidate.mediaType,
+      threadId,
+    }
+  }
+
+  const path = resolveLocalAttachmentPath(candidate.path, cwd)
+  const fileStat = await stat(path)
+  if (!fileStat.isFile()) {
+    throw new Error("agent attachment path is not a regular file")
+  }
+  return {
+    agentSessionId,
+    bytes: await readFile(path),
+    filename: candidate.filename ?? basename(path),
+    mediaType: candidate.mediaType,
+    threadId,
+  }
+}
+
+function resolveLocalAttachmentPath(path: string, cwd: string | undefined): string {
+  const normalizedPath = path.startsWith("file://") ? fileURLToPath(path) : path
+  if (!cwd) {
+    throw new Error("agent attachment local paths require a scoped working directory")
+  }
+  const base = resolve(cwd)
+  const resolved = isAbsolute(normalizedPath)
+    ? resolve(normalizedPath)
+    : resolve(base, normalizedPath)
+  const rel = relative(base, resolved)
+  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+    return resolved
+  }
+  throw new Error("agent attachment path is outside the scoped working directory")
+}
+
+function normalizeUploadedAgentAttachment(value: Record<string, unknown>): BridgeQueueAttachment {
+  return removeUndefinedValues({
+    access: isRecord(value.access) ? value.access : undefined,
+    bucket: typeof value.bucket === "string" ? value.bucket : undefined,
+    checksumSha256:
+      typeof value.checksumSha256 === "string" ? value.checksumSha256 : undefined,
+    contentHash: typeof value.contentHash === "string" ? value.contentHash : undefined,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : undefined,
+    createdBy: typeof value.createdBy === "string" ? value.createdBy : undefined,
+    filename: typeof value.filename === "string" ? value.filename : "Attachment",
+    key:
+      typeof value.key === "string"
+        ? value.key
+        : typeof value.objectKey === "string"
+          ? value.objectKey
+          : undefined,
+    mediaType: typeof value.mediaType === "string" ? value.mediaType : undefined,
+    objectKey:
+      typeof value.objectKey === "string"
+        ? value.objectKey
+        : typeof value.key === "string"
+          ? value.key
+          : undefined,
+    sizeBytes: typeof value.sizeBytes === "number" ? value.sizeBytes : undefined,
+    status: typeof value.status === "string" ? value.status : "available",
+    storageBackend: typeof value.storageBackend === "string" ? value.storageBackend : undefined,
+    threadId: typeof value.threadId === "string" ? value.threadId : undefined,
+    type: typeof value.type === "string" ? value.type : "file",
+    url: typeof value.url === "string" ? value.url : undefined,
+  }) as BridgeQueueAttachment
+}
+
+function summarizeResolvedAgentAttachment(file: BridgeQueueAttachment): Record<string, unknown> {
+  return removeUndefinedValues({
+    type: "agent_attachment_uploaded",
+    mediaType: file.mediaType,
+    sizeBytes: file.sizeBytes,
+    status: file.status,
+    storageBackend: file.storageBackend,
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function removeUndefinedValues(record: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(record)) {
+    if (value !== undefined) {
+      output[key] = value
+    }
+  }
+  return output
 }
 
 function displayNameForSessionStart(session: BridgeSessionRecord): string {

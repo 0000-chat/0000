@@ -124,6 +124,73 @@ test("normalizes addressable ACP file resources as attachment parts", () => {
   })
 })
 
+test("normalizes local ACP file resources as deferred upload candidates", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          file: {
+            filename: "agent-output.txt",
+            mediaType: "text/plain",
+            path: "./agent-output.txt",
+            sizeBytes: 17,
+          },
+          sessionUpdate: "file",
+        },
+      },
+    },
+    16,
+  )
+
+  assert.equal(event.eventType, "file")
+  assert.deepEqual(event.attachmentUpload, {
+    filename: "agent-output.txt",
+    kind: "local_file",
+    mediaType: "text/plain",
+    path: "./agent-output.txt",
+    sizeBytes: 17,
+  })
+  assert.deepEqual(event.payload, {
+    candidateKind: "local_file",
+    eventKind: "file",
+    filename: "agent-output.txt",
+    mediaType: "text/plain",
+    sizeBytes: 17,
+    status: "pending_upload",
+    type: "agent_attachment_upload",
+  })
+  assert.deepEqual(event.part?.json, event.payload)
+  assert.equal(JSON.stringify(event.payload).includes("./agent-output.txt"), false)
+})
+
+test("normalizes byte ACP file resources as deferred upload candidates", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          file: {
+            contentBase64: "YWdlbnQgb3V0cHV0",
+            filename: "agent-output.txt",
+            mediaType: "text/plain",
+            sizeBytes: 12,
+          },
+          sessionUpdate: "file",
+        },
+      },
+    },
+    17,
+  )
+
+  assert.equal(event.attachmentUpload?.kind, "base64")
+  assert.equal(JSON.stringify(event.payload).includes("YWdlbnQgb3V0cHV0"), false)
+})
+
 test("normalizes ACP thought chunks as hidden thinking by default", () => {
   const event = normalizeAcpNotification(
     {
