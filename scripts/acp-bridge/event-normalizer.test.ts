@@ -6,7 +6,6 @@ import { normalizeAcpNotification } from "./event-normalizer"
 test("normalizes ACP available command updates for UI consumption", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -38,7 +37,6 @@ test("normalizes ACP available command updates for UI consumption", () => {
 test("ignores malformed ACP command entries without dropping the update", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -60,10 +58,148 @@ test("ignores malformed ACP command entries without dropping the update", () => 
   })
 })
 
+test("normalizes SDK plan updates as structured events", () => {
+  const event = normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: {
+            plan: {
+              entries: [
+                {
+                  _meta: {
+                    fileRefs: [
+                      {
+                        line: 42,
+                        path: "scripts/acp-bridge/event-normalizer.ts",
+                      },
+                    ],
+                  },
+                  content: "Preserve plan update shape",
+                  priority: "high",
+                  status: "in_progress",
+                },
+                {
+                  content: "Verify plan events are not assistant prose",
+                  priority: "medium",
+                  status: "pending",
+                },
+              ],
+              id: "plan-1",
+              type: "items",
+            },
+            type: "planUpdate",
+          },
+        },
+      },
+    },
+    19,
+  )
+
+  assert.equal(event.eventType, "plan_update")
+  assert.equal(event.part?.type, "event")
+  assert.equal(event.part?.text, undefined)
+  const normalizedPlanUpdate = {
+    associatedFiles: [
+      {
+        line: 42,
+        path: "scripts/acp-bridge/event-normalizer.ts",
+      },
+    ],
+    category: "plan",
+    items: [
+      {
+        _meta: {
+          fileRefs: [
+            {
+              line: 42,
+              path: "scripts/acp-bridge/event-normalizer.ts",
+            },
+          ],
+        },
+        content: "Preserve plan update shape",
+        priority: "high",
+        status: "in_progress",
+      },
+      {
+        content: "Verify plan events are not assistant prose",
+        priority: "medium",
+        status: "pending",
+      },
+    ],
+    plan: {
+      entries: [
+        {
+          _meta: {
+            fileRefs: [
+              {
+                line: 42,
+                path: "scripts/acp-bridge/event-normalizer.ts",
+              },
+            ],
+          },
+          content: "Preserve plan update shape",
+          priority: "high",
+          status: "in_progress",
+        },
+        {
+          content: "Verify plan events are not assistant prose",
+          priority: "medium",
+          status: "pending",
+        },
+      ],
+      id: "plan-1",
+      type: "items",
+    },
+    planId: "plan-1",
+    type: "planUpdate",
+  }
+  assert.deepEqual(event.payload, normalizedPlanUpdate)
+  assert.deepEqual(event.part?.json, normalizedPlanUpdate)
+})
+
+test("normalizes SDK plan removals with stable adapter aliases", () => {
+  const event = normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: {
+            plan: {
+              id: "plan-removed",
+              status: "cancelled",
+            },
+            type: "planRemoved",
+          },
+        },
+      },
+    },
+    20,
+  )
+
+  assert.equal(event.eventType, "plan_removed")
+  assert.equal(event.part?.type, "event")
+  assert.equal(event.part?.text, undefined)
+  assert.deepEqual(event.payload, {
+    associatedFiles: [],
+    category: "plan",
+    items: [],
+    plan: {
+      id: "plan-removed",
+      status: "cancelled",
+    },
+    planId: "plan-removed",
+    type: "planRemoved",
+  })
+  assert.deepEqual(event.part?.json, event.payload)
+})
+
 test("normalizes ACP agent message chunks as text", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -87,7 +223,6 @@ test("normalizes ACP agent message chunks as text", () => {
 test("normalizes typed ACP agent message chunks as text", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -113,7 +248,6 @@ test("normalizes typed ACP agent message chunks as text", () => {
 test("normalizes addressable ACP file resources as attachment parts", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -153,7 +287,6 @@ test("normalizes addressable ACP file resources as attachment parts", () => {
 test("normalizes local ACP file resources as deferred upload candidates", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -195,7 +328,6 @@ test("normalizes local ACP file resources as deferred upload candidates", () => 
 test("normalizes byte ACP file resources as deferred upload candidates", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -220,7 +352,6 @@ test("normalizes byte ACP file resources as deferred upload candidates", () => {
 test("normalizes ACP thought chunks as hidden thinking by default", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -245,7 +376,6 @@ test("normalizes ACP thought chunks as hidden thinking by default", () => {
 test("normalizes typed ACP thought chunks as hidden thinking", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -272,7 +402,6 @@ test("normalizes typed ACP thought chunks as hidden thinking", () => {
 test("normalizes single-key ACP thought chunks as hidden thinking", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",
@@ -300,7 +429,6 @@ test("normalizes single-key ACP thought chunks as hidden thinking", () => {
 test("preserves user-visible ACP thought summaries", () => {
   const event = normalizeAcpNotification(
     {
-      jsonrpc: "2.0",
       method: "session/update",
       params: {
         sessionId: "session-1",

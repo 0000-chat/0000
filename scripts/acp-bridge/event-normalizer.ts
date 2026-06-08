@@ -97,7 +97,7 @@ export function normalizeAcpNotification(
     externalRequestId: readString(record.id) ?? readNumberString(record.id),
     payload: attachmentUpload
       ? sanitizeAttachmentUploadPayload(eventType, attachmentUpload)
-      : normalizeEventPayload(eventType, record),
+      : normalizeEventPayload(eventType, record, sessionUpdate),
     part: attachmentUpload
       ? {
           type: "event",
@@ -193,6 +193,9 @@ function isKnownAcpEventType(kind: string): boolean {
     kind === "tool_call" ||
     kind === "tool_call_update" ||
     kind === "tool_result" ||
+    kind === "plan" ||
+    kind === "plan_update" ||
+    kind === "plan_removed" ||
     kind === "available_commands_update" ||
     kind === "permission_request" ||
     kind === "file"
@@ -299,6 +302,10 @@ function normalizeSessionUpdatePart(kind: string, update: JsonRecord): BridgeMes
       json: { availableCommands: normalizeAvailableCommandsFromUpdate(update) },
       status: "streaming",
     }
+  }
+
+  if (isPlanEventType(kind)) {
+    return { type: "event", json: normalizePlanEventValue(update), status: "streaming" }
   }
 
   const text = truncateEventText(extractTextFromAcpUpdate(update))
@@ -449,12 +456,94 @@ function extractErrorText(update: JsonRecord): string | undefined {
   return readString(error.message) ?? readString(update.error) ?? extractTextFromAcpUpdate(update)
 }
 
-function normalizeEventPayload(kind: string, record: JsonRecord): unknown {
+function normalizeEventPayload(
+  kind: string,
+  record: JsonRecord,
+  update: JsonRecord,
+): unknown {
   if (kind === "tool_call_update" || kind === "tool_result") {
     return record
   }
 
+  if (isPlanEventType(kind)) {
+    return normalizePlanEventValue(update)
+  }
+
   return truncateEventValue(record)
+}
+
+function isPlanEventType(kind: string): boolean {
+  return kind === "plan" || kind === "plan_update" || kind === "plan_removed"
+}
+
+function normalizePlanEventValue(value: JsonRecord): unknown {
+  const normalized = asRecord(truncateEventValue(value, -1))
+  const plan = maybeRecord(normalized.plan) ?? normalized
+  const items = normalizePlanItems(normalized, plan)
+
+  return removeUndefinedValues({
+    ...normalized,
+    category: "plan",
+    planId:
+      readString(normalized.planId) ??
+      readString(normalized.id) ??
+      readString(plan.id),
+    items,
+    associatedFiles: normalizePlanAssociatedFiles(normalized, plan, items),
+  })
+}
+
+function normalizePlanItems(normalized: JsonRecord, plan: JsonRecord): unknown[] {
+  return (
+    arrayFromUnknown(normalized.items) ??
+    arrayFromUnknown(plan.entries) ??
+    arrayFromUnknown(plan.items) ??
+    arrayFromUnknown(normalized.entries) ??
+    []
+  )
+}
+
+function normalizePlanAssociatedFiles(
+  normalized: JsonRecord,
+  plan: JsonRecord,
+  items: unknown[],
+): unknown[] {
+  const files: unknown[] = []
+  appendPlanFileRefs(files, arrayFromUnknown(normalized.associatedFiles))
+  appendPlanFileRefs(files, arrayFromUnknown(normalized.associated_files))
+  appendPlanFileRefs(files, arrayFromUnknown(plan.associatedFiles))
+  appendPlanFileRefs(files, arrayFromUnknown(plan.associated_files))
+  appendPlanFileRefs(files, arrayFromUnknown(plan.fileRefs))
+  appendPlanFileRefs(files, arrayFromUnknown(plan.file_refs))
+
+  for (const item of items) {
+    const itemRecord = maybeRecord(item)
+    if (!itemRecord) {
+      continue
+    }
+    appendPlanFileRefs(files, arrayFromUnknown(itemRecord.associatedFiles))
+    appendPlanFileRefs(files, arrayFromUnknown(itemRecord.associated_files))
+    appendPlanFileRefs(files, arrayFromUnknown(itemRecord.fileRefs))
+    appendPlanFileRefs(files, arrayFromUnknown(itemRecord.file_refs))
+    const meta = maybeRecord(itemRecord._meta)
+    if (meta) {
+      appendPlanFileRefs(files, arrayFromUnknown(meta.associatedFiles))
+      appendPlanFileRefs(files, arrayFromUnknown(meta.associated_files))
+      appendPlanFileRefs(files, arrayFromUnknown(meta.fileRefs))
+      appendPlanFileRefs(files, arrayFromUnknown(meta.file_refs))
+    }
+  }
+
+  return files
+}
+
+function appendPlanFileRefs(files: unknown[], refs: unknown[] | undefined): void {
+  if (!refs) {
+    return
+  }
+  for (const ref of refs) {
+    files.push(ref)
+  }
 }
 
 function normalizeAvailableCommandsFromUpdate(update: JsonRecord): NormalizedAvailableCommand[] {

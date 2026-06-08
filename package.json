@@ -10,7 +10,7 @@
     "bridge:dev": "bun scripts/bridge-dev-supervisor.ts",
     "bridge:smoke-cloud": "bun scripts/acp-bridge/cloud-smoke.ts",
     "bridge:smoke-runtimes": "bun scripts/acp-bridge/runtime-smoke.ts",
-  "bridge:start": "bun scripts/acp-bridge.ts start",
+    "bridge:start": "bun scripts/acp-bridge.ts start",
     "bridge:update": "bun scripts/bridge-updater.ts",
     "sbom": "bun scripts/generate-sbom.ts",
     "test": "bun test",
@@ -19,6 +19,7 @@
     "quality": "bun test && bun run typecheck && bun run observability:check"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.25.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
   },

@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process"
-import { randomUUID } from "node:crypto"
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
+import { accessSync, constants } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -13,6 +13,7 @@ import {
   synthesizeLegacyHermesProfile,
 } from "./runtime-profiles"
 import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
+import { SdkAcpRuntimeClient } from "./sdk-acp-runtime-client"
 
 export type CommandResult = { ok: boolean; stdout: string; stderr?: string }
 export type AcpProbeCapabilities = {
@@ -21,23 +22,37 @@ export type AcpProbeCapabilities = {
   models?: string[]
   modes?: string[]
   runtimeConfigOptions?: Record<string, string[]>
+  sdkProtocolVersion?: string
   sessionIsolation?: "verified" | "unverified"
   sharedGatewayKey?: boolean
+  supportsAuth?: boolean
   supportsCancel?: boolean
+  supportsClientFilesystem?: boolean
+  supportsClientTerminal?: boolean
   supportsClose?: boolean
+  supportsElicitation?: boolean
+  supportsExtensions?: boolean
+  supportsLogout?: boolean
+  supportsPlans?: boolean
   supportsResume?: boolean
+  supportsSessionDelete?: boolean
+  supportsSessionFork?: boolean
+  supportsSessionList?: boolean
+  supportsSessionResume?: boolean
   supportsStructuredInteractions?: boolean
+  supportsSlashCommands?: boolean
   thoughtLevels?: string[]
 }
 export type AcpProbeResult =
   | { ok: true; capabilities?: AcpProbeCapabilities }
   | { ok: false; reason: string }
+export type AcpProbeOptions = { timeoutMs?: number }
 
 export type RuntimeDiscoveryInput = {
   baseAgentCommand: string | string[] | undefined
   customCommands?: string[][]
   discoverAcpCommands?: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>
-  probeAcpCommand?: (command: string[]) => Promise<AcpProbeResult>
+  probeAcpCommand?: (command: string[], options?: AcpProbeOptions) => Promise<AcpProbeResult>
   runCommand?: (command: string[]) => Promise<CommandResult>
 }
 
@@ -63,6 +78,7 @@ const BUILT_INS: Array<{
   label: string
   command: string[]
   binary: string
+  probeTimeoutMs?: number
 }> = [
   { kind: "hermes", label: "Hermes", command: ["hermes", "acp"], binary: "hermes" },
   { kind: "codex", label: "Codex", command: DEFAULT_CODEX_ACP_COMMAND.split(" "), binary: "npx" },
@@ -72,7 +88,13 @@ const BUILT_INS: Array<{
     command: DEFAULT_CLAUDE_CODE_ACP_COMMAND.split(" "),
     binary: "npx",
   },
-  { kind: "openclaw", label: "OpenClaw", command: ["openclaw", "acp"], binary: "openclaw" },
+  {
+    kind: "openclaw",
+    label: "OpenClaw",
+    command: ["openclaw", "acp"],
+    binary: "openclaw",
+    probeTimeoutMs: 20_000,
+  },
 ]
 
 export async function discoverRuntimeProfiles(
@@ -140,9 +162,15 @@ async function resolveBuiltInCommand(
 }
 
 async function profileForBuiltIn(
-  builtIn: { kind: BridgeRuntimeKind; label: string; command: string[]; binary: string },
+  builtIn: {
+    kind: BridgeRuntimeKind
+    label: string
+    command: string[]
+    binary: string
+    probeTimeoutMs?: number
+  },
   runCommand: (command: string[]) => Promise<CommandResult>,
-  probeAcpCommand: (command: string[]) => Promise<AcpProbeResult>,
+  probeAcpCommand: (command: string[], options?: AcpProbeOptions) => Promise<AcpProbeResult>,
   discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
 ): Promise<BridgeRuntimeProfile> {
   if (builtIn.kind === "codex") {
@@ -196,15 +224,17 @@ async function profileForBuiltIn(
     },
     probeAcpCommand,
     discoverAcpCommands,
+    { timeoutMs: builtIn.probeTimeoutMs },
   )
 }
 
 async function withAcpDetails(
   profile: BridgeRuntimeProfile,
-  probeAcpCommand: (command: string[]) => Promise<AcpProbeResult>,
+  probeAcpCommand: (command: string[], options?: AcpProbeOptions) => Promise<AcpProbeResult>,
   discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
+  options: AcpProbeOptions = {},
 ): Promise<BridgeRuntimeProfile> {
-  const probe = await probeAcpCommand(profile.command)
+  const probe = await probeAcpCommand(profile.command, options)
   if (probe.ok) {
     const availableCommands = await discoverAcpCommands(profile.command).catch(() => [])
     const probedProfile = applyProbeCapabilities(profile, probe.capabilities)
@@ -314,6 +344,28 @@ function applyProbeCapabilities(
   if (capabilities?.supportsStructuredInteractions !== undefined) {
     profileCapabilities.supportsStructuredInteractions = capabilities.supportsStructuredInteractions
   }
+  if (capabilities?.sdkProtocolVersion !== undefined) {
+    profileCapabilities.sdkProtocolVersion = capabilities.sdkProtocolVersion
+  }
+  for (const key of [
+    "supportsAuth",
+    "supportsClientFilesystem",
+    "supportsClientTerminal",
+    "supportsElicitation",
+    "supportsExtensions",
+    "supportsLogout",
+    "supportsPlans",
+    "supportsSessionDelete",
+    "supportsSessionFork",
+    "supportsSessionList",
+    "supportsSessionResume",
+    "supportsSlashCommands",
+  ] as const) {
+    if (capabilities?.[key] !== undefined) {
+      profileCapabilities[key] = capabilities[key]
+      mark(key, capabilities[key] ? "native" : "unsupported")
+    }
+  }
 
   if (profile.kind === "hermes" || capabilities?.cwdBoundSessions) {
     identityRules.cwdBoundSessions = capabilities?.cwdBoundSessions ?? profile.kind === "hermes"
@@ -376,14 +428,16 @@ function applyBooleanCapability(input: {
   }
 }
 
-export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult> {
+export function probeLocalAcpCommand(
+  command: string[],
+  options: AcpProbeOptions = {},
+): Promise<AcpProbeResult> {
   return new Promise((resolve) => {
     const child = spawnAcpCommand(command, {
       env: runtimeDiscoveryEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     })
     let settled = false
-    let stdout = ""
     let stderr = ""
     const settle = (result: AcpProbeResult) => {
       if (settled) {
@@ -396,28 +450,7 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
     }
     const timeout = setTimeout(() => {
       settle({ ok: false, reason: "ACP initialize probe timed out" })
-    }, 10_000)
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk)
-      for (const line of stdout.split(/\r?\n/)) {
-        if (!line.trim()) {
-          continue
-        }
-        try {
-          const message = JSON.parse(line) as { id?: unknown; result?: unknown; error?: unknown }
-          if (message.id === 1 && message.result !== undefined) {
-            settle({ ok: true, capabilities: capabilitiesFromInitializeResult(message.result) })
-            return
-          }
-          if (message.id === 1 && message.error !== undefined) {
-            settle({ ok: false, reason: "ACP initialize probe returned an error" })
-            return
-          }
-        } catch {
-          // Ignore non-JSON banners and wait for an ACP response.
-        }
-      }
-    })
+    }, options.timeoutMs ?? 10_000)
     child.stderr?.on("data", (chunk) => {
       stderr += String(chunk)
     })
@@ -431,18 +464,21 @@ export function probeLocalAcpCommand(command: string[]): Promise<AcpProbeResult>
       const reason = firstLine(stderr) ?? `ACP process exited with code ${code ?? "unknown"}`
       settle({ ok: false, reason })
     })
-    child.stdin?.write(
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: 1,
-          clientInfo: { name: "0000-chat-acp-probe", version: "0.1.0" },
-          sessionId: randomUUID(),
-        },
-      })}\n`,
+    const client = SdkAcpRuntimeClient.fromChildProcess(
+      child as ChildProcessWithoutNullStreams,
     )
+    void client
+      .initialize()
+      .then((result) =>
+        settle({ ok: true, capabilities: capabilitiesFromInitializeResult(result.raw) }),
+      )
+      .catch((error) => {
+        const reason =
+          error instanceof Error
+            ? error.message || "ACP initialize probe returned an error"
+            : "ACP initialize probe returned an error"
+        settle({ ok: false, reason })
+      })
   })
 }
 
@@ -457,12 +493,23 @@ export function capabilitiesFromInitializeResult(
   const sessionCapabilities = recordFromUnknown(
     agentCapabilities.sessionCapabilities ?? runtimeCapabilities.sessionCapabilities,
   )
+  const agentAuthCapabilities = recordFromUnknown(
+    agentCapabilities.auth ?? runtimeCapabilities.auth,
+  )
+  const agentMeta = recordFromUnknown(agentCapabilities._meta)
+  const runtimeMeta = recordFromUnknown(runtimeCapabilities._meta)
+  const resultMeta = recordFromUnknown(record._meta)
   const runtimeConfigOptions = runtimeConfigOptionsFromUnknown(
     record.runtimeConfigOptions ??
       runtimeCapabilities.runtimeConfigOptions ??
       runtimeCapabilities.configOptions,
   )
   const capabilities: AcpProbeCapabilities = {}
+  const sdkProtocolVersion =
+    stringFromUnknown(record.protocolVersion) ??
+    numberStringFromUnknown(record.protocolVersion) ??
+    stringFromUnknown(runtimeCapabilities.sdkProtocolVersion)
+  if (sdkProtocolVersion) capabilities.sdkProtocolVersion = sdkProtocolVersion
   const models =
     stringArrayFromUnknown(runtimeCapabilities.models) ??
     stringArrayFromUnknown(record.models) ??
@@ -512,6 +559,44 @@ export function capabilitiesFromInitializeResult(
     capabilities.supportsStructuredInteractions = supportsStructuredInteractions
   }
 
+  capabilities.supportsSessionList = Object.hasOwn(sessionCapabilities, "list")
+  capabilities.supportsSessionDelete = Object.hasOwn(sessionCapabilities, "delete")
+  capabilities.supportsSessionFork = Object.hasOwn(sessionCapabilities, "fork")
+  capabilities.supportsSessionResume = capabilities.supportsResume === true
+  capabilities.supportsAuth =
+    Object.keys(agentAuthCapabilities).length > 0 || Array.isArray(record.authMethods)
+  capabilities.supportsLogout = Object.hasOwn(agentAuthCapabilities, "logout")
+
+  const supportExtensionBoolean = (key: string): boolean | undefined =>
+    booleanFromUnknown(runtimeCapabilities[key] ?? agentMeta[key] ?? runtimeMeta[key] ?? resultMeta[key])
+
+  const supportsClientFilesystem = supportExtensionBoolean("supportsClientFilesystem")
+  if (supportsClientFilesystem !== undefined) {
+    capabilities.supportsClientFilesystem = supportsClientFilesystem
+  }
+  const supportsClientTerminal = supportExtensionBoolean("supportsClientTerminal")
+  if (supportsClientTerminal !== undefined) {
+    capabilities.supportsClientTerminal = supportsClientTerminal
+  }
+  const supportsPlans = supportExtensionBoolean("supportsPlans")
+  if (supportsPlans !== undefined) {
+    capabilities.supportsPlans = supportsPlans
+  }
+  const supportsSlashCommands =
+    supportExtensionBoolean("supportsSlashCommands") ??
+    (Array.isArray(record.availableCommands) ? true : undefined)
+  if (supportsSlashCommands !== undefined) {
+    capabilities.supportsSlashCommands = supportsSlashCommands
+  }
+  const supportsElicitation = supportExtensionBoolean("supportsElicitation")
+  if (supportsElicitation !== undefined) {
+    capabilities.supportsElicitation = supportsElicitation
+  }
+  const supportsExtensions = supportExtensionBoolean("supportsExtensions")
+  if (supportsExtensions !== undefined) {
+    capabilities.supportsExtensions = supportsExtensions
+  }
+
   const cwdBoundSessions = booleanFromUnknown(
     runtimeCapabilities.cwdBoundSessions ?? agentCapabilities.cwdBoundSessions,
   )
@@ -536,7 +621,6 @@ export function discoverLocalAcpCommands(
       stdio: ["pipe", "pipe", "pipe"],
     })
     let settled = false
-    let stdout = ""
     const settle = (commands: BridgeRuntimeAvailableCommand[]) => {
       if (settled) {
         return
@@ -547,67 +631,26 @@ export function discoverLocalAcpCommands(
       resolve(commands)
     }
     const timeout = setTimeout(() => settle([]), 5000)
-    const write = (message: unknown) => {
-      child.stdin?.write(`${JSON.stringify(message)}\n`)
-    }
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk)
-      const lines = stdout.split(/\r?\n/)
-      stdout = lines.pop() ?? ""
-      for (const line of lines) {
-        if (!line.trim()) {
-          continue
-        }
-        try {
-          const message = JSON.parse(line) as {
-            id?: unknown
-            method?: unknown
-            params?: unknown
-            result?: unknown
-          }
-          if (message.id === 1 && message.result !== undefined) {
-            write({
-              jsonrpc: "2.0",
-              id: 2,
-              method: "session/new",
-              params: { cwd: process.cwd(), mcpServers: [] },
-            })
-            continue
-          }
-          const commands = commandsFromSessionUpdate(message)
-          if (commands.length > 0) {
-            settle(commands)
-            return
-          }
-        } catch {
-          // Ignore non-JSON banners and keep waiting for ACP messages.
-        }
-      }
-    })
     child.on("error", () => settle([]))
     child.on("close", () => settle([]))
-    write({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: 1,
-        clientInfo: { name: "0000-chat-command-discovery", version: "0.1.0" },
-        sessionId: randomUUID(),
-      },
+    const client = SdkAcpRuntimeClient.fromChildProcess(
+      child as ChildProcessWithoutNullStreams,
+    )
+    client.onUpdate((event) => {
+      const commands = commandsFromSessionUpdate(event.update)
+      if (commands.length > 0) {
+        settle(commands)
+      }
     })
+    void client
+      .initialize()
+      .then(() => client.createSession({ cwd: process.cwd(), mcpServers: [] }))
+      .catch(() => settle([]))
   })
 }
 
-function commandsFromSessionUpdate(message: {
-  method?: unknown
-  params?: unknown
-}): BridgeRuntimeAvailableCommand[] {
-  if (message.method !== "session/update") {
-    return []
-  }
-  const params = recordFromUnknown(message.params)
-  const update = recordFromUnknown(params.update)
+function commandsFromSessionUpdate(value: unknown): BridgeRuntimeAvailableCommand[] {
+  const update = recordFromUnknown(value)
   if (update.sessionUpdate !== "available_commands_update") {
     return []
   }
@@ -678,6 +721,11 @@ function numberFromUnknown(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
+function numberStringFromUnknown(value: unknown): string | undefined {
+  const number = numberFromUnknown(value)
+  return number === undefined ? undefined : String(number)
+}
+
 function runtimeConfigOptionsFromUnknown(value: unknown): Record<string, string[]> | undefined {
   const record = recordFromUnknown(value)
   const entries = Object.entries(record)
@@ -730,17 +778,46 @@ function spawnAcpCommand(
   options: Parameters<typeof spawn>[2],
 ): ReturnType<typeof spawn> {
   const executable = command[0] ?? ""
+  const resolvedExecutable = resolveExecutableForSpawn(executable, options?.env)
   const args = command.slice(1)
   const child = process.versions.bun
     ? spawn(
         "node",
-        [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), executable, ...args],
+        [
+          join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"),
+          resolvedExecutable,
+          ...args,
+        ],
         { ...options, detached: process.platform !== "win32" },
       )
-    : spawn(executable, args, options)
+    : spawn(resolvedExecutable, args, options)
   activeAcpDiscoveryChildren.add(child)
   child.once("close", () => activeAcpDiscoveryChildren.delete(child))
   return child
+}
+
+export function resolveExecutableForSpawn(
+  executable: string,
+  env: NodeJS.ProcessEnv | undefined,
+): string {
+  if (!executable || executable.includes("/") || executable.includes("\\")) {
+    return executable
+  }
+
+  for (const directory of (env?.PATH ?? process.env.PATH ?? "").split(":")) {
+    if (!directory) {
+      continue
+    }
+    const candidate = join(directory, executable)
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // Keep looking through PATH.
+    }
+  }
+
+  return executable
 }
 
 export function terminateActiveAcpDiscoveryChildren(): void {

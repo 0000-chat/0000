@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import { basename, isAbsolute, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import type { CreateTerminalRequest } from "@agentclientprotocol/sdk"
 
 import {
   type HermesAcpPromptAttachment,
@@ -15,6 +16,14 @@ import type { AgentAttachmentUploadInput, BridgeEventInput } from "./convex-http
 import type { BridgeAttachmentUploadCandidate, NormalizedBridgeEvent } from "./event-normalizer"
 import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
 import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
+import {
+  TerminalHandleRegistry,
+  type TerminalHandleScope,
+} from "./terminal-handles"
+import type {
+  SdkAcpRuntimeTerminalAdapter,
+  SdkAcpRuntimeTerminalHandle,
+} from "./sdk-acp-runtime-client"
 
 export type BridgeSessionQueueItem = {
   id: string
@@ -111,9 +120,28 @@ export type BridgeSessionContext = {
   mcpServers: HermesAcpMcpServer[]
   initialSessionId?: string
   organizationId?: string
+  terminalAdapter?: SdkAcpRuntimeTerminalAdapter
+  terminalScope?: TerminalHandleScope
   onEvent: (event: NormalizedBridgeEvent) => void
   onError: (error: Error) => void
 }
+
+export type BridgeTerminalContext = {
+  generation: number
+  terminalScope: TerminalHandleScope
+} & Pick<
+  BridgeSessionContext,
+  | "agentCommand"
+  | "agentSessionId"
+  | "bridgeProfileId"
+  | "cwd"
+  | "hermesProfileName"
+  | "initialSessionId"
+  | "organizationId"
+  | "runtimeProfile"
+  | "sessionKey"
+  | "threadId"
+>
 
 type BridgeSessionRecord = {
   sessionKey: string
@@ -127,6 +155,7 @@ type BridgeSessionRecord = {
   providerSessionKey: string
   scopeConversationId: string
   scopeKeyWithoutAgent: string
+  terminalScope?: TerminalHandleScope
   idleTimer?: ReturnType<typeof setTimeout>
   lastUsedAt: number
 }
@@ -169,6 +198,11 @@ export type BridgeSessionManagerOptions = {
   log?: BridgeLogger
   supervisor?: BridgeSupervisor
   closeTimeoutMs?: number
+  terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>
+  createTerminal?: (
+    context: BridgeTerminalContext,
+    params: CreateTerminalRequest,
+  ) => Promise<SdkAcpRuntimeTerminalHandle>
 }
 
 export type BridgeSessionManagerStatus = {
@@ -225,6 +259,13 @@ export class BridgeSessionManager {
   private readonly resumeEnabled: boolean
   private readonly requireScopedIdentity: boolean
   private readonly closeTimeoutMs: number
+  private readonly terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>
+  private readonly createTerminal:
+    | ((
+        context: BridgeTerminalContext,
+        params: CreateTerminalRequest,
+      ) => Promise<SdkAcpRuntimeTerminalHandle>)
+    | undefined
   private readonly createSession: (context: BridgeSessionContext) => ManagedAcpSession
   private readonly sessions = new Map<string, BridgeSessionRecord>()
   private readonly promptQueues = new Map<string, Promise<void>>()
@@ -252,6 +293,8 @@ export class BridgeSessionManager {
     this.resumeEnabled = options.resumeEnabled === true
     this.requireScopedIdentity = options.requireScopedIdentity === true
     this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS
+    this.terminalRegistry = options.terminalRegistry
+    this.createTerminal = options.createTerminal
     this.createMcpServers = options.createMcpServers ?? (() => [])
     this.createSession =
       options.createSession ??
@@ -265,6 +308,7 @@ export class BridgeSessionManager {
           resumeEnabled: this.resumeEnabled,
           onEvent: context.onEvent,
           onError: context.onError,
+          terminalAdapter: context.terminalAdapter,
         }))
   }
 
@@ -411,9 +455,10 @@ export class BridgeSessionManager {
     const sessions = Array.from(this.sessions.values())
     this.sessions.clear()
     await Promise.all(
-      sessions.map((session) => {
+      sessions.map(async (session) => {
         this.clearIdleTimer(session)
-        return this.closeAcpSession(session)
+        await this.releaseTerminalHandles(session)
+        return await this.closeAcpSession(session)
       }),
     )
   }
@@ -935,6 +980,7 @@ export class BridgeSessionManager {
     if (!acknowledged) {
       if (activeTurnId) {
         this.cancelledQueueItemIds.add(activeTurnId)
+        await this.killTerminalHandles(session)
         this.enqueueCancellationEvent(session, item)
         await this.drainEventWrites()
         await this.closeSession(key)
@@ -955,6 +1001,7 @@ export class BridgeSessionManager {
       return false
     }
     this.markActiveTurnCancelled(key)
+    await this.killTerminalHandles(session)
     this.enqueueCancellationEvent(session, item)
     await this.drainEventWrites()
     await this.markQueueResult(item, {
@@ -1008,6 +1055,7 @@ export class BridgeSessionManager {
     if (!acknowledged) {
       if (activeTurnId) {
         this.cancelledQueueItemIds.add(activeTurnId)
+        await this.killTerminalHandles(session)
         await this.closeSession(key)
         await this.handlePromptNow(item, instruction, {
           resultMetadata: { steered: true, replacementSession: true, forcedCancel: true },
@@ -1024,6 +1072,7 @@ export class BridgeSessionManager {
     }
     if (activeTurnId) {
       this.cancelledQueueItemIds.add(activeTurnId)
+      await this.killTerminalHandles(session)
       await this.closeSession(key)
       await this.handlePromptNow(item, instruction, {
         resultMetadata: { steered: true, replacementSession: true },
@@ -1085,6 +1134,7 @@ export class BridgeSessionManager {
     }
     this.sessions.delete(sessionKey)
     this.clearIdleTimer(session)
+    await this.releaseTerminalHandles(session)
     await this.drainEventWrites()
     await this.closeAcpSession(session)
   }
@@ -1103,6 +1153,58 @@ export class BridgeSessionManager {
         clearTimeout(timeout)
       }
     }
+  }
+
+  private terminalScopeForSession(input: {
+    item: BridgeSessionQueueItem
+    providerSessionKey: string
+    runtimeProfile?: BridgeRuntimeProfile
+    threadId: string
+  }): TerminalHandleScope | undefined {
+    if (!this.terminalRegistry || !this.createTerminal) {
+      return undefined
+    }
+    const organizationId = input.item.organizationId
+    const bridgeDeviceId = this.deviceId
+    if (!organizationId || !bridgeDeviceId) {
+      return undefined
+    }
+    return {
+      agentSessionId: input.providerSessionKey,
+      bridgeDeviceId,
+      organizationId,
+      runtimeProfileId:
+        input.runtimeProfile?.id ?? input.item.bridgeProfileId ?? input.item.hermesProfileName ?? "default",
+      threadId: input.threadId,
+    }
+  }
+
+  private terminalAdapterForSession(
+    context: BridgeTerminalContext,
+  ): SdkAcpRuntimeTerminalAdapter | undefined {
+    const createTerminal = this.createTerminal
+    if (!this.terminalRegistry || !createTerminal) {
+      return undefined
+    }
+    return {
+      createTerminal: (params) => createTerminal(context, params),
+      registry: this.terminalRegistry,
+      scope: context.terminalScope,
+    }
+  }
+
+  private async killTerminalHandles(session: BridgeSessionRecord): Promise<void> {
+    if (!this.terminalRegistry || !session.terminalScope) {
+      return
+    }
+    await this.terminalRegistry.killSession(session.terminalScope)
+  }
+
+  private async releaseTerminalHandles(session: BridgeSessionRecord): Promise<void> {
+    if (!this.terminalRegistry || !session.terminalScope) {
+      return
+    }
+    await this.terminalRegistry.releaseSession(session.terminalScope)
   }
 
   private async ensureSession(item: BridgeSessionQueueItem): Promise<BridgeSessionRecord> {
@@ -1142,6 +1244,28 @@ export class BridgeSessionManager {
       ? runtimeProfile.command
       : resolveHermesProfileAgentCommand(this.agentCommand, item.hermesProfileName)
     const cwd = this.allowRemoteCwd ? item.cwd : undefined
+    const terminalScope = this.terminalScopeForSession({
+      item,
+      providerSessionKey,
+      runtimeProfile,
+      threadId,
+    })
+    const terminalAdapter = terminalScope
+      ? this.terminalAdapterForSession({
+          agentCommand,
+          agentSessionId: item.agentSessionId,
+          bridgeProfileId: item.bridgeProfileId,
+          cwd,
+          generation,
+          hermesProfileName: item.hermesProfileName,
+          initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
+          organizationId: item.organizationId,
+          runtimeProfile,
+          sessionKey,
+          terminalScope,
+          threadId,
+        })
+      : undefined
     const record: BridgeSessionRecord = {
       sessionKey,
       threadId,
@@ -1151,6 +1275,7 @@ export class BridgeSessionManager {
       providerSessionKey,
       scopeConversationId: item.mailboxConversationId ?? threadId,
       scopeKeyWithoutAgent,
+      terminalScope,
       lastUsedAt: Date.now(),
       acp: this.createSession({
         agentCommand,
@@ -1162,6 +1287,8 @@ export class BridgeSessionManager {
         hermesProfileName: item.hermesProfileName,
         agentSessionId: item.agentSessionId,
         organizationId: item.organizationId,
+        terminalAdapter,
+        terminalScope,
         initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
         mcpServers: this.createMcpServers({
           agentSessionId: item.agentSessionId,

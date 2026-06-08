@@ -57,6 +57,19 @@ export type BridgeRuntimeProfile = {
     isolatedSessions?: boolean
     supportsCancel?: boolean
     supportsClose?: boolean
+    sdkProtocolVersion?: string
+    supportsAuth?: boolean
+    supportsClientFilesystem?: boolean
+    supportsClientTerminal?: boolean
+    supportsElicitation?: boolean
+    supportsExtensions?: boolean
+    supportsLogout?: boolean
+    supportsPlans?: boolean
+    supportsSessionDelete?: boolean
+    supportsSessionFork?: boolean
+    supportsSessionList?: boolean
+    supportsSessionResume?: boolean
+    supportsSlashCommands?: boolean
     supportsStructuredInteractions?: boolean
   }
 }

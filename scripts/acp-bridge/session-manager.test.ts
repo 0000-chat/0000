@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 
 import { BridgeSupervisor } from "./bridge-supervisor"
 import { BridgeSessionManager, type BridgeSessionContext } from "./session-manager"
+import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client"
+import { TerminalHandleRegistry } from "./terminal-handles"
 
 describe("bridge session cwd safety", () => {
   test("does not let a stuck ACP close block manager shutdown forever", async () => {
@@ -1458,6 +1460,75 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("cancel-session kills active SDK terminal handles for the active turn", async () => {
+    const promptStarted = deferred<void>()
+    const finishPrompt = deferred<void>()
+    const cloud = fakeCloudClient()
+    const terminalRegistry = new TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>()
+    const handles: RecordingTerminalHandle[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createTerminal: async () => {
+        const handle = recordingTerminalHandle(`terminal-${handles.length + 1}`)
+        handles.push(handle)
+        return handle
+      },
+      deviceId: "bridge-device-1",
+      terminalRegistry,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => true,
+        sendUserMessage: async () => {
+          if (!context.terminalAdapter) {
+            throw new Error("expected terminal adapter")
+          }
+          const handle = await context.terminalAdapter.createTerminal({
+            command: "echo",
+            sessionId: "session-1",
+          })
+          context.terminalAdapter.registry.create({
+            handle,
+            scope: context.terminalAdapter.scope,
+          })
+          promptStarted.resolve()
+          await finishPrompt.promise
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "late",
+          }
+        },
+      }),
+    })
+
+    const promptRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await promptStarted.promise
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+    finishPrompt.resolve()
+    await promptRun
+
+    expect(handles).toHaveLength(1)
+    expect(handles[0]?.kills).toEqual(["SIGTERM"])
+    expect(handles[0]?.releases).toBe(0)
+    expect(terminalRegistry.list()).toEqual([])
+  })
+
   test("cancel-session fences an active prompt and ignores its late final text", async () => {
     const promptRelease = deferred<void>()
     const cloud = fakeCloudClient()
@@ -2028,6 +2099,221 @@ describe("bridge session cwd safety", () => {
     expect(manager.getStatus().activeSessions).toEqual([])
   })
 
+  test("close-session releases active SDK terminal handles for the session", async () => {
+    const cloud = fakeCloudClient()
+    const terminalRegistry = new TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>()
+    const handles: RecordingTerminalHandle[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createTerminal: async () => {
+        const handle = recordingTerminalHandle(`terminal-${handles.length + 1}`)
+        handles.push(handle)
+        return handle
+      },
+      deviceId: "bridge-device-1",
+      terminalRegistry,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          if (!context.terminalAdapter) {
+            throw new Error("expected terminal adapter")
+          }
+          const handle = await context.terminalAdapter.createTerminal({
+            command: "echo",
+            sessionId: "session-1",
+          })
+          context.terminalAdapter.registry.create({
+            handle,
+            scope: context.terminalAdapter.scope,
+          })
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ready",
+          }
+        },
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    expect(terminalRegistry.list()).toHaveLength(1)
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-close",
+      id: "queue-close",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "close-session",
+    })
+
+    expect(handles).toHaveLength(1)
+    expect(handles[0]?.kills).toEqual([])
+    expect(handles[0]?.releases).toBe(1)
+    expect(terminalRegistry.list()).toEqual([])
+  })
+
+  test("late terminal operations after cancel are ignored by clearing the session registry record", async () => {
+    const promptStarted = deferred<void>()
+    const finishPrompt = deferred<void>()
+    const cloud = fakeCloudClient()
+    const terminalRegistry = new TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>()
+    const records: ReturnType<typeof terminalRegistry.create>[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createTerminal: async () => recordingTerminalHandle("terminal-1"),
+      deviceId: "bridge-device-1",
+      terminalRegistry,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => true,
+        sendUserMessage: async () => {
+          if (!context.terminalAdapter) {
+            throw new Error("expected terminal adapter")
+          }
+          const handle = await context.terminalAdapter.createTerminal({
+            command: "echo",
+            sessionId: "session-1",
+          })
+          records.push(
+            context.terminalAdapter.registry.create({
+              handle,
+              scope: context.terminalAdapter.scope,
+            }),
+          )
+          promptStarted.resolve()
+          await finishPrompt.promise
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "late",
+          }
+        },
+      }),
+    })
+
+    const promptRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await promptStarted.promise
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+
+    const record = records[0]
+    expect(record).toBeDefined()
+    expect(terminalRegistry.lookup(record!.scope)).toBeUndefined()
+    await expect(terminalRegistry.release(record!.scope, { generation: record!.generation })).resolves
+      .toMatchObject({ status: "missing" })
+
+    finishPrompt.resolve()
+    await promptRun
+  })
+
+  test("stale generation terminal operations do not affect the current turn", async () => {
+    const cloud = fakeCloudClient()
+    const terminalRegistry = new TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>()
+    const handles: RecordingTerminalHandle[] = []
+    const records: ReturnType<typeof terminalRegistry.create>[] = []
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createTerminal: async () => {
+        const handle = recordingTerminalHandle(`terminal-${handles.length + 1}`)
+        handles.push(handle)
+        return handle
+      },
+      deviceId: "bridge-device-1",
+      terminalRegistry,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => true,
+        sendUserMessage: async () => {
+          if (!context.terminalAdapter) {
+            throw new Error("expected terminal adapter")
+          }
+          const handle = await context.terminalAdapter.createTerminal({
+            command: "echo",
+            sessionId: "session-1",
+          })
+          records.push(
+            context.terminalAdapter.registry.create({
+              handle,
+              scope: context.terminalAdapter.scope,
+            }),
+          )
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ready",
+          }
+        },
+      }),
+    })
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt-1",
+      id: "queue-prompt-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-cancel",
+      id: "queue-cancel",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "cancel-session",
+    })
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt-2",
+      id: "queue-prompt-2",
+      organizationId: "org-1",
+      prompt: "hello again",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    const staleRecord = records[0]
+    const currentRecord = records[1]
+    expect(staleRecord?.generation).toBe(1)
+    expect(currentRecord?.generation).toBe(2)
+    await expect(
+      terminalRegistry.kill(staleRecord!.scope, { generation: staleRecord!.generation }),
+    ).resolves.toMatchObject({
+      currentGeneration: currentRecord!.generation,
+      generation: staleRecord!.generation,
+      status: "stale",
+    })
+    expect(handles[1]?.kills).toEqual([])
+    expect(terminalRegistry.lookup(currentRecord!.scope)).toBe(currentRecord)
+  })
+
   test("revive-session uses native load context when an external session id is available", async () => {
     const contexts: BridgeSessionContext[] = []
     const cloud = fakeCloudClient()
@@ -2316,6 +2602,28 @@ function fakeSession() {
       text: "ok",
     }),
   }
+}
+
+type RecordingTerminalHandle = SdkAcpRuntimeTerminalHandle & {
+  kills: string[]
+  releases: number
+}
+
+function recordingTerminalHandle(terminalId: string): RecordingTerminalHandle {
+  const handle: RecordingTerminalHandle = {
+    currentOutput: async () => ({ output: terminalId, truncated: false }),
+    kill: async (signal?: string) => {
+      handle.kills.push(signal ?? "")
+    },
+    kills: [],
+    release: async () => {
+      handle.releases += 1
+    },
+    releases: 0,
+    terminalId,
+    waitForExit: async () => ({ exitCode: 0 }),
+  }
+  return handle
 }
 
 function deferred<T>() {

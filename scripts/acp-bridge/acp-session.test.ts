@@ -1,21 +1,40 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { EventEmitter } from "node:events"
-import { PassThrough, Writable } from "node:stream"
+import { PassThrough, Readable, Writable } from "node:stream"
 import { describe, expect, test } from "bun:test"
+import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientprotocol/sdk"
 
 import {
   DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
   HermesAcpRuntimeAdapter,
   HermesAcpSession,
-  type JsonRpcMessage,
   resolveRuntimeConfigApplication,
 } from "./acp-session"
+import type {
+  BridgeAcpRawUpdate,
+  BridgeAcpRuntimeClient,
+  BridgeCreateSessionParams,
+  BridgePromptParams,
+  BridgeSetConfigOptionParams,
+} from "./acp-runtime-client"
+import type {
+  InitializeResponse,
+  PromptResponse,
+  SessionConfigOption,
+} from "@agentclientprotocol/sdk"
+import { TerminalHandleRegistry } from "./terminal-handles"
+import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client"
+
+type RuntimeRequest = {
+  method: string
+  params: unknown
+}
 
 describe("ACP final text extraction", () => {
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "ACP", type: "text" }, sessionUpdate: "agent_message_chunk" },
           { content: { text: " smoke", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -41,7 +60,7 @@ describe("ACP final text extraction", () => {
   test("withholds Codex ACP text when tool activity has no classified thought events", async () => {
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
           { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
@@ -68,7 +87,7 @@ describe("ACP final text extraction", () => {
   test("keeps Codex ACP answer chunks when the turn has classified thought events", async () => {
     const session = new HermesAcpSession({
       agentCommand: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_thought_chunk" },
           { content: { text: "final", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -90,7 +109,7 @@ describe("ACP final text extraction", () => {
       onEvent: (event) => {
         observedEvents.push({ eventType: event.eventType, partType: event.part?.type })
       },
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "first ", type: "text" }, sessionUpdate: "agent_message_chunk" },
           { content: { text: "thought", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -137,7 +156,7 @@ describe("ACP final text extraction", () => {
   test("keeps non-Codex ACP message chunk accumulation unchanged", async () => {
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "normal", type: "text" }, sessionUpdate: "agent_message_chunk" },
           { content: { text: " answer", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -157,55 +176,10 @@ describe("ACP runtime adapter boundary", () => {
     expect(DEFAULT_ACP_PROCESS_EXIT_GRACE_MS).toBeGreaterThan(1000)
   })
 
-  test("retries session creation with an empty MCP server list when a runtime rejects configured MCP servers", async () => {
-    const requests: JsonRpcMessage[] = []
-    const errors: string[] = []
-    const session = new HermesAcpSession({
-      agentCommand: "openclaw acp",
-      mcpServers: [{ args: ["serve"], command: "/bin/0000-mcp", name: "0000" }],
-      onError: (error) => {
-        errors.push(error.message)
-      },
-      spawnProcess: createFakeAcpProcess({
-        failSessionNewWithMcpServers: true,
-        requests,
-        updates: [],
-      }),
-    })
-
-    await expect(session.start()).resolves.toBe("session-1")
-
-    expect(requests.map((request) => request.method)).toEqual([
-      "initialize",
-      "session/new",
-      "session/new",
-    ])
-    expect(requests[1]?.params).toMatchObject({ mcpServers: expect.any(Array) })
-    expect(requests[2]?.params).toMatchObject({ mcpServers: [] })
-    expect(errors).toContain(
-      "ACP session/new rejected configured MCP servers; retrying with an empty MCP server list",
-    )
-  })
-
-  test("sends an empty MCP server list when no client MCP servers are configured", async () => {
-    const requests: JsonRpcMessage[] = []
-    const session = new HermesAcpSession({
-      agentCommand: "openclaw acp",
-      spawnProcess: createFakeAcpProcess({
-        requests,
-        updates: [],
-      }),
-    })
-
-    await session.start()
-
-    expect(requests[1]?.params).toMatchObject({ mcpServers: [] })
-  })
-
   test("preserves safe ACP error kind diagnostics without exposing raw error payloads", async () => {
     const session = new HermesAcpSession({
       agentCommand: "claude acp",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         promptError: {
           code: -32603,
           data: { errorKind: "authentication_failed" },
@@ -225,7 +199,7 @@ describe("ACP runtime adapter boundary", () => {
     const session = new HermesAcpSession({
       agentCommand: "openclaw acp",
       processExitGraceMs: 1,
-      spawnProcess: createFakeAcpProcess({ kills, updates: [] }),
+      spawnProcess: createFakeAcpProcess({ kills }),
     })
 
     await session.start()
@@ -242,7 +216,6 @@ describe("ACP runtime adapter boundary", () => {
       spawnProcess: createFakeAcpProcess({
         emitExitOnKill: true,
         kills,
-        updates: [],
       }),
     })
 
@@ -252,12 +225,69 @@ describe("ACP runtime adapter boundary", () => {
     expect(kills).toEqual(["SIGTERM"])
   })
 
+  test("emits SDK terminal callback activity as durable bridge events", async () => {
+    const events: Array<{ eventType: string; part?: { json?: unknown; type?: string }; source: string }> =
+      []
+    const registry = new TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>()
+    const session = new HermesAcpSession({
+      agentCommand: "openclaw acp",
+      onEvent: (event) => {
+        events.push(event)
+      },
+      spawnProcess: createFakeAcpProcess({ useTerminalOnPrompt: true }),
+      terminalAdapter: {
+        createTerminal: async () => ({
+          currentOutput: async () => ({ output: "terminal output", truncated: false }),
+          kill: async () => undefined,
+          release: async () => undefined,
+          terminalId: "terminal-1",
+          waitForExit: async () => ({ exitCode: 0 }),
+        }),
+        registry,
+        scope: {
+          agentSessionId: "agent-session-1",
+          bridgeDeviceId: "device-1",
+          organizationId: "org-1",
+          runtimeProfileId: "openclaw:acp",
+          threadId: "thread-1",
+        },
+      },
+    })
+
+    const result = await session.sendUserMessage("use terminal")
+
+    expect(result.events.filter((event) => event.eventType === "terminal_activity")).toHaveLength(3)
+    expect(events.filter((event) => event.eventType === "terminal_activity")).toEqual([
+      expect.objectContaining({
+        part: expect.objectContaining({
+          json: expect.objectContaining({ action: "created", terminalId: "terminal-1" }),
+          type: "event",
+        }),
+        source: "bridge",
+      }),
+      expect.objectContaining({
+        part: expect.objectContaining({
+          json: expect.objectContaining({ action: "output", output: "terminal output" }),
+          type: "event",
+        }),
+        source: "bridge",
+      }),
+      expect.objectContaining({
+        part: expect.objectContaining({
+          json: expect.objectContaining({ action: "exit", exitCode: 0 }),
+          type: "event",
+        }),
+        source: "bridge",
+      }),
+    ])
+  })
+
   test("wraps runtime operations in tagged adapter results", async () => {
     const adapter = new HermesAcpRuntimeAdapter({
       createSession: () =>
         new HermesAcpSession({
           agentCommand: "hermes acp",
-          spawnProcess: createFakeAcpProcess({ updates: [] }),
+          runtimeClient: createFakeRuntimeClient({ updates: [] }),
         }),
     })
 
@@ -290,7 +320,7 @@ describe("ACP runtime adapter boundary", () => {
     const adapter = new HermesAcpRuntimeAdapter()
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
-      spawnProcess: createFakeAcpProcess({ updates: [] }),
+      runtimeClient: createFakeRuntimeClient({ updates: [] }),
     })
 
     const result = await adapter.sendInteractionResponse(session, {
@@ -326,10 +356,10 @@ describe("ACP runtime adapter boundary", () => {
   })
 
   test("sets ACP session config options around a prompt", async () => {
-    const requests: JsonRpcMessage[] = []
+    const requests: RuntimeRequest[] = []
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         configOptions: [
           { currentValue: "default-model", id: "model" },
           { currentValue: "medium", id: "thoughtLevel" },
@@ -375,10 +405,10 @@ describe("ACP runtime adapter boundary", () => {
   })
 
   test("sends attachment references as ACP resource link content blocks", async () => {
-    const requests: JsonRpcMessage[] = []
+    const requests: RuntimeRequest[] = []
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         requests,
         updates: [],
       }),
@@ -432,10 +462,10 @@ describe("ACP runtime adapter boundary", () => {
   })
 
   test("falls back to text attachment references when resource links are disabled", async () => {
-    const requests: JsonRpcMessage[] = []
+    const requests: RuntimeRequest[] = []
     const session = new HermesAcpSession({
       agentCommand: "legacy acp",
-      spawnProcess: createFakeAcpProcess({
+      runtimeClient: createFakeRuntimeClient({
         initializeResult: {
           agentCapabilities: {
             _meta: { "0000.chat/promptResourceLinks": false },
@@ -473,37 +503,120 @@ describe("ACP runtime adapter boundary", () => {
   })
 })
 
-function createFakeAcpProcess(options: {
+function createFakeRuntimeClient(options: {
   configOptions?: Array<{ currentValue: string; id: string }>
-  emitExitOnKill?: boolean
-  failSessionNewWithMcpServers?: boolean
   initializeResult?: unknown
-  kills?: Array<NodeJS.Signals | undefined>
   promptError?: { code: number; data?: Record<string, unknown>; message: string }
   promptResult?: unknown
-  requests?: JsonRpcMessage[]
+  requests?: RuntimeRequest[]
   updates: Array<Record<string, unknown>>
+}): BridgeAcpRuntimeClient {
+  const updateCallbacks = new Set<(event: BridgeAcpRawUpdate) => void>()
+  return {
+    async cancel() {
+      options.requests?.push({ method: "session/cancel", params: { sessionId: "session-1" } })
+      return true
+    },
+    async close() {},
+    async closeSession(params) {
+      options.requests?.push({ method: "session/close", params })
+    },
+    async createSession(params: BridgeCreateSessionParams) {
+      options.requests?.push({ method: "session/new", params })
+      const configOptions = options.configOptions as SessionConfigOption[] | undefined
+      return {
+        configOptions,
+        raw: { configOptions, sessionId: "session-1" },
+        sessionId: "session-1",
+      }
+    },
+    async initialize() {
+      options.requests?.push({ method: "initialize", params: undefined })
+      const raw = (options.initializeResult ?? {
+        agentCapabilities: { sessionCapabilities: {} },
+        protocolVersion: 1,
+      }) as InitializeResponse
+      return { capabilities: raw.agentCapabilities, raw }
+    },
+    async loadSession(params) {
+      options.requests?.push({ method: "session/load", params })
+      return { raw: { sessionId: params.sessionId }, sessionId: params.sessionId }
+    },
+    onUpdate(callback) {
+      updateCallbacks.add(callback)
+      return () => {
+        updateCallbacks.delete(callback)
+      }
+    },
+    async prompt(params: BridgePromptParams) {
+      options.requests?.push({ method: "session/prompt", params })
+      if (options.promptError) {
+        throw options.promptError
+      }
+      for (const update of options.updates) {
+        for (const callback of updateCallbacks) {
+          callback({
+            sessionId: "session-1",
+            update: normalizeFakeSessionUpdate(update) as BridgeAcpRawUpdate["update"],
+          })
+        }
+      }
+      const raw = (options.promptResult ?? { stopReason: "end_turn" }) as PromptResponse
+      return { raw, stopReason: raw.stopReason }
+    },
+    async resumeSession(params) {
+      options.requests?.push({ method: "session/resume", params })
+      return { raw: { sessionId: params.sessionId }, sessionId: params.sessionId }
+    },
+    async setConfigOption(params: BridgeSetConfigOptionParams) {
+      options.requests?.push({ method: "session/set_config_option", params })
+      options.configOptions = (options.configOptions ?? []).map((option) =>
+        option.id === params.configId && "value" in params && typeof params.value === "string"
+          ? { ...option, currentValue: params.value }
+          : option,
+      )
+      return { configOptions: (options.configOptions ?? []) as SessionConfigOption[] }
+    },
+  }
+}
+
+function createFakeAcpProcess(options: {
+  emitExitOnKill?: boolean
+  kills?: Array<NodeJS.Signals | undefined>
+  useTerminalOnPrompt?: boolean
 }): () => ChildProcessWithoutNullStreams {
   return () => {
     const stdout = new PassThrough()
     const stderr = new PassThrough()
-    const stdin = new Writable({
-      write(chunk, _encoding, callback): void {
-        try {
-          for (const line of chunk.toString("utf8").split("\n")) {
-            if (!line.trim()) {
-              continue
-            }
-            const message = JSON.parse(line) as JsonRpcMessage
-            options.requests?.push(message)
-            handleRequest(message, stdout, options)
-          }
-          callback()
-        } catch (error) {
-          callback(error instanceof Error ? error : new Error(String(error)))
+    const stdin = new PassThrough()
+    let agentConnection: AgentSideConnection
+    const agent: Agent = {
+      authenticate: async () => undefined,
+      cancel: async () => undefined,
+      initialize: async (params) => ({
+        agentCapabilities: { sessionCapabilities: {} },
+        protocolVersion: params.protocolVersion,
+      }),
+      newSession: async () => ({ sessionId: "session-1" }),
+      prompt: async (params) => {
+        if (options.useTerminalOnPrompt) {
+          const terminal = await agentConnection.createTerminal({
+            command: "printf terminal",
+            sessionId: params.sessionId,
+          })
+          await terminal.currentOutput()
+          await terminal.waitForExit()
         }
+        return { stopReason: "end_turn" }
       },
-    })
+    }
+    agentConnection = new AgentSideConnection(
+      () => agent,
+      ndJsonStream(
+        Writable.toWeb(stdout) as WritableStream<Uint8Array>,
+        Readable.toWeb(stdin) as unknown as ReadableStream<Uint8Array>,
+      ),
+    )
     const process = Object.assign(new EventEmitter(), {
       kill: (signal?: NodeJS.Signals) => {
         options.kills?.push(signal)
@@ -522,96 +635,28 @@ function createFakeAcpProcess(options: {
   }
 }
 
-function handleRequest(
-  message: JsonRpcMessage,
-  stdout: PassThrough,
-  options: {
-    configOptions?: Array<{ currentValue: string; id: string }>
-    failSessionNewWithMcpServers?: boolean
-    initializeResult?: unknown
-    promptError?: { code: number; data?: Record<string, unknown>; message: string }
-    promptResult?: unknown
-    updates: Array<Record<string, unknown>>
-  },
-) {
-  if (message.method === "initialize") {
-    writeJson(stdout, {
-      id: message.id,
-      jsonrpc: "2.0",
-      result: options.initializeResult ?? { agentCapabilities: { sessionCapabilities: {} } },
-    })
-    return
-  }
-
-  if (message.method === "session/new") {
-    const params =
-      message.params && typeof message.params === "object" && !Array.isArray(message.params)
-        ? (message.params as Record<string, unknown>)
-        : {}
-    if (
-      options.failSessionNewWithMcpServers &&
-      Array.isArray(params.mcpServers) &&
-      params.mcpServers.length > 0
-    ) {
-      writeJson(stdout, {
-        error: { code: -32602, message: "mcpServers are not supported" },
-        id: message.id,
-        jsonrpc: "2.0",
-      })
-      return
+function normalizeFakeSessionUpdate(update: Record<string, unknown>): Record<string, unknown> {
+  if (update.sessionUpdate === "tool_call") {
+    const content = update.content as Record<string, unknown> | undefined
+    return {
+      kind: "execute",
+      sessionUpdate: "tool_call",
+      status: "in_progress",
+      title: typeof content?.name === "string" ? content.name : "tool",
+      toolCallId: "tool-1",
     }
-    writeJson(stdout, {
-      id: message.id,
-      jsonrpc: "2.0",
-      result: { configOptions: options.configOptions, sessionId: "session-1" },
-    })
-    return
   }
-
-  if (message.method === "session/set_config_option") {
-    const params =
-      message.params && typeof message.params === "object" && !Array.isArray(message.params)
-        ? (message.params as Record<string, unknown>)
-        : {}
-    const configId = typeof params.configId === "string" ? params.configId : undefined
-    const value = typeof params.value === "string" ? params.value : undefined
-    if (configId && value) {
-      options.configOptions = (options.configOptions ?? []).map((option) =>
-        option.id === configId ? { ...option, currentValue: value } : option,
-      )
+  if (update.sessionUpdate === "tool_call_update") {
+    const content = update.content as Record<string, unknown> | undefined
+    return {
+      content:
+        typeof content?.text === "string"
+          ? [{ content: { text: content.text, type: "text" }, type: "content" }]
+          : undefined,
+      sessionUpdate: "tool_call_update",
+      status: "completed",
+      toolCallId: "tool-1",
     }
-    writeJson(stdout, {
-      id: message.id,
-      jsonrpc: "2.0",
-      result: { configOptions: options.configOptions },
-    })
-    return
   }
-
-  if (message.method === "session/prompt") {
-    if (options.promptError) {
-      writeJson(stdout, {
-        error: options.promptError,
-        id: message.id,
-        jsonrpc: "2.0",
-      })
-      return
-    }
-    for (const update of options.updates) {
-      writeJson(stdout, {
-        jsonrpc: "2.0",
-        method: "session/update",
-        params: { sessionId: "session-1", update },
-      })
-    }
-    writeJson(stdout, {
-      id: message.id,
-      jsonrpc: "2.0",
-      result: options.promptResult ?? { stopReason: "end_turn" },
-    })
-  }
-}
-
-function writeJson(stdout: PassThrough, message: unknown) {
-  stdout.write(`${JSON.stringify(message)}\n`)
+  return update
 }

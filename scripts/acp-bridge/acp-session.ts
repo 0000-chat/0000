@@ -1,5 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildZeroChatHiddenSystemPrompt } from "./zero-chat-policy"
 import {
@@ -7,15 +7,20 @@ import {
   normalizeAcpNotification,
   normalizeBridgeError,
 } from "./event-normalizer"
-
-export type JsonRpcMessage = {
-  jsonrpc: "2.0"
-  id?: string | number
-  method?: string
-  params?: unknown
-  result?: unknown
-  error?: unknown
-}
+import type {
+  BridgeAcpRawUpdate,
+  BridgeAcpRuntimeClient,
+  BridgeCreateSessionParams,
+  BridgeMcpServer,
+  BridgePermissionRequest,
+  BridgePermissionResponse,
+  BridgePromptContentBlock,
+} from "./acp-runtime-client"
+import {
+  SdkAcpRuntimeClient,
+  type SdkAcpRuntimeActivity,
+  type SdkAcpRuntimeTerminalAdapter,
+} from "./sdk-acp-runtime-client"
 
 export type HermesAcpRuntimeCapabilities = {
   loadSession: boolean
@@ -25,9 +30,14 @@ export type HermesAcpRuntimeCapabilities = {
     image: boolean
   }
   supportsPromptResourceLinks: boolean
+  sdkProtocolVersion?: string
+  supportsAuth: boolean
+  supportsLogout: boolean
   supportsSessionLoad: boolean
   supportsSessionResume: boolean
   supportsSessionClose: boolean
+  supportsSessionDelete: boolean
+  supportsSessionFork: boolean
   supportsPerSessionMcpServers: boolean
   supportsSessionList: boolean
   raw?: unknown
@@ -138,7 +148,9 @@ export type HermesAcpSessionOptions = {
   resumeEnabled?: boolean
   onEvent?: (event: NormalizedBridgeEvent) => void | Promise<void>
   onError?: (error: Error) => void | Promise<void>
+  runtimeClient?: BridgeAcpRuntimeClient
   spawnProcess?: (command: string, args: string[], cwd?: string) => ChildProcessWithoutNullStreams
+  terminalAdapter?: SdkAcpRuntimeTerminalAdapter
 }
 
 export type HermesAcpMcpServer = {
@@ -148,12 +160,6 @@ export type HermesAcpMcpServer = {
   name: string
 }
 
-type PendingRequest = {
-  method: string
-  resolve: (message: JsonRpcMessage) => void
-  reject: (error: Error) => void
-  timeout: ReturnType<typeof setTimeout>
-}
 type PermissionRequestOption = {
   kind?: string
   name?: string
@@ -161,7 +167,7 @@ type PermissionRequestOption = {
 }
 type PendingPermissionRequest = {
   options: PermissionRequestOption[]
-  requestId: string | number
+  resolve: (response: BridgePermissionResponse) => void
 }
 
 export const DEFAULT_ACP_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
@@ -202,19 +208,20 @@ export class HermesAcpSession {
 
   private readonly onEvent?: (event: NormalizedBridgeEvent) => void | Promise<void>
   private readonly onError?: (error: Error) => void | Promise<void>
+  private readonly providedRuntimeClient?: BridgeAcpRuntimeClient
+  private readonly terminalAdapter?: SdkAcpRuntimeTerminalAdapter
   private readonly spawnProcess: (
     command: string,
     args: string[],
     cwd?: string,
   ) => ChildProcessWithoutNullStreams
   private child?: ChildProcessWithoutNullStreams
-  private buffer = ""
-  private nextId = 1
   private nextEventSequence = 1
-  private pending = new Map<number, PendingRequest>()
   private promptEvents: NormalizedBridgeEvent[] = []
   private deferredPromptEvents: NormalizedBridgeEvent[] = []
   private readonly pendingPermissionRequests = new Map<string, PendingPermissionRequest>()
+  private runtimeClient?: BridgeAcpRuntimeClient
+  private unsubscribeRuntimeUpdates?: () => void
   private autoApprovePermissionRequests = false
   private lifecyclePhase: "starting" | "loading" | "livePrompt" | "idle" | "closing" | "closed" =
     "closed"
@@ -240,6 +247,8 @@ export class HermesAcpSession {
     this.resumeEnabled = options.resumeEnabled === true
     this.onEvent = options.onEvent
     this.onError = options.onError
+    this.providedRuntimeClient = options.runtimeClient
+    this.terminalAdapter = options.terminalAdapter
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess
   }
 
@@ -253,15 +262,12 @@ export class HermesAcpSession {
 
     this.closed = false
     this.lifecyclePhase = "starting"
-    const [executable, ...args] = this.command
-    this.child = this.spawnProcess(executable, args, this.cwd)
-    this.attachProcessHandlers(this.child)
+    this.runtimeClient = this.createRuntimeClient()
 
-    const initializeResult = await this.request("initialize", {
-      protocolVersion: 1,
-      clientInfo: { name: "0000-chat-acp-bridge", version: "0.1.0" },
-    })
-    this.capabilities = extractCapabilities(initializeResult)
+    const initializeResult = await this.withRequestTimeout("initialize", () =>
+      this.requireRuntimeClient().initialize(),
+    )
+    this.capabilities = extractCapabilities(initializeResult.raw)
 
     if (this.resumeEnabled && this.initialSessionId) {
       const resumedSessionId = await this.tryExternalSessionContinuity()
@@ -320,14 +326,17 @@ export class HermesAcpSession {
         : `${text}\n\n${options.attachmentReferenceText}`
     let rawResult: unknown
     try {
-      rawResult = await this.request("session/prompt", {
-        sessionId,
-        prompt: buildPromptContentBlocks(promptText, options.systemPrompt, {
-          attachmentBlocks,
-          includeContinuityFallbackNote: this.externalContinuityFallback,
-          threadHistory: options.threadHistory,
+      const promptResult = await this.withRequestTimeout("session/prompt", () =>
+        this.requireRuntimeClient().prompt({
+          sessionId,
+          prompt: buildPromptContentBlocks(promptText, options.systemPrompt, {
+            attachmentBlocks,
+            includeContinuityFallbackNote: this.externalContinuityFallback,
+            threadHistory: options.threadHistory,
+          }) as BridgePromptContentBlock[],
         }),
-      })
+      )
+      rawResult = promptResult.raw
     } catch (error) {
       this.discardDeferredPromptEventsSince(eventStart)
       throw error
@@ -364,7 +373,9 @@ export class HermesAcpSession {
     if (!this.sessionId) {
       return
     }
-    await this.request("session/cancel", { sessionId: this.sessionId })
+    await this.withRequestTimeout("session/cancel", () =>
+      this.requireRuntimeClient().cancel({ sessionId: this.sessionId ?? "" }),
+    )
   }
 
   async respondToPermissionRequest(
@@ -377,8 +388,7 @@ export class HermesAcpSession {
     }
     this.pendingPermissionRequests.delete(externalRequestId)
     const optionId = selectPermissionOptionId(request.options, response.approved)
-    this.writeResponse(
-      request.requestId,
+    request.resolve(
       optionId
         ? { outcome: { outcome: "selected", optionId } }
         : { outcome: { outcome: "cancelled" } },
@@ -400,9 +410,12 @@ export class HermesAcpSession {
 
   async close(): Promise<void> {
     this.lifecyclePhase = "closing"
-    if (this.sessionId && this.capabilities?.supportsSessionClose && this.child && !this.closed) {
+    if (this.sessionId && this.capabilities?.supportsSessionClose && !this.closed) {
       try {
-        await this.request("session/close", { sessionId: this.sessionId })
+        await this.withRequestTimeout("session/close", () =>
+          this.requireRuntimeClient().closeSession?.({ sessionId: this.sessionId ?? "" }) ??
+          Promise.resolve(),
+        )
       } catch (error) {
         void this.onError?.(
           error instanceof Error
@@ -412,63 +425,26 @@ export class HermesAcpSession {
       }
     }
     this.closed = true
-    for (const [id, request] of this.pending.entries()) {
-      clearTimeout(request.timeout)
-      request.reject(
-        new HermesAcpProcessError(`ACP session closed before ${request.method} completed`),
-      )
-      this.pending.delete(id)
-    }
     this.pendingPermissionRequests.clear()
+    this.unsubscribeRuntimeUpdates?.()
+    this.unsubscribeRuntimeUpdates = undefined
+    await this.runtimeClient?.close()
+    this.runtimeClient = undefined
     await this.terminateChildProcess()
     this.lifecyclePhase = "closed"
   }
 
   private async createNewSession(): Promise<unknown> {
-    const params = this.buildSessionNewParams("configured")
-    try {
-      return await this.request("session/new", params)
-    } catch (error) {
-      if (this.mcpServers.length > 0) {
-        void this.onError?.(
-          new Error(
-            "ACP session/new rejected configured MCP servers; retrying with an empty MCP server list",
-          ),
-        )
-        try {
-          return await this.request("session/new", this.buildSessionNewParams("empty"))
-        } catch {
-          void this.onError?.(
-            new Error(
-              "ACP session/new rejected empty MCP server list; retrying without MCP server field",
-            ),
-          )
-          return await this.request("session/new", this.buildSessionNewParams("omitted"))
-        }
-      }
-      void this.onError?.(
-        new Error("ACP session/new rejected empty MCP server list; retrying without MCP server field"),
-      )
-      try {
-        return await this.request("session/new", this.buildSessionNewParams("omitted"))
-      } catch {
-        throw error
-      }
-    }
+    return await this.withRequestTimeout("session/new", () =>
+      this.requireRuntimeClient().createSession(this.buildSessionNewParams()),
+    )
   }
 
-  private buildSessionNewParams(
-    mcpMode: "configured" | "empty" | "omitted",
-  ): { cwd: string; mcpServers?: HermesAcpMcpServer[] } {
-    const params: { cwd: string; mcpServers?: HermesAcpMcpServer[] } = {
+  private buildSessionNewParams(): BridgeCreateSessionParams {
+    return {
       cwd: this.cwd ?? process.cwd(),
+      mcpServers: this.mcpServers as BridgeMcpServer[],
     }
-    if (mcpMode === "configured") {
-      params.mcpServers = this.mcpServers
-    } else if (mcpMode === "empty") {
-      params.mcpServers = []
-    }
-    return params
   }
 
   private async terminateChildProcess(): Promise<void> {
@@ -522,8 +498,24 @@ export class HermesAcpSession {
       this.lifecyclePhase = "loading"
       this.externalContinuityAttempted = true
       try {
-        const loaded = await this.request(method, { sessionId: this.initialSessionId })
+        const loaded =
+          method === "session/load"
+            ? await this.withRequestTimeout(method, () =>
+                this.requireRuntimeClient().loadSession({
+                  cwd: this.cwd ?? process.cwd(),
+                  mcpServers: this.mcpServers as BridgeMcpServer[],
+                  sessionId: this.initialSessionId ?? "",
+                }),
+              )
+            : await this.withRequestTimeout(method, () =>
+                this.requireRuntimeClient().resumeSession?.({
+                  cwd: this.cwd ?? process.cwd(),
+                  mcpServers: this.mcpServers as BridgeMcpServer[],
+                  sessionId: this.initialSessionId ?? "",
+                }) ?? Promise.reject(new Error("ACP runtime does not support session/resume")),
+              )
         this.sessionId = extractSessionId(loaded, this.initialSessionId)
+        this.storeConfigOptions(loaded)
         this.started = true
         this.externalContinuityLoaded = true
         this.lifecyclePhase = "idle"
@@ -587,7 +579,10 @@ export class HermesAcpSession {
     value: string,
   ): Promise<void> {
     try {
-      const result = await this.request("session/set_config_option", { configId, sessionId, value })
+      const result = await this.withRequestTimeout("session/set_config_option", () =>
+        this.requireRuntimeClient().setConfigOption?.({ configId, sessionId, value }) ??
+        Promise.reject(new Error("ACP runtime does not support session/set_config_option")),
+      )
       this.storeConfigOptions(result)
       if (!this.currentConfigOptions.has(configId)) {
         this.currentConfigOptions.set(configId, value)
@@ -614,53 +609,60 @@ export class HermesAcpSession {
     }
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
-    const child = this.child
-    if (!child || this.closed) {
-      return Promise.reject(new HermesAcpProcessError("ACP runtime process is not running"))
+  private createRuntimeClient(): BridgeAcpRuntimeClient {
+    if (this.providedRuntimeClient) {
+      this.unsubscribeRuntimeUpdates?.()
+      this.unsubscribeRuntimeUpdates = this.providedRuntimeClient.onUpdate((event) => {
+        this.handleSessionUpdate(event)
+      })
+      return this.providedRuntimeClient
     }
 
-    const id = this.nextId
-    this.nextId += 1
-    const payload: JsonRpcMessage = { jsonrpc: "2.0", id, method, params }
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(id)
-        reject(new Error(`ACP request timed out: ${method}`))
-      }, this.requestTimeoutMs)
-
-      this.pending.set(id, {
-        method,
-        timeout,
-	        resolve: (message) => {
-	          if (message.error) {
-	            reject(new HermesAcpJsonRpcError(method, message.error))
-	            return
-	          }
-	          resolve(message.result)
-	        },
-        reject,
-      })
-
-      child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
-        if (!error) {
-          return
-        }
-        const pending = this.pending.get(id)
-        if (pending) {
-          clearTimeout(pending.timeout)
-          this.pending.delete(id)
-        }
-        reject(error)
-      })
+    const [executable, ...args] = this.command
+    this.child = this.spawnProcess(executable, args, this.cwd)
+    this.attachProcessHandlers(this.child)
+    const runtimeClient = SdkAcpRuntimeClient.fromChildProcess(this.child, {
+      ...(this.cwd && isAbsolute(this.cwd)
+        ? { filesystemPolicy: { workspaceRoots: [this.cwd] } }
+        : {}),
+      onActivity: (activity) => this.handleRuntimeActivity(activity),
+      onPermissionRequest: (params) => this.handlePermissionRequest(params),
+      ...(this.terminalAdapter ? { terminalAdapter: this.terminalAdapter } : {}),
     })
+    this.unsubscribeRuntimeUpdates = runtimeClient.onUpdate((event) => {
+      this.handleSessionUpdate(event)
+    })
+    return runtimeClient
+  }
+
+  private requireRuntimeClient(): BridgeAcpRuntimeClient {
+    if (!this.runtimeClient || this.closed) {
+      throw new HermesAcpProcessError("ACP runtime process is not running")
+    }
+    return this.runtimeClient
+  }
+
+  private async withRequestTimeout<T>(method: string, run: () => Promise<T>): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        run(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(new Error(`ACP request timed out: ${method}`))
+          }, this.requestTimeoutMs)
+        }),
+      ])
+    } catch (error) {
+      throw normalizeAcpRuntimeError(method, error)
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+    }
   }
 
   private attachProcessHandlers(child: ChildProcessWithoutNullStreams): void {
-    child.stdout.on("data", (chunk: Buffer) => {
-      this.handleStdout(chunk.toString("utf8"))
-    })
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim()
       if (text.length > 0) {
@@ -668,98 +670,90 @@ export class HermesAcpSession {
       }
     })
     child.on("error", (error) => {
-      void this.failAllPending(error)
+      void this.emitError(error)
     })
     child.on("exit", (code, signal) => {
       if (this.closed) {
         return
       }
       const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`
-      void this.failAllPending(
-        new HermesAcpProcessError(`ACP runtime process exited with ${reason}`),
-      )
+      void this.emitError(new HermesAcpProcessError(`ACP runtime process exited with ${reason}`))
     })
   }
 
-  private handleStdout(text: string): void {
-    this.buffer += text
-    const lines = this.buffer.split("\n")
-    this.buffer = lines.pop() ?? ""
-    for (const line of lines) {
-      if (line.trim().length === 0) {
-        continue
-      }
-      try {
-        this.handleMessage(JSON.parse(line) as JsonRpcMessage)
-      } catch (error) {
-        void this.emitError(error instanceof Error ? error : new Error(String(error)))
-      }
+  private handleSessionUpdate(update: BridgeAcpRawUpdate): void {
+    const event = normalizeAcpNotification(
+      { method: "session/update", params: update },
+      this.nextEventSequence,
+    )
+    this.nextEventSequence += 1
+    if (this.shouldSuppressAcpNotification()) {
+      return
     }
+    this.promptEvents.push(event)
+    if (this.shouldDeferAcpNotification(event)) {
+      this.deferredPromptEvents.push(event)
+      return
+    }
+    void this.onEvent?.(event)
   }
 
-  private handleMessage(message: JsonRpcMessage): void {
-    if (typeof message.id === "number" && !message.method) {
-      const pending = this.pending.get(message.id)
-      if (!pending) {
-        return
-      }
-      this.pending.delete(message.id)
-      clearTimeout(pending.timeout)
-      pending.resolve(message)
+  private async handleRuntimeActivity(activity: SdkAcpRuntimeActivity): Promise<void> {
+    if (this.shouldSuppressAcpNotification()) {
       return
     }
-
-    if (message.method === "session/update") {
-      const event = normalizeAcpNotification(message, this.nextEventSequence)
-      this.nextEventSequence += 1
-      if (this.shouldSuppressAcpNotification()) {
-        return
-      }
-      this.promptEvents.push(event)
-      if (this.shouldDeferAcpNotification(event)) {
-        this.deferredPromptEvents.push(event)
-        return
-      }
-      void this.onEvent?.(event)
-      return
+    const activitySessionId =
+      typeof activity.sessionId === "string" && activity.sessionId.length > 0
+        ? activity.sessionId
+        : this.sessionId
+    const event: NormalizedBridgeEvent = {
+      eventType: activity.type,
+      externalEventId: `${activitySessionId ?? "no-session"}:${this.nextEventSequence}:${activity.type}`,
+      payload: activity,
+      part: {
+        json: activity,
+        status: "streaming",
+        type: "event",
+      },
+      sessionId: activitySessionId,
+      source: "bridge",
     }
+    this.nextEventSequence += 1
+    this.promptEvents.push(event)
+    await this.onEvent?.(event)
+  }
 
-    if (message.method === "session/request_permission") {
-      const event = normalizeAcpNotification(message, this.nextEventSequence)
-      this.nextEventSequence += 1
-      if (this.shouldSuppressAcpNotification()) {
-        if (message.id !== undefined) {
-          this.writeResponse(message.id, { outcome: { outcome: "cancelled" } })
-        }
-        return
-      }
-      if (this.autoApprovePermissionRequests && event.part?.type === "approval_request") {
-        event.part = {
-          ...event.part,
-          json: { ...recordFromUnknown(event.part.json), autoApproved: true },
-        }
-      }
-      this.promptEvents.push(event)
-      void this.onEvent?.(event)
-      if (message.id !== undefined && event.externalRequestId) {
-        this.pendingPermissionRequests.set(event.externalRequestId, {
-          options: extractPermissionOptions(message),
-          requestId: message.id,
-        })
-        if (this.autoApprovePermissionRequests) {
-          void this.respondToPermissionRequest(event.externalRequestId, { approved: true })
-        }
-      }
-      return
+  private async handlePermissionRequest(
+    request: BridgePermissionRequest,
+  ): Promise<BridgePermissionResponse> {
+    const event = normalizeAcpNotification(
+      { method: "session/request_permission", params: request },
+      this.nextEventSequence,
+    )
+    this.nextEventSequence += 1
+    if (this.shouldSuppressAcpNotification()) {
+      return { outcome: { outcome: "cancelled" } }
     }
-
-    if (message.id !== undefined && message.method) {
-      this.writeErrorResponse(
-        message.id,
-        -32601,
-        `Unsupported ACP client method: ${message.method}`,
-      )
+    if (this.autoApprovePermissionRequests && event.part?.type === "approval_request") {
+      event.part = {
+        ...event.part,
+        json: { ...recordFromUnknown(event.part.json), autoApproved: true },
+      }
     }
+    this.promptEvents.push(event)
+    await this.onEvent?.(event)
+    if (this.autoApprovePermissionRequests) {
+      return permissionResponseFromApproval(extractPermissionOptions(request), true)
+    }
+    if (!event.externalRequestId) {
+      return { outcome: { outcome: "cancelled" } }
+    }
+    return await new Promise<BridgePermissionResponse>((resolve) => {
+      this.pendingPermissionRequests.set(event.externalRequestId ?? "", {
+        options: extractPermissionOptions(request),
+        resolve,
+      })
+    })
   }
 
   private shouldSuppressAcpNotification(): boolean {
@@ -768,24 +762,6 @@ export class HermesAcpSession {
       this.lifecyclePhase === "closed" ||
       this.lifecyclePhase === "closing"
     )
-  }
-
-  private writeResponse(id: string | number, result: unknown): void {
-    this.child?.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`)
-  }
-
-  private writeErrorResponse(id: string | number, code: number, message: string): void {
-    this.child?.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`)
-  }
-
-  private async failAllPending(error: Error): Promise<void> {
-    this.closed = true
-    for (const [id, pending] of this.pending.entries()) {
-      clearTimeout(pending.timeout)
-      pending.reject(error)
-      this.pending.delete(id)
-    }
-    await this.emitError(error)
   }
 
   private async emitError(error: Error): Promise<void> {
@@ -1022,8 +998,8 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
     : {}
 }
 
-function extractPermissionOptions(message: JsonRpcMessage): PermissionRequestOption[] {
-  const params = recordFromUnknown(message.params)
+function extractPermissionOptions(request: unknown): PermissionRequestOption[] {
+  const params = recordFromUnknown(request)
   const options = Array.isArray(params.options) ? params.options : []
   return options
     .map((option) => {
@@ -1045,6 +1021,16 @@ function extractPermissionOptions(message: JsonRpcMessage): PermissionRequestOpt
       return permissionOption
     })
     .filter((option): option is PermissionRequestOption => option !== undefined)
+}
+
+function permissionResponseFromApproval(
+  options: PermissionRequestOption[],
+  approved: boolean,
+): BridgePermissionResponse {
+  const optionId = selectPermissionOptionId(options, approved)
+  return optionId
+    ? { outcome: { outcome: "selected", optionId } }
+    : { outcome: { outcome: "cancelled" } }
 }
 
 function selectPermissionOptionId(
@@ -1253,7 +1239,17 @@ function extractCapabilities(result: unknown): HermesAcpRuntimeCapabilities {
     typeof agentCapabilities.promptCapabilities === "object"
       ? (agentCapabilities.promptCapabilities as Record<string, unknown>)
       : {}
+  const authCapabilities =
+    agentCapabilities.auth && typeof agentCapabilities.auth === "object"
+      ? (agentCapabilities.auth as Record<string, unknown>)
+      : {}
   const loadSession = agentCapabilities.loadSession === true
+  const sdkProtocolVersion =
+    typeof record.protocolVersion === "string"
+      ? record.protocolVersion
+      : typeof record.protocolVersion === "number"
+        ? String(record.protocolVersion)
+        : undefined
   return {
     loadSession,
     promptCapabilities: {
@@ -1262,9 +1258,14 @@ function extractCapabilities(result: unknown): HermesAcpRuntimeCapabilities {
       image: promptCapabilities.image === true,
     },
     supportsPromptResourceLinks: agentMeta["0000.chat/promptResourceLinks"] !== false,
+    ...(sdkProtocolVersion ? { sdkProtocolVersion } : {}),
+    supportsAuth: Object.keys(authCapabilities).length > 0,
+    supportsLogout: Object.hasOwn(authCapabilities, "logout"),
     supportsSessionLoad: loadSession,
     supportsSessionResume: Object.hasOwn(sessionCapabilities, "resume"),
     supportsSessionClose: Object.hasOwn(sessionCapabilities, "close"),
+    supportsSessionDelete: Object.hasOwn(sessionCapabilities, "delete"),
+    supportsSessionFork: Object.hasOwn(sessionCapabilities, "fork"),
     supportsPerSessionMcpServers: true,
     supportsSessionList: Object.hasOwn(sessionCapabilities, "list"),
     raw: result,
@@ -1391,6 +1392,17 @@ function formatAcpJsonRpcError(error: unknown): string {
     return code === undefined ? message : `${message} (code ${code})`
   }
   return code === undefined ? "json_rpc_error" : `json_rpc_error (code ${code})`
+}
+
+function normalizeAcpRuntimeError(method: string, error: unknown): Error {
+  if (error instanceof HermesAcpJsonRpcError) {
+    return error
+  }
+  const formatted = formatAcpJsonRpcError(error)
+  if (formatted !== "json_rpc_error") {
+    return new HermesAcpJsonRpcError(method, error)
+  }
+  return error instanceof Error ? error : new Error(String(error))
 }
 
 function normalizeJsonRpcErrorKind(errorKind: string | undefined): string | undefined {

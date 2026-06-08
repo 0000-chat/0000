@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 const { spawn } = require("node:child_process")
+const { accessSync, constants } = require("node:fs")
+const { delimiter, join } = require("node:path")
 
 const [, , command, ...args] = process.argv
 
@@ -8,7 +10,7 @@ if (!command) {
   process.exit(1)
 }
 
-const child = spawn(command, args, {
+const child = spawn(resolveExecutable(command), args, {
   cwd: process.cwd(),
   detached: process.platform !== "win32",
   env: process.env,
@@ -57,6 +59,27 @@ function terminateChild(signal) {
     }
     process.exit(exitCodeForSignal(null, signal))
   }, 1000).unref()
+}
+
+function resolveExecutable(command) {
+  if (command.includes("/") || command.includes("\\")) {
+    return command
+  }
+
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) {
+      continue
+    }
+    const candidate = join(directory, command)
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // Keep looking through PATH.
+    }
+  }
+
+  return command
 }
 
 function exitCodeForSignal(code, signal) {
