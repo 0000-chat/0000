@@ -84,6 +84,32 @@ test("normalizes ACP agent message chunks as text", () => {
   })
 })
 
+test("normalizes typed ACP agent message chunks as text", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: {
+            content: { text: "answer chunk", type: "text" },
+            type: "agentMessageChunk",
+          },
+        },
+      },
+    },
+    17,
+  )
+
+  assert.equal(event.eventType, "agent_message_chunk")
+  assert.deepEqual(event.part, {
+    status: "streaming",
+    text: "answer chunk",
+    type: "text",
+  })
+})
+
 test("normalizes addressable ACP file resources as attachment parts", () => {
   const event = normalizeAcpNotification(
     {
@@ -212,6 +238,61 @@ test("normalizes ACP thought chunks as hidden thinking by default", () => {
     reasoningVisibility: "hidden",
     status: "streaming",
     text: "private reasoning",
+    type: "thinking",
+  })
+})
+
+test("normalizes typed ACP thought chunks as hidden thinking", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: {
+            content: { text: "private reasoning", type: "text" },
+            type: "agentThoughtChunk",
+          },
+        },
+      },
+    },
+    18,
+  )
+
+  assert.equal(event.eventType, "agent_thought_chunk")
+  assert.deepEqual(event.part, {
+    reasoningVisibility: "hidden",
+    status: "streaming",
+    text: "private reasoning",
+    type: "thinking",
+  })
+})
+
+test("normalizes single-key ACP thought chunks as hidden thinking", () => {
+  const event = normalizeAcpNotification(
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: {
+            agentThoughtChunk: {
+              content: { text: "single-key reasoning", type: "text" },
+            },
+          },
+        },
+      },
+    },
+    19,
+  )
+
+  assert.equal(event.eventType, "agent_thought_chunk")
+  assert.deepEqual(event.part, {
+    reasoningVisibility: "hidden",
+    status: "streaming",
+    text: "single-key reasoning",
     type: "thinking",
   })
 })
