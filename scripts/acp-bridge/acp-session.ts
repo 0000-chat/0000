@@ -213,6 +213,7 @@ export class HermesAcpSession {
   private nextEventSequence = 1
   private pending = new Map<number, PendingRequest>()
   private promptEvents: NormalizedBridgeEvent[] = []
+  private deferredPromptEvents: NormalizedBridgeEvent[] = []
   private readonly pendingPermissionRequests = new Map<string, PendingPermissionRequest>()
   private autoApprovePermissionRequests = false
   private lifecyclePhase: "starting" | "loading" | "livePrompt" | "idle" | "closing" | "closed" =
@@ -327,6 +328,9 @@ export class HermesAcpSession {
           threadHistory: options.threadHistory,
         }),
       })
+    } catch (error) {
+      this.discardDeferredPromptEventsSince(eventStart)
+      throw error
     } finally {
       this.autoApprovePermissionRequests = previousAutoApprove
       await restoreRuntimeConfig()
@@ -342,12 +346,14 @@ export class HermesAcpSession {
       rawResult,
       stopReason,
     })
+    const processedEvents = reclassifyUntrustedCodexMessageChunks(events, finalText.diagnostics)
+    await this.flushDeferredPromptEvents(events, processedEvents)
     return {
       sessionId,
       rawResult,
       stopReason,
       text: finalText.text,
-      events,
+      events: processedEvents,
       capabilities: this.capabilities,
       finalText: finalText.diagnostics,
       attachmentDeliveryMode,
@@ -710,6 +716,10 @@ export class HermesAcpSession {
         return
       }
       this.promptEvents.push(event)
+      if (this.shouldDeferAcpNotification(event)) {
+        this.deferredPromptEvents.push(event)
+        return
+      }
       void this.onEvent?.(event)
       return
     }
@@ -786,6 +796,44 @@ export class HermesAcpSession {
       await this.onEvent?.(event)
     }
     await this.onError?.(error)
+  }
+
+  private shouldDeferAcpNotification(event: NormalizedBridgeEvent): boolean {
+    return (
+      this.lifecyclePhase === "livePrompt" &&
+      isCodexAcpCommand(this.command) &&
+      event.source === "hermes_acp" &&
+      event.eventType === "agent_message_chunk" &&
+      event.part?.type === "text"
+    )
+  }
+
+  private async flushDeferredPromptEvents(
+    originalEvents: NormalizedBridgeEvent[],
+    processedEvents: NormalizedBridgeEvent[],
+  ): Promise<void> {
+    if (this.deferredPromptEvents.length === 0) {
+      return
+    }
+    const originalEventSet = new Set(originalEvents)
+    const deferredEvents = this.deferredPromptEvents.filter((event) => originalEventSet.has(event))
+    this.deferredPromptEvents = this.deferredPromptEvents.filter(
+      (event) => !originalEventSet.has(event),
+    )
+    for (const originalEvent of deferredEvents) {
+      const index = originalEvents.indexOf(originalEvent)
+      await this.onEvent?.(processedEvents[index] ?? originalEvent)
+    }
+  }
+
+  private discardDeferredPromptEventsSince(eventStart: number): void {
+    if (this.deferredPromptEvents.length === 0) {
+      return
+    }
+    const originalEventSet = new Set(this.promptEvents.slice(eventStart))
+    this.deferredPromptEvents = this.deferredPromptEvents.filter(
+      (event) => !originalEventSet.has(event),
+    )
   }
 }
 
@@ -1272,6 +1320,47 @@ function extractFinalText(input: {
     return { diagnostics, text: "" }
   }
   return { diagnostics, text: trustedFinalText ?? answerText }
+}
+
+function reclassifyUntrustedCodexMessageChunks(
+  events: NormalizedBridgeEvent[],
+  diagnostics: HermesAcpFinalTextDiagnostics,
+): NormalizedBridgeEvent[] {
+  if (!diagnostics.withheld || diagnostics.reason !== "codex_unclassified_message_chunks") {
+    return events
+  }
+  return events.map((event) =>
+    event.source === "hermes_acp" && event.part?.type === "text"
+      ? reclassifyMessageChunkAsThinking(event)
+      : event,
+  )
+}
+
+function reclassifyMessageChunkAsThinking(event: NormalizedBridgeEvent): NormalizedBridgeEvent {
+  const payload = recordFromUnknown(event.payload)
+  const normalizedPayload = recordFromUnknown(payload.normalized)
+  return {
+    ...event,
+    eventType: "agent_thought_chunk",
+    externalEventId: event.externalEventId.replace(
+      /:agent_message_chunk$/,
+      ":agent_thought_chunk",
+    ),
+    part: {
+      ...event.part,
+      reasoningVisibility: "hidden",
+      type: "thinking",
+    },
+    payload: {
+      ...payload,
+      eventType: "agent_thought_chunk",
+      normalized: {
+        ...normalizedPayload,
+        reasoningVisibility: "hidden",
+        type: "thinking",
+      },
+    },
+  }
 }
 
 function isCodexAcpCommand(command: string[]): boolean {

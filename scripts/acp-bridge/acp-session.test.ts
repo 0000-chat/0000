@@ -53,6 +53,9 @@ describe("ACP final text extraction", () => {
     const result = await session.sendUserMessage("hello")
 
     expect(result.text).toBe("")
+    expect(result.events.filter((event) => event.part?.type === "text")).toEqual([])
+    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(2)
+    expect(result.events.filter((event) => event.eventType === "agent_thought_chunk")).toHaveLength(2)
     expect(result.finalText?.withheld).toBe(true)
     expect(result.finalText).toMatchObject({
       answerChunkCount: 2,
@@ -78,6 +81,57 @@ describe("ACP final text extraction", () => {
 
     expect(result.text).toBe("final answer")
     expect(result.finalText?.withheld).toBe(false)
+  })
+
+  test("reclassifies streamed Codex message chunks as hidden thinking when a later tool appears", async () => {
+    const observedEvents: Array<{ eventType: string; partType?: string }> = []
+    const session = new HermesAcpSession({
+      agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
+      onEvent: (event) => {
+        observedEvents.push({ eventType: event.eventType, partType: event.part?.type })
+      },
+      spawnProcess: createFakeAcpProcess({
+        updates: [
+          { content: { text: "first ", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: "thought", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
+          { content: { text: "tool output", type: "text" }, sessionUpdate: "tool_call_update" },
+          { content: { text: " second", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " thought", type: "text" }, sessionUpdate: "agent_message_chunk" },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.text).toBe("")
+    expect(result.finalText).toMatchObject({
+      answerChunkCount: 4,
+      answerTextLength: 28,
+      reason: "codex_unclassified_message_chunks",
+      runtimeId: "codex",
+      thoughtChunkCount: 0,
+      toolEventCount: 2,
+      withheld: true,
+    })
+    expect(result.events.map((event) => event.eventType)).toEqual([
+      "agent_thought_chunk",
+      "agent_thought_chunk",
+      "tool_call",
+      "tool_call_update",
+      "agent_thought_chunk",
+      "agent_thought_chunk",
+    ])
+    expect(result.events.filter((event) => event.part?.type === "text")).toEqual([])
+    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(4)
+    expect(observedEvents).toEqual([
+      { eventType: "tool_call", partType: "tool_call" },
+      { eventType: "tool_call_update", partType: "tool_result" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+    ])
   })
 
   test("keeps non-Codex ACP message chunk accumulation unchanged", async () => {
