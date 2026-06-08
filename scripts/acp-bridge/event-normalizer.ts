@@ -53,6 +53,11 @@ type NormalizedAvailableCommand = {
   inputHint?: string
 }
 
+type ResolvedSessionUpdate = {
+  kind: string
+  update: JsonRecord
+}
+
 const MAX_EVENT_STRING_LENGTH = 12_000
 const MAX_EVENT_ARRAY_LENGTH = 50
 const MAX_EVENT_OBJECT_KEYS = 80
@@ -73,18 +78,16 @@ export function normalizeAcpNotification(
   const sessionId = readString(params.sessionId)
   const update = asRecord(params.update)
   const rawSessionUpdate = update.sessionUpdate ?? params.sessionUpdate
-  const sessionUpdate =
-    maybeRecord(rawSessionUpdate) ??
-    (record.method === "session/request_permission" ? params : update)
-  const kind =
-    readString(rawSessionUpdate) ??
-    readString(sessionUpdate.type) ??
-    readString(sessionUpdate.kind) ??
-    readString(record.method) ??
-    "event"
-  const eventType = normalizeAcpEventType(kind)
+  const resolvedSessionUpdate = resolveSessionUpdate(
+    rawSessionUpdate,
+    update,
+    params,
+    readString(record.method),
+  )
+  const sessionUpdate = resolvedSessionUpdate.update
+  const eventType = normalizeAcpEventType(resolvedSessionUpdate.kind)
   const externalEventId = buildExternalEventId(sessionId, sequence, eventType)
-  const attachmentUpload = normalizeAttachmentUploadCandidate(kind, sessionUpdate)
+  const attachmentUpload = normalizeAttachmentUploadCandidate(eventType, sessionUpdate)
 
   return {
     externalEventId,
@@ -93,16 +96,16 @@ export function normalizeAcpNotification(
     sessionId,
     externalRequestId: readString(record.id) ?? readNumberString(record.id),
     payload: attachmentUpload
-      ? sanitizeAttachmentUploadPayload(kind, attachmentUpload)
-      : normalizeEventPayload(kind, record),
+      ? sanitizeAttachmentUploadPayload(eventType, attachmentUpload)
+      : normalizeEventPayload(eventType, record),
     part: attachmentUpload
       ? {
           type: "event",
           text: "Agent emitted an attachment.",
-          json: sanitizeAttachmentUploadPayload(kind, attachmentUpload),
+          json: sanitizeAttachmentUploadPayload(eventType, attachmentUpload),
           status: "streaming",
         }
-      : normalizeSessionUpdatePart(kind, sessionUpdate),
+      : normalizeSessionUpdatePart(eventType, sessionUpdate),
     attachmentUpload,
   }
 }
@@ -111,7 +114,89 @@ function normalizeAcpEventType(kind: string): string {
   if (kind === "session/request_permission") {
     return "permission_request"
   }
+  const normalized = kind
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_")
+    .toLowerCase()
+  if (isKnownAcpEventType(normalized)) {
+    return normalized
+  }
   return kind
+}
+
+function resolveSessionUpdate(
+  rawSessionUpdate: unknown,
+  update: JsonRecord,
+  params: JsonRecord,
+  method: string | undefined,
+): ResolvedSessionUpdate {
+  const rawKind = readString(rawSessionUpdate)
+  if (rawKind) {
+    return { kind: rawKind, update }
+  }
+
+  const rawRecord = maybeRecord(rawSessionUpdate)
+  if (rawRecord) {
+    const typedKind = readString(rawRecord.type) ?? readString(rawRecord.kind)
+    if (typedKind) {
+      return { kind: typedKind, update: mergeSessionUpdatePayload(update, rawRecord) }
+    }
+
+    const variant = readSingleSessionUpdateVariant(rawRecord)
+    if (variant) {
+      return {
+        kind: variant.kind,
+        update: mergeSessionUpdatePayload(update, variant.update),
+      }
+    }
+
+    return {
+      kind: readString(rawRecord.type) ?? readString(rawRecord.kind) ?? method ?? "event",
+      update: rawRecord,
+    }
+  }
+
+  const fallbackUpdate = method === "session/request_permission" ? params : update
+  return {
+    kind:
+      readString(fallbackUpdate.type) ?? readString(fallbackUpdate.kind) ?? method ?? "event",
+    update: fallbackUpdate,
+  }
+}
+
+function readSingleSessionUpdateVariant(
+  rawRecord: JsonRecord,
+): ResolvedSessionUpdate | undefined {
+  const entries = Object.entries(rawRecord)
+  if (entries.length !== 1) {
+    return undefined
+  }
+  const [kind, value] = entries[0] ?? []
+  if (!kind || !isKnownAcpEventType(normalizeAcpEventType(kind))) {
+    return undefined
+  }
+  return { kind, update: asRecord(value) }
+}
+
+function mergeSessionUpdatePayload(update: JsonRecord, payload: JsonRecord): JsonRecord {
+  const { sessionUpdate: _sessionUpdate, ...outerUpdate } = update
+  return { ...outerUpdate, ...payload }
+}
+
+function isKnownAcpEventType(kind: string): boolean {
+  return (
+    kind === "agent_message_chunk" ||
+    kind === "user_message_chunk" ||
+    kind === "agent_thought_chunk" ||
+    kind === "code_chunk" ||
+    kind === "tool_call" ||
+    kind === "tool_call_update" ||
+    kind === "tool_result" ||
+    kind === "available_commands_update" ||
+    kind === "permission_request" ||
+    kind === "file"
+  )
 }
 
 export function normalizeBridgeError(
