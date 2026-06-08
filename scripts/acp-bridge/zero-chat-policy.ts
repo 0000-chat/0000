@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises"
+import path from "node:path"
+
 export const ZERO_CHAT_APP_CONTEXT_POLICY = `The user's messages are sent from the 0000 Chat app. When the user says "this app", "this thread", "this space", "my app", "my database", "my table", "records", "search messages", "create an app", or "create a database", interpret those as references to 0000 Chat unless they clearly say otherwise.`
 
 export const ZERO_CHAT_TOOL_USE_POLICY = `Use the 0000-chat MCP server for 0000 Chat data and actions. Prefer those tools for spaces, threads, cached messages, OpenUI apps, dynamic databases, fields, and records. When you need the app to show a multiple-choice UI or decision-needed thread icon, call userPrompts.requestChoice instead of printing a lettered list in plain text. Inspect existing dynamic databases before creating a new table, and use database records when the user needs structured app memory, reusable datasets, searchable records, or app inputs. Store structured or repeatedly reused information in database rows when appropriate; keep one-off ephemeral facts in the thread. When asked to create or improve a space app, create a 0000 app with apps.* tools. Do not create HTML files, folders, standalone apps, or local artifacts to satisfy app requests. Inspect the space context first. For a brand-new app, save a 0000 app as a reusable prompt with apps.create({spaceIdOrSlug,title,prompt}); after apps.create returns, complete the initial generation by writing valid OpenUI rooted at AppCanvas, validating it with apps.validateOpenUi, then saving it with apps.generateFromRevision using the created appIdOrSlug. For an existing app, read or list apps first, then use apps.createRevision for prompt edits and apps.generateFromRevision for validated OpenUI generations. Do not use apps.update for prompt-backed app creation or edits. When an app depends on database data, make the saved prompt identify the table and fields so refreshes can re-read those records. Do not invent raw database access, request Convex credentials, or treat 0000 Chat data as local files.`
@@ -50,4 +53,200 @@ For elliptical follow-ups like "continue", "finish it", "what were you doing", o
 Read tools are scoped to the signed-in user's accessible 0000 Chat data. Write tools run directly when the current thread has full permissions enabled; otherwise they may return an approval-needed response. The settings.setDefaultApprovalLevel tool is a special trust-boundary tool for trusted local automation and should only be called after an explicit user request; outside an already-full-permissions thread, it must produce in-thread approval. When approval is needed, tell the user approval is needed and wait for the app flow.
 
 Never request raw Convex credentials, user cookies, or direct database access. Do not treat 0000 Chat data as local files.`
+}
+
+export type ZeroChatFilesystemOperation = "read" | "write"
+
+export type ZeroChatFilesystemPolicyReason =
+  | "path_not_absolute"
+  | "workspace_root_not_absolute"
+  | "path_resolution_failed"
+  | "workspace_root_resolution_failed"
+  | "path_outside_workspace"
+
+export type ZeroChatFilesystemApproval =
+  | { required: false }
+  | { required: true; reason: "write_requires_user_approval" }
+
+export type ZeroChatFilesystemPathResolver = (
+  absolutePath: string,
+  context: { operation: ZeroChatFilesystemOperation; role: "request" | "workspaceRoot" },
+) => Promise<string> | string
+
+export type ZeroChatFilesystemPolicyInput = {
+  operation: ZeroChatFilesystemOperation
+  requestedPath: string
+  workspaceRoots: string[]
+  resolvePath?: ZeroChatFilesystemPathResolver
+  writeApprovalRequired?: boolean
+}
+
+export type ZeroChatFilesystemAllowedDecision = {
+  allowed: true
+  operation: ZeroChatFilesystemOperation
+  requestedPath: string
+  resolvedPath: string
+  matchedWorkspaceRoot: string
+  resolvedWorkspaceRoots: string[]
+  approval: ZeroChatFilesystemApproval
+}
+
+export type ZeroChatFilesystemDeniedDecision = {
+  allowed: false
+  operation: ZeroChatFilesystemOperation
+  requestedPath: string
+  resolvedPath?: string
+  resolvedWorkspaceRoots?: string[]
+  reason: ZeroChatFilesystemPolicyReason
+  error?: string
+  approval: { required: false }
+}
+
+export type ZeroChatFilesystemPolicyDecision =
+  | ZeroChatFilesystemAllowedDecision
+  | ZeroChatFilesystemDeniedDecision
+
+export type ZeroChatFilesystemDiagnostic = {
+  allowed: boolean
+  operation: ZeroChatFilesystemOperation
+  requestedPath: string
+  resolvedPath?: string
+  matchedWorkspaceRoot?: string
+  resolvedWorkspaceRoots?: string[]
+  reason?: ZeroChatFilesystemPolicyReason
+  error?: string
+  approvalRequired: boolean
+  approvalReason?: "write_requires_user_approval"
+}
+
+export async function authorizeZeroChatFilesystemPath(
+  input: ZeroChatFilesystemPolicyInput,
+): Promise<ZeroChatFilesystemPolicyDecision> {
+  const approval = filesystemApprovalFor(input.operation, input.writeApprovalRequired)
+
+  if (!path.isAbsolute(input.requestedPath)) {
+    return denied(input, "path_not_absolute")
+  }
+
+  const nonAbsoluteWorkspaceRoot = input.workspaceRoots.find((root) => !path.isAbsolute(root))
+  if (nonAbsoluteWorkspaceRoot) {
+    return denied(input, "workspace_root_not_absolute", { error: nonAbsoluteWorkspaceRoot })
+  }
+
+  const resolvePath = input.resolvePath ?? defaultZeroChatFilesystemPathResolver
+  let resolvedPath: string
+  try {
+    resolvedPath = await resolvePath(input.requestedPath, {
+      operation: input.operation,
+      role: "request",
+    })
+  } catch (error) {
+    return denied(input, "path_resolution_failed", { error: safeErrorMessage(error) })
+  }
+
+  let resolvedWorkspaceRoots: string[]
+  try {
+    resolvedWorkspaceRoots = await Promise.all(
+      input.workspaceRoots.map((workspaceRoot) =>
+        resolvePath(workspaceRoot, { operation: input.operation, role: "workspaceRoot" }),
+      ),
+    )
+  } catch (error) {
+    return denied(input, "workspace_root_resolution_failed", {
+      error: safeErrorMessage(error),
+      resolvedPath,
+    })
+  }
+
+  const matchedWorkspaceRoot = resolvedWorkspaceRoots.find((workspaceRoot) =>
+    isPathInsideOrEqual(resolvedPath, workspaceRoot),
+  )
+
+  if (!matchedWorkspaceRoot) {
+    return denied(input, "path_outside_workspace", { resolvedPath, resolvedWorkspaceRoots })
+  }
+
+  return {
+    allowed: true,
+    operation: input.operation,
+    requestedPath: input.requestedPath,
+    resolvedPath,
+    matchedWorkspaceRoot,
+    resolvedWorkspaceRoots,
+    approval,
+  }
+}
+
+export function buildZeroChatFilesystemDiagnostic(
+  decision: ZeroChatFilesystemPolicyDecision,
+): ZeroChatFilesystemDiagnostic {
+  return {
+    allowed: decision.allowed,
+    operation: decision.operation,
+    requestedPath: decision.requestedPath,
+    resolvedPath: decision.resolvedPath,
+    matchedWorkspaceRoot: decision.allowed ? decision.matchedWorkspaceRoot : undefined,
+    resolvedWorkspaceRoots: decision.resolvedWorkspaceRoots,
+    reason: decision.allowed ? undefined : decision.reason,
+    error: decision.allowed ? undefined : decision.error,
+    approvalRequired: decision.approval.required,
+    approvalReason: decision.approval.required ? decision.approval.reason : undefined,
+  }
+}
+
+async function defaultZeroChatFilesystemPathResolver(
+  absolutePath: string,
+  context: { operation: ZeroChatFilesystemOperation; role: "request" | "workspaceRoot" },
+): Promise<string> {
+  try {
+    return await realpath(absolutePath)
+  } catch (error) {
+    if (context.operation !== "write" || context.role !== "request" || !isMissingPathError(error)) {
+      throw error
+    }
+
+    const resolvedParent = await realpath(path.dirname(absolutePath))
+    return path.join(resolvedParent, path.basename(absolutePath))
+  }
+}
+
+function filesystemApprovalFor(
+  operation: ZeroChatFilesystemOperation,
+  writeApprovalRequired = true,
+): ZeroChatFilesystemApproval {
+  if (operation === "write" && writeApprovalRequired) {
+    return { required: true, reason: "write_requires_user_approval" }
+  }
+  return { required: false }
+}
+
+function denied(
+  input: ZeroChatFilesystemPolicyInput,
+  reason: ZeroChatFilesystemPolicyReason,
+  details: Pick<ZeroChatFilesystemDeniedDecision, "error" | "resolvedPath" | "resolvedWorkspaceRoots"> = {},
+): ZeroChatFilesystemDeniedDecision {
+  return {
+    allowed: false,
+    operation: input.operation,
+    requestedPath: input.requestedPath,
+    reason,
+    approval: { required: false },
+    ...details,
+  }
+}
+
+function isPathInsideOrEqual(candidatePath: string, workspaceRoot: string): boolean {
+  const relativePath = path.relative(workspaceRoot, candidatePath)
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+}
+
+function safeErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+  return "unknown_error"
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 }

@@ -1,20 +1,36 @@
+import { chmod, mkdtemp, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import {
   capabilitiesFromInitializeResult,
   discoverRuntimeProfiles,
+  resolveExecutableForSpawn,
   runtimeDiscoveryEnv,
 } from "./runtime-discovery"
 
 const noDiscoveredCommands = async () => []
 
 describe("runtime discovery", () => {
+  test("resolves ACP executables before the Bun node proxy can lose shim PATH entries", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-bin-"))
+    const executablePath = join(tempDir, "shim-runtime")
+    await writeFile(executablePath, "#!/bin/sh\nexit 0\n")
+    await chmod(executablePath, 0o755)
+
+    expect(resolveExecutableForSpawn("shim-runtime", { PATH: tempDir })).toBe(executablePath)
+    expect(resolveExecutableForSpawn(executablePath, { PATH: "" })).toBe(executablePath)
+  })
+
   test("extracts runtime nuance capabilities from ACP initialize results", () => {
     expect(
       capabilitiesFromInitializeResult({
         agentCapabilities: {
+          auth: { logout: {} },
           loadSession: true,
-          sessionCapabilities: { cancel: {}, close: {}, resume: {} },
+          sessionCapabilities: { cancel: {}, close: {}, delete: {}, fork: {}, list: {}, resume: {} },
         },
+        protocolVersion: 1,
         runtimeCapabilities: {
           maxSessions: 4,
           runtimeConfigOptions: {
@@ -35,9 +51,16 @@ describe("runtime discovery", () => {
       },
       sessionIsolation: "unverified",
       sharedGatewayKey: true,
+      sdkProtocolVersion: "1",
+      supportsAuth: true,
       supportsCancel: true,
       supportsClose: true,
+      supportsLogout: true,
       supportsResume: true,
+      supportsSessionDelete: true,
+      supportsSessionFork: true,
+      supportsSessionList: true,
+      supportsSessionResume: true,
       supportsStructuredInteractions: true,
       thoughtLevels: ["medium", "high"],
     })
@@ -177,6 +200,34 @@ describe("runtime discovery", () => {
       command: ["bunx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
       status: "available",
     })
+  })
+
+  test("uses an extended ACP initialize probe timeout for OpenClaw", async () => {
+    const probeCalls: Array<{ command: string[]; timeoutMs?: number }> = []
+    await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      discoverAcpCommands: noDiscoveredCommands,
+      probeAcpCommand: async (command, options) => {
+        probeCalls.push({ command, timeoutMs: options?.timeoutMs })
+        return { ok: true }
+      },
+      runCommand: async (command) => {
+        if (command[0] === "command" && command[1] === "-v") {
+          return { ok: true, stdout: `/usr/bin/${command[2]}\n` }
+        }
+        return { ok: true, stdout: "" }
+      },
+    })
+
+    expect(probeCalls.find((call) => call.command.join(" ") === "openclaw acp")).toEqual({
+      command: ["openclaw", "acp"],
+      timeoutMs: 20_000,
+    })
+    expect(
+      probeCalls
+        .filter((call) => call.command.join(" ") !== "openclaw acp")
+        .every((call) => call.timeoutMs === undefined),
+    ).toBe(true)
   })
 
   test("does not synthesize a Hermes profile for non-Hermes base commands", async () => {
