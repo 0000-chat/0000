@@ -116,13 +116,28 @@ export async function discoverRuntimeProfiles(
   }
 
   for (const builtIn of BUILT_INS) {
-    const command = await resolveBuiltInCommand(builtIn, runCommand)
-    if (!command) {
+    const commands = await resolveBuiltInCommandCandidates(builtIn, runCommand)
+    if (commands.length === 0) {
       continue
     }
-    profiles.push(
-      await profileForBuiltIn({ ...builtIn, command }, runCommand, probeAcpCommand, discoverAcpCommands),
-    )
+    let fallbackProfile: BridgeRuntimeProfile | undefined
+    for (const command of commands) {
+      const profile = await profileForBuiltIn(
+        { ...builtIn, command },
+        runCommand,
+        probeAcpCommand,
+        discoverAcpCommands,
+      )
+      if (profile.status === "available") {
+        profiles.push(profile)
+        fallbackProfile = undefined
+        break
+      }
+      fallbackProfile ??= profile
+    }
+    if (fallbackProfile) {
+      profiles.push(fallbackProfile)
+    }
   }
 
   for (const command of input.customCommands ?? []) {
@@ -153,18 +168,19 @@ export async function discoverRuntimeProfiles(
   return dedupeRuntimeProfiles(profiles)
 }
 
-async function resolveBuiltInCommand(
+async function resolveBuiltInCommandCandidates(
   builtIn: { command: string[]; binary: string },
   runCommand: (command: string[]) => Promise<CommandResult>,
-): Promise<string[] | undefined> {
+): Promise<string[][]> {
   const candidates = builtIn.binary === "npx" ? ["npx", "bunx"] : [builtIn.binary]
+  const commands: string[][] = []
   for (const binary of candidates) {
     const exists = await runCommand(["command", "-v", binary])
     if (exists.ok) {
-      return [binary, ...builtIn.command.slice(1)]
+      commands.push([binary, ...builtIn.command.slice(1)])
     }
   }
-  return undefined
+  return commands
 }
 
 async function profileForBuiltIn(
