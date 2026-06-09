@@ -60,8 +60,8 @@ export type HermesAcpPromptResult = {
 export type HermesAcpFinalTextDiagnostics = {
   answerChunkCount: number
   answerTextLength: number
-  reason?: "codex_unclassified_message_chunks"
-  runtimeId: "codex" | "other"
+  reason?: "codex_unclassified_message_chunks" | "untrusted_message_chunks"
+  runtimeId: "claude-code" | "codex" | "other"
   thoughtChunkCount: number
   toolEventCount: number
   trustedFinalResultText: boolean
@@ -358,7 +358,7 @@ export class HermesAcpSession {
       rawResult,
       stopReason,
     })
-    const processedEvents = reclassifyUntrustedCodexMessageChunks(events, finalText.diagnostics)
+    const processedEvents = reclassifyUntrustedMessageChunks(events, finalText.diagnostics)
     await this.flushDeferredPromptEvents(events, processedEvents)
     return {
       sessionId,
@@ -802,7 +802,7 @@ export class HermesAcpSession {
   private shouldDeferAcpNotification(event: NormalizedBridgeEvent): boolean {
     return (
       this.lifecyclePhase === "livePrompt" &&
-      isCodexAcpCommand(this.command) &&
+      usesDeferredMessageChunkPolicy(this.command) &&
       event.source === "acp_bridge" &&
       event.eventType === "agent_message_chunk" &&
       event.part?.type === "text"
@@ -1322,23 +1322,25 @@ function extractFinalText(input: {
   const toolEventCount = input.events.filter(
     (event) => event.part?.type === "tool_call" || event.part?.type === "tool_result",
   ).length
-  const runtimeId = isCodexAcpCommand(input.command) ? "codex" : "other"
+  const runtimeId = classifyAcpRuntimeId(input.command)
   const trustedFinalText = extractTrustedFinalResultText(input.rawResult)
   const trustedFinalResultText = trustedFinalText !== undefined
-  const unclassifiedCodexTextPolicy =
-    runtimeId === "codex" &&
-    !trustedFinalResultText &&
-    thoughtEvents.length === 0 &&
-    toolEventCount > 0 &&
-    allAnswerEvents.length > 0
-      ? classifyUntrustedCodexMessageChunks(input.events)
+  const untrustedTextPolicy =
+    shouldApplyUntrustedMessageChunkPolicy({
+      allAnswerEvents,
+      runtimeId,
+      thoughtEvents,
+      toolEventCount,
+      trustedFinalResultText,
+    })
+      ? classifyUntrustedMessageChunks(input.events)
       : undefined
-  const answerEvents = unclassifiedCodexTextPolicy?.answerEvents ?? allAnswerEvents
+  const answerEvents = untrustedTextPolicy?.answerEvents ?? allAnswerEvents
   const answerText = answerEvents.map((event) => event.part?.text ?? "").join("")
   const shouldWithhold =
-    unclassifiedCodexTextPolicy !== undefined &&
+    untrustedTextPolicy !== undefined &&
     answerText.length === 0 &&
-    unclassifiedCodexTextPolicy.untrustedEvents.length > 0
+    untrustedTextPolicy.untrustedEvents.length > 0
   const diagnostics: HermesAcpFinalTextDiagnostics = {
     answerChunkCount: answerEvents.length,
     answerTextLength: answerText.length,
@@ -1348,8 +1350,9 @@ function extractFinalText(input: {
     trustedFinalResultText,
     withheld: shouldWithhold,
   }
-  if (unclassifiedCodexTextPolicy?.untrustedEvents.length) {
-    diagnostics.reason = "codex_unclassified_message_chunks"
+  if (untrustedTextPolicy?.untrustedEvents.length) {
+    diagnostics.reason =
+      runtimeId === "codex" ? "codex_unclassified_message_chunks" : "untrusted_message_chunks"
   }
   if (shouldWithhold) {
     return { diagnostics, text: "" }
@@ -1357,14 +1360,37 @@ function extractFinalText(input: {
   return { diagnostics, text: trustedFinalText ?? answerText }
 }
 
-function reclassifyUntrustedCodexMessageChunks(
+function shouldApplyUntrustedMessageChunkPolicy(input: {
+  allAnswerEvents: NormalizedBridgeEvent[]
+  runtimeId: HermesAcpFinalTextDiagnostics["runtimeId"]
+  thoughtEvents: NormalizedBridgeEvent[]
+  toolEventCount: number
+  trustedFinalResultText: boolean
+}): boolean {
+  if (
+    input.trustedFinalResultText ||
+    input.toolEventCount === 0 ||
+    input.allAnswerEvents.length === 0
+  ) {
+    return false
+  }
+  if (input.runtimeId === "codex") {
+    return input.thoughtEvents.length === 0
+  }
+  return input.runtimeId === "claude-code"
+}
+
+function reclassifyUntrustedMessageChunks(
   events: NormalizedBridgeEvent[],
   diagnostics: HermesAcpFinalTextDiagnostics,
 ): NormalizedBridgeEvent[] {
-  if (diagnostics.reason !== "codex_unclassified_message_chunks") {
+  if (
+    diagnostics.reason !== "codex_unclassified_message_chunks" &&
+    diagnostics.reason !== "untrusted_message_chunks"
+  ) {
     return events
   }
-  const untrustedEvents = new Set(classifyUntrustedCodexMessageChunks(events).untrustedEvents)
+  const untrustedEvents = new Set(classifyUntrustedMessageChunks(events).untrustedEvents)
   return events.map((event) =>
     untrustedEvents.has(event)
       ? reclassifyMessageChunkAsThinking(event)
@@ -1372,7 +1398,7 @@ function reclassifyUntrustedCodexMessageChunks(
   )
 }
 
-function classifyUntrustedCodexMessageChunks(events: NormalizedBridgeEvent[]): {
+function classifyUntrustedMessageChunks(events: NormalizedBridgeEvent[]): {
   answerEvents: NormalizedBridgeEvent[]
   untrustedEvents: NormalizedBridgeEvent[]
 } {
@@ -1425,8 +1451,26 @@ function reclassifyMessageChunkAsThinking(event: NormalizedBridgeEvent): Normali
   }
 }
 
+function classifyAcpRuntimeId(command: string[]): HermesAcpFinalTextDiagnostics["runtimeId"] {
+  if (isCodexAcpCommand(command)) {
+    return "codex"
+  }
+  if (isClaudeCodeAcpCommand(command)) {
+    return "claude-code"
+  }
+  return "other"
+}
+
+function usesDeferredMessageChunkPolicy(command: string[]): boolean {
+  return isCodexAcpCommand(command) || isClaudeCodeAcpCommand(command)
+}
+
 function isCodexAcpCommand(command: string[]): boolean {
   return command.some((part) => part.toLowerCase().includes("codex-acp"))
+}
+
+function isClaudeCodeAcpCommand(command: string[]): boolean {
+  return command.some((part) => part.toLowerCase().includes("claude-agent-acp"))
 }
 
 function extractTrustedFinalResultText(result: unknown): string | undefined {

@@ -1664,7 +1664,11 @@ export class BridgeSessionManager {
 
   private enqueueStreamChunkEvent(event: BridgeEventInput): void {
     const pending = this.pendingStreamChunkEvent
-    const eventTextLength = readBridgeEventText(event).length
+    const eventText = readBridgeEventText(event)
+    const eventTextLength = eventText.length
+    if (eventTextLength === 0) {
+      return
+    }
     if (
       pending &&
       (pending.eventType !== event.eventType ||

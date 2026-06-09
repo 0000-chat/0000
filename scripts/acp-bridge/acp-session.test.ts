@@ -202,6 +202,68 @@ describe("ACP final text extraction", () => {
     expect(result.text).toBe("normal answer")
     expect(result.finalText?.withheld).toBe(false)
   })
+
+  test("hides Claude Code ACP progress chunks before the last tool while keeping final text", async () => {
+    const observedEvents: Array<{ eventType: string; partType?: string }> = []
+    const session = new HermesAcpSession({
+      agentCommand: "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
+      onEvent: (event) => {
+        observedEvents.push({ eventType: event.eventType, partType: event.part?.type })
+      },
+      runtimeClient: createFakeRuntimeClient({
+        updates: [
+          { content: { text: "checking schema", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { name: "read", type: "tool_call" }, sessionUpdate: "tool_call" },
+          {
+            content: { status: "completed", toolCallId: "tool-1", type: "tool_call_update" },
+            sessionUpdate: "tool_call_update",
+          },
+          { content: { text: "planning writes", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { name: "write", type: "tool_call" }, sessionUpdate: "tool_call" },
+          {
+            content: { status: "completed", toolCallId: "tool-2", type: "tool_call_update" },
+            sessionUpdate: "tool_call_update",
+          },
+          { content: { text: "Done", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: ". All writes succeeded.", type: "text" }, sessionUpdate: "agent_message_chunk" },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.text).toBe("Done. All writes succeeded.")
+    expect(result.finalText).toMatchObject({
+      answerChunkCount: 2,
+      answerTextLength: 27,
+      reason: "untrusted_message_chunks",
+      runtimeId: "claude-code",
+      toolEventCount: 4,
+      withheld: false,
+    })
+    expect(result.events.map((event) => event.eventType)).toEqual([
+      "agent_thought_chunk",
+      "tool_call",
+      "tool_call_update",
+      "agent_thought_chunk",
+      "tool_call",
+      "tool_call_update",
+      "agent_message_chunk",
+      "agent_message_chunk",
+    ])
+    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(2)
+    expect(result.events.filter((event) => event.part?.type === "text")).toHaveLength(2)
+    expect(observedEvents).toEqual([
+      { eventType: "tool_call", partType: "tool_call" },
+      { eventType: "tool_call_update", partType: "tool_result" },
+      { eventType: "tool_call", partType: "tool_call" },
+      { eventType: "tool_call_update", partType: "tool_result" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_message_chunk", partType: "text" },
+      { eventType: "agent_message_chunk", partType: "text" },
+    ])
+  })
 })
 
 describe("ACP runtime adapter boundary", () => {

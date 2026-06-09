@@ -2966,6 +2966,47 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("suppresses empty ACP thought and message chunks before persistence", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: emitSessionEvents(context, [
+            streamChunkEvent("agent_thought_chunk", "", 1),
+            streamChunkEvent("agent_message_chunk", "", 2),
+            streamChunkEvent("agent_thought_chunk", "real thought", 3),
+            streamChunkEvent("agent_message_chunk", "real message", 4),
+          ]),
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    const chunks = flattenPersistedEvents(cloud.events)
+      .filter(
+        (event) =>
+          event.eventType === "agent_thought_chunk" ||
+          event.eventType === "agent_message_chunk",
+      )
+      .map((event) => ({
+        eventType: event.eventType,
+        sequence: event.sequence,
+        text: (event.normalizedPayload as { text?: string }).text,
+      }))
+    expect(chunks).toEqual([
+      { eventType: "agent_thought_chunk", sequence: 4, text: "real thought" },
+      { eventType: "agent_message_chunk", sequence: 5, text: "real message" },
+    ])
+  })
+
   test("does not coalesce ACP chunks across tool boundaries", async () => {
     const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
