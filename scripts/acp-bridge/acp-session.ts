@@ -3,9 +3,12 @@ import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildZeroChatHiddenSystemPrompt } from "./zero-chat-policy"
 import {
+  classifyRuntimeLogLine,
   type NormalizedBridgeEvent,
   normalizeAcpNotification,
   normalizeBridgeError,
+  normalizeRuntimeDiagnostic,
+  shouldSuppressRuntimeDiagnostic,
 } from "./event-normalizer"
 import type {
   BridgeAcpRawUpdate,
@@ -664,9 +667,9 @@ export class HermesAcpSession {
 
   private attachProcessHandlers(child: ChildProcessWithoutNullStreams): void {
     child.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8").trim()
-      if (text.length > 0) {
-        void this.onError?.(new Error(text))
+      const lines = chunk.toString("utf8").split(/\r?\n/)
+      for (const line of lines) {
+        void this.handleRuntimeLogLine(line)
       }
     })
     child.on("error", (error) => {
@@ -772,6 +775,27 @@ export class HermesAcpSession {
       await this.onEvent?.(event)
     }
     await this.onError?.(error)
+  }
+
+  private async handleRuntimeLogLine(line: string): Promise<void> {
+    const diagnostic = classifyRuntimeLogLine(line)
+    if (!diagnostic || shouldSuppressRuntimeDiagnostic(diagnostic)) {
+      return
+    }
+    if (diagnostic.severity === "warn") {
+      if (this.sessionId && !this.shouldSuppressAcpNotification()) {
+        const event = normalizeRuntimeDiagnostic(
+          diagnostic,
+          this.nextEventSequence,
+          this.sessionId,
+        )
+        this.nextEventSequence += 1
+        this.promptEvents.push(event)
+        await this.onEvent?.(event)
+      }
+      return
+    }
+    await this.emitError(new Error(diagnostic.text))
   }
 
   private shouldDeferAcpNotification(event: NormalizedBridgeEvent): boolean {
