@@ -598,10 +598,8 @@ export class BridgeSessionManager {
     if (!this.isCurrentSessionRecord(session)) {
       throw new Error(`ACP session ${session.sessionKey} was replaced before prompt completed`)
     }
-    if (
-      normalizeType(item) === "steer-session" &&
-      result.text.trim().length === 0
-    ) {
+    const emptyVisibleOutput = isEmptyVisiblePromptResult(result)
+    if (normalizeType(item) === "steer-session" && emptyVisibleOutput) {
       await this.markQueueResult(item, {
         ok: false,
         error: "steer_reprompt_failed",
@@ -670,6 +668,15 @@ export class BridgeSessionManager {
       })
     }
     const attachmentParts = attachmentPartsFromPromptEvents(result.events)
+    if (normalizeType(item) === "prompt" && emptyVisibleOutput && attachmentParts.length === 0) {
+      const diagnostic = buildEmptyFinalResponseDiagnostic(item, result)
+      this.enqueueEventWrite(session, diagnostic.event)
+      await this.drainEventWrites()
+      await this.markQueueResult(item, diagnostic.result)
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "empty_final_response")
+      await this.closeSession(session.sessionKey)
+      return
+    }
     if (attachmentParts.length > 0) {
       this.writeLog({
         level: "info",
@@ -1898,6 +1905,83 @@ export class BridgeSessionManager {
   private writeLog(entry: BridgeLogEntry): void {
     this.log?.(redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry)
   }
+}
+
+function isEmptyVisiblePromptResult(result: { text: string }): boolean {
+  return result.text.trim().length === 0
+}
+
+function buildEmptyFinalResponseDiagnostic(
+  item: BridgeSessionQueueItem,
+  result: {
+    finalText?: unknown
+    rawResult: unknown
+    stopReason?: string
+  },
+): {
+  event: NormalizedBridgeEvent
+  result: Record<string, unknown>
+} {
+  const reasonCode = "empty_final_response"
+  const message = "ACP runtime completed without visible assistant output."
+  const finalText = safeEmptyFinalTextDiagnostics(result.finalText)
+  return {
+    event: {
+      externalEventId: `${item.id}:empty_final_response`,
+      source: "bridge",
+      eventType: "bridge_error",
+      payload: {
+        finalText,
+        queueId: item.id,
+        reasonCode,
+        stopReason: result.stopReason,
+      },
+      part: {
+        type: "error",
+        text: message,
+        json: {
+          finalText,
+          reasonCode,
+          stopReason: result.stopReason,
+        },
+        status: "error",
+      },
+    },
+    result: {
+      ok: false,
+      error: reasonCode,
+      message,
+      reasonCode: "no_visible_assistant_output",
+      terminal: true,
+      finalText,
+      stopReason: result.stopReason,
+      result: result.rawResult,
+    },
+  }
+}
+
+function safeEmptyFinalTextDiagnostics(value: unknown): unknown {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+  const record = value as Record<string, unknown>
+  return removeUndefinedValues({
+    answerChunkCount: finiteNumber(record.answerChunkCount),
+    answerTextLength: finiteNumber(record.answerTextLength),
+    reason: typeof record.reason === "string" ? record.reason : undefined,
+    runtimeId: typeof record.runtimeId === "string" ? record.runtimeId : undefined,
+    thoughtChunkCount: finiteNumber(record.thoughtChunkCount),
+    toolEventCount: finiteNumber(record.toolEventCount),
+    trustedFinalResultText:
+      typeof record.trustedFinalResultText === "boolean"
+        ? record.trustedFinalResultText
+        : undefined,
+    withheld: typeof record.withheld === "boolean" ? record.withheld : undefined,
+  })
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
 function splitCommand(command: string): string[] {

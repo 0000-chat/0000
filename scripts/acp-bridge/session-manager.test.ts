@@ -2453,7 +2453,96 @@ describe("bridge session cwd safety", () => {
     })
   })
 
-  test("logs redacted diagnostics when Codex final text is withheld", async () => {
+  test("fails visibly when a prompt completes with hidden reasoning and no final assistant text", async () => {
+    const cloud = fakeCloudClient()
+    const logs: Array<Record<string, unknown>> = []
+    const hiddenThoughtEvent = {
+      eventType: "agent_thought_chunk",
+      externalEventId: "thought-1",
+      part: {
+        reasoningVisibility: "hidden" as const,
+        status: "streaming" as const,
+        text: "private reasoning",
+        type: "thinking" as const,
+      },
+      payload: { text: "private reasoning" },
+      source: "hermes_acp" as const,
+    }
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(hiddenThoughtEvent)
+          return {
+            events: [hiddenThoughtEvent],
+            finalText: {
+              answerChunkCount: 0,
+              answerTextLength: 0,
+              runtimeId: "codex",
+              thoughtChunkCount: 1,
+              toolEventCount: 1,
+              trustedFinalResultText: false,
+              withheld: false,
+            },
+            rawResult: { stopReason: "end_turn" },
+            sessionId: "session-1",
+            stopReason: "end_turn",
+            text: "",
+          }
+        },
+      }),
+      log: (entry) => logs.push(entry as Record<string, unknown>),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: {
+        error: "empty_final_response",
+        ok: false,
+        reasonCode: "no_visible_assistant_output",
+        terminal: true,
+      },
+    })
+    expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
+      json: {
+        finalText: expect.objectContaining({
+          answerChunkCount: 0,
+          answerTextLength: 0,
+          runtimeId: "codex",
+          thoughtChunkCount: 1,
+          toolEventCount: 1,
+          trustedFinalResultText: false,
+          withheld: false,
+        }),
+        reasonCode: "empty_final_response",
+        stopReason: "end_turn",
+      },
+      status: "error",
+      text: "ACP runtime completed without visible assistant output.",
+      type: "error",
+    })
+    const normalizedPayloads = cloud.events.flatMap((batch) =>
+      batch.map((event) => event.normalizedPayload),
+    )
+    expect(normalizedPayloads).toContainEqual(expect.objectContaining({
+      reasoningVisibility: "hidden",
+      text: "private reasoning",
+      type: "thinking",
+    }))
+    expect(JSON.stringify(cloud.results)).not.toContain("private reasoning")
+  })
+
+  test("logs redacted diagnostics when Codex final text is withheld and fails empty output", async () => {
     const cloud = fakeCloudClient()
     const logs: Array<Record<string, unknown>> = []
     const manager = new BridgeSessionManager({
@@ -2492,11 +2581,11 @@ describe("bridge session cwd safety", () => {
 
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-prompt",
-      result: { ok: true, text: "" },
+      result: { error: "empty_final_response", ok: false, terminal: true },
     })
     expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
       json: {
-        finalText: {
+        finalText: expect.objectContaining({
           answerChunkCount: 2,
           answerTextLength: 30,
           reason: "codex_unclassified_message_chunks",
@@ -2505,11 +2594,11 @@ describe("bridge session cwd safety", () => {
           toolEventCount: 1,
           trustedFinalResultText: false,
           withheld: true,
-        },
+        }),
+        reasonCode: "empty_final_response",
         stopReason: "end_turn",
       },
-      text: "",
-      type: "event",
+      type: "error",
     })
     expect(logs).toContainEqual(
       expect.objectContaining({
@@ -2523,6 +2612,86 @@ describe("bridge session cwd safety", () => {
       }),
     )
     expect(JSON.stringify({ events: cloud.events, logs })).not.toContain("private")
+  })
+
+  test("keeps final assistant text successful", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "visible answer",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: { ok: true, text: "visible answer" },
+    })
+  })
+
+  test("keeps attachment-only assistant output successful", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [
+            {
+              eventType: "file",
+              externalEventId: "file-1",
+              part: {
+                json: {
+                  filename: "result.txt",
+                  key: "attachments/result.txt",
+                  objectKey: "attachments/result.txt",
+                  status: "available",
+                  type: "file",
+                },
+                status: "complete",
+                type: "attachment",
+              },
+              payload: {},
+              source: "hermes_acp",
+            },
+          ],
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: { ok: true, parts: [expect.objectContaining({ type: "attachment" })], text: "" },
+    })
   })
 })
 
