@@ -2490,6 +2490,87 @@ describe("bridge session cwd safety", () => {
       payload: { text: "private reasoning" },
       source: "acp_bridge" as const,
     }
+    const sessionInfoActiveEvent = {
+      eventType: "unknown",
+      externalEventId: "session-info-active",
+      part: {
+        json: {
+          _meta: {
+            codex: {
+              threadStatus: {
+                activeFlags: ["background"],
+                type: "active",
+              },
+            },
+          },
+          sessionUpdate: "session_info_update",
+        },
+        status: "streaming" as const,
+        type: "event" as const,
+      },
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "session-1",
+          update: {
+            _meta: {
+              codex: {
+                threadStatus: {
+                  activeFlags: ["background"],
+                  type: "active",
+                },
+              },
+            },
+            sessionUpdate: "session_info_update",
+          },
+        },
+      },
+      source: "acp_bridge" as const,
+    }
+    const sessionInfoIdleEvent = {
+      ...sessionInfoActiveEvent,
+      externalEventId: "session-info-idle",
+      part: {
+        ...sessionInfoActiveEvent.part,
+        json: {
+          _meta: {
+            codex: {
+              threadStatus: {
+                type: "idle",
+              },
+            },
+          },
+          sessionUpdate: "session_info_update",
+        },
+      },
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "session-1",
+          update: {
+            _meta: {
+              codex: {
+                threadStatus: {
+                  type: "idle",
+                },
+              },
+            },
+            sessionUpdate: "session_info_update",
+          },
+        },
+      },
+    }
+    const toolCallEvent = {
+      eventType: "tool_call",
+      externalEventId: "tool-1",
+      part: {
+        json: { name: "shell" },
+        status: "streaming" as const,
+        type: "tool_call" as const,
+      },
+      payload: { content: { name: "shell", type: "tool_call" } },
+      source: "acp_bridge" as const,
+    }
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: (context) => ({
@@ -2497,8 +2578,17 @@ describe("bridge session cwd safety", () => {
         cancel: async () => {},
         sendUserMessage: async () => {
           context.onEvent(hiddenThoughtEvent)
+          context.onEvent(sessionInfoActiveEvent)
+          context.onEvent(toolCallEvent)
+          context.onEvent(sessionInfoIdleEvent)
+          const events = [
+            hiddenThoughtEvent,
+            sessionInfoActiveEvent,
+            toolCallEvent,
+            sessionInfoIdleEvent,
+          ]
           return {
-            events: [hiddenThoughtEvent],
+            events,
             finalText: {
               answerChunkCount: 0,
               answerTextLength: 0,
@@ -2548,6 +2638,28 @@ describe("bridge session cwd safety", () => {
         }),
         reasonCode: "empty_final_response",
         stopReason: "end_turn",
+        streamSummary: {
+          eventTypeCounts: {
+            agent_thought_chunk: 1,
+            tool_call: 1,
+            unknown: 2,
+          },
+          totalEventCount: 4,
+          unknownEvents: [
+            {
+              codexThreadStatus: "active",
+              hasTextLikeField: false,
+              method: "session/update",
+              sessionUpdate: "session_info_update",
+            },
+            {
+              codexThreadStatus: "idle",
+              hasTextLikeField: false,
+              method: "session/update",
+              sessionUpdate: "session_info_update",
+            },
+          ],
+        },
       },
       status: "error",
       text: "ACP runtime completed without visible assistant output.",
@@ -2562,6 +2674,7 @@ describe("bridge session cwd safety", () => {
       type: "thinking",
     }))
     expect(JSON.stringify(cloud.results)).not.toContain("private reasoning")
+    expect(JSON.stringify(cloud.results)).not.toContain("background")
   })
 
   test("logs redacted diagnostics when Codex final text is withheld and fails empty output", async () => {
