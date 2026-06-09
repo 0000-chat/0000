@@ -44,7 +44,7 @@ describe("bridge session cwd safety", () => {
     expect(manager.getStatus().activeSessions).toEqual([])
   })
 
-  test("ignores remote queue cwd by default", async () => {
+  test("honors remote queue cwd by default", async () => {
     const contexts: BridgeSessionContext[] = []
     const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
@@ -64,13 +64,13 @@ describe("bridge session cwd safety", () => {
       type: "prompt",
     })
 
-    expect(contexts[0]?.cwd).toBeUndefined()
+    expect(contexts[0]?.cwd).toBe("/Users/alice/private-project")
   })
 
-  test("honors remote queue cwd only when explicitly enabled", async () => {
+  test("ignores remote queue cwd only when explicitly disabled", async () => {
     const contexts: BridgeSessionContext[] = []
     const manager = new BridgeSessionManager({
-      allowRemoteCwd: true,
+      allowRemoteCwd: false,
       cloudClient: fakeCloudClient(),
       createSession: (context) => {
         contexts.push(context)
@@ -87,7 +87,54 @@ describe("bridge session cwd safety", () => {
       type: "prompt",
     })
 
-    expect(contexts[0]?.cwd).toBe("/Users/alice/private-project")
+    expect(contexts[0]?.cwd).toBeUndefined()
+  })
+
+  test("uses the honored queue cwd for MCP server context", async () => {
+    const mcpContexts: Array<Pick<BridgeSessionContext, "cwd">> = []
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createMcpServers: (context) => {
+        mcpContexts.push({ cwd: context.cwd })
+        return []
+      },
+      createSession: () => fakeSession(),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      cwd: "/Users/alice/private-project",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(mcpContexts[0]?.cwd).toBe("/Users/alice/private-project")
+  })
+
+  test("omits disabled queue cwd from MCP server context", async () => {
+    const mcpContexts: Array<Pick<BridgeSessionContext, "cwd">> = []
+    const manager = new BridgeSessionManager({
+      allowRemoteCwd: false,
+      cloudClient: fakeCloudClient(),
+      createMcpServers: (context) => {
+        mcpContexts.push({ cwd: context.cwd })
+        return []
+      },
+      createSession: () => fakeSession(),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      cwd: "/Users/alice/private-project",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(mcpContexts[0]?.cwd).toBeUndefined()
   })
 
   test("passes the real Convex agent session id into MCP server context", async () => {
