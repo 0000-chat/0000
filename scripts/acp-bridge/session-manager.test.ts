@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
 import { BridgeSupervisor } from "./bridge-supervisor"
-import { BridgeSessionManager, type BridgeSessionContext } from "./session-manager"
+import {
+  BridgeSessionManager,
+  type BridgeSessionContext,
+  type BridgeSessionQueueItem,
+} from "./session-manager"
+import type { NormalizedBridgeEvent } from "./event-normalizer"
 import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client"
 import { TerminalHandleRegistry } from "./terminal-handles"
 
@@ -2875,10 +2880,142 @@ describe("bridge session cwd safety", () => {
       result: { ok: true, parts: [expect.objectContaining({ type: "attachment" })], text: "" },
     })
   })
+
+  test("coalesces consecutive ACP thought chunks before persistence", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: emitSessionEvents(
+            context,
+            Array.from({ length: 10 }, (_, index) =>
+              streamChunkEvent("agent_thought_chunk", `thought-${index} `, index + 1),
+            ),
+          ),
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    const persisted = flattenPersistedEvents(cloud.events)
+    const thoughts = persisted.filter((event) => event.eventType === "agent_thought_chunk")
+    expect(thoughts).toHaveLength(1)
+    expect(thoughts[0]).toMatchObject({
+      eventType: "agent_thought_chunk",
+      sequence: 2,
+      normalizedPayload: {
+        chunkCount: 10,
+        firstSequence: 2,
+        lastSequence: 11,
+        text: "thought-0 thought-1 thought-2 thought-3 thought-4 thought-5 thought-6 thought-7 thought-8 thought-9 ",
+      },
+      rawPayload: {
+        chunkCount: 10,
+        coalesced: true,
+        firstSequence: 2,
+        lastSequence: 11,
+      },
+    })
+  })
+
+  test("coalesces consecutive ACP message chunks before persistence", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: emitSessionEvents(
+            context,
+            Array.from({ length: 10 }, (_, index) =>
+              streamChunkEvent("agent_message_chunk", `message-${index} `, index + 1),
+            ),
+          ),
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    const messages = flattenPersistedEvents(cloud.events).filter(
+      (event) => event.eventType === "agent_message_chunk",
+    )
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      eventType: "agent_message_chunk",
+      sequence: 2,
+      normalizedPayload: {
+        chunkCount: 10,
+        firstSequence: 2,
+        lastSequence: 11,
+        text: "message-0 message-1 message-2 message-3 message-4 message-5 message-6 message-7 message-8 message-9 ",
+      },
+    })
+  })
+
+  test("does not coalesce ACP chunks across tool boundaries", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: emitSessionEvents(context, [
+            streamChunkEvent("agent_thought_chunk", "before", 1),
+            toolCallEvent(2),
+            streamChunkEvent("agent_thought_chunk", "after", 3),
+          ]),
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    const persisted = flattenPersistedEvents(cloud.events)
+      .filter((event) =>
+        ["agent_thought_chunk", "tool_call"].includes(String(event.eventType)),
+      )
+      .map((event) => ({
+        eventType: event.eventType,
+        sequence: event.sequence,
+        text: (event.normalizedPayload as { text?: string }).text,
+      }))
+    expect(persisted).toEqual([
+      { eventType: "agent_thought_chunk", sequence: 2, text: "before" },
+      { eventType: "tool_call", sequence: 3, text: "tool started" },
+      { eventType: "agent_thought_chunk", sequence: 4, text: "after" },
+    ])
+  })
 })
 
 function fakeCloudClient() {
-  const events: Array<Array<{ normalizedPayload?: unknown; rawPayload?: unknown; source?: string }>> = []
+  const events: Array<
+    Array<{
+      eventType?: string
+      normalizedPayload?: unknown
+      rawPayload?: unknown
+      sequence?: number
+      source?: string
+    }>
+  > = []
   const results: Array<{ claimId: string; id: string; result: unknown }> = []
   const uploads: Array<{
     agentSessionId?: string
@@ -2891,9 +3028,7 @@ function fakeCloudClient() {
     events,
     results,
     uploads,
-    appendEvents: async <TResponse = Record<string, unknown>>(
-      input: Array<{ normalizedPayload?: unknown; rawPayload?: unknown; source?: string }>,
-    ) => {
+    appendEvents: async <TResponse = Record<string, unknown>>(input: Array<(typeof events)[number][number]>) => {
       events.push(input)
       return {} as TResponse
     },
@@ -2940,6 +3075,77 @@ function fakeCloudClient() {
       return {} as TResponse
     },
   }
+}
+
+function promptQueueItem(): BridgeSessionQueueItem {
+  return {
+    agentSessionId: "provider-session",
+    claimId: "claim-prompt",
+    id: "queue-prompt",
+    prompt: "hello",
+    threadId: "thread-1",
+    type: "prompt",
+  }
+}
+
+function streamChunkEvent(
+  eventType: "agent_message_chunk" | "agent_thought_chunk",
+  text: string,
+  sequence: number,
+): NormalizedBridgeEvent {
+  return {
+    eventType,
+    externalEventId: `session-1:${sequence}:${eventType}`,
+    part: {
+      status: "streaming",
+      text,
+      type: eventType === "agent_thought_chunk" ? "thinking" : "text",
+    },
+    payload: {
+      content: { text, type: "text" },
+      sessionUpdate: eventType,
+    },
+    source: "acp_bridge",
+  }
+}
+
+function toolCallEvent(sequence: number): NormalizedBridgeEvent {
+  return {
+    eventType: "tool_call",
+    externalEventId: `session-1:${sequence}:tool_call`,
+    part: {
+      json: { state: "input-available", toolCallId: "tool-1", toolName: "shell" },
+      status: "streaming",
+      text: "tool started",
+      type: "tool_call",
+    },
+    payload: { sessionUpdate: "tool_call", toolCallId: "tool-1" },
+    source: "acp_bridge",
+  }
+}
+
+function emitSessionEvents(
+  context: BridgeSessionContext,
+  events: NormalizedBridgeEvent[],
+): NormalizedBridgeEvent[] {
+  for (const event of events) {
+    context.onEvent(event)
+  }
+  return events
+}
+
+function flattenPersistedEvents(
+  batches: Array<
+    Array<{
+      eventType?: string
+      normalizedPayload?: unknown
+      rawPayload?: unknown
+      sequence?: number
+      source?: string
+    }>
+  >,
+) {
+  return batches.flat()
 }
 
 function fakeSession() {
