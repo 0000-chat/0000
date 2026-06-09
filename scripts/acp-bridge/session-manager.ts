@@ -1915,6 +1915,7 @@ function buildEmptyFinalResponseDiagnostic(
   item: BridgeSessionQueueItem,
   result: {
     finalText?: unknown
+    events?: NormalizedBridgeEvent[]
     rawResult: unknown
     stopReason?: string
   },
@@ -1925,6 +1926,7 @@ function buildEmptyFinalResponseDiagnostic(
   const reasonCode = "empty_final_response"
   const message = "ACP runtime completed without visible assistant output."
   const finalText = safeEmptyFinalTextDiagnostics(result.finalText)
+  const streamSummary = safeEmptyFinalStreamSummary(result.events)
   return {
     event: {
       externalEventId: `${item.id}:empty_final_response`,
@@ -1935,6 +1937,7 @@ function buildEmptyFinalResponseDiagnostic(
         queueId: item.id,
         reasonCode,
         stopReason: result.stopReason,
+        streamSummary,
       },
       part: {
         type: "error",
@@ -1943,6 +1946,7 @@ function buildEmptyFinalResponseDiagnostic(
           finalText,
           reasonCode,
           stopReason: result.stopReason,
+          streamSummary,
         },
         status: "error",
       },
@@ -1955,6 +1959,7 @@ function buildEmptyFinalResponseDiagnostic(
       terminal: true,
       finalText,
       stopReason: result.stopReason,
+      streamSummary,
       result: result.rawResult,
     },
   }
@@ -1978,6 +1983,55 @@ function safeEmptyFinalTextDiagnostics(value: unknown): unknown {
         : undefined,
     withheld: typeof record.withheld === "boolean" ? record.withheld : undefined,
   })
+}
+
+function safeEmptyFinalStreamSummary(events: NormalizedBridgeEvent[] | undefined): unknown {
+  if (!events) {
+    return undefined
+  }
+  const eventTypeCounts: Record<string, number> = {}
+  const unknownEvents: Array<Record<string, unknown>> = []
+  for (const event of events) {
+    eventTypeCounts[event.eventType] = (eventTypeCounts[event.eventType] ?? 0) + 1
+    if (event.eventType === "unknown" && unknownEvents.length < 10) {
+      unknownEvents.push(summarizeUnknownBridgeEvent(event))
+    }
+  }
+  return removeUndefinedValues({
+    eventTypeCounts,
+    totalEventCount: events.length,
+    unknownEvents: unknownEvents.length > 0 ? unknownEvents : undefined,
+  })
+}
+
+function summarizeUnknownBridgeEvent(event: NormalizedBridgeEvent): Record<string, unknown> {
+  const payload = isRecord(event.payload) ? event.payload : {}
+  const params = isRecord(payload.params) ? payload.params : {}
+  const update = isRecord(params.update) ? params.update : {}
+  const meta = isRecord(update._meta) ? update._meta : {}
+  const codexMeta = isRecord(meta.codex) ? meta.codex : {}
+  const threadStatus = isRecord(codexMeta.threadStatus) ? codexMeta.threadStatus : {}
+  return removeUndefinedValues({
+    method: readString(payload.method),
+    sessionUpdate: readString(update.sessionUpdate) ?? readString(params.sessionUpdate),
+    codexThreadStatus: readString(threadStatus.type),
+    hasTextLikeField: hasTextLikeField(update),
+  })
+}
+
+function hasTextLikeField(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false
+  }
+  const content = isRecord(value.content) ? value.content : undefined
+  return (
+    readString(value.text) !== undefined ||
+    readString(value.delta) !== undefined ||
+    readString(value.message) !== undefined ||
+    readString(value.markdown) !== undefined ||
+    readString(value.output) !== undefined ||
+    readString(content?.text) !== undefined
+  )
 }
 
 function finiteNumber(value: unknown): number | undefined {

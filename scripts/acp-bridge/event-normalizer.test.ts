@@ -426,6 +426,48 @@ test("normalizes single-key ACP thought chunks as hidden thinking", () => {
   })
 })
 
+test("preserves Codex session info updates as metadata-only events", () => {
+  const event = normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          _meta: {
+            codex: {
+              threadStatus: {
+                activeFlags: ["background"],
+                type: "active",
+              },
+            },
+          },
+          sessionUpdate: "session_info_update",
+        },
+      },
+    },
+    20,
+  )
+
+  assert.equal(event.eventType, "session_info_update")
+  assert.equal(event.source, "acp_bridge")
+  assert.deepEqual(event.part, {
+    json: {
+      _meta: {
+        codex: {
+          threadStatus: {
+            activeFlags: ["background"],
+            type: "active",
+          },
+        },
+      },
+      sessionUpdate: "session_info_update",
+    },
+    status: "streaming",
+    type: "event",
+  })
+  assert.equal(JSON.stringify(event.part).includes("assistant answer"), false)
+})
+
 test("preserves user-visible ACP thought summaries", () => {
   const event = normalizeAcpNotification(
     {
