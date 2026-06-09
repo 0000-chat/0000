@@ -2098,7 +2098,7 @@ function isStreamChunkBridgeEvent(event: BridgeEventInput): boolean {
 function createCoalescedBridgeStreamChunkEvent(
   event: BridgeEventInput,
 ): CoalescedBridgeStreamChunkEvent {
-  const text = readBridgeEventText(event)
+  const text = normalizeCoalescedBridgeStreamChunkText(event.eventType, readBridgeEventText(event))
   return {
     chunkCount: 1,
     event,
@@ -2116,7 +2116,7 @@ function appendCoalescedBridgeStreamChunkEvent(
   pending: CoalescedBridgeStreamChunkEvent,
   event: BridgeEventInput,
 ): void {
-  const text = readBridgeEventText(event)
+  const text = normalizeCoalescedBridgeStreamChunkText(event.eventType, readBridgeEventText(event))
   pending.chunkCount += 1
   pending.lastSequence = event.sequence
   pending.lastUpdatedAt = event.createdAt
@@ -2175,6 +2175,13 @@ function mergeBridgeEventTextPayload(
 
 function readBridgeEventText(event: BridgeEventInput): string {
   return readPayloadText(event.normalizedPayload) ?? readPayloadText(event.rawPayload) ?? ""
+}
+
+function normalizeCoalescedBridgeStreamChunkText(eventType: string, text: string): string {
+  if (eventType !== "agent_thought_chunk") {
+    return text
+  }
+  return text.replace(/[ \t]*\r?\n[ \t]*/g, " ")
 }
 
 function readPayloadText(payload: unknown): string | undefined {

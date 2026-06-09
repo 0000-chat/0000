@@ -2926,6 +2926,41 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("compacts newline-delimited ACP thought chunks before persistence", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: emitSessionEvents(context, [
+            streamChunkEvent("agent_thought_chunk", "checking repository state\n", 1),
+            streamChunkEvent("agent_thought_chunk", "running targeted tests\n", 2),
+            streamChunkEvent("agent_thought_chunk", "preparing the final diff", 3),
+          ]),
+          rawResult: { stopReason: "end_turn" },
+          sessionId: "session-1",
+          stopReason: "end_turn",
+          text: "ok",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    const thoughts = flattenPersistedEvents(cloud.events).filter(
+      (event) => event.eventType === "agent_thought_chunk",
+    )
+    expect(thoughts).toHaveLength(1)
+    expect(thoughts[0]).toMatchObject({
+      eventType: "agent_thought_chunk",
+      normalizedPayload: {
+        text: "checking repository state running targeted tests preparing the final diff",
+      },
+    })
+  })
+
   test("coalesces consecutive ACP message chunks before persistence", async () => {
     const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
