@@ -174,6 +174,8 @@ type EventWriteOutcome = { ok: true; count: number } | { ok: false; count: numbe
 
 const EVENT_BATCH_MAX_SIZE = 25
 const EVENT_BATCH_FLUSH_MS = 300
+const STREAM_CHUNK_COALESCE_MAX_CHARS = 4_000
+const STREAM_CHUNK_COALESCE_MAX_COUNT = 32
 const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250
 const APPROVAL_RESPONSE_SESSION_POLL_MS = 10
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000
@@ -276,6 +278,7 @@ export class BridgeSessionManager {
   private readonly cancelledQueueItemIds = new Set<string>()
   private readonly eventBatch: BridgeEventInput[] = []
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = []
+  private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined
   private eventBatchTimer: ReturnType<typeof setTimeout> | undefined
   private nextSequence = 1
   private nextGeneration = 1
@@ -1425,6 +1428,7 @@ export class BridgeSessionManager {
       (queueState?.pendingQueueItemIds.length ?? 0) > 0 || Boolean(queueState?.runningQueueItemId)
     const hasEventWrites =
       this.eventBatch.length > 0 ||
+      this.pendingStreamChunkEvent !== undefined ||
       this.pendingEventWrites.length > 0 ||
       this.eventBatchTimer !== undefined
     const hasPendingPermissions = session.acp.hasPendingPermissionRequests?.() === true
@@ -1608,6 +1612,7 @@ export class BridgeSessionManager {
   }
 
   private async drainEventWrites(): Promise<void> {
+    this.flushPendingStreamChunkEvent()
     this.flushEventBatch()
     const pending = this.pendingEventWrites.splice(0, this.pendingEventWrites.length)
     const outcomes = await Promise.all(pending)
@@ -1621,6 +1626,11 @@ export class BridgeSessionManager {
   }
 
   private enqueueBridgeEvent(event: BridgeEventInput): void {
+    if (isStreamChunkBridgeEvent(event)) {
+      this.enqueueStreamChunkEvent(event)
+      return
+    }
+    this.flushPendingStreamChunkEvent()
     this.eventBatch.push(event)
     if (this.eventBatch.length >= EVENT_BATCH_MAX_SIZE) {
       this.flushEventBatch()
@@ -1640,6 +1650,7 @@ export class BridgeSessionManager {
   }
 
   private flushEventBatch(): void {
+    this.flushPendingStreamChunkEvent()
     if (this.eventBatchTimer !== undefined) {
       clearTimeout(this.eventBatchTimer)
       this.eventBatchTimer = undefined
@@ -1649,6 +1660,36 @@ export class BridgeSessionManager {
     }
     const events = this.eventBatch.splice(0, this.eventBatch.length)
     this.trackEventWrite(this.appendEventBatchWithFallback(events))
+  }
+
+  private enqueueStreamChunkEvent(event: BridgeEventInput): void {
+    const pending = this.pendingStreamChunkEvent
+    const eventTextLength = readBridgeEventText(event).length
+    if (
+      pending &&
+      (pending.eventType !== event.eventType ||
+        pending.chunkCount >= STREAM_CHUNK_COALESCE_MAX_COUNT ||
+        pending.textLength + eventTextLength > STREAM_CHUNK_COALESCE_MAX_CHARS)
+    ) {
+      this.flushPendingStreamChunkEvent()
+    }
+
+    if (!this.pendingStreamChunkEvent) {
+      this.pendingStreamChunkEvent = createCoalescedBridgeStreamChunkEvent(event)
+      this.scheduleEventBatchFlush()
+      return
+    }
+
+    appendCoalescedBridgeStreamChunkEvent(this.pendingStreamChunkEvent, event)
+    this.scheduleEventBatchFlush()
+  }
+
+  private flushPendingStreamChunkEvent(): void {
+    if (!this.pendingStreamChunkEvent) {
+      return
+    }
+    this.eventBatch.push(finalizeCoalescedBridgeStreamChunkEvent(this.pendingStreamChunkEvent))
+    this.pendingStreamChunkEvent = undefined
   }
 
   private trackEventWrite(write: Promise<EventWriteOutcome>): void {
@@ -2031,6 +2072,119 @@ function hasTextLikeField(value: unknown): boolean {
     readString(value.markdown) !== undefined ||
     readString(value.output) !== undefined ||
     readString(content?.text) !== undefined
+  )
+}
+
+type CoalescedBridgeStreamChunkEvent = {
+  chunkCount: number
+  event: BridgeEventInput
+  eventType: string
+  firstCreatedAt?: number
+  firstSequence: number
+  lastSequence: number
+  lastUpdatedAt?: number
+  text: string
+  textLength: number
+}
+
+function isStreamChunkBridgeEvent(event: BridgeEventInput): boolean {
+  return event.eventType === "agent_thought_chunk" || event.eventType === "agent_message_chunk"
+}
+
+function createCoalescedBridgeStreamChunkEvent(
+  event: BridgeEventInput,
+): CoalescedBridgeStreamChunkEvent {
+  const text = readBridgeEventText(event)
+  return {
+    chunkCount: 1,
+    event,
+    eventType: event.eventType,
+    firstCreatedAt: event.createdAt,
+    firstSequence: event.sequence,
+    lastSequence: event.sequence,
+    lastUpdatedAt: event.createdAt,
+    text,
+    textLength: text.length,
+  }
+}
+
+function appendCoalescedBridgeStreamChunkEvent(
+  pending: CoalescedBridgeStreamChunkEvent,
+  event: BridgeEventInput,
+): void {
+  const text = readBridgeEventText(event)
+  pending.chunkCount += 1
+  pending.lastSequence = event.sequence
+  pending.lastUpdatedAt = event.createdAt
+  pending.text += text
+  pending.textLength += text.length
+}
+
+function finalizeCoalescedBridgeStreamChunkEvent(
+  pending: CoalescedBridgeStreamChunkEvent,
+): BridgeEventInput {
+  const metadata =
+    pending.chunkCount > 1
+      ? removeUndefinedValues({
+          chunkCount: pending.chunkCount,
+          firstCreatedAt: pending.firstCreatedAt,
+          firstSequence: pending.firstSequence,
+          lastSequence: pending.lastSequence,
+          lastUpdatedAt: pending.lastUpdatedAt,
+        })
+      : {}
+  return {
+    ...pending.event,
+    normalizedPayload: mergeBridgeEventTextPayload(pending.event.normalizedPayload, pending.text, metadata),
+    rawPayload: mergeBridgeEventTextPayload(
+      pending.event.rawPayload,
+      pending.text,
+      pending.chunkCount > 1 ? { ...metadata, coalesced: true } : metadata,
+    ),
+    sequence: pending.firstSequence,
+    createdAt: pending.firstCreatedAt,
+  }
+}
+
+function mergeBridgeEventTextPayload(
+  payload: unknown,
+  text: string,
+  metadata: Record<string, unknown>,
+): unknown {
+  if (!isRecord(payload)) {
+    return removeUndefinedValues({ ...metadata, text })
+  }
+  const content = isRecord(payload.content) ? payload.content : undefined
+  return removeUndefinedValues({
+    ...payload,
+    ...metadata,
+    ...(typeof payload.text === "string" ? { text } : {}),
+    ...(typeof payload.delta === "string" ? { delta: text } : {}),
+    ...(typeof payload.message === "string" ? { message: text } : {}),
+    ...(typeof payload.markdown === "string" ? { markdown: text } : {}),
+    ...(typeof payload.output === "string" ? { output: text } : {}),
+    ...(content && typeof content.text === "string"
+      ? { content: { ...content, text } }
+      : {}),
+  })
+}
+
+function readBridgeEventText(event: BridgeEventInput): string {
+  return readPayloadText(event.normalizedPayload) ?? readPayloadText(event.rawPayload) ?? ""
+}
+
+function readPayloadText(payload: unknown): string | undefined {
+  if (!isRecord(payload)) {
+    return undefined
+  }
+  const content = isRecord(payload.content) ? payload.content : undefined
+  return (
+    readString(payload.text) ??
+    readString(payload.delta) ??
+    readString(payload.message) ??
+    readString(payload.markdown) ??
+    readString(payload.output) ??
+    readString(content?.text)
   )
 }
 
