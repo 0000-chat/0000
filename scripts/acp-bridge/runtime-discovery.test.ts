@@ -117,7 +117,7 @@ describe("runtime discovery", () => {
     const codex = profiles.find((profile) => profile.kind === "codex")
     expect(codex).toMatchObject({
       id: "codex:codex-acp",
-      command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+      command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
       diagnostics: { acp: "supported", contextMode: "available", mcpServers: 2 },
       capabilities: { nativeSkills: true, nativeHooks: true, nativeMcp: true },
     })
@@ -202,7 +202,7 @@ describe("runtime discovery", () => {
     })
   })
 
-  test("uses an extended ACP initialize probe timeout for OpenClaw", async () => {
+  test("uses extended ACP initialize probe timeouts for runtimes with slower startup", async () => {
     const probeCalls: Array<{ command: string[]; timeoutMs?: number }> = []
     await discoverRuntimeProfiles({
       baseAgentCommand: "hermes acp",
@@ -219,20 +219,31 @@ describe("runtime discovery", () => {
       },
     })
 
+    expect(
+      probeCalls.some(
+        (call) =>
+          call.command.join(" ") === "npx --yes @agentclientprotocol/codex-acp@0.0.45" &&
+          call.timeoutMs === 30_000,
+      ),
+    ).toBe(true)
     expect(probeCalls.find((call) => call.command.join(" ") === "openclaw acp")).toEqual({
       command: ["openclaw", "acp"],
       timeoutMs: 20_000,
     })
     expect(
       probeCalls
-        .filter((call) => call.command.join(" ") !== "openclaw acp")
+        .filter(
+          (call) =>
+            call.command.join(" ") !== "npx --yes @agentclientprotocol/codex-acp@0.0.45" &&
+            call.command.join(" ") !== "openclaw acp",
+        )
         .every((call) => call.timeoutMs === undefined),
     ).toBe(true)
   })
 
   test("does not synthesize a Hermes profile for non-Hermes base commands", async () => {
     const profiles = await discoverRuntimeProfiles({
-      baseAgentCommand: "npx --yes @zed-industries/codex-acp@latest",
+      baseAgentCommand: "npx --yes @agentclientprotocol/codex-acp@latest",
       discoverAcpCommands: noDiscoveredCommands,
       probeAcpCommand: async () => ({ ok: true }),
       runCommand: async (command) => {

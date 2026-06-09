@@ -81,7 +81,13 @@ const BUILT_INS: Array<{
   probeTimeoutMs?: number
 }> = [
   { kind: "hermes", label: "Hermes", command: ["hermes", "acp"], binary: "hermes" },
-  { kind: "codex", label: "Codex", command: DEFAULT_CODEX_ACP_COMMAND.split(" "), binary: "npx" },
+  {
+    kind: "codex",
+    label: "Codex",
+    command: DEFAULT_CODEX_ACP_COMMAND.split(" "),
+    binary: "npx",
+    probeTimeoutMs: 30_000,
+  },
   {
     kind: "claude-code",
     label: "Claude Code",
@@ -205,6 +211,7 @@ async function profileForBuiltIn(
       },
       probeAcpCommand,
       discoverAcpCommands,
+      { timeoutMs: builtIn.probeTimeoutMs },
     )
   }
 

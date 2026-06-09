@@ -4,10 +4,10 @@ import { buildRuntimeSmokeMatrix, formatRuntimeSmokeMatrix } from "./runtime-smo
 import type { BridgeRuntimeProfile } from "./runtime-profiles"
 
 const profile = (overrides: Partial<BridgeRuntimeProfile>): BridgeRuntimeProfile => ({
-  id: "codex:npx-zed-codex-acp",
+  id: "codex:npx-agentclientprotocol-codex-acp",
   kind: "codex",
   label: "Codex",
-  command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+  command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
   status: "available",
   diagnostics: { acp: "supported" },
   availableCommands: [],

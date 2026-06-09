@@ -778,7 +778,7 @@ export class HermesAcpSession {
     return (
       this.lifecyclePhase === "livePrompt" &&
       isCodexAcpCommand(this.command) &&
-      event.source === "hermes_acp" &&
+      event.source === "acp_bridge" &&
       event.eventType === "agent_message_chunk" &&
       event.part?.type === "text"
     )
@@ -1287,12 +1287,12 @@ function extractFinalText(input: {
   stopReason?: string
 }): { diagnostics: HermesAcpFinalTextDiagnostics; text: string } {
   const answerEvents = input.events.filter(
-    (event) => event.source === "hermes_acp" && event.part?.type === "text",
+    (event) => event.source === "acp_bridge" && event.part?.type === "text",
   )
   const answerText = answerEvents.map((event) => event.part?.text ?? "").join("")
   const thoughtEvents = input.events.filter(
     (event) =>
-      event.source === "hermes_acp" &&
+      event.source === "acp_bridge" &&
       (event.eventType === "agent_thought_chunk" || event.part?.type === "thinking"),
   )
   const toolEventCount = input.events.filter(
@@ -1331,7 +1331,7 @@ function reclassifyUntrustedCodexMessageChunks(
     return events
   }
   return events.map((event) =>
-    event.source === "hermes_acp" && event.part?.type === "text"
+    event.source === "acp_bridge" && event.part?.type === "text"
       ? reclassifyMessageChunkAsThinking(event)
       : event,
   )

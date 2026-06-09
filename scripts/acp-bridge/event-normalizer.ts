@@ -20,7 +20,7 @@ export type BridgeMessagePart = {
 
 export type NormalizedBridgeEvent = {
   externalEventId: string
-  source: "hermes_acp" | "bridge"
+  source: "acp_bridge" | "bridge"
   eventType: string
   sessionId?: string
   externalRequestId?: string
@@ -91,7 +91,7 @@ export function normalizeAcpNotification(
 
   return {
     externalEventId,
-    source: "hermes_acp",
+    source: "acp_bridge",
     eventType,
     sessionId,
     externalRequestId: readString(record.id) ?? readNumberString(record.id),
