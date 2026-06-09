@@ -29,6 +29,13 @@ export type NormalizedBridgeEvent = {
   attachmentUpload?: BridgeAttachmentUploadCandidate
 }
 
+export type RuntimeLogSeverity = "debug" | "info" | "warn" | "error"
+
+export type RuntimeLogClassification = {
+  severity: RuntimeLogSeverity
+  text: string
+}
+
 export type BridgeAttachmentUploadCandidate =
   | {
       kind: "base64"
@@ -218,6 +225,48 @@ export function normalizeBridgeError(
   }
 }
 
+export function normalizeRuntimeDiagnostic(
+  diagnostic: RuntimeLogClassification,
+  sequence: number,
+  sessionId?: string,
+): NormalizedBridgeEvent {
+  return {
+    externalEventId: buildExternalEventId(sessionId, sequence, "runtime_diagnostic"),
+    source: "bridge",
+    eventType: "runtime_diagnostic",
+    sessionId,
+    payload: {
+      message: truncateEventText(diagnostic.text),
+      severity: diagnostic.severity,
+    },
+    part: {
+      type: "event",
+      json: {
+        message: truncateEventText(diagnostic.text),
+        severity: diagnostic.severity,
+      },
+      status: "streaming",
+    },
+  }
+}
+
+export function classifyRuntimeLogLine(line: string): RuntimeLogClassification | undefined {
+  const text = truncateEventText(redactRuntimeLogLine(line.trim()))
+  if (!text) {
+    return undefined
+  }
+  return {
+    severity: parseRuntimeLogSeverity(text),
+    text,
+  }
+}
+
+export function shouldSuppressRuntimeDiagnostic(
+  diagnostic: RuntimeLogClassification | undefined,
+): boolean {
+  return diagnostic?.severity === "debug" || diagnostic?.severity === "info"
+}
+
 export function extractTextFromAcpUpdate(update: unknown): string | undefined {
   const record = asRecord(update)
   const content = asRecord(record.content)
@@ -231,6 +280,46 @@ export function extractTextFromAcpUpdate(update: unknown): string | undefined {
     readString(record.code) ??
     readString(record.output)
   )
+}
+
+function parseRuntimeLogSeverity(text: string): RuntimeLogSeverity {
+  if (/\b(?:fatal|panic)\b/i.test(text)) {
+    return "error"
+  }
+  if (/(?:^|[\s:[({])(?:err|error|exception|traceback)(?:$|[\s:\])},.])/i.test(text)) {
+    return "error"
+  }
+  if (/(?:^|[\s:[({])(?:warn|warning)(?:$|[\s:\])},.])/i.test(text)) {
+    return "warn"
+  }
+  if (/(?:^|[\s:[({])(?:debug|trace)(?:$|[\s:\])},.])/i.test(text)) {
+    return "debug"
+  }
+  if (/(?:^|[\s:[({])info(?:$|[\s:\])},.])/i.test(text)) {
+    return "info"
+  }
+  if (isRoutineHermesLifecycleLogLine(text)) {
+    return "info"
+  }
+  return "error"
+}
+
+function isRoutineHermesLifecycleLogLine(text: string): boolean {
+  return (
+    /acp_adapter\.server:\s*ACP client connected/i.test(text) ||
+    /Initialize from unknown \(protocol v\d+\)/i.test(text) ||
+    /run_agent:\s*Loaded environment variables/i.test(text) ||
+    /OpenAI client created/i.test(text) ||
+    /agent\.auxiliary_client:\s*Vision auto-detect/i.test(text) ||
+    /tools\.terminal_tool:\s*local environment ready/i.test(text) ||
+    /OpenAI client closed/i.test(text)
+  )
+}
+
+function redactRuntimeLogLine(text: string): string {
+  return text
+    .replace(BEARER_TOKEN_PATTERN, "Bearer [REDACTED]")
+    .replace(KEY_VALUE_SECRET_PATTERN, "$1[REDACTED]")
 }
 
 function normalizeSessionUpdatePart(kind: string, update: JsonRecord): BridgeMessagePart {

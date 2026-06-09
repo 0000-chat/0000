@@ -1,7 +1,13 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import { normalizeAcpNotification } from "./event-normalizer"
+import {
+  classifyRuntimeLogLine,
+  normalizeAcpNotification,
+  normalizeBridgeError,
+  normalizeRuntimeDiagnostic,
+  shouldSuppressRuntimeDiagnostic,
+} from "./event-normalizer"
 
 test("normalizes ACP available command updates for UI consumption", () => {
   const event = normalizeAcpNotification(
@@ -32,6 +38,65 @@ test("normalizes ACP available command updates for UI consumption", () => {
       { description: "Set the current goal", name: "goal" },
     ],
   })
+})
+
+test("classifies routine Hermes lifecycle logs as suppressible info diagnostics", () => {
+  for (const line of [
+    "acp_adapter.server: ACP client connected",
+    "Initialize from unknown (protocol v1)",
+    "run_agent: Loaded environment variables from profile",
+    "OpenAI client created for request",
+    "agent.auxiliary_client: Vision auto-detect enabled",
+    "tools.terminal_tool: local environment ready",
+    "OpenAI client closed request_complete",
+  ]) {
+    const diagnostic = classifyRuntimeLogLine(line)
+    assert.equal(diagnostic?.severity, "info")
+    assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), true)
+  }
+})
+
+test("classifies WARN runtime logs as runtime_diagnostic events", () => {
+  const diagnostic = classifyRuntimeLogLine("WARN acp_adapter.server: transient reconnect")
+
+  assert.deepEqual(diagnostic, {
+    severity: "warn",
+    text: "WARN acp_adapter.server: transient reconnect",
+  })
+  assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), false)
+
+  const event = normalizeRuntimeDiagnostic(diagnostic!, 4, "session-1")
+
+  assert.equal(event.eventType, "runtime_diagnostic")
+  assert.equal(event.part?.type, "event")
+  assert.deepEqual(event.payload, {
+    message: "WARN acp_adapter.server: transient reconnect",
+    severity: "warn",
+  })
+})
+
+test("keeps ERROR and PANIC runtime logs as bridge errors", () => {
+  for (const line of [
+    "ERROR acp_adapter.server: runtime crashed",
+    "FATAL worker failed to initialize",
+    "panic: unexpected nil session",
+  ]) {
+    const diagnostic = classifyRuntimeLogLine(line)
+    assert.equal(diagnostic?.severity, "error")
+    assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), false)
+
+    const event = normalizeBridgeError(new Error(diagnostic!.text), 5, "session-1")
+    assert.equal(event.eventType, "bridge_error")
+    assert.equal(event.part?.type, "error")
+  }
+})
+
+test("redacts sensitive runtime log values before classification", () => {
+  const diagnostic = classifyRuntimeLogLine("ERROR token=sk-secret Bearer abc123")
+
+  assert.equal(diagnostic?.severity, "error")
+  assert.equal(diagnostic?.text.includes("sk-secret"), false)
+  assert.equal(diagnostic?.text.includes("abc123"), false)
 })
 
 test("ignores malformed ACP command entries without dropping the update", () => {

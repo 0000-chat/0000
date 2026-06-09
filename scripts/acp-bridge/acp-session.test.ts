@@ -226,6 +226,113 @@ describe("ACP runtime adapter boundary", () => {
     )
   })
 
+  test("suppresses routine Hermes stderr lifecycle logs", async () => {
+    const processes: ChildProcessWithoutNullStreams[] = []
+    const events: Array<{ eventType: string }> = []
+    const errors: Error[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      onError: (error) => {
+        errors.push(error)
+      },
+      onEvent: (event) => {
+        events.push({ eventType: event.eventType })
+      },
+      spawnProcess: createFakeAcpProcess({ processes }),
+    })
+
+    await session.start()
+    const stderr = processes[0]?.stderr as PassThrough | undefined
+    stderr?.write(
+      [
+        "acp_adapter.server: ACP client connected",
+        "Initialize from unknown (protocol v1)",
+        "run_agent: Loaded environment variables from profile",
+        "OpenAI client created for request",
+        "agent.auxiliary_client: Vision auto-detect enabled",
+        "tools.terminal_tool: local environment ready",
+        "OpenAI client closed request_complete",
+      ].join("\n"),
+    )
+    await waitForMicrotasks()
+
+    expect(events).toEqual([])
+    expect(errors).toEqual([])
+  })
+
+  test("maps WARN Hermes stderr logs to runtime diagnostics", async () => {
+    const processes: ChildProcessWithoutNullStreams[] = []
+    const events: Array<{ eventType: string; payload: unknown; partType?: string }> = []
+    const errors: Error[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      onError: (error) => {
+        errors.push(error)
+      },
+      onEvent: (event) => {
+        events.push({
+          eventType: event.eventType,
+          partType: event.part?.type,
+          payload: event.payload,
+        })
+      },
+      spawnProcess: createFakeAcpProcess({ processes }),
+    })
+
+    await session.start()
+    const stderr = processes[0]?.stderr as PassThrough | undefined
+    stderr?.write("WARN acp_adapter.server: transient reconnect\n")
+    await waitForMicrotasks()
+
+    expect(errors).toEqual([])
+    expect(events).toEqual([
+      {
+        eventType: "runtime_diagnostic",
+        partType: "event",
+        payload: {
+          message: "WARN acp_adapter.server: transient reconnect",
+          severity: "warn",
+        },
+      },
+    ])
+  })
+
+  test("keeps ERROR Hermes stderr logs as bridge errors", async () => {
+    const processes: ChildProcessWithoutNullStreams[] = []
+    const events: Array<{ eventType: string; partStatus?: string; partType?: string }> = []
+    const errors: Error[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      onError: (error) => {
+        errors.push(error)
+      },
+      onEvent: (event) => {
+        events.push({
+          eventType: event.eventType,
+          partStatus: event.part?.status,
+          partType: event.part?.type,
+        })
+      },
+      spawnProcess: createFakeAcpProcess({ processes }),
+    })
+
+    await session.start()
+    const stderr = processes[0]?.stderr as PassThrough | undefined
+    stderr?.write("ERROR acp_adapter.server: runtime crashed\n")
+    await waitForMicrotasks()
+
+    expect(errors.map((error) => error.message)).toEqual([
+      "ERROR acp_adapter.server: runtime crashed",
+    ])
+    expect(events).toEqual([
+      {
+        eventType: "bridge_error",
+        partStatus: "error",
+        partType: "error",
+      },
+    ])
+  })
+
   test("force-kills the ACP process when graceful termination does not exit", async () => {
     const kills: Array<NodeJS.Signals | undefined> = []
     const session = new HermesAcpSession({
@@ -615,6 +722,7 @@ function createFakeRuntimeClient(options: {
 function createFakeAcpProcess(options: {
   emitExitOnKill?: boolean
   kills?: Array<NodeJS.Signals | undefined>
+  processes?: ChildProcessWithoutNullStreams[]
   useTerminalOnPrompt?: boolean
 }): () => ChildProcessWithoutNullStreams {
   return () => {
@@ -663,8 +771,13 @@ function createFakeAcpProcess(options: {
       stdin,
       stdout,
     }) as unknown as ChildProcessWithoutNullStreams
+    options.processes?.push(process)
     return process
   }
+}
+
+async function waitForMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve))
 }
 
 function normalizeFakeSessionUpdate(update: Record<string, unknown>): Record<string, unknown> {
