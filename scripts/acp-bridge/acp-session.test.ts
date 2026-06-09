@@ -57,7 +57,7 @@ describe("ACP final text extraction", () => {
     })
   })
 
-  test("withholds Codex ACP text when tool activity has no classified thought events", async () => {
+  test("keeps post-tool Codex ACP text while hiding pre-tool unclassified text", async () => {
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
       runtimeClient: createFakeRuntimeClient({
@@ -71,16 +71,48 @@ describe("ACP final text extraction", () => {
 
     const result = await session.sendUserMessage("hello")
 
-    expect(result.text).toBe("")
-    expect(result.events.filter((event) => event.part?.type === "text")).toEqual([])
-    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(2)
-    expect(result.events.filter((event) => event.eventType === "agent_thought_chunk")).toHaveLength(2)
-    expect(result.finalText?.withheld).toBe(true)
+    expect(result.text).toBe("\nfinal answer")
+    expect(result.events.filter((event) => event.part?.type === "text")).toHaveLength(1)
+    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(1)
+    expect(result.events.filter((event) => event.eventType === "agent_thought_chunk")).toHaveLength(1)
+    expect(result.finalText?.withheld).toBe(false)
     expect(result.finalText).toMatchObject({
-      answerChunkCount: 2,
-      answerTextLength: 30,
+      answerChunkCount: 1,
+      answerTextLength: 13,
       runtimeId: "codex",
       thoughtChunkCount: 0,
+    })
+  })
+
+  test("keeps Codex ACP final chunks emitted after completed tool activity", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      runtimeClient: createFakeRuntimeClient({
+        updates: [
+          { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
+          {
+            content: { status: "completed", toolCallId: "tool-1", type: "tool_call_update" },
+            sessionUpdate: "tool_call_update",
+          },
+          { content: { text: "Final", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " answer", type: "text" }, sessionUpdate: "agent_message_chunk" },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.text).toBe("Final answer")
+    expect(result.events.filter((event) => event.part?.type === "text")).toHaveLength(2)
+    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(0)
+    expect(result.finalText).toMatchObject({
+      answerChunkCount: 2,
+      answerTextLength: 12,
+      runtimeId: "codex",
+      thoughtChunkCount: 0,
+      toolEventCount: 2,
+      trustedFinalResultText: false,
+      withheld: false,
     })
   })
 
@@ -102,7 +134,7 @@ describe("ACP final text extraction", () => {
     expect(result.finalText?.withheld).toBe(false)
   })
 
-  test("reclassifies streamed Codex message chunks as hidden thinking when a later tool appears", async () => {
+  test("hides pre-tool Codex message chunks while keeping post-tool final chunks", async () => {
     const observedEvents: Array<{ eventType: string; partType?: string }> = []
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
@@ -123,33 +155,33 @@ describe("ACP final text extraction", () => {
 
     const result = await session.sendUserMessage("hello")
 
-    expect(result.text).toBe("")
+    expect(result.text).toBe(" second thought")
     expect(result.finalText).toMatchObject({
-      answerChunkCount: 4,
-      answerTextLength: 28,
+      answerChunkCount: 2,
+      answerTextLength: 15,
       reason: "codex_unclassified_message_chunks",
       runtimeId: "codex",
       thoughtChunkCount: 0,
       toolEventCount: 2,
-      withheld: true,
+      withheld: false,
     })
     expect(result.events.map((event) => event.eventType)).toEqual([
       "agent_thought_chunk",
       "agent_thought_chunk",
       "tool_call",
       "tool_call_update",
-      "agent_thought_chunk",
-      "agent_thought_chunk",
+      "agent_message_chunk",
+      "agent_message_chunk",
     ])
-    expect(result.events.filter((event) => event.part?.type === "text")).toEqual([])
-    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(4)
+    expect(result.events.filter((event) => event.part?.type === "text")).toHaveLength(2)
+    expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(2)
     expect(observedEvents).toEqual([
       { eventType: "tool_call", partType: "tool_call" },
       { eventType: "tool_call_update", partType: "tool_result" },
       { eventType: "agent_thought_chunk", partType: "thinking" },
       { eventType: "agent_thought_chunk", partType: "thinking" },
-      { eventType: "agent_thought_chunk", partType: "thinking" },
-      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_message_chunk", partType: "text" },
+      { eventType: "agent_message_chunk", partType: "text" },
     ])
   })
 
