@@ -276,10 +276,12 @@ describe("bridge security defaults", () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600)
   })
 
-  test("keeps remote cwd disabled unless explicitly enabled", () => {
-    expect(getAllowRemoteCwd({}, {})).toBe(false)
+  test("honors remote cwd by default with an explicit environment opt-out", () => {
+    expect(getAllowRemoteCwd({}, {})).toBe(true)
     expect(getAllowRemoteCwd({ "allow-remote-cwd": "true" }, {})).toBe(true)
     expect(getAllowRemoteCwd({}, { ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD: "1" })).toBe(true)
+    expect(getAllowRemoteCwd({}, { ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD: "0" })).toBe(false)
+    expect(getAllowRemoteCwd({}, { ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD: "false" })).toBe(false)
   })
 
   test("prints startup security defaults", () => {

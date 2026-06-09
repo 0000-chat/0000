@@ -289,7 +289,7 @@ export class BridgeSessionManager {
     this.log = options.log
     this.supervisor = options.supervisor
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
-    this.allowRemoteCwd = options.allowRemoteCwd === true
+    this.allowRemoteCwd = options.allowRemoteCwd !== false
     this.resumeEnabled = options.resumeEnabled === true
     this.requireScopedIdentity = options.requireScopedIdentity === true
     this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS
@@ -1299,7 +1299,7 @@ export class BridgeSessionManager {
         initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
         mcpServers: this.createMcpServers({
           agentSessionId: item.agentSessionId,
-          cwd: item.cwd,
+          cwd,
           organizationId: item.organizationId,
           sessionKey,
           threadId,
