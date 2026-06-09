@@ -729,11 +729,15 @@ export class HermesAcpSession {
   private async handlePermissionRequest(
     request: BridgePermissionRequest,
   ): Promise<BridgePermissionResponse> {
-    const event = normalizeAcpNotification(
+    let event = normalizeAcpNotification(
       { method: "session/request_permission", params: request },
       this.nextEventSequence,
     )
     this.nextEventSequence += 1
+    event = {
+      ...event,
+      externalRequestId: event.externalRequestId ?? event.externalEventId,
+    }
     if (this.shouldSuppressAcpNotification()) {
       return { outcome: { outcome: "cancelled" } }
     }
@@ -747,9 +751,6 @@ export class HermesAcpSession {
     await this.onEvent?.(event)
     if (this.autoApprovePermissionRequests) {
       return permissionResponseFromApproval(extractPermissionOptions(request), true)
-    }
-    if (!event.externalRequestId) {
-      return { outcome: { outcome: "cancelled" } }
     }
     return await new Promise<BridgePermissionResponse>((resolve) => {
       this.pendingPermissionRequests.set(event.externalRequestId ?? "", {

@@ -20,6 +20,7 @@ import type {
 import type {
   InitializeResponse,
   PromptResponse,
+  RequestPermissionResponse,
   SessionConfigOption,
 } from "@agentclientprotocol/sdk"
 import { TerminalHandleRegistry } from "./terminal-handles"
@@ -204,6 +205,47 @@ describe("ACP final text extraction", () => {
 })
 
 describe("ACP runtime adapter boundary", () => {
+  test("keeps SDK permission callbacks pending with an app-actionable request id", async () => {
+    const permissionEventSeen = deferred<void>()
+    const permissionResponses: RequestPermissionResponse[] = []
+    let permissionExternalRequestId: string | undefined
+
+    const session = new HermesAcpSession({
+      agentCommand: "codex acp",
+      onEvent: (event) => {
+        if (event.eventType === "permission_request") {
+          permissionExternalRequestId = event.externalRequestId
+          permissionEventSeen.resolve()
+        }
+      },
+      spawnProcess: createFakeAcpProcess({
+        permissionResponses,
+        requestPermissionOnPrompt: true,
+      }),
+    })
+
+    await session.start()
+    const resultPromise = session.sendUserMessage("needs approval")
+
+    await permissionEventSeen.promise
+    await waitForMicrotasks()
+
+    expect(typeof permissionExternalRequestId).toBe("string")
+    expect(permissionExternalRequestId).not.toHaveLength(0)
+
+    const delivered = await session.respondToPermissionRequest(permissionExternalRequestId ?? "", {
+      approved: true,
+    })
+    expect(delivered).toBe(true)
+
+    const result = await resultPromise
+
+    expect(permissionResponses).toEqual([
+      { outcome: { optionId: "allow_once", outcome: "selected" } },
+    ])
+    expect(result.stopReason).toBe("end_turn")
+  })
+
   test("lets the node proxy run its process-group kill fallback before bridge escalation", () => {
     expect(DEFAULT_ACP_PROCESS_EXIT_GRACE_MS).toBeGreaterThan(1000)
   })
@@ -722,7 +764,9 @@ function createFakeRuntimeClient(options: {
 function createFakeAcpProcess(options: {
   emitExitOnKill?: boolean
   kills?: Array<NodeJS.Signals | undefined>
+  permissionResponses?: RequestPermissionResponse[]
   processes?: ChildProcessWithoutNullStreams[]
+  requestPermissionOnPrompt?: boolean
   useTerminalOnPrompt?: boolean
 }): () => ChildProcessWithoutNullStreams {
   return () => {
@@ -746,6 +790,26 @@ function createFakeAcpProcess(options: {
           })
           await terminal.currentOutput()
           await terminal.waitForExit()
+        }
+        if (options.requestPermissionOnPrompt) {
+          const response = await agentConnection.requestPermission({
+            options: [
+              { kind: "allow_once", name: "Allow once", optionId: "allow_once" },
+              { kind: "reject_once", name: "Reject once", optionId: "reject_once" },
+            ],
+            sessionId: params.sessionId,
+            toolCall: {
+              kind: "edit",
+              status: "pending",
+              title: "Edit file",
+              toolCallId: "tool-approval-1",
+            },
+          })
+          options.permissionResponses?.push(response)
+          return {
+            stopReason:
+              response.outcome.outcome === "selected" ? "end_turn" : "cancelled",
+          }
         }
         return { stopReason: "end_turn" }
       },
@@ -778,6 +842,16 @@ function createFakeAcpProcess(options: {
 
 async function waitForMicrotasks(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve))
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+  return { promise, reject, resolve }
 }
 
 function normalizeFakeSessionUpdate(update: Record<string, unknown>): Record<string, unknown> {
