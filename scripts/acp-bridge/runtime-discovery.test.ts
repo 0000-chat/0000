@@ -202,6 +202,47 @@ describe("runtime discovery", () => {
     })
   })
 
+  test("falls back to bunx when npx exists but the ACP package command fails to probe", async () => {
+    const probeCalls: string[] = []
+    const profiles = await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      discoverAcpCommands: noDiscoveredCommands,
+      probeAcpCommand: async (command) => {
+        const key = command.join(" ")
+        probeCalls.push(key)
+        if (key === "npx --yes @agentclientprotocol/codex-acp@0.0.45") {
+          return { ok: false, reason: "sh: codex-acp: command not found" }
+        }
+        return { ok: true }
+      },
+      runCommand: async (command) => {
+        const key = command.join(" ")
+        if (key === "command -v npx") {
+          return { ok: true, stdout: "/home/dev/.volta/bin/npx\n" }
+        }
+        if (key === "command -v bunx") {
+          return { ok: true, stdout: "/home/dev/.bun/bin/bunx\n" }
+        }
+        if (key === "codex --version") {
+          return { ok: true, stdout: "codex-cli 1.0.0\n" }
+        }
+        if (key === "codex mcp list") {
+          return { ok: true, stdout: "" }
+        }
+        return { ok: false, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(probeCalls).toContain("npx --yes @agentclientprotocol/codex-acp@0.0.45")
+    expect(probeCalls).toContain("bunx --yes @agentclientprotocol/codex-acp@0.0.45")
+    expect(profiles.find((profile) => profile.kind === "codex")).toMatchObject({
+      id: "codex:codex-acp",
+      command: ["bunx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+      diagnostics: { acp: "supported" },
+      status: "available",
+    })
+  })
+
   test("uses extended ACP initialize probe timeouts for runtimes with slower startup", async () => {
     const probeCalls: Array<{ command: string[]; timeoutMs?: number }> = []
     await discoverRuntimeProfiles({
