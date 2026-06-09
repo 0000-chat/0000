@@ -232,7 +232,7 @@ describe("bridge multi-organization config", () => {
 
 describe("bridge security defaults", () => {
   test("pins default package-backed ACP runtime commands", () => {
-    expect(DEFAULT_CODEX_ACP_COMMAND).toBe("npx --yes @zed-industries/codex-acp@0.15.0")
+    expect(DEFAULT_CODEX_ACP_COMMAND).toBe("npx --yes @agentclientprotocol/codex-acp@0.0.45")
     expect(DEFAULT_CLAUDE_CODE_ACP_COMMAND).toBe(
       "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
     )

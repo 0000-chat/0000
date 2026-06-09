@@ -169,7 +169,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@zed-industries/codex-acp@latest"],
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@latest"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -194,8 +194,9 @@ describe("bridge session cwd safety", () => {
 
   test("mirrors prompt lifecycle into the shadow supervisor", async () => {
     const supervisor = new BridgeSupervisor()
+    const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
-      cloudClient: fakeCloudClient(),
+      cloudClient: cloud,
       createSession: (context) => ({
         close: async () => {},
         cancel: async () => {},
@@ -205,7 +206,7 @@ describe("bridge session cwd safety", () => {
             externalEventId: "choice-1",
             part: { type: "choice", status: "streaming" },
             payload: {},
-            source: "hermes_acp",
+            source: "acp_bridge",
           })
           return {
             events: [],
@@ -215,10 +216,21 @@ describe("bridge session cwd safety", () => {
           }
         },
       }),
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
       supervisor,
     })
 
     await manager.handleQueueItem({
+      bridgeProfileId: "codex:codex-acp",
       claimId: "claim-1",
       id: "queue-1",
       prompt: "hello",
@@ -230,6 +242,16 @@ describe("bridge session cwd safety", () => {
       checkpoint: "completed",
       claimId: "claim-1",
       queueItemId: "queue-1",
+    })
+    const acpEvent = cloud.events.flat().find((event) => event.source === "acp_bridge")
+    expect(acpEvent?.rawPayload).toMatchObject({
+      runtimeCommand: {
+        executable: "npx",
+        package: "@agentclientprotocol/codex-acp@0.0.45",
+      },
+      runtimeKind: "codex",
+      runtimeLabel: "Codex",
+      runtimeProfileId: "codex:codex-acp",
     })
   })
 
@@ -259,7 +281,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -300,7 +322,7 @@ describe("bridge session cwd safety", () => {
       "claude-code:claude-acp",
     ])
     expect(contexts.map((context) => context.agentCommand)).toEqual([
-      ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+      ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
       ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
     ])
     expect(closedProfiles).toContain("codex:codex-acp")
@@ -337,7 +359,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -384,7 +406,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -407,7 +429,7 @@ describe("bridge session cwd safety", () => {
     expect(contexts[0]?.agentCommand).toEqual([
       "npx",
       "--yes",
-      "@zed-industries/codex-acp@0.15.0",
+      "@agentclientprotocol/codex-acp@0.0.45",
     ])
   })
 
@@ -753,7 +775,7 @@ describe("bridge session cwd safety", () => {
                 type: "attachment",
               },
               payload: {},
-              source: "hermes_acp",
+              source: "acp_bridge",
             },
           ],
           rawResult: {},
@@ -828,7 +850,7 @@ describe("bridge session cwd safety", () => {
                 status: "pending_upload",
                 type: "agent_attachment_upload",
               },
-              source: "hermes_acp",
+              source: "acp_bridge",
             },
           ],
           rawResult: {},
@@ -2466,7 +2488,7 @@ describe("bridge session cwd safety", () => {
         type: "thinking" as const,
       },
       payload: { text: "private reasoning" },
-      source: "hermes_acp" as const,
+      source: "acp_bridge" as const,
     }
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
@@ -2669,7 +2691,7 @@ describe("bridge session cwd safety", () => {
                 type: "attachment",
               },
               payload: {},
-              source: "hermes_acp",
+              source: "acp_bridge",
             },
           ],
           rawResult: { stopReason: "end_turn" },
@@ -2696,7 +2718,7 @@ describe("bridge session cwd safety", () => {
 })
 
 function fakeCloudClient() {
-  const events: Array<Array<{ normalizedPayload?: unknown }>> = []
+  const events: Array<Array<{ normalizedPayload?: unknown; rawPayload?: unknown; source?: string }>> = []
   const results: Array<{ claimId: string; id: string; result: unknown }> = []
   const uploads: Array<{
     agentSessionId?: string
@@ -2710,7 +2732,7 @@ function fakeCloudClient() {
     results,
     uploads,
     appendEvents: async <TResponse = Record<string, unknown>>(
-      input: Array<{ normalizedPayload?: unknown }>,
+      input: Array<{ normalizedPayload?: unknown; rawPayload?: unknown; source?: string }>,
     ) => {
       events.push(input)
       return {} as TResponse

@@ -33,7 +33,7 @@ type RuntimeRequest = {
 describe("ACP final text extraction", () => {
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
+      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "ACP", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -59,7 +59,7 @@ describe("ACP final text extraction", () => {
 
   test("withholds Codex ACP text when tool activity has no classified thought events", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
+      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -86,7 +86,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps Codex ACP answer chunks when the turn has classified thought events", async () => {
     const session = new HermesAcpSession({
-      agentCommand: ["npx", "--yes", "@zed-industries/codex-acp@0.15.0"],
+      agentCommand: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_thought_chunk" },
@@ -105,7 +105,7 @@ describe("ACP final text extraction", () => {
   test("reclassifies streamed Codex message chunks as hidden thinking when a later tool appears", async () => {
     const observedEvents: Array<{ eventType: string; partType?: string }> = []
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @zed-industries/codex-acp@0.15.0",
+      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
       onEvent: (event) => {
         observedEvents.push({ eventType: event.eventType, partType: event.part?.type })
       },

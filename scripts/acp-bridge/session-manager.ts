@@ -2034,18 +2034,50 @@ function toBridgeEvent(
   sequence: number,
 ): BridgeEventInput {
   const shouldRedactPayload = event.eventType === "bridge_error" || event.part?.type === "error"
+  const rawPayload = withRuntimeEventMetadata(event.payload, record.runtimeProfile)
   return {
     threadId: record.threadId,
     agentSessionId: record.providerSessionKey,
     eventType: event.eventType,
     sequence,
-    rawPayload: shouldRedactPayload ? redactLogValue(event.payload) : event.payload,
+    rawPayload: shouldRedactPayload ? redactLogValue(rawPayload) : rawPayload,
     normalizedPayload: shouldRedactPayload ? redactLogValue(event.part) : event.part,
     source: event.source,
     externalEventId: event.externalEventId,
     externalRequestId: event.externalRequestId,
     createdAt: Date.now(),
   }
+}
+
+function withRuntimeEventMetadata(
+  payload: unknown,
+  runtimeProfile: BridgeRuntimeProfile | undefined,
+): unknown {
+  if (!runtimeProfile || !isRecord(payload)) {
+    return payload
+  }
+  return removeUndefinedValues({
+    ...payload,
+    runtimeProfileId: runtimeProfile.id,
+    runtimeKind: runtimeProfile.kind,
+    runtimeLabel: runtimeProfile.label,
+    runtimeCommand: summarizeRuntimeCommand(runtimeProfile.command),
+  })
+}
+
+function summarizeRuntimeCommand(command: string[] | undefined):
+  | {
+      executable?: string
+      package?: string
+    }
+  | undefined {
+  if (!command || command.length === 0) {
+    return undefined
+  }
+  return removeUndefinedValues({
+    executable: command[0],
+    package: command.find((part) => part.startsWith("@") || part.includes("codex-acp")),
+  })
 }
 
 function normalizeType(item: BridgeSessionQueueItem): string {

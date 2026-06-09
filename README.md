@@ -71,7 +71,7 @@ installs should use `bun run bridge start`.
 By default the bridge starts `hermes acp`. You can connect other ACP runtimes:
 
 ```bash
-bun run bridge start --runtime-command "npx --yes @zed-industries/codex-acp@0.15.0"
+bun run bridge start --runtime-command "npx --yes @agentclientprotocol/codex-acp@0.0.45"
 bun run bridge start --runtime-command "npx -y @agentclientprotocol/claude-agent-acp@0.39.0"
 ```
 
