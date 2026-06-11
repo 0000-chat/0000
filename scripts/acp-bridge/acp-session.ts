@@ -235,6 +235,7 @@ export class HermesAcpSession {
   private closed = false
   private started = false
   private currentConfigOptions = new Map<string, string>()
+  private lastRequestActivityAt = Date.now()
   sessionId?: string
   capabilities?: HermesAcpRuntimeCapabilities
 
@@ -648,12 +649,20 @@ export class HermesAcpSession {
   private async withRequestTimeout<T>(method: string, run: () => Promise<T>): Promise<T> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
+      this.markRequestActivity()
       return await Promise.race([
         run(),
         new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => {
-            reject(new Error(`ACP request timed out: ${method}`))
-          }, this.requestTimeoutMs)
+          const checkTimeout = () => {
+            const idleForMs = Date.now() - this.lastRequestActivityAt
+            const remainingMs = this.requestTimeoutMs - idleForMs
+            if (remainingMs <= 0) {
+              reject(new Error(`ACP request timed out: ${method}`))
+              return
+            }
+            timeout = setTimeout(checkTimeout, remainingMs)
+          }
+          timeout = setTimeout(checkTimeout, this.requestTimeoutMs)
         }),
       ])
     } catch (error) {
@@ -663,6 +672,10 @@ export class HermesAcpSession {
         clearTimeout(timeout)
       }
     }
+  }
+
+  private markRequestActivity(): void {
+    this.lastRequestActivityAt = Date.now()
   }
 
   private attachProcessHandlers(child: ChildProcessWithoutNullStreams): void {
@@ -685,6 +698,7 @@ export class HermesAcpSession {
   }
 
   private handleSessionUpdate(update: BridgeAcpRawUpdate): void {
+    this.markRequestActivity()
     const event = normalizeAcpNotification(
       { method: "session/update", params: update },
       this.nextEventSequence,
@@ -702,6 +716,7 @@ export class HermesAcpSession {
   }
 
   private async handleRuntimeActivity(activity: SdkAcpRuntimeActivity): Promise<void> {
+    this.markRequestActivity()
     if (this.shouldSuppressAcpNotification()) {
       return
     }
@@ -729,6 +744,7 @@ export class HermesAcpSession {
   private async handlePermissionRequest(
     request: BridgePermissionRequest,
   ): Promise<BridgePermissionResponse> {
+    this.markRequestActivity()
     let event = normalizeAcpNotification(
       { method: "session/request_permission", params: request },
       this.nextEventSequence,
@@ -769,6 +785,7 @@ export class HermesAcpSession {
   }
 
   private async emitError(error: Error): Promise<void> {
+    this.markRequestActivity()
     if (this.sessionId) {
       const event = normalizeBridgeError(error, this.nextEventSequence, this.sessionId)
       this.nextEventSequence += 1
@@ -813,6 +830,7 @@ export class HermesAcpSession {
     originalEvents: NormalizedBridgeEvent[],
     processedEvents: NormalizedBridgeEvent[],
   ): Promise<void> {
+    this.markRequestActivity()
     if (this.deferredPromptEvents.length === 0) {
       return
     }
