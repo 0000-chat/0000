@@ -3130,8 +3130,9 @@ describe("bridge session cwd safety", () => {
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-prompt",
       result: {
-        error: "ACP session/prompt failed: [redacted]",
+        error: "ACP prompt request timed out.",
         ok: false,
+        reasonCode: "acp_method_timeout",
         terminal: true,
       },
     })
