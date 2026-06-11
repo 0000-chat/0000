@@ -2500,6 +2500,73 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("terminalizes ACP prompt request timeouts without retrying the same prompt", async () => {
+    const cloud = fakeCloudClient()
+    let closeCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {
+          closeCount += 1
+        },
+        cancel: async () => {},
+        getPromptTimeoutDiagnostics: () => ({
+          deferredPromptEventCount: 1,
+          eventTypeCounts: { permission_request: 2, tool_call: 1 },
+          externalContinuity: { attempted: true, fallback: false, loaded: true },
+          lastPromptEventType: "permission_request",
+          lifecyclePhase: "livePrompt",
+          pendingPermissionRequestCount: 1,
+          promptEventCount: 3,
+          requestTimeoutMs: 600_000,
+        }),
+        sendUserMessage: async () => {
+          throw new Error("ACP request timed out: session/prompt")
+        },
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+
+    expect(closeCount).toBe(1)
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: {
+        error: "ACP prompt request timed out.",
+        ok: false,
+        diagnostics: {
+          deferredPromptEventCount: 1,
+          eventTypeCounts: { permission_request: 2, tool_call: 1 },
+          externalContinuity: { attempted: true, fallback: false, loaded: true },
+          lastPromptEventType: "permission_request",
+          lifecyclePhase: "livePrompt",
+          pendingPermissionRequestCount: 1,
+          promptEventCount: 3,
+          requestTimeoutMs: 600_000,
+        },
+        reasonCode: "acp_method_timeout",
+        terminal: true,
+      },
+    })
+    expect(cloud.events.at(-1)?.at(-1)?.normalizedPayload).toMatchObject({
+      json: {
+        diagnostics: {
+          eventTypeCounts: { permission_request: 2, tool_call: 1 },
+          pendingPermissionRequestCount: 1,
+        },
+        reasonCode: "acp_method_timeout",
+      },
+      text: "ACP prompt request timed out.",
+      type: "error",
+    })
+  })
+
   test("revive-session falls back to thread history when native resume is disabled", async () => {
     const contexts: BridgeSessionContext[] = []
     const cloud = fakeCloudClient()
