@@ -3112,6 +3112,30 @@ describe("bridge session cwd safety", () => {
       { eventType: "agent_thought_chunk", sequence: 4, text: "after" },
     ])
   })
+
+  test("marks ACP prompt timeouts as terminal queue failures", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        ...fakeSession(),
+        sendUserMessage: async () => {
+          throw new Error("ACP session/prompt failed: ACP request timed out: session/prompt")
+        },
+      }),
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: {
+        error: "ACP session/prompt failed: [redacted]",
+        ok: false,
+        terminal: true,
+      },
+    })
+  })
 })
 
 function fakeCloudClient() {

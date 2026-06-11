@@ -31,6 +31,9 @@ type RuntimeRequest = {
   params: unknown
 }
 
+type FakeRuntimeUpdate = Record<string, unknown>
+type DelayedFakeRuntimeUpdate = { delayMs: number; update: FakeRuntimeUpdate }
+
 describe("ACP final text extraction", () => {
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
@@ -328,6 +331,29 @@ describe("ACP runtime adapter boundary", () => {
     await expect(session.sendUserMessage("hello")).rejects.toThrow(
       "ACP session/prompt failed: provider_login_failed (code -32603)",
     )
+  })
+
+  test("extends prompt timeout while ACP activity continues", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "codex acp",
+      requestTimeoutMs: 30,
+      runtimeClient: createFakeRuntimeClient({
+        promptDelayMs: 20,
+        updates: [
+          {
+            delayMs: 20,
+            update: {
+              content: { text: "still working", type: "text" },
+              sessionUpdate: "agent_message_chunk",
+            },
+          },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("long but active")
+
+    expect(result.stopReason).toBe("end_turn")
   })
 
   test("suppresses routine Hermes stderr lifecycle logs", async () => {
@@ -749,10 +775,11 @@ describe("ACP runtime adapter boundary", () => {
 function createFakeRuntimeClient(options: {
   configOptions?: Array<{ currentValue: string; id: string }>
   initializeResult?: unknown
+  promptDelayMs?: number
   promptError?: { code: number; data?: Record<string, unknown>; message: string }
   promptResult?: unknown
   requests?: RuntimeRequest[]
-  updates: Array<Record<string, unknown>>
+  updates: Array<FakeRuntimeUpdate | DelayedFakeRuntimeUpdate>
 }): BridgeAcpRuntimeClient {
   const updateCallbacks = new Set<(event: BridgeAcpRawUpdate) => void>()
   return {
@@ -797,12 +824,19 @@ function createFakeRuntimeClient(options: {
         throw options.promptError
       }
       for (const update of options.updates) {
+        if (isDelayedFakeRuntimeUpdate(update)) {
+          await new Promise((resolve) => setTimeout(resolve, update.delayMs))
+        }
+        const rawUpdate = isDelayedFakeRuntimeUpdate(update) ? update.update : update
         for (const callback of updateCallbacks) {
           callback({
             sessionId: "session-1",
-            update: normalizeFakeSessionUpdate(update) as BridgeAcpRawUpdate["update"],
+            update: normalizeFakeSessionUpdate(rawUpdate) as BridgeAcpRawUpdate["update"],
           })
         }
+      }
+      if (options.promptDelayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.promptDelayMs))
       }
       const raw = (options.promptResult ?? { stopReason: "end_turn" }) as PromptResponse
       return { raw, stopReason: raw.stopReason }
@@ -821,6 +855,12 @@ function createFakeRuntimeClient(options: {
       return { configOptions: (options.configOptions ?? []) as SessionConfigOption[] }
     },
   }
+}
+
+function isDelayedFakeRuntimeUpdate(
+  update: FakeRuntimeUpdate | DelayedFakeRuntimeUpdate,
+): update is DelayedFakeRuntimeUpdate {
+  return typeof (update as DelayedFakeRuntimeUpdate).delayMs === "number"
 }
 
 function createFakeAcpProcess(options: {

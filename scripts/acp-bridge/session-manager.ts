@@ -438,7 +438,7 @@ export class BridgeSessionManager {
       }
       this.supervisor?.recordFailed(this.supervisorWorkItem(item), message)
       await this.drainEventWrites()
-      const terminal = isTerminalQueueItemError(type, message)
+      const terminal = isTerminalQueueItemError(type, rawMessage)
       await this.markQueueResult(
         item,
         terminal
@@ -2484,12 +2484,22 @@ function isApprovalResponseType(type: string): boolean {
 }
 
 function isTerminalQueueItemError(type: string, message: string): boolean {
+  if (type === "prompt") {
+    return isTerminalPromptError(message)
+  }
   if (!isApprovalResponseType(type)) {
     return false
   }
   return (
     message.includes("does not match an active ACP session") ||
     message.includes("did not match a pending ACP permission request")
+  )
+}
+
+function isTerminalPromptError(message: string): boolean {
+  return (
+    message.includes("ACP request timed out: session/prompt") ||
+    /\bprovider_login_failed(?:\s+\(code\s+-?\d+\))?\b/i.test(message)
   )
 }
 
