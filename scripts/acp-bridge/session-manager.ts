@@ -7,6 +7,7 @@ import {
   type HermesAcpPromptAttachment,
   type HermesAcpMcpServer,
   type HermesAcpPromptResult,
+  type HermesAcpPromptTimeoutDiagnostics,
   type RuntimeConfigApplicationResult,
   HermesAcpSession,
   resolveRuntimeConfigApplication,
@@ -101,6 +102,7 @@ export type ManagedAcpSession = {
     response: { approved: boolean; reason?: string },
   ): Promise<boolean>
   hasPendingPermissionRequests?(): boolean
+  getPromptTimeoutDiagnostics?(): HermesAcpPromptTimeoutDiagnostics
   getExternalContinuityState?(): {
     attempted: boolean
     fallback: boolean
@@ -573,6 +575,37 @@ export class BridgeSessionManager {
         runtimeConfig: runtimeConfigApplication?.applied,
       })
     } catch (error) {
+      const promptFailure = classifyPromptError(error)
+      if (promptFailure.terminal) {
+        const diagnostics = session.acp.getPromptTimeoutDiagnostics?.()
+        this.enqueueEventWrite(session, {
+          externalEventId: `${item.id}:${promptFailure.reasonCode}`,
+          source: "bridge",
+          eventType: "bridge_error",
+          payload: {
+            diagnostics,
+            queueId: item.id,
+            reasonCode: promptFailure.reasonCode,
+          },
+          part: {
+            type: "error",
+            text: promptFailure.message,
+            json: { diagnostics, reasonCode: promptFailure.reasonCode },
+            status: "error",
+          },
+        })
+        await this.drainEventWrites()
+        await this.markQueueResult(item, {
+          ok: false,
+          diagnostics,
+          error: promptFailure.message,
+          reasonCode: promptFailure.reasonCode,
+          terminal: true,
+        })
+        this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), promptFailure.reasonCode)
+        await this.closeSession(session.sessionKey)
+        return
+      }
       await this.closeSession(session.sessionKey)
       throw error
     }
@@ -1954,6 +1987,20 @@ export class BridgeSessionManager {
 
 function isEmptyVisiblePromptResult(result: { text: string }): boolean {
   return result.text.trim().length === 0
+}
+
+function classifyPromptError(error: unknown):
+  | { terminal: true; message: string; reasonCode: "acp_method_timeout" }
+  | { terminal: false } {
+  const message = error instanceof Error ? error.message : String(error)
+  if (message.includes("ACP request timed out: session/prompt")) {
+    return {
+      terminal: true,
+      message: "ACP prompt request timed out.",
+      reasonCode: "acp_method_timeout",
+    }
+  }
+  return { terminal: false }
 }
 
 function buildEmptyFinalResponseDiagnostic(

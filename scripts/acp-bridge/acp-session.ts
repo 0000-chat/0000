@@ -163,6 +163,21 @@ export type HermesAcpMcpServer = {
   name: string
 }
 
+export type HermesAcpPromptTimeoutDiagnostics = {
+  deferredPromptEventCount: number
+  eventTypeCounts: Record<string, number>
+  externalContinuity: {
+    attempted: boolean
+    fallback: boolean
+    loaded: boolean
+  }
+  lastPromptEventType?: string
+  lifecyclePhase: string
+  pendingPermissionRequestCount: number
+  promptEventCount: number
+  requestTimeoutMs: number
+}
+
 type PermissionRequestOption = {
   kind?: string
   name?: string
@@ -402,6 +417,19 @@ export class HermesAcpSession {
 
   hasPendingPermissionRequests(): boolean {
     return this.pendingPermissionRequests.size > 0
+  }
+
+  getPromptTimeoutDiagnostics(): HermesAcpPromptTimeoutDiagnostics {
+    return {
+      deferredPromptEventCount: this.deferredPromptEvents.length,
+      eventTypeCounts: countPromptEventTypes(this.promptEvents),
+      externalContinuity: this.getExternalContinuityState(),
+      lastPromptEventType: this.promptEvents.at(-1)?.eventType,
+      lifecyclePhase: this.lifecyclePhase,
+      pendingPermissionRequestCount: this.pendingPermissionRequests.size,
+      promptEventCount: this.promptEvents.length,
+      requestTimeoutMs: this.requestTimeoutMs,
+    }
   }
 
   getExternalContinuityState(): { attempted: boolean; fallback: boolean; loaded: boolean } {
@@ -1526,6 +1554,15 @@ function normalizeAcpRuntimeError(method: string, error: unknown): Error {
     return new HermesAcpJsonRpcError(method, error)
   }
   return error instanceof Error ? error : new Error(String(error))
+}
+
+function countPromptEventTypes(events: NormalizedBridgeEvent[]): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const event of events) {
+    const eventType = event.eventType || "unknown"
+    counts[eventType] = (counts[eventType] ?? 0) + 1
+  }
+  return counts
 }
 
 function normalizeJsonRpcErrorKind(errorKind: string | undefined): string | undefined {
