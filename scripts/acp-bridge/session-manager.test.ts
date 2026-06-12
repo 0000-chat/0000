@@ -221,7 +221,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@latest"],
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -271,7 +271,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -298,8 +298,8 @@ describe("bridge session cwd safety", () => {
     const acpEvent = cloud.events.flat().find((event) => event.source === "acp_bridge")
     expect(acpEvent?.rawPayload).toMatchObject({
       runtimeCommand: {
-        executable: "npx",
-        package: "@agentclientprotocol/codex-acp@0.0.45",
+        executable: "bunx",
+        package: "@zed-industries/codex-acp@0.15.0",
       },
       runtimeKind: "codex",
       runtimeLabel: "Codex",
@@ -390,7 +390,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -431,7 +431,7 @@ describe("bridge session cwd safety", () => {
       "claude-code:claude-acp",
     ])
     expect(contexts.map((context) => context.agentCommand)).toEqual([
-      ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+      ["bunx", "@zed-industries/codex-acp@0.15.0"],
       ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
     ])
     expect(closedProfiles).toContain("codex:codex-acp")
@@ -468,7 +468,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -515,7 +515,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -535,11 +535,7 @@ describe("bridge session cwd safety", () => {
 
     expect(contexts[0]?.bridgeProfileId).toBeUndefined()
     expect(contexts[0]?.runtimeProfile?.id).toBe("codex:codex-acp")
-    expect(contexts[0]?.agentCommand).toEqual([
-      "npx",
-      "--yes",
-      "@agentclientprotocol/codex-acp@0.0.45",
-    ])
+    expect(contexts[0]?.agentCommand).toEqual(["bunx", "@zed-industries/codex-acp@0.15.0"])
   })
 
   test("recreates cwd-bound runtime sessions when the queue cwd changes", async () => {

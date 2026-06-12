@@ -1545,20 +1545,38 @@ export async function runBridgeLoopIteration(
             heartbeatResult.control.refreshHermesProfiles ||
             heartbeatResult.control.refreshRuntimeProfiles
           ) {
+            const previousRuntimeProfiles = input.status.runtimeProfiles ?? []
             input.status.hermesProfiles = await discoverProfiles()
-            input.status.runtimeProfiles = await discoverRuntimeProfiles({
+            const refreshedRuntimeProfiles = await discoverRuntimeProfiles({
               baseAgentCommand: input.agentCommand ?? DEFAULT_AGENT_COMMAND,
               customCommands: input.runtimeCommands,
             })
+            input.status.runtimeProfiles = refreshedRuntimeProfiles
             const refreshedAt = new Date(currentTime()).toISOString()
             input.status.lastHermesProfileRefreshAt = refreshedAt
             input.status.lastRuntimeProfileRefreshAt = refreshedAt
+            const runtimeCommandChanged = runtimeProfileCommandsChanged(
+              previousRuntimeProfiles,
+              refreshedRuntimeProfiles,
+            )
             input.log({
               level: "info",
               event: "bridge.hermes_profiles.refresh",
               deviceId: input.config.deviceId,
               profileCount: input.status.hermesProfiles.length,
+              runtimeProfileCount: refreshedRuntimeProfiles.length,
+              runtimeCommandChanged,
             })
+            if (runtimeCommandChanged) {
+              input.status.lifecycle = "restarting"
+              input.status.updateState = buildBridgeUpdateState("restarting", currentTime())
+              restartResult = { restartRequested: true }
+              input.log({
+                level: "info",
+                event: "bridge.runtime_profiles.restart_requested",
+                deviceId: input.config.deviceId,
+              })
+            }
             await persistStatus(input.statusPath, input.status)
             const refreshHeartbeatResult = await heartbeat(input.config, input.status)
             if (!refreshHeartbeatResult.ok) {
@@ -1796,6 +1814,26 @@ export function bridgeHeartbeatSignature(
     pendingControlCommand: status.pendingControlCommand,
     updateState: status.updateState,
   })
+}
+
+function runtimeProfileCommandsChanged(
+  previousProfiles: BridgeRuntimeProfile[],
+  refreshedProfiles: BridgeRuntimeProfile[],
+): boolean {
+  const previousById = new Map(
+    previousProfiles.map((profile) => [profile.id, profile.command.join("\u0000")]),
+  )
+  const refreshedIds = new Set(refreshedProfiles.map((profile) => profile.id))
+  if (previousProfiles.some((profile) => !refreshedIds.has(profile.id))) {
+    return true
+  }
+  for (const profile of refreshedProfiles) {
+    const previousCommand = previousById.get(profile.id)
+    if (previousCommand === undefined || previousCommand !== profile.command.join("\u0000")) {
+      return true
+    }
+  }
+  return false
 }
 
 function syncBridgeRuntimeStatus(

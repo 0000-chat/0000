@@ -9,10 +9,10 @@ import {
 import type { BridgeRuntimeProfile } from "./runtime-profiles"
 
 const profile = (overrides: Partial<BridgeRuntimeProfile>): BridgeRuntimeProfile => ({
-  id: "codex:npx-agentclientprotocol-codex-acp",
+  id: "codex:codex-acp",
   kind: "codex",
   label: "Codex",
-  command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+  command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
   status: "available",
   diagnostics: { acp: "supported" },
   availableCommands: [],

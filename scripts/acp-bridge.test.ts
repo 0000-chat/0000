@@ -239,7 +239,7 @@ describe("bridge multi-organization config", () => {
 
 describe("bridge security defaults", () => {
   test("pins default package-backed ACP runtime commands", () => {
-    expect(DEFAULT_CODEX_ACP_COMMAND).toBe("npx --yes @agentclientprotocol/codex-acp@0.0.45")
+    expect(DEFAULT_CODEX_ACP_COMMAND).toBe("bunx @zed-industries/codex-acp@0.15.0")
     expect(DEFAULT_CLAUDE_CODE_ACP_COMMAND).toBe(
       "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
     )
@@ -504,6 +504,162 @@ describe("bridge supervisor claim gating", () => {
     expect(logs).toEqual([])
     expect(status.connected).toBe(false)
     expect(status.registrationFailure?.reasonCode).toBe("bridge_credentials_invalid")
+  })
+
+  test("requests restart when refreshed runtime profile commands change", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    let claimCalled = false
+    let heartbeatCount = 0
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    }
+
+    const result = await runBridgeLoopIteration({
+      claimCommands: async () => {
+        claimCalled = true
+        return []
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      discoverHermesProfiles: async () => [],
+      discoverRuntimeProfiles: async () => [
+        {
+          capabilities: {},
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 3, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1
+        return heartbeatCount === 1
+          ? { ok: true, control: { refreshRuntimeProfiles: { requestedAt: "now" } } }
+          : { ok: true }
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(result.restartRequested).toBe(true)
+    expect(claimCalled).toBe(false)
+    expect(status.lifecycle).toBe("restarting")
+    expect(status.runtimeProfiles?.[0]?.command).toEqual([
+      "bunx",
+      "@zed-industries/codex-acp@0.15.0",
+    ])
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.runtime_profiles.restart_requested",
+      }),
+    )
+  })
+
+  test("requests restart when refreshed runtime profile ids change", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    let claimCalled = false
+    let heartbeatCount = 0
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    }
+
+    const result = await runBridgeLoopIteration({
+      claimCommands: async () => {
+        claimCalled = true
+        return []
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      discoverHermesProfiles: async () => [],
+      discoverRuntimeProfiles: async () => [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1
+        return heartbeatCount === 1
+          ? { ok: true, control: { refreshRuntimeProfiles: { requestedAt: "now" } } }
+          : { ok: true }
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(result.restartRequested).toBe(true)
+    expect(claimCalled).toBe(false)
+    expect(status.lifecycle).toBe("restarting")
   })
 
   test("skips queue claims when local journal health is hard-failed", async () => {

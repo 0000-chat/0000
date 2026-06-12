@@ -85,7 +85,7 @@ const BUILT_INS: Array<{
     kind: "codex",
     label: "Codex",
     command: DEFAULT_CODEX_ACP_COMMAND.split(" "),
-    binary: "npx",
+    binary: "bunx",
     probeTimeoutMs: 30_000,
   },
   {
@@ -140,7 +140,11 @@ export async function discoverRuntimeProfiles(
     }
   }
 
-  for (const command of input.customCommands ?? []) {
+  for (const rawCommand of input.customCommands ?? []) {
+    if (isRetiredCodexAcpCommand(rawCommand)) {
+      continue
+    }
+    const command = rawCommand
     const binary = command[0]
     if (!binary) {
       continue
@@ -168,19 +172,39 @@ export async function discoverRuntimeProfiles(
   return dedupeRuntimeProfiles(profiles)
 }
 
+function isRetiredCodexAcpCommand(command: string[]): boolean {
+  return command.some(
+    (part) =>
+      part === "@agentclientprotocol/codex-acp" ||
+      part.startsWith("@agentclientprotocol/codex-acp@"),
+  )
+}
+
 async function resolveBuiltInCommandCandidates(
   builtIn: { command: string[]; binary: string },
   runCommand: (command: string[]) => Promise<CommandResult>,
 ): Promise<string[][]> {
-  const candidates = builtIn.binary === "npx" ? ["npx", "bunx"] : [builtIn.binary]
+  const candidates =
+    builtIn.binary === "npx" && builtIn.command[0] === "npx" ? ["npx", "bunx"] : [builtIn.binary]
   const commands: string[][] = []
   for (const binary of candidates) {
     const exists = await runCommand(["command", "-v", binary])
     if (exists.ok) {
-      commands.push([binary, ...builtIn.command.slice(1)])
+      commands.push(commandForBinary(binary, builtIn.command))
     }
   }
   return commands
+}
+
+function commandForBinary(binary: string, command: string[]): string[] {
+  if (command[0] === binary) {
+    return command
+  }
+  const args = command.slice(1)
+  if (binary === "bunx" && command[0] === "npx") {
+    return [binary, ...args.filter((arg) => arg !== "--yes" && arg !== "-y")]
+  }
+  return [binary, ...args]
 }
 
 async function profileForBuiltIn(
