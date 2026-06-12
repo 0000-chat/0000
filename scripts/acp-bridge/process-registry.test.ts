@@ -21,8 +21,8 @@ describe("ACP bridge process registry", () => {
     const registry = new AcpBridgeProcessRegistry({ path })
 
     await registry.registerProcess({
-      args: ["--yes", "@agentclientprotocol/codex-acp@0.0.45"],
-      command: "npx",
+      args: ["@zed-industries/codex-acp@0.15.0"],
+      command: "bunx",
       cwd: "/repo",
       pid: 12345,
       queueItemId: "queue-1",
@@ -34,8 +34,8 @@ describe("ACP bridge process registry", () => {
     const raw = JSON.parse(await readFile(path, "utf8")) as { entries: AcpBridgeProcessRegistryEntry[] }
     expect(raw.entries).toEqual([
       expect.objectContaining({
-        args: ["--yes", "@agentclientprotocol/codex-acp@0.0.45"],
-        command: "npx",
+        args: ["@zed-industries/codex-acp@0.15.0"],
+        command: "bunx",
         pid: 12345,
         queueItemId: "queue-1",
         claimId: "claim-1",
