@@ -427,7 +427,7 @@ describe("ACP runtime adapter boundary", () => {
     ])
   })
 
-  test("keeps ERROR Hermes stderr logs as bridge errors", async () => {
+  test("keeps ERROR Hermes stderr logs as single bridge error events", async () => {
     const processes: ChildProcessWithoutNullStreams[] = []
     const events: Array<{ eventType: string; partStatus?: string; partType?: string }> = []
     const errors: Error[] = []
@@ -451,9 +451,7 @@ describe("ACP runtime adapter boundary", () => {
     stderr?.write("ERROR acp_adapter.server: runtime crashed\n")
     await waitForMicrotasks()
 
-    expect(errors.map((error) => error.message)).toEqual([
-      "ERROR acp_adapter.server: runtime crashed",
-    ])
+    expect(errors).toEqual([])
     expect(events).toEqual([
       {
         eventType: "bridge_error",
@@ -475,6 +473,44 @@ describe("ACP runtime adapter boundary", () => {
     await session.close()
 
     expect(kills).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  test("registers spawned ACP children and closes them through the process registry", async () => {
+    const kills: Array<NodeJS.Signals | undefined> = []
+    const registered: Array<Record<string, unknown>> = []
+    const terminated: string[] = []
+    const session = new HermesAcpSession({
+      agentCommand: ["codex", "acp"],
+      processRegistry: {
+        registerProcess: async (input) => {
+          registered.push(input)
+          return {
+            ...input,
+            id: "process-1",
+            startedAt: "2026-06-12T00:00:00.000Z",
+            updatedAt: "2026-06-12T00:00:00.000Z",
+          }
+        },
+        terminateProcess: async (entry, child) => {
+          terminated.push(entry.id)
+          child?.kill("SIGTERM")
+        },
+      },
+      spawnProcess: createFakeAcpProcess({ emitExitOnKill: true, kills, pid: 4321 }),
+    })
+
+    await session.start()
+    await session.close()
+
+    expect(registered).toEqual([
+      expect.objectContaining({
+        args: ["acp"],
+        command: "codex",
+        pid: 4321,
+      }),
+    ])
+    expect(terminated).toEqual(["process-1"])
+    expect(kills).toEqual(["SIGTERM"])
   })
 
   test("does not force-kill the ACP process when graceful termination exits", async () => {
@@ -866,6 +902,7 @@ function isDelayedFakeRuntimeUpdate(
 function createFakeAcpProcess(options: {
   emitExitOnKill?: boolean
   kills?: Array<NodeJS.Signals | undefined>
+  pid?: number
   permissionResponses?: RequestPermissionResponse[]
   processes?: ChildProcessWithoutNullStreams[]
   requestPermissionOnPrompt?: boolean
@@ -935,6 +972,7 @@ function createFakeAcpProcess(options: {
       },
       stderr,
       stdin,
+      pid: options.pid,
       stdout,
     }) as unknown as ChildProcessWithoutNullStreams
     options.processes?.push(process)

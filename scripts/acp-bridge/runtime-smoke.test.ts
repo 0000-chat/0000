@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
-import { buildRuntimeSmokeMatrix, formatRuntimeSmokeMatrix } from "./runtime-smoke"
+import {
+  assertRuntimeSmokeProcessHealth,
+  buildRuntimeSmokeMatrix,
+  formatRuntimeSmokeMatrix,
+  runRuntimeSmokeMatrix,
+} from "./runtime-smoke"
 import type { BridgeRuntimeProfile } from "./runtime-profiles"
 
 const profile = (overrides: Partial<BridgeRuntimeProfile>): BridgeRuntimeProfile => ({
@@ -87,15 +92,54 @@ describe("runtime smoke matrix", () => {
   })
 
   test("formats a redacted markdown table for docs and handoff notes", async () => {
-    const matrix = await buildRuntimeSmokeMatrix({
+    const matrix = await runRuntimeSmokeMatrix({
       host: "smoke-host",
       now: () => new Date("2026-06-05T00:00:00.000Z"),
       discover: async () => [profile({})],
+      getProcessHealth: () => ({ canClaim: true, childCount: 0, status: "healthy" }),
     })
 
     expect(formatRuntimeSmokeMatrix(matrix)).toContain(
       "Summary: 1 pass, 0 fail, 3 blocked",
     )
+    expect(formatRuntimeSmokeMatrix(matrix)).toContain("Process health: healthy (can claim: yes")
     expect(formatRuntimeSmokeMatrix(matrix)).toContain("| Codex | pass | supported |")
+  })
+
+  test("cleans discovery probe children when discovery throws", async () => {
+    let cleanupCalls = 0
+
+    await expect(
+      runRuntimeSmokeMatrix({
+        discover: async () => {
+          throw new Error("discovery failed")
+        },
+        cleanupDiscoveryChildren: async () => {
+          cleanupCalls += 1
+        },
+      }),
+    ).rejects.toThrow("discovery failed")
+
+    expect(cleanupCalls).toBe(1)
+  })
+
+  test("fails smoke health when discovery child count does not return to baseline", () => {
+    expect(() =>
+      assertRuntimeSmokeProcessHealth({
+        baselineChildCount: 0,
+        finalChildCount: 1,
+        processHealth: { canClaim: true, childCount: 0, status: "healthy" },
+      }),
+    ).toThrow("leaked discovery children")
+  })
+
+  test("fails smoke health when process health cannot claim", () => {
+    expect(() =>
+      assertRuntimeSmokeProcessHealth({
+        baselineChildCount: 0,
+        finalChildCount: 0,
+        processHealth: { canClaim: false, childCount: 2, status: "cap_exceeded" },
+      }),
+    ).toThrow("process health cannot claim")
   })
 })

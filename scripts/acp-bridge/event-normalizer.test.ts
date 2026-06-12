@@ -56,12 +56,27 @@ test("classifies routine Hermes lifecycle logs as suppressible info diagnostics"
   }
 })
 
+test("classifies routine CLI status logs as suppressible info diagnostics", () => {
+  for (const line of [
+    "The user's messages are sent from the 0000 Chat app. When the",
+    "📦 Preflight compression: ~141,110 tokens >= 136,000 threshold. This may take a moment.",
+    "🗜️ Compacting context — summarizing earlier conversation so I can continue...",
+    "2026-06-12 17:31:19 [INFO] agent.auxiliary_client: Auxiliary compression: connection error on auto, trying fallback",
+  ]) {
+    const diagnostic = classifyRuntimeLogLine(line)
+    assert.equal(diagnostic?.severity, "info")
+    assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), true)
+  }
+})
+
 test("classifies WARN runtime logs as runtime_diagnostic events", () => {
-  const diagnostic = classifyRuntimeLogLine("WARN acp_adapter.server: transient reconnect")
+  const diagnostic = classifyRuntimeLogLine(
+    "2026-06-10 20:46:59 [WARNING] agent.tool_executor: Tool memory returned error",
+  )
 
   assert.deepEqual(diagnostic, {
     severity: "warn",
-    text: "WARN acp_adapter.server: transient reconnect",
+    text: "2026-06-10 20:46:59 [WARNING] agent.tool_executor: Tool memory returned error",
   })
   assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), false)
 
@@ -70,7 +85,7 @@ test("classifies WARN runtime logs as runtime_diagnostic events", () => {
   assert.equal(event.eventType, "runtime_diagnostic")
   assert.equal(event.part?.type, "event")
   assert.deepEqual(event.payload, {
-    message: "WARN acp_adapter.server: transient reconnect",
+    message: "2026-06-10 20:46:59 [WARNING] agent.tool_executor: Tool memory returned error",
     severity: "warn",
   })
 })

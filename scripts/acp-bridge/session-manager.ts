@@ -6,6 +6,7 @@ import type { CreateTerminalRequest } from "@agentclientprotocol/sdk"
 import {
   type HermesAcpPromptAttachment,
   type HermesAcpMcpServer,
+  type HermesAcpProcessRegistryMetadata,
   type HermesAcpPromptResult,
   type HermesAcpPromptTimeoutDiagnostics,
   type RuntimeConfigApplicationResult,
@@ -17,6 +18,7 @@ import type { AgentAttachmentUploadInput, BridgeEventInput } from "./convex-http
 import type { BridgeAttachmentUploadCandidate, NormalizedBridgeEvent } from "./event-normalizer"
 import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
 import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
+import type { AcpBridgeProcessRegistryLike } from "./process-registry"
 import {
   TerminalHandleRegistry,
   type TerminalHandleScope,
@@ -124,6 +126,7 @@ export type BridgeSessionContext = {
   organizationId?: string
   terminalAdapter?: SdkAcpRuntimeTerminalAdapter
   terminalScope?: TerminalHandleScope
+  processRegistryMetadata?: HermesAcpProcessRegistryMetadata
   onEvent: (event: NormalizedBridgeEvent) => void
   onError: (error: Error) => void
 }
@@ -181,6 +184,7 @@ const STREAM_CHUNK_COALESCE_MAX_COUNT = 32
 const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250
 const APPROVAL_RESPONSE_SESSION_POLL_MS = 10
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000
+const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300
 
 export type BridgeSessionManagerOptions = {
   cloudClient: BridgeSessionCloudClient
@@ -201,6 +205,7 @@ export type BridgeSessionManagerOptions = {
   requireScopedIdentity?: boolean
   log?: BridgeLogger
   supervisor?: BridgeSupervisor
+  processRegistry?: Pick<AcpBridgeProcessRegistryLike, "registerProcess" | "terminateProcess">
   closeTimeoutMs?: number
   terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>
   createTerminal?: (
@@ -211,6 +216,7 @@ export type BridgeSessionManagerOptions = {
 
 export type BridgeSessionManagerStatus = {
   activeSessions: string[]
+  terminalInteractionSessionKeyCount: number
   sessions: Array<{
     sessionKey: string
     threadId: string
@@ -258,6 +264,10 @@ export class BridgeSessionManager {
   ) => HermesAcpMcpServer[]
   private readonly log?: BridgeLogger
   private readonly supervisor?: BridgeSupervisor
+  private readonly processRegistry?: Pick<
+    AcpBridgeProcessRegistryLike,
+    "registerProcess" | "terminateProcess"
+  >
   private readonly idleSessionTtlMs: number
   private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
@@ -278,6 +288,8 @@ export class BridgeSessionManager {
     { pendingQueueItemIds: string[]; runningQueueItemId?: string }
   >()
   private readonly cancelledQueueItemIds = new Set<string>()
+  private readonly terminalInteractionSessionKeys = new Set<string>()
+  private readonly terminalInteractionSessionKeyOrder: string[] = []
   private readonly eventBatch: BridgeEventInput[] = []
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = []
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined
@@ -293,6 +305,7 @@ export class BridgeSessionManager {
     this.requestTimeoutMs = options.requestTimeoutMs
     this.log = options.log
     this.supervisor = options.supervisor
+    this.processRegistry = options.processRegistry
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
     this.allowRemoteCwd = options.allowRemoteCwd !== false
     this.resumeEnabled = options.resumeEnabled === true
@@ -309,6 +322,8 @@ export class BridgeSessionManager {
           cwd: context.cwd,
           initialSessionId: context.initialSessionId,
           mcpServers: context.mcpServers,
+          processRegistry: this.processRegistry,
+          processRegistryMetadata: context.processRegistryMetadata,
           requestTimeoutMs: this.requestTimeoutMs,
           resumeEnabled: this.resumeEnabled,
           onEvent: context.onEvent,
@@ -320,6 +335,7 @@ export class BridgeSessionManager {
   getStatus(): BridgeSessionManagerStatus {
     return {
       activeSessions: Array.from(this.sessions.keys()),
+      terminalInteractionSessionKeyCount: this.terminalInteractionSessionKeys.size,
       sessions: Array.from(this.sessions.values()).map((session) => {
         const queueState = this.sessionQueueState.get(session.sessionKey)
         return {
@@ -603,10 +619,10 @@ export class BridgeSessionManager {
           terminal: true,
         })
         this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), promptFailure.reasonCode)
-        await this.closeSession(session.sessionKey)
+        await this.closeSession(session.sessionKey, { terminalInteraction: true })
         return
       }
-      await this.closeSession(session.sessionKey)
+      await this.closeSession(session.sessionKey, { terminalInteraction: true })
       throw error
     }
     if (this.cancelledQueueItemIds.delete(item.id)) {
@@ -644,7 +660,7 @@ export class BridgeSessionManager {
         stopReason: result.stopReason,
       })
       this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "steer_reprompt_failed")
-      await this.closeSession(session.sessionKey)
+      await this.closeSession(session.sessionKey, { terminalInteraction: true })
       return
     }
     this.enqueueEventWrite(session, {
@@ -710,7 +726,7 @@ export class BridgeSessionManager {
       await this.drainEventWrites()
       await this.markQueueResult(item, diagnostic.result)
       this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "empty_final_response")
-      await this.closeSession(session.sessionKey)
+      await this.closeSession(session.sessionKey, { terminalInteraction: true })
       return
     }
     if (attachmentParts.length > 0) {
@@ -888,6 +904,10 @@ export class BridgeSessionManager {
       if (!sessionKey) {
         throw new Error(`input response ${item.id} is missing threadId`)
       }
+      if (!key && this.isTerminalInteractionSessionKey(sessionKey)) {
+        await this.markStaleInteractionResponse(item, type)
+        return
+      }
       const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
       const threadHistory = normalizeThreadHistory(item.threadHistory)
       this.writeLog({
@@ -926,6 +946,10 @@ export class BridgeSessionManager {
       if (!sessionKey) {
         throw new Error(`choice response ${item.id} is missing threadId`)
       }
+      if (!key && this.isTerminalInteractionSessionKey(sessionKey)) {
+        await this.markStaleInteractionResponse(item, type)
+        return
+      }
       const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
       const threadHistory = normalizeThreadHistory(item.threadHistory)
       this.writeLog({
@@ -954,7 +978,8 @@ export class BridgeSessionManager {
       session = await this.waitForSession(key)
     }
     if (!session) {
-      throw new Error(`approval response ${item.id} does not match an active ACP session`)
+      await this.markStaleInteractionResponse(item, type)
+      return
     }
     const externalRequestId = item.externalRequestId ?? item.approvalId
     if (!externalRequestId) {
@@ -966,11 +991,37 @@ export class BridgeSessionManager {
       reason: item.approvalReason,
     })
     if (!handled) {
-      throw new Error(`approval response ${item.id} did not match a pending ACP permission request`)
+      await this.markStaleInteractionResponse(item, type)
+      return
     }
     session.lastUsedAt = Date.now()
     this.scheduleIdleClose(session)
     await this.markQueueResult(item, { ok: true, approved })
+  }
+
+  private async markStaleInteractionResponse(
+    item: BridgeSessionQueueItem,
+    type: string,
+  ): Promise<void> {
+    this.writeLog({
+      level: "info",
+      event: "bridge.interaction_response.stale_noop",
+      queueId: item.id,
+      queueType: type,
+      threadId: item.threadId ?? item.sessionId,
+      sessionId: item.sessionId,
+      agentSessionId: item.agentSessionId,
+    })
+    await this.markQueueResult(item, {
+      ok: true,
+      stale: true,
+      noOp: true,
+      reasonCode: "stale_interaction_response",
+    })
+  }
+
+  private isTerminalInteractionSessionKey(sessionKey: string): boolean {
+    return this.terminalInteractionSessionKeys.has(sessionKey)
   }
 
   private async waitForSession(sessionKey: string): Promise<BridgeSessionRecord | undefined> {
@@ -1026,7 +1077,7 @@ export class BridgeSessionManager {
         await this.killTerminalHandles(session)
         this.enqueueCancellationEvent(session, item)
         await this.drainEventWrites()
-        await this.closeSession(key)
+        await this.closeSession(key, { terminalInteraction: true })
         await this.markQueueResult(item, {
           ok: true,
           cancelled: true,
@@ -1060,7 +1111,7 @@ export class BridgeSessionManager {
     const key = this.findSessionKeyForItem(item)
     const closed = Boolean(key && this.sessions.has(key))
     if (key) {
-      await this.closeSession(key)
+      await this.closeSession(key, { terminalInteraction: true })
     }
     await this.markQueueResult(item, { ok: true, closed })
   }
@@ -1099,7 +1150,7 @@ export class BridgeSessionManager {
       if (activeTurnId) {
         this.cancelledQueueItemIds.add(activeTurnId)
         await this.killTerminalHandles(session)
-        await this.closeSession(key)
+        await this.closeSession(key, { terminalInteraction: true })
         await this.handlePromptNow(item, instruction, {
           resultMetadata: { steered: true, replacementSession: true, forcedCancel: true },
         })
@@ -1116,7 +1167,7 @@ export class BridgeSessionManager {
     if (activeTurnId) {
       this.cancelledQueueItemIds.add(activeTurnId)
       await this.killTerminalHandles(session)
-      await this.closeSession(key)
+      await this.closeSession(key, { terminalInteraction: true })
       await this.handlePromptNow(item, instruction, {
         resultMetadata: { steered: true, replacementSession: true },
       })
@@ -1170,16 +1221,42 @@ export class BridgeSessionManager {
     )
   }
 
-  private async closeSession(sessionKey: string): Promise<void> {
+  private async closeSession(
+    sessionKey: string,
+    options: { terminalInteraction?: boolean } = {},
+  ): Promise<void> {
     const session = this.sessions.get(sessionKey)
     if (!session) {
       return
+    }
+    if (options.terminalInteraction) {
+      this.rememberTerminalInteractionSession(session)
     }
     this.sessions.delete(sessionKey)
     this.clearIdleTimer(session)
     await this.releaseTerminalHandles(session)
     await this.drainEventWrites()
     await this.closeAcpSession(session)
+  }
+
+  private rememberTerminalInteractionSession(session: BridgeSessionRecord): void {
+    this.rememberTerminalInteractionSessionKey(session.sessionKey)
+    this.rememberTerminalInteractionSessionKey(session.threadId)
+    this.rememberTerminalInteractionSessionKey(session.providerSessionKey)
+  }
+
+  private rememberTerminalInteractionSessionKey(sessionKey: string | undefined): void {
+    if (!sessionKey || this.terminalInteractionSessionKeys.has(sessionKey)) {
+      return
+    }
+    this.terminalInteractionSessionKeys.add(sessionKey)
+    this.terminalInteractionSessionKeyOrder.push(sessionKey)
+    while (this.terminalInteractionSessionKeyOrder.length > MAX_TERMINAL_INTERACTION_SESSION_KEYS) {
+      const expired = this.terminalInteractionSessionKeyOrder.shift()
+      if (expired) {
+        this.terminalInteractionSessionKeys.delete(expired)
+      }
+    }
   }
 
   private async closeAcpSession(session: BridgeSessionRecord): Promise<void> {
@@ -1332,6 +1409,14 @@ export class BridgeSessionManager {
         organizationId: item.organizationId,
         terminalAdapter,
         terminalScope,
+        processRegistryMetadata: {
+          bridgeDeviceId: this.deviceId,
+          claimId: item.claimId,
+          hermesProfileName: item.hermesProfileName,
+          queueItemId: item.id,
+          runtimeProfileId: runtimeProfile?.id ?? item.bridgeProfileId,
+          sessionKey,
+        },
         initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
         mcpServers: this.createMcpServers({
           agentSessionId: item.agentSessionId,

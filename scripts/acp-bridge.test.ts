@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdtemp, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
+import { fileURLToPath } from "node:url"
 
 import {
   buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
+  buildHeartbeatStatusPayload,
   type BridgeStatus,
   describeStatus,
   deriveConvexCloudUrl,
@@ -76,6 +78,11 @@ describe("bridge Convex URL resolution", () => {
 
 describe("bridge MCP helper configuration", () => {
   test("uses public app URL for agent tool invocation", () => {
+    const expectedAgentToolsMcpScriptPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "agent-tools-mcp.ts",
+    )
+
     expect(
       buildAgentToolsMcpServers({
         agentSessionId: "agent_session_1",
@@ -87,7 +94,7 @@ describe("bridge MCP helper configuration", () => {
       }),
     ).toEqual([
       {
-        args: ["scripts/agent-tools-mcp.ts"],
+        args: [expectedAgentToolsMcpScriptPath],
         command: "bun",
         env: [
           { name: "ZERO_CHAT_AGENT_SESSION_ID", value: "agent_session_1" },
@@ -417,7 +424,7 @@ describe("bridge supervisor claim gating", () => {
         flush: async () => {},
       }),
       manager: {
-        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
         handleQueueItem: async () => {},
       },
       maxInFlight: 1,
@@ -477,7 +484,7 @@ describe("bridge supervisor claim gating", () => {
         flush: async () => {},
       }),
       manager: {
-        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
         handleQueueItem: async () => {},
       },
       maxInFlight: 1,
@@ -519,7 +526,7 @@ describe("bridge supervisor claim gating", () => {
         flush: async () => {},
       }),
       manager: {
-        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
         handleQueueItem: async () => {},
       },
       maxInFlight: 1,
@@ -544,6 +551,136 @@ describe("bridge supervisor claim gating", () => {
         reason: "local_journal_hard_failed",
       }),
     )
+  })
+
+  test("skips cleanup and queue claims when process health is unsafe", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    let cleanupRan = false
+    let claimed = false
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    }
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => false,
+      claimCommands: async () => {
+        claimed = true
+        return []
+      },
+      cleanupStaleClaims: async () => {
+        cleanupRan = true
+        return { inspected: 0, released: 0 }
+      },
+      config: bridgeRegistration(),
+      getProcessHealth: () => ({
+        ambiguousProcessCount: 1,
+        canClaim: false,
+        childCount: 2,
+        childCountsByRuntimeProfile: { "codex:default": 2 },
+        processCap: 1,
+        processCapExceeded: true,
+        startupReconciliation: {
+          ambiguousProcessCount: 1,
+          lastReconciledAt: "2026-06-05T10:03:00.000Z",
+          removedDeadProcessCount: 0,
+          retainedProcessCount: 1,
+          status: "ambiguous",
+          terminatedProcessCount: 0,
+        },
+        status: "cap_exceeded",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(cleanupRan).toBe(false)
+    expect(claimed).toBe(false)
+    expect(status.processHealth).toMatchObject({
+      canClaim: false,
+      childCountsByRuntimeProfile: { "codex:default": 2 },
+      processCapExceeded: true,
+      startupReconciliation: {
+        ambiguousProcessCount: 1,
+        lastReconciledAt: "2026-06-05T10:03:00.000Z",
+        removedDeadProcessCount: 0,
+        retainedProcessCount: 1,
+        status: "ambiguous",
+        terminatedProcessCount: 0,
+      },
+      status: "cap_exceeded",
+    })
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue.claim_skipped",
+        reason: "process_health_unsafe",
+      }),
+    )
+    expect(buildHeartbeatStatusPayload(status).processHealth).toMatchObject({
+      status: "cap_exceeded",
+      canClaim: false,
+      startupReconciliation: {
+        ambiguousProcessCount: 1,
+        lastReconciledAt: "2026-06-05T10:03:00.000Z",
+        removedDeadProcessCount: 0,
+        retainedProcessCount: 1,
+        status: "ambiguous",
+        terminatedProcessCount: 0,
+      },
+    })
+  })
+
+  test("describes startup reconciliation separately from process health", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: {
+        ambiguousProcessCount: 1,
+        canClaim: false,
+        childCount: 1,
+        childCountsByRuntimeProfile: { "codex:default": 1 },
+        processCap: 1,
+        processCapExceeded: true,
+        startupReconciliation: {
+          ambiguousProcessCount: 1,
+          lastReconciledAt: "2026-06-05T10:03:00.000Z",
+          removedDeadProcessCount: 0,
+          retainedProcessCount: 1,
+          status: "ambiguous",
+          terminatedProcessCount: 0,
+        },
+        status: "ambiguous",
+      },
+      recentErrors: [],
+    }
+
+    expect(describeStatus(status, true)).toContain(
+      "startup reconciliation: ambiguous at 2026-06-05T10:03:00.000Z",
+    )
+    expect(buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation).toMatchObject({
+      ambiguousProcessCount: 1,
+      status: "ambiguous",
+    })
   })
 
   test("dispatches claimed lifecycle queue commands", async () => {
@@ -571,7 +708,7 @@ describe("bridge supervisor claim gating", () => {
         flush: async () => {},
       }),
       manager: {
-        getStatus: () => ({ activeSessions: [], sessions: [] }),
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
         handleQueueItem: async (item) => {
           handled.push(item as unknown as Record<string, unknown>)
         },
