@@ -40,7 +40,7 @@ describe("bridge host adapter boundary", () => {
         },
       ],
     })
-    await adapter.appendDiagnostics({
+    const diagnosticsResult = await adapter.appendDiagnostics({
       diagnostics: [{ message: "ok", reasonCode: "bridge.config.loaded", traceId: "trace-1" }],
     })
     await adapter.completeWork({ claimId: "claim-1", result: { ok: true }, workItem: claimed.workItems[0]! })
@@ -61,13 +61,13 @@ describe("bridge host adapter boundary", () => {
       "heartbeat",
       "claimWork",
       "appendEvents",
-      "appendEvents",
       "markResult",
       "markResult",
       "markResult",
     ])
-    expect(calls[4]?.args).toEqual(["queue-1", { ok: true, claimId: "claim-1" }, "claim-1"])
-    expect(calls[5]?.args).toEqual([
+    expect(diagnosticsResult).toEqual({ ok: true, skipped: 1 })
+    expect(calls[3]?.args).toEqual(["queue-1", { ok: true, claimId: "claim-1" }, "claim-1"])
+    expect(calls[4]?.args).toEqual([
       "queue-1",
       { claimId: "claim-1", error: "runtime stopped", ok: false, retryable: true },
       "claim-1",
