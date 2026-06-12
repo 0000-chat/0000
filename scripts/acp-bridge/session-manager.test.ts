@@ -307,6 +307,63 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("terminalizes active prompt when provider silent watchdog fires", async () => {
+    const cloud = fakeCloudClient()
+    const logs: Array<Record<string, unknown>> = []
+    let closeCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {
+          closeCount += 1
+        },
+        cancel: async () => {},
+        sendUserMessage: async () => await new Promise(() => {}),
+      }),
+      log: (entry) => logs.push(entry),
+    })
+
+    void manager.handleQueueItem(promptQueueItem())
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe("queue-prompt"),
+    )
+
+    await expect(
+      manager.failActiveQueueItem("queue-prompt", "provider_silent_timeout"),
+    ).resolves.toBe(true)
+
+    expect(closeCount).toBe(1)
+    expect(manager.getStatus().sessions).toEqual([])
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        claimId: "claim-prompt",
+        id: "queue-prompt",
+        result: expect.objectContaining({
+          ok: false,
+          reasonCode: "provider_silent_timeout",
+          terminal: true,
+        }),
+      }),
+    )
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "bridge_error",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({ reasonCode: "provider_silent_timeout" }),
+          status: "error",
+          type: "error",
+        }),
+      }),
+    )
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        error: "provider_silent_timeout",
+        event: "agent.turn.failed",
+        queueId: "queue-prompt",
+      }),
+    )
+  })
+
   test("recreates an ACP session when an explicit runtime profile changes", async () => {
     const cloud = fakeCloudClient()
     const contexts: BridgeSessionContext[] = []
