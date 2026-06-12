@@ -55,9 +55,11 @@ export const bridgeLogEventNames = [
   "bridge.registration.disabled",
   "bridge.queue_item.complete",
   "bridge.queue_item.error",
+  "bridge.queue_item.externally_terminalized",
   "bridge.queue_item.in_flight",
   "bridge.queue_item.settled",
   "bridge.queue_item.start",
+  "bridge.lifecycle.externally_terminalized_result_ignored",
   "bridge.lifecycle.idle_close",
   "bridge.lifecycle.late_prompt_result_ignored",
   "bridge.lifecycle.replacement_session",
@@ -66,6 +68,7 @@ export const bridgeLogEventNames = [
   "bridge.start",
   "bridge.stop",
   "bridge.subscription.disabled",
+  "bridge.watchdog.terminalize_missed",
   "bridge.watchdog.timeout",
 ] as const
 

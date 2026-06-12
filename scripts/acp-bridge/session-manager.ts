@@ -283,11 +283,13 @@ export class BridgeSessionManager {
   private readonly createSession: (context: BridgeSessionContext) => ManagedAcpSession
   private readonly sessions = new Map<string, BridgeSessionRecord>()
   private readonly promptQueues = new Map<string, Promise<void>>()
+  private readonly activeQueueItems = new Map<string, BridgeSessionQueueItem>()
   private readonly sessionQueueState = new Map<
     string,
     { pendingQueueItemIds: string[]; runningQueueItemId?: string }
   >()
   private readonly cancelledQueueItemIds = new Set<string>()
+  private readonly externallyTerminalizedQueueItemIds = new Set<string>()
   private readonly terminalInteractionSessionKeys = new Set<string>()
   private readonly terminalInteractionSessionKeyOrder: string[] = []
   private readonly eventBatch: BridgeEventInput[] = []
@@ -357,6 +359,7 @@ export class BridgeSessionManager {
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
     const type = normalizeType(item)
+    this.activeQueueItems.set(item.id, item)
     this.supervisor?.recordQueued(this.supervisorWorkItem(item))
     this.supervisor?.recordClaimed(this.supervisorWorkItem(item))
     this.writeLog({
@@ -386,6 +389,9 @@ export class BridgeSessionManager {
       if (type === "prompt") {
         this.writeAgentTurnLog("agent.turn.started", item, type)
         await this.handlePrompt(item)
+        if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
+          return
+        }
         this.writeAgentTurnLog("agent.turn.completed", item, type)
         this.writeQueueCompleteLog(item, type)
         return
@@ -437,6 +443,18 @@ export class BridgeSessionManager {
       })
       this.writeQueueCompleteLog(item, type)
     } catch (error) {
+      if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
+        this.writeLog({
+          level: "info",
+          event: "bridge.lifecycle.externally_terminalized_result_ignored",
+          queueId: item.id,
+          queueType: type,
+          threadId: item.threadId,
+          sessionId: item.sessionId,
+          agentSessionId: item.agentSessionId,
+        })
+        return
+      }
       const rawMessage = error instanceof Error ? error.message : String(error)
       const message = String(redactLogValue(rawMessage))
       this.writeLog({
@@ -468,7 +486,73 @@ export class BridgeSessionManager {
               error: message,
             },
       )
+    } finally {
+      this.activeQueueItems.delete(item.id)
+      if (!this.sessionQueueStateHasQueueItem(item.id)) {
+        this.externallyTerminalizedQueueItemIds.delete(item.id)
+      }
     }
+  }
+
+  async failActiveQueueItem(queueItemId: string, reasonCode: string): Promise<boolean> {
+    const item = this.activeQueueItems.get(queueItemId)
+    if (!item) {
+      return false
+    }
+    const type = normalizeType(item)
+    const sessionKey = this.findSessionKeyForActiveQueueItem(queueItemId) ?? this.findSessionKeyForItem(item)
+    const session = sessionKey ? this.sessions.get(sessionKey) : undefined
+    this.externallyTerminalizedQueueItemIds.add(queueItemId)
+    if (sessionKey) {
+      this.clearQueueItemFromSessionQueue(sessionKey, queueItemId)
+    }
+    const message =
+      reasonCode === "provider_silent_timeout"
+        ? "ACP provider stopped producing events before the run completed."
+        : `ACP bridge terminalized active queue item: ${reasonCode}`
+    if (type === "prompt") {
+      this.writeAgentTurnLog("agent.turn.failed", item, type, reasonCode)
+    }
+    if (session) {
+      this.enqueueEventWrite(session, {
+        externalEventId: `${queueItemId}:${reasonCode}`,
+        source: "bridge",
+        eventType: "bridge_error",
+        payload: {
+          queueId: queueItemId,
+          reasonCode,
+        },
+        part: {
+          type: "error",
+          text: message,
+          json: { reasonCode },
+          status: "error",
+        },
+      })
+    }
+    this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), reasonCode)
+    await this.drainEventWrites()
+    await this.markQueueResult(item, {
+      ok: false,
+      error: message,
+      reasonCode,
+      terminal: true,
+    })
+    this.writeLog({
+      level: "warn",
+      event: "bridge.queue_item.externally_terminalized",
+      queueId: queueItemId,
+      queueType: type,
+      threadId: item.threadId,
+      sessionId: item.sessionId,
+      agentSessionId: item.agentSessionId,
+      reasonCode,
+    })
+    if (sessionKey) {
+      await this.closeSession(sessionKey, { terminalInteraction: true })
+    }
+    this.activeQueueItems.delete(queueItemId)
+    return true
   }
 
   async close(): Promise<void> {
@@ -591,6 +675,9 @@ export class BridgeSessionManager {
         runtimeConfig: runtimeConfigApplication?.applied,
       })
     } catch (error) {
+      if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
+        return
+      }
       const promptFailure = classifyPromptError(error)
       if (promptFailure.terminal) {
         const diagnostics = session.acp.getPromptTimeoutDiagnostics?.()
@@ -624,6 +711,21 @@ export class BridgeSessionManager {
       }
       await this.closeSession(session.sessionKey, { terminalInteraction: true })
       throw error
+    }
+    if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
+      this.writeLog({
+        level: "info",
+        event: "bridge.lifecycle.late_prompt_result_ignored",
+        queueId: item.id,
+        queueType: normalizeType(item),
+        threadId: session.threadId,
+        sessionId: item.sessionId,
+        agentSessionId: session.providerSessionKey,
+        acpSessionId: result.sessionId,
+        textLength: result.text.length,
+        reason: "externally_terminalized",
+      })
+      return
     }
     if (this.cancelledQueueItemIds.delete(item.id)) {
       await this.markQueueResult(item, {
@@ -857,6 +959,42 @@ export class BridgeSessionManager {
     if (state && state.pendingQueueItemIds.length === 0 && !state.runningQueueItemId) {
       this.sessionQueueState.delete(sessionKey)
     }
+  }
+
+  private findSessionKeyForActiveQueueItem(queueItemId: string): string | undefined {
+    for (const [sessionKey, state] of this.sessionQueueState.entries()) {
+      if (
+        state.runningQueueItemId === queueItemId ||
+        state.pendingQueueItemIds.includes(queueItemId)
+      ) {
+        return sessionKey
+      }
+    }
+    return undefined
+  }
+
+  private clearQueueItemFromSessionQueue(sessionKey: string, queueItemId: string): void {
+    const state = this.sessionQueueState.get(sessionKey)
+    if (!state) {
+      return
+    }
+    state.pendingQueueItemIds = state.pendingQueueItemIds.filter((id) => id !== queueItemId)
+    if (state.runningQueueItemId === queueItemId) {
+      state.runningQueueItemId = undefined
+    }
+    this.deleteEmptySessionQueueState(sessionKey)
+  }
+
+  private sessionQueueStateHasQueueItem(queueItemId: string): boolean {
+    for (const state of this.sessionQueueState.values()) {
+      if (
+        state.runningQueueItemId === queueItemId ||
+        state.pendingQueueItemIds.includes(queueItemId)
+      ) {
+        return true
+      }
+    }
+    return false
   }
 
   private getActiveTurnId(sessionKey: string): string | undefined {

@@ -742,6 +742,85 @@ describe("bridge supervisor claim gating", () => {
       }),
     )
   })
+
+  test("terminalizes watchdog-failed in-flight commands before claiming more work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    const inFlightCommands = new Map<string, Promise<void>>([
+      ["queue-timeout", new Promise<void>(() => {})],
+    ])
+    const inFlightCommandMetadata = new Map([
+      [
+        "queue-timeout",
+        {
+          id: "queue-timeout",
+          startedAt: "2026-06-05T10:00:00.000Z",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+    ])
+    const terminalized: Array<Record<string, unknown>> = []
+    let claimLimit: number | undefined
+
+    await runBridgeLoopIteration({
+      claimCommands: async (_config, limit) => {
+        claimLimit = limit
+        return []
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata,
+      inFlightCommands,
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        failActiveQueueItem: async (queueItemId, reasonCode) => {
+          terminalized.push({ queueItemId, reasonCode })
+          return true
+        },
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 5, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      watchdogFailures: [
+        {
+          checkpoint: "failed",
+          queueItemId: "queue-timeout",
+          reasonCode: "provider_silent_timeout",
+        },
+      ],
+      writeStatus: async () => {},
+    })
+
+    expect(terminalized).toEqual([
+      { queueItemId: "queue-timeout", reasonCode: "provider_silent_timeout" },
+    ])
+    expect(inFlightCommands.has("queue-timeout")).toBe(false)
+    expect(inFlightCommandMetadata.has("queue-timeout")).toBe(false)
+    expect(claimLimit).toBe(1)
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.settled",
+        queueId: "queue-timeout",
+        reason: "provider_silent_timeout",
+      }),
+    )
+  })
 })
 
 function bridgeRegistration() {
