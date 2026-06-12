@@ -5,9 +5,14 @@ import {
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
 } from "./runtime-defaults"
-import { discoverRuntimeProfiles, terminateActiveAcpDiscoveryChildren } from "./runtime-discovery"
+import {
+  discoverRuntimeProfiles,
+  getActiveAcpDiscoveryChildCount,
+  terminateActiveAcpDiscoveryChildren,
+} from "./runtime-discovery"
 import type { BridgeRuntimeKind, BridgeRuntimeProfile } from "./runtime-profiles"
 import { commandKey } from "./runtime-profiles"
+import type { AcpBridgeProcessHealth } from "./process-registry"
 
 export type RuntimeSmokeStatus = "pass" | "fail" | "blocked"
 
@@ -34,6 +39,7 @@ export type RuntimeSmokeRow = {
 export type RuntimeSmokeMatrix = {
   generatedAt: string
   host: string
+  processHealth?: RuntimeSmokeProcessHealth
   summary: Record<RuntimeSmokeStatus, number>
   rows: RuntimeSmokeRow[]
 }
@@ -45,6 +51,15 @@ type RuntimeSmokeInput = {
   includeAvailableCommands?: boolean
   now?: () => Date
   host?: string
+  getProcessHealth?: () => Pick<AcpBridgeProcessHealth, "canClaim" | "childCount" | "status">
+  cleanupDiscoveryChildren?: () => Promise<void> | void
+}
+
+export type RuntimeSmokeProcessHealth = {
+  baselineChildCount: number
+  finalChildCount: number
+  canClaim: boolean
+  status: string
 }
 
 const EXPECTED_BUILT_INS: Array<{
@@ -96,15 +111,62 @@ export async function buildRuntimeSmokeMatrix(
   }
 }
 
+export async function runRuntimeSmokeMatrix(
+  input: RuntimeSmokeInput = {},
+): Promise<RuntimeSmokeMatrix> {
+  const baselineChildCount = getActiveAcpDiscoveryChildCount()
+  let matrix: RuntimeSmokeMatrix
+  try {
+    matrix = await buildRuntimeSmokeMatrix(input)
+  } finally {
+    await (input.cleanupDiscoveryChildren ?? shutdownSmokeProbeChildren)()
+  }
+  const finalChildCount = getActiveAcpDiscoveryChildCount()
+  const processHealth = assertRuntimeSmokeProcessHealth({
+    baselineChildCount,
+    finalChildCount,
+    processHealth: input.getProcessHealth?.(),
+  })
+  return { ...matrix, processHealth }
+}
+
+export function assertRuntimeSmokeProcessHealth(input: {
+  baselineChildCount: number
+  finalChildCount: number
+  processHealth?: Pick<AcpBridgeProcessHealth, "canClaim" | "childCount" | "status">
+}): RuntimeSmokeProcessHealth {
+  const processHealth = input.processHealth
+  const result: RuntimeSmokeProcessHealth = {
+    baselineChildCount: input.baselineChildCount,
+    finalChildCount: input.finalChildCount,
+    canClaim: processHealth?.canClaim ?? true,
+    status: processHealth?.status ?? "healthy",
+  }
+  if (input.finalChildCount !== input.baselineChildCount) {
+    throw new Error(
+      `ACP runtime smoke leaked discovery children: baseline=${input.baselineChildCount} final=${input.finalChildCount}`,
+    )
+  }
+  if (processHealth && !processHealth.canClaim) {
+    throw new Error(
+      `ACP runtime smoke process health cannot claim: status=${processHealth.status} childCount=${processHealth.childCount}`,
+    )
+  }
+  return result
+}
+
 export function formatRuntimeSmokeMatrix(matrix: RuntimeSmokeMatrix): string {
   const lines = [
     `ACP runtime smoke matrix (${matrix.generatedAt})`,
     `Host: ${matrix.host}`,
     `Summary: ${matrix.summary.pass} pass, ${matrix.summary.fail} fail, ${matrix.summary.blocked} blocked`,
+    matrix.processHealth
+      ? `Process health: ${matrix.processHealth.status} (can claim: ${matrix.processHealth.canClaim ? "yes" : "no"}, discovery children ${matrix.processHealth.finalChildCount}/${matrix.processHealth.baselineChildCount})`
+      : undefined,
     "",
     "| Runtime | Status | ACP | Command | Evidence |",
     "| --- | --- | --- | --- | --- |",
-  ]
+  ].filter((line): line is string => line !== undefined)
   for (const row of matrix.rows) {
     lines.push(
       [
@@ -260,18 +322,16 @@ function parseSmokeArgs(argv: string[]): {
 
 async function main() {
   const args = parseSmokeArgs(process.argv.slice(2))
-  const matrix = await buildRuntimeSmokeMatrix({
+  const matrix = await runRuntimeSmokeMatrix({
     baseAgentCommand: args.baseAgentCommand,
     customCommands: args.customCommands,
     includeAvailableCommands: args.includeAvailableCommands,
   })
   if (args.json) {
     process.stdout.write(`${JSON.stringify(matrix, null, 2)}\n`)
-    await shutdownSmokeProbeChildren()
     return
   }
   process.stdout.write(formatRuntimeSmokeMatrix(matrix))
-  await shutdownSmokeProbeChildren()
 }
 
 async function shutdownSmokeProbeChildren() {

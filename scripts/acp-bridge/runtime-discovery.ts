@@ -849,6 +849,10 @@ export function terminateActiveAcpDiscoveryChildren(): void {
   }
 }
 
+export function getActiveAcpDiscoveryChildCount(): number {
+  return activeAcpDiscoveryChildren.size
+}
+
 function terminateSpawnedAcpCommand(child: ReturnType<typeof spawn>): void {
   if (child.exitCode !== null || child.signalCode !== null) {
     return

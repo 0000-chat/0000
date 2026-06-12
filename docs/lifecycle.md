@@ -75,12 +75,16 @@ The host owns global queue ordering and active-session limits. The bridge must
 still enforce local safety:
 
 - do not claim work while local journal health is hard-failed
+- do not claim work until ACP process registry reconciliation has completed
+- do not claim work while ACP process health is ambiguous, corrupt, newer than
+  this bridge understands, or over the local child-process cap
 - do not run two prompts concurrently for the same scoped session
 - scope sessions by organization, bridge device, agent, thread, and runtime
   profile
 - keep lifecycle commands fenced to the claimed queue item/session
-- report stale, duplicate, or ambiguous lifecycle commands as terminal queue
-  results
+- remove active queue ids only after terminal process cleanup has been attempted
+- acknowledge stale permission, cancel, choice, and input responses after a
+  terminal prompt as stale no-op results
 
 ## Required Diagnostics
 
@@ -103,3 +107,25 @@ Important codes include:
 
 Diagnostics must classify provider/runtime failures without forwarding raw
 provider payloads, tokens, auth headers, prompts, or full user content.
+
+## Hard-Switch Process Ownership
+
+ACP child processes, bridge sessions, and claimed queue work must not drift
+apart. Every spawned ACP child is registered with pid, command, cwd, session
+key, queue/claim metadata, and runtime profile metadata. Session close and
+terminal prompt paths terminate through that registry record before active
+queue state is cleared.
+
+Startup recovery is a hard switch:
+
+1. Load the process registry.
+2. If the registry is corrupt or has a newer version, enter no-claim mode.
+3. Reconcile registered children before stale cleanup or queue claims.
+4. Remove dead children from the registry.
+5. Terminate live children only with registry pid plus command fingerprint.
+6. If a live child cannot be proven, mark the process state ambiguous and do
+   not claim work.
+
+Process caps are enforced locally. A cap breach does not kill by name or guess;
+it stops new claims, appears in `bridge-status.json` under `processHealth`, and
+is sent in heartbeat status so the host can surface the recovery state.

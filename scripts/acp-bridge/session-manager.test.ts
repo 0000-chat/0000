@@ -712,6 +712,149 @@ describe("bridge session cwd safety", () => {
     })
   })
 
+  test("acknowledges stale interaction responses as no-op terminal-safe results", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "",
+        }),
+      }),
+    })
+
+    await manager.handleQueueItem({
+      claimId: "claim-terminal",
+      id: "queue-terminal",
+      prompt: "terminalize",
+      threadId: "thread-1",
+      type: "prompt",
+    })
+    await manager.handleQueueItem({
+      approvalId: "permission-1",
+      approvalOutcome: "approved",
+      claimId: "claim-permission",
+      externalRequestId: "permission-1",
+      id: "queue-permission",
+      threadId: "thread-1",
+      type: "approval-response",
+    })
+    await manager.handleQueueItem({
+      approvalOutcome: "choice-a",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      prompt: "choice-a",
+      threadId: "thread-1",
+      type: "choice-response",
+    })
+    await manager.handleQueueItem({
+      claimId: "claim-input",
+      id: "queue-input",
+      prompt: "late input",
+      threadId: "thread-1",
+      type: "input-response",
+    })
+
+    expect(cloud.results.slice(-3)).toEqual([
+      expect.objectContaining({
+        id: "queue-permission",
+        result: expect.objectContaining({
+          ok: true,
+          stale: true,
+          noOp: true,
+          reasonCode: "stale_interaction_response",
+        }),
+      }),
+      expect.objectContaining({
+        id: "queue-choice",
+        result: expect.objectContaining({
+          ok: true,
+          stale: true,
+          noOp: true,
+          reasonCode: "stale_interaction_response",
+        }),
+      }),
+      expect.objectContaining({
+        id: "queue-input",
+        result: expect.objectContaining({
+          ok: true,
+          stale: true,
+          noOp: true,
+          reasonCode: "stale_interaction_response",
+        }),
+      }),
+    ])
+  })
+
+  test("bounds remembered terminal interaction session keys", async () => {
+    const cloud = fakeCloudClient()
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => ({
+          events: [],
+          rawResult: {},
+          sessionId: `session-${prompt}`,
+          text: "",
+        }),
+      }),
+    })
+
+    for (let index = 0; index < 130; index += 1) {
+      await manager.handleQueueItem({
+        agentSessionId: `provider-${index}`,
+        claimId: `claim-${index}`,
+        id: `queue-${index}`,
+        prompt: `${index}`,
+        threadId: `thread-${index}`,
+        type: "prompt",
+      })
+    }
+
+    expect(manager.getStatus().terminalInteractionSessionKeyCount).toBe(300)
+    await manager.handleQueueItem({
+      approvalOutcome: "choice-old",
+      claimId: "claim-old-choice",
+      id: "queue-old-choice",
+      prompt: "choice-old",
+      threadId: "thread-0",
+      type: "choice-response",
+    })
+    await manager.handleQueueItem({
+      approvalOutcome: "choice-new",
+      claimId: "claim-new-choice",
+      id: "queue-new-choice",
+      prompt: "choice-new",
+      threadId: "thread-129",
+      type: "choice-response",
+    })
+
+    expect(cloud.results.at(-2)).toMatchObject({
+      id: "queue-old-choice",
+      result: { ok: true, choiceId: "choice-old" },
+    })
+    expect(cloud.results.at(-2)?.result).not.toMatchObject({
+      stale: true,
+      reasonCode: "stale_interaction_response",
+    })
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-new-choice",
+      result: {
+        ok: true,
+        stale: true,
+        noOp: true,
+        reasonCode: "stale_interaction_response",
+      },
+    })
+  })
+
   test("passes system prompt while adapting structured attachments into native prompt references", async () => {
     const prompts: string[] = []
     const promptOptions: Array<Record<string, unknown> | undefined> = []

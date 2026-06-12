@@ -1,4 +1,8 @@
 import type { BridgeHostAdapter, BridgeDiagnosticInput } from "./host-adapter"
+import type {
+  AcpBridgeProcessHealth,
+  AcpBridgeProcessRegistryLike,
+} from "./process-registry"
 import {
   BridgeJournalError,
   openBridgeJournal,
@@ -63,6 +67,7 @@ export type OpenBridgeSupervisorOptions = {
   host?: BridgeHostAdapter
   journalPath: string
   organizationId?: string
+  processRegistry?: Pick<AcpBridgeProcessRegistryLike, "getProcessHealth" | "reconcileBeforeClaiming">
   providerSilentTimeoutMs?: number
 }
 
@@ -72,6 +77,7 @@ export type BridgeSupervisorOptions = {
   journal?: BridgeJournal
   maxTurnStates?: number
   now?: () => number
+  processRegistry?: Pick<AcpBridgeProcessRegistryLike, "getProcessHealth" | "reconcileBeforeClaiming">
   providerSilentTimeoutMs?: number
 }
 
@@ -83,6 +89,7 @@ export function openBridgeSupervisor(options: OpenBridgeSupervisorOptions): Brid
     return new BridgeSupervisor({
       host: options.host,
       journal: openBridgeJournal({ path: options.journalPath }),
+      processRegistry: options.processRegistry,
       providerSilentTimeoutMs: options.providerSilentTimeoutMs,
     })
   } catch (error) {
@@ -94,6 +101,7 @@ export function openBridgeSupervisor(options: OpenBridgeSupervisorOptions): Brid
         message: mapped.message,
       },
       host: options.host,
+      processRegistry: options.processRegistry,
       providerSilentTimeoutMs: options.providerSilentTimeoutMs,
     })
   }
@@ -105,6 +113,10 @@ export class BridgeSupervisor {
   private readonly journal?: BridgeJournal
   private readonly maxTurnStates: number
   private readonly now: () => number
+  private readonly processRegistry?: Pick<
+    AcpBridgeProcessRegistryLike,
+    "getProcessHealth" | "reconcileBeforeClaiming"
+  >
   private readonly providerSilentTimeoutMs: number
   private readonly promptOutboxIds = new Map<string, number>()
   private readonly turns = new Map<string, BridgeTurnState>()
@@ -113,6 +125,7 @@ export class BridgeSupervisor {
     this.health = options.health ?? { status: "healthy" }
     this.host = options.host
     this.journal = options.journal
+    this.processRegistry = options.processRegistry
     this.maxTurnStates = options.maxTurnStates ?? DEFAULT_MAX_TURN_STATES
     this.now = options.now ?? Date.now
     this.providerSilentTimeoutMs =
@@ -120,11 +133,29 @@ export class BridgeSupervisor {
   }
 
   canClaimWork(): boolean {
-    return this.health.status === "healthy"
+    return this.health.status === "healthy" && this.getProcessHealth().canClaim
   }
 
   getHealth(): BridgeSupervisorHealth {
     return this.health
+  }
+
+  getProcessHealth(): AcpBridgeProcessHealth {
+    return this.processRegistry?.getProcessHealth() ?? {
+      ambiguousProcessCount: 0,
+      canClaim: true,
+      childCount: 0,
+      childCountsByRuntimeProfile: {},
+      processCapExceeded: false,
+      startupReconciliation: {
+        ambiguousProcessCount: 0,
+        removedDeadProcessCount: 0,
+        retainedProcessCount: 0,
+        status: "not_run",
+        terminatedProcessCount: 0,
+      },
+      status: "healthy",
+    }
   }
 
   getTurnState(queueItemId: string): BridgeTurnState | undefined {
@@ -227,6 +258,14 @@ export class BridgeSupervisor {
       } catch (error) {
         this.markJournalHardFailed(error)
       }
+    }
+  }
+
+  async reconcileProcessesBeforeClaiming(): Promise<void> {
+    try {
+      await this.processRegistry?.reconcileBeforeClaiming()
+    } catch (error) {
+      this.markJournalHardFailed(error)
     }
   }
 

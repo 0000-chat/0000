@@ -11,6 +11,10 @@ import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./acp-bridge/conv
 import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter"
 import { openBridgeSupervisor, type BridgeSupervisor } from "./acp-bridge/bridge-supervisor"
 import {
+  AcpBridgeProcessRegistry,
+  type AcpBridgeProcessHealth,
+} from "./acp-bridge/process-registry"
+import {
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
   redactLogValue,
@@ -49,6 +53,7 @@ export {
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json")
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json")
 const DEFAULT_JOURNAL_DIR = join(homedir(), ".0000", "bridge-journals")
+const DEFAULT_PROCESS_REGISTRY_DIR = join(homedir(), ".0000", "bridge-processes")
 const DEFAULT_PAIR_PATH = "/api/agent-bridge/pair"
 const DEFAULT_CLAIM_PATH = "/api/agent-bridge/queue/claim"
 const DEFAULT_CLEANUP_STALE_PATH = "/api/agent-bridge/queue/cleanup-stale"
@@ -58,6 +63,7 @@ const DEFAULT_POLL_MS = 2000
 const DEFAULT_HEARTBEAT_MS = 15_000
 const DEFAULT_MAX_IN_FLIGHT_COMMANDS = 2
 const DEFAULT_AGENT_COMMAND = "hermes acp"
+const AGENT_TOOLS_MCP_SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "agent-tools-mcp.ts")
 const DEFAULT_ACP_RESUME_ENABLED = false
 const DEFAULT_ACP_IDLE_TTL_MS = 0
 const DEFAULT_ALLOW_REMOTE_CWD = true
@@ -175,6 +181,12 @@ export type BridgeStatus = {
     runningQueueItemId?: string
     lastUsedAt?: number
   }>
+  processHealth?: AcpBridgeProcessHealth & { registryPath?: string }
+  lastStaleCleanupAt?: string
+  lastStaleCleanup?: {
+    inspected?: number
+    released?: number
+  }
   setupSummary?: Record<string, unknown>
   recentErrors: string[]
   registrationFailure?: BridgeRegistrationFailure
@@ -233,6 +245,9 @@ export type BridgeRegistrationStatus = {
   activeQueueItemIds?: string[]
   inFlightCommands?: BridgeStatus["inFlightCommands"]
   sessionQueues?: BridgeStatus["sessionQueues"]
+  processHealth?: BridgeStatus["processHealth"]
+  lastStaleCleanupAt?: string
+  lastStaleCleanup?: BridgeStatus["lastStaleCleanup"]
   recentErrors: string[]
   registrationFailure?: BridgeRegistrationFailure
 }
@@ -358,6 +373,7 @@ export type BridgeLoopIterationInput = {
   cleanupStaleClaims?: typeof cleanupStaleClaims
   claimCommands?: typeof claimCommands
   canClaimWork?: () => boolean
+  getProcessHealth?: () => AcpBridgeProcessHealth
   writeStatus?: typeof writeStatus
   launchUpdater?: typeof launchBridgeUpdater
 }
@@ -584,7 +600,7 @@ export function buildAgentToolsMcpServers(input: AgentToolsMcpServerInput): Herm
   assertRealAgentSessionId(input.agentSessionId)
   return [
     {
-      args: ["scripts/agent-tools-mcp.ts"],
+      args: [AGENT_TOOLS_MCP_SCRIPT_PATH],
       command: "bun",
       env: [
         { name: "ZERO_CHAT_AGENT_SESSION_ID", value: input.agentSessionId },
@@ -629,6 +645,12 @@ export function describeStatus(status: BridgeStatus, configExists: boolean): str
       }
       lines.push(`    active sessions: ${registration.activeSessions.length}`)
       lines.push(`    in-flight commands: ${registration.inFlightCommands?.length ?? 0}`)
+      if (registration.processHealth) {
+        lines.push(
+          `    process health: ${registration.processHealth.status} (can claim: ${registration.processHealth.canClaim ? "yes" : "no"}, children: ${registration.processHealth.childCount})`,
+        )
+        appendStartupReconciliationLines(lines, registration.processHealth, "    ")
+      }
       if (registration.lastHeartbeatAt) {
         lines.push(`    last heartbeat: ${registration.lastHeartbeatAt}`)
       }
@@ -652,6 +674,23 @@ export function describeStatus(status: BridgeStatus, configExists: boolean): str
   lines.push(`connected: ${status.connected ? "yes" : "no"}`)
   lines.push(`max in-flight commands: ${status.maxInFlight ?? 0}`)
   lines.push(`in-flight commands: ${status.inFlightCommands?.length ?? 0}`)
+  if (status.processHealth) {
+    lines.push(
+      `process health: ${status.processHealth.status} (can claim: ${status.processHealth.canClaim ? "yes" : "no"}, children: ${status.processHealth.childCount})`,
+    )
+    appendStartupReconciliationLines(lines, status.processHealth)
+    if (status.processHealth.ambiguousProcessCount > 0) {
+      lines.push(`ambiguous ACP processes: ${status.processHealth.ambiguousProcessCount}`)
+    }
+    if (status.processHealth.processCapExceeded) {
+      lines.push(`process cap exceeded: ${status.processHealth.childCount}/${status.processHealth.processCap ?? "unknown"}`)
+    }
+  }
+  if (status.lastStaleCleanupAt) {
+    lines.push(
+      `last stale cleanup: ${status.lastStaleCleanupAt} (released ${status.lastStaleCleanup?.released ?? 0}, inspected ${status.lastStaleCleanup?.inspected ?? 0})`,
+    )
+  }
   for (const command of status.inFlightCommands ?? []) {
     lines.push(
       `  - ${command.id}${command.type ? ` (${command.type})` : ""}${command.threadId ? ` thread=${command.threadId}` : ""}`,
@@ -678,6 +717,26 @@ export function describeStatus(status: BridgeStatus, configExists: boolean): str
     }
   }
   return `${lines.join("\n")}\n`
+}
+
+function appendStartupReconciliationLines(
+  lines: string[],
+  processHealth: BridgeStatus["processHealth"],
+  prefix = "",
+): void {
+  const reconciliation = processHealth?.startupReconciliation
+  if (!reconciliation) {
+    return
+  }
+  const when = reconciliation.lastReconciledAt
+    ? ` at ${reconciliation.lastReconciledAt}`
+    : ""
+  lines.push(`${prefix}startup reconciliation: ${reconciliation.status}${when}`)
+  if (reconciliation.status === "ambiguous") {
+    lines.push(
+      `${prefix}startup reconciliation recovery: stop verified bridge-owned ACP children or inspect the registry before deleting it`,
+    )
+  }
 }
 
 export function buildEndpoint(baseUrl: string, path: string): string {
@@ -982,11 +1041,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       })
       const cloudClient = createCloudClient(registration)
       const hostAdapter = new ConvexBridgeHostAdapter(cloudClient)
+      const processRegistryPath = getBridgeProcessRegistryPath(parsed.flags, registration.deviceId)
+      const processRegistry = new AcpBridgeProcessRegistry({
+        maxProcesses: maxInFlight,
+        path: processRegistryPath,
+      })
       const supervisor = openBridgeSupervisor({
         bridgeDeviceId: registration.deviceId,
         host: hostAdapter,
         journalPath: getBridgeJournalPath(parsed.flags, registration.deviceId),
+        processRegistry,
       })
+      await supervisor.reconcileProcessesBeforeClaiming()
       await supervisor.publishHealthDiagnostic({ bridgeDeviceId: registration.deviceId })
       await supervisor.replayOutboxBeforeClaiming()
       const manager = new BridgeSessionManager({
@@ -1013,6 +1079,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         },
         log,
         allowRemoteCwd,
+        processRegistry,
         supervisor,
       })
       const wakeSignal = createBridgeWakeSignal({
@@ -1047,6 +1114,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         activeQueueItemIds: [],
         inFlightCommands: [],
         sessionQueues: [],
+        processHealth: {
+          ...supervisor.getProcessHealth(),
+          registryPath: processRegistryPath,
+        },
         recentErrors: [],
         localJournal: bridgeSupervisorHealthStatus(supervisor),
       }
@@ -1159,6 +1230,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight())
       const effectiveMaxInFlight = context.inFlightCommands.size + availableProcessSlots
       context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
+      context.status.processHealth = context.supervisor.getProcessHealth()
       await publishBridgeSupervisorHealthIfChanged(context)
       for (const watchdog of context.supervisor.checkWatchdogs()) {
         context.log({
@@ -1186,6 +1258,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         recordLoopError: recordLoopError(context),
         statusPath,
         canClaimWork: () => context.supervisor.canClaimWork(),
+        getProcessHealth: () => context.supervisor.getProcessHealth(),
         writeStatus: persistAggregateStatus,
       })
       if (result.restartRequested) {
@@ -1221,6 +1294,9 @@ function buildAggregateBridgeStatus(
     activeQueueItemIds: status.activeQueueItemIds,
     inFlightCommands: status.inFlightCommands,
     sessionQueues: status.sessionQueues,
+    processHealth: status.processHealth,
+    lastStaleCleanupAt: status.lastStaleCleanupAt,
+    lastStaleCleanup: status.lastStaleCleanup,
     recentErrors: status.recentErrors,
     registrationFailure: status.registrationFailure,
   }))
@@ -1245,6 +1321,9 @@ function buildAggregateBridgeStatus(
     ),
     inFlightCommands: registrations.flatMap((registration) => registration.inFlightCommands ?? []),
     sessionQueues: registrations.flatMap((registration) => registration.sessionQueues ?? []),
+    processHealth: first?.status.processHealth,
+    lastStaleCleanupAt: first?.status.lastStaleCleanupAt,
+    lastStaleCleanup: first?.status.lastStaleCleanup,
     recentErrors: registrations.flatMap((registration) => registration.recentErrors).slice(-10),
     registrations,
     registrationFailure: first?.status.registrationFailure,
@@ -1359,6 +1438,7 @@ export async function runBridgeLoopIteration(
       input.maxInFlight,
       input.inFlightCommands,
       input.inFlightCommandMetadata,
+      input.getProcessHealth?.(),
     )
   }
   const runCommand = (command: BridgeQueueCommand) => {
@@ -1496,6 +1576,25 @@ export async function runBridgeLoopIteration(
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size
     if (availableSlots > 0) {
+      const processHealth = input.getProcessHealth?.()
+      if (processHealth) {
+        input.status.processHealth = processHealth
+      }
+      if (processHealth && !processHealth.canClaim) {
+        input.log({
+          level: "warn",
+          event: "bridge.queue.claim_skipped",
+          deviceId: input.config.deviceId,
+          reason: "process_health_unsafe",
+          processHealthStatus: processHealth.status,
+          childCount: processHealth.childCount,
+          ambiguousProcessCount: processHealth.ambiguousProcessCount,
+          processCapExceeded: processHealth.processCapExceeded,
+        })
+        syncBridgeStatus()
+        await persistStatus(input.statusPath, input.status)
+        return { restartRequested: false }
+      }
       if (input.canClaimWork && !input.canClaimWork()) {
         input.log({
           level: "warn",
@@ -1511,6 +1610,12 @@ export async function runBridgeLoopIteration(
       if (now - input.lastStaleCleanupAt >= 60_000) {
         input.setLastStaleCleanupAt(now)
         const cleanupResult = await cleanup(input.config, { limit: availableSlots })
+        input.status.lastStaleCleanupAt = new Date(now).toISOString()
+        input.status.lastStaleCleanup = {
+          inspected:
+            typeof cleanupResult.inspected === "number" ? cleanupResult.inspected : undefined,
+          released: typeof cleanupResult.released === "number" ? cleanupResult.released : undefined,
+        }
         if (typeof cleanupResult.released === "number" && cleanupResult.released > 0) {
           input.log({
             level: "info",
@@ -1611,8 +1716,11 @@ export function bridgeHeartbeatSignature(
     | "devHotReload"
     | "inFlightCommands"
     | "lifecycle"
+    | "lastStaleCleanupAt"
+    | "lastStaleCleanup"
     | "maxInFlight"
     | "pendingControlCommand"
+    | "processHealth"
     | "sessionQueues"
     | "updateState"
   >,
@@ -1631,6 +1739,9 @@ export function bridgeHeartbeatSignature(
       }))
       .sort((left, right) => left.id.localeCompare(right.id)),
     maxInFlight: status.maxInFlight,
+    processHealth: status.processHealth,
+    lastStaleCleanupAt: status.lastStaleCleanupAt,
+    lastStaleCleanup: status.lastStaleCleanup,
     sessionQueues: (status.sessionQueues ?? [])
       .map((session) => ({
         hermesProfileName: session.hermesProfileName,
@@ -1655,6 +1766,7 @@ function syncBridgeRuntimeStatus(
   maxInFlight: number,
   inFlightCommands: Map<string, Promise<void>>,
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>,
+  processHealth?: AcpBridgeProcessHealth,
 ): void {
   const managerStatus = manager.getStatus()
   status.lifecycle ??= "running"
@@ -1674,6 +1786,9 @@ function syncBridgeRuntimeStatus(
   status.sessionQueues = managerStatus.sessions
   status.activeQueueItemIds = Array.from(inFlightCommands.keys())
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values())
+  if (processHealth) {
+    status.processHealth = processHealth
+  }
 }
 
 async function showStatus(parsed: ParsedBridgeArgs) {
@@ -1836,7 +1951,7 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`
 }
 
 function getStatusPath(flags: FlagMap, env: NodeJS.ProcessEnv = process.env): string {
@@ -1853,6 +1968,18 @@ function getBridgeJournalPath(
     return explicit
   }
   return join(DEFAULT_JOURNAL_DIR, `${sanitizeFileSegment(deviceId)}.sqlite`)
+}
+
+function getBridgeProcessRegistryPath(
+  flags: FlagMap,
+  deviceId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicit = getFlag(flags, "process-registry-file", env.ZERO_CHAT_BRIDGE_PROCESS_REGISTRY)
+  if (explicit) {
+    return explicit
+  }
+  return join(DEFAULT_PROCESS_REGISTRY_DIR, `${sanitizeFileSegment(deviceId)}.json`)
 }
 
 function sanitizeFileSegment(value: string): string {
@@ -1938,6 +2065,7 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     activeQueueItemIds: status.activeQueueItemIds ?? [],
     inFlightCommands: status.inFlightCommands ?? [],
     maxInFlight: status.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT_COMMANDS,
+    processHealth: status.processHealth,
     sessionQueues: (status.sessionQueues ?? []).map((session) => ({
       queueDepth: session.queueDepth,
       runningQueueItemId: session.runningQueueItemId,
@@ -1945,6 +2073,8 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
       threadId: session.threadId,
     })),
     lastPollAt: status.lastPollAt,
+    lastStaleCleanupAt: status.lastStaleCleanupAt,
+    lastStaleCleanup: status.lastStaleCleanup,
     recentErrors: status.recentErrors.slice(-5),
   }
 }

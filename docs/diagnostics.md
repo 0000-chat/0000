@@ -10,6 +10,7 @@ thread end to end.
 | Local stdout/stderr | Immediate bridge process output |
 | `~/.0000/bridge-status.json` | Current local heartbeat and active work projection |
 | SQLite journal | Durable queue, session, lifecycle, and result breadcrumbs |
+| ACP process registry | Durable child-process ownership records used for restart recovery |
 | Host diagnostics endpoint | Host-visible bridge diagnostic records |
 | Host log forwarding endpoint | Sanitized operational events for centralized search |
 
@@ -50,11 +51,48 @@ payloads in diagnostics.
 1. Start with the host thread and queue item status.
 2. Match the queue item to bridge diagnostics by queue item id and trace id.
 3. Check `bridge-status.json` for active sessions and runtime profile state.
-4. Inspect the SQLite journal for claim, prompt, cancel, result, and cleanup
+4. Check `processHealth` in `bridge-status.json`. `canClaim: false`,
+   `ambiguousProcessCount > 0`, or `processCapExceeded: true` means the bridge
+   intentionally stopped claiming queue work until local ownership is safe.
+5. Inspect the SQLite journal for claim, prompt, cancel, result, and cleanup
    transitions.
-5. Compare host log forwarding records with local bridge logs.
-6. Reproduce locally with `bun run bridge:smoke-runtimes` or a focused custom ACP
+6. Compare host log forwarding records with local bridge logs.
+7. Reproduce locally with `bun run bridge:smoke-runtimes` or a focused custom ACP
    command.
+
+## ACP Process Health
+
+Each bridge registration owns a local JSON process registry under
+`~/.0000/bridge-processes/<device>.json` unless
+`ZERO_CHAT_BRIDGE_PROCESS_REGISTRY` or `--process-registry-file` overrides it.
+The file is written with temp-file plus rename and owner-only permissions.
+
+On startup, the bridge reconciles the registry before stale cleanup or queue
+claiming. Dead registered children are removed. Live children are terminated
+only when the registry pid and command fingerprint match; the bridge never kills
+by process name alone. Corrupt registry JSON, a newer registry version, an
+unverifiable live child, or a process-cap breach sets `processHealth.canClaim`
+to `false`.
+
+Relevant status fields:
+
+- `processHealth.status`: `healthy`, `corrupt`, `newer_version`, `ambiguous`, or
+  `cap_exceeded`.
+- `processHealth.childCount`: registered ACP children still owned locally.
+- `processHealth.childCountsByRuntimeProfile`: child counts grouped by runtime
+  profile id or Hermes profile.
+- `processHealth.ambiguousProcessCount`: live registry entries the bridge could
+  not safely prove before acting.
+- `processHealth.processCapExceeded`: whether local child count is above the
+  configured cap.
+- `lastStaleCleanupAt` and `lastStaleCleanup`: last host stale-claim cleanup
+  attempt and result.
+
+When `canClaim` is false, inspect the registry file and local process table.
+If a process is still valid bridge-owned work, let it finish or terminate it
+with pid-specific evidence. If the registry is corrupt or newer than the
+installed bridge understands, preserve the file for debugging and reconnect or
+upgrade the bridge before claiming new work.
 
 ## Local Doctor Bundle
 

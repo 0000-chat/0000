@@ -184,6 +184,42 @@ describe("bridge supervisor shadow mode", () => {
     expect(supervisor.canClaimWork()).toBe(false)
   })
 
+  test("runs process reconciliation before claims and exposes unsafe process health", async () => {
+    let reconciled = false
+    const supervisor = new BridgeSupervisor({
+      processRegistry: {
+        getProcessHealth: () => ({
+          ambiguousProcessCount: reconciled ? 1 : 0,
+          canClaim: !reconciled,
+          childCount: 1,
+          childCountsByRuntimeProfile: { "codex:default": 1 },
+          processCap: 1,
+          processCapExceeded: true,
+          startupReconciliation: {
+            ambiguousProcessCount: reconciled ? 1 : 0,
+            removedDeadProcessCount: 0,
+            retainedProcessCount: reconciled ? 1 : 0,
+            status: reconciled ? "ambiguous" : "not_run",
+            terminatedProcessCount: 0,
+          },
+          status: reconciled ? "ambiguous" : "healthy",
+        }),
+        reconcileBeforeClaiming: async () => {
+          reconciled = true
+        },
+      },
+    })
+
+    await supervisor.reconcileProcessesBeforeClaiming()
+
+    expect(supervisor.canClaimWork()).toBe(false)
+    expect(supervisor.getProcessHealth()).toMatchObject({
+      ambiguousProcessCount: 1,
+      canClaim: false,
+      status: "ambiguous",
+    })
+  })
+
   test("does not let local diagnostic write failures interrupt provider events", () => {
     const journal = journalAtTempPath()
     const supervisor = new BridgeSupervisor({ journal })
