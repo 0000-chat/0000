@@ -198,13 +198,12 @@ export type BridgeStatus = {
   runtimeConformance?: RuntimeConformanceSummary
   liveness?: {
     activeSessions: Array<{
+      agentSessionId?: string
       bridgeProfileId?: string
-      lastActivityAt: number
+      currentState: string
+      lastMeaningfulEventAt?: number
       queueItemId: string
       reasonCode?: string
-      sessionKey: string
-      startedAt: number
-      state: string
     }>
   }
   availability?: ReturnType<typeof deriveBridgeAvailability>
@@ -1967,7 +1966,7 @@ function syncBridgeRuntimeStatus(
 	      }
   status.maxInFlight = maxInFlight
   status.activeSessions = managerStatus.activeSessions
-  status.liveness = managerStatus.liveness ?? { activeSessions: [] }
+  status.liveness = normalizeBridgeLivenessStatus(managerStatus.liveness)
   status.sessionQueues = managerStatus.sessions
   status.activeQueueItemIds = Array.from(inFlightCommands.keys())
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values())
@@ -1982,6 +1981,33 @@ function syncBridgeRuntimeStatus(
     processHealth: status.processHealth,
     runtimeConformance: status.runtimeConformance,
   })
+}
+
+function normalizeBridgeLivenessStatus(
+  liveness:
+    | {
+        activeSessions: Array<{
+          bridgeProfileId?: string
+          lastActivityAt: number
+          queueItemId: string
+          reasonCode?: string
+          sessionKey: string
+          startedAt: number
+          state: string
+        }>
+      }
+    | undefined,
+): NonNullable<BridgeStatus["liveness"]> {
+  return {
+    activeSessions:
+      liveness?.activeSessions.map((session) => ({
+        bridgeProfileId: session.bridgeProfileId,
+        currentState: session.state,
+        lastMeaningfulEventAt: session.lastActivityAt,
+        queueItemId: session.queueItemId,
+        reasonCode: session.reasonCode,
+      })) ?? [],
+  }
 }
 
 async function showStatus(parsed: ParsedBridgeArgs) {

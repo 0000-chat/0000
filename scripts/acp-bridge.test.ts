@@ -930,11 +930,9 @@ describe("bridge supervisor claim gating", () => {
         activeSessions: [
           {
             bridgeProfileId: "codex:default",
-            lastActivityAt: 2_000,
+            currentState: "active",
+            lastMeaningfulEventAt: 2_000,
             queueItemId: "queue-1",
-            sessionKey: "session-1",
-            startedAt: 1_000,
-            state: "active",
           },
         ],
       },
@@ -958,7 +956,7 @@ describe("bridge supervisor claim gating", () => {
 
     expect(buildHeartbeatStatusPayload(status)).toMatchObject({
       availability: { canClaim: false, status: "unavailable" },
-      liveness: { activeSessions: [{ queueItemId: "queue-1", state: "active" }] },
+      liveness: { activeSessions: [{ currentState: "active", queueItemId: "queue-1" }] },
       runtimeConformance: {
         canClaim: false,
         profiles: { "codex:default": { state: "failing" } },
