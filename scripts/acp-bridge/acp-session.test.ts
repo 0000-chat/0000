@@ -427,7 +427,7 @@ describe("ACP runtime adapter boundary", () => {
     ])
   })
 
-  test("keeps ERROR Hermes stderr logs as bridge errors", async () => {
+  test("keeps ERROR Hermes stderr logs as single bridge error events", async () => {
     const processes: ChildProcessWithoutNullStreams[] = []
     const events: Array<{ eventType: string; partStatus?: string; partType?: string }> = []
     const errors: Error[] = []
@@ -451,9 +451,7 @@ describe("ACP runtime adapter boundary", () => {
     stderr?.write("ERROR acp_adapter.server: runtime crashed\n")
     await waitForMicrotasks()
 
-    expect(errors.map((error) => error.message)).toEqual([
-      "ERROR acp_adapter.server: runtime crashed",
-    ])
+    expect(errors).toEqual([])
     expect(events).toEqual([
       {
         eventType: "bridge_error",

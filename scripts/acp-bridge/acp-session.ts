@@ -812,7 +812,10 @@ export class HermesAcpSession {
     )
   }
 
-  private async emitError(error: Error): Promise<void> {
+  private async emitError(
+    error: Error,
+    options: { forwardToErrorHandler?: boolean } = {},
+  ): Promise<void> {
     this.markRequestActivity()
     if (this.sessionId) {
       const event = normalizeBridgeError(error, this.nextEventSequence, this.sessionId)
@@ -820,7 +823,9 @@ export class HermesAcpSession {
       this.promptEvents.push(event)
       await this.onEvent?.(event)
     }
-    await this.onError?.(error)
+    if (options.forwardToErrorHandler !== false) {
+      await this.onError?.(error)
+    }
   }
 
   private async handleRuntimeLogLine(line: string): Promise<void> {
@@ -841,7 +846,7 @@ export class HermesAcpSession {
       }
       return
     }
-    await this.emitError(new Error(diagnostic.text))
+    await this.emitError(new Error(diagnostic.text), { forwardToErrorHandler: false })
   }
 
   private shouldDeferAcpNotification(event: NormalizedBridgeEvent): boolean {

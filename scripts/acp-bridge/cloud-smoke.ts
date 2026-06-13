@@ -57,7 +57,6 @@ async function main() {
         client.heartbeat({
           capabilities: { smoke: true },
           status: {
-            activeQueueItemIds: [],
             activeSessions: [],
             connected: true,
             inFlightCommands: [],

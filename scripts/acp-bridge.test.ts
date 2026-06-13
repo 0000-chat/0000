@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdtemp, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
+import { fileURLToPath } from "node:url"
 
 import {
   buildBridgeDoctorReport,
@@ -11,11 +12,13 @@ import {
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
   buildAgentToolsMcpServers,
+  buildHeartbeatStatusPayload,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getConvexUrl,
   normalizeBridgeConfigFile,
   parseBridgeArgs,
+  bridgeHeartbeatSignature,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
@@ -76,6 +79,11 @@ describe("bridge Convex URL resolution", () => {
 
 describe("bridge MCP helper configuration", () => {
   test("uses public app URL for agent tool invocation", () => {
+    const expectedAgentToolsMcpScriptPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "agent-tools-mcp.ts",
+    )
+
     expect(
       buildAgentToolsMcpServers({
         agentSessionId: "agent_session_1",
@@ -87,7 +95,7 @@ describe("bridge MCP helper configuration", () => {
       }),
     ).toEqual([
       {
-        args: ["scripts/agent-tools-mcp.ts"],
+        args: [expectedAgentToolsMcpScriptPath],
         command: "bun",
         env: [
           { name: "ZERO_CHAT_AGENT_SESSION_ID", value: "agent_session_1" },
@@ -227,6 +235,63 @@ describe("bridge multi-organization config", () => {
     expect(output).toContain("registration failure: bridge_device_not_paired")
     expect(output).not.toContain("secret-token")
     expect(output).not.toContain("secret-value")
+  })
+})
+
+describe("bridge heartbeat contract", () => {
+  test("publishes canonical liveness sessions without legacy active queue ids", () => {
+    const status: BridgeStatus = {
+      activeSessions: ["session-a"],
+      connected: true,
+      inFlightCommands: [
+        {
+          id: "queue-a",
+          agentSessionId: "agent-session-a",
+          startedAt: "2026-06-13T00:00:00.000Z",
+          threadId: "thread-a",
+          type: "prompt",
+        },
+      ],
+      liveness: {
+        activeSessions: [
+          {
+            bridgeProfileId: "codex:codex-acp",
+            currentState: "active",
+            lastMeaningfulEventAt: 1_781_400_000_000,
+            queueItemId: "queue-a",
+            sessionKey: "session-a",
+          },
+        ],
+      },
+      maxInFlight: 4,
+      recentErrors: [],
+      sessionQueues: [
+        {
+          queueDepth: 1,
+          runningQueueItemId: "queue-a",
+          sessionKey: "session-a",
+          threadId: "thread-a",
+        },
+      ],
+    }
+
+    const payload = buildHeartbeatStatusPayload(status) as Record<string, unknown>
+    expect(payload.activeQueueItemIds).toBeUndefined()
+    expect(payload.liveness).toEqual(status.liveness)
+
+    const changedStatus: BridgeStatus = {
+      ...status,
+      liveness: {
+        activeSessions: [
+          {
+            currentState: "active",
+            queueItemId: "queue-b",
+            sessionKey: "session-a",
+          },
+        ],
+      },
+    }
+    expect(bridgeHeartbeatSignature(changedStatus)).not.toBe(bridgeHeartbeatSignature(status))
   })
 })
 

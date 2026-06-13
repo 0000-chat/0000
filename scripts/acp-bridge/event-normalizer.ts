@@ -283,6 +283,13 @@ export function extractTextFromAcpUpdate(update: unknown): string | undefined {
 }
 
 function parseRuntimeLogSeverity(text: string): RuntimeLogSeverity {
+  if (isRoutineCliStatusLine(text)) {
+    return "info"
+  }
+  const explicitSeverity = parseExplicitRuntimeLogSeverity(text)
+  if (explicitSeverity) {
+    return explicitSeverity
+  }
   if (/\b(?:fatal|panic)\b/i.test(text)) {
     return "error"
   }
@@ -302,6 +309,32 @@ function parseRuntimeLogSeverity(text: string): RuntimeLogSeverity {
     return "info"
   }
   return "error"
+}
+
+function parseExplicitRuntimeLogSeverity(text: string): RuntimeLogSeverity | undefined {
+  const match = text.match(/(?:^|[\s:[({])(?:\[)?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE)(?:\])?(?:$|[\s:\])},.])/i)
+  const value = match?.[1]?.toLowerCase()
+  if (value === "info") {
+    return "info"
+  }
+  if (value === "warn" || value === "warning") {
+    return "warn"
+  }
+  if (value === "error") {
+    return "error"
+  }
+  if (value === "debug" || value === "trace") {
+    return "debug"
+  }
+  return undefined
+}
+
+function isRoutineCliStatusLine(text: string): boolean {
+  return (
+    /^The user's messages are sent from the 0000 Chat app\./.test(text) ||
+    /Preflight compression:/i.test(text) ||
+    /Compacting context/i.test(text)
+  )
 }
 
 function isRoutineHermesLifecycleLogLine(text: string): boolean {
