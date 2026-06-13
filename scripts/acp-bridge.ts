@@ -200,7 +200,6 @@ export type BridgeStatus = {
   lastHermesProfileRefreshAt?: string;
   lastRuntimeProfileRefreshAt?: string;
   activeSessions: string[];
-  activeQueueItemIds?: string[];
   inFlightCommands?: Array<{
     id: string;
     type?: string;
@@ -301,7 +300,6 @@ export type BridgeRegistrationStatus = {
   lastPollAt?: string;
   maxInFlight?: number;
   activeSessions: string[];
-  activeQueueItemIds?: string[];
   inFlightCommands?: BridgeStatus["inFlightCommands"];
   sessionQueues?: BridgeStatus["sessionQueues"];
   processHealth?: BridgeStatus["processHealth"];
@@ -1355,7 +1353,6 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         hermesProfiles,
         runtimeProfiles,
         activeSessions: [],
-        activeQueueItemIds: [],
         inFlightCommands: [],
         sessionQueues: [],
         processHealth: {
@@ -1438,7 +1435,6 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         context.status,
         context.manager,
         maxInFlight,
-        context.inFlightCommands,
         context.inFlightCommandMetadata,
       );
       await persistAggregateStatus();
@@ -1454,7 +1450,6 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         context.status,
         context.manager,
         maxInFlight,
-        context.inFlightCommands,
         context.inFlightCommandMetadata,
       );
       context.status.localJournal = bridgeSupervisorHealthStatus(
@@ -1577,7 +1572,6 @@ function buildAggregateBridgeStatus(
     lastPollAt: status.lastPollAt,
     maxInFlight: status.maxInFlight,
     activeSessions: status.activeSessions,
-    activeQueueItemIds: status.activeQueueItemIds,
     inFlightCommands: status.inFlightCommands,
     sessionQueues: status.sessionQueues,
     processHealth: status.processHealth,
@@ -1606,9 +1600,6 @@ function buildAggregateBridgeStatus(
     runtimeProfiles: first?.status.runtimeProfiles,
     activeSessions: registrations.flatMap(
       (registration) => registration.activeSessions,
-    ),
-    activeQueueItemIds: registrations.flatMap(
-      (registration) => registration.activeQueueItemIds ?? [],
     ),
     inFlightCommands: registrations.flatMap(
       (registration) => registration.inFlightCommands ?? [],
@@ -1749,7 +1740,6 @@ export async function runBridgeLoopIteration(
       input.status,
       input.manager,
       input.maxInFlight,
-      input.inFlightCommands,
       input.inFlightCommandMetadata,
       input.getProcessHealth?.(),
       input.getRuntimeConformance?.(),
@@ -1773,7 +1763,6 @@ export async function runBridgeLoopIteration(
       threadId: command.threadId,
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
-      activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
     });
     const task = input.manager
       .handleQueueItem(command)
@@ -1792,7 +1781,6 @@ export async function runBridgeLoopIteration(
             threadId: command.threadId,
             sessionId: command.sessionId,
             agentSessionId: command.agentSessionId,
-            activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
           });
         }
         void persistStatus(input.statusPath, input.status);
@@ -1971,7 +1959,6 @@ export async function runBridgeLoopIteration(
         deviceId: input.config.deviceId,
         queueId: watchdog.queueItemId,
         reason: watchdog.reasonCode,
-        activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
       });
       await persistStatus(input.statusPath, input.status);
     }
@@ -2155,7 +2142,6 @@ export function shouldSendBridgeHeartbeat(
 export function bridgeHeartbeatSignature(
   status: Pick<
     BridgeStatus,
-    | "activeQueueItemIds"
     | "connected"
     | "devHotReload"
     | "inFlightCommands"
@@ -2173,7 +2159,6 @@ export function bridgeHeartbeatSignature(
   >,
 ): string {
   return JSON.stringify({
-    activeQueueItemIds: [...(status.activeQueueItemIds ?? [])].sort(),
     connected: status.connected,
     devHotReload: status.devHotReload,
     inFlightCommands: (status.inFlightCommands ?? [])
@@ -2240,7 +2225,6 @@ function syncBridgeRuntimeStatus(
   status: BridgeStatus,
   manager: BridgeLoopManager,
   maxInFlight: number,
-  inFlightCommands: Map<string, Promise<void>>,
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>,
   processHealth?: AcpBridgeProcessHealth,
   runtimeConformance?: RuntimeConformanceSummary,
@@ -2262,7 +2246,6 @@ function syncBridgeRuntimeStatus(
   status.activeSessions = managerStatus.activeSessions;
   status.liveness = normalizeBridgeLivenessStatus(managerStatus.liveness);
   status.sessionQueues = managerStatus.sessions;
-  status.activeQueueItemIds = Array.from(inFlightCommands.keys());
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values());
   if (processHealth) {
     status.processHealth = processHealth;
@@ -2645,7 +2628,6 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     },
     devHotReload: status.devHotReload,
     activeSessions: status.activeSessions,
-    activeQueueItemIds: status.activeQueueItemIds ?? [],
     inFlightCommands: status.inFlightCommands ?? [],
     maxInFlight: status.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT_COMMANDS,
     processHealth: status.processHealth,

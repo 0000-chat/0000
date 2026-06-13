@@ -9,6 +9,7 @@ import {
   buildBridgeRegistrationFailure,
   buildHeartbeatStatusPayload,
   type BridgeStatus,
+  bridgeHeartbeatSignature,
   describeStatus,
   deriveConvexCloudUrl,
   ensureSecureBridgeConfigFile,
@@ -1016,7 +1017,9 @@ describe("bridge supervisor claim gating", () => {
       },
     };
 
-    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+    const payload = buildHeartbeatStatusPayload(status) as Record<string, unknown>;
+    expect(payload.activeQueueItemIds).toBeUndefined();
+    expect(payload).toMatchObject({
       availability: { canClaim: false, status: "unavailable" },
       liveness: {
         activeSessions: [{ currentState: "active", queueItemId: "queue-1" }],
@@ -1026,6 +1029,19 @@ describe("bridge supervisor claim gating", () => {
         profiles: { "codex:default": { state: "failing" } },
       },
     });
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        liveness: {
+          activeSessions: [
+            {
+              currentState: "active",
+              queueItemId: "queue-2",
+            },
+          ],
+        },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
   });
 
   test("dispatches claimed lifecycle queue commands", async () => {
