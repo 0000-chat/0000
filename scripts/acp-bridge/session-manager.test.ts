@@ -3280,6 +3280,39 @@ describe("bridge session cwd safety", () => {
       },
     })
   })
+
+  test("marks silent live ACP sessions as terminal queue failures", async () => {
+    const cloud = fakeCloudClient()
+    let closeCount = 0
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        ...fakeSession(),
+        close: async () => {
+          closeCount += 1
+        },
+        sendUserMessage: async () => {
+          await new Promise<void>(() => {})
+          throw new Error("unreachable")
+        },
+      }),
+      livenessTimeoutMs: 5,
+    })
+
+    await manager.handleQueueItem(promptQueueItem())
+
+    expect(closeCount).toBe(1)
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: {
+        error: "ACP live session stopped producing progress.",
+        ok: false,
+        reasonCode: "provider_silent_timeout",
+        terminal: true,
+      },
+    })
+    expect(manager.getStatus().liveness?.activeSessions).toEqual([])
+  })
 })
 
 function fakeCloudClient() {

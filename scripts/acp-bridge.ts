@@ -21,6 +21,7 @@ import {
 } from "./acp-bridge/bridge-log"
 import {
   DEFAULT_ACP_REQUEST_TIMEOUT_MS,
+  HermesAcpSession,
   type HermesAcpMcpServer,
 } from "./acp-bridge/acp-session"
 import {
@@ -41,6 +42,14 @@ import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles"
 import { shouldRestartBridgeForDevHotReload } from "./acp-bridge/dev-hot-reload"
 import { openBridgeJournal } from "./acp-bridge/sqlite-journal"
 import { buildRestartCommandArgs } from "./bridge-updater"
+import { deriveBridgeAvailability, classifyBridgeCloudFailure } from "./acp-bridge/bridge-availability"
+import {
+  DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+  runRuntimeConformance,
+  summarizeRuntimeConformance,
+  type RuntimeConformanceRecord,
+  type RuntimeConformanceSummary,
+} from "./acp-bridge/runtime-conformance"
 export {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -182,6 +191,19 @@ export type BridgeStatus = {
     lastUsedAt?: number
   }>
   processHealth?: AcpBridgeProcessHealth & { registryPath?: string }
+  runtimeConformance?: RuntimeConformanceSummary
+  liveness?: {
+    activeSessions: Array<{
+      bridgeProfileId?: string
+      lastActivityAt: number
+      queueItemId: string
+      reasonCode?: string
+      sessionKey: string
+      startedAt: number
+      state: string
+    }>
+  }
+  availability?: ReturnType<typeof deriveBridgeAvailability>
   lastStaleCleanupAt?: string
   lastStaleCleanup?: {
     inspected?: number
@@ -246,6 +268,9 @@ export type BridgeRegistrationStatus = {
   inFlightCommands?: BridgeStatus["inFlightCommands"]
   sessionQueues?: BridgeStatus["sessionQueues"]
   processHealth?: BridgeStatus["processHealth"]
+  runtimeConformance?: BridgeStatus["runtimeConformance"]
+  liveness?: BridgeStatus["liveness"]
+  availability?: BridgeStatus["availability"]
   lastStaleCleanupAt?: string
   lastStaleCleanup?: BridgeStatus["lastStaleCleanup"]
   recentErrors: string[]
@@ -374,6 +399,7 @@ export type BridgeLoopIterationInput = {
   claimCommands?: typeof claimCommands
   canClaimWork?: () => boolean
   getProcessHealth?: () => AcpBridgeProcessHealth
+  getRuntimeConformance?: () => RuntimeConformanceSummary | undefined
   writeStatus?: typeof writeStatus
   launchUpdater?: typeof launchBridgeUpdater
 }
@@ -1000,6 +1026,16 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     baseAgentCommand: agentCommand,
     customCommands: customRuntimeCommands,
   }).catch(() => [])
+  const runtimeConformanceRecords = await probeRuntimeProfilesConformance(runtimeProfiles, {
+    requestTimeoutMs,
+  })
+  const runtimeConformanceSummary = () =>
+    summarizeRuntimeConformance({
+      now: Date.now(),
+      profiles: runtimeProfiles,
+      records: runtimeConformanceRecords,
+      ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+    })
 
   type RuntimeContext = {
     config: BridgeRegistration
@@ -1118,6 +1154,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           ...supervisor.getProcessHealth(),
           registryPath: processRegistryPath,
         },
+        runtimeConformance: runtimeConformanceSummary(),
         recentErrors: [],
         localJournal: bridgeSupervisorHealthStatus(supervisor),
       }
@@ -1259,6 +1296,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         statusPath,
         canClaimWork: () => context.supervisor.canClaimWork(),
         getProcessHealth: () => context.supervisor.getProcessHealth(),
+        getRuntimeConformance: runtimeConformanceSummary,
         writeStatus: persistAggregateStatus,
       })
       if (result.restartRequested) {
@@ -1268,6 +1306,28 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     await waitForAnyWakeSignal()
   }
+}
+
+async function probeRuntimeProfilesConformance(
+  profiles: BridgeRuntimeProfile[],
+  options: { requestTimeoutMs: number },
+): Promise<Record<string, RuntimeConformanceRecord>> {
+  const records: Record<string, RuntimeConformanceRecord> = {}
+  await Promise.all(
+    profiles
+      .filter((profile) => profile.status === "available")
+      .map(async (profile) => {
+        records[profile.id] = await runRuntimeConformance({
+          createSession: () =>
+            new HermesAcpSession({
+              agentCommand: profile.command,
+              requestTimeoutMs: options.requestTimeoutMs,
+            }),
+          profile,
+        })
+      }),
+  )
+  return records
 }
 
 function buildAggregateBridgeStatus(
@@ -1295,6 +1355,9 @@ function buildAggregateBridgeStatus(
     inFlightCommands: status.inFlightCommands,
     sessionQueues: status.sessionQueues,
     processHealth: status.processHealth,
+    runtimeConformance: status.runtimeConformance,
+    liveness: status.liveness,
+    availability: status.availability,
     lastStaleCleanupAt: status.lastStaleCleanupAt,
     lastStaleCleanup: status.lastStaleCleanup,
     recentErrors: status.recentErrors,
@@ -1322,6 +1385,9 @@ function buildAggregateBridgeStatus(
     inFlightCommands: registrations.flatMap((registration) => registration.inFlightCommands ?? []),
     sessionQueues: registrations.flatMap((registration) => registration.sessionQueues ?? []),
     processHealth: first?.status.processHealth,
+    runtimeConformance: first?.status.runtimeConformance,
+    liveness: first?.status.liveness,
+    availability: first?.status.availability,
     lastStaleCleanupAt: first?.status.lastStaleCleanupAt,
     lastStaleCleanup: first?.status.lastStaleCleanup,
     recentErrors: registrations.flatMap((registration) => registration.recentErrors).slice(-10),
@@ -1439,6 +1505,7 @@ export async function runBridgeLoopIteration(
       input.inFlightCommands,
       input.inFlightCommandMetadata,
       input.getProcessHealth?.(),
+      input.getRuntimeConformance?.(),
     )
   }
   const runCommand = (command: BridgeQueueCommand) => {
@@ -1580,6 +1647,10 @@ export async function runBridgeLoopIteration(
       if (processHealth) {
         input.status.processHealth = processHealth
       }
+      const runtimeConformance = input.getRuntimeConformance?.() ?? input.status.runtimeConformance
+      if (runtimeConformance) {
+        input.status.runtimeConformance = runtimeConformance
+      }
       if (processHealth && !processHealth.canClaim) {
         input.log({
           level: "warn",
@@ -1590,6 +1661,18 @@ export async function runBridgeLoopIteration(
           childCount: processHealth.childCount,
           ambiguousProcessCount: processHealth.ambiguousProcessCount,
           processCapExceeded: processHealth.processCapExceeded,
+        })
+        syncBridgeStatus()
+        await persistStatus(input.statusPath, input.status)
+        return { restartRequested: false }
+      }
+      if (runtimeConformance && !runtimeConformance.canClaim) {
+        input.log({
+          level: "warn",
+          event: "bridge.queue.claim_skipped",
+          deviceId: input.config.deviceId,
+          reason: "runtime_conformance_unavailable",
+          runtimeConformanceStatus: runtimeConformance.status,
         })
         syncBridgeStatus()
         await persistStatus(input.statusPath, input.status)
@@ -1672,6 +1755,12 @@ export function buildBridgeRegistrationFailure(
   if (!(error instanceof BridgeCloudHttpError)) {
     return undefined
   }
+  if (
+    classifyBridgeCloudFailure({ body: error.responseBody, status: error.status }) !==
+    "auth_failed"
+  ) {
+    return undefined
+  }
   const message = redactForOutput(error.message)
   if (error.status === 401 || /Bridge device credentials are invalid/i.test(error.responseBody)) {
     return {
@@ -1721,6 +1810,9 @@ export function bridgeHeartbeatSignature(
     | "maxInFlight"
     | "pendingControlCommand"
     | "processHealth"
+    | "runtimeConformance"
+    | "liveness"
+    | "availability"
     | "sessionQueues"
     | "updateState"
   >,
@@ -1740,6 +1832,9 @@ export function bridgeHeartbeatSignature(
       .sort((left, right) => left.id.localeCompare(right.id)),
     maxInFlight: status.maxInFlight,
     processHealth: status.processHealth,
+    runtimeConformance: status.runtimeConformance,
+    liveness: status.liveness,
+    availability: status.availability,
     lastStaleCleanupAt: status.lastStaleCleanupAt,
     lastStaleCleanup: status.lastStaleCleanup,
     sessionQueues: (status.sessionQueues ?? [])
@@ -1767,6 +1862,7 @@ function syncBridgeRuntimeStatus(
   inFlightCommands: Map<string, Promise<void>>,
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>,
   processHealth?: AcpBridgeProcessHealth,
+  runtimeConformance?: RuntimeConformanceSummary,
 ): void {
   const managerStatus = manager.getStatus()
   status.lifecycle ??= "running"
@@ -1783,12 +1879,21 @@ function syncBridgeRuntimeStatus(
 	      }
   status.maxInFlight = maxInFlight
   status.activeSessions = managerStatus.activeSessions
+  status.liveness = managerStatus.liveness ?? { activeSessions: [] }
   status.sessionQueues = managerStatus.sessions
   status.activeQueueItemIds = Array.from(inFlightCommands.keys())
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values())
   if (processHealth) {
     status.processHealth = processHealth
   }
+  if (runtimeConformance) {
+    status.runtimeConformance = runtimeConformance
+  }
+  status.availability = deriveBridgeAvailability({
+    connected: status.connected,
+    processHealth: status.processHealth,
+    runtimeConformance: status.runtimeConformance,
+  })
 }
 
 async function showStatus(parsed: ParsedBridgeArgs) {
@@ -2066,6 +2171,9 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     inFlightCommands: status.inFlightCommands ?? [],
     maxInFlight: status.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT_COMMANDS,
     processHealth: status.processHealth,
+    runtimeConformance: status.runtimeConformance,
+    liveness: status.liveness,
+    availability: status.availability,
     sessionQueues: (status.sessionQueues ?? []).map((session) => ({
       queueDepth: session.queueDepth,
       runningQueueItemId: session.runningQueueItemId,
