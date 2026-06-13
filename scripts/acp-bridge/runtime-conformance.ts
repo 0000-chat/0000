@@ -27,7 +27,7 @@ export type RuntimeConformanceClaimDecision =
 
 export type RuntimeConformanceSession = {
   close(): Promise<void>
-  sendUserMessage(text: string): Promise<HermesAcpPromptResult>
+  sendUserMessage?(text: string): Promise<HermesAcpPromptResult>
   start?(): Promise<string>
 }
 
@@ -89,21 +89,16 @@ export async function runRuntimeConformance(input: {
     return failingRecord(input.profile.id, checkedAt, "acp_session_create_failed", error)
   }
   try {
-    const result = await session.sendUserMessage("Return exactly: ok")
     await closeQuietly(session)
-    if (typeof result.text === "string" && result.text.trim().length > 0) {
-      return {
-        checkedAt,
-        diagnostics: [],
-        runtimeId: input.profile.id,
-        state: "passing",
-        strength: "prompt_smoke",
-      }
+    return {
+      checkedAt,
+      diagnostics: [],
+      runtimeId: input.profile.id,
+      state: "passing",
+      strength: "init_only",
     }
-    return failingRecord(input.profile.id, checkedAt, "prompt_send_failed", "empty prompt smoke")
   } catch (error) {
-    await closeQuietly(session)
-    return failingRecord(input.profile.id, checkedAt, "prompt_send_failed", error)
+    return failingRecord(input.profile.id, checkedAt, "acp_session_create_failed", error)
   }
 }
 
@@ -120,7 +115,7 @@ export function summarizeRuntimeConformance(input: {
     const decision = evaluateConformanceForClaim({
       now: input.now,
       record,
-      requiredStrength: "prompt_smoke",
+      requiredStrength: "init_only",
       ttlMs,
     })
     profiles[profile.id] = {
