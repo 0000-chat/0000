@@ -709,7 +709,7 @@ describe("bridge supervisor claim gating", () => {
     )
   })
 
-  test("skips cleanup and queue claims when process health is unsafe", async () => {
+  test("runs cleanup but skips queue claims when process health is unsafe", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
     const logs: Array<Record<string, unknown>> = []
     let cleanupRan = false
@@ -770,7 +770,7 @@ describe("bridge supervisor claim gating", () => {
       writeStatus: async () => {},
     })
 
-    expect(cleanupRan).toBe(false)
+    expect(cleanupRan).toBe(true)
     expect(claimed).toBe(false)
     expect(status.processHealth).toMatchObject({
       canClaim: false,
@@ -806,6 +806,84 @@ describe("bridge supervisor claim gating", () => {
     })
   })
 
+  test("runs cleanup but skips queue claims when runtime conformance is unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
+    const logs: Array<Record<string, unknown>> = []
+    let cleanupRan = false
+    let claimed = false
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    }
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => true,
+      claimCommands: async () => {
+        claimed = true
+        return []
+      },
+      cleanupStaleClaims: async () => {
+        cleanupRan = true
+        return { inspected: 0, released: 0 }
+      },
+      config: bridgeRegistration(),
+      getRuntimeConformance: () => ({
+        canClaim: false,
+        profiles: {
+          "codex:default": {
+            canClaim: false,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 0, 0),
+            diagnostics: [{ reasonCode: "acp_session_create_failed" }],
+            reasonCode: "runtime_conformance_failed",
+            runtimeId: "codex:default",
+            state: "failing",
+            strength: "none",
+          },
+        },
+        status: "unavailable",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({ activeSessions: [], terminalInteractionSessionKeyCount: 0, sessions: [] }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
+      recordLoopError: async (error) => {
+        throw error
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    })
+
+    expect(cleanupRan).toBe(true)
+    expect(claimed).toBe(false)
+    expect(status.runtimeConformance).toMatchObject({
+      canClaim: false,
+      status: "unavailable",
+    })
+    expect(status.availability).toEqual({
+      canClaim: false,
+      reasonCode: "runtime_conformance_unavailable",
+      status: "unavailable",
+    })
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue.claim_skipped",
+        reason: "runtime_conformance_unavailable",
+      }),
+    )
+  })
+
   test("describes startup reconciliation separately from process health", () => {
     const status: BridgeStatus = {
       activeSessions: [],
@@ -836,6 +914,55 @@ describe("bridge supervisor claim gating", () => {
     expect(buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation).toMatchObject({
       ambiguousProcessCount: 1,
       status: "ambiguous",
+    })
+  })
+
+  test("heartbeat payload reports runtime conformance, liveness, and availability", () => {
+    const status: BridgeStatus = {
+      activeSessions: ["session-1"],
+      availability: {
+        canClaim: false,
+        reasonCode: "runtime_conformance_unavailable",
+        status: "unavailable",
+      },
+      connected: true,
+      liveness: {
+        activeSessions: [
+          {
+            bridgeProfileId: "codex:default",
+            lastActivityAt: 2_000,
+            queueItemId: "queue-1",
+            sessionKey: "session-1",
+            startedAt: 1_000,
+            state: "active",
+          },
+        ],
+      },
+      recentErrors: [],
+      runtimeConformance: {
+        canClaim: false,
+        profiles: {
+          "codex:default": {
+            canClaim: false,
+            checkedAt: 1_000,
+            diagnostics: [{ reasonCode: "acp_session_create_failed" }],
+            reasonCode: "runtime_conformance_failed",
+            runtimeId: "codex:default",
+            state: "failing",
+            strength: "none",
+          },
+        },
+        status: "unavailable",
+      },
+    }
+
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      availability: { canClaim: false, status: "unavailable" },
+      liveness: { activeSessions: [{ queueItemId: "queue-1", state: "active" }] },
+      runtimeConformance: {
+        canClaim: false,
+        profiles: { "codex:default": { state: "failing" } },
+      },
     })
   })
 

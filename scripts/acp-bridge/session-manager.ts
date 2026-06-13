@@ -20,6 +20,12 @@ import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profile
 import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
 import type { AcpBridgeProcessRegistryLike } from "./process-registry"
 import {
+  createSessionLivenessRecord,
+  evaluateSessionLiveness,
+  reduceSessionLiveness,
+  type SessionLivenessRecord,
+} from "./session-liveness"
+import {
   TerminalHandleRegistry,
   type TerminalHandleScope,
 } from "./terminal-handles"
@@ -184,6 +190,7 @@ const STREAM_CHUNK_COALESCE_MAX_COUNT = 32
 const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250
 const APPROVAL_RESPONSE_SESSION_POLL_MS = 10
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000
+const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000
 const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300
 
 export type BridgeSessionManagerOptions = {
@@ -204,6 +211,7 @@ export type BridgeSessionManagerOptions = {
   resumeEnabled?: boolean
   requireScopedIdentity?: boolean
   log?: BridgeLogger
+  livenessTimeoutMs?: number
   supervisor?: BridgeSupervisor
   processRegistry?: Pick<AcpBridgeProcessRegistryLike, "registerProcess" | "terminateProcess">
   closeTimeoutMs?: number
@@ -216,6 +224,9 @@ export type BridgeSessionManagerOptions = {
 
 export type BridgeSessionManagerStatus = {
   activeSessions: string[]
+  liveness?: {
+    activeSessions: SessionLivenessRecord[]
+  }
   terminalInteractionSessionKeyCount: number
   sessions: Array<{
     sessionKey: string
@@ -269,6 +280,7 @@ export class BridgeSessionManager {
     "registerProcess" | "terminateProcess"
   >
   private readonly idleSessionTtlMs: number
+  private readonly livenessTimeoutMs: number
   private readonly allowRemoteCwd: boolean
   private readonly resumeEnabled: boolean
   private readonly requireScopedIdentity: boolean
@@ -292,6 +304,8 @@ export class BridgeSessionManager {
   private readonly externallyTerminalizedQueueItemIds = new Set<string>()
   private readonly terminalInteractionSessionKeys = new Set<string>()
   private readonly terminalInteractionSessionKeyOrder: string[] = []
+  private readonly activeLiveness = new Map<string, SessionLivenessRecord>()
+  private readonly activeLivenessFailures = new Map<string, (error: Error) => void>()
   private readonly eventBatch: BridgeEventInput[] = []
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = []
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined
@@ -309,6 +323,7 @@ export class BridgeSessionManager {
     this.supervisor = options.supervisor
     this.processRegistry = options.processRegistry
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
+    this.livenessTimeoutMs = options.livenessTimeoutMs ?? DEFAULT_SESSION_LIVENESS_TIMEOUT_MS
     this.allowRemoteCwd = options.allowRemoteCwd !== false
     this.resumeEnabled = options.resumeEnabled === true
     this.requireScopedIdentity = options.requireScopedIdentity === true
@@ -337,6 +352,9 @@ export class BridgeSessionManager {
   getStatus(): BridgeSessionManagerStatus {
     return {
       activeSessions: Array.from(this.sessions.keys()),
+      liveness: {
+        activeSessions: Array.from(this.activeLiveness.values()),
+      },
       terminalInteractionSessionKeyCount: this.terminalInteractionSessionKeys.size,
       sessions: Array.from(this.sessions.values()).map((session) => {
         const queueState = this.sessionQueueState.get(session.sessionKey)
@@ -670,7 +688,7 @@ export class BridgeSessionManager {
           }
     try {
       this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session))
-      result = await session.acp.sendUserMessage(prompt, {
+      result = await this.sendPromptWithLiveness(item, session, prompt, {
         ...acpPromptOptions,
         runtimeConfig: runtimeConfigApplication?.applied,
       })
@@ -939,6 +957,84 @@ export class BridgeSessionManager {
         (id) => id !== queueItemId,
       )
       this.deleteEmptySessionQueueState(sessionKey)
+    }
+  }
+
+  private async sendPromptWithLiveness(
+    item: BridgeSessionQueueItem,
+    session: BridgeSessionRecord,
+    prompt: string,
+    options: Parameters<ManagedAcpSession["sendUserMessage"]>[1],
+  ): Promise<HermesAcpPromptResult> {
+    const now = Date.now()
+    const queueItemId = item.id
+    this.activeLiveness.set(
+      queueItemId,
+      createSessionLivenessRecord({
+        bridgeProfileId: item.bridgeProfileId ?? session.runtimeProfile?.id,
+        now,
+        queueItemId,
+        sessionKey: session.sessionKey,
+      }),
+    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const livenessFailure = new Promise<never>((_, reject) => {
+      this.activeLivenessFailures.set(queueItemId, reject)
+      const schedule = () => {
+        if (timer) {
+          clearTimeout(timer)
+        }
+        const record = this.activeLiveness.get(queueItemId)
+        if (!record) {
+          return
+        }
+        const decision = evaluateSessionLiveness({
+          now: Date.now(),
+          record,
+          timeoutMs: this.livenessTimeoutMs,
+        })
+        if (!decision.ok) {
+          reject(new Error(`ACP live session lost: ${decision.reasonCode}`))
+          return
+        }
+        const delay = Math.max(1, this.livenessTimeoutMs - (Date.now() - record.lastActivityAt))
+        timer = setTimeout(schedule, delay)
+      }
+      schedule()
+    })
+    try {
+      return await Promise.race([
+        session.acp.sendUserMessage(prompt, options),
+        livenessFailure,
+      ])
+    } finally {
+      if (timer) {
+        clearTimeout(timer)
+      }
+      this.activeLiveness.delete(queueItemId)
+      this.activeLivenessFailures.delete(queueItemId)
+    }
+  }
+
+  private recordLivenessEvent(
+    queueItemId: string,
+    type: Parameters<typeof reduceSessionLiveness>[1]["type"],
+  ): void {
+    const record = this.activeLiveness.get(queueItemId)
+    if (!record) {
+      return
+    }
+    const next = reduceSessionLiveness(record, { at: Date.now(), type })
+    this.activeLiveness.set(queueItemId, next)
+    const decision = evaluateSessionLiveness({
+      now: Date.now(),
+      record: next,
+      timeoutMs: this.livenessTimeoutMs,
+    })
+    if (!decision.ok) {
+      this.activeLivenessFailures.get(queueItemId)?.(
+        new Error(`ACP live session lost: ${decision.reasonCode}`),
+      )
     }
   }
 
@@ -1565,10 +1661,15 @@ export class BridgeSessionManager {
         }),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
+            this.recordLivenessEvent(
+              item.id,
+              event.eventType.includes("tool") ? "tool_progress" : "assistant_output",
+            )
             this.supervisor?.recordProviderEvent(this.supervisorWorkItem(item, record), {
               eventType: event.eventType,
             })
             if (event.part?.type === "approval_request" || event.part?.type === "choice") {
+              this.recordLivenessEvent(item.id, "permission_request")
               this.supervisor?.recordWaitingForInteraction(
                 this.supervisorWorkItem(item, record),
                 event.externalEventId ?? item.externalRequestId ?? item.approvalId ?? item.id,
@@ -1594,6 +1695,9 @@ export class BridgeSessionManager {
         },
         onError: (error) => {
           if (this.isCurrentSessionRecord(record)) {
+            if (/runtime process exited/i.test(error.message)) {
+              this.recordLivenessEvent(item.id, "process_exited")
+            }
             this.enqueueErrorWrite(record, error)
           }
         },
@@ -2213,9 +2317,23 @@ function isEmptyVisiblePromptResult(result: { text: string }): boolean {
 }
 
 function classifyPromptError(error: unknown):
-  | { terminal: true; message: string; reasonCode: "acp_method_timeout" }
+  | { terminal: true; message: string; reasonCode: "acp_method_timeout" | "provider_silent_timeout" | "runtime_process_exited" }
   | { terminal: false } {
   const message = error instanceof Error ? error.message : String(error)
+  if (message.includes("ACP live session lost: provider_silent_timeout")) {
+    return {
+      terminal: true,
+      message: "ACP live session stopped producing progress.",
+      reasonCode: "provider_silent_timeout",
+    }
+  }
+  if (message.includes("ACP live session lost: runtime_process_exited")) {
+    return {
+      terminal: true,
+      message: "ACP runtime process exited during the live session.",
+      reasonCode: "runtime_process_exited",
+    }
+  }
   if (message.includes("ACP request timed out: session/prompt")) {
     return {
       terminal: true,
@@ -2722,6 +2840,8 @@ function isTerminalQueueItemError(type: string, message: string): boolean {
 function isTerminalPromptError(message: string): boolean {
   return (
     message.includes("ACP request timed out: session/prompt") ||
+    message.includes("ACP live session lost: provider_silent_timeout") ||
+    message.includes("ACP live session lost: runtime_process_exited") ||
     /\bprovider_login_failed(?:\s+\(code\s+-?\d+\))?\b/i.test(message)
   )
 }
