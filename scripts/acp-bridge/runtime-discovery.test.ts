@@ -95,8 +95,8 @@ describe("runtime discovery", () => {
       }),
       runCommand: async (command) => {
         const key = command.join(" ")
-        if (key === "command -v npx") {
-          return { ok: true, stdout: "/usr/bin/npx\n" }
+        if (key === "command -v bunx") {
+          return { ok: true, stdout: "/usr/bin/bunx\n" }
         }
         if (key === "codex --version") {
           return { ok: true, stdout: "codex-cli 1.0.0\n" }
@@ -117,7 +117,7 @@ describe("runtime discovery", () => {
     const codex = profiles.find((profile) => profile.kind === "codex")
     expect(codex).toMatchObject({
       id: "codex:codex-acp",
-      command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+      command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
       diagnostics: { acp: "supported", contextMode: "available", mcpServers: 2 },
       capabilities: { nativeSkills: true, nativeHooks: true, nativeMcp: true },
     })
@@ -197,12 +197,12 @@ describe("runtime discovery", () => {
 
     expect(profiles.find((profile) => profile.kind === "claude-code")).toMatchObject({
       id: "claude-code:claude-acp",
-      command: ["bunx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
+      command: ["bunx", "@agentclientprotocol/claude-agent-acp@0.39.0"],
       status: "available",
     })
   })
 
-  test("falls back to bunx when npx exists but the ACP package command fails to probe", async () => {
+  test("does not fall back to retired Codex ACP package when Zed Codex probe fails", async () => {
     const probeCalls: string[] = []
     const profiles = await discoverRuntimeProfiles({
       baseAgentCommand: "hermes acp",
@@ -210,7 +210,7 @@ describe("runtime discovery", () => {
       probeAcpCommand: async (command) => {
         const key = command.join(" ")
         probeCalls.push(key)
-        if (key === "npx --yes @agentclientprotocol/codex-acp@0.0.45") {
+        if (key === "bunx @zed-industries/codex-acp@0.15.0") {
           return { ok: false, reason: "sh: codex-acp: command not found" }
         }
         return { ok: true }
@@ -233,13 +233,14 @@ describe("runtime discovery", () => {
       },
     })
 
-    expect(probeCalls).toContain("npx --yes @agentclientprotocol/codex-acp@0.0.45")
-    expect(probeCalls).toContain("bunx --yes @agentclientprotocol/codex-acp@0.0.45")
+    expect(probeCalls).toContain("bunx @zed-industries/codex-acp@0.15.0")
+    expect(probeCalls).not.toContain("bunx --yes @agentclientprotocol/codex-acp@0.0.45")
+    expect(probeCalls).not.toContain("npx --yes @agentclientprotocol/codex-acp@0.0.45")
     expect(profiles.find((profile) => profile.kind === "codex")).toMatchObject({
       id: "codex:codex-acp",
-      command: ["bunx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
-      diagnostics: { acp: "supported" },
-      status: "available",
+      command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+      diagnostics: { acp: "unsupported", reason: "sh: codex-acp: command not found" },
+      status: "unavailable",
     })
   })
 
@@ -263,7 +264,7 @@ describe("runtime discovery", () => {
     expect(
       probeCalls.some(
         (call) =>
-          call.command.join(" ") === "npx --yes @agentclientprotocol/codex-acp@0.0.45" &&
+          call.command.join(" ") === "bunx @zed-industries/codex-acp@0.15.0" &&
           call.timeoutMs === 30_000,
       ),
     ).toBe(true)
@@ -275,7 +276,7 @@ describe("runtime discovery", () => {
       probeCalls
         .filter(
           (call) =>
-            call.command.join(" ") !== "npx --yes @agentclientprotocol/codex-acp@0.0.45" &&
+            call.command.join(" ") !== "bunx @zed-industries/codex-acp@0.15.0" &&
             call.command.join(" ") !== "openclaw acp",
         )
         .every((call) => call.timeoutMs === undefined),
@@ -284,12 +285,12 @@ describe("runtime discovery", () => {
 
   test("does not synthesize a Hermes profile for non-Hermes base commands", async () => {
     const profiles = await discoverRuntimeProfiles({
-      baseAgentCommand: "npx --yes @agentclientprotocol/codex-acp@latest",
+      baseAgentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       discoverAcpCommands: noDiscoveredCommands,
       probeAcpCommand: async () => ({ ok: true }),
       runCommand: async (command) => {
-        if (command.join(" ") === "command -v npx") {
-          return { ok: true, stdout: "/usr/bin/npx\n" }
+        if (command.join(" ") === "command -v bunx") {
+          return { ok: true, stdout: "/usr/bin/bunx\n" }
         }
         return { ok: false, stdout: "", stderr: "" }
       },
@@ -305,8 +306,8 @@ describe("runtime discovery", () => {
       discoverAcpCommands: noDiscoveredCommands,
       probeAcpCommand: async () => ({ ok: false, reason: "initialize timed out" }),
       runCommand: async (command) => {
-        if (command.join(" ") === "command -v npx") {
-          return { ok: true, stdout: "/usr/bin/npx\n" }
+        if (command.join(" ") === "command -v bunx") {
+          return { ok: true, stdout: "/usr/bin/bunx\n" }
         }
         return { ok: false, stdout: "", stderr: "" }
       },
@@ -364,6 +365,37 @@ describe("runtime discovery", () => {
       status: "available",
       capabilities: { sessionMcpServers: true },
     })
+  })
+
+  test("ignores retired Codex ACP custom commands", async () => {
+    const probeCalls: string[] = []
+    const profiles = await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      customCommands: [["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"]],
+      discoverAcpCommands: noDiscoveredCommands,
+      probeAcpCommand: async (command) => {
+        probeCalls.push(command.join(" "))
+        return { ok: true }
+      },
+      runCommand: async (command) => {
+        const key = command.join(" ")
+        if (key === "command -v npx") {
+          return { ok: true, stdout: "/usr/bin/npx\n" }
+        }
+        if (key === "command -v hermes" || key === "command -v bunx") {
+          return { ok: false, stdout: "", stderr: "" }
+        }
+        return { ok: false, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(probeCalls).not.toContain("npx --yes @agentclientprotocol/codex-acp@0.0.45")
+    expect(
+      profiles.some(
+        (profile) =>
+          profile.command.join(" ") === "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      ),
+    ).toBe(false)
   })
 
   test("publishes Hermes cwd-bound session behavior and max session limits", async () => {

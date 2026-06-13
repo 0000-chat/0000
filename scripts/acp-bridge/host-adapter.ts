@@ -117,15 +117,7 @@ export class ConvexBridgeHostAdapter implements BridgeHostAdapter {
     if (input.diagnostics.length === 0) {
       return {}
     }
-    return await this.appendEvents({
-      events: input.diagnostics.map((diagnostic, index) => ({
-        eventType: "bridge.diagnostic",
-        rawPayload: diagnostic,
-        sequence: index + 1,
-        source: "bridge",
-        threadId: diagnostic.traceId ?? "bridge-diagnostics",
-      })),
-    })
+    return { ok: true, skipped: input.diagnostics.length }
   }
 
   async completeWork(input: BridgeCompleteWorkInput): Promise<Record<string, unknown>> {

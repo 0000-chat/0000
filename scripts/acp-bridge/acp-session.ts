@@ -24,6 +24,10 @@ import {
   type SdkAcpRuntimeActivity,
   type SdkAcpRuntimeTerminalAdapter,
 } from "./sdk-acp-runtime-client"
+import type {
+  AcpBridgeProcessRegistryEntry,
+  AcpBridgeProcessRegistryLike,
+} from "./process-registry"
 
 export type HermesAcpRuntimeCapabilities = {
   loadSession: boolean
@@ -146,6 +150,8 @@ export type HermesAcpSessionOptions = {
   cwd?: string
   initialSessionId?: string
   mcpServers?: HermesAcpMcpServer[]
+  processRegistry?: Pick<AcpBridgeProcessRegistryLike, "registerProcess" | "terminateProcess">
+  processRegistryMetadata?: HermesAcpProcessRegistryMetadata
   processExitGraceMs?: number
   requestTimeoutMs?: number
   resumeEnabled?: boolean
@@ -154,6 +160,15 @@ export type HermesAcpSessionOptions = {
   runtimeClient?: BridgeAcpRuntimeClient
   spawnProcess?: (command: string, args: string[], cwd?: string) => ChildProcessWithoutNullStreams
   terminalAdapter?: SdkAcpRuntimeTerminalAdapter
+}
+
+export type HermesAcpProcessRegistryMetadata = {
+  bridgeDeviceId?: string
+  claimId?: string
+  hermesProfileName?: string
+  queueItemId?: string
+  runtimeProfileId?: string
+  sessionKey?: string
 }
 
 export type HermesAcpMcpServer = {
@@ -226,6 +241,11 @@ export class HermesAcpSession {
 
   private readonly onEvent?: (event: NormalizedBridgeEvent) => void | Promise<void>
   private readonly onError?: (error: Error) => void | Promise<void>
+  private readonly processRegistry?: Pick<
+    AcpBridgeProcessRegistryLike,
+    "registerProcess" | "terminateProcess"
+  >
+  private readonly processRegistryMetadata: HermesAcpProcessRegistryMetadata
   private readonly providedRuntimeClient?: BridgeAcpRuntimeClient
   private readonly terminalAdapter?: SdkAcpRuntimeTerminalAdapter
   private readonly spawnProcess: (
@@ -234,6 +254,7 @@ export class HermesAcpSession {
     cwd?: string,
   ) => ChildProcessWithoutNullStreams
   private child?: ChildProcessWithoutNullStreams
+  private registeredProcess?: AcpBridgeProcessRegistryEntry
   private nextEventSequence = 1
   private promptEvents: NormalizedBridgeEvent[] = []
   private deferredPromptEvents: NormalizedBridgeEvent[] = []
@@ -266,6 +287,8 @@ export class HermesAcpSession {
     this.resumeEnabled = options.resumeEnabled === true
     this.onEvent = options.onEvent
     this.onError = options.onError
+    this.processRegistry = options.processRegistry
+    this.processRegistryMetadata = options.processRegistryMetadata ?? {}
     this.providedRuntimeClient = options.runtimeClient
     this.terminalAdapter = options.terminalAdapter
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess
@@ -281,7 +304,7 @@ export class HermesAcpSession {
 
     this.closed = false
     this.lifecyclePhase = "starting"
-    this.runtimeClient = this.createRuntimeClient()
+    this.runtimeClient = await this.createRuntimeClient()
 
     const initializeResult = await this.withRequestTimeout("initialize", () =>
       this.requireRuntimeClient().initialize(),
@@ -484,6 +507,16 @@ export class HermesAcpSession {
     if (!child) {
       return
     }
+    if (this.processRegistry && this.registeredProcess) {
+      await this.processRegistry.terminateProcess(this.registeredProcess, child, {
+        graceMs: this.processExitGraceMs,
+      })
+      this.registeredProcess = undefined
+      if (this.child === child) {
+        this.child = undefined
+      }
+      return
+    }
     await new Promise<void>((resolve) => {
       let settled = false
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -641,7 +674,7 @@ export class HermesAcpSession {
     }
   }
 
-  private createRuntimeClient(): BridgeAcpRuntimeClient {
+  private async createRuntimeClient(): Promise<BridgeAcpRuntimeClient> {
     if (this.providedRuntimeClient) {
       this.unsubscribeRuntimeUpdates?.()
       this.unsubscribeRuntimeUpdates = this.providedRuntimeClient.onUpdate((event) => {
@@ -652,6 +685,15 @@ export class HermesAcpSession {
 
     const [executable, ...args] = this.command
     this.child = this.spawnProcess(executable, args, this.cwd)
+    if (this.processRegistry && typeof this.child.pid === "number") {
+      this.registeredProcess = await this.processRegistry.registerProcess({
+        args,
+        command: executable,
+        cwd: this.cwd,
+        pid: this.child.pid,
+        ...this.processRegistryMetadata,
+      })
+    }
     this.attachProcessHandlers(this.child)
     const runtimeClient = SdkAcpRuntimeClient.fromChildProcess(this.child, {
       ...(this.cwd && isAbsolute(this.cwd)

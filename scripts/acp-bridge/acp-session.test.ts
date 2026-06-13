@@ -37,7 +37,7 @@ type DelayedFakeRuntimeUpdate = { delayMs: number; update: FakeRuntimeUpdate }
 describe("ACP final text extraction", () => {
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "ACP", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -63,7 +63,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps post-tool Codex ACP text while hiding pre-tool unclassified text", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -90,7 +90,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps Codex ACP final chunks emitted after completed tool activity", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
@@ -122,7 +122,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps Codex ACP answer chunks when the turn has classified thought events", async () => {
     const session = new HermesAcpSession({
-      agentCommand: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+      agentCommand: ["bunx", "@zed-industries/codex-acp@0.15.0"],
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_thought_chunk" },
@@ -141,7 +141,7 @@ describe("ACP final text extraction", () => {
   test("hides pre-tool Codex message chunks while keeping post-tool final chunks", async () => {
     const observedEvents: Array<{ eventType: string; partType?: string }> = []
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       onEvent: (event) => {
         observedEvents.push({ eventType: event.eventType, partType: event.part?.type })
       },
@@ -473,6 +473,44 @@ describe("ACP runtime adapter boundary", () => {
     await session.close()
 
     expect(kills).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  test("registers spawned ACP children and closes them through the process registry", async () => {
+    const kills: Array<NodeJS.Signals | undefined> = []
+    const registered: Array<Record<string, unknown>> = []
+    const terminated: string[] = []
+    const session = new HermesAcpSession({
+      agentCommand: ["codex", "acp"],
+      processRegistry: {
+        registerProcess: async (input) => {
+          registered.push(input)
+          return {
+            ...input,
+            id: "process-1",
+            startedAt: "2026-06-12T00:00:00.000Z",
+            updatedAt: "2026-06-12T00:00:00.000Z",
+          }
+        },
+        terminateProcess: async (entry, child) => {
+          terminated.push(entry.id)
+          child?.kill("SIGTERM")
+        },
+      },
+      spawnProcess: createFakeAcpProcess({ emitExitOnKill: true, kills, pid: 4321 }),
+    })
+
+    await session.start()
+    await session.close()
+
+    expect(registered).toEqual([
+      expect.objectContaining({
+        args: ["acp"],
+        command: "codex",
+        pid: 4321,
+      }),
+    ])
+    expect(terminated).toEqual(["process-1"])
+    expect(kills).toEqual(["SIGTERM"])
   })
 
   test("does not force-kill the ACP process when graceful termination exits", async () => {
@@ -864,6 +902,7 @@ function isDelayedFakeRuntimeUpdate(
 function createFakeAcpProcess(options: {
   emitExitOnKill?: boolean
   kills?: Array<NodeJS.Signals | undefined>
+  pid?: number
   permissionResponses?: RequestPermissionResponse[]
   processes?: ChildProcessWithoutNullStreams[]
   requestPermissionOnPrompt?: boolean
@@ -933,6 +972,7 @@ function createFakeAcpProcess(options: {
       },
       stderr,
       stdin,
+      pid: options.pid,
       stdout,
     }) as unknown as ChildProcessWithoutNullStreams
     options.processes?.push(process)
