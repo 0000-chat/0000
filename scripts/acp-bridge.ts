@@ -1033,9 +1033,20 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     baseAgentCommand: agentCommand,
     customCommands: customRuntimeCommands,
   }).catch(() => [])
-  const runtimeConformanceRecords = await probeRuntimeProfilesConformance(runtimeProfiles, {
+  let runtimeConformanceRecords = await probeRuntimeProfilesConformance(runtimeProfiles, {
     requestTimeoutMs,
   })
+  let lastRuntimeConformanceProbeAt = Date.now()
+  const refreshRuntimeConformanceIfStale = async () => {
+    const now = Date.now()
+    if (now - lastRuntimeConformanceProbeAt < DEFAULT_RUNTIME_CONFORMANCE_TTL_MS / 2) {
+      return
+    }
+    lastRuntimeConformanceProbeAt = now
+    runtimeConformanceRecords = await probeRuntimeProfilesConformance(runtimeProfiles, {
+      requestTimeoutMs,
+    })
+  }
   const runtimeConformanceSummary = () =>
     summarizeRuntimeConformance({
       now: Date.now(),
@@ -1286,6 +1297,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           reason: watchdog.reasonCode,
         })
       }
+      await refreshRuntimeConformanceIfStale()
       const result = await runBridgeLoopIteration({
         config: context.config,
         agentCommand,
@@ -1707,6 +1719,26 @@ export async function runBridgeLoopIteration(
       if (runtimeConformance) {
         input.status.runtimeConformance = runtimeConformance
       }
+      const now = currentTime()
+      if (now - input.lastStaleCleanupAt >= 60_000) {
+        input.setLastStaleCleanupAt(now)
+        const cleanupResult = await cleanup(input.config, { limit: availableSlots })
+        input.status.lastStaleCleanupAt = new Date(now).toISOString()
+        input.status.lastStaleCleanup = {
+          inspected:
+            typeof cleanupResult.inspected === "number" ? cleanupResult.inspected : undefined,
+          released: typeof cleanupResult.released === "number" ? cleanupResult.released : undefined,
+        }
+        if (typeof cleanupResult.released === "number" && cleanupResult.released > 0) {
+          input.log({
+            level: "info",
+            event: "bridge.queue.cleanup_stale",
+            deviceId: input.config.deviceId,
+            released: cleanupResult.released,
+            inspected: cleanupResult.inspected,
+          })
+        }
+      }
       if (processHealth && !processHealth.canClaim) {
         input.log({
           level: "warn",
@@ -1744,26 +1776,6 @@ export async function runBridgeLoopIteration(
         syncBridgeStatus()
         await persistStatus(input.statusPath, input.status)
         return { restartRequested: false }
-      }
-      const now = currentTime()
-      if (now - input.lastStaleCleanupAt >= 60_000) {
-        input.setLastStaleCleanupAt(now)
-        const cleanupResult = await cleanup(input.config, { limit: availableSlots })
-        input.status.lastStaleCleanupAt = new Date(now).toISOString()
-        input.status.lastStaleCleanup = {
-          inspected:
-            typeof cleanupResult.inspected === "number" ? cleanupResult.inspected : undefined,
-          released: typeof cleanupResult.released === "number" ? cleanupResult.released : undefined,
-        }
-        if (typeof cleanupResult.released === "number" && cleanupResult.released > 0) {
-          input.log({
-            level: "info",
-            event: "bridge.queue.cleanup_stale",
-            deviceId: input.config.deviceId,
-            released: cleanupResult.released,
-            inspected: cleanupResult.inspected,
-          })
-        }
       }
       input.status.lastPollAt = new Date(now).toISOString()
       const commands = await claim(input.config, availableSlots)

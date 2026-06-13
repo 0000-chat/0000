@@ -136,12 +136,13 @@ export function summarizeRuntimeConformance(input: {
     }
   }
   const entries = Object.values(profiles)
-  const canClaim = entries.every((entry) => entry.canClaim)
   const hasPassing = entries.some((entry) => entry.canClaim)
+  const allPassing = entries.every((entry) => entry.canClaim)
+  const canClaim = entries.length === 0 || hasPassing
   return {
     canClaim,
     profiles,
-    status: canClaim ? "healthy" : hasPassing ? "degraded" : "unavailable",
+    status: allPassing ? "healthy" : hasPassing ? "degraded" : "unavailable",
   }
 }
 

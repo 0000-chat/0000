@@ -182,4 +182,49 @@ describe("runtime conformance", () => {
       status: "unavailable",
     })
   })
+
+  test("keeps bridge claimable when at least one runtime profile is healthy", () => {
+    const now = 10_000
+
+    expect(
+      summarizeRuntimeConformance({
+        now,
+        profiles: [
+          {
+            capabilities: {},
+            command: ["codex", "acp"],
+            id: "codex:default",
+            kind: "codex",
+            label: "Codex",
+            status: "available",
+          },
+          {
+            capabilities: {},
+            command: ["broken", "acp"],
+            id: "broken:default",
+            kind: "unknown-acp",
+            label: "Broken",
+            status: "available",
+          },
+        ],
+        records: {
+          "broken:default": passing({
+            checkedAt: now,
+            runtimeId: "broken:default",
+            state: "failing",
+            strength: "none",
+          }),
+          "codex:default": passing({ checkedAt: now }),
+        },
+        ttlMs: 60_000,
+      }),
+    ).toMatchObject({
+      canClaim: true,
+      profiles: {
+        "broken:default": { canClaim: false, reasonCode: "runtime_conformance_failed" },
+        "codex:default": { canClaim: true },
+      },
+      status: "degraded",
+    })
+  })
 })

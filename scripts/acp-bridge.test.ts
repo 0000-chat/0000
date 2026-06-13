@@ -709,7 +709,7 @@ describe("bridge supervisor claim gating", () => {
     )
   })
 
-  test("skips cleanup and queue claims when process health is unsafe", async () => {
+  test("runs cleanup but skips queue claims when process health is unsafe", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
     const logs: Array<Record<string, unknown>> = []
     let cleanupRan = false
@@ -770,7 +770,7 @@ describe("bridge supervisor claim gating", () => {
       writeStatus: async () => {},
     })
 
-    expect(cleanupRan).toBe(false)
+    expect(cleanupRan).toBe(true)
     expect(claimed).toBe(false)
     expect(status.processHealth).toMatchObject({
       canClaim: false,
@@ -806,7 +806,7 @@ describe("bridge supervisor claim gating", () => {
     })
   })
 
-  test("skips cleanup and queue claims when runtime conformance is unavailable", async () => {
+  test("runs cleanup but skips queue claims when runtime conformance is unavailable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"))
     const logs: Array<Record<string, unknown>> = []
     let cleanupRan = false
@@ -865,7 +865,7 @@ describe("bridge supervisor claim gating", () => {
       writeStatus: async () => {},
     })
 
-    expect(cleanupRan).toBe(false)
+    expect(cleanupRan).toBe(true)
     expect(claimed).toBe(false)
     expect(status.runtimeConformance).toMatchObject({
       canClaim: false,
