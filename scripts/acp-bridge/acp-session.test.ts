@@ -37,7 +37,7 @@ type DelayedFakeRuntimeUpdate = { delayMs: number; update: FakeRuntimeUpdate }
 describe("ACP final text extraction", () => {
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "ACP", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -63,7 +63,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps post-tool Codex ACP text while hiding pre-tool unclassified text", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
@@ -90,7 +90,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps Codex ACP final chunks emitted after completed tool activity", async () => {
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { name: "shell", type: "tool_call" }, sessionUpdate: "tool_call" },
@@ -122,7 +122,7 @@ describe("ACP final text extraction", () => {
 
   test("keeps Codex ACP answer chunks when the turn has classified thought events", async () => {
     const session = new HermesAcpSession({
-      agentCommand: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+      agentCommand: ["bunx", "@zed-industries/codex-acp@0.15.0"],
       runtimeClient: createFakeRuntimeClient({
         updates: [
           { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_thought_chunk" },
@@ -141,7 +141,7 @@ describe("ACP final text extraction", () => {
   test("hides pre-tool Codex message chunks while keeping post-tool final chunks", async () => {
     const observedEvents: Array<{ eventType: string; partType?: string }> = []
     const session = new HermesAcpSession({
-      agentCommand: "npx --yes @agentclientprotocol/codex-acp@0.0.45",
+      agentCommand: "bunx @zed-industries/codex-acp@0.15.0",
       onEvent: (event) => {
         observedEvents.push({ eventType: event.eventType, partType: event.part?.type })
       },

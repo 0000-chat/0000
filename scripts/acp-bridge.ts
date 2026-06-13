@@ -9,7 +9,11 @@ import { randomUUID } from "node:crypto"
 
 import { BridgeCloudHttpError, ConvexBridgeCloudClient } from "./acp-bridge/convex-http"
 import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter"
-import { openBridgeSupervisor, type BridgeSupervisor } from "./acp-bridge/bridge-supervisor"
+import {
+  openBridgeSupervisor,
+  type BridgeSupervisor,
+  type BridgeWatchdogResult,
+} from "./acp-bridge/bridge-supervisor"
 import {
   AcpBridgeProcessRegistry,
   type AcpBridgeProcessHealth,
@@ -374,7 +378,9 @@ type InFlightCommandMetadata = {
   startedAt: string
 }
 
-type BridgeLoopManager = Pick<BridgeSessionManager, "getStatus" | "handleQueueItem">
+type BridgeLoopManager = Pick<BridgeSessionManager, "getStatus" | "handleQueueItem"> & {
+  failActiveQueueItem?: BridgeSessionManager["failActiveQueueItem"]
+}
 
 export type BridgeLoopIterationInput = {
   config: BridgeConfig
@@ -385,6 +391,7 @@ export type BridgeLoopIterationInput = {
   manager: BridgeLoopManager
   inFlightCommands: Map<string, Promise<void>>
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>
+  watchdogFailures?: BridgeWatchdogResult[]
   lastStaleCleanupAt: number
   setLastStaleCleanupAt: (value: number) => void
   log: FlushableBridgeLogger
@@ -1269,7 +1276,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       context.status.localJournal = bridgeSupervisorHealthStatus(context.supervisor)
       context.status.processHealth = context.supervisor.getProcessHealth()
       await publishBridgeSupervisorHealthIfChanged(context)
-      for (const watchdog of context.supervisor.checkWatchdogs()) {
+      const watchdogFailures = context.supervisor.checkWatchdogs()
+      for (const watchdog of watchdogFailures) {
         context.log({
           level: "warn",
           event: "bridge.watchdog.timeout",
@@ -1287,6 +1295,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         manager: context.manager,
         inFlightCommands: context.inFlightCommands,
         inFlightCommandMetadata: context.inFlightCommandMetadata,
+        watchdogFailures,
         lastStaleCleanupAt: context.lastStaleCleanupAt,
         setLastStaleCleanupAt: (value) => {
           context.lastStaleCleanupAt = value
@@ -1532,20 +1541,22 @@ export async function runBridgeLoopIteration(
       .handleQueueItem(command)
       .catch(input.recordLoopError)
       .finally(() => {
-        input.inFlightCommands.delete(command.id)
+        const wasInFlight = input.inFlightCommands.delete(command.id)
         input.inFlightCommandMetadata.delete(command.id)
         syncBridgeStatus()
-        input.log({
-          level: "info",
-          event: "bridge.queue_item.settled",
-          deviceId: input.config.deviceId,
-          queueId: command.id,
-          queueType: command.type ?? command.kind,
-          threadId: command.threadId,
-          sessionId: command.sessionId,
-          agentSessionId: command.agentSessionId,
-          activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
-        })
+        if (wasInFlight) {
+          input.log({
+            level: "info",
+            event: "bridge.queue_item.settled",
+            deviceId: input.config.deviceId,
+            queueId: command.id,
+            queueType: command.type ?? command.kind,
+            threadId: command.threadId,
+            sessionId: command.sessionId,
+            agentSessionId: command.agentSessionId,
+            activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
+          })
+        }
         void persistStatus(input.statusPath, input.status)
       })
     input.inFlightCommands.set(command.id, task)
@@ -1601,20 +1612,38 @@ export async function runBridgeLoopIteration(
             heartbeatResult.control.refreshHermesProfiles ||
             heartbeatResult.control.refreshRuntimeProfiles
           ) {
+            const previousRuntimeProfiles = input.status.runtimeProfiles ?? []
             input.status.hermesProfiles = await discoverProfiles()
-            input.status.runtimeProfiles = await discoverRuntimeProfiles({
+            const refreshedRuntimeProfiles = await discoverRuntimeProfiles({
               baseAgentCommand: input.agentCommand ?? DEFAULT_AGENT_COMMAND,
               customCommands: input.runtimeCommands,
             })
+            input.status.runtimeProfiles = refreshedRuntimeProfiles
             const refreshedAt = new Date(currentTime()).toISOString()
             input.status.lastHermesProfileRefreshAt = refreshedAt
             input.status.lastRuntimeProfileRefreshAt = refreshedAt
+            const runtimeCommandChanged = runtimeProfileCommandsChanged(
+              previousRuntimeProfiles,
+              refreshedRuntimeProfiles,
+            )
             input.log({
               level: "info",
               event: "bridge.hermes_profiles.refresh",
               deviceId: input.config.deviceId,
               profileCount: input.status.hermesProfiles.length,
+              runtimeProfileCount: refreshedRuntimeProfiles.length,
+              runtimeCommandChanged,
             })
+            if (runtimeCommandChanged) {
+              input.status.lifecycle = "restarting"
+              input.status.updateState = buildBridgeUpdateState("restarting", currentTime())
+              restartResult = { restartRequested: true }
+              input.log({
+                level: "info",
+                event: "bridge.runtime_profiles.restart_requested",
+                deviceId: input.config.deviceId,
+              })
+            }
             await persistStatus(input.statusPath, input.status)
             const refreshHeartbeatResult = await heartbeat(input.config, input.status)
             if (!refreshHeartbeatResult.ok) {
@@ -1640,6 +1669,33 @@ export async function runBridgeLoopIteration(
       syncBridgeStatus()
       await persistStatus(input.statusPath, input.status)
       return restartResult
+    }
+    for (const watchdog of input.watchdogFailures ?? []) {
+      const terminalized =
+        (await input.manager.failActiveQueueItem?.(watchdog.queueItemId, watchdog.reasonCode)) ??
+        false
+      if (!terminalized) {
+        input.log({
+          level: "warn",
+          event: "bridge.watchdog.terminalize_missed",
+          deviceId: input.config.deviceId,
+          queueId: watchdog.queueItemId,
+          reason: watchdog.reasonCode,
+        })
+        continue
+      }
+      input.inFlightCommands.delete(watchdog.queueItemId)
+      input.inFlightCommandMetadata.delete(watchdog.queueItemId)
+      syncBridgeStatus()
+      input.log({
+        level: "warn",
+        event: "bridge.queue_item.settled",
+        deviceId: input.config.deviceId,
+        queueId: watchdog.queueItemId,
+        reason: watchdog.reasonCode,
+        activeQueueItemIds: Array.from(input.inFlightCommands.keys()),
+      })
+      await persistStatus(input.statusPath, input.status)
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size
     if (availableSlots > 0) {
@@ -1853,6 +1909,26 @@ export function bridgeHeartbeatSignature(
     pendingControlCommand: status.pendingControlCommand,
     updateState: status.updateState,
   })
+}
+
+function runtimeProfileCommandsChanged(
+  previousProfiles: BridgeRuntimeProfile[],
+  refreshedProfiles: BridgeRuntimeProfile[],
+): boolean {
+  const previousById = new Map(
+    previousProfiles.map((profile) => [profile.id, profile.command.join("\u0000")]),
+  )
+  const refreshedIds = new Set(refreshedProfiles.map((profile) => profile.id))
+  if (previousProfiles.some((profile) => !refreshedIds.has(profile.id))) {
+    return true
+  }
+  for (const profile of refreshedProfiles) {
+    const previousCommand = previousById.get(profile.id)
+    if (previousCommand === undefined || previousCommand !== profile.command.join("\u0000")) {
+      return true
+    }
+  }
+  return false
 }
 
 function syncBridgeRuntimeStatus(
