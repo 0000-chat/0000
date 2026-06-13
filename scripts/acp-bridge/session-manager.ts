@@ -1,7 +1,7 @@
-import { readFile, stat } from "node:fs/promises"
-import { basename, isAbsolute, relative, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
-import type { CreateTerminalRequest } from "@agentclientprotocol/sdk"
+import { readFile, stat } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { CreateTerminalRequest } from "@agentclientprotocol/sdk";
 
 import {
   type HermesAcpPromptAttachment,
@@ -12,134 +12,150 @@ import {
   type RuntimeConfigApplicationResult,
   HermesAcpSession,
   resolveRuntimeConfigApplication,
-} from "./acp-session"
-import { type BridgeLogEntry, type BridgeLogger, redactLogValue } from "./bridge-log"
-import type { AgentAttachmentUploadInput, BridgeEventInput } from "./convex-http"
-import type { BridgeAttachmentUploadCandidate, NormalizedBridgeEvent } from "./event-normalizer"
-import { type BridgeRuntimeProfile, findRuntimeProfile } from "./runtime-profiles"
-import type { BridgeSupervisor, BridgeSupervisorWorkItem } from "./bridge-supervisor"
-import type { AcpBridgeProcessRegistryLike } from "./process-registry"
+} from "./acp-session";
+import {
+  type BridgeLogEntry,
+  type BridgeLogger,
+  redactLogValue,
+} from "./bridge-log";
+import type {
+  AgentAttachmentUploadInput,
+  BridgeEventInput,
+} from "./convex-http";
+import type {
+  BridgeAttachmentUploadCandidate,
+  NormalizedBridgeEvent,
+} from "./event-normalizer";
+import {
+  type BridgeRuntimeProfile,
+  findRuntimeProfile,
+} from "./runtime-profiles";
+import type {
+  BridgeSupervisor,
+  BridgeSupervisorWorkItem,
+} from "./bridge-supervisor";
+import type { AcpBridgeProcessRegistryLike } from "./process-registry";
 import {
   createSessionLivenessRecord,
   evaluateSessionLiveness,
   reduceSessionLiveness,
   type SessionLivenessRecord,
-} from "./session-liveness"
+} from "./session-liveness";
 import {
   TerminalHandleRegistry,
   type TerminalHandleScope,
-} from "./terminal-handles"
+} from "./terminal-handles";
 import type {
   SdkAcpRuntimeTerminalAdapter,
   SdkAcpRuntimeTerminalHandle,
-} from "./sdk-acp-runtime-client"
+} from "./sdk-acp-runtime-client";
 
 export type BridgeSessionQueueItem = {
-  id: string
-  claimId?: string
-  type?: string
-  kind?: string
-  attachments?: BridgeQueueAttachment[]
-  threadId?: string
-  sessionId?: string
-  agentSessionId?: string
-  cwd?: string
-  prompt?: string
-  threadHistory?: string
-  systemPrompt?: string
+  id: string;
+  claimId?: string;
+  type?: string;
+  kind?: string;
+  attachments?: BridgeQueueAttachment[];
+  threadId?: string;
+  sessionId?: string;
+  agentSessionId?: string;
+  cwd?: string;
+  prompt?: string;
+  threadHistory?: string;
+  systemPrompt?: string;
   runtimeOptions?: {
-    modelId?: string
-    thinkingLevel?: string
-  }
-  approvalId?: string
-  approvalOutcome?: string
-  approvalReason?: string
-  approvalLevel?: "ask" | "full_permissions"
-  externalRequestId?: string
-  externalSessionId?: string
-  organizationId?: string
-  mailboxConversationId?: string
-  runtimeConfig?: Record<string, string | undefined>
-  traceId?: string
-  agentName?: string
-  bridgeProfileId?: string
-  hermesProfileName?: string
-}
+    modelId?: string;
+    thinkingLevel?: string;
+  };
+  approvalId?: string;
+  approvalOutcome?: string;
+  approvalReason?: string;
+  approvalLevel?: "ask" | "full_permissions";
+  externalRequestId?: string;
+  externalSessionId?: string;
+  organizationId?: string;
+  mailboxConversationId?: string;
+  runtimeConfig?: Record<string, string | undefined>;
+  traceId?: string;
+  agentName?: string;
+  bridgeProfileId?: string;
+  hermesProfileName?: string;
+};
 
 export type BridgeQueueAttachment = {
   access?: {
-    expiresAt?: number
-    mode?: string
-    url?: string
-  }
-  bucket?: string
-  checksumSha256?: string
-  contentHash?: string
-  createdAt?: string
-  createdBy?: string
-  filename?: string
-  key?: string
-  mediaType?: string
-  objectKey?: string
-  sizeBytes?: number
-  status?: string
-  storageBackend?: string
-  threadId?: string
-  type?: string
-  url?: string
-}
+    expiresAt?: number;
+    mode?: string;
+    url?: string;
+  };
+  bucket?: string;
+  checksumSha256?: string;
+  contentHash?: string;
+  createdAt?: string;
+  createdBy?: string;
+  filename?: string;
+  key?: string;
+  mediaType?: string;
+  objectKey?: string;
+  sizeBytes?: number;
+  status?: string;
+  storageBackend?: string;
+  threadId?: string;
+  type?: string;
+  url?: string;
+};
 
 export type ManagedAcpSession = {
-  readonly sessionId?: string
-  start?(): Promise<string>
+  readonly sessionId?: string;
+  start?(): Promise<string>;
   sendUserMessage(
     text: string,
     options?: {
-      systemPrompt?: string
-      threadHistory?: string
-      attachmentReferenceText?: string
-      attachments?: HermesAcpPromptAttachment[]
-      autoApprovePermissionRequests?: boolean
-      runtimeConfig?: Record<string, string>
+      systemPrompt?: string;
+      threadHistory?: string;
+      attachmentReferenceText?: string;
+      attachments?: HermesAcpPromptAttachment[];
+      autoApprovePermissionRequests?: boolean;
+      runtimeConfig?: Record<string, string>;
     },
-  ): Promise<HermesAcpPromptResult>
-  cancel(): Promise<boolean | void>
-  close(): Promise<void>
+  ): Promise<HermesAcpPromptResult>;
+  cancel(): Promise<boolean | void>;
+  close(): Promise<void>;
   respondToPermissionRequest?(
     externalRequestId: string,
     response: { approved: boolean; reason?: string },
-  ): Promise<boolean>
-  hasPendingPermissionRequests?(): boolean
-  getPromptTimeoutDiagnostics?(): HermesAcpPromptTimeoutDiagnostics
+  ): Promise<boolean>;
+  hasPendingPermissionRequests?(): boolean;
+  getPromptTimeoutDiagnostics?(): HermesAcpPromptTimeoutDiagnostics;
   getExternalContinuityState?(): {
-    attempted: boolean
-    fallback: boolean
-    loaded: boolean
-  }
-}
+    attempted: boolean;
+    fallback: boolean;
+    loaded: boolean;
+  };
+};
 
 export type BridgeSessionContext = {
-  agentCommand?: string | string[]
-  agentSessionId?: string
-  bridgeProfileId?: string
-  runtimeProfile?: BridgeRuntimeProfile
-  sessionKey: string
-  threadId: string
-  cwd?: string
-  hermesProfileName?: string
-  mcpServers: HermesAcpMcpServer[]
-  initialSessionId?: string
-  organizationId?: string
-  terminalAdapter?: SdkAcpRuntimeTerminalAdapter
-  terminalScope?: TerminalHandleScope
-  processRegistryMetadata?: HermesAcpProcessRegistryMetadata
-  onEvent: (event: NormalizedBridgeEvent) => void
-  onError: (error: Error) => void
-}
+  agentCommand?: string | string[];
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  runtimeProfile?: BridgeRuntimeProfile;
+  sessionKey: string;
+  threadId: string;
+  cwd?: string;
+  hermesProfileName?: string;
+  mcpServers: HermesAcpMcpServer[];
+  initialSessionId?: string;
+  organizationId?: string;
+  terminalAdapter?: SdkAcpRuntimeTerminalAdapter;
+  terminalScope?: TerminalHandleScope;
+  processRegistryMetadata?: HermesAcpProcessRegistryMetadata;
+  onEvent: (event: NormalizedBridgeEvent) => void;
+  onError: (error: Error) => void;
+};
 
 export type BridgeTerminalContext = {
-  generation: number
-  terminalScope: TerminalHandleScope
+  generation: number;
+  terminalScope: TerminalHandleScope;
 } & Pick<
   BridgeSessionContext,
   | "agentCommand"
@@ -152,96 +168,103 @@ export type BridgeTerminalContext = {
   | "runtimeProfile"
   | "sessionKey"
   | "threadId"
->
+>;
 
 type BridgeSessionRecord = {
-  sessionKey: string
-  threadId: string
-  cwd?: string
-  acp: ManagedAcpSession
-  agentName?: string
-  runtimeProfile?: BridgeRuntimeProfile
-  hermesProfileName?: string
-  generation: number
-  providerSessionKey: string
-  scopeConversationId: string
-  scopeKeyWithoutAgent: string
-  terminalScope?: TerminalHandleScope
-  idleTimer?: ReturnType<typeof setTimeout>
-  lastUsedAt: number
-}
+  sessionKey: string;
+  threadId: string;
+  cwd?: string;
+  acp: ManagedAcpSession;
+  agentName?: string;
+  runtimeProfile?: BridgeRuntimeProfile;
+  hermesProfileName?: string;
+  generation: number;
+  providerSessionKey: string;
+  scopeConversationId: string;
+  scopeKeyWithoutAgent: string;
+  terminalScope?: TerminalHandleScope;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  lastUsedAt: number;
+};
 
 type BridgeSessionCloudClient = {
-  appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>
-  uploadAttachment(input: AgentAttachmentUploadInput): Promise<{ file: Record<string, unknown> }>
+  appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>;
+  uploadAttachment(
+    input: AgentAttachmentUploadInput,
+  ): Promise<{ file: Record<string, unknown> }>;
   markResult(
     commandId: string,
     result: Record<string, unknown>,
     claimId?: string,
-  ): Promise<Record<string, unknown>>
-}
+  ): Promise<Record<string, unknown>>;
+};
 
-type EventWriteOutcome = { ok: true; count: number } | { ok: false; count: number; error: Error }
+type EventWriteOutcome =
+  | { ok: true; count: number }
+  | { ok: false; count: number; error: Error };
 
-const EVENT_BATCH_MAX_SIZE = 25
-const EVENT_BATCH_FLUSH_MS = 300
-const STREAM_CHUNK_COALESCE_MAX_CHARS = 4_000
-const STREAM_CHUNK_COALESCE_MAX_COUNT = 32
-const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250
-const APPROVAL_RESPONSE_SESSION_POLL_MS = 10
-const DEFAULT_CLOSE_TIMEOUT_MS = 5_000
-const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000
-const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300
+const EVENT_BATCH_MAX_SIZE = 25;
+const EVENT_BATCH_FLUSH_MS = 300;
+const STREAM_CHUNK_COALESCE_MAX_CHARS = 4_000;
+const STREAM_CHUNK_COALESCE_MAX_COUNT = 32;
+const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250;
+const APPROVAL_RESPONSE_SESSION_POLL_MS = 10;
+const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
+const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000;
+const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300;
 
 export type BridgeSessionManagerOptions = {
-  cloudClient: BridgeSessionCloudClient
-  deviceId?: string
-  agentCommand?: string | string[]
-  runtimeProfiles?: BridgeRuntimeProfile[]
-  requestTimeoutMs?: number
+  cloudClient: BridgeSessionCloudClient;
+  deviceId?: string;
+  agentCommand?: string | string[];
+  runtimeProfiles?: BridgeRuntimeProfile[];
+  requestTimeoutMs?: number;
   createMcpServers?: (
     context: Pick<
       BridgeSessionContext,
       "agentSessionId" | "cwd" | "organizationId" | "sessionKey" | "threadId"
     >,
-  ) => HermesAcpMcpServer[]
-  createSession?: (context: BridgeSessionContext) => ManagedAcpSession
-  idleSessionTtlMs?: number
-  allowRemoteCwd?: boolean
-  resumeEnabled?: boolean
-  requireScopedIdentity?: boolean
-  log?: BridgeLogger
-  livenessTimeoutMs?: number
-  supervisor?: BridgeSupervisor
-  processRegistry?: Pick<AcpBridgeProcessRegistryLike, "registerProcess" | "terminateProcess">
-  closeTimeoutMs?: number
-  terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>
+  ) => HermesAcpMcpServer[];
+  createSession?: (context: BridgeSessionContext) => ManagedAcpSession;
+  idleSessionTtlMs?: number;
+  allowRemoteCwd?: boolean;
+  resumeEnabled?: boolean;
+  requireScopedIdentity?: boolean;
+  log?: BridgeLogger;
+  livenessTimeoutMs?: number;
+  supervisor?: BridgeSupervisor;
+  processRegistry?: Pick<
+    AcpBridgeProcessRegistryLike,
+    "registerProcess" | "terminateProcess"
+  >;
+  closeTimeoutMs?: number;
+  terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>;
   createTerminal?: (
     context: BridgeTerminalContext,
     params: CreateTerminalRequest,
-  ) => Promise<SdkAcpRuntimeTerminalHandle>
-}
+  ) => Promise<SdkAcpRuntimeTerminalHandle>;
+};
 
 export type BridgeSessionManagerStatus = {
-  activeSessions: string[]
+  activeSessions: string[];
   liveness?: {
-    activeSessions: SessionLivenessRecord[]
-  }
-  terminalInteractionSessionKeyCount: number
+    activeSessions: SessionLivenessRecord[];
+  };
+  terminalInteractionSessionKeyCount: number;
   sessions: Array<{
-    sessionKey: string
-    threadId: string
-    runtimeProfileId?: string
-    runtimeLabel?: string
-    runtimeKind?: string
-    hermesProfileName?: string
-    queueDepth: number
-    runningQueueItemId?: string
-    lastUsedAt: number
-  }>
-}
+    sessionKey: string;
+    threadId: string;
+    runtimeProfileId?: string;
+    runtimeLabel?: string;
+    runtimeKind?: string;
+    hermesProfileName?: string;
+    queueDepth: number;
+    runningQueueItemId?: string;
+    lastUsedAt: number;
+  }>;
+};
 
-export type BridgeSessionLogEntry = BridgeLogEntry
+export type BridgeSessionLogEntry = BridgeLogEntry;
 
 export function resolveHermesProfileAgentCommand(
   baseCommand: string | string[] | undefined,
@@ -249,88 +272,99 @@ export function resolveHermesProfileAgentCommand(
 ): string[] {
   const command = Array.isArray(baseCommand)
     ? [...baseCommand]
-    : splitCommand(baseCommand ?? "hermes acp")
-  const profileName = hermesProfileName?.trim()
+    : splitCommand(baseCommand ?? "hermes acp");
+  const profileName = hermesProfileName?.trim();
   if (!profileName) {
-    return command
+    return command;
   }
-  const acpIndex = command.findIndex((part) => part === "acp")
+  const acpIndex = command.findIndex((part) => part === "acp");
   if (acpIndex < 0) {
-    return [...command, "-p", profileName, "acp"]
+    return [...command, "-p", profileName, "acp"];
   }
-  return [...command.slice(0, acpIndex), "-p", profileName, ...command.slice(acpIndex)]
+  return [
+    ...command.slice(0, acpIndex),
+    "-p",
+    profileName,
+    ...command.slice(acpIndex),
+  ];
 }
 
 export class BridgeSessionManager {
-  private readonly cloudClient: BridgeSessionCloudClient
-  private readonly deviceId?: string
-  private readonly agentCommand?: string | string[]
-  private readonly runtimeProfiles: BridgeRuntimeProfile[]
-  private readonly requestTimeoutMs?: number
+  private readonly cloudClient: BridgeSessionCloudClient;
+  private readonly deviceId?: string;
+  private readonly agentCommand?: string | string[];
+  private readonly runtimeProfiles: BridgeRuntimeProfile[];
+  private readonly requestTimeoutMs?: number;
   private readonly createMcpServers: (
     context: Pick<
       BridgeSessionContext,
       "agentSessionId" | "cwd" | "organizationId" | "sessionKey" | "threadId"
     >,
-  ) => HermesAcpMcpServer[]
-  private readonly log?: BridgeLogger
-  private readonly supervisor?: BridgeSupervisor
+  ) => HermesAcpMcpServer[];
+  private readonly log?: BridgeLogger;
+  private readonly supervisor?: BridgeSupervisor;
   private readonly processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
     "registerProcess" | "terminateProcess"
-  >
-  private readonly idleSessionTtlMs: number
-  private readonly livenessTimeoutMs: number
-  private readonly allowRemoteCwd: boolean
-  private readonly resumeEnabled: boolean
-  private readonly requireScopedIdentity: boolean
-  private readonly closeTimeoutMs: number
-  private readonly terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>
+  >;
+  private readonly idleSessionTtlMs: number;
+  private readonly livenessTimeoutMs: number;
+  private readonly allowRemoteCwd: boolean;
+  private readonly resumeEnabled: boolean;
+  private readonly requireScopedIdentity: boolean;
+  private readonly closeTimeoutMs: number;
+  private readonly terminalRegistry?: TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>;
   private readonly createTerminal:
     | ((
         context: BridgeTerminalContext,
         params: CreateTerminalRequest,
       ) => Promise<SdkAcpRuntimeTerminalHandle>)
-    | undefined
-  private readonly createSession: (context: BridgeSessionContext) => ManagedAcpSession
-  private readonly sessions = new Map<string, BridgeSessionRecord>()
-  private readonly promptQueues = new Map<string, Promise<void>>()
-  private readonly activeQueueItems = new Map<string, BridgeSessionQueueItem>()
+    | undefined;
+  private readonly createSession: (
+    context: BridgeSessionContext,
+  ) => ManagedAcpSession;
+  private readonly sessions = new Map<string, BridgeSessionRecord>();
+  private readonly promptQueues = new Map<string, Promise<void>>();
+  private readonly activeQueueItems = new Map<string, BridgeSessionQueueItem>();
   private readonly sessionQueueState = new Map<
     string,
     { pendingQueueItemIds: string[]; runningQueueItemId?: string }
-  >()
-  private readonly cancelledQueueItemIds = new Set<string>()
-  private readonly externallyTerminalizedQueueItemIds = new Set<string>()
-  private readonly terminalInteractionSessionKeys = new Set<string>()
-  private readonly terminalInteractionSessionKeyOrder: string[] = []
-  private readonly activeLiveness = new Map<string, SessionLivenessRecord>()
-  private readonly activeLivenessFailures = new Map<string, (error: Error) => void>()
-  private readonly eventBatch: BridgeEventInput[] = []
-  private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = []
-  private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined
-  private eventBatchTimer: ReturnType<typeof setTimeout> | undefined
-  private nextSequence = 1
-  private nextGeneration = 1
+  >();
+  private readonly cancelledQueueItemIds = new Set<string>();
+  private readonly externallyTerminalizedQueueItemIds = new Set<string>();
+  private readonly terminalInteractionSessionKeys = new Set<string>();
+  private readonly terminalInteractionSessionKeyOrder: string[] = [];
+  private readonly activeLiveness = new Map<string, SessionLivenessRecord>();
+  private readonly activeLivenessFailures = new Map<
+    string,
+    (error: Error) => void
+  >();
+  private readonly eventBatch: BridgeEventInput[] = [];
+  private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = [];
+  private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined;
+  private eventBatchTimer: ReturnType<typeof setTimeout> | undefined;
+  private nextSequence = 1;
+  private nextGeneration = 1;
 
   constructor(options: BridgeSessionManagerOptions) {
-    this.cloudClient = options.cloudClient
-    this.deviceId = options.deviceId
-    this.agentCommand = options.agentCommand
-    this.runtimeProfiles = options.runtimeProfiles ?? []
-    this.requestTimeoutMs = options.requestTimeoutMs
-    this.log = options.log
-    this.supervisor = options.supervisor
-    this.processRegistry = options.processRegistry
-    this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0
-    this.livenessTimeoutMs = options.livenessTimeoutMs ?? DEFAULT_SESSION_LIVENESS_TIMEOUT_MS
-    this.allowRemoteCwd = options.allowRemoteCwd !== false
-    this.resumeEnabled = options.resumeEnabled === true
-    this.requireScopedIdentity = options.requireScopedIdentity === true
-    this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS
-    this.terminalRegistry = options.terminalRegistry
-    this.createTerminal = options.createTerminal
-    this.createMcpServers = options.createMcpServers ?? (() => [])
+    this.cloudClient = options.cloudClient;
+    this.deviceId = options.deviceId;
+    this.agentCommand = options.agentCommand;
+    this.runtimeProfiles = options.runtimeProfiles ?? [];
+    this.requestTimeoutMs = options.requestTimeoutMs;
+    this.log = options.log;
+    this.supervisor = options.supervisor;
+    this.processRegistry = options.processRegistry;
+    this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0;
+    this.livenessTimeoutMs =
+      options.livenessTimeoutMs ?? DEFAULT_SESSION_LIVENESS_TIMEOUT_MS;
+    this.allowRemoteCwd = options.allowRemoteCwd !== false;
+    this.resumeEnabled = options.resumeEnabled === true;
+    this.requireScopedIdentity = options.requireScopedIdentity === true;
+    this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
+    this.terminalRegistry = options.terminalRegistry;
+    this.createTerminal = options.createTerminal;
+    this.createMcpServers = options.createMcpServers ?? (() => []);
     this.createSession =
       options.createSession ??
       ((context) =>
@@ -346,7 +380,7 @@ export class BridgeSessionManager {
           onEvent: context.onEvent,
           onError: context.onError,
           terminalAdapter: context.terminalAdapter,
-        }))
+        }));
   }
 
   getStatus(): BridgeSessionManagerStatus {
@@ -355,9 +389,10 @@ export class BridgeSessionManager {
       liveness: {
         activeSessions: Array.from(this.activeLiveness.values()),
       },
-      terminalInteractionSessionKeyCount: this.terminalInteractionSessionKeys.size,
+      terminalInteractionSessionKeyCount:
+        this.terminalInteractionSessionKeys.size,
       sessions: Array.from(this.sessions.values()).map((session) => {
-        const queueState = this.sessionQueueState.get(session.sessionKey)
+        const queueState = this.sessionQueueState.get(session.sessionKey);
         return {
           sessionKey: session.sessionKey,
           threadId: session.threadId,
@@ -370,16 +405,16 @@ export class BridgeSessionManager {
             (queueState?.runningQueueItemId ? 1 : 0),
           runningQueueItemId: queueState?.runningQueueItemId,
           lastUsedAt: session.lastUsedAt,
-        }
+        };
       }),
-    }
+    };
   }
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
-    const type = normalizeType(item)
-    this.activeQueueItems.set(item.id, item)
-    this.supervisor?.recordQueued(this.supervisorWorkItem(item))
-    this.supervisor?.recordClaimed(this.supervisorWorkItem(item))
+    const type = normalizeType(item);
+    this.activeQueueItems.set(item.id, item);
+    this.supervisor?.recordQueued(this.supervisorWorkItem(item));
+    this.supervisor?.recordClaimed(this.supervisorWorkItem(item));
     this.writeLog({
       level: "info",
       event: "bridge.queue_item.start",
@@ -390,76 +425,79 @@ export class BridgeSessionManager {
       agentSessionId: item.agentSessionId,
       bridgeProfileId: item.bridgeProfileId,
       hermesProfileName: item.hermesProfileName,
-    })
+    });
     try {
       if (type === "ping") {
-        await this.markQueueResult(item, { ok: true, kind: "pong" })
-        this.writeQueueCompleteLog(item, type)
-        return
+        await this.markQueueResult(item, { ok: true, kind: "pong" });
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (type === "start-session") {
-        await this.handleStartSession(item)
-        this.writeQueueCompleteLog(item, type)
-        return
+        await this.handleStartSession(item);
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (type === "prompt") {
-        this.writeAgentTurnLog("agent.turn.started", item, type)
-        await this.handlePrompt(item)
+        this.writeAgentTurnLog("agent.turn.started", item, type);
+        await this.handlePrompt(item);
         if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
-          return
+          return;
         }
-        this.writeAgentTurnLog("agent.turn.completed", item, type)
-        this.writeQueueCompleteLog(item, type)
-        return
+        this.writeAgentTurnLog("agent.turn.completed", item, type);
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (type === "cancel" || type === "cancel-session") {
-        this.supervisor?.recordCancelling(this.supervisorWorkItem(item))
-        const cancelled = await this.handleCancel(item)
+        this.supervisor?.recordCancelling(this.supervisorWorkItem(item));
+        const cancelled = await this.handleCancel(item);
         if (cancelled) {
-          this.supervisor?.recordCancelled(this.supervisorWorkItem(item))
+          this.supervisor?.recordCancelled(this.supervisorWorkItem(item));
         } else {
-          this.supervisor?.recordFailed(this.supervisorWorkItem(item), "cancel_not_acknowledged")
+          this.supervisor?.recordFailed(
+            this.supervisorWorkItem(item),
+            "cancel_not_acknowledged",
+          );
         }
-        this.writeQueueCompleteLog(item, type)
-        return
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (type === "close-session") {
-        await this.handleCloseSession(item)
-        this.writeQueueCompleteLog(item, type)
-        return
+        await this.handleCloseSession(item);
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (type === "steer-session") {
-        await this.handleSteerSession(item)
-        this.writeQueueCompleteLog(item, type)
-        return
+        await this.handleSteerSession(item);
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (type === "revive-session") {
-        await this.handleReviveSession(item)
-        this.writeQueueCompleteLog(item, type)
-        return
+        await this.handleReviveSession(item);
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       if (isApprovalResponseType(type)) {
-        await this.handleApprovalResponse(item, type)
+        await this.handleApprovalResponse(item, type);
         this.supervisor?.recordInteractionAnswered(
           this.supervisorWorkItem(item),
           item.externalRequestId ?? item.approvalId ?? item.id,
-        )
-        this.writeQueueCompleteLog(item, type)
-        return
+        );
+        this.writeQueueCompleteLog(item, type);
+        return;
       }
 
       await this.markQueueResult(item, {
         ok: false,
         error: `unsupported command type: ${type}`,
-      })
-      this.writeQueueCompleteLog(item, type)
+      });
+      this.writeQueueCompleteLog(item, type);
     } catch (error) {
       if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
         this.writeLog({
@@ -470,11 +508,11 @@ export class BridgeSessionManager {
           threadId: item.threadId,
           sessionId: item.sessionId,
           agentSessionId: item.agentSessionId,
-        })
-        return
+        });
+        return;
       }
-      const rawMessage = error instanceof Error ? error.message : String(error)
-      const message = String(redactLogValue(rawMessage))
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = String(redactLogValue(rawMessage));
       this.writeLog({
         level: "error",
         event: "bridge.queue_item.error",
@@ -484,13 +522,13 @@ export class BridgeSessionManager {
         sessionId: item.sessionId,
         agentSessionId: item.agentSessionId,
         error: message,
-      })
+      });
       if (type === "prompt") {
-        this.writeAgentTurnLog("agent.turn.failed", item, type, message)
+        this.writeAgentTurnLog("agent.turn.failed", item, type, message);
       }
-      this.supervisor?.recordFailed(this.supervisorWorkItem(item), message)
-      await this.drainEventWrites()
-      const terminal = isTerminalQueueItemError(type, rawMessage)
+      this.supervisor?.recordFailed(this.supervisorWorkItem(item), message);
+      await this.drainEventWrites();
+      const terminal = isTerminalQueueItemError(type, rawMessage);
       await this.markQueueResult(
         item,
         terminal
@@ -503,33 +541,38 @@ export class BridgeSessionManager {
               ok: false,
               error: message,
             },
-      )
+      );
     } finally {
-      this.activeQueueItems.delete(item.id)
+      this.activeQueueItems.delete(item.id);
       if (!this.sessionQueueStateHasQueueItem(item.id)) {
-        this.externallyTerminalizedQueueItemIds.delete(item.id)
+        this.externallyTerminalizedQueueItemIds.delete(item.id);
       }
     }
   }
 
-  async failActiveQueueItem(queueItemId: string, reasonCode: string): Promise<boolean> {
-    const item = this.activeQueueItems.get(queueItemId)
+  async failActiveQueueItem(
+    queueItemId: string,
+    reasonCode: string,
+  ): Promise<boolean> {
+    const item = this.activeQueueItems.get(queueItemId);
     if (!item) {
-      return false
+      return false;
     }
-    const type = normalizeType(item)
-    const sessionKey = this.findSessionKeyForActiveQueueItem(queueItemId) ?? this.findSessionKeyForItem(item)
-    const session = sessionKey ? this.sessions.get(sessionKey) : undefined
-    this.externallyTerminalizedQueueItemIds.add(queueItemId)
+    const type = normalizeType(item);
+    const sessionKey =
+      this.findSessionKeyForActiveQueueItem(queueItemId) ??
+      this.findSessionKeyForItem(item);
+    const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
+    this.externallyTerminalizedQueueItemIds.add(queueItemId);
     if (sessionKey) {
-      this.clearQueueItemFromSessionQueue(sessionKey, queueItemId)
+      this.clearQueueItemFromSessionQueue(sessionKey, queueItemId);
     }
     const message =
       reasonCode === "provider_silent_timeout"
         ? "ACP provider stopped producing events before the run completed."
-        : `ACP bridge terminalized active queue item: ${reasonCode}`
+        : `ACP bridge terminalized active queue item: ${reasonCode}`;
     if (type === "prompt") {
-      this.writeAgentTurnLog("agent.turn.failed", item, type, reasonCode)
+      this.writeAgentTurnLog("agent.turn.failed", item, type, reasonCode);
     }
     if (session) {
       this.enqueueEventWrite(session, {
@@ -546,16 +589,19 @@ export class BridgeSessionManager {
           json: { reasonCode },
           status: "error",
         },
-      })
+      });
     }
-    this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), reasonCode)
-    await this.drainEventWrites()
+    this.supervisor?.recordFailed(
+      this.supervisorWorkItem(item, session),
+      reasonCode,
+    );
+    await this.drainEventWrites();
     await this.markQueueResult(item, {
       ok: false,
       error: message,
       reasonCode,
       terminal: true,
-    })
+    });
     this.writeLog({
       level: "warn",
       event: "bridge.queue_item.externally_terminalized",
@@ -565,43 +611,45 @@ export class BridgeSessionManager {
       sessionId: item.sessionId,
       agentSessionId: item.agentSessionId,
       reasonCode,
-    })
+    });
     if (sessionKey) {
-      await this.closeSession(sessionKey, { terminalInteraction: true })
+      await this.closeSession(sessionKey, { terminalInteraction: true });
     }
-    this.activeQueueItems.delete(queueItemId)
-    return true
+    this.activeQueueItems.delete(queueItemId);
+    return true;
   }
 
   async close(): Promise<void> {
-    await this.drainEventWrites()
-    const sessions = Array.from(this.sessions.values())
-    this.sessions.clear()
+    await this.drainEventWrites();
+    const sessions = Array.from(this.sessions.values());
+    this.sessions.clear();
     await Promise.all(
       sessions.map(async (session) => {
-        this.clearIdleTimer(session)
-        await this.releaseTerminalHandles(session)
-        return await this.closeAcpSession(session)
+        this.clearIdleTimer(session);
+        await this.releaseTerminalHandles(session);
+        return await this.closeAcpSession(session);
       }),
-    )
+    );
   }
 
   private async handlePrompt(item: BridgeSessionQueueItem): Promise<void> {
     if (!item.prompt) {
-      throw new Error(`prompt command ${item.id} is missing prompt text`)
+      throw new Error(`prompt command ${item.id} is missing prompt text`);
     }
-    const promptText = item.prompt
-    const threadId = item.threadId ?? item.sessionId
+    const promptText = item.prompt;
+    const threadId = item.threadId ?? item.sessionId;
     if (!threadId) {
-      throw new Error(`queue item ${item.id} is missing threadId`)
+      throw new Error(`queue item ${item.id} is missing threadId`);
     }
-    this.assertRequiredScopedIdentity(item)
-    const sessionKey = this.sessionKeyForItem(item) ?? threadId
-    const attachments = normalizeBridgeAttachments(item.attachments)
-    const attachmentReferenceText = attachmentReferenceTextForPrompt(attachments)
-    const threadHistory = normalizeThreadHistory(item.threadHistory)
-    const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
-    const autoApprovePermissionRequests = item.approvalLevel === "full_permissions"
+    this.assertRequiredScopedIdentity(item);
+    const sessionKey = this.sessionKeyForItem(item) ?? threadId;
+    const attachments = normalizeBridgeAttachments(item.attachments);
+    const attachmentReferenceText =
+      attachmentReferenceTextForPrompt(attachments);
+    const threadHistory = normalizeThreadHistory(item.threadHistory);
+    const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
+    const autoApprovePermissionRequests =
+      item.approvalLevel === "full_permissions";
     if (attachments.length > 0) {
       this.writeLog({
         level: "info",
@@ -611,9 +659,12 @@ export class BridgeSessionManager {
         threadId,
         attachmentCount: attachments.length,
         attachmentMediaTypes: summarizeAttachmentMediaTypes(attachments),
-        attachmentTotalBytes: attachments.reduce((sum, attachment) => sum + (attachment.sizeBytes ?? 0), 0),
+        attachmentTotalBytes: attachments.reduce(
+          (sum, attachment) => sum + (attachment.sizeBytes ?? 0),
+          0,
+        ),
         deliveryMode: "pending",
-      })
+      });
     }
     await this.runSerializedPrompt(sessionKey, item.id, () =>
       this.handlePromptNow(item, promptText, {
@@ -624,7 +675,8 @@ export class BridgeSessionManager {
           attachments.length > 0
             ? {
                 attachmentCount: attachments.length,
-                attachmentMediaTypes: summarizeAttachmentMediaTypes(attachments),
+                attachmentMediaTypes:
+                  summarizeAttachmentMediaTypes(attachments),
                 attachmentTotalBytes: attachments.reduce(
                   (sum, attachment) => sum + (attachment.sizeBytes ?? 0),
                   0,
@@ -634,36 +686,38 @@ export class BridgeSessionManager {
         systemPrompt,
         threadHistory,
       }),
-    )
+    );
   }
 
   private async handlePromptNow(
     item: BridgeSessionQueueItem,
     prompt: string,
     options: {
-      systemPrompt?: string
-      threadHistory?: string
-      attachmentReferenceText?: string
-      attachments?: HermesAcpPromptAttachment[]
-      autoApprovePermissionRequests?: boolean
-      resultMetadata?: Record<string, unknown>
-      sessionKey?: string
+      systemPrompt?: string;
+      threadHistory?: string;
+      attachmentReferenceText?: string;
+      attachments?: HermesAcpPromptAttachment[];
+      autoApprovePermissionRequests?: boolean;
+      resultMetadata?: Record<string, unknown>;
+      sessionKey?: string;
     } = {},
   ): Promise<void> {
     const session = options.sessionKey
       ? this.sessions.get(options.sessionKey)
-      : await this.ensureSession(item)
+      : await this.ensureSession(item);
     if (!session) {
-      throw new Error(`ACP session ${options.sessionKey} is no longer active`)
+      throw new Error(`ACP session ${options.sessionKey} is no longer active`);
     }
     const {
       resultMetadata: baseResultMetadata,
       sessionKey: _resolvedSessionKey,
       ...acpPromptOptions
-    } = options
-    session.lastUsedAt = Date.now()
-    this.clearIdleTimer(session)
-    this.supervisor?.recordPromptPersisted(this.supervisorWorkItem(item, session))
+    } = options;
+    session.lastUsedAt = Date.now();
+    this.clearIdleTimer(session);
+    this.supervisor?.recordPromptPersisted(
+      this.supervisorWorkItem(item, session),
+    );
     this.enqueueEventWrite(session, {
       externalEventId: `${item.id}:message_started`,
       source: "bridge",
@@ -674,9 +728,12 @@ export class BridgeSessionManager {
         text: `${displayNameForSessionStart(session)} started this run.`,
         status: "streaming",
       },
-    })
-    let result: HermesAcpPromptResult
-    const runtimeConfigApplication = applyRuntimeConfigFallback(item, session.runtimeProfile)
+    });
+    let result: HermesAcpPromptResult;
+    const runtimeConfigApplication = applyRuntimeConfigFallback(
+      item,
+      session.runtimeProfile,
+    );
     const resultMetadata =
       runtimeConfigApplication === undefined
         ? baseResultMetadata
@@ -685,20 +742,20 @@ export class BridgeSessionManager {
             runtimeConfigApplied: runtimeConfigApplication.applied,
             runtimeConfigDiagnostics: runtimeConfigApplication.diagnostics,
             runtimeConfigPolicy: runtimeConfigApplication.policy,
-          }
+          };
     try {
-      this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session))
+      this.supervisor?.recordPromptSent(this.supervisorWorkItem(item, session));
       result = await this.sendPromptWithLiveness(item, session, prompt, {
         ...acpPromptOptions,
         runtimeConfig: runtimeConfigApplication?.applied,
-      })
+      });
     } catch (error) {
       if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
-        return
+        return;
       }
-      const promptFailure = classifyPromptError(error)
+      const promptFailure = classifyPromptError(error);
       if (promptFailure.terminal) {
-        const diagnostics = session.acp.getPromptTimeoutDiagnostics?.()
+        const diagnostics = session.acp.getPromptTimeoutDiagnostics?.();
         this.enqueueEventWrite(session, {
           externalEventId: `${item.id}:${promptFailure.reasonCode}`,
           source: "bridge",
@@ -714,21 +771,28 @@ export class BridgeSessionManager {
             json: { diagnostics, reasonCode: promptFailure.reasonCode },
             status: "error",
           },
-        })
-        await this.drainEventWrites()
+        });
+        await this.drainEventWrites();
         await this.markQueueResult(item, {
           ok: false,
           diagnostics,
           error: promptFailure.message,
           reasonCode: promptFailure.reasonCode,
           terminal: true,
-        })
-        this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), promptFailure.reasonCode)
-        await this.closeSession(session.sessionKey, { terminalInteraction: true })
-        return
+        });
+        this.supervisor?.recordFailed(
+          this.supervisorWorkItem(item, session),
+          promptFailure.reasonCode,
+        );
+        await this.closeSession(session.sessionKey, {
+          terminalInteraction: true,
+        });
+        return;
       }
-      await this.closeSession(session.sessionKey, { terminalInteraction: true })
-      throw error
+      await this.closeSession(session.sessionKey, {
+        terminalInteraction: true,
+      });
+      throw error;
     }
     if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
       this.writeLog({
@@ -742,8 +806,8 @@ export class BridgeSessionManager {
         acpSessionId: result.sessionId,
         textLength: result.text.length,
         reason: "externally_terminalized",
-      })
-      return
+      });
+      return;
     }
     if (this.cancelledQueueItemIds.delete(item.id)) {
       await this.markQueueResult(item, {
@@ -752,8 +816,8 @@ export class BridgeSessionManager {
         ignoredLateResult: true,
         stopReason: "cancelled",
         terminal: true,
-      })
-      this.supervisor?.recordCancelled(this.supervisorWorkItem(item, session))
+      });
+      this.supervisor?.recordCancelled(this.supervisorWorkItem(item, session));
       this.writeLog({
         level: "info",
         event: "bridge.lifecycle.late_prompt_result_ignored",
@@ -764,13 +828,15 @@ export class BridgeSessionManager {
         agentSessionId: session.providerSessionKey,
         acpSessionId: result.sessionId,
         textLength: result.text.length,
-      })
-      return
+      });
+      return;
     }
     if (!this.isCurrentSessionRecord(session)) {
-      throw new Error(`ACP session ${session.sessionKey} was replaced before prompt completed`)
+      throw new Error(
+        `ACP session ${session.sessionKey} was replaced before prompt completed`,
+      );
     }
-    const emptyVisibleOutput = isEmptyVisiblePromptResult(result)
+    const emptyVisibleOutput = isEmptyVisiblePromptResult(result);
     if (normalizeType(item) === "steer-session" && emptyVisibleOutput) {
       await this.markQueueResult(item, {
         ok: false,
@@ -778,10 +844,15 @@ export class BridgeSessionManager {
         terminal: true,
         finalText: result.finalText,
         stopReason: result.stopReason,
-      })
-      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "steer_reprompt_failed")
-      await this.closeSession(session.sessionKey, { terminalInteraction: true })
-      return
+      });
+      this.supervisor?.recordFailed(
+        this.supervisorWorkItem(item, session),
+        "steer_reprompt_failed",
+      );
+      await this.closeSession(session.sessionKey, {
+        terminalInteraction: true,
+      });
+      return;
     }
     this.enqueueEventWrite(session, {
       externalEventId: `${item.id}:message_completed`,
@@ -799,7 +870,7 @@ export class BridgeSessionManager {
         json: { finalText: result.finalText, stopReason: result.stopReason },
         status: "complete",
       },
-    })
+    });
     if (result.finalText?.withheld) {
       this.writeLog({
         level: "warn",
@@ -817,14 +888,21 @@ export class BridgeSessionManager {
         thoughtChunkCount: result.finalText.thoughtChunkCount,
         toolEventCount: result.finalText.toolEventCount,
         trustedFinalResultText: result.finalText.trustedFinalResultText,
-      })
+      });
     }
-    const attachmentUploadSummary = await this.resolveAgentAttachmentUploads(item, session, result.events)
-    await this.drainEventWrites()
+    const attachmentUploadSummary = await this.resolveAgentAttachmentUploads(
+      item,
+      session,
+      result.events,
+    );
+    await this.drainEventWrites();
     const finalResultMetadata =
       result.attachmentDeliveryMode && resultMetadata
-        ? { ...resultMetadata, attachmentDeliveryMode: result.attachmentDeliveryMode }
-        : resultMetadata
+        ? {
+            ...resultMetadata,
+            attachmentDeliveryMode: result.attachmentDeliveryMode,
+          }
+        : resultMetadata;
     if (result.attachmentDeliveryMode && baseResultMetadata?.attachmentCount) {
       this.writeLog({
         level: "info",
@@ -837,17 +915,26 @@ export class BridgeSessionManager {
         acpSessionId: result.sessionId,
         attachmentCount: baseResultMetadata.attachmentCount,
         attachmentDeliveryMode: result.attachmentDeliveryMode,
-      })
+      });
     }
-    const attachmentParts = attachmentPartsFromPromptEvents(result.events)
-    if (normalizeType(item) === "prompt" && emptyVisibleOutput && attachmentParts.length === 0) {
-      const diagnostic = buildEmptyFinalResponseDiagnostic(item, result)
-      this.enqueueEventWrite(session, diagnostic.event)
-      await this.drainEventWrites()
-      await this.markQueueResult(item, diagnostic.result)
-      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "empty_final_response")
-      await this.closeSession(session.sessionKey, { terminalInteraction: true })
-      return
+    const attachmentParts = attachmentPartsFromPromptEvents(result.events);
+    if (
+      normalizeType(item) === "prompt" &&
+      emptyVisibleOutput &&
+      attachmentParts.length === 0
+    ) {
+      const diagnostic = buildEmptyFinalResponseDiagnostic(item, result);
+      this.enqueueEventWrite(session, diagnostic.event);
+      await this.drainEventWrites();
+      await this.markQueueResult(item, diagnostic.result);
+      this.supervisor?.recordFailed(
+        this.supervisorWorkItem(item, session),
+        "empty_final_response",
+      );
+      await this.closeSession(session.sessionKey, {
+        terminalInteraction: true,
+      });
+      return;
     }
     if (attachmentParts.length > 0) {
       this.writeLog({
@@ -866,12 +953,13 @@ export class BridgeSessionManager {
         attachmentTotalBytes: attachmentParts.reduce(
           (sum, part) =>
             sum +
-            (typeof (part.payload as BridgeQueueAttachment).sizeBytes === "number"
+            (typeof (part.payload as BridgeQueueAttachment).sizeBytes ===
+            "number"
               ? ((part.payload as BridgeQueueAttachment).sizeBytes ?? 0)
               : 0),
           0,
         ),
-      })
+      });
     }
     if (
       attachmentUploadSummary.uploadedCount > 0 ||
@@ -890,7 +978,7 @@ export class BridgeSessionManager {
         failedCount: attachmentUploadSummary.failedCount,
         attachmentMediaTypes: attachmentUploadSummary.mediaTypes,
         attachmentTotalBytes: attachmentUploadSummary.totalBytes,
-      })
+      });
     }
     await this.markQueueResult(item, {
       ok: true,
@@ -902,10 +990,10 @@ export class BridgeSessionManager {
       parts: attachmentParts.length > 0 ? attachmentParts : undefined,
       result: result.rawResult,
       ...finalResultMetadata,
-    })
-    this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session))
-    session.lastUsedAt = Date.now()
-    this.scheduleIdleClose(session)
+    });
+    this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session));
+    session.lastUsedAt = Date.now();
+    this.scheduleIdleClose(session);
     this.writeLog({
       level: "info",
       event: "bridge.session.ready",
@@ -915,7 +1003,7 @@ export class BridgeSessionManager {
       sessionId: item.sessionId,
       agentSessionId: session.providerSessionKey,
       acpSessionId: result.sessionId,
-    })
+    });
   }
 
   private async runSerializedPrompt(
@@ -923,40 +1011,40 @@ export class BridgeSessionManager {
     queueItemId: string,
     task: () => Promise<void>,
   ): Promise<void> {
-    const queueState = this.getSessionQueueState(sessionKey)
-    queueState.pendingQueueItemIds.push(queueItemId)
-    const previous = this.promptQueues.get(sessionKey) ?? Promise.resolve()
+    const queueState = this.getSessionQueueState(sessionKey);
+    queueState.pendingQueueItemIds.push(queueItemId);
+    const previous = this.promptQueues.get(sessionKey) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
       .then(async () => {
         queueState.pendingQueueItemIds = queueState.pendingQueueItemIds.filter(
           (id) => id !== queueItemId,
-        )
-        queueState.runningQueueItemId = queueItemId
+        );
+        queueState.runningQueueItemId = queueItemId;
         try {
-          await task()
+          await task();
         } finally {
           if (queueState.runningQueueItemId === queueItemId) {
-            queueState.runningQueueItemId = undefined
+            queueState.runningQueueItemId = undefined;
           }
-          this.deleteEmptySessionQueueState(sessionKey)
+          this.deleteEmptySessionQueueState(sessionKey);
         }
-      })
+      });
     const tracked = current.then(
       () => undefined,
       () => undefined,
-    )
-    this.promptQueues.set(sessionKey, tracked)
+    );
+    this.promptQueues.set(sessionKey, tracked);
     try {
-      await current
+      await current;
     } finally {
       if (this.promptQueues.get(sessionKey) === tracked) {
-        this.promptQueues.delete(sessionKey)
+        this.promptQueues.delete(sessionKey);
       }
       queueState.pendingQueueItemIds = queueState.pendingQueueItemIds.filter(
         (id) => id !== queueItemId,
-      )
-      this.deleteEmptySessionQueueState(sessionKey)
+      );
+      this.deleteEmptySessionQueueState(sessionKey);
     }
   }
 
@@ -966,53 +1054,81 @@ export class BridgeSessionManager {
     prompt: string,
     options: Parameters<ManagedAcpSession["sendUserMessage"]>[1],
   ): Promise<HermesAcpPromptResult> {
-    const now = Date.now()
-    const queueItemId = item.id
+    const now = Date.now();
+    const queueItemId = item.id;
     this.activeLiveness.set(
       queueItemId,
       createSessionLivenessRecord({
         bridgeProfileId: item.bridgeProfileId ?? session.runtimeProfile?.id,
+        claimId: item.claimId,
         now,
         queueItemId,
         sessionKey: session.sessionKey,
       }),
-    )
-    let timer: ReturnType<typeof setTimeout> | undefined
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const livenessFailure = new Promise<never>((_, reject) => {
-      this.activeLivenessFailures.set(queueItemId, reject)
+      this.activeLivenessFailures.set(queueItemId, reject);
       const schedule = () => {
         if (timer) {
-          clearTimeout(timer)
+          clearTimeout(timer);
         }
-        const record = this.activeLiveness.get(queueItemId)
+        const record = this.activeLiveness.get(queueItemId);
         if (!record) {
-          return
+          return;
+        }
+        const silenceMs = Date.now() - record.lastMeaningfulEventAt;
+        if (silenceMs >= this.livenessTimeoutMs && record.state !== "quiet") {
+          const next = reduceSessionLiveness(record, {
+            at: Date.now(),
+            type: "provider_quiet",
+          });
+          this.activeLiveness.set(queueItemId, next);
+          this.writeLog({
+            level: "warn",
+            event: "bridge.session.quiet_degraded",
+            queueId: queueItemId,
+            threadId: item.threadId,
+            sessionId: item.sessionId,
+            agentSessionId: session.providerSessionKey,
+            bridgeProfileId: item.bridgeProfileId ?? session.runtimeProfile?.id,
+            reasonCode: "provider_quiet",
+            silenceMs,
+          });
         }
         const decision = evaluateSessionLiveness({
           now: Date.now(),
-          record,
+          record: this.activeLiveness.get(queueItemId) ?? record,
           timeoutMs: this.livenessTimeoutMs,
-        })
+        });
         if (!decision.ok) {
-          reject(new Error(`ACP live session lost: ${decision.reasonCode}`))
-          return
+          reject(new Error(`ACP live session lost: ${decision.reasonCode}`));
+          return;
         }
-        const delay = Math.max(1, this.livenessTimeoutMs - (Date.now() - record.lastActivityAt))
-        timer = setTimeout(schedule, delay)
-      }
-      schedule()
-    })
+        const currentRecord = this.activeLiveness.get(queueItemId) ?? record;
+        const delay =
+          currentRecord.state === "quiet"
+            ? this.livenessTimeoutMs
+            : Math.max(
+                1,
+                this.livenessTimeoutMs -
+                  (Date.now() - currentRecord.lastMeaningfulEventAt),
+              );
+        timer = setTimeout(schedule, delay);
+      };
+      schedule();
+    });
     try {
       return await Promise.race([
         session.acp.sendUserMessage(prompt, options),
         livenessFailure,
-      ])
+      ]);
     } finally {
       if (timer) {
-        clearTimeout(timer)
+        clearTimeout(timer);
       }
-      this.activeLiveness.delete(queueItemId)
-      this.activeLivenessFailures.delete(queueItemId)
+      this.activeLiveness.delete(queueItemId);
+      this.activeLivenessFailures.delete(queueItemId);
     }
   }
 
@@ -1020,65 +1136,77 @@ export class BridgeSessionManager {
     queueItemId: string,
     type: Parameters<typeof reduceSessionLiveness>[1]["type"],
   ): void {
-    const record = this.activeLiveness.get(queueItemId)
+    const record = this.activeLiveness.get(queueItemId);
     if (!record) {
-      return
+      return;
     }
-    const next = reduceSessionLiveness(record, { at: Date.now(), type })
-    this.activeLiveness.set(queueItemId, next)
+    const next = reduceSessionLiveness(record, { at: Date.now(), type });
+    this.activeLiveness.set(queueItemId, next);
     const decision = evaluateSessionLiveness({
       now: Date.now(),
       record: next,
       timeoutMs: this.livenessTimeoutMs,
-    })
+    });
     if (!decision.ok) {
       this.activeLivenessFailures.get(queueItemId)?.(
         new Error(`ACP live session lost: ${decision.reasonCode}`),
-      )
+      );
     }
   }
 
   private getSessionQueueState(sessionKey: string) {
-    const existing = this.sessionQueueState.get(sessionKey)
+    const existing = this.sessionQueueState.get(sessionKey);
     if (existing) {
-      return existing
+      return existing;
     }
-    const next: { pendingQueueItemIds: string[]; runningQueueItemId?: string } = {
-      pendingQueueItemIds: [],
-    }
-    this.sessionQueueState.set(sessionKey, next)
-    return next
+    const next: { pendingQueueItemIds: string[]; runningQueueItemId?: string } =
+      {
+        pendingQueueItemIds: [],
+      };
+    this.sessionQueueState.set(sessionKey, next);
+    return next;
   }
 
   private deleteEmptySessionQueueState(sessionKey: string): void {
-    const state = this.sessionQueueState.get(sessionKey)
-    if (state && state.pendingQueueItemIds.length === 0 && !state.runningQueueItemId) {
-      this.sessionQueueState.delete(sessionKey)
+    const state = this.sessionQueueState.get(sessionKey);
+    if (
+      state &&
+      state.pendingQueueItemIds.length === 0 &&
+      !state.runningQueueItemId
+    ) {
+      this.sessionQueueState.delete(sessionKey);
     }
   }
 
-  private findSessionKeyForActiveQueueItem(queueItemId: string): string | undefined {
+  private findSessionKeyForActiveQueueItem(
+    queueItemId: string,
+  ): string | undefined {
     for (const [sessionKey, state] of this.sessionQueueState.entries()) {
       if (
         state.runningQueueItemId === queueItemId ||
         state.pendingQueueItemIds.includes(queueItemId)
       ) {
-        return sessionKey
+        return sessionKey;
       }
     }
-    return undefined
+    return undefined;
   }
 
-  private clearQueueItemFromSessionQueue(sessionKey: string, queueItemId: string): void {
-    const state = this.sessionQueueState.get(sessionKey)
+  private clearQueueItemFromSessionQueue(
+    sessionKey: string,
+    queueItemId: string,
+  ): void {
+    const state = this.sessionQueueState.get(sessionKey);
     if (!state) {
-      return
+      return;
     }
-    state.pendingQueueItemIds = state.pendingQueueItemIds.filter((id) => id !== queueItemId)
+    state.pendingQueueItemIds = state.pendingQueueItemIds.filter(
+      (id) => id !== queueItemId,
+    );
     if (state.runningQueueItemId === queueItemId) {
-      state.runningQueueItemId = undefined
+      state.runningQueueItemId = undefined;
     }
-    this.deleteEmptySessionQueueState(sessionKey)
+    this.deleteEmptySessionQueueState(sessionKey);
   }
 
   private sessionQueueStateHasQueueItem(queueItemId: string): boolean {
@@ -1087,20 +1215,20 @@ export class BridgeSessionManager {
         state.runningQueueItemId === queueItemId ||
         state.pendingQueueItemIds.includes(queueItemId)
       ) {
-        return true
+        return true;
       }
     }
-    return false
+    return false;
   }
 
   private getActiveTurnId(sessionKey: string): string | undefined {
-    return this.sessionQueueState.get(sessionKey)?.runningQueueItemId
+    return this.sessionQueueState.get(sessionKey)?.runningQueueItemId;
   }
 
   private markActiveTurnCancelled(sessionKey: string): void {
-    const runningQueueItemId = this.getActiveTurnId(sessionKey)
+    const runningQueueItemId = this.getActiveTurnId(sessionKey);
     if (runningQueueItemId) {
-      this.cancelledQueueItemIds.add(runningQueueItemId)
+      this.cancelledQueueItemIds.add(runningQueueItemId);
     }
   }
 
@@ -1112,38 +1240,45 @@ export class BridgeSessionManager {
       externalEventId: `${item.id}:message_cancelled`,
       source: "bridge",
       eventType: "message_cancelled",
-      payload: { queueId: item.id, queueType: normalizeType(item), stopReason: "cancelled" },
+      payload: {
+        queueId: item.id,
+        queueType: normalizeType(item),
+        stopReason: "cancelled",
+      },
       part: {
         type: "event",
         text: "Run cancelled.",
         status: "complete",
       },
-    })
+    });
   }
 
-  private async handleApprovalResponse(item: BridgeSessionQueueItem, type: string): Promise<void> {
-    const key = this.findSessionKeyForItem(item)
+  private async handleApprovalResponse(
+    item: BridgeSessionQueueItem,
+    type: string,
+  ): Promise<void> {
+    const key = this.findSessionKeyForItem(item);
     if (type === "input-response") {
-      const responseText = item.prompt?.trim()
+      const responseText = item.prompt?.trim();
       if (!responseText) {
-        throw new Error(`input response ${item.id} is missing response text`)
+        throw new Error(`input response ${item.id} is missing response text`);
       }
-      const threadId = item.threadId ?? item.sessionId
+      const threadId = item.threadId ?? item.sessionId;
       if (!key && hasExplicitRuntimeScope(item)) {
         throw new Error(
           `input response ${item.id} does not match an active ACP session for the requested runtime`,
-        )
+        );
       }
-      const sessionKey = key ?? threadId
+      const sessionKey = key ?? threadId;
       if (!sessionKey) {
-        throw new Error(`input response ${item.id} is missing threadId`)
+        throw new Error(`input response ${item.id} is missing threadId`);
       }
       if (!key && this.isTerminalInteractionSessionKey(sessionKey)) {
-        await this.markStaleInteractionResponse(item, type)
-        return
+        await this.markStaleInteractionResponse(item, type);
+        return;
       }
-      const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
-      const threadHistory = normalizeThreadHistory(item.threadHistory)
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
+      const threadHistory = normalizeThreadHistory(item.threadHistory);
       this.writeLog({
         level: "info",
         event: "bridge.input_response.continuation",
@@ -1153,7 +1288,7 @@ export class BridgeSessionManager {
         agentSessionId: key,
         hasActiveSession: this.sessions.has(sessionKey),
         hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
-      })
+      });
       await this.runSerializedPrompt(sessionKey, item.id, () =>
         this.handlePromptNow(item, responseText, {
           systemPrompt,
@@ -1161,31 +1296,31 @@ export class BridgeSessionManager {
           sessionKey: key,
           resultMetadata: { inputResponse: true },
         }),
-      )
-      return
+      );
+      return;
     }
 
     if (type === "choice-response") {
-      const choiceId = item.approvalOutcome?.trim()
+      const choiceId = item.approvalOutcome?.trim();
       if (!choiceId) {
-        throw new Error(`choice response ${item.id} is missing choice id`)
+        throw new Error(`choice response ${item.id} is missing choice id`);
       }
-      const threadId = item.threadId ?? item.sessionId
+      const threadId = item.threadId ?? item.sessionId;
       if (!key && hasExplicitRuntimeScope(item)) {
         throw new Error(
           `choice response ${item.id} does not match an active ACP session for the requested runtime`,
-        )
+        );
       }
-      const sessionKey = key ?? threadId
+      const sessionKey = key ?? threadId;
       if (!sessionKey) {
-        throw new Error(`choice response ${item.id} is missing threadId`)
+        throw new Error(`choice response ${item.id} is missing threadId`);
       }
       if (!key && this.isTerminalInteractionSessionKey(sessionKey)) {
-        await this.markStaleInteractionResponse(item, type)
-        return
+        await this.markStaleInteractionResponse(item, type);
+        return;
       }
-      const systemPrompt = normalizeSystemPrompt(item.systemPrompt)
-      const threadHistory = normalizeThreadHistory(item.threadHistory)
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
+      const threadHistory = normalizeThreadHistory(item.threadHistory);
       this.writeLog({
         level: "info",
         event: "bridge.choice_response.continuation",
@@ -1195,7 +1330,7 @@ export class BridgeSessionManager {
         agentSessionId: key,
         hasActiveSession: this.sessions.has(sessionKey),
         hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
-      })
+      });
       await this.runSerializedPrompt(sessionKey, item.id, () =>
         this.handlePromptNow(item, `Selected choice: ${choiceId}`, {
           systemPrompt,
@@ -1203,34 +1338,40 @@ export class BridgeSessionManager {
           sessionKey: key,
           resultMetadata: { choiceId },
         }),
-      )
-      return
+      );
+      return;
     }
 
-    let session = key ? this.sessions.get(key) : undefined
+    let session = key ? this.sessions.get(key) : undefined;
     if (!session && key && this.sessionQueueState.has(key)) {
-      session = await this.waitForSession(key)
+      session = await this.waitForSession(key);
     }
     if (!session) {
-      await this.markStaleInteractionResponse(item, type)
-      return
+      await this.markStaleInteractionResponse(item, type);
+      return;
     }
-    const externalRequestId = item.externalRequestId ?? item.approvalId
+    const externalRequestId = item.externalRequestId ?? item.approvalId;
     if (!externalRequestId) {
-      throw new Error(`approval response ${item.id} is missing external request id`)
+      throw new Error(
+        `approval response ${item.id} is missing external request id`,
+      );
     }
-    const approved = item.approvalOutcome === "approved" || item.approvalOutcome === "allow"
-    const handled = await session.acp.respondToPermissionRequest?.(externalRequestId, {
-      approved,
-      reason: item.approvalReason,
-    })
+    const approved =
+      item.approvalOutcome === "approved" || item.approvalOutcome === "allow";
+    const handled = await session.acp.respondToPermissionRequest?.(
+      externalRequestId,
+      {
+        approved,
+        reason: item.approvalReason,
+      },
+    );
     if (!handled) {
-      await this.markStaleInteractionResponse(item, type)
-      return
+      await this.markStaleInteractionResponse(item, type);
+      return;
     }
-    session.lastUsedAt = Date.now()
-    this.scheduleIdleClose(session)
-    await this.markQueueResult(item, { ok: true, approved })
+    session.lastUsedAt = Date.now();
+    this.scheduleIdleClose(session);
+    await this.markQueueResult(item, { ok: true, approved });
   }
 
   private async markStaleInteractionResponse(
@@ -1245,203 +1386,236 @@ export class BridgeSessionManager {
       threadId: item.threadId ?? item.sessionId,
       sessionId: item.sessionId,
       agentSessionId: item.agentSessionId,
-    })
+    });
     await this.markQueueResult(item, {
       ok: true,
       stale: true,
       noOp: true,
       reasonCode: "stale_interaction_response",
-    })
+    });
   }
 
   private isTerminalInteractionSessionKey(sessionKey: string): boolean {
-    return this.terminalInteractionSessionKeys.has(sessionKey)
+    return this.terminalInteractionSessionKeys.has(sessionKey);
   }
 
-  private async waitForSession(sessionKey: string): Promise<BridgeSessionRecord | undefined> {
-    const deadline = Date.now() + APPROVAL_RESPONSE_SESSION_WAIT_MS
+  private async waitForSession(
+    sessionKey: string,
+  ): Promise<BridgeSessionRecord | undefined> {
+    const deadline = Date.now() + APPROVAL_RESPONSE_SESSION_WAIT_MS;
     while (Date.now() < deadline) {
-      const session = this.sessions.get(sessionKey)
+      const session = this.sessions.get(sessionKey);
       if (session) {
-        return session
+        return session;
       }
-      const queueState = this.sessionQueueState.get(sessionKey)
+      const queueState = this.sessionQueueState.get(sessionKey);
       const hasQueuedPrompt =
-        (queueState?.pendingQueueItemIds.length ?? 0) > 0 || Boolean(queueState?.runningQueueItemId)
+        (queueState?.pendingQueueItemIds.length ?? 0) > 0 ||
+        Boolean(queueState?.runningQueueItemId);
       if (!hasQueuedPrompt) {
-        return undefined
+        return undefined;
       }
-      await new Promise((resolve) => setTimeout(resolve, APPROVAL_RESPONSE_SESSION_POLL_MS))
+      await new Promise((resolve) =>
+        setTimeout(resolve, APPROVAL_RESPONSE_SESSION_POLL_MS),
+      );
     }
-    return this.sessions.get(sessionKey)
+    return this.sessions.get(sessionKey);
   }
 
-  private async handleStartSession(item: BridgeSessionQueueItem): Promise<void> {
-    const session = await this.ensureSession(item)
-    session.lastUsedAt = Date.now()
-    this.scheduleIdleClose(session)
+  private async handleStartSession(
+    item: BridgeSessionQueueItem,
+  ): Promise<void> {
+    const session = await this.ensureSession(item);
+    session.lastUsedAt = Date.now();
+    this.scheduleIdleClose(session);
     await this.markQueueResult(item, {
       ok: true,
       started: true,
       agentSessionId: session.providerSessionKey,
-    })
+    });
   }
 
   private async handleCancel(item: BridgeSessionQueueItem): Promise<boolean> {
-    const key = this.findSessionKeyForItem(item)
-    const session = key ? this.sessions.get(key) : undefined
+    const key = this.findSessionKeyForItem(item);
+    const session = key ? this.sessions.get(key) : undefined;
     if (!key || !session) {
       await this.markQueueResult(item, {
         ok: false,
         error: "cancel_not_acknowledged",
         terminal: true,
-      })
-      return false
+      });
+      return false;
     }
-    const activeTurnId = this.getActiveTurnId(key)
-    let acknowledged: boolean
+    const activeTurnId = this.getActiveTurnId(key);
+    let acknowledged: boolean;
     try {
-      acknowledged = (await session.acp.cancel()) !== false
+      acknowledged = (await session.acp.cancel()) !== false;
     } catch {
-      acknowledged = false
+      acknowledged = false;
     }
     if (!acknowledged) {
       if (activeTurnId) {
-        this.cancelledQueueItemIds.add(activeTurnId)
-        await this.killTerminalHandles(session)
-        this.enqueueCancellationEvent(session, item)
-        await this.drainEventWrites()
-        await this.closeSession(key, { terminalInteraction: true })
+        this.cancelledQueueItemIds.add(activeTurnId);
+        await this.killTerminalHandles(session);
+        this.enqueueCancellationEvent(session, item);
+        await this.drainEventWrites();
+        await this.closeSession(key, { terminalInteraction: true });
         await this.markQueueResult(item, {
           ok: true,
           cancelled: true,
           forced: true,
           stopReason: "cancelled",
           terminal: true,
-        })
-        return true
+        });
+        return true;
       }
       await this.markQueueResult(item, {
         ok: false,
         error: "cancel_not_acknowledged",
         terminal: true,
-      })
-      return false
+      });
+      return false;
     }
-    this.markActiveTurnCancelled(key)
-    await this.killTerminalHandles(session)
-    this.enqueueCancellationEvent(session, item)
-    await this.drainEventWrites()
+    this.markActiveTurnCancelled(key);
+    await this.killTerminalHandles(session);
+    this.enqueueCancellationEvent(session, item);
+    await this.drainEventWrites();
     await this.markQueueResult(item, {
       ok: true,
       cancelled: true,
       stopReason: "cancelled",
       terminal: true,
-    })
-    return true
+    });
+    return true;
   }
 
-  private async handleCloseSession(item: BridgeSessionQueueItem): Promise<void> {
-    const key = this.findSessionKeyForItem(item)
-    const closed = Boolean(key && this.sessions.has(key))
+  private async handleCloseSession(
+    item: BridgeSessionQueueItem,
+  ): Promise<void> {
+    const key = this.findSessionKeyForItem(item);
+    const closed = Boolean(key && this.sessions.has(key));
     if (key) {
-      await this.closeSession(key, { terminalInteraction: true })
+      await this.closeSession(key, { terminalInteraction: true });
     }
-    await this.markQueueResult(item, { ok: true, closed })
+    await this.markQueueResult(item, { ok: true, closed });
   }
 
-  private async handleSteerSession(item: BridgeSessionQueueItem): Promise<void> {
-    const instruction = item.prompt?.trim()
+  private async handleSteerSession(
+    item: BridgeSessionQueueItem,
+  ): Promise<void> {
+    const instruction = item.prompt?.trim();
     if (!instruction) {
       await this.markQueueResult(item, {
         ok: false,
         error: "steer_empty_instruction",
         terminal: true,
-      })
-      this.supervisor?.recordFailed(this.supervisorWorkItem(item), "steer_empty_instruction")
-      return
+      });
+      this.supervisor?.recordFailed(
+        this.supervisorWorkItem(item),
+        "steer_empty_instruction",
+      );
+      return;
     }
-    const key = this.findSessionKeyForItem(item)
-    const session = key ? this.sessions.get(key) : undefined
+    const key = this.findSessionKeyForItem(item);
+    const session = key ? this.sessions.get(key) : undefined;
     if (!key || !session) {
       await this.markQueueResult(item, {
         ok: false,
         error: "session_replacement_required",
         terminal: true,
-      })
-      this.supervisor?.recordFailed(this.supervisorWorkItem(item), "session_replacement_required")
-      return
+      });
+      this.supervisor?.recordFailed(
+        this.supervisorWorkItem(item),
+        "session_replacement_required",
+      );
+      return;
     }
-    this.supervisor?.recordSteering(this.supervisorWorkItem(item, session))
-    const activeTurnId = this.getActiveTurnId(key)
-    let acknowledged: boolean
+    this.supervisor?.recordSteering(this.supervisorWorkItem(item, session));
+    const activeTurnId = this.getActiveTurnId(key);
+    let acknowledged: boolean;
     try {
-      acknowledged = (await session.acp.cancel()) !== false
+      acknowledged = (await session.acp.cancel()) !== false;
     } catch {
-      acknowledged = false
+      acknowledged = false;
     }
     if (!acknowledged) {
       if (activeTurnId) {
-        this.cancelledQueueItemIds.add(activeTurnId)
-        await this.killTerminalHandles(session)
-        await this.closeSession(key, { terminalInteraction: true })
+        this.cancelledQueueItemIds.add(activeTurnId);
+        await this.killTerminalHandles(session);
+        await this.closeSession(key, { terminalInteraction: true });
         await this.handlePromptNow(item, instruction, {
-          resultMetadata: { steered: true, replacementSession: true, forcedCancel: true },
-        })
-        return
+          resultMetadata: {
+            steered: true,
+            replacementSession: true,
+            forcedCancel: true,
+          },
+        });
+        return;
       }
       await this.markQueueResult(item, {
         ok: false,
         error: "session_replacement_required",
         terminal: true,
-      })
-      this.supervisor?.recordFailed(this.supervisorWorkItem(item, session), "session_replacement_required")
-      return
+      });
+      this.supervisor?.recordFailed(
+        this.supervisorWorkItem(item, session),
+        "session_replacement_required",
+      );
+      return;
     }
     if (activeTurnId) {
-      this.cancelledQueueItemIds.add(activeTurnId)
-      await this.killTerminalHandles(session)
-      await this.closeSession(key, { terminalInteraction: true })
+      this.cancelledQueueItemIds.add(activeTurnId);
+      await this.killTerminalHandles(session);
+      await this.closeSession(key, { terminalInteraction: true });
       await this.handlePromptNow(item, instruction, {
         resultMetadata: { steered: true, replacementSession: true },
-      })
-      return
+      });
+      return;
     }
     await this.handlePromptNow(item, instruction, {
       sessionKey: key,
       resultMetadata: { steered: true },
-    })
+    });
   }
 
-  private async handleReviveSession(item: BridgeSessionQueueItem): Promise<void> {
-    const existingSessionKey = this.findSessionKeyForItem(item)
-    const existingSession = existingSessionKey ? this.sessions.get(existingSessionKey) : undefined
-    const session = await this.ensureSession(item)
+  private async handleReviveSession(
+    item: BridgeSessionQueueItem,
+  ): Promise<void> {
+    const existingSessionKey = this.findSessionKeyForItem(item);
+    const existingSession = existingSessionKey
+      ? this.sessions.get(existingSessionKey)
+      : undefined;
+    const session = await this.ensureSession(item);
     const createdForRevive =
       !existingSession ||
       existingSession.sessionKey !== session.sessionKey ||
-      existingSession.generation !== session.generation
-    if (createdForRevive && this.resumeEnabled && item.externalSessionId && session.acp.start) {
+      existingSession.generation !== session.generation;
+    if (
+      createdForRevive &&
+      this.resumeEnabled &&
+      item.externalSessionId &&
+      session.acp.start
+    ) {
       try {
-        await session.acp.start()
+        await session.acp.start();
       } catch (error) {
-        await this.closeSession(session.sessionKey)
-        throw error
+        await this.closeSession(session.sessionKey);
+        throw error;
       }
     }
     const nativeLoad =
       createdForRevive &&
       this.resumeEnabled &&
       Boolean(item.externalSessionId) &&
-      session.acp.getExternalContinuityState?.().loaded === true
-    session.lastUsedAt = Date.now()
-    this.scheduleIdleClose(session)
+      session.acp.getExternalContinuityState?.().loaded === true;
+    session.lastUsedAt = Date.now();
+    this.scheduleIdleClose(session);
     await this.markQueueResult(item, {
       ok: true,
       revived: true,
       reviveMode: nativeLoad ? "native-load" : "thread-history",
       agentSessionId: session.providerSessionKey,
-    })
+    });
   }
 
   private async markQueueResult(
@@ -1452,127 +1626,148 @@ export class BridgeSessionManager {
       item.id,
       item.claimId ? { ...result, claimId: item.claimId } : result,
       item.claimId,
-    )
+    );
   }
 
   private async closeSession(
     sessionKey: string,
     options: { terminalInteraction?: boolean } = {},
   ): Promise<void> {
-    const session = this.sessions.get(sessionKey)
+    const session = this.sessions.get(sessionKey);
     if (!session) {
-      return
+      return;
     }
     if (options.terminalInteraction) {
-      this.rememberTerminalInteractionSession(session)
+      this.rememberTerminalInteractionSession(session);
     }
-    this.sessions.delete(sessionKey)
-    this.clearIdleTimer(session)
-    await this.releaseTerminalHandles(session)
-    await this.drainEventWrites()
-    await this.closeAcpSession(session)
+    this.sessions.delete(sessionKey);
+    this.clearIdleTimer(session);
+    await this.releaseTerminalHandles(session);
+    await this.drainEventWrites();
+    await this.closeAcpSession(session);
   }
 
-  private rememberTerminalInteractionSession(session: BridgeSessionRecord): void {
-    this.rememberTerminalInteractionSessionKey(session.sessionKey)
-    this.rememberTerminalInteractionSessionKey(session.threadId)
-    this.rememberTerminalInteractionSessionKey(session.providerSessionKey)
+  private rememberTerminalInteractionSession(
+    session: BridgeSessionRecord,
+  ): void {
+    this.rememberTerminalInteractionSessionKey(session.sessionKey);
+    this.rememberTerminalInteractionSessionKey(session.threadId);
+    this.rememberTerminalInteractionSessionKey(session.providerSessionKey);
   }
 
-  private rememberTerminalInteractionSessionKey(sessionKey: string | undefined): void {
+  private rememberTerminalInteractionSessionKey(
+    sessionKey: string | undefined,
+  ): void {
     if (!sessionKey || this.terminalInteractionSessionKeys.has(sessionKey)) {
-      return
+      return;
     }
-    this.terminalInteractionSessionKeys.add(sessionKey)
-    this.terminalInteractionSessionKeyOrder.push(sessionKey)
-    while (this.terminalInteractionSessionKeyOrder.length > MAX_TERMINAL_INTERACTION_SESSION_KEYS) {
-      const expired = this.terminalInteractionSessionKeyOrder.shift()
+    this.terminalInteractionSessionKeys.add(sessionKey);
+    this.terminalInteractionSessionKeyOrder.push(sessionKey);
+    while (
+      this.terminalInteractionSessionKeyOrder.length >
+      MAX_TERMINAL_INTERACTION_SESSION_KEYS
+    ) {
+      const expired = this.terminalInteractionSessionKeyOrder.shift();
       if (expired) {
-        this.terminalInteractionSessionKeys.delete(expired)
+        this.terminalInteractionSessionKeys.delete(expired);
       }
     }
   }
 
   private async closeAcpSession(session: BridgeSessionRecord): Promise<void> {
-    let timeout: ReturnType<typeof setTimeout> | undefined
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         session.acp.close(),
         new Promise<void>((resolve) => {
-          timeout = setTimeout(resolve, this.closeTimeoutMs)
+          timeout = setTimeout(resolve, this.closeTimeoutMs);
         }),
-      ])
+      ]);
     } finally {
       if (timeout) {
-        clearTimeout(timeout)
+        clearTimeout(timeout);
       }
     }
   }
 
   private terminalScopeForSession(input: {
-    item: BridgeSessionQueueItem
-    providerSessionKey: string
-    runtimeProfile?: BridgeRuntimeProfile
-    threadId: string
+    item: BridgeSessionQueueItem;
+    providerSessionKey: string;
+    runtimeProfile?: BridgeRuntimeProfile;
+    threadId: string;
   }): TerminalHandleScope | undefined {
     if (!this.terminalRegistry || !this.createTerminal) {
-      return undefined
+      return undefined;
     }
-    const organizationId = input.item.organizationId
-    const bridgeDeviceId = this.deviceId
+    const organizationId = input.item.organizationId;
+    const bridgeDeviceId = this.deviceId;
     if (!organizationId || !bridgeDeviceId) {
-      return undefined
+      return undefined;
     }
     return {
       agentSessionId: input.providerSessionKey,
       bridgeDeviceId,
       organizationId,
       runtimeProfileId:
-        input.runtimeProfile?.id ?? input.item.bridgeProfileId ?? input.item.hermesProfileName ?? "default",
+        input.runtimeProfile?.id ??
+        input.item.bridgeProfileId ??
+        input.item.hermesProfileName ??
+        "default",
       threadId: input.threadId,
-    }
+    };
   }
 
   private terminalAdapterForSession(
     context: BridgeTerminalContext,
   ): SdkAcpRuntimeTerminalAdapter | undefined {
-    const createTerminal = this.createTerminal
+    const createTerminal = this.createTerminal;
     if (!this.terminalRegistry || !createTerminal) {
-      return undefined
+      return undefined;
     }
     return {
       createTerminal: (params) => createTerminal(context, params),
       registry: this.terminalRegistry,
       scope: context.terminalScope,
-    }
+    };
   }
 
-  private async killTerminalHandles(session: BridgeSessionRecord): Promise<void> {
+  private async killTerminalHandles(
+    session: BridgeSessionRecord,
+  ): Promise<void> {
     if (!this.terminalRegistry || !session.terminalScope) {
-      return
+      return;
     }
-    await this.terminalRegistry.killSession(session.terminalScope)
+    await this.terminalRegistry.killSession(session.terminalScope);
   }
 
-  private async releaseTerminalHandles(session: BridgeSessionRecord): Promise<void> {
+  private async releaseTerminalHandles(
+    session: BridgeSessionRecord,
+  ): Promise<void> {
     if (!this.terminalRegistry || !session.terminalScope) {
-      return
+      return;
     }
-    await this.terminalRegistry.releaseSession(session.terminalScope)
+    await this.terminalRegistry.releaseSession(session.terminalScope);
   }
 
-  private async ensureSession(item: BridgeSessionQueueItem): Promise<BridgeSessionRecord> {
-    const threadId = item.threadId ?? item.sessionId
+  private async ensureSession(
+    item: BridgeSessionQueueItem,
+  ): Promise<BridgeSessionRecord> {
+    const threadId = item.threadId ?? item.sessionId;
     if (!threadId) {
-      throw new Error(`queue item ${item.id} is missing threadId`)
+      throw new Error(`queue item ${item.id} is missing threadId`);
     }
-    this.assertRequiredScopedIdentity(item)
-    const sessionKey = this.sessionKeyForItem(item) ?? threadId
-    const providerSessionKey = providerSessionKeyForItem(item) ?? threadId
-    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
-    const existing = this.sessions.get(sessionKey)
+    this.assertRequiredScopedIdentity(item);
+    const sessionKey = this.sessionKeyForItem(item) ?? threadId;
+    const providerSessionKey = providerSessionKeyForItem(item) ?? threadId;
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(
+      item,
+      providerSessionKey,
+      threadId,
+    );
+    const existing = this.sessions.get(sessionKey);
     if (existing) {
-      existing.agentName = normalizeAgentName(item.agentName) ?? existing.agentName
+      existing.agentName =
+        normalizeAgentName(item.agentName) ?? existing.agentName;
       if (!this.sessionMatchesExplicitRuntimeRequest(existing, item)) {
         this.writeLog({
           level: "warn",
@@ -1584,26 +1779,29 @@ export class BridgeSessionManager {
           requestedBridgeProfileId: item.bridgeProfileId,
           previousHermesProfileName: existing.hermesProfileName,
           requestedHermesProfileName: item.hermesProfileName,
-        })
-        await this.closeSession(sessionKey)
+        });
+        await this.closeSession(sessionKey);
       } else {
-        return existing
+        return existing;
       }
     }
 
-    const generation = this.nextGeneration
-    this.nextGeneration += 1
-    const runtimeProfile = this.resolveRuntimeProfileForItem(item)
+    const generation = this.nextGeneration;
+    this.nextGeneration += 1;
+    const runtimeProfile = this.resolveRuntimeProfileForItem(item);
     const agentCommand = runtimeProfile
       ? runtimeProfile.command
-      : resolveHermesProfileAgentCommand(this.agentCommand, item.hermesProfileName)
-    const cwd = this.allowRemoteCwd ? item.cwd : undefined
+      : resolveHermesProfileAgentCommand(
+          this.agentCommand,
+          item.hermesProfileName,
+        );
+    const cwd = this.allowRemoteCwd ? item.cwd : undefined;
     const terminalScope = this.terminalScopeForSession({
       item,
       providerSessionKey,
       runtimeProfile,
       threadId,
-    })
+    });
     const terminalAdapter = terminalScope
       ? this.terminalAdapterForSession({
           agentCommand,
@@ -1612,14 +1810,16 @@ export class BridgeSessionManager {
           cwd,
           generation,
           hermesProfileName: item.hermesProfileName,
-          initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
+          initialSessionId: this.resumeEnabled
+            ? item.externalSessionId
+            : undefined,
           organizationId: item.organizationId,
           runtimeProfile,
           sessionKey,
           terminalScope,
           threadId,
         })
-      : undefined
+      : undefined;
     const record: BridgeSessionRecord = {
       sessionKey,
       threadId,
@@ -1651,7 +1851,9 @@ export class BridgeSessionManager {
           runtimeProfileId: runtimeProfile?.id ?? item.bridgeProfileId,
           sessionKey,
         },
-        initialSessionId: this.resumeEnabled ? item.externalSessionId : undefined,
+        initialSessionId: this.resumeEnabled
+          ? item.externalSessionId
+          : undefined,
         mcpServers: this.createMcpServers({
           agentSessionId: item.agentSessionId,
           cwd,
@@ -1663,17 +1865,28 @@ export class BridgeSessionManager {
           if (this.isCurrentSessionRecord(record)) {
             this.recordLivenessEvent(
               item.id,
-              event.eventType.includes("tool") ? "tool_progress" : "assistant_output",
-            )
-            this.supervisor?.recordProviderEvent(this.supervisorWorkItem(item, record), {
-              eventType: event.eventType,
-            })
-            if (event.part?.type === "approval_request" || event.part?.type === "choice") {
-              this.recordLivenessEvent(item.id, "permission_request")
+              event.eventType.includes("tool")
+                ? "tool_progress"
+                : "assistant_output",
+            );
+            this.supervisor?.recordProviderEvent(
+              this.supervisorWorkItem(item, record),
+              {
+                eventType: event.eventType,
+              },
+            );
+            if (
+              event.part?.type === "approval_request" ||
+              event.part?.type === "choice"
+            ) {
+              this.recordLivenessEvent(item.id, "permission_request");
               this.supervisor?.recordWaitingForInteraction(
                 this.supervisorWorkItem(item, record),
-                event.externalEventId ?? item.externalRequestId ?? item.approvalId ?? item.id,
-              )
+                event.externalEventId ??
+                  item.externalRequestId ??
+                  item.approvalId ??
+                  item.id,
+              );
             }
             if (event.attachmentUpload) {
               this.writeLog({
@@ -1687,114 +1900,129 @@ export class BridgeSessionManager {
                 candidateKind: event.attachmentUpload.kind,
                 mediaType: event.attachmentUpload.mediaType,
                 sizeBytes: event.attachmentUpload.sizeBytes,
-              })
-              return
+              });
+              return;
             }
-            this.enqueueEventWrite(record, event)
+            this.enqueueEventWrite(record, event);
           }
         },
         onError: (error) => {
           if (this.isCurrentSessionRecord(record)) {
             if (/runtime process exited/i.test(error.message)) {
-              this.recordLivenessEvent(item.id, "process_exited")
+              this.recordLivenessEvent(item.id, "process_exited");
             }
-            this.enqueueErrorWrite(record, error)
+            this.enqueueErrorWrite(record, error);
           }
         },
       }),
       runtimeProfile,
       hermesProfileName: item.hermesProfileName,
-    }
-    await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey)
-    this.sessions.set(sessionKey, record)
-    return record
+    };
+    await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey);
+    this.sessions.set(sessionKey, record);
+    return record;
   }
 
   private sessionMatchesExplicitRuntimeRequest(
     session: BridgeSessionRecord,
     item: BridgeSessionQueueItem,
   ): boolean {
-    const requestedCwd = this.allowRemoteCwd ? item.cwd : undefined
+    const requestedCwd = this.allowRemoteCwd ? item.cwd : undefined;
     if (
       session.runtimeProfile?.identityRules?.cwdBoundSessions &&
       session.cwd !== requestedCwd
     ) {
-      return false
+      return false;
     }
     if (item.bridgeProfileId) {
-      return session.runtimeProfile?.id === item.bridgeProfileId
+      return session.runtimeProfile?.id === item.bridgeProfileId;
     }
     if (item.hermesProfileName) {
-      return session.hermesProfileName === item.hermesProfileName
+      return session.hermesProfileName === item.hermesProfileName;
     }
-    return true
+    return true;
   }
 
   private resolveRuntimeProfileForItem(
     item: BridgeSessionQueueItem,
   ): BridgeRuntimeProfile | undefined {
     if (item.bridgeProfileId) {
-      const selected = this.runtimeProfiles.find((profile) => profile.id === item.bridgeProfileId)
+      const selected = this.runtimeProfiles.find(
+        (profile) => profile.id === item.bridgeProfileId,
+      );
       if (!selected) {
-        throw new Error(`Bridge runtime profile is unavailable: ${item.bridgeProfileId}`)
+        throw new Error(
+          `Bridge runtime profile is unavailable: ${item.bridgeProfileId}`,
+        );
       }
       if (selected.status !== "available") {
-        const reason = selected.diagnostics?.reason ? `: ${selected.diagnostics.reason}` : ""
-        throw new Error(`Bridge runtime profile is unavailable: ${item.bridgeProfileId}${reason}`)
+        const reason = selected.diagnostics?.reason
+          ? `: ${selected.diagnostics.reason}`
+          : "";
+        throw new Error(
+          `Bridge runtime profile is unavailable: ${item.bridgeProfileId}${reason}`,
+        );
       }
-      return selected
+      return selected;
     }
     if (item.hermesProfileName) {
-      return undefined
+      return undefined;
     }
-    const availableProfiles = this.runtimeProfiles.filter((profile) => profile.status === "available")
+    const availableProfiles = this.runtimeProfiles.filter(
+      (profile) => profile.status === "available",
+    );
     if (availableProfiles.length > 1) {
       throw new Error(
         "Bridge runtime profile is required when multiple ACP runtimes are available",
-      )
+      );
     }
-    return findRuntimeProfile(this.runtimeProfiles, undefined)
+    return findRuntimeProfile(this.runtimeProfiles, undefined);
   }
 
   private isCurrentSessionRecord(record: BridgeSessionRecord): boolean {
-    const current = this.sessions.get(record.sessionKey)
-    return current === record && current.generation === record.generation
+    const current = this.sessions.get(record.sessionKey);
+    return current === record && current.generation === record.generation;
   }
 
   private clearIdleTimer(record: BridgeSessionRecord): void {
     if (record.idleTimer !== undefined) {
-      clearTimeout(record.idleTimer)
-      record.idleTimer = undefined
+      clearTimeout(record.idleTimer);
+      record.idleTimer = undefined;
     }
   }
 
   private scheduleIdleClose(record: BridgeSessionRecord): void {
     if (this.idleSessionTtlMs <= 0 || !this.isCurrentSessionRecord(record)) {
-      return
+      return;
     }
-    this.clearIdleTimer(record)
+    this.clearIdleTimer(record);
     record.idleTimer = setTimeout(() => {
-      void this.closeSessionIfIdle(record.sessionKey, record.generation)
-    }, this.idleSessionTtlMs)
+      void this.closeSessionIfIdle(record.sessionKey, record.generation);
+    }, this.idleSessionTtlMs);
   }
 
-  private async closeSessionIfIdle(sessionKey: string, generation: number): Promise<void> {
-    const session = this.sessions.get(sessionKey)
+  private async closeSessionIfIdle(
+    sessionKey: string,
+    generation: number,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionKey);
     if (!session || session.generation !== generation) {
-      return
+      return;
     }
-    const queueState = this.sessionQueueState.get(sessionKey)
+    const queueState = this.sessionQueueState.get(sessionKey);
     const hasQueueWork =
-      (queueState?.pendingQueueItemIds.length ?? 0) > 0 || Boolean(queueState?.runningQueueItemId)
+      (queueState?.pendingQueueItemIds.length ?? 0) > 0 ||
+      Boolean(queueState?.runningQueueItemId);
     const hasEventWrites =
       this.eventBatch.length > 0 ||
       this.pendingStreamChunkEvent !== undefined ||
       this.pendingEventWrites.length > 0 ||
-      this.eventBatchTimer !== undefined
-    const hasPendingPermissions = session.acp.hasPendingPermissionRequests?.() === true
+      this.eventBatchTimer !== undefined;
+    const hasPendingPermissions =
+      session.acp.hasPendingPermissionRequests?.() === true;
     if (hasQueueWork || hasEventWrites || hasPendingPermissions) {
-      this.scheduleIdleClose(session)
-      return
+      this.scheduleIdleClose(session);
+      return;
     }
     this.writeLog({
       level: "info",
@@ -1803,15 +2031,18 @@ export class BridgeSessionManager {
       agentSessionId: session.providerSessionKey,
       providerSessionId: session.providerSessionKey,
       acpSessionId: session.acp.sessionId,
-    })
-    await this.closeSession(sessionKey)
+    });
+    await this.closeSession(sessionKey);
   }
 
-  private enqueueEventWrite(record: BridgeSessionRecord, event: NormalizedBridgeEvent): void {
-    const sequence = this.nextSequence
-    this.nextSequence += 1
-    this.writeBridgeActivityLog(record, event, sequence)
-    this.enqueueBridgeEvent(toBridgeEvent(record, event, sequence))
+  private enqueueEventWrite(
+    record: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    const sequence = this.nextSequence;
+    this.nextSequence += 1;
+    this.writeBridgeActivityLog(record, event, sequence);
+    this.enqueueBridgeEvent(toBridgeEvent(record, event, sequence));
   }
 
   private async resolveAgentAttachmentUploads(
@@ -1819,48 +2050,52 @@ export class BridgeSessionManager {
     record: BridgeSessionRecord,
     events: NormalizedBridgeEvent[],
   ): Promise<{
-    failedCount: number
-    mediaTypes: string[]
-    totalBytes: number
-    uploadedCount: number
+    failedCount: number;
+    mediaTypes: string[];
+    totalBytes: number;
+    uploadedCount: number;
   }> {
-    let failedCount = 0
-    let totalBytes = 0
-    let uploadedCount = 0
-    const mediaTypes = new Set<string>()
+    let failedCount = 0;
+    let totalBytes = 0;
+    let uploadedCount = 0;
+    const mediaTypes = new Set<string>();
 
     for (const event of events) {
       if (!event.attachmentUpload) {
-        continue
+        continue;
       }
-      const candidate = event.attachmentUpload
+      const candidate = event.attachmentUpload;
       try {
         const uploadInput = await buildAgentAttachmentUploadInput(
           candidate,
           record.threadId,
           record.providerSessionKey,
           record.cwd,
-        )
-        const response = await this.cloudClient.uploadAttachment(uploadInput)
-        const file = normalizeUploadedAgentAttachment(response.file)
+        );
+        const response = await this.cloudClient.uploadAttachment(uploadInput);
+        const file = normalizeUploadedAgentAttachment(response.file);
         event.part = {
           type: "attachment",
           json: file,
           status: "complete",
-        }
-        event.payload = summarizeResolvedAgentAttachment(file)
-        delete event.attachmentUpload
-        this.enqueueEventWrite(record, event)
-        uploadedCount += 1
+        };
+        event.payload = summarizeResolvedAgentAttachment(file);
+        delete event.attachmentUpload;
+        this.enqueueEventWrite(record, event);
+        uploadedCount += 1;
         if (typeof file.mediaType === "string") {
-          mediaTypes.add(file.mediaType)
+          mediaTypes.add(file.mediaType);
         }
         if (typeof file.sizeBytes === "number") {
-          totalBytes += file.sizeBytes
+          totalBytes += file.sizeBytes;
         }
       } catch (error) {
-        failedCount += 1
-        const message = String(redactLogValue(error instanceof Error ? error.message : String(error)))
+        failedCount += 1;
+        const message = String(
+          redactLogValue(
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
         event.part = {
           type: "attachment",
           json: removeUndefinedValues({
@@ -1872,16 +2107,16 @@ export class BridgeSessionManager {
             type: "file",
           }),
           status: "error",
-        }
+        };
         event.payload = removeUndefinedValues({
           type: "agent_attachment_upload_failed",
           candidateKind: candidate.kind,
           mediaType: candidate.mediaType,
           sizeBytes: candidate.sizeBytes,
           status: "error",
-        })
-        delete event.attachmentUpload
-        this.enqueueEventWrite(record, event)
+        });
+        delete event.attachmentUpload;
+        this.enqueueEventWrite(record, event);
         this.writeLog({
           level: "warn",
           event: "agent.attachments.upload_failed",
@@ -1894,7 +2129,7 @@ export class BridgeSessionManager {
           mediaType: candidate.mediaType,
           sizeBytes: candidate.sizeBytes,
           error: message,
-        })
+        });
       }
     }
 
@@ -1903,7 +2138,7 @@ export class BridgeSessionManager {
       mediaTypes: [...mediaTypes].sort(),
       totalBytes,
       uploadedCount,
-    }
+    };
   }
 
   private writeBridgeActivityLog(
@@ -1911,14 +2146,16 @@ export class BridgeSessionManager {
     event: NormalizedBridgeEvent,
     sequence: number,
   ): void {
-    const queueId = this.sessionQueueState.get(record.sessionKey)?.runningQueueItemId
+    const queueId = this.sessionQueueState.get(
+      record.sessionKey,
+    )?.runningQueueItemId;
     const base = {
       agentSessionId: record.providerSessionKey,
       queueId,
       threadId: record.threadId,
       timelineSequence: sequence,
       turnId: queueId,
-    }
+    };
 
     if (event.part?.type === "thinking") {
       this.writeLog({
@@ -1926,38 +2163,41 @@ export class BridgeSessionManager {
         event: "agent.reasoning.chunk",
         level: "debug",
         textLength: event.part.text?.length ?? 0,
-      })
-      return
+      });
+      return;
     }
 
     if (event.part?.type === "tool_call") {
-      const tool = readToolLogFields(event.part.json)
+      const tool = readToolLogFields(event.part.json);
       this.writeLog({
         ...base,
         event: "agent.tool.requested",
         level: "info",
         toolCallId: tool.toolCallId,
         toolName: tool.toolName,
-      })
-      return
+      });
+      return;
     }
 
     if (event.part?.type === "tool_result") {
-      const tool = readToolLogFields(event.part.json)
+      const tool = readToolLogFields(event.part.json);
       this.writeLog({
         ...base,
-        event: event.part.status === "error" ? "agent.tool.failed" : "agent.tool.completed",
+        event:
+          event.part.status === "error"
+            ? "agent.tool.failed"
+            : "agent.tool.completed",
         level: event.part.status === "error" ? "error" : "info",
         toolCallId: tool.toolCallId,
         toolName: tool.toolName,
-      })
+      });
     }
   }
 
   private enqueueErrorWrite(record: BridgeSessionRecord, error: Error): void {
-    const sequence = this.nextSequence
-    this.nextSequence += 1
-    const message = String(redactLogValue(error.message))
+    const sequence = this.nextSequence;
+    this.nextSequence += 1;
+    const message = String(redactLogValue(error.message));
     this.enqueueBridgeEvent({
       threadId: record.threadId,
       agentSessionId: record.providerSessionKey,
@@ -1968,66 +2208,69 @@ export class BridgeSessionManager {
       source: "bridge",
       externalEventId: `${record.sessionKey}:${sequence}:bridge_error`,
       createdAt: Date.now(),
-    })
+    });
   }
 
   private async drainEventWrites(): Promise<void> {
-    this.flushPendingStreamChunkEvent()
-    this.flushEventBatch()
-    const pending = this.pendingEventWrites.splice(0, this.pendingEventWrites.length)
-    const outcomes = await Promise.all(pending)
-    const failures = outcomes.filter((outcome) => !outcome.ok)
+    this.flushPendingStreamChunkEvent();
+    this.flushEventBatch();
+    const pending = this.pendingEventWrites.splice(
+      0,
+      this.pendingEventWrites.length,
+    );
+    const outcomes = await Promise.all(pending);
+    const failures = outcomes.filter((outcome) => !outcome.ok);
     if (failures.length > 0) {
-      const firstFailure = failures[0]
+      const firstFailure = failures[0];
       throw new Error(
         `bridge event upload failed for ${failures.reduce((total, failure) => total + failure.count, 0)} event(s): ${firstFailure.error.message}`,
-      )
+      );
     }
   }
 
   private enqueueBridgeEvent(event: BridgeEventInput): void {
     if (isStreamChunkBridgeEvent(event)) {
-      this.enqueueStreamChunkEvent(event)
-      return
+      this.enqueueStreamChunkEvent(event);
+      return;
     }
-    this.flushPendingStreamChunkEvent()
-    this.eventBatch.push(event)
+    this.flushPendingStreamChunkEvent();
+    this.eventBatch.push(event);
     if (this.eventBatch.length >= EVENT_BATCH_MAX_SIZE) {
-      this.flushEventBatch()
-      return
+      this.flushEventBatch();
+      return;
     }
-    this.scheduleEventBatchFlush()
+    this.scheduleEventBatchFlush();
   }
 
   private scheduleEventBatchFlush(): void {
     if (this.eventBatchTimer !== undefined) {
-      return
+      return;
     }
     this.eventBatchTimer = setTimeout(() => {
-      this.eventBatchTimer = undefined
-      this.flushEventBatch()
-    }, EVENT_BATCH_FLUSH_MS)
+      this.eventBatchTimer = undefined;
+      this.flushEventBatch();
+    }, EVENT_BATCH_FLUSH_MS);
   }
 
   private flushEventBatch(): void {
-    this.flushPendingStreamChunkEvent()
+    this.flushPendingStreamChunkEvent();
     if (this.eventBatchTimer !== undefined) {
-      clearTimeout(this.eventBatchTimer)
-      this.eventBatchTimer = undefined
+      clearTimeout(this.eventBatchTimer);
+      this.eventBatchTimer = undefined;
     }
     if (this.eventBatch.length === 0) {
-      return
+      return;
     }
-    const events = this.eventBatch.splice(0, this.eventBatch.length)
-    this.trackEventWrite(this.appendEventBatchWithFallback(events))
+    const events = this.eventBatch.splice(0, this.eventBatch.length);
+    this.trackEventWrite(this.appendEventBatchWithFallback(events));
   }
 
   private enqueueStreamChunkEvent(event: BridgeEventInput): void {
-    const pending = this.pendingStreamChunkEvent
-    const eventText = readBridgeEventText(event)
-    const eventTextLength = eventText.length
+    const pending = this.pendingStreamChunkEvent;
+    const eventText = readBridgeEventText(event);
+    const eventTextLength = eventText.length;
     if (eventTextLength === 0) {
-      return
+      return;
     }
     if (
       pending &&
@@ -2035,76 +2278,87 @@ export class BridgeSessionManager {
         pending.chunkCount >= STREAM_CHUNK_COALESCE_MAX_COUNT ||
         pending.textLength + eventTextLength > STREAM_CHUNK_COALESCE_MAX_CHARS)
     ) {
-      this.flushPendingStreamChunkEvent()
+      this.flushPendingStreamChunkEvent();
     }
 
     if (!this.pendingStreamChunkEvent) {
-      this.pendingStreamChunkEvent = createCoalescedBridgeStreamChunkEvent(event)
-      this.scheduleEventBatchFlush()
-      return
+      this.pendingStreamChunkEvent =
+        createCoalescedBridgeStreamChunkEvent(event);
+      this.scheduleEventBatchFlush();
+      return;
     }
 
-    appendCoalescedBridgeStreamChunkEvent(this.pendingStreamChunkEvent, event)
-    this.scheduleEventBatchFlush()
+    appendCoalescedBridgeStreamChunkEvent(this.pendingStreamChunkEvent, event);
+    this.scheduleEventBatchFlush();
   }
 
   private flushPendingStreamChunkEvent(): void {
     if (!this.pendingStreamChunkEvent) {
-      return
+      return;
     }
-    this.eventBatch.push(finalizeCoalescedBridgeStreamChunkEvent(this.pendingStreamChunkEvent))
-    this.pendingStreamChunkEvent = undefined
+    this.eventBatch.push(
+      finalizeCoalescedBridgeStreamChunkEvent(this.pendingStreamChunkEvent),
+    );
+    this.pendingStreamChunkEvent = undefined;
   }
 
   private trackEventWrite(write: Promise<EventWriteOutcome>): void {
-    this.pendingEventWrites.push(write)
+    this.pendingEventWrites.push(write);
     const forgetWrite = () => {
-      const index = this.pendingEventWrites.indexOf(write)
+      const index = this.pendingEventWrites.indexOf(write);
       if (index >= 0) {
-        this.pendingEventWrites.splice(index, 1)
+        this.pendingEventWrites.splice(index, 1);
       }
-    }
-    void write.then(forgetWrite, forgetWrite)
+    };
+    void write.then(forgetWrite, forgetWrite);
   }
 
   private async appendEventBatchWithFallback(
     events: BridgeEventInput[],
   ): Promise<EventWriteOutcome> {
     try {
-      await this.cloudClient.appendEvents(events)
-      this.writeLog({ level: "debug", event: "bridge.events.appended", eventCount: events.length })
-      return { ok: true, count: events.length }
+      await this.cloudClient.appendEvents(events);
+      this.writeLog({
+        level: "debug",
+        event: "bridge.events.appended",
+        eventCount: events.length,
+      });
+      return { ok: true, count: events.length };
     } catch (error) {
-      const message = String(redactLogValue(error instanceof Error ? error.message : String(error)))
+      const message = String(
+        redactLogValue(error instanceof Error ? error.message : String(error)),
+      );
       this.writeLog({
         level: "error",
         event: "bridge.events.append_failed",
         eventCount: events.length,
         error: message,
-      })
+      });
       if (events.length <= 1) {
-        return { ok: false, count: events.length, error: new Error(message) }
+        return { ok: false, count: events.length, error: new Error(message) };
       }
 
-      let failedCount = 0
-      let firstError: Error | undefined
+      let failedCount = 0;
+      let firstError: Error | undefined;
       for (const event of events) {
         try {
-          await this.cloudClient.appendEvents([event])
+          await this.cloudClient.appendEvents([event]);
           this.writeLog({
             level: "debug",
             event: "bridge.events.appended_single",
             eventType: event.eventType,
             threadId: event.threadId,
-          })
+          });
         } catch (singleError) {
-          failedCount += 1
+          failedCount += 1;
           const singleMessage = String(
             redactLogValue(
-              singleError instanceof Error ? singleError.message : String(singleError),
+              singleError instanceof Error
+                ? singleError.message
+                : String(singleError),
             ),
-          )
-          firstError = firstError ?? new Error(singleMessage)
+          );
+          firstError = firstError ?? new Error(singleMessage);
           this.writeLog({
             level: "error",
             event: "bridge.events.append_single_failed",
@@ -2112,7 +2366,7 @@ export class BridgeSessionManager {
             threadId: event.threadId,
             externalEventId: event.externalEventId,
             error: singleMessage,
-          })
+          });
         }
       }
 
@@ -2120,14 +2374,19 @@ export class BridgeSessionManager {
         return {
           ok: false,
           count: failedCount,
-          error: firstError ?? new Error(`bridge event upload failed for ${failedCount} event(s)`),
-        }
+          error:
+            firstError ??
+            new Error(`bridge event upload failed for ${failedCount} event(s)`),
+        };
       }
-      return { ok: true, count: events.length }
+      return { ok: true, count: events.length };
     }
   }
 
-  private writeQueueCompleteLog(item: BridgeSessionQueueItem, type: string): void {
+  private writeQueueCompleteLog(
+    item: BridgeSessionQueueItem,
+    type: string,
+  ): void {
     this.writeLog({
       level: "info",
       event: "bridge.queue_item.complete",
@@ -2137,7 +2396,7 @@ export class BridgeSessionManager {
       sessionId: item.sessionId,
       agentSessionId: item.agentSessionId,
       activeSessionCount: this.sessions.size,
-    })
+    });
   }
 
   private writeAgentTurnLog(
@@ -2155,7 +2414,7 @@ export class BridgeSessionManager {
       sessionId: item.sessionId,
       agentSessionId: item.agentSessionId,
       error,
-    })
+    });
   }
 
   private supervisorWorkItem(
@@ -2182,79 +2441,94 @@ export class BridgeSessionManager {
       traceId: item.traceId,
       type: item.type,
       kind: item.kind,
-    }
+    };
   }
 
   private sessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
-    const providerSessionKey = providerSessionKeyForItem(item)
+    const providerSessionKey = providerSessionKeyForItem(item);
     if (!providerSessionKey) {
-      return undefined
+      return undefined;
     }
-    const threadId = item.threadId ?? item.sessionId ?? "unknown-thread"
+    const threadId = item.threadId ?? item.sessionId ?? "unknown-thread";
     return [
       item.organizationId ?? "unknown-org",
       this.deviceId ?? "unknown-device",
-      item.bridgeProfileId ?? item.hermesProfileName ?? item.agentName ?? "unknown-agent",
+      item.bridgeProfileId ??
+        item.hermesProfileName ??
+        item.agentName ??
+        "unknown-agent",
       item.mailboxConversationId ?? threadId,
       providerSessionKey,
     ]
       .map(encodeSessionKeyPart)
-      .join(":")
+      .join(":");
   }
 
   private assertRequiredScopedIdentity(item: BridgeSessionQueueItem): void {
     if (!this.requireScopedIdentity) {
-      return
+      return;
     }
     if (!item.organizationId) {
       throw new Error(
         `queue item ${item.id} is missing organizationId; reconnect the bridge with a fresh agent link`,
-      )
+      );
     }
     if (!this.deviceId) {
-      throw new Error("bridge device identity is missing; reconnect the bridge")
+      throw new Error(
+        "bridge device identity is missing; reconnect the bridge",
+      );
     }
     if (!item.agentSessionId) {
       throw new Error(
         `queue item ${item.id} is missing agentSessionId; reconnect the agent from 0000`,
-      )
+      );
     }
   }
 
-  private findSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
-    const exact = this.sessionKeyForItem(item)
-    if (exact && (this.sessions.has(exact) || this.sessionQueueState.has(exact))) {
-      return exact
+  private findSessionKeyForItem(
+    item: BridgeSessionQueueItem,
+  ): string | undefined {
+    const exact = this.sessionKeyForItem(item);
+    if (
+      exact &&
+      (this.sessions.has(exact) || this.sessionQueueState.has(exact))
+    ) {
+      return exact;
     }
     if (hasExplicitRuntimeScope(item)) {
-      return undefined
+      return undefined;
     }
 
-    const providerSessionKey = providerSessionKeyForItem(item)
-    const threadId = item.threadId ?? item.sessionId
+    const providerSessionKey = providerSessionKeyForItem(item);
+    const threadId = item.threadId ?? item.sessionId;
     if (!providerSessionKey || !threadId) {
-      return exact
+      return exact;
     }
 
-    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(item, providerSessionKey, threadId)
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(
+      item,
+      providerSessionKey,
+      threadId,
+    );
     const scopeMatch = this.latestSessionMatching(
       (session) => session.scopeKeyWithoutAgent === scopeKeyWithoutAgent,
-    )
+    );
     if (scopeMatch) {
-      return scopeMatch.sessionKey
+      return scopeMatch.sessionKey;
     }
 
     const providerThreadMatches = Array.from(this.sessions.values()).filter(
       (session) =>
         session.providerSessionKey === providerSessionKey &&
-        session.scopeConversationId === (item.mailboxConversationId ?? threadId),
-    )
+        session.scopeConversationId ===
+          (item.mailboxConversationId ?? threadId),
+    );
     if (providerThreadMatches.length > 1) {
       throw new Error(
         `queue item ${item.id} matches multiple active ACP sessions; include organization and runtime scope`,
-      )
+      );
     }
-    return providerThreadMatches[0]?.sessionKey
+    return providerThreadMatches[0]?.sessionKey;
   }
 
   private latestSessionMatching(
@@ -2262,7 +2536,7 @@ export class BridgeSessionManager {
   ): BridgeSessionRecord | undefined {
     return Array.from(this.sessions.values())
       .filter(predicate)
-      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0]
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0];
   }
 
   private scopeKeyWithoutAgentForItem(
@@ -2277,7 +2551,7 @@ export class BridgeSessionManager {
       providerSessionKey,
     ]
       .map(encodeSessionKeyPart)
-      .join(":")
+      .join(":");
   }
 
   private async closeReplacedRuntimeSessions(
@@ -2288,7 +2562,7 @@ export class BridgeSessionManager {
       (session) =>
         session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
         session.sessionKey !== nextSessionKey,
-    )
+    );
     await Promise.all(
       replaced.map(async (session) => {
         this.writeLog({
@@ -2301,65 +2575,76 @@ export class BridgeSessionManager {
           bridgeProfileId: session.runtimeProfile?.id,
           hermesProfileName: session.hermesProfileName,
           reason: "runtime_profile_changed",
-        })
-        await this.closeSession(session.sessionKey)
+        });
+        await this.closeSession(session.sessionKey);
       }),
-    )
+    );
   }
 
   private writeLog(entry: BridgeLogEntry): void {
-    this.log?.(redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry)
+    this.log?.(
+      redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry,
+    );
   }
 }
 
 function isEmptyVisiblePromptResult(result: { text: string }): boolean {
-  return result.text.trim().length === 0
+  return result.text.trim().length === 0;
 }
 
-function classifyPromptError(error: unknown):
-  | { terminal: true; message: string; reasonCode: "acp_method_timeout" | "provider_silent_timeout" | "runtime_process_exited" }
+function classifyPromptError(
+  error: unknown,
+):
+  | {
+      terminal: true;
+      message: string;
+      reasonCode:
+        | "acp_method_timeout"
+        | "provider_silent_timeout"
+        | "runtime_process_exited";
+    }
   | { terminal: false } {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = error instanceof Error ? error.message : String(error);
   if (message.includes("ACP live session lost: provider_silent_timeout")) {
     return {
       terminal: true,
       message: "ACP live session stopped producing progress.",
       reasonCode: "provider_silent_timeout",
-    }
+    };
   }
   if (message.includes("ACP live session lost: runtime_process_exited")) {
     return {
       terminal: true,
       message: "ACP runtime process exited during the live session.",
       reasonCode: "runtime_process_exited",
-    }
+    };
   }
   if (message.includes("ACP request timed out: session/prompt")) {
     return {
       terminal: true,
       message: "ACP prompt request timed out.",
       reasonCode: "acp_method_timeout",
-    }
+    };
   }
-  return { terminal: false }
+  return { terminal: false };
 }
 
 function buildEmptyFinalResponseDiagnostic(
   item: BridgeSessionQueueItem,
   result: {
-    finalText?: unknown
-    events?: NormalizedBridgeEvent[]
-    rawResult: unknown
-    stopReason?: string
+    finalText?: unknown;
+    events?: NormalizedBridgeEvent[];
+    rawResult: unknown;
+    stopReason?: string;
   },
 ): {
-  event: NormalizedBridgeEvent
-  result: Record<string, unknown>
+  event: NormalizedBridgeEvent;
+  result: Record<string, unknown>;
 } {
-  const reasonCode = "empty_final_response"
-  const message = "ACP runtime completed without visible assistant output."
-  const finalText = safeEmptyFinalTextDiagnostics(result.finalText)
-  const streamSummary = safeEmptyFinalStreamSummary(result.events)
+  const reasonCode = "empty_final_response";
+  const message = "ACP runtime completed without visible assistant output.";
+  const finalText = safeEmptyFinalTextDiagnostics(result.finalText);
+  const streamSummary = safeEmptyFinalStreamSummary(result.events);
   return {
     event: {
       externalEventId: `${item.id}:empty_final_response`,
@@ -2395,68 +2680,78 @@ function buildEmptyFinalResponseDiagnostic(
       streamSummary,
       result: result.rawResult,
     },
-  }
+  };
 }
 
 function safeEmptyFinalTextDiagnostics(value: unknown): unknown {
   if (!value || typeof value !== "object") {
-    return undefined
+    return undefined;
   }
-  const record = value as Record<string, unknown>
+  const record = value as Record<string, unknown>;
   return removeUndefinedValues({
     answerChunkCount: finiteNumber(record.answerChunkCount),
     answerTextLength: finiteNumber(record.answerTextLength),
     reason: typeof record.reason === "string" ? record.reason : undefined,
-    runtimeId: typeof record.runtimeId === "string" ? record.runtimeId : undefined,
+    runtimeId:
+      typeof record.runtimeId === "string" ? record.runtimeId : undefined,
     thoughtChunkCount: finiteNumber(record.thoughtChunkCount),
     toolEventCount: finiteNumber(record.toolEventCount),
     trustedFinalResultText:
       typeof record.trustedFinalResultText === "boolean"
         ? record.trustedFinalResultText
         : undefined,
-    withheld: typeof record.withheld === "boolean" ? record.withheld : undefined,
-  })
+    withheld:
+      typeof record.withheld === "boolean" ? record.withheld : undefined,
+  });
 }
 
-function safeEmptyFinalStreamSummary(events: NormalizedBridgeEvent[] | undefined): unknown {
+function safeEmptyFinalStreamSummary(
+  events: NormalizedBridgeEvent[] | undefined,
+): unknown {
   if (!events) {
-    return undefined
+    return undefined;
   }
-  const eventTypeCounts: Record<string, number> = {}
-  const unknownEvents: Array<Record<string, unknown>> = []
+  const eventTypeCounts: Record<string, number> = {};
+  const unknownEvents: Array<Record<string, unknown>> = [];
   for (const event of events) {
-    eventTypeCounts[event.eventType] = (eventTypeCounts[event.eventType] ?? 0) + 1
+    eventTypeCounts[event.eventType] =
+      (eventTypeCounts[event.eventType] ?? 0) + 1;
     if (event.eventType === "unknown" && unknownEvents.length < 10) {
-      unknownEvents.push(summarizeUnknownBridgeEvent(event))
+      unknownEvents.push(summarizeUnknownBridgeEvent(event));
     }
   }
   return removeUndefinedValues({
     eventTypeCounts,
     totalEventCount: events.length,
     unknownEvents: unknownEvents.length > 0 ? unknownEvents : undefined,
-  })
+  });
 }
 
-function summarizeUnknownBridgeEvent(event: NormalizedBridgeEvent): Record<string, unknown> {
-  const payload = isRecord(event.payload) ? event.payload : {}
-  const params = isRecord(payload.params) ? payload.params : {}
-  const update = isRecord(params.update) ? params.update : {}
-  const meta = isRecord(update._meta) ? update._meta : {}
-  const codexMeta = isRecord(meta.codex) ? meta.codex : {}
-  const threadStatus = isRecord(codexMeta.threadStatus) ? codexMeta.threadStatus : {}
+function summarizeUnknownBridgeEvent(
+  event: NormalizedBridgeEvent,
+): Record<string, unknown> {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const params = isRecord(payload.params) ? payload.params : {};
+  const update = isRecord(params.update) ? params.update : {};
+  const meta = isRecord(update._meta) ? update._meta : {};
+  const codexMeta = isRecord(meta.codex) ? meta.codex : {};
+  const threadStatus = isRecord(codexMeta.threadStatus)
+    ? codexMeta.threadStatus
+    : {};
   return removeUndefinedValues({
     method: readString(payload.method),
-    sessionUpdate: readString(update.sessionUpdate) ?? readString(params.sessionUpdate),
+    sessionUpdate:
+      readString(update.sessionUpdate) ?? readString(params.sessionUpdate),
     codexThreadStatus: readString(threadStatus.type),
     hasTextLikeField: hasTextLikeField(update),
-  })
+  });
 }
 
 function hasTextLikeField(value: unknown): boolean {
   if (!isRecord(value)) {
-    return false
+    return false;
   }
-  const content = isRecord(value.content) ? value.content : undefined
+  const content = isRecord(value.content) ? value.content : undefined;
   return (
     readString(value.text) !== undefined ||
     readString(value.delta) !== undefined ||
@@ -2464,29 +2759,32 @@ function hasTextLikeField(value: unknown): boolean {
     readString(value.markdown) !== undefined ||
     readString(value.output) !== undefined ||
     readString(content?.text) !== undefined
-  )
+  );
 }
 
 type CoalescedBridgeStreamChunkEvent = {
-  chunkCount: number
-  event: BridgeEventInput
-  eventType: string
-  firstCreatedAt?: number
-  firstSequence: number
-  lastSequence: number
-  lastUpdatedAt?: number
-  text: string
-  textLength: number
-}
+  chunkCount: number;
+  event: BridgeEventInput;
+  eventType: string;
+  firstCreatedAt?: number;
+  firstSequence: number;
+  lastSequence: number;
+  lastUpdatedAt?: number;
+  text: string;
+  textLength: number;
+};
 
 function isStreamChunkBridgeEvent(event: BridgeEventInput): boolean {
-  return event.eventType === "agent_thought_chunk" || event.eventType === "agent_message_chunk"
+  return (
+    event.eventType === "agent_thought_chunk" ||
+    event.eventType === "agent_message_chunk"
+  );
 }
 
 function createCoalescedBridgeStreamChunkEvent(
   event: BridgeEventInput,
 ): CoalescedBridgeStreamChunkEvent {
-  const text = readBridgeEventText(event)
+  const text = readBridgeEventText(event);
   return {
     chunkCount: 1,
     event,
@@ -2497,19 +2795,19 @@ function createCoalescedBridgeStreamChunkEvent(
     lastUpdatedAt: event.createdAt,
     text,
     textLength: text.length,
-  }
+  };
 }
 
 function appendCoalescedBridgeStreamChunkEvent(
   pending: CoalescedBridgeStreamChunkEvent,
   event: BridgeEventInput,
 ): void {
-  const text = readBridgeEventText(event)
-  pending.chunkCount += 1
-  pending.lastSequence = event.sequence
-  pending.lastUpdatedAt = event.createdAt
-  pending.text += text
-  pending.textLength += text.length
+  const text = readBridgeEventText(event);
+  pending.chunkCount += 1;
+  pending.lastSequence = event.sequence;
+  pending.lastUpdatedAt = event.createdAt;
+  pending.text += text;
+  pending.textLength += text.length;
 }
 
 function finalizeCoalescedBridgeStreamChunkEvent(
@@ -2524,10 +2822,14 @@ function finalizeCoalescedBridgeStreamChunkEvent(
           lastSequence: pending.lastSequence,
           lastUpdatedAt: pending.lastUpdatedAt,
         })
-      : {}
+      : {};
   return {
     ...pending.event,
-    normalizedPayload: mergeBridgeEventTextPayload(pending.event.normalizedPayload, pending.text, metadata),
+    normalizedPayload: mergeBridgeEventTextPayload(
+      pending.event.normalizedPayload,
+      pending.text,
+      metadata,
+    ),
     rawPayload: mergeBridgeEventTextPayload(
       pending.event.rawPayload,
       pending.text,
@@ -2535,7 +2837,7 @@ function finalizeCoalescedBridgeStreamChunkEvent(
     ),
     sequence: pending.firstSequence,
     createdAt: pending.firstCreatedAt,
-  }
+  };
 }
 
 function mergeBridgeEventTextPayload(
@@ -2544,9 +2846,9 @@ function mergeBridgeEventTextPayload(
   metadata: Record<string, unknown>,
 ): unknown {
   if (!isRecord(payload)) {
-    return removeUndefinedValues({ ...metadata, text })
+    return removeUndefinedValues({ ...metadata, text });
   }
-  const content = isRecord(payload.content) ? payload.content : undefined
+  const content = isRecord(payload.content) ? payload.content : undefined;
   return removeUndefinedValues({
     ...payload,
     ...metadata,
@@ -2558,18 +2860,22 @@ function mergeBridgeEventTextPayload(
     ...(content && typeof content.text === "string"
       ? { content: { ...content, text } }
       : {}),
-  })
+  });
 }
 
 function readBridgeEventText(event: BridgeEventInput): string {
-  return readPayloadText(event.normalizedPayload) ?? readPayloadText(event.rawPayload) ?? ""
+  return (
+    readPayloadText(event.normalizedPayload) ??
+    readPayloadText(event.rawPayload) ??
+    ""
+  );
 }
 
 function readPayloadText(payload: unknown): string | undefined {
   if (!isRecord(payload)) {
-    return undefined
+    return undefined;
   }
-  const content = isRecord(payload.content) ? payload.content : undefined
+  const content = isRecord(payload.content) ? payload.content : undefined;
   return (
     readString(payload.text) ??
     readString(payload.delta) ??
@@ -2577,55 +2883,57 @@ function readPayloadText(payload: unknown): string | undefined {
     readString(payload.markdown) ??
     readString(payload.output) ??
     readString(content?.text)
-  )
+  );
 }
 
 function finiteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function splitCommand(command: string): string[] {
-  const parts: string[] = []
-  let current = ""
-  let quote: "'" | '"' | undefined
-  let escaping = false
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaping = false;
 
   for (const character of command) {
     if (escaping) {
-      current += character
-      escaping = false
-      continue
+      current += character;
+      escaping = false;
+      continue;
     }
     if (character === "\\") {
-      escaping = true
-      continue
+      escaping = true;
+      continue;
     }
     if (quote) {
       if (character === quote) {
-        quote = undefined
+        quote = undefined;
       } else {
-        current += character
+        current += character;
       }
-      continue
+      continue;
     }
     if (character === "'" || character === '"') {
-      quote = character
-      continue
+      quote = character;
+      continue;
     }
     if (/\s/.test(character)) {
       if (current.length > 0) {
-        parts.push(current)
-        current = ""
+        parts.push(current);
+        current = "";
       }
-      continue
+      continue;
     }
-    current += character
+    current += character;
   }
 
   if (current.length > 0) {
-    parts.push(current)
+    parts.push(current);
   }
-  return parts
+  return parts;
 }
 
 function toBridgeEvent(
@@ -2633,20 +2941,26 @@ function toBridgeEvent(
   event: NormalizedBridgeEvent,
   sequence: number,
 ): BridgeEventInput {
-  const shouldRedactPayload = event.eventType === "bridge_error" || event.part?.type === "error"
-  const rawPayload = withRuntimeEventMetadata(event.payload, record.runtimeProfile)
+  const shouldRedactPayload =
+    event.eventType === "bridge_error" || event.part?.type === "error";
+  const rawPayload = withRuntimeEventMetadata(
+    event.payload,
+    record.runtimeProfile,
+  );
   return {
     threadId: record.threadId,
     agentSessionId: record.providerSessionKey,
     eventType: event.eventType,
     sequence,
     rawPayload: shouldRedactPayload ? redactLogValue(rawPayload) : rawPayload,
-    normalizedPayload: shouldRedactPayload ? redactLogValue(event.part) : event.part,
+    normalizedPayload: shouldRedactPayload
+      ? redactLogValue(event.part)
+      : event.part,
     source: event.source,
     externalEventId: event.externalEventId,
     externalRequestId: event.externalRequestId,
     createdAt: Date.now(),
-  }
+  };
 }
 
 function withRuntimeEventMetadata(
@@ -2654,7 +2968,7 @@ function withRuntimeEventMetadata(
   runtimeProfile: BridgeRuntimeProfile | undefined,
 ): unknown {
   if (!runtimeProfile || !isRecord(payload)) {
-    return payload
+    return payload;
   }
   return removeUndefinedValues({
     ...payload,
@@ -2662,32 +2976,34 @@ function withRuntimeEventMetadata(
     runtimeKind: runtimeProfile.kind,
     runtimeLabel: runtimeProfile.label,
     runtimeCommand: summarizeRuntimeCommand(runtimeProfile.command),
-  })
+  });
 }
 
 function summarizeRuntimeCommand(command: string[] | undefined):
   | {
-      executable?: string
-      package?: string
+      executable?: string;
+      package?: string;
     }
   | undefined {
   if (!command || command.length === 0) {
-    return undefined
+    return undefined;
   }
   return removeUndefinedValues({
     executable: command[0],
-    package: command.find((part) => part.startsWith("@") || part.includes("codex-acp")),
-  })
+    package: command.find(
+      (part) => part.startsWith("@") || part.includes("codex-acp"),
+    ),
+  });
 }
 
 function normalizeType(item: BridgeSessionQueueItem): string {
-  return item.type ?? item.kind ?? "unknown"
+  return item.type ?? item.kind ?? "unknown";
 }
 
 function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
   return events.flatMap((event, index) => {
     if (event.part?.type !== "attachment" || !isRecord(event.part.json)) {
-      return []
+      return [];
     }
     return [
       {
@@ -2696,8 +3012,8 @@ function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
         payload: event.part.json,
         type: "attachment",
       },
-    ]
-  })
+    ];
+  });
 }
 
 async function buildAgentAttachmentUploadInput(
@@ -2713,13 +3029,13 @@ async function buildAgentAttachmentUploadInput(
       filename: candidate.filename,
       mediaType: candidate.mediaType,
       threadId,
-    }
+    };
   }
 
-  const path = resolveLocalAttachmentPath(candidate.path, cwd)
-  const fileStat = await stat(path)
+  const path = resolveLocalAttachmentPath(candidate.path, cwd);
+  const fileStat = await stat(path);
   if (!fileStat.isFile()) {
-    throw new Error("agent attachment path is not a regular file")
+    throw new Error("agent attachment path is not a regular file");
   }
   return {
     agentSessionId,
@@ -2727,92 +3043,118 @@ async function buildAgentAttachmentUploadInput(
     filename: candidate.filename ?? basename(path),
     mediaType: candidate.mediaType,
     threadId,
-  }
+  };
 }
 
-function resolveLocalAttachmentPath(path: string, cwd: string | undefined): string {
-  const normalizedPath = path.startsWith("file://") ? fileURLToPath(path) : path
+function resolveLocalAttachmentPath(
+  path: string,
+  cwd: string | undefined,
+): string {
+  const normalizedPath = path.startsWith("file://")
+    ? fileURLToPath(path)
+    : path;
   if (!cwd) {
-    throw new Error("agent attachment local paths require a scoped working directory")
+    throw new Error(
+      "agent attachment local paths require a scoped working directory",
+    );
   }
-  const base = resolve(cwd)
+  const base = resolve(cwd);
   const resolved = isAbsolute(normalizedPath)
     ? resolve(normalizedPath)
-    : resolve(base, normalizedPath)
-  const rel = relative(base, resolved)
+    : resolve(base, normalizedPath);
+  const rel = relative(base, resolved);
   if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
-    return resolved
+    return resolved;
   }
-  throw new Error("agent attachment path is outside the scoped working directory")
+  throw new Error(
+    "agent attachment path is outside the scoped working directory",
+  );
 }
 
-function normalizeUploadedAgentAttachment(value: Record<string, unknown>): BridgeQueueAttachment {
+function normalizeUploadedAgentAttachment(
+  value: Record<string, unknown>,
+): BridgeQueueAttachment {
   return removeUndefinedValues({
     access: isRecord(value.access) ? value.access : undefined,
     bucket: typeof value.bucket === "string" ? value.bucket : undefined,
     checksumSha256:
-      typeof value.checksumSha256 === "string" ? value.checksumSha256 : undefined,
-    contentHash: typeof value.contentHash === "string" ? value.contentHash : undefined,
-    createdAt: typeof value.createdAt === "string" ? value.createdAt : undefined,
-    createdBy: typeof value.createdBy === "string" ? value.createdBy : undefined,
-    filename: typeof value.filename === "string" ? value.filename : "Attachment",
+      typeof value.checksumSha256 === "string"
+        ? value.checksumSha256
+        : undefined,
+    contentHash:
+      typeof value.contentHash === "string" ? value.contentHash : undefined,
+    createdAt:
+      typeof value.createdAt === "string" ? value.createdAt : undefined,
+    createdBy:
+      typeof value.createdBy === "string" ? value.createdBy : undefined,
+    filename:
+      typeof value.filename === "string" ? value.filename : "Attachment",
     key:
       typeof value.key === "string"
         ? value.key
         : typeof value.objectKey === "string"
           ? value.objectKey
           : undefined,
-    mediaType: typeof value.mediaType === "string" ? value.mediaType : undefined,
+    mediaType:
+      typeof value.mediaType === "string" ? value.mediaType : undefined,
     objectKey:
       typeof value.objectKey === "string"
         ? value.objectKey
         : typeof value.key === "string"
           ? value.key
           : undefined,
-    sizeBytes: typeof value.sizeBytes === "number" ? value.sizeBytes : undefined,
+    sizeBytes:
+      typeof value.sizeBytes === "number" ? value.sizeBytes : undefined,
     status: typeof value.status === "string" ? value.status : "available",
-    storageBackend: typeof value.storageBackend === "string" ? value.storageBackend : undefined,
+    storageBackend:
+      typeof value.storageBackend === "string"
+        ? value.storageBackend
+        : undefined,
     threadId: typeof value.threadId === "string" ? value.threadId : undefined,
     type: typeof value.type === "string" ? value.type : "file",
     url: typeof value.url === "string" ? value.url : undefined,
-  }) as BridgeQueueAttachment
+  }) as BridgeQueueAttachment;
 }
 
-function summarizeResolvedAgentAttachment(file: BridgeQueueAttachment): Record<string, unknown> {
+function summarizeResolvedAgentAttachment(
+  file: BridgeQueueAttachment,
+): Record<string, unknown> {
   return removeUndefinedValues({
     type: "agent_attachment_uploaded",
     mediaType: file.mediaType,
     sizeBytes: file.sizeBytes,
     status: file.status,
     storageBackend: file.storageBackend,
-  })
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function removeUndefinedValues(record: Record<string, unknown>): Record<string, unknown> {
-  const output: Record<string, unknown> = {}
+function removeUndefinedValues(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     if (value !== undefined) {
-      output[key] = value
+      output[key] = value;
     }
   }
-  return output
+  return output;
 }
 
 function displayNameForSessionStart(session: BridgeSessionRecord): string {
-  const agentName = normalizeAgentName(session.agentName)
+  const agentName = normalizeAgentName(session.agentName);
   if (agentName) {
-    return agentName
+    return agentName;
   }
-  return "Agent"
+  return "Agent";
 }
 
 function normalizeAgentName(value: string | undefined): string | undefined {
-  const trimmed = value?.trim()
-  return trimmed || undefined
+  const trimmed = value?.trim();
+  return trimmed || undefined;
 }
 
 function isApprovalResponseType(type: string): boolean {
@@ -2821,20 +3163,20 @@ function isApprovalResponseType(type: string): boolean {
     type === "permission-response" ||
     type === "choice-response" ||
     type === "input-response"
-  )
+  );
 }
 
 function isTerminalQueueItemError(type: string, message: string): boolean {
   if (type === "prompt") {
-    return isTerminalPromptError(message)
+    return isTerminalPromptError(message);
   }
   if (!isApprovalResponseType(type)) {
-    return false
+    return false;
   }
   return (
     message.includes("does not match an active ACP session") ||
     message.includes("did not match a pending ACP permission request")
-  )
+  );
 }
 
 function isTerminalPromptError(message: string): boolean {
@@ -2843,87 +3185,109 @@ function isTerminalPromptError(message: string): boolean {
     message.includes("ACP live session lost: provider_silent_timeout") ||
     message.includes("ACP live session lost: runtime_process_exited") ||
     /\bprovider_login_failed(?:\s+\(code\s+-?\d+\))?\b/i.test(message)
-  )
+  );
 }
 
-function normalizeSystemPrompt(systemPrompt: string | undefined): string | undefined {
-  const normalized = systemPrompt?.trim()
-  return normalized ? normalized : undefined
+function normalizeSystemPrompt(
+  systemPrompt: string | undefined,
+): string | undefined {
+  const normalized = systemPrompt?.trim();
+  return normalized ? normalized : undefined;
 }
 
 function normalizeBridgeAttachments(
   attachments: BridgeQueueAttachment[] | undefined,
 ): BridgeQueueAttachment[] {
   if (!Array.isArray(attachments)) {
-    return []
+    return [];
   }
   return attachments.filter((attachment) => {
-    const url = attachment.access?.url ?? attachment.url
-    return typeof url === "string" && url.trim().length > 0
-  })
+    const url = attachment.access?.url ?? attachment.url;
+    return typeof url === "string" && url.trim().length > 0;
+  });
 }
 
-function attachmentReferenceTextForPrompt(attachments: BridgeQueueAttachment[]): string | undefined {
+function attachmentReferenceTextForPrompt(
+  attachments: BridgeQueueAttachment[],
+): string | undefined {
   if (attachments.length === 0) {
-    return undefined
+    return undefined;
   }
   const lines = attachments.map((attachment, index) => {
-    const label = attachment.filename?.trim() || `Attachment ${index + 1}`
-    const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
-    const size = typeof attachment.sizeBytes === "number" ? `, ${attachment.sizeBytes} bytes` : ""
-    const checksum = attachment.checksumSha256 ? `, sha256=${attachment.checksumSha256}` : ""
-    const url = attachment.access?.url ?? attachment.url
-    return `- ${label} (${mediaType}${size}${checksum}): ${url}`
-  })
-  return `Attached files available to this ACP run:\n${lines.join("\n")}`
+    const label = attachment.filename?.trim() || `Attachment ${index + 1}`;
+    const mediaType =
+      attachment.mediaType?.trim() || "application/octet-stream";
+    const size =
+      typeof attachment.sizeBytes === "number"
+        ? `, ${attachment.sizeBytes} bytes`
+        : "";
+    const checksum = attachment.checksumSha256
+      ? `, sha256=${attachment.checksumSha256}`
+      : "";
+    const url = attachment.access?.url ?? attachment.url;
+    return `- ${label} (${mediaType}${size}${checksum}): ${url}`;
+  });
+  return `Attached files available to this ACP run:\n${lines.join("\n")}`;
 }
 
 function summarizeAttachmentMediaTypes(attachments: BridgeQueueAttachment[]) {
-  const counts = new Map<string, number>()
+  const counts = new Map<string, number>();
   for (const attachment of attachments) {
-    const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
-    counts.set(mediaType, (counts.get(mediaType) ?? 0) + 1)
+    const mediaType =
+      attachment.mediaType?.trim() || "application/octet-stream";
+    counts.set(mediaType, (counts.get(mediaType) ?? 0) + 1);
   }
-  return Array.from(counts.entries()).map(([mediaType, count]) => ({ count, mediaType }))
+  return Array.from(counts.entries()).map(([mediaType, count]) => ({
+    count,
+    mediaType,
+  }));
 }
 
-function normalizeThreadHistory(threadHistory: string | undefined): string | undefined {
-  const normalized = threadHistory?.trim()
-  return normalized ? normalized : undefined
+function normalizeThreadHistory(
+  threadHistory: string | undefined,
+): string | undefined {
+  const normalized = threadHistory?.trim();
+  return normalized ? normalized : undefined;
 }
 
-function providerSessionKeyForItem(item: BridgeSessionQueueItem): string | undefined {
-  return item.agentSessionId ?? item.sessionId ?? item.threadId
+function providerSessionKeyForItem(
+  item: BridgeSessionQueueItem,
+): string | undefined {
+  return item.agentSessionId ?? item.sessionId ?? item.threadId;
 }
 
 function hasExplicitRuntimeScope(item: BridgeSessionQueueItem): boolean {
-  return Boolean(item.bridgeProfileId ?? item.hermesProfileName)
+  return Boolean(item.bridgeProfileId ?? item.hermesProfileName);
 }
 
 function applyRuntimeConfigFallback(
   item: BridgeSessionQueueItem,
   profile: BridgeRuntimeProfile | undefined,
 ): RuntimeConfigApplicationResult | undefined {
-  const requested = requestedRuntimeConfigForItem(item, profile)
+  const requested = requestedRuntimeConfigForItem(item, profile);
   if (!requested || !profile?.runtimeConfigOptions) {
-    return undefined
+    return undefined;
   }
   return resolveRuntimeConfigApplication({
     requested,
     supportedOptions: profile.runtimeConfigOptions,
-  })
+  });
 }
 
 function requestedRuntimeConfigForItem(
   item: BridgeSessionQueueItem,
   profile: BridgeRuntimeProfile | undefined,
 ): Record<string, string | undefined> | undefined {
-  const requested: Record<string, string | undefined> = { ...(item.runtimeConfig ?? {}) }
-  const modelId = normalizeRuntimeOptionValue(item.runtimeOptions?.modelId)
+  const requested: Record<string, string | undefined> = {
+    ...(item.runtimeConfig ?? {}),
+  };
+  const modelId = normalizeRuntimeOptionValue(item.runtimeOptions?.modelId);
   if (modelId) {
-    requested.model = modelId
+    requested.model = modelId;
   }
-  const thinkingLevel = normalizeRuntimeOptionValue(item.runtimeOptions?.thinkingLevel)
+  const thinkingLevel = normalizeRuntimeOptionValue(
+    item.runtimeOptions?.thinkingLevel,
+  );
   const thinkingConfigId = thinkingLevel
     ? findRuntimeConfigOptionId(profile?.runtimeConfigOptions, [
         "thoughtLevel",
@@ -2931,11 +3295,11 @@ function requestedRuntimeConfigForItem(
         "thinkingLevel",
         "reasoningLevel",
       ])
-    : undefined
+    : undefined;
   if (thinkingConfigId) {
-    requested[thinkingConfigId] = thinkingLevel
+    requested[thinkingConfigId] = thinkingLevel;
   }
-  return Object.keys(requested).length > 0 ? requested : undefined
+  return Object.keys(requested).length > 0 ? requested : undefined;
 }
 
 function findRuntimeConfigOptionId(
@@ -2943,29 +3307,45 @@ function findRuntimeConfigOptionId(
   candidates: string[],
 ): string | undefined {
   if (!supportedOptions) {
-    return undefined
+    return undefined;
   }
-  return candidates.find((candidate) => supportedOptions[candidate] !== undefined)
+  return candidates.find(
+    (candidate) => supportedOptions[candidate] !== undefined,
+  );
 }
 
-function normalizeRuntimeOptionValue(value: string | undefined): string | undefined {
-  const normalized = value?.trim()
-  return normalized ? normalized : undefined
+function normalizeRuntimeOptionValue(
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
 }
 
 function encodeSessionKeyPart(value: string): string {
-  return encodeURIComponent(value)
+  return encodeURIComponent(value);
 }
 
-function readToolLogFields(value: unknown): { toolCallId?: string; toolName: string } {
-  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+function readToolLogFields(value: unknown): {
+  toolCallId?: string;
+  toolName: string;
+} {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
   return {
-    toolCallId: readString(record.toolCallId) ?? readString(record.tool_call_id) ?? readString(record.id),
+    toolCallId:
+      readString(record.toolCallId) ??
+      readString(record.tool_call_id) ??
+      readString(record.id),
     toolName:
-      readString(record.toolName) ?? readString(record.name) ?? readString(record.tool) ?? "unknown",
-  }
+      readString(record.toolName) ??
+      readString(record.name) ??
+      readString(record.tool) ??
+      "unknown",
+  };
 }
 
 function readString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
