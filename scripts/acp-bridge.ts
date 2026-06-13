@@ -2246,6 +2246,7 @@ function syncBridgeRuntimeStatus(
   status.activeSessions = managerStatus.activeSessions;
   status.liveness = normalizeBridgeLivenessStatus(managerStatus.liveness);
   status.sessionQueues = managerStatus.sessions;
+  delete (status as { activeQueueItemIds?: unknown }).activeQueueItemIds;
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values());
   if (processHealth) {
     status.processHealth = processHealth;
