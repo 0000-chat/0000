@@ -87,6 +87,7 @@ export type AcpBridgeProcessIdentity = {
 
 export type AcpBridgeProcessCandidate = {
   argv?: string[]
+  cgroup?: string
   commandLine?: string
   elapsedMs?: number
   parentCommandLine?: string
@@ -117,6 +118,7 @@ export type AcpBridgeStartupReconciliation = {
 
 export type AcpBridgeProcessRegistryOptions = {
   beforePersistWrite?: () => Promise<void> | void
+  currentCgroup?: string
   isProcessAlive?: (pid: number) => boolean
   listProcessCandidates?: () => AcpBridgeProcessCandidate[]
   maxProcesses?: number
@@ -135,6 +137,7 @@ export type AcpBridgeProcessRegistryOptions = {
 
 export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
   private readonly beforePersistWrite?: () => Promise<void> | void
+  private readonly currentCgroup?: string
   private readonly isProcessAlive: (pid: number) => boolean
   private readonly listProcessCandidates: () => AcpBridgeProcessCandidate[]
   private readonly maxProcesses?: number
@@ -159,6 +162,7 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
   constructor(options: AcpBridgeProcessRegistryOptions) {
     this.path = options.path
     this.beforePersistWrite = options.beforePersistWrite
+    this.currentCgroup = options.currentCgroup ?? readProcCgroup(process.pid)
     this.maxProcesses = options.maxProcesses
     this.now = options.now ?? (() => new Date())
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive
@@ -405,9 +409,12 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
   ): Promise<{ orphaned: number; terminated: number }> {
     let orphaned = 0
     let terminated = 0
+    const activeRuntimeProfileIds = this.activeRuntimeProfileIds()
     for (const candidate of this.listProcessCandidates()) {
       if (
-        !isOwnedStaleProxyCandidate(candidate, {
+        !isOwnedStaleProcessCandidate(candidate, {
+          activeRuntimeProfileIds,
+          currentCgroup: this.currentCgroup,
           orphanProcessGraceMs: this.orphanProcessGraceMs,
           ownedProxyScriptPath: this.ownedProxyScriptPath,
           retainedRegisteredPids,
@@ -420,6 +427,20 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
       terminated += 1
     }
     return { orphaned, terminated }
+  }
+
+  private activeRuntimeProfileIds(): Set<string> {
+    const active = new Set<string>()
+    for (const entry of this.entries.values()) {
+      if (!entry.runtimeProfileId || !this.isProcessAlive(entry.pid)) {
+        continue
+      }
+      if (!processIdentityMatchesEntry(this.readProcessIdentity(entry.pid), entry)) {
+        continue
+      }
+      active.add(entry.runtimeProfileId)
+    }
+    return active
   }
 }
 
@@ -540,9 +561,11 @@ async function terminatePid(
   }
 }
 
-function isOwnedStaleProxyCandidate(
+function isOwnedStaleProcessCandidate(
   candidate: AcpBridgeProcessCandidate,
   options: {
+    activeRuntimeProfileIds: Set<string>
+    currentCgroup?: string
     orphanProcessGraceMs: number
     ownedProxyScriptPath: string
     retainedRegisteredPids: Set<number>
@@ -560,11 +583,14 @@ function isOwnedStaleProxyCandidate(
     return false
   }
   const commandText = candidate.argv?.join("\0") ?? candidate.commandLine ?? ""
-  if (!commandText.includes(options.ownedProxyScriptPath)) {
+  const parentText = candidate.parentCommandLine ?? ""
+  if (isLiveBridgeProcessText(parentText, options.ownedProxyScriptPath)) {
     return false
   }
-  const parentText = candidate.parentCommandLine ?? ""
-  return !isLiveBridgeProcessText(parentText, options.ownedProxyScriptPath)
+  if (commandText.includes(options.ownedProxyScriptPath)) {
+    return true
+  }
+  return isEscapedBridgeHelperCandidate(candidate, commandText, options)
 }
 
 function isLiveBridgeProcessText(commandLine: string, ownedProxyScriptPath: string): boolean {
@@ -572,6 +598,38 @@ function isLiveBridgeProcessText(commandLine: string, ownedProxyScriptPath: stri
     commandLine.includes(ownedProxyScriptPath) ||
     /\bscripts\/(?:acp-bridge|bridge-dev-supervisor)\.ts\b/.test(commandLine)
   )
+}
+
+function isEscapedBridgeHelperCandidate(
+  candidate: AcpBridgeProcessCandidate,
+  commandText: string,
+  options: {
+    activeRuntimeProfileIds: Set<string>
+    currentCgroup?: string
+  },
+): boolean {
+  if (!options.currentCgroup || candidate.cgroup !== options.currentCgroup) {
+    return false
+  }
+  if (hasActiveExternalHelperRuntime(options.activeRuntimeProfileIds)) {
+    return false
+  }
+  return (
+    /\bnode\s+\.\/start\.mjs\b/.test(commandText) ||
+    commandText.includes("/context-mode/") && /\/start\.mjs(?:\s|$)/.test(commandText)
+  )
+}
+
+function hasActiveExternalHelperRuntime(activeRuntimeProfileIds: Set<string>): boolean {
+  for (const runtimeProfileId of activeRuntimeProfileIds) {
+    if (
+      runtimeProfileId.startsWith("codex:") ||
+      runtimeProfileId.startsWith("openclaw:")
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 function processIdentityMatchesEntry(
@@ -768,6 +826,7 @@ function readPsProcessCandidates(
     return candidates.map((candidate) =>
       compact({
         ...candidate,
+        cgroup: readProcCgroup(candidate.pid),
         parentCommandLine: candidate.ppid
           ? commandByPid.get(candidate.ppid)
           : undefined,
@@ -797,6 +856,19 @@ function parsePsProcessCandidate(line: string, source: string): AcpBridgeProcess
     ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : undefined,
     source,
   })
+}
+
+function readProcCgroup(pid: number): string | undefined {
+  try {
+    const raw = readFileSync(`/proc/${pid}/cgroup`, "utf8")
+    const unified = raw
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.startsWith("0::"))
+    return unified?.slice("0::".length) || undefined
+  } catch {
+    return undefined
+  }
 }
 
 function parsePsElapsedMs(value: string | undefined): number | undefined {

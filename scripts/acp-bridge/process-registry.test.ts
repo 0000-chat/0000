@@ -260,9 +260,12 @@ describe("ACP bridge process registry", () => {
 
   test("periodic cleanup terminates only stale unregistered bridge proxy processes", async () => {
     const path = tempRegistryPath()
+    const currentCgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/0000-chat-bridge.service"
     const ownedProxyScriptPath = "/opt/0000/scripts/acp-bridge/acp-node-proxy.cjs"
     const terminated: number[] = []
     const registry = new AcpBridgeProcessRegistry({
+      currentCgroup,
+      isProcessAlive: (pid) => pid === 333,
       listProcessCandidates: () => [
         {
           commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
@@ -285,10 +288,44 @@ describe("ACP bridge process registry", () => {
           ppid: 1,
           source: "test",
         },
+        {
+          cgroup: currentCgroup,
+          commandLine: "node ./start.mjs",
+          elapsedMs: 120_000,
+          pid: 555,
+          ppid: 1,
+          source: "test",
+        },
+        {
+          cgroup: currentCgroup,
+          commandLine:
+            "/home/ubuntu/.bun/bin/bun /home/ubuntu/.codex/plugins/cache/context-mode/context-mode/1.0.162/start.mjs",
+          elapsedMs: 120_000,
+          parentCommandLine: "node ./start.mjs",
+          pid: 556,
+          ppid: 555,
+          source: "test",
+        },
+        {
+          cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/other.service",
+          commandLine: "node ./start.mjs",
+          elapsedMs: 120_000,
+          pid: 557,
+          ppid: 1,
+          source: "test",
+        },
       ],
       orphanProcessGraceMs: 60_000,
       ownedProxyScriptPath,
       path,
+      readProcessIdentity: (pid) =>
+        pid === 333
+          ? {
+              argv: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+              source: "test",
+              startTime: "boot-1:333",
+            }
+          : undefined,
       terminateProcessId: async (pid) => {
         terminated.push(pid)
       },
@@ -305,10 +342,10 @@ describe("ACP bridge process registry", () => {
     const result = await registry.cleanupOrphanedProcesses()
 
     expect(result).toMatchObject({
-      orphanedProcessCount: 1,
-      terminatedOrphanedProcessCount: 1,
+      orphanedProcessCount: 3,
+      terminatedOrphanedProcessCount: 3,
     })
-    expect(terminated).toEqual([222])
+    expect(terminated).toEqual([222, 555, 556])
     expect(registry.getProcessHealth()).toMatchObject({
       childCount: 1,
       startupReconciliation: {
@@ -317,6 +354,114 @@ describe("ACP bridge process registry", () => {
         terminatedOrphanedProcessCount: 0,
       },
     })
+  })
+
+  test("periodic cleanup preserves escaped helpers while a matching external runtime is active", async () => {
+    const path = tempRegistryPath()
+    const currentCgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/0000-chat-bridge.service"
+    const terminated: number[] = []
+    const registry = new AcpBridgeProcessRegistry({
+      currentCgroup,
+      isProcessAlive: (pid) => pid === 333,
+      listProcessCandidates: () => [
+        {
+          cgroup: currentCgroup,
+          commandLine: "node ./start.mjs",
+          elapsedMs: 120_000,
+          pid: 555,
+          ppid: 1,
+          source: "test",
+        },
+        {
+          cgroup: currentCgroup,
+          commandLine:
+            "/home/ubuntu/.bun/bin/bun /home/ubuntu/.codex/plugins/cache/context-mode/context-mode/1.0.162/start.mjs",
+          elapsedMs: 120_000,
+          parentCommandLine: "node ./start.mjs",
+          pid: 556,
+          ppid: 555,
+          source: "test",
+        },
+      ],
+      path,
+      readProcessIdentity: (pid) =>
+        pid === 333
+          ? {
+              argv: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+              source: "test",
+              startTime: "boot-1:333",
+            }
+          : undefined,
+      terminateProcessId: async (pid) => {
+        terminated.push(pid)
+      },
+    })
+    await registry.registerProcess({
+      args: ["@zed-industries/codex-acp@0.15.0"],
+      bridgeDeviceId: "device-1",
+      command: "bunx",
+      pid: 333,
+      runtimeProfileId: "codex:codex-acp",
+      sessionKey: "session-1",
+    })
+
+    const result = await registry.cleanupOrphanedProcesses()
+
+    expect(result).toMatchObject({
+      orphanedProcessCount: 0,
+      terminatedOrphanedProcessCount: 0,
+    })
+    expect(terminated).toEqual([])
+  })
+
+  test("periodic cleanup ignores stale external runtime entries when cleaning escaped helpers", async () => {
+    const path = tempRegistryPath()
+    const currentCgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/0000-chat-bridge.service"
+    const terminated: number[] = []
+    const registry = new AcpBridgeProcessRegistry({
+      currentCgroup,
+      isProcessAlive: () => false,
+      listProcessCandidates: () => [
+        {
+          cgroup: currentCgroup,
+          commandLine: "node ./start.mjs",
+          elapsedMs: 120_000,
+          pid: 555,
+          ppid: 1,
+          source: "test",
+        },
+        {
+          cgroup: currentCgroup,
+          commandLine:
+            "/home/ubuntu/.bun/bin/bun /home/ubuntu/.codex/plugins/cache/context-mode/context-mode/1.0.162/start.mjs",
+          elapsedMs: 120_000,
+          parentCommandLine: "node ./start.mjs",
+          pid: 556,
+          ppid: 555,
+          source: "test",
+        },
+      ],
+      path,
+      terminateProcessId: async (pid) => {
+        terminated.push(pid)
+      },
+    })
+    await registry.registerProcess({
+      args: ["@zed-industries/codex-acp@0.15.0"],
+      bridgeDeviceId: "device-1",
+      command: "bunx",
+      pid: 333,
+      runtimeProfileId: "codex:codex-acp",
+      sessionKey: "session-1",
+    })
+
+    const result = await registry.cleanupOrphanedProcesses()
+
+    expect(result).toMatchObject({
+      orphanedProcessCount: 2,
+      terminatedOrphanedProcessCount: 2,
+    })
+    expect(terminated).toEqual([555, 556])
   })
 
   test("startup reconciliation refuses claims for live ambiguous registered children", async () => {
