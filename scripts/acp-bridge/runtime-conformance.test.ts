@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   evaluateConformanceForClaim,
   runRuntimeConformance,
+  shouldRefreshRuntimeConformance,
   summarizeRuntimeConformance,
   type RuntimeConformanceRecord,
 } from "./runtime-conformance"
@@ -19,6 +20,48 @@ function passing(patch: Partial<RuntimeConformanceRecord> = {}): RuntimeConforma
 }
 
 describe("runtime conformance", () => {
+  test("defers refreshes while bridge work is active", () => {
+    expect(
+      shouldRefreshRuntimeConformance({
+        inFlightCommandCount: 0,
+        lastProbeAt: 0,
+        now: 30_000,
+        runningSessionCount: 0,
+        ttlMs: 60_000,
+      }),
+    ).toBe(true)
+    expect(
+      shouldRefreshRuntimeConformance({
+        force: true,
+        inFlightCommandCount: 0,
+        lastProbeAt: 30_000,
+        now: 30_001,
+        runningSessionCount: 0,
+        ttlMs: 60_000,
+      }),
+    ).toBe(true)
+    expect(
+      shouldRefreshRuntimeConformance({
+        force: true,
+        inFlightCommandCount: 0,
+        lastProbeAt: 0,
+        now: 120_000,
+        runningSessionCount: 1,
+        ttlMs: 60_000,
+      }),
+    ).toBe(false)
+    expect(
+      shouldRefreshRuntimeConformance({
+        force: true,
+        inFlightCommandCount: 1,
+        lastProbeAt: 0,
+        now: 120_000,
+        runningSessionCount: 0,
+        ttlMs: 60_000,
+      }),
+    ).toBe(false)
+  })
+
   test("permits claims only for fresh passing init conformance", () => {
     expect(
       evaluateConformanceForClaim({
