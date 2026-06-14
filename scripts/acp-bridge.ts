@@ -85,6 +85,7 @@ const DEFAULT_RESULT_PATH = "/api/agent-bridge/queue/result";
 const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
+const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
 const DEFAULT_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
 const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
@@ -1261,6 +1262,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     config: BridgeRegistration;
     inFlightCommands: Map<string, Promise<void>>;
     inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
+    lastProcessOrphanCleanupAt: number;
     lastStaleCleanupAt: number;
     lastJournalHealthSignature: string;
     log: FlushableBridgeLogger;
@@ -1393,6 +1395,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         inFlightCommands: new Map(),
         inFlightCommandMetadata: new Map(),
         lastJournalHealthSignature: bridgeSupervisorHealthSignature(supervisor),
+        lastProcessOrphanCleanupAt: 0,
         lastStaleCleanupAt: 0,
         log,
         manager,
@@ -1508,6 +1511,42 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         context.supervisor,
       );
       context.status.processHealth = context.supervisor.getProcessHealth();
+      const processOrphanCleanupNow = Date.now();
+      if (
+        processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
+        DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
+      ) {
+        context.lastProcessOrphanCleanupAt = processOrphanCleanupNow;
+        try {
+          const orphanCleanup =
+            await context.supervisor.cleanupOrphanedProcesses();
+          if (
+            orphanCleanup &&
+            (orphanCleanup.orphanedProcessCount > 0 ||
+              orphanCleanup.terminatedOrphanedProcessCount > 0)
+          ) {
+            context.log({
+              level: "warn",
+              event: "bridge.process.orphan_cleanup",
+              deviceId: context.config.deviceId,
+              orphanedProcessCount: orphanCleanup.orphanedProcessCount,
+              terminatedOrphanedProcessCount:
+                orphanCleanup.terminatedOrphanedProcessCount,
+            });
+          }
+        } catch (error) {
+          const message = redactForOutput(
+            error instanceof Error ? error.message : String(error),
+          );
+          context.log({
+            level: "warn",
+            event: "bridge.process.orphan_cleanup_failed",
+            deviceId: context.config.deviceId,
+            error: message,
+          });
+        }
+        context.status.processHealth = context.supervisor.getProcessHealth();
+      }
       await publishBridgeSupervisorHealthIfChanged(context);
       const watchdogFailures = context.supervisor.checkWatchdogs();
       for (const watchdog of watchdogFailures) {

@@ -1,5 +1,6 @@
 import type { BridgeHostAdapter, BridgeDiagnosticInput } from "./host-adapter";
 import type {
+  AcpBridgeOrphanProcessCleanup,
   AcpBridgeProcessHealth,
   AcpBridgeProcessRegistryLike,
 } from "./process-registry";
@@ -81,7 +82,7 @@ export type OpenBridgeSupervisorOptions = {
   organizationId?: string;
   processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
-    "getProcessHealth" | "reconcileBeforeClaiming"
+    "cleanupOrphanedProcesses" | "getProcessHealth" | "reconcileBeforeClaiming"
   >;
   providerSilentTimeoutMs?: number;
 };
@@ -94,7 +95,7 @@ export type BridgeSupervisorOptions = {
   now?: () => number;
   processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
-    "getProcessHealth" | "reconcileBeforeClaiming"
+    "cleanupOrphanedProcesses" | "getProcessHealth" | "reconcileBeforeClaiming"
   >;
   providerSilentTimeoutMs?: number;
 };
@@ -135,7 +136,7 @@ export class BridgeSupervisor {
   private readonly now: () => number;
   private readonly processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
-    "getProcessHealth" | "reconcileBeforeClaiming"
+    "cleanupOrphanedProcesses" | "getProcessHealth" | "reconcileBeforeClaiming"
   >;
   private readonly providerSilentTimeoutMs: number;
   private readonly promptOutboxIds = new Map<string, number>();
@@ -322,6 +323,10 @@ export class BridgeSupervisor {
     } catch (error) {
       this.markJournalHardFailed(error);
     }
+  }
+
+  async cleanupOrphanedProcesses(): Promise<AcpBridgeOrphanProcessCleanup | undefined> {
+    return await this.processRegistry?.cleanupOrphanedProcesses();
   }
 
   async publishHealthDiagnostic(
