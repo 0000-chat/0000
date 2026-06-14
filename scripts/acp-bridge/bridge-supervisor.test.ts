@@ -218,9 +218,11 @@ describe("bridge supervisor shadow mode", () => {
           processCapExceeded: true,
           startupReconciliation: {
             ambiguousProcessCount: reconciled ? 1 : 0,
+            orphanedProcessCount: 0,
             removedDeadProcessCount: 0,
             retainedProcessCount: reconciled ? 1 : 0,
             status: reconciled ? "ambiguous" : "not_run",
+            terminatedOrphanedProcessCount: 0,
             terminatedProcessCount: 0,
           },
           status: reconciled ? "ambiguous" : "healthy",

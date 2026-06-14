@@ -2,11 +2,14 @@ import { execFileSync, type ChildProcessWithoutNullStreams } from "node:child_pr
 import { createHash, randomUUID } from "node:crypto"
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync, readFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 const REGISTRY_VERSION = 1
 const REGISTRY_FILE_MODE = 0o600
 const DEFAULT_PROCESS_EXIT_GRACE_MS = 2_500
+const DEFAULT_ORPHAN_PROCESS_GRACE_MS = 60_000
+const DEFAULT_OWNED_PROXY_SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs")
 
 export type AcpBridgeProcessRegistryEntry = {
   args: string[]
@@ -75,6 +78,16 @@ export type AcpBridgeProcessIdentity = {
   startTime?: string
 }
 
+export type AcpBridgeProcessCandidate = {
+  argv?: string[]
+  commandLine?: string
+  elapsedMs?: number
+  parentCommandLine?: string
+  pid: number
+  ppid?: number
+  source: string
+}
+
 export type AcpBridgeStoredProcessIdentity = {
   capturedAt: string
   fingerprint: string
@@ -86,9 +99,11 @@ export type AcpBridgeStoredProcessIdentity = {
 export type AcpBridgeStartupReconciliation = {
   ambiguousProcessCount: number
   lastReconciledAt?: string
+  orphanedProcessCount: number
   removedDeadProcessCount: number
   retainedProcessCount: number
   status: "not_run" | "healthy" | "ambiguous" | "blocked"
+  terminatedOrphanedProcessCount: number
   terminatedProcessCount: number
   reason?: "corrupt" | "newer_version"
 }
@@ -96,20 +111,36 @@ export type AcpBridgeStartupReconciliation = {
 export type AcpBridgeProcessRegistryOptions = {
   beforePersistWrite?: () => Promise<void> | void
   isProcessAlive?: (pid: number) => boolean
+  listProcessCandidates?: () => AcpBridgeProcessCandidate[]
   maxProcesses?: number
   now?: () => Date
+  orphanProcessGraceMs?: number
+  ownedProxyScriptPath?: string
   path: string
   readProcessCommand?: (pid: number) => string | undefined
   readProcessIdentity?: (pid: number) => AcpBridgeProcessIdentity | undefined
+  terminateProcessId?: (
+    pid: number,
+    graceMs: number,
+    isProcessAlive: (pid: number) => boolean,
+  ) => Promise<void>
 }
 
 export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
   private readonly beforePersistWrite?: () => Promise<void> | void
   private readonly isProcessAlive: (pid: number) => boolean
+  private readonly listProcessCandidates: () => AcpBridgeProcessCandidate[]
   private readonly maxProcesses?: number
   private readonly now: () => Date
+  private readonly orphanProcessGraceMs: number
+  private readonly ownedProxyScriptPath: string
   private readonly path: string
   private readonly readProcessIdentity: (pid: number) => AcpBridgeProcessIdentity | undefined
+  private readonly terminateProcessId: (
+    pid: number,
+    graceMs: number,
+    isProcessAlive: (pid: number) => boolean,
+  ) => Promise<void>
   private entries = new Map<string, AcpBridgeProcessRegistryEntry>()
   private loaded = false
   private unsafeStatus: Extract<AcpBridgeProcessHealthStatus, "corrupt" | "newer_version" | "ambiguous"> | undefined
@@ -124,6 +155,10 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
     this.maxProcesses = options.maxProcesses
     this.now = options.now ?? (() => new Date())
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive
+    this.listProcessCandidates = options.listProcessCandidates ?? defaultListProcessCandidates
+    this.orphanProcessGraceMs = options.orphanProcessGraceMs ?? DEFAULT_ORPHAN_PROCESS_GRACE_MS
+    this.ownedProxyScriptPath = options.ownedProxyScriptPath ?? DEFAULT_OWNED_PROXY_SCRIPT_PATH
+    this.terminateProcessId = options.terminateProcessId ?? terminatePid
     this.readProcessIdentity =
       options.readProcessIdentity ??
       (options.readProcessCommand
@@ -213,7 +248,7 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
         this.ambiguousProcessCount = Math.max(1, this.ambiguousProcessCount)
         return
       }
-      await terminatePid(entry.pid, graceMs, this.isProcessAlive)
+      await this.terminateProcessId(entry.pid, graceMs, this.isProcessAlive)
       await this.unregisterProcess(entry.id)
     })
   }
@@ -246,19 +281,24 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
           ambiguous += 1
           continue
         }
-        await terminatePid(entry.pid, DEFAULT_PROCESS_EXIT_GRACE_MS, this.isProcessAlive)
+        await this.terminateProcessId(entry.pid, DEFAULT_PROCESS_EXIT_GRACE_MS, this.isProcessAlive)
         terminated += 1
         this.entries.delete(entry.id)
       }
+      const orphanCleanup = await this.reconcileOrphanedProxyProcesses(
+        new Set(Array.from(this.entries.values()).map((entry) => entry.pid)),
+      )
       this.ambiguousProcessCount = ambiguous
       this.unsafeStatus = ambiguous > 0 ? "ambiguous" : undefined
       this.lastReconciledAt = this.now().toISOString()
       this.startupReconciliation = {
         ambiguousProcessCount: ambiguous,
         lastReconciledAt: this.lastReconciledAt,
+        orphanedProcessCount: orphanCleanup.orphaned,
         removedDeadProcessCount: removedDead,
         retainedProcessCount: ambiguous,
         status: ambiguous > 0 ? "ambiguous" : "healthy",
+        terminatedOrphanedProcessCount: orphanCleanup.terminated,
         terminatedProcessCount: terminated,
       }
       await this.persist()
@@ -336,6 +376,28 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
       () => undefined,
     )
     return await run
+  }
+
+  private async reconcileOrphanedProxyProcesses(
+    retainedRegisteredPids: Set<number>,
+  ): Promise<{ orphaned: number; terminated: number }> {
+    let orphaned = 0
+    let terminated = 0
+    for (const candidate of this.listProcessCandidates()) {
+      if (
+        !isOwnedStaleProxyCandidate(candidate, {
+          orphanProcessGraceMs: this.orphanProcessGraceMs,
+          ownedProxyScriptPath: this.ownedProxyScriptPath,
+          retainedRegisteredPids,
+        })
+      ) {
+        continue
+      }
+      orphaned += 1
+      await this.terminateProcessId(candidate.pid, DEFAULT_PROCESS_EXIT_GRACE_MS, this.isProcessAlive)
+      terminated += 1
+    }
+    return { orphaned, terminated }
   }
 }
 
@@ -454,6 +516,40 @@ async function terminatePid(
   } catch {
     // The process exited after the grace period check.
   }
+}
+
+function isOwnedStaleProxyCandidate(
+  candidate: AcpBridgeProcessCandidate,
+  options: {
+    orphanProcessGraceMs: number
+    ownedProxyScriptPath: string
+    retainedRegisteredPids: Set<number>
+  },
+): boolean {
+  if (
+    candidate.pid <= 0 ||
+    candidate.pid === process.pid ||
+    candidate.ppid === process.pid ||
+    options.retainedRegisteredPids.has(candidate.pid)
+  ) {
+    return false
+  }
+  if (candidate.elapsedMs === undefined || candidate.elapsedMs < options.orphanProcessGraceMs) {
+    return false
+  }
+  const commandText = candidate.argv?.join("\0") ?? candidate.commandLine ?? ""
+  if (!commandText.includes(options.ownedProxyScriptPath)) {
+    return false
+  }
+  const parentText = candidate.parentCommandLine ?? ""
+  return !isLiveBridgeProcessText(parentText, options.ownedProxyScriptPath)
+}
+
+function isLiveBridgeProcessText(commandLine: string, ownedProxyScriptPath: string): boolean {
+  return (
+    commandLine.includes(ownedProxyScriptPath) ||
+    /\bscripts\/(?:acp-bridge|bridge-dev-supervisor)\.ts\b/.test(commandLine)
+  )
 }
 
 function processIdentityMatchesEntry(
@@ -619,12 +715,100 @@ function readPsProcessIdentity(pid: number): AcpBridgeProcessIdentity | undefine
   }
 }
 
+function defaultListProcessCandidates(): AcpBridgeProcessCandidate[] {
+  return (
+    readPsProcessCandidates(["-axo", "pid=,ppid=,etimes=,command="], "ps-etimes") ??
+    readPsProcessCandidates(["-axo", "pid=,ppid=,etime=,command="], "ps-etime") ??
+    []
+  )
+}
+
+function readPsProcessCandidates(
+  args: string[],
+  source: string,
+): AcpBridgeProcessCandidate[] | undefined {
+  try {
+    const output = execFileSync("ps", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000,
+    })
+    const candidates: AcpBridgeProcessCandidate[] = []
+    for (const line of output.split("\n")) {
+      const parsed = parsePsProcessCandidate(line, source)
+      if (parsed) {
+        candidates.push(parsed)
+      }
+    }
+    const commandByPid = new Map(
+      candidates.map((candidate) => [candidate.pid, candidate.commandLine]),
+    )
+    return candidates.map((candidate) =>
+      compact({
+        ...candidate,
+        parentCommandLine: candidate.ppid
+          ? commandByPid.get(candidate.ppid)
+          : undefined,
+      }),
+    )
+  } catch {
+    return undefined
+  }
+}
+
+function parsePsProcessCandidate(line: string, source: string): AcpBridgeProcessCandidate | undefined {
+  const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/)
+  if (!match) {
+    return undefined
+  }
+  const pid = Number(match[1])
+  const ppid = Number(match[2])
+  const elapsedMs = parsePsElapsedMs(match[3])
+  const commandLine = match[4]?.trim()
+  if (!Number.isInteger(pid) || pid <= 0 || !commandLine) {
+    return undefined
+  }
+  return compact({
+    commandLine,
+    elapsedMs,
+    pid,
+    ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : undefined,
+    source,
+  })
+}
+
+function parsePsElapsedMs(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined
+  }
+  if (/^\d+$/.test(value)) {
+    return Number(value) * 1000
+  }
+  const daySplit = value.split("-")
+  const days = daySplit.length === 2 ? Number(daySplit[0]) : 0
+  const timePart = daySplit.length === 2 ? daySplit[1] : daySplit[0]
+  const timeParts = timePart.split(":").map((part) => Number(part))
+  if (
+    !Number.isFinite(days) ||
+    timeParts.length < 2 ||
+    timeParts.length > 3 ||
+    timeParts.some((part) => !Number.isFinite(part))
+  ) {
+    return undefined
+  }
+  const [hours, minutes, seconds] =
+    timeParts.length === 3 ? timeParts : [0, timeParts[0], timeParts[1]]
+  return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000
+}
+
 function emptyStartupReconciliation(): AcpBridgeStartupReconciliation {
   return {
     ambiguousProcessCount: 0,
+    orphanedProcessCount: 0,
     removedDeadProcessCount: 0,
     retainedProcessCount: 0,
     status: "not_run",
+    terminatedOrphanedProcessCount: 0,
     terminatedProcessCount: 0,
   }
 }
