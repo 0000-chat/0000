@@ -2656,7 +2656,7 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands ?? [],
     maxInFlight: status.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT_COMMANDS,
-    processHealth: status.processHealth,
+    processHealth: buildHeartbeatProcessHealthPayload(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
     availability: status.availability,
@@ -2671,6 +2671,43 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     lastStaleCleanup: status.lastStaleCleanup,
     recentErrors: status.recentErrors.slice(-5),
   };
+}
+
+function buildHeartbeatProcessHealthPayload(
+  processHealth: BridgeStatus["processHealth"],
+) {
+  if (!processHealth) {
+    return undefined;
+  }
+  const { startupReconciliation, ...rest } = processHealth;
+  return {
+    ...rest,
+    startupReconciliation: startupReconciliation
+      ? {
+          ambiguousProcessCount: startupReconciliation.ambiguousProcessCount,
+          lastReconciledAt: startupReconciliation.lastReconciledAt,
+          removedDeadProcessCount:
+            startupReconciliation.removedDeadProcessCount,
+          retainedProcessCount: startupReconciliation.retainedProcessCount,
+          status: heartbeatStartupReconciliationStatus(
+            startupReconciliation.status,
+          ),
+          terminatedProcessCount:
+            startupReconciliation.terminatedProcessCount,
+        }
+      : undefined,
+  };
+}
+
+function heartbeatStartupReconciliationStatus(
+  status: NonNullable<
+    NonNullable<BridgeStatus["processHealth"]>["startupReconciliation"]
+  >["status"],
+): "healthy" | "unsafe" | "cap_exceeded" {
+  if (status === "healthy" || status === "not_run") {
+    return "healthy";
+  }
+  return "unsafe";
 }
 
 export function sanitizeHermesProfilesForCapabilities(

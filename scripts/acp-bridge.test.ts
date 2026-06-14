@@ -859,14 +859,18 @@ describe("bridge supervisor claim gating", () => {
       startupReconciliation: {
         ambiguousProcessCount: 1,
         lastReconciledAt: "2026-06-05T10:03:00.000Z",
-        orphanedProcessCount: 0,
         removedDeadProcessCount: 0,
         retainedProcessCount: 1,
-        status: "ambiguous",
-        terminatedOrphanedProcessCount: 0,
+        status: "unsafe",
         terminatedProcessCount: 0,
       },
     });
+    expect(
+      buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation,
+    ).not.toHaveProperty("orphanedProcessCount");
+    expect(
+      buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation,
+    ).not.toHaveProperty("terminatedOrphanedProcessCount");
   });
 
   test("runs cleanup but skips queue claims when runtime conformance is unavailable", async () => {
@@ -984,8 +988,14 @@ describe("bridge supervisor claim gating", () => {
       buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation,
     ).toMatchObject({
       ambiguousProcessCount: 1,
-      status: "ambiguous",
+      status: "unsafe",
     });
+    expect(
+      buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation,
+    ).not.toHaveProperty("orphanedProcessCount");
+    expect(
+      buildHeartbeatStatusPayload(status).processHealth?.startupReconciliation,
+    ).not.toHaveProperty("terminatedOrphanedProcessCount");
   });
 
   test("heartbeat payload reports runtime conformance, liveness, and availability", () => {
