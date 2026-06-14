@@ -68,6 +68,37 @@ export function shouldRefreshRuntimeConformance(input: {
   return input.now - input.lastProbeAt >= (input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS) / 2
 }
 
+export function refreshActiveRuntimeConformanceRecords(input: {
+  activeRuntimeProfileIds: Iterable<string>
+  now: number
+  records: Record<string, RuntimeConformanceRecord>
+  requiredStrength?: Exclude<RuntimeConformanceStrength, "none">
+}): Record<string, RuntimeConformanceRecord> {
+  const activeRuntimeProfileIds = new Set(input.activeRuntimeProfileIds)
+  if (activeRuntimeProfileIds.size === 0) {
+    return input.records
+  }
+  const requiredStrength = input.requiredStrength ?? "init_only"
+  let changed = false
+  const records = { ...input.records }
+  for (const runtimeId of activeRuntimeProfileIds) {
+    const record = records[runtimeId]
+    if (
+      !record ||
+      record.state !== "passing" ||
+      STRENGTH_RANK[record.strength] < STRENGTH_RANK[requiredStrength]
+    ) {
+      continue
+    }
+    if (record.checkedAt >= input.now) {
+      continue
+    }
+    records[runtimeId] = { ...record, checkedAt: input.now }
+    changed = true
+  }
+  return changed ? records : input.records
+}
+
 export function evaluateConformanceForClaim(input: {
   now: number
   record: RuntimeConformanceRecord | null | undefined

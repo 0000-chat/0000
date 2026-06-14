@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   evaluateConformanceForClaim,
+  refreshActiveRuntimeConformanceRecords,
   runRuntimeConformance,
   shouldRefreshRuntimeConformance,
   summarizeRuntimeConformance,
@@ -119,6 +120,58 @@ describe("runtime conformance", () => {
         ttlMs: 60_000,
       }),
     ).toMatchObject({ ok: false, reasonCode: "runtime_conformance_insufficient" })
+  })
+
+  test("keeps active passing runtime conformance fresh without reviving failing profiles", () => {
+    const records = {
+      codex: passing({ checkedAt: 1_000, runtimeId: "codex" }),
+      broken: passing({ checkedAt: 1_000, runtimeId: "broken", state: "failing" }),
+      idle: passing({ checkedAt: 1_000, runtimeId: "idle" }),
+      weak: passing({ checkedAt: 1_000, runtimeId: "weak", strength: "init_only" }),
+    }
+
+    const refreshed = refreshActiveRuntimeConformanceRecords({
+      activeRuntimeProfileIds: ["codex", "broken", "weak"],
+      now: 120_000,
+      records,
+      requiredStrength: "prompt_smoke",
+    })
+
+    expect(refreshed.codex?.checkedAt).toBe(1_000)
+    expect(refreshed.broken?.checkedAt).toBe(1_000)
+    expect(refreshed.idle?.checkedAt).toBe(1_000)
+    expect(refreshed.weak?.checkedAt).toBe(1_000)
+    const defaultStrengthRefreshed = refreshActiveRuntimeConformanceRecords({
+      activeRuntimeProfileIds: ["codex"],
+      now: 120_000,
+      records,
+    })
+    expect(defaultStrengthRefreshed.codex?.checkedAt).toBe(120_000)
+    expect(
+      summarizeRuntimeConformance({
+        now: 120_001,
+        profiles: [
+          {
+            capabilities: {},
+            command: ["codex"],
+            id: "codex",
+            kind: "codex",
+            label: "Codex",
+            status: "available",
+          },
+          {
+            capabilities: {},
+            command: ["idle"],
+            id: "idle",
+            kind: "codex",
+            label: "Idle",
+            status: "available",
+          },
+        ],
+        records: defaultStrengthRefreshed,
+        ttlMs: 60_000,
+      }),
+    ).toMatchObject({ canClaim: true, status: "degraded" })
   })
 
   test("detects initialize failures before user sessions are bound", async () => {

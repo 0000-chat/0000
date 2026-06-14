@@ -35,6 +35,7 @@ export type BridgeQueuePollInput = {
 }
 
 export type BridgeQueueClaimInput = {
+  lane?: "any" | "control"
   limit?: number
   queueItemIds?: string[]
 }

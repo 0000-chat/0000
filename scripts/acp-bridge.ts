@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import {
   BridgeCloudHttpError,
   ConvexBridgeCloudClient,
+  type BridgeQueueClaimInput,
 } from "./acp-bridge/convex-http";
 import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter";
 import {
@@ -56,6 +57,7 @@ import {
 } from "./acp-bridge/bridge-availability";
 import {
   DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+  refreshActiveRuntimeConformanceRecords,
   runRuntimeConformance,
   shouldRefreshRuntimeConformance,
   summarizeRuntimeConformance,
@@ -1277,6 +1279,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           .sessions.filter((session) => session.runningQueueItemId).length,
       0,
     );
+  const activeRuntimeProfileIds = () => {
+    const ids = new Set<string>();
+    for (const context of contexts.values()) {
+      for (const session of context.manager.getStatus().sessions) {
+        if (session.runningQueueItemId && session.runtimeProfileId) {
+          ids.add(session.runtimeProfileId);
+        }
+      }
+    }
+    return ids;
+  };
   const refreshRuntimeConformanceIfStale = async (
     options: { force?: boolean } = {},
   ) => {
@@ -1291,6 +1304,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
       })
     ) {
+      runtimeConformanceRecords = refreshActiveRuntimeConformanceRecords({
+        activeRuntimeProfileIds: activeRuntimeProfileIds(),
+        now,
+        records: runtimeConformanceRecords,
+      });
+      for (const context of contexts.values()) {
+        context.status.runtimeConformance = runtimeConformanceSummary();
+      }
       return;
     }
     const ownerContext = contexts.values().next().value as
@@ -2131,7 +2152,9 @@ export async function runBridgeLoopIteration(
         await persistStatus(input.statusPath, input.status);
         return { restartRequested: false };
       }
-      if (runtimeConformance && !runtimeConformance.canClaim) {
+      const conformanceAllowsPromptClaims = runtimeConformance?.canClaim !== false;
+      const effectivePromptSlots = conformanceAllowsPromptClaims ? promptSlots : 0;
+      if (!conformanceAllowsPromptClaims && controlSlots <= 0) {
         input.log({
           level: "warn",
           event: "bridge.queue.claim_skipped",
@@ -2142,6 +2165,15 @@ export async function runBridgeLoopIteration(
         syncBridgeStatus();
         await persistStatus(input.statusPath, input.status);
         return { restartRequested: false };
+      }
+      if (!conformanceAllowsPromptClaims) {
+        input.log({
+          level: "warn",
+          event: "bridge.queue.claim_skipped",
+          deviceId: input.config.deviceId,
+          reason: "runtime_conformance_prompt_claims_paused",
+          runtimeConformanceStatus: runtimeConformance.status,
+        });
       }
       if (input.canClaimWork && !input.canClaimWork()) {
         input.log({
@@ -2155,10 +2187,19 @@ export async function runBridgeLoopIteration(
         return { restartRequested: false };
       }
       input.status.lastPollAt = new Date(now).toISOString();
-      const commands = selectClaimedCommandsForLanes(await claim(input.config, claimLimit), {
-        controlSlots,
-        promptSlots,
-      });
+      const effectiveClaimLimit =
+        effectivePromptSlots > 0 ? effectivePromptSlots + controlSlots : controlSlots;
+      const commands = selectClaimedCommandsForLanes(
+        await claim(
+          input.config,
+          effectiveClaimLimit,
+          effectivePromptSlots > 0 ? "any" : "control",
+        ),
+        {
+          controlSlots,
+          promptSlots: effectivePromptSlots,
+        },
+      );
       if (commands.length > 0) {
         input.log({
           level: "info",
@@ -2758,9 +2799,10 @@ async function publishBridgeSupervisorHealthIfChanged(context: {
 async function claimCommands(
   config: BridgeConfig,
   limit = DEFAULT_MAX_IN_FLIGHT_COMMANDS,
+  lane: BridgeQueueClaimInput["lane"] = "any",
 ): Promise<BridgeQueueCommand[]> {
   const adapter = new ConvexBridgeHostAdapter(createCloudClient(config));
-  const response = await adapter.claimWork({ limit });
+  const response = await adapter.claimWork({ lane, limit });
   const rawResponse = response.raw as QueueClaimResponse;
   const rawCommands = Array.isArray(rawResponse.commands)
     ? rawResponse.commands

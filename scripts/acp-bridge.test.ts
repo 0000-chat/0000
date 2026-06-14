@@ -879,11 +879,13 @@ describe("bridge supervisor claim gating", () => {
     ).not.toHaveProperty("terminatedOrphanedProcessCount");
   });
 
-  test("runs cleanup but skips queue claims when runtime conformance is unavailable", async () => {
+  test("runs cleanup and drains controls when runtime conformance is unavailable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
     let cleanupRan = false;
-    let claimed = false;
+    let claimLimit: number | undefined;
+    let claimLane: string | undefined;
+    const handled: Array<Record<string, unknown>> = [];
     const status: BridgeStatus = {
       activeSessions: [],
       connected: true,
@@ -892,9 +894,17 @@ describe("bridge supervisor claim gating", () => {
 
     await runBridgeLoopIteration({
       canClaimWork: () => true,
-      claimCommands: async () => {
-        claimed = true;
-        return [];
+      claimCommands: async (_config, limit, lane) => {
+        claimLimit = limit;
+        claimLane = lane;
+        return [
+          {
+            agentSessionId: "session-1",
+            id: "permission-response-1",
+            threadId: "thread-1",
+            type: "permission-response",
+          },
+        ];
       },
       cleanupStaleClaims: async () => {
         cleanupRan = true;
@@ -928,7 +938,9 @@ describe("bridge supervisor claim gating", () => {
           terminalInteractionSessionKeyCount: 0,
           sessions: [],
         }),
-        handleQueueItem: async () => {},
+        handleQueueItem: async (command) => {
+          handled.push(command as unknown as Record<string, unknown>);
+        },
       },
       maxInFlight: 1,
       now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
@@ -943,7 +955,14 @@ describe("bridge supervisor claim gating", () => {
     });
 
     expect(cleanupRan).toBe(true);
-    expect(claimed).toBe(false);
+    expect(claimLimit).toBe(4);
+    expect(claimLane).toBe("control");
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "permission-response-1",
+        type: "permission-response",
+      }),
+    ]);
     expect(status.runtimeConformance).toMatchObject({
       canClaim: false,
       status: "unavailable",
@@ -956,7 +975,7 @@ describe("bridge supervisor claim gating", () => {
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "bridge.queue.claim_skipped",
-        reason: "runtime_conformance_unavailable",
+        reason: "runtime_conformance_prompt_claims_paused",
       }),
     );
   });
