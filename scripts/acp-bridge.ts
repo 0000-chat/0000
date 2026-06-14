@@ -57,6 +57,7 @@ import {
 import {
   DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
   runRuntimeConformance,
+  shouldRefreshRuntimeConformance,
   summarizeRuntimeConformance,
   type RuntimeConformanceRecord,
   type RuntimeConformanceSummary,
@@ -1227,29 +1228,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     baseAgentCommand: agentCommand,
     customCommands: customRuntimeCommands,
   }).catch(() => []);
-  let runtimeConformanceRecords = await probeRuntimeProfilesConformance(
-    runtimeProfiles,
-    {
-      requestTimeoutMs,
-    },
-  );
-  let lastRuntimeConformanceProbeAt = Date.now();
-  const refreshRuntimeConformanceIfStale = async () => {
-    const now = Date.now();
-    if (
-      now - lastRuntimeConformanceProbeAt <
-      DEFAULT_RUNTIME_CONFORMANCE_TTL_MS / 2
-    ) {
-      return;
-    }
-    lastRuntimeConformanceProbeAt = now;
-    runtimeConformanceRecords = await probeRuntimeProfilesConformance(
-      runtimeProfiles,
-      {
-        requestTimeoutMs,
-      },
-    );
-  };
+  let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> = {};
+  let lastRuntimeConformanceProbeAt = 0;
   const runtimeConformanceSummary = () =>
     summarizeRuntimeConformance({
       now: Date.now(),
@@ -1267,6 +1247,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     lastJournalHealthSignature: string;
     log: FlushableBridgeLogger;
     manager: BridgeSessionManager;
+    processRegistry: AcpBridgeProcessRegistry;
     status: BridgeStatus;
     supervisor: BridgeSupervisor;
     wakeSignal: BridgeWakeSignal;
@@ -1285,6 +1266,50 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       (count, context) => count + context.inFlightCommands.size,
       0,
     );
+  const totalRunningSessionQueues = () =>
+    Array.from(contexts.values()).reduce(
+      (count, context) =>
+        count +
+        context.manager
+          .getStatus()
+          .sessions.filter((session) => session.runningQueueItemId).length,
+      0,
+    );
+  const refreshRuntimeConformanceIfStale = async (
+    options: { force?: boolean } = {},
+  ) => {
+    const now = Date.now();
+    if (
+      !shouldRefreshRuntimeConformance({
+        force: options.force,
+        inFlightCommandCount: totalInFlight(),
+        lastProbeAt: lastRuntimeConformanceProbeAt,
+        now,
+        runningSessionCount: totalRunningSessionQueues(),
+        ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+      })
+    ) {
+      return;
+    }
+    const ownerContext = contexts.values().next().value as
+      | RuntimeContext
+      | undefined;
+    if (!ownerContext) {
+      return;
+    }
+    lastRuntimeConformanceProbeAt = now;
+    runtimeConformanceRecords = await probeRuntimeProfilesConformance(
+      runtimeProfiles,
+      {
+        bridgeDeviceId: ownerContext.config.deviceId,
+        processRegistry: ownerContext.processRegistry,
+        requestTimeoutMs,
+      },
+    );
+    for (const context of contexts.values()) {
+      context.status.runtimeConformance = runtimeConformanceSummary();
+    }
+  };
   const ensureContexts = async () => {
     const latestConfig = await readBridgeConfigFile(configPath);
     const activeIds = new Set(
@@ -1399,6 +1424,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         lastStaleCleanupAt: 0,
         log,
         manager,
+        processRegistry,
         status,
         supervisor,
         wakeSignal,
@@ -1438,6 +1464,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
 
   await ensureContexts();
+  await refreshRuntimeConformanceIfStale({ force: true });
   writeStdout(
     buildStartupSecuritySummary({ allowRemoteCwd, configPath, logUrl }),
   );
@@ -1503,6 +1530,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
 
   while (!stopping) {
     await ensureContexts();
+    await refreshRuntimeConformanceIfStale();
     for (const context of contexts.values()) {
       const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight());
       const effectiveMaxInFlight =
@@ -1561,7 +1589,6 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           reason: watchdog.reasonCode,
         });
       }
-      await refreshRuntimeConformanceIfStale();
       const result = await runBridgeLoopIteration({
         config: context.config,
         agentCommand,
@@ -1595,7 +1622,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
 
 async function probeRuntimeProfilesConformance(
   profiles: BridgeRuntimeProfile[],
-  options: { requestTimeoutMs: number },
+  options: {
+    bridgeDeviceId?: string;
+    processRegistry?: AcpBridgeProcessRegistry;
+    requestTimeoutMs: number;
+  },
 ): Promise<Record<string, RuntimeConformanceRecord>> {
   const records: Record<string, RuntimeConformanceRecord> = {};
   await Promise.all(
@@ -1606,6 +1637,12 @@ async function probeRuntimeProfilesConformance(
           createSession: () =>
             new HermesAcpSession({
               agentCommand: profile.command,
+              processRegistry: options.processRegistry,
+              processRegistryMetadata: {
+                bridgeDeviceId: options.bridgeDeviceId,
+                runtimeProfileId: profile.id,
+                sessionKey: `runtime-conformance:${profile.id}`,
+              },
               requestTimeoutMs: options.requestTimeoutMs,
             }),
           profile,

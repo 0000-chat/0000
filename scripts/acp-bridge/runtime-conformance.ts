@@ -51,6 +51,23 @@ const STRENGTH_RANK: Record<RuntimeConformanceStrength, number> = {
   prompt_smoke: 2,
 }
 
+export function shouldRefreshRuntimeConformance(input: {
+  force?: boolean
+  inFlightCommandCount: number
+  lastProbeAt: number
+  now: number
+  runningSessionCount: number
+  ttlMs?: number
+}): boolean {
+  if (input.runningSessionCount > 0 || input.inFlightCommandCount > 0) {
+    return false
+  }
+  if (input.force === true) {
+    return true
+  }
+  return input.now - input.lastProbeAt >= (input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS) / 2
+}
+
 export function evaluateConformanceForClaim(input: {
   now: number
   record: RuntimeConformanceRecord | null | undefined
