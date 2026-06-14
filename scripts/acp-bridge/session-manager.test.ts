@@ -2937,15 +2937,13 @@ describe("bridge session cwd safety", () => {
     const staleRecord = records[0];
     const currentRecord = records[1];
     expect(staleRecord?.generation).toBe(1);
-    expect(currentRecord?.generation).toBe(2);
+    expect(currentRecord?.generation).toBe(1);
     await expect(
       terminalRegistry.kill(staleRecord!.scope, {
         generation: staleRecord!.generation,
       }),
     ).resolves.toMatchObject({
-      currentGeneration: currentRecord!.generation,
-      generation: staleRecord!.generation,
-      status: "stale",
+      status: "missing",
     });
     expect(handles[1]?.kills).toEqual([]);
     expect(terminalRegistry.lookup(currentRecord!.scope)).toBe(currentRecord);

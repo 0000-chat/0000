@@ -178,6 +178,8 @@ type ProposedAgentProfile = {
 
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
+const DEFAULT_CONTROL_LANE_CLAIM_LIMIT = 4;
+
 type BridgeWakeSignal = {
   wait(timeoutMs: number): Promise<void>;
   close(): Promise<void>;
@@ -701,7 +703,7 @@ export function getMaxInFlight(
   if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
     throw new Error("max-in-flight must be a positive integer");
   }
-  return Math.max(2, maxInFlight);
+  return maxInFlight;
 }
 
 export function getAllowRemoteCwd(
@@ -2063,8 +2065,18 @@ export async function runBridgeLoopIteration(
       });
       await persistStatus(input.statusPath, input.status);
     }
-    const availableSlots = input.maxInFlight - input.inFlightCommands.size;
-    if (availableSlots > 0) {
+    const promptSlots = Math.max(
+      0,
+      input.maxInFlight -
+        countInFlightCommands(input.inFlightCommandMetadata, isPromptLaneCommandType),
+    );
+    const controlSlots =
+      countInFlightCommands(input.inFlightCommandMetadata, isControlLaneCommandType) > 0
+        ? 0
+        : DEFAULT_CONTROL_LANE_CLAIM_LIMIT;
+    const claimLimit =
+      promptSlots > 0 ? promptSlots + controlSlots : controlSlots;
+    if (claimLimit > 0) {
       const processHealth = input.getProcessHealth?.();
       if (processHealth) {
         input.status.processHealth = processHealth;
@@ -2078,7 +2090,7 @@ export async function runBridgeLoopIteration(
       if (now - input.lastStaleCleanupAt >= 60_000) {
         input.setLastStaleCleanupAt(now);
         const cleanupResult = await cleanup(input.config, {
-          limit: availableSlots,
+          limit: Math.max(1, promptSlots),
         });
         input.status.lastStaleCleanupAt = new Date(now).toISOString();
         input.status.lastStaleCleanup = {
@@ -2143,7 +2155,10 @@ export async function runBridgeLoopIteration(
         return { restartRequested: false };
       }
       input.status.lastPollAt = new Date(now).toISOString();
-      const commands = await claim(input.config, availableSlots);
+      const commands = selectClaimedCommandsForLanes(await claim(input.config, claimLimit), {
+        controlSlots,
+        promptSlots,
+      });
       if (commands.length > 0) {
         input.log({
           level: "info",
@@ -2182,6 +2197,69 @@ export async function runBridgeLoopIteration(
     await input.recordLoopError(error);
   }
   return { restartRequested: false };
+}
+
+function countInFlightCommands(
+  commands: Map<string, InFlightCommandMetadata>,
+  predicate: (type: string | undefined) => boolean,
+): number {
+  let count = 0;
+  for (const command of commands.values()) {
+    if (predicate(command.type)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function isPromptLaneCommandType(type: string | undefined): boolean {
+  return type === undefined || type === "prompt" || type === "start-session";
+}
+
+function isControlLaneCommandType(type: string | undefined): boolean {
+  return (
+    type === "approval" ||
+    type === "approval-response" ||
+    type === "cancel" ||
+    type === "cancel-session" ||
+    type === "choice-response" ||
+    type === "close-session" ||
+    type === "input-response" ||
+    type === "permission-response" ||
+    type === "ping" ||
+    type === "revive-session" ||
+    type === "steer-session"
+  );
+}
+
+function selectClaimedCommandsForLanes(
+  commands: BridgeQueueCommand[],
+  slots: { controlSlots: number; promptSlots: number },
+): BridgeQueueCommand[] {
+  const selected: BridgeQueueCommand[] = [];
+  let controlCount = 0;
+  let promptCount = 0;
+
+  for (const command of commands) {
+    const type = command.type ?? command.kind;
+    if (isPromptLaneCommandType(type)) {
+      if (promptCount >= slots.promptSlots) {
+        continue;
+      }
+      promptCount += 1;
+      selected.push(command);
+      continue;
+    }
+    if (isControlLaneCommandType(type)) {
+      if (controlCount >= slots.controlSlots) {
+        continue;
+      }
+      controlCount += 1;
+      selected.push(command);
+    }
+  }
+
+  return selected;
 }
 
 export function buildBridgeRegistrationFailure(

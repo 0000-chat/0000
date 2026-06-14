@@ -326,8 +326,9 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
     const record = adapter.registry.create({
       handle,
       scope: adapter.scope,
+      terminalId: handle.terminalId,
     })
-    const terminalId = handle.terminalId ?? `${record.key}:${record.generation}`
+    const terminalId = record.terminalId
     this.terminalRecords.set(terminalId, record)
     await this.emitActivity({
       type: "terminal_activity",
@@ -382,7 +383,10 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
   private async killTerminal(params: KillTerminalRequest): Promise<KillTerminalResponse> {
     const adapter = this.requireTerminalAdapter()
     const record = await this.requireTerminalRecord(params.terminalId, "kill")
-    const result = await adapter.registry.kill(record.scope, { generation: record.generation })
+    const result = await adapter.registry.kill(record.scope, {
+      generation: record.generation,
+      terminalId: record.terminalId,
+    })
     if (result.status !== "stale") {
       this.terminalRecords.delete(params.terminalId)
     }
@@ -404,7 +408,10 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
   ): Promise<ReleaseTerminalResponse> {
     const adapter = this.requireTerminalAdapter()
     const record = await this.requireTerminalRecord(params.terminalId, "release")
-    const result = await adapter.registry.release(record.scope, { generation: record.generation })
+    const result = await adapter.registry.release(record.scope, {
+      generation: record.generation,
+      terminalId: record.terminalId,
+    })
     if (result.status !== "stale") {
       this.terminalRecords.delete(params.terminalId)
     }
@@ -436,7 +443,7 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
     if (!record) {
       throw new Error(`Unknown ACP terminal handle: ${terminalId}`)
     }
-    const currentRecord = this.terminalAdapter?.registry.lookup(record.scope)
+    const currentRecord = this.terminalAdapter?.registry.lookup(record.scope, record.terminalId)
     if (currentRecord !== record || currentRecord.generation !== record.generation) {
       this.terminalRecords.delete(terminalId)
       await this.emitActivity({

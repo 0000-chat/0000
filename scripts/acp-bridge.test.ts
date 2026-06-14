@@ -17,6 +17,7 @@ import {
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getConvexUrl,
+  getMaxInFlight,
   normalizeBridgeConfigFile,
   parseBridgeArgs,
   runBridgeLoopIteration,
@@ -46,6 +47,11 @@ describe("bridge command parsing", () => {
       flags: { "app-url": "https://0000.chat" },
       positionals: ["CODE"],
     });
+  });
+
+  test("honors max-in-flight of one for serialized ACP runtimes", () => {
+    expect(getMaxInFlight({ "max-in-flight": "1" }, {})).toBe(1);
+    expect(getMaxInFlight({}, { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "1" })).toBe(1);
   });
 });
 
@@ -1199,7 +1205,7 @@ describe("bridge supervisor claim gating", () => {
     ]);
     expect(inFlightCommands.has("queue-timeout")).toBe(false);
     expect(inFlightCommandMetadata.has("queue-timeout")).toBe(false);
-    expect(claimLimit).toBe(1);
+    expect(claimLimit).toBe(5);
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "bridge.queue_item.settled",
@@ -1207,6 +1213,205 @@ describe("bridge supervisor claim gating", () => {
         reason: "provider_silent_timeout",
       }),
     );
+  });
+
+  test("claims permission responses while a serialized prompt is in flight", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const inFlightCommands = new Map<string, Promise<void>>([
+      ["queue-prompt", new Promise<void>(() => {})],
+    ]);
+    const inFlightCommandMetadata = new Map([
+      [
+        "queue-prompt",
+        {
+          agentSessionId: "agent-session-1",
+          id: "queue-prompt",
+          startedAt: "2026-06-05T10:00:00.000Z",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+    ]);
+    const handled: string[] = [];
+    let claimLimit: number | undefined;
+
+    await runBridgeLoopIteration({
+      claimCommands: async (_config, limit) => {
+        claimLimit = limit;
+        return [
+          {
+            agentSessionId: "agent-session-1",
+            id: "queue-permission",
+            kind: "permission-response",
+            threadId: "thread-1",
+            type: "permission-response",
+          },
+        ];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata,
+      inFlightCommands,
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: ["session-1"],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (command) => {
+          handled.push(command.id);
+        },
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 6, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimLimit).toBe(4);
+    expect(handled).toEqual(["queue-permission"]);
+    expect(inFlightCommands.has("queue-prompt")).toBe(true);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.in_flight",
+        queueId: "queue-permission",
+        queueType: "permission-response",
+      }),
+    );
+  });
+
+  test("does not start extra prompt commands when control lane raises claim limit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const handled: string[] = [];
+    let claimLimit: number | undefined;
+
+    await runBridgeLoopIteration({
+      claimCommands: async (_config, limit) => {
+        claimLimit = limit;
+        return [
+          {
+            id: "queue-prompt-1",
+            kind: "prompt",
+            threadId: "thread-1",
+            type: "prompt",
+          },
+          {
+            id: "queue-prompt-2",
+            kind: "prompt",
+            threadId: "thread-2",
+            type: "prompt",
+          },
+        ];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (command) => {
+          handled.push(command.id);
+        },
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 7, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimLimit).toBe(5);
+    expect(handled).toEqual(["queue-prompt-1"]);
+  });
+
+  test("starts one prompt plus available control commands from a mixed claim", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const handled: string[] = [];
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          id: "queue-prompt-1",
+          kind: "prompt",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+        {
+          id: "queue-permission",
+          kind: "permission-response",
+          threadId: "thread-1",
+          type: "permission-response",
+        },
+        {
+          id: "queue-prompt-2",
+          kind: "prompt",
+          threadId: "thread-2",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (command) => {
+          handled.push(command.id);
+        },
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 8, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(handled).toEqual(["queue-prompt-1", "queue-permission"]);
   });
 
   test("keeps quiet watchdog in-flight instead of terminalizing", async () => {

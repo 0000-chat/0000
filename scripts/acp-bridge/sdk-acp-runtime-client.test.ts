@@ -454,7 +454,7 @@ test("serves SDK terminal callbacks through the terminal handle registry", async
     }),
     expect.objectContaining({
       action: "created",
-      generation: 2,
+      generation: 1,
       sessionId: "session-1",
       status: "running",
       terminalId: "terminal-2",
@@ -473,6 +473,84 @@ test("serves SDK terminal callbacks through the terminal handle registry", async
     (activity) => activity.type === "terminal_activity" && activity.action === "created",
   )
   expect(createActivity?.command).toHaveLength(300)
+})
+
+test("serves overlapping SDK terminal callbacks without staling older handles", async () => {
+  const streams = createPairedStreams()
+  const registry = new TerminalHandleRegistry<SdkAcpRuntimeTerminalHandle>()
+  const activities: SdkAcpRuntimeActivity[] = []
+  let handleCount = 0
+  let agentConnection: AgentSideConnection
+  const agent: Agent = {
+    authenticate: async () => undefined,
+    cancel: async () => undefined,
+    initialize: async (params) => ({
+      agentCapabilities: {},
+      protocolVersion: params.protocolVersion,
+    }),
+    newSession: async () => ({ sessionId: "session-1" }),
+    prompt: async (params) => {
+      const first = await agentConnection.createTerminal({
+        command: "echo first",
+        sessionId: params.sessionId,
+      })
+      const second = await agentConnection.createTerminal({
+        command: "echo second",
+        sessionId: params.sessionId,
+      })
+
+      await expect(first.currentOutput()).resolves.toMatchObject({
+        output: "terminal-1",
+        truncated: false,
+      })
+      await expect(second.currentOutput()).resolves.toMatchObject({
+        output: "terminal-2",
+        truncated: false,
+      })
+      await first.release()
+      await second.release()
+      return { stopReason: "end_turn" }
+    },
+  }
+  agentConnection = new AgentSideConnection(() => agent, streams.agent)
+  const client = new SdkAcpRuntimeClient({
+    stream: streams.client,
+    terminalAdapter: {
+      createTerminal: async () => {
+        handleCount += 1
+        const id = `terminal-${handleCount}`
+        return {
+          currentOutput: async () => ({ output: id, truncated: false }),
+          release: async () => {},
+          terminalId: id,
+          waitForExit: async () => ({ exitCode: 0 }),
+        }
+      },
+      registry,
+      scope: {
+        agentSessionId: "agent-session-1",
+        bridgeDeviceId: "device-1",
+        organizationId: "org-1",
+        runtimeProfileId: "codex:codex-acp",
+        threadId: "thread-1",
+      },
+    },
+    onActivity: (activity) => {
+      activities.push(activity)
+    },
+  })
+
+  await client.initialize()
+  const session = await client.createSession({ cwd: "/tmp", mcpServers: [] })
+  await expect(
+    client.prompt({ prompt: [{ text: "use terminals", type: "text" }], sessionId: session.sessionId }),
+  ).resolves.toMatchObject({ stopReason: "end_turn" })
+  expect(registry.list()).toHaveLength(0)
+  expect(
+    activities.filter(
+      (activity) => activity.type === "terminal_activity" && activity.action === "fenced",
+    ),
+  ).toEqual([])
 })
 
 function createPairedStreams(): { agent: Stream; client: Stream } {
