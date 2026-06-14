@@ -88,6 +88,8 @@ const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
 const DEFAULT_MAX_IN_FLIGHT_COMMANDS = 2;
+const MIN_REMOTE_MAX_IN_FLIGHT_COMMANDS = 1;
+const MAX_REMOTE_MAX_IN_FLIGHT_COMMANDS = 16;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
 const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -444,6 +446,11 @@ export type BridgeLoopIterationInput = {
   canClaimWork?: () => boolean;
   getProcessHealth?: () => AcpBridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
+  applyMaxInFlightSetting?: (
+    deviceId: string,
+    maxInFlight: number,
+    updatedAt?: number,
+  ) => number;
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
 };
@@ -701,7 +708,7 @@ export function getMaxInFlight(
   if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
     throw new Error("max-in-flight must be a positive integer");
   }
-  return Math.max(2, maxInFlight);
+  return maxInFlight;
 }
 
 export function getAllowRemoteCwd(
@@ -1209,7 +1216,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const pollMs = Number(
     getFlag(parsed.flags, "poll-ms", String(DEFAULT_POLL_MS)),
   );
-  const maxInFlight = getMaxInFlight(parsed.flags);
+  const startupMaxInFlight = getMaxInFlight(parsed.flags);
   const agentCommand =
     getFlag(parsed.flags, "agent-command", DEFAULT_AGENT_COMMAND) ??
     DEFAULT_AGENT_COMMAND;
@@ -1254,10 +1261,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
 
   const contexts = new Map<string, RuntimeContext>();
+  const desiredMaxInFlightByDevice = new Map<
+    string,
+    { maxInFlight: number; updatedAt?: number }
+  >();
+  let effectiveBridgeMaxInFlight = startupMaxInFlight;
   let stopping = false;
 
   const aggregateStatus = () =>
-    buildAggregateBridgeStatus(Array.from(contexts.values()), maxInFlight);
+    buildAggregateBridgeStatus(
+      Array.from(contexts.values()),
+      effectiveBridgeMaxInFlight,
+    );
   const persistAggregateStatus = async () => {
     await writeStatus(statusPath, aggregateStatus());
   };
@@ -1266,6 +1281,60 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       (count, context) => count + context.inFlightCommands.size,
       0,
     );
+  const recomputeEffectiveMaxInFlight = () => {
+    const desiredValues = Array.from(desiredMaxInFlightByDevice.values()).map(
+      (setting) => setting.maxInFlight,
+    );
+    const next =
+      desiredValues.length > 0
+        ? Math.max(...desiredValues)
+        : startupMaxInFlight;
+    if (next === effectiveBridgeMaxInFlight) {
+      return next;
+    }
+    effectiveBridgeMaxInFlight = next;
+    for (const context of contexts.values()) {
+      context.processRegistry.setMaxProcesses(next);
+      context.status.maxInFlight = next;
+      syncBridgeRuntimeStatus(
+        context.status,
+        context.manager,
+        next,
+        context.inFlightCommandMetadata,
+        context.supervisor.getProcessHealth(),
+        runtimeConformanceSummary(),
+      );
+    }
+    return next;
+  };
+  const applyMaxInFlightSetting = (
+    deviceId: string,
+    maxInFlight: number,
+    updatedAt?: number,
+  ) => {
+    const current = desiredMaxInFlightByDevice.get(deviceId);
+    if (
+      current?.updatedAt !== undefined &&
+      updatedAt !== undefined &&
+      updatedAt < current.updatedAt
+    ) {
+      return getContextMaxInFlightAllowance(deviceId);
+    }
+    desiredMaxInFlightByDevice.set(deviceId, { maxInFlight, updatedAt });
+    recomputeEffectiveMaxInFlight();
+    return getContextMaxInFlightAllowance(deviceId);
+  };
+  const getContextMaxInFlightAllowance = (deviceId: string) => {
+    const context = contexts.get(deviceId);
+    if (!context) {
+      return effectiveBridgeMaxInFlight;
+    }
+    const availableProcessSlots = Math.max(
+      0,
+      effectiveBridgeMaxInFlight - totalInFlight(),
+    );
+    return context.inFlightCommands.size + availableProcessSlots;
+  };
   const totalRunningSessionQueues = () =>
     Array.from(contexts.values()).reduce(
       (count, context) =>
@@ -1332,7 +1401,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         registration.deviceId,
       );
       const processRegistry = new AcpBridgeProcessRegistry({
-        maxProcesses: maxInFlight,
+        maxProcesses: effectiveBridgeMaxInFlight,
         path: processRegistryPath,
       });
       const supervisor = openBridgeSupervisor({
@@ -1379,7 +1448,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       const wakeSignal = createBridgeWakeSignal({
         config: registration,
         convexUrl: getConvexUrl(parsed.flags, registration),
-        limit: maxInFlight,
+        limit: effectiveBridgeMaxInFlight,
         log,
       });
       const status: BridgeStatus = {
@@ -1399,7 +1468,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
               pendingRestart: false,
             },
         lastStartedAt: new Date().toISOString(),
-        maxInFlight,
+        maxInFlight: effectiveBridgeMaxInFlight,
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
         hermesProfiles,
@@ -1449,6 +1518,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       context.supervisor.close();
       await context.log.flush();
       contexts.delete(deviceId);
+      desiredMaxInFlightByDevice.delete(deviceId);
+      recomputeEffectiveMaxInFlight();
     }
     await persistAggregateStatus();
   };
@@ -1489,7 +1560,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       syncBridgeRuntimeStatus(
         context.status,
         context.manager,
-        maxInFlight,
+        effectiveBridgeMaxInFlight,
         context.inFlightCommandMetadata,
       );
       await persistAggregateStatus();
@@ -1504,7 +1575,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       syncBridgeRuntimeStatus(
         context.status,
         context.manager,
-        maxInFlight,
+        effectiveBridgeMaxInFlight,
         context.inFlightCommandMetadata,
       );
       context.status.localJournal = bridgeSupervisorHealthStatus(
@@ -1532,7 +1603,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     await ensureContexts();
     await refreshRuntimeConformanceIfStale();
     for (const context of contexts.values()) {
-      const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight());
+      const availableProcessSlots = Math.max(
+        0,
+        effectiveBridgeMaxInFlight - totalInFlight(),
+      );
       const effectiveMaxInFlight =
         context.inFlightCommands.size + availableProcessSlots;
       context.status.localJournal = bridgeSupervisorHealthStatus(
@@ -1609,6 +1683,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         canClaimWork: () => context.supervisor.canClaimWork(),
         getProcessHealth: () => context.supervisor.getProcessHealth(),
         getRuntimeConformance: runtimeConformanceSummary,
+        applyMaxInFlightSetting,
         writeStatus: persistAggregateStatus,
       });
       if (result.restartRequested) {
@@ -1738,6 +1813,27 @@ function normalizeControlCommand(
   };
 }
 
+function normalizeControlMaxInFlight(
+  settings?: BridgeControlResponse["settings"],
+): { maxInFlight: number; updatedAt?: number } | undefined {
+  if (!settings) {
+    return undefined;
+  }
+  const maxInFlight = Number(settings.maxInFlight);
+  if (
+    !Number.isInteger(maxInFlight) ||
+    maxInFlight < MIN_REMOTE_MAX_IN_FLIGHT_COMMANDS ||
+    maxInFlight > MAX_REMOTE_MAX_IN_FLIGHT_COMMANDS
+  ) {
+    return undefined;
+  }
+  return {
+    maxInFlight,
+    updatedAt:
+      typeof settings.updatedAt === "number" ? settings.updatedAt : undefined,
+  };
+}
+
 async function launchBridgeUpdater(
   input: BridgeUpdaterLaunchInput,
 ): Promise<void> {
@@ -1835,12 +1931,13 @@ export async function runBridgeLoopIteration(
   const persistStatus = input.writeStatus ?? writeStatus;
   const currentTime = input.now ?? Date.now;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
+  let currentMaxInFlight = input.maxInFlight;
 
   const syncBridgeStatus = () => {
     syncBridgeRuntimeStatus(
       input.status,
       input.manager,
-      input.maxInFlight,
+      currentMaxInFlight,
       input.inFlightCommandMetadata,
       input.getProcessHealth?.(),
       input.getRuntimeConformance?.(),
@@ -1929,8 +2026,33 @@ export async function runBridgeLoopIteration(
       } else if (
         heartbeatResult.control?.refreshHermesProfiles ||
         heartbeatResult.control?.refreshRuntimeProfiles ||
-        heartbeatResult.control?.command
+        heartbeatResult.control?.command ||
+        heartbeatResult.control?.settings
       ) {
+        const controlSettings = normalizeControlMaxInFlight(
+          heartbeatResult.control.settings,
+        );
+        if (controlSettings) {
+          const previousMaxInFlight = currentMaxInFlight;
+          currentMaxInFlight =
+            input.applyMaxInFlightSetting?.(
+              input.config.deviceId,
+              controlSettings.maxInFlight,
+              controlSettings.updatedAt,
+            ) ?? controlSettings.maxInFlight;
+          syncBridgeStatus();
+          if (currentMaxInFlight !== previousMaxInFlight) {
+            input.log({
+              level: "info",
+              event: "bridge.settings.max_in_flight_applied",
+              deviceId: input.config.deviceId,
+              previousMaxInFlight,
+              maxInFlight: currentMaxInFlight,
+              requestedMaxInFlight: controlSettings.maxInFlight,
+              updatedAt: controlSettings.updatedAt,
+            });
+          }
+        }
         const controlCommand = normalizeControlCommand(
           heartbeatResult.control.command,
         );
@@ -2063,7 +2185,7 @@ export async function runBridgeLoopIteration(
       });
       await persistStatus(input.statusPath, input.status);
     }
-    const availableSlots = input.maxInFlight - input.inFlightCommands.size;
+    const availableSlots = currentMaxInFlight - input.inFlightCommands.size;
     if (availableSlots > 0) {
       const processHealth = input.getProcessHealth?.();
       if (processHealth) {
@@ -2717,6 +2839,10 @@ type BridgeControlResponse = {
   };
   refreshRuntimeProfiles?: {
     requestedAt?: unknown;
+  };
+  settings?: {
+    maxInFlight?: unknown;
+    updatedAt?: unknown;
   };
 };
 

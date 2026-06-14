@@ -711,6 +711,190 @@ describe("bridge supervisor claim gating", () => {
     expect(status.lifecycle).toBe("restarting");
   });
 
+  test("hot-applies heartbeat max concurrency settings before claiming work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    let claimLimit: number | undefined;
+    let appliedMax: number | undefined;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      applyMaxInFlightSetting: (_deviceId, maxInFlight) => {
+        appliedMax = maxInFlight;
+        return maxInFlight;
+      },
+      claimCommands: async (_config, limit) => {
+        claimLimit = limit;
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: {
+          settings: {
+            maxInFlight: 4,
+            updatedAt: Date.UTC(2026, 5, 5, 10, 3, 0),
+          },
+        },
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(appliedMax).toBe(4);
+    expect(claimLimit).toBe(4);
+    expect(status.maxInFlight).toBe(4);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.settings.max_in_flight_applied",
+        maxInFlight: 4,
+      }),
+    );
+  });
+
+  test("hot-applied concurrency uses the registration allowance after global in-flight work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let claimLimit: number | undefined;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      applyMaxInFlightSetting: () => 3,
+      claimCommands: async (_config, limit) => {
+        claimLimit = limit;
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: {
+          settings: {
+            maxInFlight: 4,
+            updatedAt: Date.UTC(2026, 5, 5, 10, 3, 0),
+          },
+        },
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimLimit).toBe(3);
+    expect(status.maxInFlight).toBe(3);
+  });
+
+  test("ignores stale max concurrency setting revisions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let latestUpdatedAt = Date.UTC(2026, 5, 5, 10, 3, 0);
+    let effectiveMax = 4;
+    let claimLimit: number | undefined;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      applyMaxInFlightSetting: (_deviceId, maxInFlight, updatedAt) => {
+        if (updatedAt !== undefined && updatedAt < latestUpdatedAt) {
+          return effectiveMax;
+        }
+        if (updatedAt !== undefined) {
+          latestUpdatedAt = updatedAt;
+        }
+        effectiveMax = maxInFlight;
+        return effectiveMax;
+      },
+      claimCommands: async (_config, limit) => {
+        claimLimit = limit;
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 4,
+      now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: {
+          settings: {
+            maxInFlight: 1,
+            updatedAt: Date.UTC(2026, 5, 5, 10, 1, 0),
+          },
+        },
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimLimit).toBe(4);
+    expect(status.maxInFlight).toBe(4);
+  });
+
   test("skips queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
