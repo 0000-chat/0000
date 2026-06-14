@@ -209,6 +209,11 @@ describe("bridge supervisor shadow mode", () => {
     let reconciled = false;
     const supervisor = new BridgeSupervisor({
       processRegistry: {
+        cleanupOrphanedProcesses: async () => ({
+          lastReconciledAt: "2026-06-05T10:04:00.000Z",
+          orphanedProcessCount: 0,
+          terminatedOrphanedProcessCount: 0,
+        }),
         getProcessHealth: () => ({
           ambiguousProcessCount: reconciled ? 1 : 0,
           canClaim: !reconciled,
@@ -240,6 +245,53 @@ describe("bridge supervisor shadow mode", () => {
       ambiguousProcessCount: 1,
       canClaim: false,
       status: "ambiguous",
+    });
+  });
+
+  test("runs orphan process cleanup without marking active registry entries unsafe", async () => {
+    const supervisor = new BridgeSupervisor({
+      processRegistry: {
+        cleanupOrphanedProcesses: async () => {
+          return {
+            lastReconciledAt: "2026-06-05T10:04:00.000Z",
+            orphanedProcessCount: 2,
+            terminatedOrphanedProcessCount: 2,
+          };
+        },
+        getProcessHealth: () => ({
+          ambiguousProcessCount: 0,
+          canClaim: true,
+          childCount: 1,
+          childCountsByRuntimeProfile: { "hermes:default": 1 },
+          processCap: 2,
+          processCapExceeded: false,
+          startupReconciliation: {
+            ambiguousProcessCount: 0,
+            lastReconciledAt: "2026-06-05T10:04:00.000Z",
+            orphanedProcessCount: 0,
+            removedDeadProcessCount: 0,
+            retainedProcessCount: 0,
+            status: "healthy",
+            terminatedOrphanedProcessCount: 0,
+            terminatedProcessCount: 0,
+          },
+          status: "healthy",
+        }),
+        reconcileBeforeClaiming: async () => {},
+      },
+    });
+
+    await expect(supervisor.cleanupOrphanedProcesses()).resolves.toMatchObject({
+      orphanedProcessCount: 2,
+      terminatedOrphanedProcessCount: 2,
+    });
+    expect(supervisor.canClaimWork()).toBe(true);
+    expect(supervisor.getProcessHealth()).toMatchObject({
+      childCount: 1,
+      startupReconciliation: {
+        orphanedProcessCount: 0,
+        terminatedOrphanedProcessCount: 0,
+      },
     });
   });
 

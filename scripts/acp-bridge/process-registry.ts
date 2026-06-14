@@ -53,7 +53,14 @@ export type AcpBridgeProcessHealth = {
   status: AcpBridgeProcessHealthStatus
 }
 
+export type AcpBridgeOrphanProcessCleanup = {
+  lastReconciledAt: string
+  orphanedProcessCount: number
+  terminatedOrphanedProcessCount: number
+}
+
 export type AcpBridgeProcessRegistryLike = {
+  cleanupOrphanedProcesses(): Promise<AcpBridgeOrphanProcessCleanup>
   getProcessHealth(): AcpBridgeProcessHealth
   reconcileBeforeClaiming(): Promise<void>
   registerProcess(
@@ -302,6 +309,21 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
         terminatedProcessCount: terminated,
       }
       await this.persist()
+    })
+  }
+
+  async cleanupOrphanedProcesses(): Promise<AcpBridgeOrphanProcessCleanup> {
+    return await this.withRegistryMutation(async () => {
+      await this.ensureLoaded()
+      const orphanCleanup = await this.reconcileOrphanedProxyProcesses(
+        new Set(Array.from(this.entries.values()).map((entry) => entry.pid)),
+      )
+      const lastReconciledAt = this.now().toISOString()
+      return {
+        lastReconciledAt,
+        orphanedProcessCount: orphanCleanup.orphaned,
+        terminatedOrphanedProcessCount: orphanCleanup.terminated,
+      }
     })
   }
 
