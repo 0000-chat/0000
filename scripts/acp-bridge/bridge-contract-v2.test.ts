@@ -66,6 +66,7 @@ const expectedBridgeDiagnosticReasonCodes = [
   "permission_timeout_denied",
   "permission_response_unmatched",
   "permission_request_orphaned",
+  "tool_result_timeout",
   "interaction_expired",
   "interaction_response_rejected",
   "interaction_delivery_failed",

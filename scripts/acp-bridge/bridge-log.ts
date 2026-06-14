@@ -67,6 +67,7 @@ export const bridgeLogEventNames = [
   "bridge.runtime_profiles.restart_requested",
   "bridge.session.quiet_degraded",
   "bridge.session.runtime_profile_changed",
+  "bridge.session.tool_result_timeout",
   "bridge.start",
   "bridge.stop",
   "bridge.subscription.disabled",

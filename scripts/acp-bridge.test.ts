@@ -794,9 +794,11 @@ describe("bridge supervisor claim gating", () => {
         startupReconciliation: {
           ambiguousProcessCount: 1,
           lastReconciledAt: "2026-06-05T10:03:00.000Z",
+          orphanedProcessCount: 0,
           removedDeadProcessCount: 0,
           retainedProcessCount: 1,
           status: "ambiguous",
+          terminatedOrphanedProcessCount: 0,
           terminatedProcessCount: 0,
         },
         status: "cap_exceeded",
@@ -836,9 +838,11 @@ describe("bridge supervisor claim gating", () => {
       startupReconciliation: {
         ambiguousProcessCount: 1,
         lastReconciledAt: "2026-06-05T10:03:00.000Z",
+        orphanedProcessCount: 0,
         removedDeadProcessCount: 0,
         retainedProcessCount: 1,
         status: "ambiguous",
+        terminatedOrphanedProcessCount: 0,
         terminatedProcessCount: 0,
       },
       status: "cap_exceeded",
@@ -855,9 +859,11 @@ describe("bridge supervisor claim gating", () => {
       startupReconciliation: {
         ambiguousProcessCount: 1,
         lastReconciledAt: "2026-06-05T10:03:00.000Z",
+        orphanedProcessCount: 0,
         removedDeadProcessCount: 0,
         retainedProcessCount: 1,
         status: "ambiguous",
+        terminatedOrphanedProcessCount: 0,
         terminatedProcessCount: 0,
       },
     });
@@ -959,9 +965,11 @@ describe("bridge supervisor claim gating", () => {
         startupReconciliation: {
           ambiguousProcessCount: 1,
           lastReconciledAt: "2026-06-05T10:03:00.000Z",
+          orphanedProcessCount: 0,
           removedDeadProcessCount: 0,
           retainedProcessCount: 1,
           status: "ambiguous",
+          terminatedOrphanedProcessCount: 0,
           terminatedProcessCount: 0,
         },
         status: "ambiguous",

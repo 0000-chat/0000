@@ -170,9 +170,11 @@ export class BridgeSupervisor {
         processCapExceeded: false,
         startupReconciliation: {
           ambiguousProcessCount: 0,
+          orphanedProcessCount: 0,
           removedDeadProcessCount: 0,
           retainedProcessCount: 0,
           status: "not_run",
+          terminatedOrphanedProcessCount: 0,
           terminatedProcessCount: 0,
         },
         status: "healthy",

@@ -380,6 +380,212 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("terminalizes active prompt when a tool call never resolves", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    let closeCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {
+          closeCount += 1;
+        },
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          await new Promise(() => {});
+          throw new Error("unreachable");
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    void manager.handleQueueItem(promptQueueItem());
+    await eventually(() =>
+      expect(cloud.results).toContainEqual(
+        expect.objectContaining({
+          claimId: "claim-prompt",
+          id: "queue-prompt",
+          result: expect.objectContaining({
+            ok: false,
+            reasonCode: "tool_result_timeout",
+            terminal: true,
+          }),
+        }),
+      ),
+    );
+
+    expect(closeCount).toBe(1);
+    expect(manager.getStatus().sessions).toEqual([]);
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "bridge_error",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            reasonCode: "tool_result_timeout",
+            toolCallId: "tool-1",
+          }),
+          status: "error",
+          type: "error",
+        }),
+      }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+        queueId: "queue-prompt",
+        reasonCode: "tool_result_timeout",
+        toolCallId: "tool-1",
+      }),
+    );
+  });
+
+  test("tracks unresolved tool calls against the running item in a reused session", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    let sendCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          sendCount += 1;
+          if (sendCount === 1) {
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: "first complete",
+            };
+          }
+          context.onEvent(toolCallEvent(1));
+          await new Promise(() => {});
+          throw new Error("unreachable");
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+    void manager.handleQueueItem({
+      ...promptQueueItem(),
+      claimId: "claim-second",
+      id: "queue-second",
+      prompt: "again",
+    });
+
+    await eventually(() =>
+      expect(cloud.results).toContainEqual(
+        expect.objectContaining({
+          claimId: "claim-second",
+          id: "queue-second",
+          result: expect.objectContaining({
+            ok: false,
+            reasonCode: "tool_result_timeout",
+            terminal: true,
+          }),
+        }),
+      ),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+        queueId: "queue-second",
+        reasonCode: "tool_result_timeout",
+        toolCallId: "tool-1",
+      }),
+    );
+  });
+
+  test("clears pending tool timeout when the tool result arrives", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          context.onEvent(toolResultEvent(2));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+      }),
+    );
+  });
+
+  test("attributes late reused-session events to the most recent turn", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    let sendCount = 0;
+    let sessionContext!: BridgeSessionContext;
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        sessionContext = context;
+        return {
+          close: async () => {},
+          cancel: async () => {},
+          sendUserMessage: async () => {
+            sendCount += 1;
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: sendCount === 1 ? "first" : "second",
+            };
+          },
+        };
+      },
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 1_000,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      claimId: "claim-second",
+      id: "queue-second",
+      prompt: "again",
+    });
+    sessionContext.onEvent(toolCallEvent(3));
+
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "agent.tool.requested",
+        queueId: "queue-second",
+        toolCallId: "tool-1",
+      }),
+    );
+  });
+
   test("recreates an ACP session when an explicit runtime profile changes", async () => {
     const cloud = fakeCloudClient();
     const contexts: BridgeSessionContext[] = [];
@@ -3689,6 +3895,25 @@ function toolCallEvent(sequence: number): NormalizedBridgeEvent {
       type: "tool_call",
     },
     payload: { sessionUpdate: "tool_call", toolCallId: "tool-1" },
+    source: "acp_bridge",
+  };
+}
+
+function toolResultEvent(sequence: number): NormalizedBridgeEvent {
+  return {
+    eventType: "tool_result",
+    externalEventId: `session-1:${sequence}:tool_result`,
+    part: {
+      json: {
+        state: "output-available",
+        toolCallId: "tool-1",
+        toolName: "shell",
+      },
+      status: "streaming",
+      text: "tool finished",
+      type: "tool_result",
+    },
+    payload: { sessionUpdate: "tool_result", toolCallId: "tool-1" },
     source: "acp_bridge",
   };
 }

@@ -203,6 +203,19 @@ type EventWriteOutcome =
   | { ok: true; count: number }
   | { ok: false; count: number; error: Error };
 
+type ActiveToolCall = {
+  startedAt: number;
+  timeout: ReturnType<typeof setTimeout>;
+  toolCallId: string;
+  toolName: string;
+};
+
+type ToolResultTimeoutDetails = {
+  ageMs: number;
+  toolCallId: string;
+  toolName: string;
+};
+
 const EVENT_BATCH_MAX_SIZE = 25;
 const EVENT_BATCH_FLUSH_MS = 300;
 const STREAM_CHUNK_COALESCE_MAX_CHARS = 4_000;
@@ -211,6 +224,7 @@ const APPROVAL_RESPONSE_SESSION_WAIT_MS = 250;
 const APPROVAL_RESPONSE_SESSION_POLL_MS = 10;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000;
+export const DEFAULT_TOOL_RESULT_TIMEOUT_MS = 5 * 60_000;
 const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300;
 
 export type BridgeSessionManagerOptions = {
@@ -232,6 +246,7 @@ export type BridgeSessionManagerOptions = {
   requireScopedIdentity?: boolean;
   log?: BridgeLogger;
   livenessTimeoutMs?: number;
+  toolResultTimeoutMs?: number;
   supervisor?: BridgeSupervisor;
   processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
@@ -309,6 +324,7 @@ export class BridgeSessionManager {
   >;
   private readonly idleSessionTtlMs: number;
   private readonly livenessTimeoutMs: number;
+  private readonly toolResultTimeoutMs: number;
   private readonly allowRemoteCwd: boolean;
   private readonly resumeEnabled: boolean;
   private readonly requireScopedIdentity: boolean;
@@ -339,6 +355,15 @@ export class BridgeSessionManager {
     string,
     (error: Error) => void
   >();
+  private readonly activeToolCalls = new Map<string, Map<string, ActiveToolCall>>();
+  private readonly activeToolTimeoutFailures = new Map<
+    string,
+    ToolResultTimeoutDetails
+  >();
+  private readonly lastSessionEventQueueItems = new Map<
+    string,
+    BridgeSessionQueueItem
+  >();
   private readonly eventBatch: BridgeEventInput[] = [];
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = [];
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined;
@@ -358,6 +383,8 @@ export class BridgeSessionManager {
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0;
     this.livenessTimeoutMs =
       options.livenessTimeoutMs ?? DEFAULT_SESSION_LIVENESS_TIMEOUT_MS;
+    this.toolResultTimeoutMs =
+      options.toolResultTimeoutMs ?? DEFAULT_TOOL_RESULT_TIMEOUT_MS;
     this.allowRemoteCwd = options.allowRemoteCwd !== false;
     this.resumeEnabled = options.resumeEnabled === true;
     this.requireScopedIdentity = options.requireScopedIdentity === true;
@@ -564,6 +591,8 @@ export class BridgeSessionManager {
       this.findSessionKeyForItem(item);
     const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
     this.externallyTerminalizedQueueItemIds.add(queueItemId);
+    this.clearToolCallsForQueueItem(queueItemId);
+    this.activeToolTimeoutFailures.delete(queueItemId);
     if (sessionKey) {
       this.clearQueueItemFromSessionQueue(sessionKey, queueItemId);
     }
@@ -621,6 +650,11 @@ export class BridgeSessionManager {
 
   async close(): Promise<void> {
     await this.drainEventWrites();
+    for (const queueItemId of this.activeToolCalls.keys()) {
+      this.clearToolCallsForQueueItem(queueItemId);
+    }
+    this.activeToolTimeoutFailures.clear();
+    this.lastSessionEventQueueItems.clear();
     const sessions = Array.from(this.sessions.values());
     this.sessions.clear();
     await Promise.all(
@@ -713,6 +747,7 @@ export class BridgeSessionManager {
       sessionKey: _resolvedSessionKey,
       ...acpPromptOptions
     } = options;
+    this.lastSessionEventQueueItems.set(session.sessionKey, item);
     session.lastUsedAt = Date.now();
     this.clearIdleTimer(session);
     this.supervisor?.recordPromptPersisted(
@@ -753,22 +788,32 @@ export class BridgeSessionManager {
       if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
         return;
       }
-      const promptFailure = classifyPromptError(error);
+      const promptFailure = classifyPromptError(
+        error,
+        this.activeToolTimeoutFailures.get(item.id),
+      );
+      this.activeToolTimeoutFailures.delete(item.id);
       if (promptFailure.terminal) {
         const diagnostics = session.acp.getPromptTimeoutDiagnostics?.();
+        const failureDetails = promptFailure.details ?? {};
         this.enqueueEventWrite(session, {
           externalEventId: `${item.id}:${promptFailure.reasonCode}`,
           source: "bridge",
           eventType: "bridge_error",
-          payload: {
+          payload: removeUndefinedValues({
             diagnostics,
             queueId: item.id,
             reasonCode: promptFailure.reasonCode,
-          },
+            ...failureDetails,
+          }),
           part: {
             type: "error",
             text: promptFailure.message,
-            json: { diagnostics, reasonCode: promptFailure.reasonCode },
+            json: removeUndefinedValues({
+              diagnostics,
+              reasonCode: promptFailure.reasonCode,
+              ...failureDetails,
+            }),
             status: "error",
           },
         });
@@ -778,6 +823,7 @@ export class BridgeSessionManager {
           diagnostics,
           error: promptFailure.message,
           reasonCode: promptFailure.reasonCode,
+          ...failureDetails,
           terminal: true,
         });
         this.supervisor?.recordFailed(
@@ -794,6 +840,7 @@ export class BridgeSessionManager {
       });
       throw error;
     }
+    this.activeToolTimeoutFailures.delete(item.id);
     if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
       this.writeLog({
         level: "info",
@@ -1127,6 +1174,7 @@ export class BridgeSessionManager {
       if (timer) {
         clearTimeout(timer);
       }
+      this.clearToolCallsForQueueItem(queueItemId);
       this.activeLiveness.delete(queueItemId);
       this.activeLivenessFailures.delete(queueItemId);
     }
@@ -1152,6 +1200,110 @@ export class BridgeSessionManager {
         new Error(`ACP live session lost: ${decision.reasonCode}`),
       );
     }
+  }
+
+  private recordToolEvent(
+    queueItemId: string,
+    session: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    const part = event.part;
+    if (!part || (part.type !== "tool_call" && part.type !== "tool_result")) {
+      return;
+    }
+    const tool = readToolLogFields(part.json);
+    const toolCallId =
+      tool.toolCallId ??
+      event.externalEventId ??
+      `${queueItemId}:${tool.toolName}`;
+    if (part.type === "tool_call") {
+      this.trackPendingToolCall(queueItemId, session, {
+        toolCallId,
+        toolName: tool.toolName,
+      });
+      return;
+    }
+    const state = readToolState(part.json);
+    if (state === "input-streaming" || state === "input-available") {
+      this.trackPendingToolCall(queueItemId, session, {
+        toolCallId,
+        toolName: tool.toolName,
+      });
+      return;
+    }
+    this.clearToolCall(queueItemId, toolCallId);
+  }
+
+  private trackPendingToolCall(
+    queueItemId: string,
+    session: BridgeSessionRecord,
+    tool: { toolCallId: string; toolName: string },
+  ): void {
+    this.clearToolCall(queueItemId, tool.toolCallId);
+    let queueTools = this.activeToolCalls.get(queueItemId);
+    if (!queueTools) {
+      queueTools = new Map();
+      this.activeToolCalls.set(queueItemId, queueTools);
+    }
+    const startedAt = Date.now();
+    const timeout = setTimeout(() => {
+      const activeTool = this.activeToolCalls.get(queueItemId)?.get(tool.toolCallId);
+      if (!activeTool) {
+        return;
+      }
+      const ageMs = Date.now() - activeTool.startedAt;
+      const details = {
+        ageMs,
+        toolCallId: activeTool.toolCallId,
+        toolName: activeTool.toolName,
+      };
+      this.activeToolTimeoutFailures.set(queueItemId, details);
+      this.writeLog({
+        level: "warn",
+        event: "bridge.session.tool_result_timeout",
+        queueId: queueItemId,
+        threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+        bridgeProfileId: session.runtimeProfile?.id,
+        reasonCode: "tool_result_timeout",
+        timeoutMs: this.toolResultTimeoutMs,
+        ...details,
+      });
+      this.activeLivenessFailures.get(queueItemId)?.(
+        new Error("ACP live session lost: tool_result_timeout"),
+      );
+    }, this.toolResultTimeoutMs);
+    timeout.unref?.();
+    queueTools.set(tool.toolCallId, {
+      startedAt,
+      timeout,
+      toolCallId: tool.toolCallId,
+      toolName: tool.toolName,
+    });
+  }
+
+  private clearToolCall(queueItemId: string, toolCallId: string): void {
+    const queueTools = this.activeToolCalls.get(queueItemId);
+    const activeTool = queueTools?.get(toolCallId);
+    if (!queueTools || !activeTool) {
+      return;
+    }
+    clearTimeout(activeTool.timeout);
+    queueTools.delete(toolCallId);
+    if (queueTools.size === 0) {
+      this.activeToolCalls.delete(queueItemId);
+    }
+  }
+
+  private clearToolCallsForQueueItem(queueItemId: string): void {
+    const queueTools = this.activeToolCalls.get(queueItemId);
+    if (!queueTools) {
+      return;
+    }
+    for (const activeTool of queueTools.values()) {
+      clearTimeout(activeTool.timeout);
+    }
+    this.activeToolCalls.delete(queueItemId);
   }
 
   private getSessionQueueState(sessionKey: string) {
@@ -1641,6 +1793,7 @@ export class BridgeSessionManager {
       this.rememberTerminalInteractionSession(session);
     }
     this.sessions.delete(sessionKey);
+    this.lastSessionEventQueueItems.delete(sessionKey);
     this.clearIdleTimer(session);
     await this.releaseTerminalHandles(session);
     await this.drainEventWrites();
@@ -1863,14 +2016,19 @@ export class BridgeSessionManager {
         }),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
+            const eventItem = this.currentQueueItemForSessionEvent(
+              record,
+              item,
+            );
             this.recordLivenessEvent(
-              item.id,
+              eventItem.id,
               event.eventType.includes("tool")
                 ? "tool_progress"
                 : "assistant_output",
             );
+            this.recordToolEvent(eventItem.id, record, event);
             this.supervisor?.recordProviderEvent(
-              this.supervisorWorkItem(item, record),
+              this.supervisorWorkItem(eventItem, record),
               {
                 eventType: event.eventType,
               },
@@ -1879,13 +2037,13 @@ export class BridgeSessionManager {
               event.part?.type === "approval_request" ||
               event.part?.type === "choice"
             ) {
-              this.recordLivenessEvent(item.id, "permission_request");
+              this.recordLivenessEvent(eventItem.id, "permission_request");
               this.supervisor?.recordWaitingForInteraction(
-                this.supervisorWorkItem(item, record),
+                this.supervisorWorkItem(eventItem, record),
                 event.externalEventId ??
-                  item.externalRequestId ??
-                  item.approvalId ??
-                  item.id,
+                  eventItem.externalRequestId ??
+                  eventItem.approvalId ??
+                  eventItem.id,
               );
             }
             if (event.attachmentUpload) {
@@ -1893,10 +2051,10 @@ export class BridgeSessionManager {
                 level: "debug",
                 event: "agent.attachments.upload_deferred",
                 threadId: record.threadId,
-                sessionId: item.sessionId,
+                sessionId: eventItem.sessionId,
                 agentSessionId: record.providerSessionKey,
-                queueId: item.id,
-                queueType: normalizeType(item),
+                queueId: eventItem.id,
+                queueType: normalizeType(eventItem),
                 candidateKind: event.attachmentUpload.kind,
                 mediaType: event.attachmentUpload.mediaType,
                 sizeBytes: event.attachmentUpload.sizeBytes,
@@ -1908,8 +2066,12 @@ export class BridgeSessionManager {
         },
         onError: (error) => {
           if (this.isCurrentSessionRecord(record)) {
+            const eventItem = this.currentQueueItemForSessionEvent(
+              record,
+              item,
+            );
             if (/runtime process exited/i.test(error.message)) {
-              this.recordLivenessEvent(item.id, "process_exited");
+              this.recordLivenessEvent(eventItem.id, "process_exited");
             }
             this.enqueueErrorWrite(record, error);
           }
@@ -1982,6 +2144,19 @@ export class BridgeSessionManager {
   private isCurrentSessionRecord(record: BridgeSessionRecord): boolean {
     const current = this.sessions.get(record.sessionKey);
     return current === record && current.generation === record.generation;
+  }
+
+  private currentQueueItemForSessionEvent(
+    record: BridgeSessionRecord,
+    fallback: BridgeSessionQueueItem,
+  ): BridgeSessionQueueItem {
+    const runningQueueItemId = this.sessionQueueState.get(
+      record.sessionKey,
+    )?.runningQueueItemId;
+    if (!runningQueueItemId) {
+      return this.lastSessionEventQueueItems.get(record.sessionKey) ?? fallback;
+    }
+    return this.activeQueueItems.get(runningQueueItemId) ?? fallback;
   }
 
   private clearIdleTimer(record: BridgeSessionRecord): void {
@@ -2146,9 +2321,9 @@ export class BridgeSessionManager {
     event: NormalizedBridgeEvent,
     sequence: number,
   ): void {
-    const queueId = this.sessionQueueState.get(
-      record.sessionKey,
-    )?.runningQueueItemId;
+    const queueId =
+      this.sessionQueueState.get(record.sessionKey)?.runningQueueItemId ??
+      this.lastSessionEventQueueItems.get(record.sessionKey)?.id;
     const base = {
       agentSessionId: record.providerSessionKey,
       queueId,
@@ -2594,17 +2769,28 @@ function isEmptyVisiblePromptResult(result: { text: string }): boolean {
 
 function classifyPromptError(
   error: unknown,
+  toolTimeoutDetails?: ToolResultTimeoutDetails,
 ):
   | {
       terminal: true;
+      details?: Record<string, unknown>;
       message: string;
       reasonCode:
         | "acp_method_timeout"
         | "provider_silent_timeout"
-        | "runtime_process_exited";
+        | "runtime_process_exited"
+        | "tool_result_timeout";
     }
   | { terminal: false } {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("ACP live session lost: tool_result_timeout")) {
+    return {
+      terminal: true,
+      details: toolTimeoutDetails,
+      message: "ACP tool call did not return a result before the timeout.",
+      reasonCode: "tool_result_timeout",
+    };
+  }
   if (message.includes("ACP live session lost: provider_silent_timeout")) {
     return {
       terminal: true,
@@ -3184,6 +3370,7 @@ function isTerminalPromptError(message: string): boolean {
     message.includes("ACP request timed out: session/prompt") ||
     message.includes("ACP live session lost: provider_silent_timeout") ||
     message.includes("ACP live session lost: runtime_process_exited") ||
+    message.includes("ACP live session lost: tool_result_timeout") ||
     /\bprovider_login_failed(?:\s+\(code\s+-?\d+\))?\b/i.test(message)
   );
 }
@@ -3344,6 +3531,14 @@ function readToolLogFields(value: unknown): {
       readString(record.tool) ??
       "unknown",
   };
+}
+
+function readToolState(value: unknown): string | undefined {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  return readString(record.state) ?? readString(record.status);
 }
 
 function readString(value: unknown): string | undefined {

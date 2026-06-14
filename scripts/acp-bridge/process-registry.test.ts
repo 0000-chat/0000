@@ -197,6 +197,67 @@ describe("ACP bridge process registry", () => {
     })
   })
 
+  test("startup reconciliation terminates stale unregistered bridge proxy processes", async () => {
+    const path = tempRegistryPath()
+    const ownedProxyScriptPath = "/opt/0000/scripts/acp-bridge/acp-node-proxy.cjs"
+    const terminated: number[] = []
+    const registry = new AcpBridgeProcessRegistry({
+      listProcessCandidates: () => [
+        {
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          elapsedMs: 120_000,
+          pid: 222,
+          ppid: 1,
+          source: "test",
+        },
+        {
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          elapsedMs: 1_000,
+          pid: 333,
+          ppid: 1,
+          source: "test",
+        },
+        {
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          elapsedMs: 120_000,
+          parentCommandLine: "bun scripts/acp-bridge.ts start --max-in-flight 1",
+          pid: 334,
+          ppid: 900,
+          source: "test",
+        },
+        {
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          elapsedMs: 120_000,
+          parentCommandLine: `node ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          pid: 335,
+          ppid: 901,
+          source: "test",
+        },
+        {
+          commandLine: "bun /other/scripts/acp-bridge/acp-node-proxy.cjs bunx @zed-industries/codex-acp@0.15.0",
+          elapsedMs: 120_000,
+          pid: 444,
+          ppid: 1,
+          source: "test",
+        },
+      ],
+      orphanProcessGraceMs: 60_000,
+      ownedProxyScriptPath,
+      path,
+      terminateProcessId: async (pid) => {
+        terminated.push(pid)
+      },
+    })
+
+    await registry.reconcileBeforeClaiming()
+
+    expect(terminated).toEqual([222])
+    expect(registry.getProcessHealth().startupReconciliation).toMatchObject({
+      orphanedProcessCount: 1,
+      terminatedOrphanedProcessCount: 1,
+    })
+  })
+
   test("startup reconciliation refuses claims for live ambiguous registered children", async () => {
     const path = tempRegistryPath()
     const registry = new AcpBridgeProcessRegistry({
