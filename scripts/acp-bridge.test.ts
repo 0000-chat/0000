@@ -711,15 +711,15 @@ describe("bridge supervisor claim gating", () => {
     expect(status.lifecycle).toBe("restarting");
   });
 
-  test("skips queue claims when local journal health is hard-failed", async () => {
+  test("skips normal queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
-    let claimed = false;
+    const claimCalls: Array<{ limit?: number; lane?: string }> = [];
 
     await runBridgeLoopIteration({
       canClaimWork: () => false,
-      claimCommands: async () => {
-        claimed = true;
+      claimCommands: async (_config, limit, options) => {
+        claimCalls.push({ limit, lane: options?.lane });
         return [];
       },
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
@@ -753,7 +753,7 @@ describe("bridge supervisor claim gating", () => {
       writeStatus: async () => {},
     });
 
-    expect(claimed).toBe(false);
+    expect(claimCalls).toEqual([{ limit: 1, lane: "control" }]);
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "bridge.queue.claim_skipped",
@@ -762,11 +762,11 @@ describe("bridge supervisor claim gating", () => {
     );
   });
 
-  test("runs cleanup but skips queue claims when process health is unsafe", async () => {
+  test("runs cleanup but skips normal queue claims when process health is unsafe", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
     let cleanupRan = false;
-    let claimed = false;
+    const claimCalls: Array<{ limit?: number; lane?: string }> = [];
     const status: BridgeStatus = {
       activeSessions: [],
       connected: true,
@@ -775,8 +775,8 @@ describe("bridge supervisor claim gating", () => {
 
     await runBridgeLoopIteration({
       canClaimWork: () => false,
-      claimCommands: async () => {
-        claimed = true;
+      claimCommands: async (_config, limit, options) => {
+        claimCalls.push({ limit, lane: options?.lane });
         return [];
       },
       cleanupStaleClaims: async () => {
@@ -830,7 +830,7 @@ describe("bridge supervisor claim gating", () => {
     });
 
     expect(cleanupRan).toBe(true);
-    expect(claimed).toBe(false);
+    expect(claimCalls).toEqual([{ limit: 1, lane: "control" }]);
     expect(status.processHealth).toMatchObject({
       canClaim: false,
       childCountsByRuntimeProfile: { "codex:default": 2 },
@@ -873,11 +873,11 @@ describe("bridge supervisor claim gating", () => {
     ).not.toHaveProperty("terminatedOrphanedProcessCount");
   });
 
-  test("runs cleanup but skips queue claims when runtime conformance is unavailable", async () => {
+  test("runs cleanup but skips normal queue claims when runtime conformance is unavailable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
     let cleanupRan = false;
-    let claimed = false;
+    const claimCalls: Array<{ limit?: number; lane?: string }> = [];
     const status: BridgeStatus = {
       activeSessions: [],
       connected: true,
@@ -886,8 +886,8 @@ describe("bridge supervisor claim gating", () => {
 
     await runBridgeLoopIteration({
       canClaimWork: () => true,
-      claimCommands: async () => {
-        claimed = true;
+      claimCommands: async (_config, limit, options) => {
+        claimCalls.push({ limit, lane: options?.lane });
         return [];
       },
       cleanupStaleClaims: async () => {
@@ -937,7 +937,7 @@ describe("bridge supervisor claim gating", () => {
     });
 
     expect(cleanupRan).toBe(true);
-    expect(claimed).toBe(false);
+    expect(claimCalls).toEqual([{ limit: 1, lane: "control" }]);
     expect(status.runtimeConformance).toMatchObject({
       canClaim: false,
       status: "unavailable",
@@ -1068,16 +1068,19 @@ describe("bridge supervisor claim gating", () => {
     const handled: Array<Record<string, unknown>> = [];
 
     await runBridgeLoopIteration({
-      claimCommands: async () => [
-        {
-          agentSessionId: "agent-session-1",
-          claimId: "claim-1",
-          id: "queue-cancel-1",
-          kind: "cancel-session",
-          threadId: "thread-1",
-          type: "cancel-session",
-        },
-      ],
+      claimCommands: async (_config, _limit, options) =>
+        options?.lane === "control"
+          ? []
+          : [
+              {
+                agentSessionId: "agent-session-1",
+                claimId: "claim-1",
+                id: "queue-cancel-1",
+                kind: "cancel-session",
+                threadId: "thread-1",
+                type: "cancel-session",
+              },
+            ],
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
       config: bridgeRegistration(),
       inFlightCommandMetadata: new Map(),
@@ -1122,6 +1125,89 @@ describe("bridge supervisor claim gating", () => {
         event: "bridge.queue_item.in_flight",
         queueId: "queue-cancel-1",
         queueType: "cancel-session",
+      }),
+    );
+  });
+
+  test("claims control responses while normal command slots are saturated", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const handled: Array<Record<string, unknown>> = [];
+    const claimCalls: Array<{ limit?: number; lane?: string }> = [];
+    const inFlightCommands = new Map<string, Promise<void>>([
+      ["queue-active", new Promise<void>(() => {})],
+    ]);
+    const inFlightCommandMetadata = new Map([
+      [
+        "queue-active",
+        {
+          id: "queue-active",
+          startedAt: "2026-06-05T10:00:00.000Z",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+    ]);
+
+    await runBridgeLoopIteration({
+      claimCommands: async (_config, limit, options) => {
+        claimCalls.push({ limit, lane: options?.lane });
+        return [
+          {
+            agentSessionId: "agent-session-1",
+            claimId: "claim-permission",
+            externalRequestId: "request-1",
+            id: "queue-permission-1",
+            threadId: "thread-1",
+            type: "permission-response",
+          },
+        ];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata,
+      inFlightCommands,
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
+        },
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimCalls).toEqual([{ limit: 1, lane: "control" }]);
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-permission-1",
+        type: "permission-response",
+      }),
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue.claimed",
+        lane: "control",
+        commandCount: 1,
       }),
     );
   });

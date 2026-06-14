@@ -2064,6 +2064,22 @@ export async function runBridgeLoopIteration(
       await persistStatus(input.statusPath, input.status);
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size;
+    input.status.lastPollAt = new Date(currentTime()).toISOString();
+    const controlCommands = await claim(input.config, 1, {
+      lane: "control",
+    });
+    if (controlCommands.length > 0) {
+      input.log({
+        level: "info",
+        event: "bridge.queue.claimed",
+        deviceId: input.config.deviceId,
+        lane: "control",
+        commandCount: controlCommands.length,
+      });
+    }
+    for (const command of controlCommands) {
+      runCommand(command);
+    }
     if (availableSlots > 0) {
       const processHealth = input.getProcessHealth?.();
       if (processHealth) {
@@ -2142,7 +2158,6 @@ export async function runBridgeLoopIteration(
         await persistStatus(input.statusPath, input.status);
         return { restartRequested: false };
       }
-      input.status.lastPollAt = new Date(now).toISOString();
       const commands = await claim(input.config, availableSlots);
       if (commands.length > 0) {
         input.log({
@@ -2680,9 +2695,10 @@ async function publishBridgeSupervisorHealthIfChanged(context: {
 async function claimCommands(
   config: BridgeConfig,
   limit = DEFAULT_MAX_IN_FLIGHT_COMMANDS,
+  options: { lane?: "any" | "control" } = {},
 ): Promise<BridgeQueueCommand[]> {
   const adapter = new ConvexBridgeHostAdapter(createCloudClient(config));
-  const response = await adapter.claimWork({ limit });
+  const response = await adapter.claimWork({ limit, ...options });
   const rawResponse = response.raw as QueueClaimResponse;
   const rawCommands = Array.isArray(rawResponse.commands)
     ? rawResponse.commands
