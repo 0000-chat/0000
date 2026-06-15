@@ -1,3 +1,5 @@
+import { z } from "zod/v4"
+
 export const BRIDGE_CONTRACT_VERSION = 2 as const
 
 export const bridgeDiagnosticReasonCodes = [
@@ -150,3 +152,49 @@ export function validateBridgeDiagnosticPacketInput<TInput extends BridgeDiagnos
     ] as const),
   }
 }
+
+const bridgeDiagnosticReasonCodeSchema = z.custom<BridgeDiagnosticReasonCode>(
+  (value) => isBridgeDiagnosticReasonCode(value),
+  { message: "Unknown bridge diagnostic reason code" },
+)
+
+const runtimeConformanceHealthStatusSchema = z.enum([
+  "healthy",
+  "degraded",
+  "unavailable",
+  "quarantined",
+])
+
+const runtimeConformanceProfileSchema = z
+  .object({
+    canClaim: z.boolean(),
+    checkedAt: z.number(),
+    diagnostics: z.array(
+      z
+        .object({
+          message: z.string().optional(),
+          reasonCode: bridgeDiagnosticReasonCodeSchema,
+        })
+        .passthrough(),
+    ),
+    reasonCode: bridgeDiagnosticReasonCodeSchema.optional(),
+    runtimeId: z.string(),
+    state: z.enum(["passing", "failing", "quarantined"]),
+    status: runtimeConformanceHealthStatusSchema,
+    strength: z.enum(["none", "init_only", "prompt_smoke"]),
+  })
+  .passthrough()
+
+export const bridgeStatusV2Schema = z
+  .object({
+    connected: z.boolean(),
+    runtimeConformance: z
+      .object({
+        canClaim: z.boolean(),
+        profiles: z.record(z.string(), runtimeConformanceProfileSchema),
+        status: runtimeConformanceHealthStatusSchema,
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough()

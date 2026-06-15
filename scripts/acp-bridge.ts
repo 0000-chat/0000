@@ -57,7 +57,7 @@ import {
 import {
   DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
   runRuntimeConformance,
-  shouldRefreshRuntimeConformance,
+  shouldRefreshRuntimeConformanceProfile,
   summarizeRuntimeConformance,
   type RuntimeConformanceRecord,
   type RuntimeConformanceSummary,
@@ -209,6 +209,7 @@ export type BridgeStatus = {
     threadId?: string;
     sessionId?: string;
     agentSessionId?: string;
+    bridgeProfileId?: string;
     startedAt: string;
   }>;
   sessionQueues?: Array<{
@@ -409,6 +410,7 @@ type InFlightCommandMetadata = {
   threadId?: string;
   sessionId?: string;
   agentSessionId?: string;
+  bridgeProfileId?: string;
   startedAt: string;
 };
 
@@ -1229,9 +1231,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     customCommands: customRuntimeCommands,
   }).catch(() => []);
   let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> = {};
-  let lastRuntimeConformanceProbeAt = 0;
+  const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>();
   const runtimeConformanceSummary = () =>
     summarizeRuntimeConformance({
+      activeProfileIds: bridgeActiveRuntimeProfileIds(contexts.values()),
       now: Date.now(),
       profiles: runtimeProfiles,
       records: runtimeConformanceRecords,
@@ -1266,46 +1269,43 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       (count, context) => count + context.inFlightCommands.size,
       0,
     );
-  const totalRunningSessionQueues = () =>
-    Array.from(contexts.values()).reduce(
-      (count, context) =>
-        count +
-        context.manager
-          .getStatus()
-          .sessions.filter((session) => session.runningQueueItemId).length,
-      0,
-    );
   const refreshRuntimeConformanceIfStale = async (
     options: { force?: boolean } = {},
   ) => {
-    const now = Date.now();
-    if (
-      !shouldRefreshRuntimeConformance({
-        force: options.force,
-        inFlightCommandCount: totalInFlight(),
-        lastProbeAt: lastRuntimeConformanceProbeAt,
-        now,
-        runningSessionCount: totalRunningSessionQueues(),
-        ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
-      })
-    ) {
-      return;
-    }
     const ownerContext = contexts.values().next().value as
       | RuntimeContext
       | undefined;
     if (!ownerContext) {
       return;
     }
-    lastRuntimeConformanceProbeAt = now;
-    runtimeConformanceRecords = await probeRuntimeProfilesConformance(
-      runtimeProfiles,
-      {
-        bridgeDeviceId: ownerContext.config.deviceId,
-        processRegistry: ownerContext.processRegistry,
-        requestTimeoutMs,
-      },
-    );
+    const refreshed = await refreshRuntimeConformanceProfiles({
+      force: options.force,
+      getInFlightProfileIds: () =>
+        bridgeInFlightRuntimeProfileIds(contexts.values()),
+      getRunningSessionProfileIds: () =>
+        bridgeRunningSessionRuntimeProfileIds(contexts.values()),
+      lastProbeAtByProfile: lastRuntimeConformanceProbeAtByProfile,
+      now: () => Date.now(),
+      probeProfile: async (profile) =>
+        runRuntimeConformance({
+          createSession: () =>
+            new HermesAcpSession({
+              agentCommand: profile.command,
+              processRegistry: ownerContext.processRegistry,
+              processRegistryMetadata: {
+                bridgeDeviceId: ownerContext.config.deviceId,
+                runtimeProfileId: profile.id,
+                sessionKey: `runtime-conformance:${profile.id}`,
+              },
+              requestTimeoutMs,
+            }),
+          profile,
+        }),
+      profiles: runtimeProfiles,
+      records: runtimeConformanceRecords,
+      ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+    });
+    runtimeConformanceRecords = refreshed.records;
     for (const context of contexts.values()) {
       context.status.runtimeConformance = runtimeConformanceSummary();
     }
@@ -1620,36 +1620,114 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   }
 }
 
-async function probeRuntimeProfilesConformance(
-  profiles: BridgeRuntimeProfile[],
-  options: {
-    bridgeDeviceId?: string;
-    processRegistry?: AcpBridgeProcessRegistry;
-    requestTimeoutMs: number;
-  },
-): Promise<Record<string, RuntimeConformanceRecord>> {
-  const records: Record<string, RuntimeConformanceRecord> = {};
-  await Promise.all(
-    profiles
-      .filter((profile) => profile.status === "available")
-      .map(async (profile) => {
-        records[profile.id] = await runRuntimeConformance({
-          createSession: () =>
-            new HermesAcpSession({
-              agentCommand: profile.command,
-              processRegistry: options.processRegistry,
-              processRegistryMetadata: {
-                bridgeDeviceId: options.bridgeDeviceId,
-                runtimeProfileId: profile.id,
-                sessionKey: `runtime-conformance:${profile.id}`,
-              },
-              requestTimeoutMs: options.requestTimeoutMs,
-            }),
-          profile,
-        });
-      }),
-  );
-  return records;
+export async function refreshRuntimeConformanceProfilesForTest(input: {
+  getInFlightProfileIds: () => Set<string>;
+  getRunningSessionProfileIds: () => Set<string>;
+  now: () => number;
+  probeProfile: (
+    profile: BridgeRuntimeProfile,
+  ) => Promise<RuntimeConformanceRecord>;
+  profiles: BridgeRuntimeProfile[];
+  records: Record<string, RuntimeConformanceRecord>;
+  ttlMs: number;
+}): Promise<Record<string, RuntimeConformanceRecord>> {
+  const refreshed = await refreshRuntimeConformanceProfiles({
+    ...input,
+    lastProbeAtByProfile: new Map(
+      Object.entries(input.records).map(([profileId, record]) => [
+        profileId,
+        record.checkedAt,
+      ]),
+    ),
+  });
+  return refreshed.records;
+}
+
+async function refreshRuntimeConformanceProfiles(input: {
+  force?: boolean;
+  getInFlightProfileIds: () => Set<string>;
+  getRunningSessionProfileIds: () => Set<string>;
+  lastProbeAtByProfile: Map<string, number>;
+  now: () => number;
+  probeProfile: (
+    profile: BridgeRuntimeProfile,
+  ) => Promise<RuntimeConformanceRecord>;
+  profiles: BridgeRuntimeProfile[];
+  records: Record<string, RuntimeConformanceRecord>;
+  ttlMs: number;
+}): Promise<{ records: Record<string, RuntimeConformanceRecord> }> {
+  const nextRecords = { ...input.records };
+  for (const profile of input.profiles.filter(
+    (candidate) => candidate.status === "available",
+  )) {
+    const lastProbeAt =
+      input.lastProbeAtByProfile.get(profile.id) ??
+      nextRecords[profile.id]?.checkedAt ??
+      0;
+    if (
+      shouldRefreshRuntimeConformanceProfile({
+        force: input.force,
+        inFlightProfileIds: input.getInFlightProfileIds(),
+        lastProbeAt,
+        now: input.now(),
+        profileId: profile.id,
+        runningSessionProfileIds: input.getRunningSessionProfileIds(),
+        ttlMs: input.ttlMs,
+      })
+    ) {
+      const record = await input.probeProfile(profile);
+      nextRecords[profile.id] = record;
+      input.lastProbeAtByProfile.set(profile.id, record.checkedAt);
+    }
+  }
+  return { records: nextRecords };
+}
+
+function bridgeInFlightRuntimeProfileIds(
+  contexts: Iterable<{ inFlightCommandMetadata: Map<string, InFlightCommandMetadata> }>,
+): Set<string> {
+  const profileIds = new Set<string>();
+  for (const context of contexts) {
+    for (const command of context.inFlightCommandMetadata.values()) {
+      if (command.bridgeProfileId) {
+        profileIds.add(command.bridgeProfileId);
+      }
+    }
+  }
+  return profileIds;
+}
+
+function bridgeRunningSessionRuntimeProfileIds(
+  contexts: Iterable<{ manager: BridgeLoopManager }>,
+): Set<string> {
+  const profileIds = new Set<string>();
+  for (const context of contexts) {
+    const status = context.manager.getStatus();
+    for (const session of status.sessions) {
+      if (session.runningQueueItemId && session.runtimeProfileId) {
+        profileIds.add(session.runtimeProfileId);
+      }
+    }
+    for (const session of status.liveness?.activeSessions ?? []) {
+      if (session.bridgeProfileId) {
+        profileIds.add(session.bridgeProfileId);
+      }
+    }
+  }
+  return profileIds;
+}
+
+function bridgeActiveRuntimeProfileIds(
+  contexts: Iterable<{
+    inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
+    manager: BridgeLoopManager;
+  }>,
+): Set<string> {
+  const contextList = Array.from(contexts);
+  return new Set([
+    ...bridgeInFlightRuntimeProfileIds(contextList),
+    ...bridgeRunningSessionRuntimeProfileIds(contextList),
+  ]);
 }
 
 function buildAggregateBridgeStatus(
@@ -1853,6 +1931,7 @@ export async function runBridgeLoopIteration(
       threadId: command.threadId,
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
+      bridgeProfileId: command.bridgeProfileId,
       startedAt: new Date(currentTime()).toISOString(),
     });
     input.log({
@@ -2265,6 +2344,7 @@ export function bridgeHeartbeatSignature(
     inFlightCommands: (status.inFlightCommands ?? [])
       .map((command) => ({
         agentSessionId: command.agentSessionId,
+        bridgeProfileId: command.bridgeProfileId,
         id: command.id,
         sessionId: command.sessionId,
         threadId: command.threadId,

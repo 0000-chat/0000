@@ -19,6 +19,7 @@ import {
   getConvexUrl,
   normalizeBridgeConfigFile,
   parseBridgeArgs,
+  refreshRuntimeConformanceProfilesForTest,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
@@ -388,6 +389,65 @@ describe("bridge doctor", () => {
 });
 
 describe("bridge supervisor claim gating", () => {
+  test("runtime conformance refresh can run for idle profiles while another profile is active", async () => {
+    const refreshedProfiles: string[] = [];
+
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(["hermes:default"]),
+      getRunningSessionProfileIds: () => new Set(["hermes:default"]),
+      now: () => 1_781_400_160_000,
+      profiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 1_781_400_160_000,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      records: {
+        "hermes:default": {
+          checkedAt: 1_781_400_000_000,
+          diagnostics: [],
+          runtimeId: "hermes:default",
+          state: "passing",
+          strength: "init_only",
+        },
+        "codex:codex-acp": {
+          checkedAt: 1_781_400_000_000,
+          diagnostics: [],
+          runtimeId: "codex:codex-acp",
+          state: "passing",
+          strength: "init_only",
+        },
+      },
+      ttlMs: 300_000,
+    });
+
+    expect(refreshedProfiles).toEqual(["codex:codex-acp"]);
+    expect(records["hermes:default"]?.checkedAt).toBe(1_781_400_000_000);
+    expect(records["codex:codex-acp"]?.checkedAt).toBe(1_781_400_160_000);
+  });
+
   test("classifies stale bridge registrations as hard auth failures", () => {
     const notPaired = buildBridgeRegistrationFailure(
       new BridgeCloudHttpError(
@@ -905,6 +965,7 @@ describe("bridge supervisor claim gating", () => {
             reasonCode: "runtime_conformance_failed",
             runtimeId: "codex:default",
             state: "failing",
+            status: "unavailable",
             strength: "none",
           },
         },
@@ -1004,7 +1065,7 @@ describe("bridge supervisor claim gating", () => {
       availability: {
         canClaim: false,
         reasonCode: "runtime_conformance_unavailable",
-        status: "unavailable",
+        status: "degraded",
       },
       connected: true,
       liveness: {
@@ -1025,26 +1086,34 @@ describe("bridge supervisor claim gating", () => {
             canClaim: false,
             checkedAt: 1_000,
             diagnostics: [{ reasonCode: "acp_session_create_failed" }],
-            reasonCode: "runtime_conformance_failed",
+            reasonCode: "runtime_conformance_stale",
             runtimeId: "codex:default",
-            state: "failing",
-            strength: "none",
+            state: "passing",
+            status: "degraded",
+            strength: "init_only",
           },
         },
-        status: "unavailable",
+        status: "degraded",
       },
     };
 
     const payload = buildHeartbeatStatusPayload(status) as Record<string, unknown>;
     expect(payload.activeQueueItemIds).toBeUndefined();
     expect(payload).toMatchObject({
-      availability: { canClaim: false, status: "unavailable" },
+      availability: { canClaim: false, status: "degraded" },
       liveness: {
         activeSessions: [{ currentState: "active", queueItemId: "queue-1" }],
       },
       runtimeConformance: {
         canClaim: false,
-        profiles: { "codex:default": { state: "failing" } },
+        profiles: {
+          "codex:default": {
+            reasonCode: "runtime_conformance_stale",
+            state: "passing",
+            status: "degraded",
+          },
+        },
+        status: "degraded",
       },
     });
     expect(
