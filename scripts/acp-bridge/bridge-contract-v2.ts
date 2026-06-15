@@ -180,7 +180,6 @@ const runtimeConformanceProfileSchema = z
     reasonCode: bridgeDiagnosticReasonCodeSchema.optional(),
     runtimeId: z.string(),
     state: z.enum(["passing", "failing", "quarantined"]),
-    status: runtimeConformanceHealthStatusSchema,
     strength: z.enum(["none", "init_only", "prompt_smoke"]),
   })
   .passthrough()
