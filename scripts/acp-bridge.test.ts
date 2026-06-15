@@ -19,6 +19,7 @@ import {
   getConvexUrl,
   normalizeBridgeConfigFile,
   parseBridgeArgs,
+  refreshRuntimeConformanceProfilesForTest,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
   writeBridgeConfigFile,
@@ -388,6 +389,65 @@ describe("bridge doctor", () => {
 });
 
 describe("bridge supervisor claim gating", () => {
+  test("runtime conformance refresh can run for idle profiles while another profile is active", async () => {
+    const refreshedProfiles: string[] = [];
+
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(["hermes:default"]),
+      getRunningSessionProfileIds: () => new Set(["hermes:default"]),
+      now: () => 1_781_400_160_000,
+      profiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 1_781_400_160_000,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      records: {
+        "hermes:default": {
+          checkedAt: 1_781_400_000_000,
+          diagnostics: [],
+          runtimeId: "hermes:default",
+          state: "passing",
+          strength: "init_only",
+        },
+        "codex:codex-acp": {
+          checkedAt: 1_781_400_000_000,
+          diagnostics: [],
+          runtimeId: "codex:codex-acp",
+          state: "passing",
+          strength: "init_only",
+        },
+      },
+      ttlMs: 300_000,
+    });
+
+    expect(refreshedProfiles).toEqual(["codex:codex-acp"]);
+    expect(records["hermes:default"]?.checkedAt).toBe(1_781_400_000_000);
+    expect(records["codex:codex-acp"]?.checkedAt).toBe(1_781_400_160_000);
+  });
+
   test("classifies stale bridge registrations as hard auth failures", () => {
     const notPaired = buildBridgeRegistrationFailure(
       new BridgeCloudHttpError(
@@ -873,7 +933,7 @@ describe("bridge supervisor claim gating", () => {
     ).not.toHaveProperty("terminatedOrphanedProcessCount");
   });
 
-  test("runs cleanup but skips queue claims when runtime conformance is unavailable", async () => {
+  test("reports unavailable runtime conformance without globally skipping claims", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
     let cleanupRan = false;
@@ -905,6 +965,7 @@ describe("bridge supervisor claim gating", () => {
             reasonCode: "runtime_conformance_failed",
             runtimeId: "codex:default",
             state: "failing",
+            status: "unavailable",
             strength: "none",
           },
         },
@@ -937,7 +998,7 @@ describe("bridge supervisor claim gating", () => {
     });
 
     expect(cleanupRan).toBe(true);
-    expect(claimed).toBe(false);
+    expect(claimed).toBe(true);
     expect(status.runtimeConformance).toMatchObject({
       canClaim: false,
       status: "unavailable",
@@ -947,12 +1008,206 @@ describe("bridge supervisor claim gating", () => {
       reasonCode: "runtime_conformance_unavailable",
       status: "unavailable",
     });
-    expect(logs).toContainEqual(
+    expect(logs).not.toContainEqual(
       expect.objectContaining({
         event: "bridge.queue.claim_skipped",
         reason: "runtime_conformance_unavailable",
       }),
     );
+  });
+
+  test("claims control-lane work when runtime conformance is degraded", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let claimed = false;
+    const handled: Array<Record<string, unknown>> = [];
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => true,
+      claimCommands: async () => {
+        claimed = true;
+        return [
+          {
+            agentSessionId: "agent-session-1",
+            approvalId: "permission-1",
+            approvalOutcome: "approved",
+            bridgeProfileId: "codex:default",
+            claimId: "claim-permission",
+            externalRequestId: "permission-1",
+            id: "queue-permission",
+            threadId: "thread-1",
+            type: "permission-response",
+          },
+        ];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getRuntimeConformance: () => ({
+        canClaim: false,
+        profiles: {
+          "codex:default": {
+            canClaim: false,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 0, 0),
+            diagnostics: [],
+            reasonCode: "runtime_conformance_stale",
+            runtimeId: "codex:default",
+            state: "passing",
+            status: "degraded",
+            strength: "init_only",
+          },
+        },
+        status: "degraded",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: ["session-1"],
+          liveness: {
+            activeSessions: [
+              {
+                bridgeProfileId: "codex:default",
+                lastActivityAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+                lastMeaningfulEventAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+                providerActivitySeen: true,
+                queueItemId: "queue-active",
+                sessionKey: "session-1",
+                startedAt: Date.UTC(2026, 5, 14, 0, 0, 0),
+                state: "active",
+              },
+            ],
+          },
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
+        },
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: ["session-1"],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimed).toBe(true);
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-permission",
+        type: "permission-response",
+      }),
+    ]);
+  });
+
+  test("rejects claimed prompt work for a stale runtime profile before execution", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const results: Array<{
+      command: Record<string, unknown>;
+      result: Record<string, unknown>;
+    }> = [];
+    let handled = false;
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => true,
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          bridgeProfileId: "codex:stale",
+          claimId: "claim-stale",
+          id: "queue-stale-prompt",
+          prompt: "do not run",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getRuntimeConformance: () => ({
+        canClaim: true,
+        profiles: {
+          "codex:healthy": {
+            canClaim: true,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+            diagnostics: [],
+            runtimeId: "codex:healthy",
+            state: "passing",
+            status: "healthy",
+            strength: "init_only",
+          },
+          "codex:stale": {
+            canClaim: false,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 0, 0),
+            diagnostics: [],
+            reasonCode: "runtime_conformance_stale",
+            runtimeId: "codex:stale",
+            state: "passing",
+            status: "unavailable",
+            strength: "init_only",
+          },
+        },
+        status: "degraded",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {
+          handled = true;
+        },
+      },
+      markCommandResult: async (_config, command, result) => {
+        results.push({
+          command: command as unknown as Record<string, unknown>,
+          result: result as Record<string, unknown>,
+        });
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(handled).toBe(false);
+    expect(results).toEqual([
+      {
+        command: expect.objectContaining({
+          bridgeProfileId: "codex:stale",
+          id: "queue-stale-prompt",
+        }),
+        result: expect.objectContaining({
+          error: "runtime_conformance_stale",
+          ok: false,
+          retryable: true,
+        }),
+      },
+    ]);
   });
 
   test("describes startup reconciliation separately from process health", () => {
@@ -1004,7 +1259,7 @@ describe("bridge supervisor claim gating", () => {
       availability: {
         canClaim: false,
         reasonCode: "runtime_conformance_unavailable",
-        status: "unavailable",
+        status: "degraded",
       },
       connected: true,
       liveness: {
@@ -1025,26 +1280,34 @@ describe("bridge supervisor claim gating", () => {
             canClaim: false,
             checkedAt: 1_000,
             diagnostics: [{ reasonCode: "acp_session_create_failed" }],
-            reasonCode: "runtime_conformance_failed",
+            reasonCode: "runtime_conformance_stale",
             runtimeId: "codex:default",
-            state: "failing",
-            strength: "none",
+            state: "passing",
+            status: "degraded",
+            strength: "init_only",
           },
         },
-        status: "unavailable",
+        status: "degraded",
       },
     };
 
     const payload = buildHeartbeatStatusPayload(status) as Record<string, unknown>;
     expect(payload.activeQueueItemIds).toBeUndefined();
     expect(payload).toMatchObject({
-      availability: { canClaim: false, status: "unavailable" },
+      availability: { canClaim: false, status: "degraded" },
       liveness: {
         activeSessions: [{ currentState: "active", queueItemId: "queue-1" }],
       },
       runtimeConformance: {
         canClaim: false,
-        profiles: { "codex:default": { state: "failing" } },
+        profiles: {
+          "codex:default": {
+            reasonCode: "runtime_conformance_stale",
+            state: "passing",
+            status: "degraded",
+          },
+        },
+        status: "degraded",
       },
     });
     expect(

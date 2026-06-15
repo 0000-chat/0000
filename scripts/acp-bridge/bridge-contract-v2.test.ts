@@ -4,6 +4,7 @@ import {
   BRIDGE_CONTRACT_VERSION,
   bridgeDiagnosticReasonCodes,
   bridgeFeatureEnabled,
+  bridgeStatusV2Schema,
   bridgeV2FeatureDefaults,
   isBridgeDiagnosticReasonCode,
   requireBridgeTraceFields,
@@ -145,5 +146,29 @@ describe("bridge contract v2 helpers", () => {
         },
       }),
     ).toThrow("Unknown bridge diagnostic reason code: not_a_bridge_reason_code")
+  })
+
+  test("runtime conformance contract accepts degraded profile health", () => {
+    expect(
+      bridgeStatusV2Schema.parse({
+        connected: true,
+        runtimeConformance: {
+          canClaim: false,
+          profiles: {
+            "codex:codex-acp": {
+              canClaim: false,
+              checkedAt: 1_781_400_000_000,
+              diagnostics: [],
+              reasonCode: "runtime_conformance_stale",
+              runtimeId: "codex:codex-acp",
+              state: "passing",
+              status: "degraded",
+              strength: "init_only",
+            },
+          },
+          status: "degraded",
+        },
+      }).runtimeConformance?.status,
+    ).toBe("degraded")
   })
 })
