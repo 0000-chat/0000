@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import {
   BridgeCloudHttpError,
   ConvexBridgeCloudClient,
+  type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
 import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter";
 import {
@@ -443,6 +444,7 @@ export type BridgeLoopIterationInput = {
   discoverRuntimeProfiles?: typeof discoverBridgeRuntimeProfiles;
   cleanupStaleClaims?: typeof cleanupStaleClaims;
   claimCommands?: typeof claimCommands;
+  markCommandResult?: typeof markCommandResult;
   canClaimWork?: () => boolean;
   getProcessHealth?: () => AcpBridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
@@ -1910,6 +1912,7 @@ export async function runBridgeLoopIteration(
     input.discoverRuntimeProfiles ?? discoverBridgeRuntimeProfiles;
   const cleanup = input.cleanupStaleClaims ?? cleanupStaleClaims;
   const claim = input.claimCommands ?? claimCommands;
+  const markResult = input.markCommandResult ?? markCommandResult;
   const persistStatus = input.writeStatus ?? writeStatus;
   const currentTime = input.now ?? Date.now;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
@@ -2198,18 +2201,6 @@ export async function runBridgeLoopIteration(
         await persistStatus(input.statusPath, input.status);
         return { restartRequested: false };
       }
-      if (runtimeConformance && !runtimeConformance.canClaim) {
-        input.log({
-          level: "warn",
-          event: "bridge.queue.claim_skipped",
-          deviceId: input.config.deviceId,
-          reason: "runtime_conformance_unavailable",
-          runtimeConformanceStatus: runtimeConformance.status,
-        });
-        syncBridgeStatus();
-        await persistStatus(input.statusPath, input.status);
-        return { restartRequested: false };
-      }
       if (input.canClaimWork && !input.canClaimWork()) {
         input.log({
           level: "warn",
@@ -2232,6 +2223,25 @@ export async function runBridgeLoopIteration(
         });
       }
       for (const command of commands) {
+        const conformanceBlock = runtimeConformanceBlockForCommand(
+          command,
+          runtimeConformance,
+        );
+        if (conformanceBlock) {
+          const result = runtimeConformanceBlockResult(command, conformanceBlock);
+          await markResult(input.config, command, result);
+          input.log({
+            level: "warn",
+            event: "bridge.queue.claim_skipped",
+            deviceId: input.config.deviceId,
+            queueId: command.id,
+            queueType: command.type ?? command.kind,
+            bridgeProfileId: command.bridgeProfileId,
+            reason: conformanceBlock.reasonCode,
+            runtimeConformanceStatus: conformanceBlock.status,
+          });
+          continue;
+        }
         runCommand(command);
       }
     }
@@ -2772,6 +2782,64 @@ async function claimCommands(
   return rawCommands
     .map(normalizeQueueCommand)
     .filter((command) => command !== undefined);
+}
+
+async function markCommandResult(
+  config: BridgeConfig,
+  command: BridgeQueueCommand,
+  result: BridgeQueueResult,
+): Promise<void> {
+  await createCloudClient(config).markResult(
+    command.id,
+    command.claimId ? { ...result, claimId: command.claimId } : result,
+    command.claimId,
+  );
+}
+
+function runtimeConformanceBlockForCommand(
+  command: BridgeQueueCommand,
+  runtimeConformance: RuntimeConformanceSummary | undefined,
+): { reasonCode: string; status: string } | undefined {
+  if (!commandRequiresRuntimeConformance(command)) {
+    return undefined;
+  }
+  if (!runtimeConformance || !command.bridgeProfileId) {
+    return undefined;
+  }
+  const profile = runtimeConformance.profiles[command.bridgeProfileId];
+  if (!profile) {
+    return {
+      reasonCode: "runtime_conformance_missing",
+      status: runtimeConformance.status,
+    };
+  }
+  if (profile.canClaim) {
+    return undefined;
+  }
+  return {
+    reasonCode: profile.reasonCode ?? "runtime_conformance_missing",
+    status: profile.status,
+  };
+}
+
+function commandRequiresRuntimeConformance(command: BridgeQueueCommand): boolean {
+  const type = command.type ?? command.kind;
+  return type === "prompt" || type === "start-session";
+}
+
+function runtimeConformanceBlockResult(
+  command: BridgeQueueCommand,
+  block: { reasonCode: string; status: string },
+): BridgeQueueResult {
+  return {
+    ...(command.claimId ? { claimId: command.claimId } : {}),
+    bridgeProfileId: command.bridgeProfileId,
+    error: block.reasonCode,
+    ok: false,
+    reasonCode: block.reasonCode,
+    retryable: true,
+    runtimeConformanceStatus: block.status,
+  };
 }
 
 async function cleanupStaleClaims(
