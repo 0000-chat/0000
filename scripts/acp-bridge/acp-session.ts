@@ -156,6 +156,7 @@ export type HermesAcpSessionOptions = {
   requestTimeoutMs?: number
   resumeEnabled?: boolean
   onEvent?: (event: NormalizedBridgeEvent) => void | Promise<void>
+  onEventBoundary?: () => void | Promise<void>
   onError?: (error: Error) => void | Promise<void>
   runtimeClient?: BridgeAcpRuntimeClient
   spawnProcess?: (command: string, args: string[], cwd?: string) => ChildProcessWithoutNullStreams
@@ -240,6 +241,7 @@ export class HermesAcpSession {
   readonly resumeEnabled: boolean
 
   private readonly onEvent?: (event: NormalizedBridgeEvent) => void | Promise<void>
+  private readonly onEventBoundary?: () => void | Promise<void>
   private readonly onError?: (error: Error) => void | Promise<void>
   private readonly processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
@@ -286,6 +288,7 @@ export class HermesAcpSession {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_ACP_REQUEST_TIMEOUT_MS
     this.resumeEnabled = options.resumeEnabled === true
     this.onEvent = options.onEvent
+    this.onEventBoundary = options.onEventBoundary
     this.onError = options.onError
     this.processRegistry = options.processRegistry
     this.processRegistryMetadata = options.processRegistryMetadata ?? {}
@@ -914,9 +917,21 @@ export class HermesAcpSession {
     this.deferredPromptEvents = this.deferredPromptEvents.filter(
       (event) => !originalEventSet.has(event),
     )
-    for (const originalEvent of deferredEvents) {
-      const index = originalEvents.indexOf(originalEvent)
-      await this.onEvent?.(processedEvents[index] ?? originalEvent)
+    const deferredEventSet = new Set(deferredEvents)
+    let emittedDeferredEvent = false
+    for (let index = 0; index < originalEvents.length; index += 1) {
+      const originalEvent = originalEvents[index]
+      if (!originalEvent) {
+        continue
+      }
+      if (deferredEventSet.has(originalEvent)) {
+        await this.onEvent?.(processedEvents[index] ?? originalEvent)
+        emittedDeferredEvent = true
+        continue
+      }
+      if (emittedDeferredEvent && isStreamChunkBoundaryEvent(processedEvents[index] ?? originalEvent)) {
+        await this.onEventBoundary?.()
+      }
     }
   }
 
@@ -1542,6 +1557,10 @@ function reclassifyMessageChunkAsThinking(event: NormalizedBridgeEvent): Normali
       },
     },
   }
+}
+
+function isStreamChunkBoundaryEvent(event: NormalizedBridgeEvent): boolean {
+  return event.part?.type !== "text" && event.part?.type !== "thinking"
 }
 
 function classifyAcpRuntimeId(command: string[]): HermesAcpFinalTextDiagnostics["runtimeId"] {

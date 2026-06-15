@@ -117,7 +117,7 @@ describe("runtime discovery", () => {
     const codex = profiles.find((profile) => profile.kind === "codex")
     expect(codex).toMatchObject({
       id: "codex:codex-acp",
-      command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+      command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
       diagnostics: { acp: "supported", contextMode: "available", mcpServers: 2 },
       capabilities: { nativeSkills: true, nativeHooks: true, nativeMcp: true },
     })
@@ -210,7 +210,7 @@ describe("runtime discovery", () => {
       probeAcpCommand: async (command) => {
         const key = command.join(" ")
         probeCalls.push(key)
-        if (key === "bunx @zed-industries/codex-acp@0.15.0") {
+        if (key === "bunx @zed-industries/codex-acp@0.16.0") {
           return { ok: false, reason: "sh: codex-acp: command not found" }
         }
         return { ok: true }
@@ -233,12 +233,12 @@ describe("runtime discovery", () => {
       },
     })
 
-    expect(probeCalls).toContain("bunx @zed-industries/codex-acp@0.15.0")
+    expect(probeCalls).toContain("bunx @zed-industries/codex-acp@0.16.0")
     expect(probeCalls).not.toContain("bunx --yes @agentclientprotocol/codex-acp@0.0.45")
     expect(probeCalls).not.toContain("npx --yes @agentclientprotocol/codex-acp@0.0.45")
     expect(profiles.find((profile) => profile.kind === "codex")).toMatchObject({
       id: "codex:codex-acp",
-      command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+      command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
       diagnostics: { acp: "unsupported", reason: "sh: codex-acp: command not found" },
       status: "unavailable",
     })
@@ -264,7 +264,7 @@ describe("runtime discovery", () => {
     expect(
       probeCalls.some(
         (call) =>
-          call.command.join(" ") === "bunx @zed-industries/codex-acp@0.15.0" &&
+          call.command.join(" ") === "bunx @zed-industries/codex-acp@0.16.0" &&
           call.timeoutMs === 30_000,
       ),
     ).toBe(true)
@@ -276,7 +276,7 @@ describe("runtime discovery", () => {
       probeCalls
         .filter(
           (call) =>
-            call.command.join(" ") !== "bunx @zed-industries/codex-acp@0.15.0" &&
+            call.command.join(" ") !== "bunx @zed-industries/codex-acp@0.16.0" &&
             call.command.join(" ") !== "openclaw acp",
         )
         .every((call) => call.timeoutMs === undefined),
@@ -285,7 +285,7 @@ describe("runtime discovery", () => {
 
   test("does not synthesize a Hermes profile for non-Hermes base commands", async () => {
     const profiles = await discoverRuntimeProfiles({
-      baseAgentCommand: "bunx @zed-industries/codex-acp@0.15.0",
+      baseAgentCommand: "bunx @zed-industries/codex-acp@0.16.0",
       discoverAcpCommands: noDiscoveredCommands,
       probeAcpCommand: async () => ({ ok: true }),
       runCommand: async (command) => {

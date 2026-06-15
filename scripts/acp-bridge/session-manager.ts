@@ -150,6 +150,7 @@ export type BridgeSessionContext = {
   terminalScope?: TerminalHandleScope;
   processRegistryMetadata?: HermesAcpProcessRegistryMetadata;
   onEvent: (event: NormalizedBridgeEvent) => void;
+  onEventBoundary?: () => void;
   onError: (error: Error) => void;
 };
 
@@ -369,6 +370,7 @@ export class BridgeSessionManager {
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined;
   private eventBatchTimer: ReturnType<typeof setTimeout> | undefined;
   private nextSequence = 1;
+  private readonly activePromptSequenceBases = new Map<string, number>();
   private nextGeneration = 1;
 
   constructor(options: BridgeSessionManagerOptions) {
@@ -405,6 +407,7 @@ export class BridgeSessionManager {
           requestTimeoutMs: this.requestTimeoutMs,
           resumeEnabled: this.resumeEnabled,
           onEvent: context.onEvent,
+          onEventBoundary: context.onEventBoundary,
           onError: context.onError,
           terminalAdapter: context.terminalAdapter,
         }));
@@ -753,7 +756,7 @@ export class BridgeSessionManager {
     this.supervisor?.recordPromptPersisted(
       this.supervisorWorkItem(item, session),
     );
-    this.enqueueEventWrite(session, {
+    const messageStartedSequence = this.enqueueEventWrite(session, {
       externalEventId: `${item.id}:message_started`,
       source: "bridge",
       eventType: "message_started",
@@ -764,6 +767,7 @@ export class BridgeSessionManager {
         status: "streaming",
       },
     });
+    this.activePromptSequenceBases.set(session.sessionKey, messageStartedSequence);
     let result: HermesAcpPromptResult;
     const runtimeConfigApplication = applyRuntimeConfigFallback(
       item,
@@ -785,6 +789,7 @@ export class BridgeSessionManager {
         runtimeConfig: runtimeConfigApplication?.applied,
       });
     } catch (error) {
+      this.activePromptSequenceBases.delete(session.sessionKey);
       if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
         return;
       }
@@ -840,6 +845,7 @@ export class BridgeSessionManager {
       });
       throw error;
     }
+    this.activePromptSequenceBases.delete(session.sessionKey);
     this.activeToolTimeoutFailures.delete(item.id);
     if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
       this.writeLog({
@@ -2064,6 +2070,9 @@ export class BridgeSessionManager {
             this.enqueueEventWrite(record, event);
           }
         },
+        onEventBoundary: () => {
+          this.flushPendingStreamChunkEvent();
+        },
         onError: (error) => {
           if (this.isCurrentSessionRecord(record)) {
             const eventItem = this.currentQueueItemForSessionEvent(
@@ -2213,11 +2222,32 @@ export class BridgeSessionManager {
   private enqueueEventWrite(
     record: BridgeSessionRecord,
     event: NormalizedBridgeEvent,
-  ): void {
-    const sequence = this.nextSequence;
-    this.nextSequence += 1;
+  ): number {
+    const sequence = this.allocateEventSequence(record, event);
     this.writeBridgeActivityLog(record, event, sequence);
     this.enqueueBridgeEvent(toBridgeEvent(record, event, sequence));
+    return sequence;
+  }
+
+  private allocateEventSequence(
+    record: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): number {
+    const baseSequence = this.activePromptSequenceBases.get(record.sessionKey);
+    if (
+      event.source === "acp_bridge" &&
+      baseSequence !== undefined &&
+      typeof event.providerSequence === "number" &&
+      Number.isInteger(event.providerSequence) &&
+      event.providerSequence >= 1
+    ) {
+      const sequence = baseSequence + event.providerSequence;
+      this.nextSequence = Math.max(this.nextSequence, sequence + 1);
+      return sequence;
+    }
+    const sequence = this.nextSequence;
+    this.nextSequence += 1;
+    return sequence;
   }
 
   private async resolveAgentAttachmentUploads(

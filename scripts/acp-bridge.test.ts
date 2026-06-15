@@ -252,7 +252,7 @@ describe("bridge multi-organization config", () => {
 describe("bridge security defaults", () => {
   test("pins default package-backed ACP runtime commands", () => {
     expect(DEFAULT_CODEX_ACP_COMMAND).toBe(
-      "bunx @zed-industries/codex-acp@0.15.0",
+      "bunx @zed-industries/codex-acp@0.16.0",
     );
     expect(DEFAULT_CLAUDE_CODE_ACP_COMMAND).toBe(
       "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
@@ -633,7 +633,7 @@ describe("bridge supervisor claim gating", () => {
       discoverRuntimeProfiles: async () => [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -679,7 +679,7 @@ describe("bridge supervisor claim gating", () => {
     expect(status.lifecycle).toBe("restarting");
     expect(status.runtimeProfiles?.[0]?.command).toEqual([
       "bunx",
-      "@zed-industries/codex-acp@0.15.0",
+      "@zed-industries/codex-acp@0.16.0",
     ]);
     expect(logs).toContainEqual(
       expect.objectContaining({
@@ -727,7 +727,7 @@ describe("bridge supervisor claim gating", () => {
         },
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",

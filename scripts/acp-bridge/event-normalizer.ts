@@ -22,6 +22,7 @@ export type NormalizedBridgeEvent = {
   externalEventId: string
   source: "acp_bridge" | "bridge"
   eventType: string
+  providerSequence?: number
   sessionId?: string
   externalRequestId?: string
   payload: unknown
@@ -100,6 +101,7 @@ export function normalizeAcpNotification(
     externalEventId,
     source: "acp_bridge",
     eventType,
+    providerSequence: sequence,
     sessionId,
     externalRequestId: readString(record.id) ?? readNumberString(record.id),
     payload: attachmentUpload

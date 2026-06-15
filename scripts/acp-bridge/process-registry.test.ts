@@ -21,7 +21,7 @@ describe("ACP bridge process registry", () => {
     const registry = new AcpBridgeProcessRegistry({ path })
 
     await registry.registerProcess({
-      args: ["@zed-industries/codex-acp@0.15.0"],
+      args: ["@zed-industries/codex-acp@0.16.0"],
       command: "bunx",
       cwd: "/repo",
       pid: 12345,
@@ -34,7 +34,7 @@ describe("ACP bridge process registry", () => {
     const raw = JSON.parse(await readFile(path, "utf8")) as { entries: AcpBridgeProcessRegistryEntry[] }
     expect(raw.entries).toEqual([
       expect.objectContaining({
-        args: ["@zed-industries/codex-acp@0.15.0"],
+        args: ["@zed-industries/codex-acp@0.16.0"],
         command: "bunx",
         pid: 12345,
         queueItemId: "queue-1",
@@ -204,21 +204,21 @@ describe("ACP bridge process registry", () => {
     const registry = new AcpBridgeProcessRegistry({
       listProcessCandidates: () => [
         {
-          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           elapsedMs: 120_000,
           pid: 222,
           ppid: 1,
           source: "test",
         },
         {
-          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           elapsedMs: 1_000,
           pid: 333,
           ppid: 1,
           source: "test",
         },
         {
-          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           elapsedMs: 120_000,
           parentCommandLine: "bun scripts/acp-bridge.ts start --max-in-flight 1",
           pid: 334,
@@ -226,15 +226,15 @@ describe("ACP bridge process registry", () => {
           source: "test",
         },
         {
-          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           elapsedMs: 120_000,
-          parentCommandLine: `node ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          parentCommandLine: `node ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           pid: 335,
           ppid: 901,
           source: "test",
         },
         {
-          commandLine: "bun /other/scripts/acp-bridge/acp-node-proxy.cjs bunx @zed-industries/codex-acp@0.15.0",
+          commandLine: "bun /other/scripts/acp-bridge/acp-node-proxy.cjs bunx @zed-industries/codex-acp@0.16.0",
           elapsedMs: 120_000,
           pid: 444,
           ppid: 1,
@@ -268,7 +268,7 @@ describe("ACP bridge process registry", () => {
       isProcessAlive: (pid) => pid === 333,
       listProcessCandidates: () => [
         {
-          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           elapsedMs: 120_000,
           pid: 222,
           ppid: 1,
@@ -282,7 +282,7 @@ describe("ACP bridge process registry", () => {
           source: "test",
         },
         {
-          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.15.0`,
+          commandLine: `bun ${ownedProxyScriptPath} bunx @zed-industries/codex-acp@0.16.0`,
           elapsedMs: 1_000,
           pid: 444,
           ppid: 1,
@@ -321,7 +321,7 @@ describe("ACP bridge process registry", () => {
       readProcessIdentity: (pid) =>
         pid === 333
           ? {
-              argv: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+              argv: ["bunx", "@zed-industries/codex-acp@0.16.0"],
               source: "test",
               startTime: "boot-1:333",
             }
@@ -387,7 +387,7 @@ describe("ACP bridge process registry", () => {
       readProcessIdentity: (pid) =>
         pid === 333
           ? {
-              argv: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+              argv: ["bunx", "@zed-industries/codex-acp@0.16.0"],
               source: "test",
               startTime: "boot-1:333",
             }
@@ -397,7 +397,7 @@ describe("ACP bridge process registry", () => {
       },
     })
     await registry.registerProcess({
-      args: ["@zed-industries/codex-acp@0.15.0"],
+      args: ["@zed-industries/codex-acp@0.16.0"],
       bridgeDeviceId: "device-1",
       command: "bunx",
       pid: 333,
@@ -447,7 +447,7 @@ describe("ACP bridge process registry", () => {
       },
     })
     await registry.registerProcess({
-      args: ["@zed-industries/codex-acp@0.15.0"],
+      args: ["@zed-industries/codex-acp@0.16.0"],
       bridgeDeviceId: "device-1",
       command: "bunx",
       pid: 333,
