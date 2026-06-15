@@ -4,7 +4,9 @@ import {
   evaluateConformanceForClaim,
   runRuntimeConformance,
   shouldRefreshRuntimeConformance,
+  shouldRefreshRuntimeConformanceProfile,
   summarizeRuntimeConformance,
+  summarizeRuntimeProfileHealth,
   type RuntimeConformanceRecord,
 } from "./runtime-conformance"
 
@@ -60,6 +62,56 @@ describe("runtime conformance", () => {
         ttlMs: 60_000,
       }),
     ).toBe(false)
+  })
+
+  test("refresh eligibility ignores running sessions on unrelated profiles", () => {
+    expect(
+      shouldRefreshRuntimeConformanceProfile({
+        force: false,
+        inFlightProfileIds: new Set(["hermes:default"]),
+        lastProbeAt: 1_781_400_000_000,
+        now: 1_781_400_160_000,
+        profileId: "codex:codex-acp",
+        runningSessionProfileIds: new Set(["hermes:default"]),
+        ttlMs: 300_000,
+      }),
+    ).toBe(true)
+  })
+
+  test("refresh eligibility defers intrusive probe for active same profile", () => {
+    expect(
+      shouldRefreshRuntimeConformanceProfile({
+        force: false,
+        inFlightProfileIds: new Set(["codex:codex-acp"]),
+        lastProbeAt: 1_781_400_000_000,
+        now: 1_781_400_160_000,
+        profileId: "codex:codex-acp",
+        runningSessionProfileIds: new Set(["codex:codex-acp"]),
+        ttlMs: 300_000,
+      }),
+    ).toBe(false)
+  })
+
+  test("active liveness can degrade instead of making profile unavailable", () => {
+    expect(
+      summarizeRuntimeProfileHealth({
+        activeProfileIds: new Set(["codex:codex-acp"]),
+        now: 1_781_400_360_000,
+        profileId: "codex:codex-acp",
+        record: {
+          checkedAt: 1_781_400_000_000,
+          diagnostics: [],
+          runtimeId: "codex:codex-acp",
+          state: "passing",
+          strength: "init_only",
+        },
+        ttlMs: 300_000,
+      }),
+    ).toEqual({
+      canClaim: false,
+      reasonCode: "runtime_conformance_stale",
+      status: "degraded",
+    })
   })
 
   test("permits claims only for fresh passing init conformance", () => {
@@ -210,6 +262,23 @@ describe("runtime conformance", () => {
       profiles: { "codex:default": { canClaim: true, state: "passing" } },
       status: "healthy",
     })
+    expect(
+      summarizeRuntimeConformance({
+        now,
+        profiles: [
+          {
+            capabilities: {},
+            command: ["codex", "acp"],
+            id: "codex:default",
+            kind: "codex",
+            label: "Codex",
+            status: "available",
+          },
+        ],
+        records: { "codex:default": passing({ checkedAt: now }) },
+        ttlMs: 60_000,
+      }).profiles["codex:default"],
+    ).not.toHaveProperty("status")
 
     expect(
       summarizeRuntimeConformance({

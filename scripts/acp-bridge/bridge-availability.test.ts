@@ -45,4 +45,18 @@ describe("bridge availability", () => {
       status: "unavailable",
     })
   })
+
+  test("degraded runtime health reports degraded availability", () => {
+    expect(
+      deriveBridgeAvailability({
+        connected: true,
+        processHealth: { canClaim: true, status: "healthy" },
+        runtimeConformance: { canClaim: false, status: "degraded" },
+      }),
+    ).toEqual({
+      canClaim: false,
+      reasonCode: "runtime_conformance_unavailable",
+      status: "degraded",
+    })
+  })
 })

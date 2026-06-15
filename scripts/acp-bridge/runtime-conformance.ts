@@ -25,6 +25,12 @@ export type RuntimeConformanceClaimDecision =
   | { ok: true }
   | { ok: false; reasonCode: RuntimeConformanceReasonCode }
 
+export type RuntimeConformanceHealthStatus =
+  | "healthy"
+  | "degraded"
+  | "unavailable"
+  | "quarantined"
+
 export type RuntimeConformanceSession = {
   close(): Promise<void>
   sendUserMessage?(text: string): Promise<HermesAcpPromptResult>
@@ -40,7 +46,7 @@ export type RuntimeConformanceSummary = {
       reasonCode?: RuntimeConformanceReasonCode
     }
   >
-  status: "healthy" | "degraded" | "unavailable"
+  status: RuntimeConformanceHealthStatus
 }
 
 export const DEFAULT_RUNTIME_CONFORMANCE_TTL_MS = 5 * 60_000
@@ -64,6 +70,27 @@ export function shouldRefreshRuntimeConformance(input: {
   }
   if (input.force === true) {
     return true
+  }
+  return input.now - input.lastProbeAt >= (input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS) / 2
+}
+
+export function shouldRefreshRuntimeConformanceProfile(input: {
+  force?: boolean
+  inFlightProfileIds: Set<string>
+  lastProbeAt: number
+  now: number
+  profileId: string
+  runningSessionProfileIds: Set<string>
+  ttlMs?: number
+}): boolean {
+  if (input.force === true) {
+    return true
+  }
+  if (input.inFlightProfileIds.has(input.profileId)) {
+    return false
+  }
+  if (input.runningSessionProfileIds.has(input.profileId)) {
+    return false
   }
   return input.now - input.lastProbeAt >= (input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS) / 2
 }
@@ -120,6 +147,7 @@ export async function runRuntimeConformance(input: {
 }
 
 export function summarizeRuntimeConformance(input: {
+  activeProfileIds?: Set<string>
   now: number
   profiles: BridgeRuntimeProfile[]
   records: Record<string, RuntimeConformanceRecord | undefined>
@@ -127,12 +155,14 @@ export function summarizeRuntimeConformance(input: {
 }): RuntimeConformanceSummary {
   const ttlMs = input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS
   const profiles: RuntimeConformanceSummary["profiles"] = {}
+  const healthEntries: RuntimeConformanceHealthStatus[] = []
   for (const profile of input.profiles.filter((candidate) => candidate.status === "available")) {
     const record = input.records[profile.id]
-    const decision = evaluateConformanceForClaim({
+    const health = summarizeRuntimeProfileHealth({
+      activeProfileIds: input.activeProfileIds ?? new Set(),
       now: input.now,
+      profileId: profile.id,
       record,
-      requiredStrength: "init_only",
       ttlMs,
     })
     profiles[profile.id] = {
@@ -143,18 +173,70 @@ export function summarizeRuntimeConformance(input: {
         state: "failing" as const,
         strength: "none" as const,
       }),
-      canClaim: decision.ok,
-      ...(!decision.ok ? { reasonCode: decision.reasonCode } : {}),
+      canClaim: health.canClaim,
+      ...(!health.canClaim ? { reasonCode: health.reasonCode } : {}),
     }
+    healthEntries.push(health.status)
   }
   const entries = Object.values(profiles)
   const hasPassing = entries.some((entry) => entry.canClaim)
   const allPassing = entries.every((entry) => entry.canClaim)
+  const hasDegraded = healthEntries.some((status) => status === "degraded")
+  const allQuarantined =
+    healthEntries.length > 0 && healthEntries.every((status) => status === "quarantined")
   const canClaim = entries.length === 0 || hasPassing
   return {
     canClaim,
     profiles,
-    status: allPassing ? "healthy" : hasPassing ? "degraded" : "unavailable",
+    status: allPassing
+      ? "healthy"
+      : hasPassing || hasDegraded
+        ? "degraded"
+        : allQuarantined
+          ? "quarantined"
+          : "unavailable",
+  }
+}
+
+export function summarizeRuntimeProfileHealth(input: {
+  activeProfileIds: Set<string>
+  now: number
+  profileId: string
+  record: RuntimeConformanceRecord | null | undefined
+  ttlMs?: number
+}): {
+  canClaim: boolean
+  reasonCode?: RuntimeConformanceReasonCode
+  status: RuntimeConformanceHealthStatus
+} {
+  const ttlMs = input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS
+  const decision = evaluateConformanceForClaim({
+    now: input.now,
+    record: input.record,
+    requiredStrength: "init_only",
+    ttlMs,
+  })
+  if (decision.ok) {
+    return { canClaim: true, status: "healthy" }
+  }
+  if (decision.reasonCode === "runtime_quarantined") {
+    return {
+      canClaim: false,
+      reasonCode: decision.reasonCode,
+      status: "quarantined",
+    }
+  }
+  if (input.activeProfileIds.has(input.profileId)) {
+    return {
+      canClaim: false,
+      reasonCode: decision.reasonCode,
+      status: "degraded",
+    }
+  }
+  return {
+    canClaim: false,
+    reasonCode: decision.reasonCode,
+    status: "unavailable",
   }
 }
 
