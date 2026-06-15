@@ -231,7 +231,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -281,7 +281,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -311,7 +311,7 @@ describe("bridge session cwd safety", () => {
     expect(acpEvent?.rawPayload).toMatchObject({
       runtimeCommand: {
         executable: "bunx",
-        package: "@zed-industries/codex-acp@0.15.0",
+        package: "@zed-industries/codex-acp@0.16.0",
       },
       runtimeKind: "codex",
       runtimeLabel: "Codex",
@@ -612,7 +612,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -657,7 +657,7 @@ describe("bridge session cwd safety", () => {
       "claude-code:claude-acp",
     ]);
     expect(contexts.map((context) => context.agentCommand)).toEqual([
-      ["bunx", "@zed-industries/codex-acp@0.15.0"],
+      ["bunx", "@zed-industries/codex-acp@0.16.0"],
       ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
     ]);
     expect(closedProfiles).toContain("codex:codex-acp");
@@ -694,7 +694,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -745,7 +745,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.15.0"],
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -767,7 +767,7 @@ describe("bridge session cwd safety", () => {
     expect(contexts[0]?.runtimeProfile?.id).toBe("codex:codex-acp");
     expect(contexts[0]?.agentCommand).toEqual([
       "bunx",
-      "@zed-industries/codex-acp@0.15.0",
+      "@zed-industries/codex-acp@0.16.0",
     ]);
   });
 
