@@ -3702,6 +3702,50 @@ describe("bridge session cwd safety", () => {
     ]);
   });
 
+  test("preserves deferred Codex thought order and coalesces only within tool boundaries", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(3));
+          context.onEvent(streamChunkEvent("agent_thought_chunk", "before ", 1));
+          context.onEvent(streamChunkEvent("agent_thought_chunk", "tool", 2));
+          context.onEventBoundary?.();
+          context.onEvent(streamChunkEvent("agent_thought_chunk", "after ", 4));
+          context.onEvent(streamChunkEvent("agent_thought_chunk", "tool", 5));
+          return {
+            events: [],
+            rawResult: { stopReason: "end_turn" },
+            sessionId: "session-1",
+            stopReason: "end_turn",
+            text: "ok",
+          };
+        },
+      }),
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+
+    const persisted = flattenPersistedEvents(cloud.events)
+      .filter((event) =>
+        ["agent_thought_chunk", "tool_call"].includes(String(event.eventType)),
+      )
+      .sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0))
+      .map((event) => ({
+        eventType: event.eventType,
+        sequence: event.sequence,
+        text: (event.normalizedPayload as { text?: string }).text,
+      }));
+    expect(persisted).toEqual([
+      { eventType: "agent_thought_chunk", sequence: 2, text: "before tool" },
+      { eventType: "tool_call", sequence: 4, text: "tool started" },
+      { eventType: "agent_thought_chunk", sequence: 5, text: "after tool" },
+    ]);
+  });
+
   test("marks ACP prompt timeouts as terminal queue failures", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({
@@ -3876,6 +3920,7 @@ function streamChunkEvent(
       content: { text, type: "text" },
       sessionUpdate: eventType,
     },
+    providerSequence: sequence,
     source: "acp_bridge",
   };
 }
@@ -3895,6 +3940,7 @@ function toolCallEvent(sequence: number): NormalizedBridgeEvent {
       type: "tool_call",
     },
     payload: { sessionUpdate: "tool_call", toolCallId: "tool-1" },
+    providerSequence: sequence,
     source: "acp_bridge",
   };
 }
@@ -3914,6 +3960,7 @@ function toolResultEvent(sequence: number): NormalizedBridgeEvent {
       type: "tool_result",
     },
     payload: { sessionUpdate: "tool_result", toolCallId: "tool-1" },
+    providerSequence: sequence,
     source: "acp_bridge",
   };
 }
