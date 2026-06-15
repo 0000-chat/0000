@@ -162,7 +162,6 @@ describe("bridge contract v2 helpers", () => {
               reasonCode: "runtime_conformance_stale",
               runtimeId: "codex:codex-acp",
               state: "passing",
-              status: "degraded",
               strength: "init_only",
             },
           },

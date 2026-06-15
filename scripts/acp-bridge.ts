@@ -2818,7 +2818,7 @@ function runtimeConformanceBlockForCommand(
   }
   return {
     reasonCode: profile.reasonCode ?? "runtime_conformance_missing",
-    status: profile.status,
+    status: runtimeConformance.status,
   };
 }
 

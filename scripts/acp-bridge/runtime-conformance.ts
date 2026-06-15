@@ -44,7 +44,6 @@ export type RuntimeConformanceSummary = {
     RuntimeConformanceRecord & {
       canClaim: boolean
       reasonCode?: RuntimeConformanceReasonCode
-      status: RuntimeConformanceHealthStatus
     }
   >
   status: RuntimeConformanceHealthStatus
@@ -156,6 +155,7 @@ export function summarizeRuntimeConformance(input: {
 }): RuntimeConformanceSummary {
   const ttlMs = input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS
   const profiles: RuntimeConformanceSummary["profiles"] = {}
+  const healthEntries: RuntimeConformanceHealthStatus[] = []
   for (const profile of input.profiles.filter((candidate) => candidate.status === "available")) {
     const record = input.records[profile.id]
     const health = summarizeRuntimeProfileHealth({
@@ -174,16 +174,16 @@ export function summarizeRuntimeConformance(input: {
         strength: "none" as const,
       }),
       canClaim: health.canClaim,
-      status: health.status,
       ...(!health.canClaim ? { reasonCode: health.reasonCode } : {}),
     }
+    healthEntries.push(health.status)
   }
   const entries = Object.values(profiles)
   const hasPassing = entries.some((entry) => entry.canClaim)
   const allPassing = entries.every((entry) => entry.canClaim)
-  const hasDegraded = entries.some((entry) => entry.status === "degraded")
+  const hasDegraded = healthEntries.some((status) => status === "degraded")
   const allQuarantined =
-    entries.length > 0 && entries.every((entry) => entry.status === "quarantined")
+    healthEntries.length > 0 && healthEntries.every((status) => status === "quarantined")
   const canClaim = entries.length === 0 || hasPassing
   return {
     canClaim,

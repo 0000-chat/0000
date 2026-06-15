@@ -262,6 +262,23 @@ describe("runtime conformance", () => {
       profiles: { "codex:default": { canClaim: true, state: "passing" } },
       status: "healthy",
     })
+    expect(
+      summarizeRuntimeConformance({
+        now,
+        profiles: [
+          {
+            capabilities: {},
+            command: ["codex", "acp"],
+            id: "codex:default",
+            kind: "codex",
+            label: "Codex",
+            status: "available",
+          },
+        ],
+        records: { "codex:default": passing({ checkedAt: now }) },
+        ttlMs: 60_000,
+      }).profiles["codex:default"],
+    ).not.toHaveProperty("status")
 
     expect(
       summarizeRuntimeConformance({
