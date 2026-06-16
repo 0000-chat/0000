@@ -19,8 +19,8 @@ For development or recovery:
 
 ```bash
 cd "$HOME/0000"
-git fetch --tags --force origin "v0.1.9"
-git checkout --detach "v0.1.9"
+git fetch --tags --force origin "v0.1.10"
+git checkout --detach "v0.1.10"
 bun install
 bun test
 ```

@@ -138,7 +138,7 @@ describe("ACP final text extraction", () => {
     expect(result.finalText?.withheld).toBe(false)
   })
 
-  test("hides pre-tool Codex message chunks while keeping post-tool final chunks", async () => {
+  test("streams pre-tool Codex message chunks as thinking before the tool boundary", async () => {
     const observedEvents: Array<{ eventType: string; partType?: string }> = []
     const session = new HermesAcpSession({
       agentCommand: "bunx @zed-industries/codex-acp@0.16.0",
@@ -180,10 +180,10 @@ describe("ACP final text extraction", () => {
     expect(result.events.filter((event) => event.part?.type === "text")).toHaveLength(2)
     expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(2)
     expect(observedEvents).toEqual([
+      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
       { eventType: "tool_call", partType: "tool_call" },
       { eventType: "tool_call_update", partType: "tool_result" },
-      { eventType: "agent_thought_chunk", partType: "thinking" },
-      { eventType: "agent_thought_chunk", partType: "thinking" },
       { eventType: "agent_message_chunk", partType: "text" },
       { eventType: "agent_message_chunk", partType: "text" },
     ])
@@ -206,7 +206,7 @@ describe("ACP final text extraction", () => {
     expect(result.finalText?.withheld).toBe(false)
   })
 
-  test("hides Claude Code ACP progress chunks before the last tool while keeping final text", async () => {
+  test("streams Claude Code ACP progress chunks before tool boundaries while keeping final text", async () => {
     const observedEvents: Array<{ eventType: string; partType?: string }> = []
     const session = new HermesAcpSession({
       agentCommand: "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
@@ -257,12 +257,12 @@ describe("ACP final text extraction", () => {
     expect(result.events.filter((event) => event.part?.type === "thinking")).toHaveLength(2)
     expect(result.events.filter((event) => event.part?.type === "text")).toHaveLength(2)
     expect(observedEvents).toEqual([
-      { eventType: "tool_call", partType: "tool_call" },
-      { eventType: "tool_call_update", partType: "tool_result" },
+      { eventType: "agent_thought_chunk", partType: "thinking" },
       { eventType: "tool_call", partType: "tool_call" },
       { eventType: "tool_call_update", partType: "tool_result" },
       { eventType: "agent_thought_chunk", partType: "thinking" },
-      { eventType: "agent_thought_chunk", partType: "thinking" },
+      { eventType: "tool_call", partType: "tool_call" },
+      { eventType: "tool_call_update", partType: "tool_result" },
       { eventType: "agent_message_chunk", partType: "text" },
       { eventType: "agent_message_chunk", partType: "text" },
     ])

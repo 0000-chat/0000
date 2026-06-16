@@ -106,7 +106,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.9";
+export const BRIDGE_VERSION = "0.1.10";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 
 export type BridgeCommandName =
