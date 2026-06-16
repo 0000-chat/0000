@@ -785,6 +785,9 @@ export class HermesAcpSession {
       this.deferredPromptEvents.push(event)
       return
     }
+    if (isStreamChunkBoundaryEvent(event)) {
+      this.flushDeferredPromptEventsBeforeBoundary()
+    }
     void this.onEvent?.(event)
   }
 
@@ -932,6 +935,16 @@ export class HermesAcpSession {
       if (emittedDeferredEvent && isStreamChunkBoundaryEvent(processedEvents[index] ?? originalEvent)) {
         await this.onEventBoundary?.()
       }
+    }
+  }
+
+  private flushDeferredPromptEventsBeforeBoundary(): void {
+    if (this.deferredPromptEvents.length === 0) {
+      return
+    }
+    const events = this.deferredPromptEvents.splice(0, this.deferredPromptEvents.length)
+    for (const event of events) {
+      void this.onEvent?.(reclassifyMessageChunkAsThinking(event))
     }
   }
 
