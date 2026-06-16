@@ -12,6 +12,7 @@ import {
   bridgeHeartbeatSignature,
   describeStatus,
   deriveConvexCloudUrl,
+  appendBridgeRegistration,
   ensureSecureBridgeConfigFile,
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
@@ -19,6 +20,7 @@ import {
   getConvexUrl,
   normalizeBridgeConfigFile,
   parseBridgeArgs,
+  preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
@@ -201,6 +203,43 @@ describe("bridge multi-organization config", () => {
         pairedAt: "2026-06-01T00:02:00.000Z",
       },
     ]);
+  });
+
+  test("appends to an existing empty v2 bridge config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-empty-config-"));
+    const path = join(dir, "bridge.json");
+    await writeBridgeConfigFile(path, { version: 2, registrations: [] });
+
+    const updated = await appendBridgeRegistration(path, {
+      appUrl: "https://0000.chat",
+      bridgeToken: "token-a",
+      deviceId: "bridge_a",
+      deviceName: "Org A laptop",
+      pairedAt: "2026-06-01T00:00:00.000Z",
+    });
+
+    expect(updated.registrations).toHaveLength(1);
+    expect(updated.registrations[0]?.deviceId).toBe("bridge_a");
+    expect(normalizeBridgeConfigFile(updated)).toEqual(updated);
+  });
+
+  test("persists retry-stable pending agent connection credentials", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-pending-connect-"));
+    const configPath = join(dir, "bridge.json");
+
+    const first = await preparePendingAgentConnectionRequest(
+      configPath,
+      "ABCD1234",
+    );
+    const second = await preparePendingAgentConnectionRequest(
+      configPath,
+      "ABCD1234",
+    );
+
+    expect(second).toEqual(first);
+    expect(first.deviceId).toMatch(/^bridge_[0-9a-f]{24}$/);
+    expect(first.bridgeToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect((await stat(first.path)).mode & 0o777).toBe(0o600);
   });
 
   test("renders multi-registration status without leaking secrets", () => {

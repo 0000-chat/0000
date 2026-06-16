@@ -3,9 +3,16 @@ import { spawn } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
   BridgeCloudHttpError,
@@ -106,7 +113,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.10";
+export const BRIDGE_VERSION = "0.1.11";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 
 export type BridgeCommandName =
@@ -153,6 +160,13 @@ type PairResponse = {
   endpoint?: unknown;
   logIngestUrl?: unknown;
   logUrl?: unknown;
+};
+
+export type PendingAgentConnectionRequest = {
+  bridgeToken: string;
+  createdAt: string;
+  deviceId: string;
+  path: string;
 };
 
 type QueueClaimResponse = {
@@ -1068,12 +1082,19 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
       DEFAULT_AGENT_CONNECTION_REGISTER_PATH,
     ) ?? DEFAULT_AGENT_CONNECTION_REGISTER_PATH,
   );
+  const configPath = getConfigPath(parsed.flags);
+  const pendingRequest = await preparePendingAgentConnectionRequest(
+    configPath,
+    code,
+  );
   const response = await postJson<PairResponse>(endpoint, undefined, {
     code,
     deviceName: proposedProfile.proposedAgentName,
     host: hostname(),
     platform: process.platform,
     proposedProfile,
+    requestedBridgeToken: pendingRequest.bridgeToken,
+    requestedDeviceId: pendingRequest.deviceId,
   });
 
   const deviceId = readString(response.deviceId, "deviceId");
@@ -1100,7 +1121,6 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
     config.logIngestUrl = logIngestUrl;
   }
 
-  const configPath = getConfigPath(parsed.flags);
   const updatedConfig = await appendBridgeRegistration(configPath, config);
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
@@ -1125,6 +1145,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
       skillInstallPath: skillPath,
     }),
   });
+  await clearPendingAgentConnectionRequest(pendingRequest);
 
   writeStdout(
     `Connected pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`,
@@ -3180,16 +3201,103 @@ async function readBridgeConfigFile(path: string): Promise<MultiBridgeConfig> {
   return normalizeBridgeConfigFile(await readJsonFile<BridgeConfigFile>(path));
 }
 
-async function appendBridgeRegistration(
+export async function appendBridgeRegistration(
   path: string,
   registration: BridgeRegistration,
 ): Promise<MultiBridgeConfig> {
   const existing = existsSync(path)
-    ? await readBridgeConfigFile(path)
+    ? normalizeAppendableBridgeConfig(await readJsonFile<BridgeConfigFile>(path))
     : ({ version: 2, registrations: [] } satisfies MultiBridgeConfig);
   const next = upsertBridgeRegistration(existing, registration);
   await writeBridgeConfigFile(path, next);
   return next;
+}
+
+function normalizeAppendableBridgeConfig(raw: unknown): MultiBridgeConfig {
+  const record = recordFromUnknown(raw);
+  if (
+    record?.version === 2 &&
+    Array.isArray(record.registrations) &&
+    record.registrations.length === 0
+  ) {
+    return { version: 2, registrations: [] };
+  }
+  return normalizeBridgeConfigFile(raw);
+}
+
+export async function preparePendingAgentConnectionRequest(
+  configPath: string,
+  code: string,
+): Promise<PendingAgentConnectionRequest> {
+  const path = pendingAgentConnectionRequestPath(configPath, code);
+  if (existsSync(path)) {
+    const existing = normalizePendingAgentConnectionRequest(
+      await readJsonFile<PendingAgentConnectionRequest>(path),
+      path,
+    );
+    await chmod(path, BRIDGE_LOCAL_STATE_MODE);
+    return existing;
+  }
+
+  const request = {
+    bridgeToken: randomBridgeToken(),
+    createdAt: new Date().toISOString(),
+    deviceId: `bridge_${randomBytes(12).toString("hex")}`,
+    path,
+  };
+  await writeSecureJsonFile(path, request);
+  return request;
+}
+
+async function clearPendingAgentConnectionRequest(
+  request: PendingAgentConnectionRequest,
+): Promise<void> {
+  await unlink(request.path).catch((error: unknown) => {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  });
+}
+
+function pendingAgentConnectionRequestPath(
+  configPath: string,
+  code: string,
+): string {
+  const codeHash = createHash("sha256")
+    .update(code.trim().toUpperCase())
+    .digest("hex")
+    .slice(0, 32);
+  return join(dirname(configPath), "agent-connection-requests", `${codeHash}.json`);
+}
+
+function normalizePendingAgentConnectionRequest(
+  value: unknown,
+  path: string,
+): PendingAgentConnectionRequest {
+  const record = recordFromUnknown(value);
+  if (!record) {
+    throw new Error("pending agent connection request must be an object");
+  }
+  const deviceId = readString(record.deviceId, "deviceId");
+  const bridgeToken = readString(record.bridgeToken, "bridgeToken");
+  const createdAt = readString(record.createdAt, "createdAt");
+  if (!/^bridge_[0-9a-f]{24}$/.test(deviceId)) {
+    throw new Error("pending agent connection request has invalid deviceId");
+  }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(bridgeToken)) {
+    throw new Error("pending agent connection request has invalid bridgeToken");
+  }
+  return { bridgeToken, createdAt, deviceId, path };
+}
+
+function randomBridgeToken(): string {
+  return randomBytes(32).toString("base64url").slice(0, 43);
 }
 
 export async function ensureSecureBridgeConfigFile(
@@ -3202,6 +3310,13 @@ export async function ensureSecureBridgeConfigFile(
 }
 
 export async function writeBridgeConfigFile(
+  path: string,
+  value: unknown,
+): Promise<void> {
+  await writeSecureJsonFile(path, value);
+}
+
+async function writeSecureJsonFile(
   path: string,
   value: unknown,
 ): Promise<void> {
