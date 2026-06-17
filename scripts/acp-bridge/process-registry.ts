@@ -63,6 +63,7 @@ export type AcpBridgeProcessRegistryLike = {
   cleanupOrphanedProcesses(): Promise<AcpBridgeOrphanProcessCleanup>
   getProcessHealth(): AcpBridgeProcessHealth
   reconcileBeforeClaiming(): Promise<void>
+  setMaxProcesses?(maxProcesses: number | undefined): void
   registerProcess(
     input: AcpBridgeProcessRegistrationInput,
   ): Promise<AcpBridgeProcessRegistryEntry>
@@ -140,7 +141,7 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
   private readonly currentCgroup?: string
   private readonly isProcessAlive: (pid: number) => boolean
   private readonly listProcessCandidates: () => AcpBridgeProcessCandidate[]
-  private readonly maxProcesses?: number
+  private maxProcesses?: number
   private readonly now: () => Date
   private readonly orphanProcessGraceMs: number
   private readonly ownedProxyScriptPath: string
@@ -178,6 +179,10 @@ export class AcpBridgeProcessRegistry implements AcpBridgeProcessRegistryLike {
             return commandLine ? { commandLine, source: "command" } : undefined
           }
         : defaultReadProcessIdentity)
+  }
+
+  setMaxProcesses(maxProcesses: number | undefined): void {
+    this.maxProcesses = maxProcesses
   }
 
   async load(): Promise<void> {

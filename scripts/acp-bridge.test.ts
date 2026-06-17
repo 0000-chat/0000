@@ -17,6 +17,7 @@ import {
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
+  getLocalHardMaxInFlight,
   getConvexUrl,
   normalizeBridgeConfigFile,
   parseBridgeArgs,
@@ -49,6 +50,22 @@ describe("bridge command parsing", () => {
       flags: { "app-url": "https://0000.chat" },
       positionals: ["CODE"],
     });
+  });
+});
+
+describe("bridge capacity configuration", () => {
+  test("does not set a local hard cap unless max-in-flight is configured", () => {
+    expect(getLocalHardMaxInFlight({}, {})).toBeUndefined();
+  });
+
+  test("uses explicit max-in-flight as an optional local hard cap", () => {
+    expect(getLocalHardMaxInFlight({ "max-in-flight": "6" }, {})).toBe(6);
+    expect(
+      getLocalHardMaxInFlight(
+        {},
+        { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
+      ),
+    ).toBe(9);
   });
 });
 
@@ -808,6 +825,75 @@ describe("bridge supervisor claim gating", () => {
     expect(result.restartRequested).toBe(true);
     expect(claimCalled).toBe(false);
     expect(status.lifecycle).toBe("restarting");
+  });
+
+  test("applies bridge capacity settings returned by heartbeat control", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let appliedSettings: unknown;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      maxInFlight: 2,
+      recentErrors: [],
+    };
+    let statusMaxInFlight = 2;
+
+    await runBridgeLoopIteration({
+      applySettingsControl: (settings) => {
+        appliedSettings = settings;
+        statusMaxInFlight = 6;
+        status.maxInFlight = 6;
+        status.capacity = {
+          orgMaxInFlight: 6,
+          bridgeConfiguredMaxInFlight: 6,
+          bridgeMaxInFlight: 6,
+          totalInFlight: 0,
+        };
+      },
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 3, 30),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 2,
+      getStatusMaxInFlight: () => statusMaxInFlight,
+      now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        ok: true,
+        control: { settings: { maxInFlight: 6, updatedAt: 1_779_180_010_000 } },
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(appliedSettings).toEqual({
+      maxInFlight: 6,
+      updatedAt: 1_779_180_010_000,
+    });
+    expect(status.maxInFlight).toBe(6);
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      maxInFlight: 6,
+      capacity: {
+        orgMaxInFlight: 6,
+        bridgeConfiguredMaxInFlight: 6,
+        bridgeMaxInFlight: 6,
+      },
+    });
   });
 
   test("skips queue claims when local journal health is hard-failed", async () => {
