@@ -415,7 +415,13 @@ export class BridgeSessionManager {
 
   getStatus(): BridgeSessionManagerStatus {
     return {
-      activeSessions: Array.from(this.sessions.keys()),
+      activeSessions: Array.from(
+        new Set(
+          Array.from(this.activeLiveness.values()).map(
+            (session) => session.sessionKey,
+          ),
+        ),
+      ),
       liveness: {
         activeSessions: Array.from(this.activeLiveness.values()),
       },
