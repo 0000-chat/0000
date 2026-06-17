@@ -95,6 +95,7 @@ const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
+const DEFAULT_RESTART_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
 const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
@@ -113,7 +114,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.12";
+export const BRIDGE_VERSION = "0.1.13";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 
 export type BridgeCommandName =
@@ -1592,7 +1593,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       );
       await persistAggregateStatus();
     };
-  const stop = async () => {
+  const stop = async (
+    options: {
+      forceRuntimeProcesses?: boolean;
+      shutdownTimeoutMs?: number;
+    } = {},
+  ) => {
     if (stopping) {
       return;
     }
@@ -1614,11 +1620,33 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         deviceId: context.config.deviceId,
         activeSessionCount: context.manager.getStatus().activeSessions.length,
       });
-      await context.wakeSignal.close();
-      await context.manager.close();
-      context.supervisor.close();
-      await Promise.allSettled(context.inFlightCommands.values());
-      await context.log.flush();
+      const shutdownTask = (async () => {
+        await context.wakeSignal.close();
+        if (options.forceRuntimeProcesses) {
+          context.supervisor.close();
+        }
+        await context.manager.close();
+        if (!options.forceRuntimeProcesses) {
+          context.supervisor.close();
+        }
+        await Promise.allSettled(context.inFlightCommands.values());
+        await context.log.flush();
+      })();
+      const shutdownResult =
+        options.shutdownTimeoutMs === undefined
+          ? await shutdownTask.then(() => "completed" as const)
+          : await waitForRestartShutdownTask(
+              shutdownTask,
+              options.shutdownTimeoutMs,
+            );
+      if (shutdownResult === "timed_out") {
+        context.log({
+          level: "warn",
+          event: "bridge.stop.timeout",
+          deviceId: context.config.deviceId,
+          timeoutMs: options.shutdownTimeoutMs,
+        });
+      }
     }
     await persistAggregateStatus();
   };
@@ -1758,8 +1786,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         writeStatus: persistAggregateStatus,
       });
       if (result.restartRequested) {
-        await stop();
-        break;
+        await stop({
+          forceRuntimeProcesses: true,
+          shutdownTimeoutMs: DEFAULT_RESTART_STOP_TIMEOUT_MS,
+        });
+        process.exit(0);
       }
     }
     await waitForAnyWakeSignal();
@@ -1992,6 +2023,32 @@ async function launchBridgeUpdater(
 
 function getBridgeRestartCommand(): string[] {
   return [process.execPath, ...process.argv.slice(1)];
+}
+
+export async function waitForRestartShutdownTask(
+  task: Promise<unknown>,
+  timeoutMs: number,
+): Promise<"completed" | "timed_out"> {
+  if (timeoutMs <= 0) {
+    return "timed_out";
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      task.then(
+        () => "completed" as const,
+        () => "completed" as const,
+      ),
+      new Promise<"timed_out">((resolve) => {
+        timer = setTimeout(() => resolve("timed_out"), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function applyPendingBridgeControlCommand(

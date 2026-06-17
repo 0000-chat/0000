@@ -72,6 +72,7 @@ export const bridgeLogEventNames = [
   "bridge.session.tool_result_timeout",
   "bridge.start",
   "bridge.stop",
+  "bridge.stop.timeout",
   "bridge.subscription.disabled",
   "bridge.watchdog.terminalize_missed",
   "bridge.watchdog.quiet",
