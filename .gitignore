@@ -7,3 +7,4 @@ node_modules/
 sbom.cdx.json
 dist/
 coverage/
+.fusion/

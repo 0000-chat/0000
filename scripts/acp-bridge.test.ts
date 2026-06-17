@@ -25,6 +25,7 @@ import {
   refreshRuntimeConformanceProfilesForTest,
   runBridgeLoopIteration,
   upsertBridgeRegistration,
+  waitForRestartShutdownTask,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge";
@@ -66,6 +67,17 @@ describe("bridge capacity configuration", () => {
         { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
       ),
     ).toBe(9);
+  });
+});
+
+describe("bridge restart shutdown", () => {
+  test("does not wait forever for stuck shutdown work during a restart", async () => {
+    const result = await waitForRestartShutdownTask(
+      new Promise<void>(() => {}),
+      5,
+    );
+
+    expect(result).toBe("timed_out");
   });
 });
 
