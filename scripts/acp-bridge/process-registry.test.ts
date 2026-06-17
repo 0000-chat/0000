@@ -126,6 +126,31 @@ describe("ACP bridge process registry", () => {
     })
   })
 
+  test("updates the process cap after registry creation", async () => {
+    const path = tempRegistryPath()
+    const registry = new AcpBridgeProcessRegistry({ maxProcesses: 1, path })
+    await registry.registerProcess({
+      args: ["acp"],
+      command: "codex",
+      pid: 111,
+      runtimeProfileId: "codex:default",
+    })
+
+    expect(registry.getProcessHealth()).toMatchObject({
+      canClaim: false,
+      processCap: 1,
+      processCapExceeded: true,
+    })
+
+    registry.setMaxProcesses(2)
+
+    expect(registry.getProcessHealth()).toMatchObject({
+      canClaim: true,
+      processCap: 2,
+      processCapExceeded: false,
+    })
+  })
+
   test("serializes concurrent registrations so persisted entries are not lost", async () => {
     const path = tempRegistryPath()
     let beforePersistWriteCalls = 0

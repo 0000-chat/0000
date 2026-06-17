@@ -95,7 +95,7 @@ const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
-const DEFAULT_MAX_IN_FLIGHT_COMMANDS = 2;
+const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
 const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -211,6 +211,13 @@ export type BridgeStatus = {
   lastHeartbeatSignature?: string;
   lastPollAt?: string;
   maxInFlight?: number;
+  capacity?: {
+    orgMaxInFlight?: number;
+    bridgeConfiguredMaxInFlight?: number;
+    bridgeMaxInFlight?: number;
+    totalInFlight?: number;
+    localHardMaxInFlight?: number;
+  };
   acpResumeEnabled?: boolean;
   acpIdleTtlMs?: number;
   hermesProfiles?: HermesProfileSummary[];
@@ -318,6 +325,7 @@ export type BridgeRegistrationStatus = {
   lastHeartbeatAt?: string;
   lastPollAt?: string;
   maxInFlight?: number;
+  capacity?: BridgeStatus["capacity"];
   activeSessions: string[];
   inFlightCommands?: BridgeStatus["inFlightCommands"];
   sessionQueues?: BridgeStatus["sessionQueues"];
@@ -442,6 +450,9 @@ export type BridgeLoopIterationInput = {
   runtimeCommands?: string[][];
   status: BridgeStatus;
   maxInFlight: number;
+  statusMaxInFlight?: number;
+  getStatusMaxInFlight?: () => number;
+  applySettingsControl?: (settings: BridgeControlResponse["settings"]) => void;
   manager: BridgeLoopManager;
   inFlightCommands: Map<string, Promise<void>>;
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
@@ -702,24 +713,76 @@ export function getToolResultTimeoutMs(
   return timeoutMs;
 }
 
-export function getMaxInFlight(
+export function getLocalHardMaxInFlight(
   flags: FlagMap,
   env: NodeJS.ProcessEnv = process.env,
-): number {
+): number | undefined {
   const rawValue = getFlag(
     flags,
     "max-in-flight",
     env.ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT,
   );
   if (rawValue === undefined) {
-    return DEFAULT_MAX_IN_FLIGHT_COMMANDS;
+    return undefined;
   }
 
   const maxInFlight = Number(rawValue);
   if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
     throw new Error("max-in-flight must be a positive integer");
   }
-  return Math.max(2, maxInFlight);
+  return maxInFlight;
+}
+
+export function getMaxInFlight(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return (
+    getLocalHardMaxInFlight(flags, env) ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS
+  );
+}
+
+function normalizeControlMaxInFlight(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
+function normalizeControlUpdatedAt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function buildBridgeCapacitySnapshot(
+  contexts: Iterable<{
+    inFlightCommands: Map<string, Promise<void>>;
+    orgMaxInFlight: number;
+  }>,
+  localHardMaxInFlight: number | undefined,
+  pendingOrgMaxInFlight = 0,
+): NonNullable<BridgeStatus["capacity"]> {
+  const list = Array.from(contexts);
+  const bridgeConfiguredMaxInFlight =
+    list.reduce((sum, context) => sum + context.orgMaxInFlight, 0) +
+    pendingOrgMaxInFlight;
+  const bridgeMaxInFlight =
+    localHardMaxInFlight === undefined
+      ? bridgeConfiguredMaxInFlight
+      : Math.min(bridgeConfiguredMaxInFlight, localHardMaxInFlight);
+  const totalInFlight = list.reduce(
+    (sum, context) => sum + context.inFlightCommands.size,
+    0,
+  );
+  return {
+    bridgeConfiguredMaxInFlight,
+    bridgeMaxInFlight,
+    totalInFlight,
+    ...(localHardMaxInFlight === undefined
+      ? {}
+      : { localHardMaxInFlight }),
+  };
 }
 
 export function getAllowRemoteCwd(
@@ -1234,7 +1297,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const pollMs = Number(
     getFlag(parsed.flags, "poll-ms", String(DEFAULT_POLL_MS)),
   );
-  const maxInFlight = getMaxInFlight(parsed.flags);
+  const localHardMaxInFlight = getLocalHardMaxInFlight(parsed.flags);
   const agentCommand =
     getFlag(parsed.flags, "agent-command", DEFAULT_AGENT_COMMAND) ??
     DEFAULT_AGENT_COMMAND;
@@ -1277,13 +1340,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     status: BridgeStatus;
     supervisor: BridgeSupervisor;
     wakeSignal: BridgeWakeSignal;
+    orgMaxInFlight: number;
+    orgMaxInFlightUpdatedAt?: number;
   };
 
   const contexts = new Map<string, RuntimeContext>();
   let stopping = false;
 
   const aggregateStatus = () =>
-    buildAggregateBridgeStatus(Array.from(contexts.values()), maxInFlight);
+    buildAggregateBridgeStatus(
+      Array.from(contexts.values()),
+      buildBridgeCapacitySnapshot(contexts.values(), localHardMaxInFlight),
+    );
   const persistAggregateStatus = async () => {
     await writeStatus(statusPath, aggregateStatus());
   };
@@ -1355,7 +1423,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         registration.deviceId,
       );
       const processRegistry = new AcpBridgeProcessRegistry({
-        maxProcesses: maxInFlight,
+        maxProcesses: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
         path: processRegistryPath,
       });
       const supervisor = openBridgeSupervisor({
@@ -1402,9 +1470,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       const wakeSignal = createBridgeWakeSignal({
         config: registration,
         convexUrl: getConvexUrl(parsed.flags, registration),
-        limit: maxInFlight,
+        limit: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
         log,
       });
+      const initialCapacity = buildBridgeCapacitySnapshot(
+        contexts.values(),
+        localHardMaxInFlight,
+        DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+      );
       const status: BridgeStatus = {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
@@ -1422,7 +1495,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
               pendingRestart: false,
             },
         lastStartedAt: new Date().toISOString(),
-        maxInFlight,
+        maxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+        capacity: initialCapacity,
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
         hermesProfiles,
@@ -1451,6 +1525,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         status,
         supervisor,
         wakeSignal,
+        orgMaxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
       };
       contexts.set(registration.deviceId, context);
       log({
@@ -1512,7 +1587,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       syncBridgeRuntimeStatus(
         context.status,
         context.manager,
-        maxInFlight,
+        context.orgMaxInFlight,
         context.inFlightCommandMetadata,
       );
       await persistAggregateStatus();
@@ -1527,7 +1602,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       syncBridgeRuntimeStatus(
         context.status,
         context.manager,
-        maxInFlight,
+        context.orgMaxInFlight,
         context.inFlightCommandMetadata,
       );
       context.status.localJournal = bridgeSupervisorHealthStatus(
@@ -1548,6 +1623,34 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     await persistAggregateStatus();
   };
 
+  const applyBridgeSettingsControl = (
+    context: RuntimeContext,
+    settings: BridgeControlResponse["settings"],
+  ) => {
+    const nextMaxInFlight = normalizeControlMaxInFlight(
+      settings?.maxInFlight,
+    );
+    if (nextMaxInFlight === undefined) {
+      return;
+    }
+    const updatedAt = normalizeControlUpdatedAt(settings?.updatedAt);
+    if (
+      updatedAt !== undefined &&
+      context.orgMaxInFlightUpdatedAt !== undefined &&
+      updatedAt < context.orgMaxInFlightUpdatedAt
+    ) {
+      return;
+    }
+    context.orgMaxInFlight = nextMaxInFlight;
+    context.orgMaxInFlightUpdatedAt = updatedAt;
+    context.processRegistry.setMaxProcesses(nextMaxInFlight);
+    context.status.maxInFlight = nextMaxInFlight;
+    context.status.capacity = {
+      ...buildBridgeCapacitySnapshot(contexts.values(), localHardMaxInFlight),
+      orgMaxInFlight: nextMaxInFlight,
+    };
+  };
+
   process.once("SIGINT", () => void stop());
   process.once("SIGTERM", () => void stop());
 
@@ -1555,9 +1658,25 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     await ensureContexts();
     await refreshRuntimeConformanceIfStale();
     for (const context of contexts.values()) {
-      const availableProcessSlots = Math.max(0, maxInFlight - totalInFlight());
+      const bridgeCapacity = buildBridgeCapacitySnapshot(
+        contexts.values(),
+        localHardMaxInFlight,
+      );
+      const availableProcessSlots = Math.max(
+        0,
+        (bridgeCapacity.bridgeMaxInFlight ?? 0) - totalInFlight(),
+      );
+      const availableOrgSlots = Math.max(
+        0,
+        context.orgMaxInFlight - context.inFlightCommands.size,
+      );
       const effectiveMaxInFlight =
-        context.inFlightCommands.size + availableProcessSlots;
+        context.inFlightCommands.size +
+        Math.min(availableOrgSlots, availableProcessSlots);
+      context.status.capacity = {
+        ...bridgeCapacity,
+        orgMaxInFlight: context.orgMaxInFlight,
+      };
       context.status.localJournal = bridgeSupervisorHealthStatus(
         context.supervisor,
       );
@@ -1618,6 +1737,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         runtimeCommands: customRuntimeCommands,
         status: context.status,
         maxInFlight: effectiveMaxInFlight,
+        getStatusMaxInFlight: () => context.orgMaxInFlight,
         manager: context.manager,
         inFlightCommands: context.inFlightCommands,
         inFlightCommandMetadata: context.inFlightCommandMetadata,
@@ -1625,6 +1745,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         lastStaleCleanupAt: context.lastStaleCleanupAt,
         setLastStaleCleanupAt: (value) => {
           context.lastStaleCleanupAt = value;
+        },
+        applySettingsControl: (settings) => {
+          applyBridgeSettingsControl(context, settings);
         },
         log: context.log,
         recordLoopError: recordLoopError(context),
@@ -1758,7 +1881,7 @@ function buildAggregateBridgeStatus(
     config: BridgeRegistration;
     status: BridgeStatus;
   }>,
-  maxInFlight: number,
+  capacity: NonNullable<BridgeStatus["capacity"]>,
 ): BridgeStatus {
   const first = contexts[0];
   const registrations = contexts.map(({ config, status }) => ({
@@ -1773,6 +1896,7 @@ function buildAggregateBridgeStatus(
     lastHeartbeatAt: status.lastHeartbeatAt,
     lastPollAt: status.lastPollAt,
     maxInFlight: status.maxInFlight,
+    capacity: status.capacity,
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands,
     sessionQueues: status.sessionQueues,
@@ -1795,7 +1919,8 @@ function buildAggregateBridgeStatus(
     lastStartedAt: first?.status.lastStartedAt,
     lastHeartbeatAt: first?.status.lastHeartbeatAt,
     lastPollAt: first?.status.lastPollAt,
-    maxInFlight,
+    maxInFlight: capacity.bridgeMaxInFlight,
+    capacity,
     acpResumeEnabled: first?.status.acpResumeEnabled,
     acpIdleTtlMs: first?.status.acpIdleTtlMs,
     hermesProfiles: first?.status.hermesProfiles,
@@ -1942,7 +2067,9 @@ export async function runBridgeLoopIteration(
     syncBridgeRuntimeStatus(
       input.status,
       input.manager,
-      input.maxInFlight,
+      input.getStatusMaxInFlight?.() ??
+        input.statusMaxInFlight ??
+        input.maxInFlight,
       input.inFlightCommandMetadata,
       input.getProcessHealth?.(),
       input.getRuntimeConformance?.(),
@@ -2030,10 +2157,16 @@ export async function runBridgeLoopIteration(
           error: message,
         });
       } else if (
+        heartbeatResult.control?.settings ||
         heartbeatResult.control?.refreshHermesProfiles ||
         heartbeatResult.control?.refreshRuntimeProfiles ||
         heartbeatResult.control?.command
       ) {
+        if (heartbeatResult.control.settings) {
+          input.applySettingsControl?.(heartbeatResult.control.settings);
+          syncBridgeStatus();
+          await persistStatus(input.statusPath, input.status);
+        }
         const controlCommand = normalizeControlCommand(
           heartbeatResult.control.command,
         );
@@ -2365,6 +2498,7 @@ export function bridgeHeartbeatSignature(
     | "runtimeConformance"
     | "liveness"
     | "availability"
+    | "capacity"
     | "sessionQueues"
     | "updateState"
   >,
@@ -2383,6 +2517,7 @@ export function bridgeHeartbeatSignature(
       }))
       .sort((left, right) => left.id.localeCompare(right.id)),
     maxInFlight: status.maxInFlight,
+    capacity: status.capacity,
     processHealth: status.processHealth,
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
@@ -2695,7 +2830,7 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight ${DEFAULT_MAX_IN_FLIGHT_COMMANDS}] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Max concurrent claimed bridge commands\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
 }
 
 function getStatusPath(
@@ -2790,7 +2925,7 @@ async function publishBridgeSupervisorHealthIfChanged(context: {
 
 async function claimCommands(
   config: BridgeConfig,
-  limit = DEFAULT_MAX_IN_FLIGHT_COMMANDS,
+  limit = DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
 ): Promise<BridgeQueueCommand[]> {
   const adapter = new ConvexBridgeHostAdapter(createCloudClient(config));
   const response = await adapter.claimWork({ limit });
@@ -2881,6 +3016,10 @@ type BridgeHeartbeatSendResult =
 
 type BridgeControlResponse = {
   command?: BridgeControlCommandState;
+  settings?: {
+    maxInFlight?: unknown;
+    updatedAt?: unknown;
+  };
   refreshHermesProfiles?: {
     requestedAt?: unknown;
   };
@@ -2900,7 +3039,8 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     devHotReload: status.devHotReload,
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands ?? [],
-    maxInFlight: status.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT_COMMANDS,
+    maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+    capacity: status.capacity,
     processHealth: buildHeartbeatProcessHealthPayload(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
