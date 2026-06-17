@@ -875,12 +875,15 @@ describe("bridge session cwd safety", () => {
       type: "prompt",
     });
 
-    const sessions = manager.getStatus().activeSessions;
+    const status = manager.getStatus();
+    const sessions = status.sessions.map((session) => session.sessionKey);
     expect(sessions).toHaveLength(2);
     expect(new Set(sessions).size).toBe(2);
     expect(sessions.every((key) => key.includes("provider-session"))).toBe(
       true,
     );
+    expect(status.activeSessions).toEqual([]);
+    expect(status.liveness?.activeSessions).toEqual([]);
   });
 
   test("returns provider session ids instead of internal scoped session keys", async () => {
@@ -1630,6 +1633,46 @@ describe("bridge session cwd safety", () => {
         ok: true,
       },
     });
+  });
+
+  test("does not count retained idle sessions as active live runs", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    const status = manager.getStatus();
+    expect(status.sessions).toHaveLength(1);
+    expect(status.sessions[0]).toMatchObject({
+      queueDepth: 0,
+      runtimeProfileId: "codex:default",
+      threadId: "thread-1",
+    });
+    expect(status.activeSessions).toEqual([]);
+    expect(status.liveness?.activeSessions).toEqual([]);
   });
 
   test("rejects ambiguous sparse choice responses across scoped sessions", async () => {
