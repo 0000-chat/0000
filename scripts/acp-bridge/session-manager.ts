@@ -903,6 +903,13 @@ export class BridgeSessionManager {
           ...failureDetails,
           terminal: true,
         });
+        this.externallyTerminalizedQueueItemIds.add(item.id);
+        this.writeAgentTurnLog(
+          "agent.turn.failed",
+          item,
+          normalizeType(item),
+          promptFailure.reasonCode,
+        );
         this.supervisor?.recordFailed(
           this.supervisorWorkItem(item, session),
           promptFailure.reasonCode,
@@ -1561,8 +1568,12 @@ export class BridgeSessionManager {
         hasActiveSession: this.sessions.has(sessionKey),
         hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
       });
+      const continuationPrompt =
+        item.prompt && item.prompt.trim() !== choiceId
+          ? item.prompt.trim()
+          : `Selected choice: ${choiceId}`;
       await this.runSerializedPrompt(sessionKey, item.id, () =>
-        this.handlePromptNow(item, `Selected choice: ${choiceId}`, {
+        this.handlePromptNow(item, continuationPrompt, {
           systemPrompt,
           threadHistory,
           sessionKey: key,
@@ -3667,29 +3678,73 @@ function readToolLogFields(value: unknown): {
   toolCallId?: string;
   toolName: string;
 } {
-  const record =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {};
+  const records = toolFieldRecords(value);
   return {
-    toolCallId:
-      readString(record.toolCallId) ??
-      readString(record.tool_call_id) ??
-      readString(record.id),
+    toolCallId: readFirstToolString(records, [
+      "toolCallId",
+      "tool_call_id",
+      "id",
+    ]),
     toolName:
-      readString(record.toolName) ??
-      readString(record.name) ??
-      readString(record.tool) ??
+      readFirstToolString(records, ["toolName", "name", "tool", "title"]) ??
       "unknown",
   };
 }
 
 function readToolState(value: unknown): string | undefined {
+  const records = toolFieldRecords(value);
+  return readFirstToolString(records, ["state", "status"]);
+}
+
+function toolFieldRecords(value: unknown): Record<string, unknown>[] {
   const record =
     value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
-      : {};
-  return readString(record.state) ?? readString(record.status);
+      : undefined;
+  if (!record) {
+    return [];
+  }
+  const records = [record];
+  const content = record.content;
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      const itemRecord = asToolRecord(item);
+      if (itemRecord) {
+        records.push(itemRecord);
+        const nestedContent = asToolRecord(itemRecord.content);
+        if (nestedContent) {
+          records.push(nestedContent);
+        }
+      }
+    }
+    return records;
+  }
+  const contentRecord = asToolRecord(content);
+  if (contentRecord) {
+    records.push(contentRecord);
+  }
+  return records;
+}
+
+function asToolRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readFirstToolString(
+  records: Record<string, unknown>[],
+  keys: string[],
+): string | undefined {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = readString(record[key]);
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return undefined;
 }
 
 function readString(value: unknown): string | undefined {
