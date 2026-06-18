@@ -266,18 +266,21 @@ export type BridgeSessionManagerStatus = {
   liveness?: {
     activeSessions: SessionLivenessRecord[];
   };
+  retainedSessions?: BridgeSessionManagerSessionStatus[];
   terminalInteractionSessionKeyCount: number;
-  sessions: Array<{
-    sessionKey: string;
-    threadId: string;
-    runtimeProfileId?: string;
-    runtimeLabel?: string;
-    runtimeKind?: string;
-    hermesProfileName?: string;
-    queueDepth: number;
-    runningQueueItemId?: string;
-    lastUsedAt: number;
-  }>;
+  sessions: BridgeSessionManagerSessionStatus[];
+};
+
+export type BridgeSessionManagerSessionStatus = {
+  sessionKey: string;
+  threadId: string;
+  runtimeProfileId?: string;
+  runtimeLabel?: string;
+  runtimeKind?: string;
+  hermesProfileName?: string;
+  queueDepth: number;
+  runningQueueItemId?: string;
+  lastUsedAt: number;
 };
 
 export type BridgeSessionLogEntry = BridgeLogEntry;
@@ -414,35 +417,41 @@ export class BridgeSessionManager {
   }
 
   getStatus(): BridgeSessionManagerStatus {
-    return {
-      activeSessions: Array.from(
-        new Set(
-          Array.from(this.activeLiveness.values()).map(
-            (session) => session.sessionKey,
-          ),
-        ),
+    const sessions = Array.from(this.sessions.values()).map((session) => {
+      const queueState = this.sessionQueueState.get(session.sessionKey);
+      return {
+        sessionKey: session.sessionKey,
+        threadId: session.threadId,
+        runtimeProfileId: session.runtimeProfile?.id,
+        runtimeLabel: session.runtimeProfile?.label,
+        runtimeKind: session.runtimeProfile?.kind,
+        hermesProfileName: session.hermesProfileName,
+        queueDepth:
+          (queueState?.pendingQueueItemIds.length ?? 0) +
+          (queueState?.runningQueueItemId ? 1 : 0),
+        runningQueueItemId: queueState?.runningQueueItemId,
+        lastUsedAt: session.lastUsedAt,
+      };
+    });
+    const activeSessionKeys = new Set(
+      Array.from(this.activeLiveness.values()).map(
+        (session) => session.sessionKey,
       ),
+    );
+    for (const session of sessions) {
+      if (session.queueDepth > 0 || session.runningQueueItemId) {
+        activeSessionKeys.add(session.sessionKey);
+      }
+    }
+    return {
+      activeSessions: Array.from(activeSessionKeys),
       liveness: {
         activeSessions: Array.from(this.activeLiveness.values()),
       },
+      retainedSessions: sessions,
       terminalInteractionSessionKeyCount:
         this.terminalInteractionSessionKeys.size,
-      sessions: Array.from(this.sessions.values()).map((session) => {
-        const queueState = this.sessionQueueState.get(session.sessionKey);
-        return {
-          sessionKey: session.sessionKey,
-          threadId: session.threadId,
-          runtimeProfileId: session.runtimeProfile?.id,
-          runtimeLabel: session.runtimeProfile?.label,
-          runtimeKind: session.runtimeProfile?.kind,
-          hermesProfileName: session.hermesProfileName,
-          queueDepth:
-            (queueState?.pendingQueueItemIds.length ?? 0) +
-            (queueState?.runningQueueItemId ? 1 : 0),
-          runningQueueItemId: queueState?.runningQueueItemId,
-          lastUsedAt: session.lastUsedAt,
-        };
-      }),
+      sessions,
     };
   }
 

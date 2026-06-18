@@ -235,17 +235,8 @@ export type BridgeStatus = {
     bridgeProfileId?: string;
     startedAt: string;
   }>;
-  sessionQueues?: Array<{
-    sessionKey: string;
-    threadId: string;
-    runtimeProfileId?: string;
-    runtimeLabel?: string;
-    runtimeKind?: string;
-    hermesProfileName?: string;
-    queueDepth: number;
-    runningQueueItemId?: string;
-    lastUsedAt?: number;
-  }>;
+  retainedSessions?: BridgeSessionSummary[];
+  sessionQueues?: BridgeSessionSummary[];
   processHealth?: AcpBridgeProcessHealth & { registryPath?: string };
   runtimeConformance?: RuntimeConformanceSummary;
   liveness?: {
@@ -281,6 +272,18 @@ export type BridgeStatus = {
     reasonCode?: string;
     message?: string;
   };
+};
+
+type BridgeSessionSummary = {
+  sessionKey: string;
+  threadId: string;
+  runtimeProfileId?: string;
+  runtimeLabel?: string;
+  runtimeKind?: string;
+  hermesProfileName?: string;
+  queueDepth: number;
+  runningQueueItemId?: string;
+  lastUsedAt?: number;
 };
 
 export type BridgeDoctorReport = {
@@ -329,7 +332,18 @@ export type BridgeRegistrationStatus = {
   capacity?: BridgeStatus["capacity"];
   activeSessions: string[];
   inFlightCommands?: BridgeStatus["inFlightCommands"];
-  sessionQueues?: BridgeStatus["sessionQueues"];
+  retainedSessions?: BridgeStatus["retainedSessions"];
+  sessionQueues?: Array<{
+    sessionKey: string;
+    threadId: string;
+    runtimeProfileId?: string;
+    runtimeLabel?: string;
+    runtimeKind?: string;
+    hermesProfileName?: string;
+    queueDepth: number;
+    runningQueueItemId?: string;
+    lastUsedAt?: number;
+  }>;
   processHealth?: BridgeStatus["processHealth"];
   runtimeConformance?: BridgeStatus["runtimeConformance"];
   liveness?: BridgeStatus["liveness"];
@@ -894,6 +908,9 @@ export function describeStatus(
       }
       lines.push(`    active sessions: ${registration.activeSessions.length}`);
       lines.push(
+        `    retained sessions: ${registration.retainedSessions?.length ?? registration.sessionQueues?.length ?? 0}`,
+      );
+      lines.push(
         `    in-flight commands: ${registration.inFlightCommands?.length ?? 0}`,
       );
       if (registration.processHealth) {
@@ -964,6 +981,9 @@ export function describeStatus(
       `  - ${sessionId}${sessionQueue ? ` queueDepth=${sessionQueue.queueDepth}` : ""}`,
     );
   }
+  lines.push(
+    `retained sessions: ${status.retainedSessions?.length ?? status.sessionQueues?.length ?? 0}`,
+  );
   if (status.lastStartedAt) {
     lines.push(`last started: ${status.lastStartedAt}`);
   }
@@ -1930,6 +1950,7 @@ function buildAggregateBridgeStatus(
     capacity: status.capacity,
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands,
+    retainedSessions: status.retainedSessions,
     sessionQueues: status.sessionQueues,
     processHealth: status.processHealth,
     runtimeConformance: status.runtimeConformance,
@@ -1961,6 +1982,10 @@ function buildAggregateBridgeStatus(
     ),
     inFlightCommands: registrations.flatMap(
       (registration) => registration.inFlightCommands ?? [],
+    ),
+    retainedSessions: registrations.flatMap(
+      (registration) =>
+        registration.retainedSessions ?? registration.sessionQueues ?? [],
     ),
     sessionQueues: registrations.flatMap(
       (registration) => registration.sessionQueues ?? [],
@@ -2649,6 +2674,7 @@ function syncBridgeRuntimeStatus(
   status.maxInFlight = maxInFlight;
   status.activeSessions = managerStatus.activeSessions;
   status.liveness = normalizeBridgeLivenessStatus(managerStatus.liveness);
+  status.retainedSessions = managerStatus.retainedSessions ?? managerStatus.sessions;
   status.sessionQueues = managerStatus.sessions;
   delete (status as { activeQueueItemIds?: unknown }).activeQueueItemIds;
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values());
@@ -3102,6 +3128,14 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
     availability: status.availability,
+    retainedSessions: (status.retainedSessions ?? status.sessionQueues ?? []).map(
+      (session) => ({
+        queueDepth: session.queueDepth,
+        runningQueueItemId: session.runningQueueItemId,
+        sessionKey: session.sessionKey,
+        threadId: session.threadId,
+      }),
+    ),
     sessionQueues: (status.sessionQueues ?? []).map((session) => ({
       queueDepth: session.queueDepth,
       runningQueueItemId: session.runningQueueItemId,
