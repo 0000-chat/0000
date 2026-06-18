@@ -283,7 +283,31 @@ export type BridgeSessionManagerSessionStatus = {
   lastUsedAt: number;
 };
 
+export type BridgeProcessPressureCleanupRequest = {
+  targetFreeProcessSlots: number;
+  maxSessionsToClose?: number;
+};
+
 export type BridgeSessionLogEntry = BridgeLogEntry;
+
+export function bridgeQueueItemMatchesSessionRuntimeScope(
+  item: Pick<BridgeSessionQueueItem, "bridgeProfileId" | "hermesProfileName">,
+  session: { hermesProfileName?: string; runtimeProfileId?: string },
+): boolean {
+  if (
+    item.bridgeProfileId !== undefined &&
+    item.bridgeProfileId !== session.runtimeProfileId
+  ) {
+    return false;
+  }
+  if (
+    item.hermesProfileName !== undefined &&
+    item.hermesProfileName !== session.hermesProfileName
+  ) {
+    return false;
+  }
+  return true;
+}
 
 export function resolveHermesProfileAgentCommand(
   baseCommand: string | string[] | undefined,
@@ -453,6 +477,39 @@ export class BridgeSessionManager {
         this.terminalInteractionSessionKeys.size,
       sessions,
     };
+  }
+
+  async closeIdleSessionsForProcessPressure(
+    request: BridgeProcessPressureCleanupRequest,
+  ): Promise<number> {
+    const requestedCloseCount =
+      request.maxSessionsToClose ?? request.targetFreeProcessSlots;
+    const maxSessionsToClose = Math.max(0, Math.floor(requestedCloseCount));
+    if (maxSessionsToClose <= 0) {
+      return 0;
+    }
+    const idleSessions = Array.from(this.sessions.values())
+      .filter((session) => this.canCloseSessionForIdlePressure(session))
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt)
+      .slice(0, maxSessionsToClose);
+    let closedSessionCount = 0;
+    for (const session of idleSessions) {
+      if (!this.canCloseSessionForIdlePressure(session)) {
+        continue;
+      }
+      this.writeLog({
+        level: "info",
+        event: "bridge.lifecycle.idle_pressure_close",
+        threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+        providerSessionId: session.providerSessionKey,
+        acpSessionId: session.acp.sessionId,
+        targetFreeProcessSlots: request.targetFreeProcessSlots,
+      });
+      await this.closeSession(session.sessionKey);
+      closedSessionCount += 1;
+    }
+    return closedSessionCount;
   }
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
@@ -2208,18 +2265,7 @@ export class BridgeSessionManager {
     if (!session || session.generation !== generation) {
       return;
     }
-    const queueState = this.sessionQueueState.get(sessionKey);
-    const hasQueueWork =
-      (queueState?.pendingQueueItemIds.length ?? 0) > 0 ||
-      Boolean(queueState?.runningQueueItemId);
-    const hasEventWrites =
-      this.eventBatch.length > 0 ||
-      this.pendingStreamChunkEvent !== undefined ||
-      this.pendingEventWrites.length > 0 ||
-      this.eventBatchTimer !== undefined;
-    const hasPendingPermissions =
-      session.acp.hasPendingPermissionRequests?.() === true;
-    if (hasQueueWork || hasEventWrites || hasPendingPermissions) {
+    if (!this.canCloseSessionForIdlePressure(session)) {
       this.scheduleIdleClose(session);
       return;
     }
@@ -2232,6 +2278,66 @@ export class BridgeSessionManager {
       acpSessionId: session.acp.sessionId,
     });
     await this.closeSession(sessionKey);
+  }
+
+  private canCloseSessionForIdlePressure(record: BridgeSessionRecord): boolean {
+    if (!this.isCurrentSessionRecord(record)) {
+      return false;
+    }
+    const queueState = this.sessionQueueState.get(record.sessionKey);
+    const hasQueueWork =
+      (queueState?.pendingQueueItemIds.length ?? 0) > 0 ||
+      Boolean(queueState?.runningQueueItemId);
+    const hasActiveLiveness = Array.from(this.activeLiveness.values()).some(
+      (liveness) => liveness.sessionKey === record.sessionKey,
+    );
+    const hasActiveQueueItem = Array.from(this.activeQueueItems.values()).some(
+      (item) => this.queueItemMatchesSessionRecord(item, record),
+    );
+    const hasEventWrites =
+      this.eventBatch.length > 0 ||
+      this.pendingStreamChunkEvent !== undefined ||
+      this.pendingEventWrites.length > 0 ||
+      this.eventBatchTimer !== undefined;
+    const hasPendingPermissions =
+      record.acp.hasPendingPermissionRequests?.() === true;
+    return (
+      !hasQueueWork &&
+      !hasActiveLiveness &&
+      !hasActiveQueueItem &&
+      !hasEventWrites &&
+      !hasPendingPermissions
+    );
+  }
+
+  private queueItemMatchesSessionRecord(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+  ): boolean {
+    if (this.sessionKeyForItem(item) === record.sessionKey) {
+      return true;
+    }
+    const providerSessionKey = providerSessionKeyForItem(item);
+    const threadId = item.threadId ?? item.sessionId;
+    if (!providerSessionKey || !threadId) {
+      return false;
+    }
+    if (
+      providerSessionKey !== record.providerSessionKey ||
+      threadId !== record.threadId
+    ) {
+      return false;
+    }
+    if (
+      hasExplicitRuntimeScope(item) &&
+      !bridgeQueueItemMatchesSessionRuntimeScope(item, {
+        hermesProfileName: record.hermesProfileName,
+        runtimeProfileId: record.runtimeProfile?.id,
+      })
+    ) {
+      return false;
+    }
+    return true;
   }
 
   private enqueueEventWrite(
