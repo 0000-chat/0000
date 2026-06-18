@@ -708,13 +708,14 @@ function compactToolEvent(update: JsonRecord): JsonRecord {
   const content = update.content
   const output = update.output
   const text = extractTextFromAcpUpdate(update)
+  const fieldRecords = toolEventFieldRecords(update)
+  const status = readFirstString(fieldRecords, ["status"])
   const compact: JsonRecord = {
     type: readString(update.type) ?? readString(update.kind) ?? "tool_call_update",
-    state: normalizeToolState(readString(update.state) ?? readString(update.status)),
-    status: readString(update.status),
-    toolCallId:
-      readString(update.toolCallId) ?? readString(update.tool_call_id) ?? readString(update.id),
-    toolName: readString(update.toolName) ?? readString(update.name) ?? readString(update.tool),
+    state: normalizeToolState(readFirstString(fieldRecords, ["state"]) ?? status),
+    status,
+    toolCallId: readFirstString(fieldRecords, ["toolCallId", "tool_call_id", "id"]),
+    toolName: readFirstString(fieldRecords, ["toolName", "name", "tool", "title"]),
   }
 
   const contentLength = valueLength(content)
@@ -731,6 +732,41 @@ function compactToolEvent(update: JsonRecord): JsonRecord {
 
   compact.omitted = "tool result payload omitted by bridge"
   return removeUndefinedValues(compact)
+}
+
+function toolEventFieldRecords(update: JsonRecord): JsonRecord[] {
+  const records: JsonRecord[] = [update]
+  const content = update.content
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      const itemRecord = maybeRecord(item)
+      if (itemRecord) {
+        records.push(itemRecord)
+        const nestedContent = maybeRecord(itemRecord.content)
+        if (nestedContent) {
+          records.push(nestedContent)
+        }
+      }
+    }
+    return records
+  }
+  const contentRecord = maybeRecord(content)
+  if (contentRecord) {
+    records.push(contentRecord)
+  }
+  return records
+}
+
+function readFirstString(records: JsonRecord[], keys: string[]): string | undefined {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = readString(record[key])
+      if (value) {
+        return value
+      }
+    }
+  }
+  return undefined
 }
 
 function readReasoningVisibility(update: JsonRecord): "hidden" | "user_visible_summary" {
