@@ -17,6 +17,7 @@ import {
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
+  getAcpIdleTtlMs,
   getLocalHardMaxInFlight,
   getConvexUrl,
   normalizeBridgeConfigFile,
@@ -67,6 +68,22 @@ describe("bridge capacity configuration", () => {
         { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
       ),
     ).toBe(9);
+  });
+});
+
+describe("bridge ACP idle session cleanup", () => {
+  test("enables idle ACP session cleanup by default", () => {
+    expect(getAcpIdleTtlMs({}, {})).toBe(30 * 60 * 1000);
+  });
+
+  test("keeps explicit idle cleanup overrides", () => {
+    expect(getAcpIdleTtlMs({ "acp-idle-ttl-ms": "0" }, {})).toBe(0);
+    expect(
+      getAcpIdleTtlMs(
+        {},
+        { ZERO_CHAT_BRIDGE_ACP_IDLE_TTL_MS: "1200" },
+      ),
+    ).toBe(1200);
   });
 });
 
@@ -1566,6 +1583,225 @@ describe("bridge supervisor claim gating", () => {
         event: "bridge.queue_item.in_flight",
         queueId: "queue-cancel-1",
         queueType: "cancel-session",
+      }),
+    );
+  });
+
+  test("closes retained idle sessions under ACP process pressure before claiming work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const handled: Array<Record<string, unknown>> = [];
+    const pressureRequests: Array<Record<string, unknown>> = [];
+    let cleanupRan = false;
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          claimId: "claim-1",
+          id: "queue-prompt-1",
+          kind: "prompt",
+          prompt: "hello",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () => ({
+        ambiguousProcessCount: 0,
+        canClaim: true,
+        childCount: cleanupRan ? 6 : 7,
+        childCountsByRuntimeProfile: {
+          "codex:codex-acp": cleanupRan ? 6 : 7,
+        },
+        processCap: 8,
+        processCapExceeded: false,
+        startupReconciliation: {
+          ambiguousProcessCount: 0,
+          lastReconciledAt: "2026-06-05T10:03:00.000Z",
+          orphanedProcessCount: 0,
+          removedDeadProcessCount: 0,
+          retainedProcessCount: cleanupRan ? 6 : 7,
+          status: "healthy",
+          terminatedOrphanedProcessCount: 0,
+          terminatedProcessCount: 0,
+        },
+        status: "healthy",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        closeIdleSessionsForProcessPressure: async (request) => {
+          pressureRequests.push(request);
+          cleanupRan = true;
+          return 1;
+        },
+        getStatus: () => ({
+          activeSessions: [],
+          retainedSessions: [
+            {
+              lastUsedAt: Date.now() - 60_000,
+              queueDepth: 0,
+              sessionKey: "idle-session",
+              threadId: "thread-idle",
+            },
+          ],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [
+            {
+              lastUsedAt: Date.now() - 60_000,
+              queueDepth: 0,
+              sessionKey: "idle-session",
+              threadId: "thread-idle",
+            },
+          ],
+        }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
+        },
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(pressureRequests).toEqual([
+      {
+        maxSessionsToClose: 1,
+        targetFreeProcessSlots: 2,
+      },
+    ]);
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-prompt-1",
+        type: "prompt",
+      }),
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.lifecycle.idle_pressure_close",
+        closedSessionCount: 1,
+        childCountBefore: 7,
+        childCountAfter: 6,
+      }),
+    );
+  });
+
+  test("closes enough retained idle sessions when ACP processes already exceed the cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const handled: Array<Record<string, unknown>> = [];
+    const pressureRequests: Array<Record<string, unknown>> = [];
+    let closedSessions = 0;
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          claimId: "claim-1",
+          id: "queue-prompt-1",
+          kind: "prompt",
+          prompt: "hello",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () => {
+        const childCount = 10 - closedSessions;
+        return {
+          ambiguousProcessCount: 0,
+          canClaim: childCount < 8,
+          childCount,
+          childCountsByRuntimeProfile: {
+            "codex:codex-acp": childCount,
+          },
+          processCap: 8,
+          processCapExceeded: childCount >= 8,
+          startupReconciliation: {
+            ambiguousProcessCount: 0,
+            lastReconciledAt: "2026-06-05T10:03:00.000Z",
+            orphanedProcessCount: 0,
+            removedDeadProcessCount: 0,
+            retainedProcessCount: childCount,
+            status: childCount >= 8 ? "blocked" : "healthy",
+            terminatedOrphanedProcessCount: 0,
+            terminatedProcessCount: 0,
+          },
+          status: childCount >= 8 ? "cap_exceeded" : "healthy",
+        };
+      },
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        closeIdleSessionsForProcessPressure: async (request) => {
+          pressureRequests.push(request);
+          closedSessions += request.maxSessionsToClose ?? 0;
+          return request.maxSessionsToClose ?? 0;
+        },
+        getStatus: () => ({
+          activeSessions: [],
+          retainedSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
+        },
+      },
+      maxInFlight: 1,
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(pressureRequests).toEqual([
+      {
+        maxSessionsToClose: 4,
+        targetFreeProcessSlots: 2,
+      },
+    ]);
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-prompt-1",
+        type: "prompt",
+      }),
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.lifecycle.idle_pressure_close",
+        closedSessionCount: 4,
+        childCountBefore: 10,
+        childCountAfter: 6,
       }),
     );
   });

@@ -103,7 +103,8 @@ const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
   "agent-tools-mcp.ts",
 );
 const DEFAULT_ACP_RESUME_ENABLED = false;
-const DEFAULT_ACP_IDLE_TTL_MS = 0;
+const DEFAULT_ACP_IDLE_TTL_MS = 30 * 60_000;
+const PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS = 2;
 const DEFAULT_ALLOW_REMOTE_CWD = true;
 const DEFAULT_AGENT_CONNECTION_REGISTER_PATH =
   "/api/agent-connections/register";
@@ -456,6 +457,7 @@ type BridgeLoopManager = Pick<
   BridgeSessionManager,
   "getStatus" | "handleQueueItem"
 > & {
+  closeIdleSessionsForProcessPressure?: BridgeSessionManager["closeIdleSessionsForProcessPressure"];
   failActiveQueueItem?: BridgeSessionManager["failActiveQueueItem"];
 };
 
@@ -495,6 +497,31 @@ export type BridgeLoopIterationInput = {
 export type BridgeLoopIterationResult = {
   restartRequested: boolean;
 };
+
+function processPressureCleanupRequest(
+  processHealth: BridgeStatus["processHealth"],
+): { maxSessionsToClose: number; targetFreeProcessSlots: number } | undefined {
+  if (
+    !processHealth ||
+    typeof processHealth.processCap !== "number" ||
+    processHealth.processCap <= 0
+  ) {
+    return undefined;
+  }
+  const freeProcessSlots = processHealth.processCap - processHealth.childCount;
+  if (freeProcessSlots > 1) {
+    return undefined;
+  }
+  const maxSessionsToClose =
+    PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS - freeProcessSlots;
+  if (maxSessionsToClose <= 0) {
+    return undefined;
+  }
+  return {
+    maxSessionsToClose,
+    targetFreeProcessSlots: PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS,
+  };
+}
 
 export type BridgeUpdaterLaunchInput = {
   currentVersion: string;
@@ -2383,7 +2410,7 @@ export async function runBridgeLoopIteration(
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size;
     if (availableSlots > 0) {
-      const processHealth = input.getProcessHealth?.();
+      let processHealth = input.getProcessHealth?.();
       if (processHealth) {
         input.status.processHealth = processHealth;
       }
@@ -2419,6 +2446,37 @@ export async function runBridgeLoopIteration(
             deviceId: input.config.deviceId,
             released: cleanupResult.released,
             inspected: cleanupResult.inspected,
+          });
+        }
+      }
+      const pressureCleanupRequest =
+        processPressureCleanupRequest(processHealth);
+      if (
+        pressureCleanupRequest &&
+        input.manager.closeIdleSessionsForProcessPressure
+      ) {
+        const childCountBefore = processHealth?.childCount;
+        const processCapBefore = processHealth?.processCap;
+        const closedSessionCount =
+          await input.manager.closeIdleSessionsForProcessPressure(
+            pressureCleanupRequest,
+          );
+        if (closedSessionCount > 0) {
+          processHealth = input.getProcessHealth?.() ?? processHealth;
+          if (processHealth) {
+            input.status.processHealth = processHealth;
+          }
+          input.log({
+            level: "info",
+            event: "bridge.lifecycle.idle_pressure_close",
+            deviceId: input.config.deviceId,
+            closedSessionCount,
+            targetFreeProcessSlots:
+              pressureCleanupRequest.targetFreeProcessSlots,
+            maxSessionsToClose: pressureCleanupRequest.maxSessionsToClose,
+            childCountBefore,
+            childCountAfter: processHealth?.childCount,
+            processCap: processHealth?.processCap ?? processCapBefore,
           });
         }
       }

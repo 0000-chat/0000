@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { BridgeSupervisor } from "./bridge-supervisor";
 import {
   BridgeSessionManager,
+  bridgeQueueItemMatchesSessionRuntimeScope,
   type BridgeSessionContext,
   type BridgeSessionQueueItem,
 } from "./session-manager";
@@ -11,6 +12,27 @@ import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client";
 import { TerminalHandleRegistry } from "./terminal-handles";
 
 describe("bridge session cwd safety", () => {
+  test("runtime-scoped active items do not match sessions from another runtime", () => {
+    expect(
+      bridgeQueueItemMatchesSessionRuntimeScope(
+        { bridgeProfileId: "runtime-a" },
+        { runtimeProfileId: "runtime-b" },
+      ),
+    ).toBe(false);
+    expect(
+      bridgeQueueItemMatchesSessionRuntimeScope(
+        { bridgeProfileId: "runtime-a" },
+        { runtimeProfileId: "runtime-a" },
+      ),
+    ).toBe(true);
+    expect(
+      bridgeQueueItemMatchesSessionRuntimeScope(
+        { hermesProfileName: "ops" },
+        { hermesProfileName: "default", runtimeProfileId: "runtime-a" },
+      ),
+    ).toBe(false);
+  });
+
   test("does not let a stuck ACP close block manager shutdown forever", async () => {
     const closeStarted = deferred<void>();
     const manager = new BridgeSessionManager({
@@ -2420,6 +2442,86 @@ describe("bridge session cwd safety", () => {
       id: "queue-steer",
       result: { ok: true, steered: true, text: "steered" },
     });
+  });
+
+  test("process pressure cleanup does not close an active direct steer prompt", async () => {
+    const steerRelease = deferred<void>();
+    const prompts: string[] = [];
+    let closeCount = 0;
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {
+          closeCount += 1;
+        },
+        cancel: async () => true,
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt);
+          if (prompt === "Keep going") {
+            await steerRelease.promise;
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: "steered",
+            };
+          }
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ready",
+          };
+        },
+      }),
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    const eventBatchCountAfterPrompt = cloud.events.length;
+    const steerRun = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      claimId: "claim-steer",
+      id: "queue-steer",
+      prompt: "Keep going",
+      threadId: "thread-1",
+      type: "steer-session",
+    });
+    let assertionError: unknown;
+    try {
+      await eventually(() => {
+        expect(manager.getStatus().liveness?.activeSessions).toHaveLength(1);
+        expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBeUndefined();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await eventually(() =>
+        expect(cloud.events.length).toBeGreaterThan(eventBatchCountAfterPrompt),
+      );
+
+      const closed = await manager.closeIdleSessionsForProcessPressure({
+        maxSessionsToClose: 1,
+        targetFreeProcessSlots: 2,
+      });
+
+      expect(closed).toBe(0);
+      expect(closeCount).toBe(0);
+      expect(manager.getStatus().liveness?.activeSessions).toHaveLength(1);
+      expect(prompts).toEqual(["hello", "Keep going"]);
+    } catch (error) {
+      assertionError = error;
+    }
+    steerRelease.resolve();
+    await steerRun.catch(() => undefined);
+    if (assertionError) {
+      throw assertionError;
+    }
   });
 
   test("steer-session replaces the ACP session when an active turn is still running", async () => {
