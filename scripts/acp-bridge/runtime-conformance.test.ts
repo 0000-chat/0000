@@ -92,6 +92,20 @@ describe("runtime conformance", () => {
     ).toBe(false)
   })
 
+  test("refresh eligibility probes active same profile after conformance expires", () => {
+    expect(
+      shouldRefreshRuntimeConformanceProfile({
+        force: false,
+        inFlightProfileIds: new Set(["codex:codex-acp"]),
+        lastProbeAt: 1_781_400_000_000,
+        now: 1_781_400_360_001,
+        profileId: "codex:codex-acp",
+        runningSessionProfileIds: new Set(["codex:codex-acp"]),
+        ttlMs: 300_000,
+      }),
+    ).toBe(true)
+  })
+
   test("active liveness can degrade instead of making profile unavailable", () => {
     expect(
       summarizeRuntimeProfileHealth({

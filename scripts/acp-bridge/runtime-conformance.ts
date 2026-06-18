@@ -86,13 +86,15 @@ export function shouldRefreshRuntimeConformanceProfile(input: {
   if (input.force === true) {
     return true
   }
-  if (input.inFlightProfileIds.has(input.profileId)) {
+  const ttlMs = input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS
+  const ageMs = input.now - input.lastProbeAt
+  const sameProfileActive =
+    input.inFlightProfileIds.has(input.profileId) ||
+    input.runningSessionProfileIds.has(input.profileId)
+  if (sameProfileActive && ageMs <= ttlMs) {
     return false
   }
-  if (input.runningSessionProfileIds.has(input.profileId)) {
-    return false
-  }
-  return input.now - input.lastProbeAt >= (input.ttlMs ?? DEFAULT_RUNTIME_CONFORMANCE_TTL_MS) / 2
+  return ageMs >= ttlMs / 2
 }
 
 export function evaluateConformanceForClaim(input: {
