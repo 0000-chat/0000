@@ -453,6 +453,70 @@ test("normalizes ACP thought chunks as hidden thinking by default", () => {
   })
 })
 
+test("normalizes ACP tool updates with official title and status fields", () => {
+  const event = normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          content: [{ content: { text: "done", type: "text" }, type: "content" }],
+          sessionUpdate: "tool_call_update",
+          status: "completed",
+          title: "Run typecheck",
+          toolCallId: "call-1",
+        },
+      },
+    },
+    18,
+  )
+
+  assert.equal(event.eventType, "tool_call_update")
+  assert.equal(event.part?.type, "tool_result")
+  assert.deepEqual(event.part?.json, {
+    contentLength: 1,
+    omitted: "tool result payload omitted by bridge",
+    state: "output-available",
+    status: "completed",
+    toolCallId: "call-1",
+    toolName: "Run typecheck",
+    type: "tool_call_update",
+  })
+})
+
+test("normalizes legacy nested ACP tool update fields", () => {
+  const event = normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          content: {
+            name: "shell",
+            status: "completed",
+            toolCallId: "tool-1",
+            type: "tool_call_update",
+          },
+          sessionUpdate: "tool_call_update",
+        },
+      },
+    },
+    19,
+  )
+
+  assert.equal(event.eventType, "tool_call_update")
+  assert.equal(event.part?.type, "tool_result")
+  assert.deepEqual(event.part?.json, {
+    contentLength: 4,
+    omitted: "tool result payload omitted by bridge",
+    state: "output-available",
+    status: "completed",
+    toolCallId: "tool-1",
+    toolName: "shell",
+    type: "tool_call_update",
+  })
+})
+
 test("normalizes typed ACP thought chunks as hidden thinking", () => {
   const event = normalizeAcpNotification(
     {

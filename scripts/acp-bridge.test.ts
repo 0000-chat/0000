@@ -56,6 +56,16 @@ describe("bridge command parsing", () => {
 });
 
 describe("bridge capacity configuration", () => {
+  test("closes idle ACP sessions by default to avoid process accumulation", () => {
+    expect(getAcpIdleTtlMs({}, {})).toBe(30 * 60_000);
+    expect(
+      getAcpIdleTtlMs(
+        {},
+        { ZERO_CHAT_BRIDGE_ACP_IDLE_TTL_MS: "0" },
+      ),
+    ).toBe(0);
+  });
+
   test("does not set a local hard cap unless max-in-flight is configured", () => {
     expect(getLocalHardMaxInFlight({}, {})).toBeUndefined();
   });

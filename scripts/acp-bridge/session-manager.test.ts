@@ -424,7 +424,7 @@ describe("bridge session cwd safety", () => {
       toolResultTimeoutMs: 5,
     });
 
-    void manager.handleQueueItem(promptQueueItem());
+    const handled = manager.handleQueueItem(promptQueueItem());
     await eventually(() =>
       expect(cloud.results).toContainEqual(
         expect.objectContaining({
@@ -460,6 +460,26 @@ describe("bridge session cwd safety", () => {
         queueId: "queue-prompt",
         reasonCode: "tool_result_timeout",
         toolCallId: "tool-1",
+      }),
+    );
+    await handled;
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        error: "tool_result_timeout",
+        event: "agent.turn.failed",
+        queueId: "queue-prompt",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "agent.turn.completed",
+        queueId: "queue-prompt",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.complete",
+        queueId: "queue-prompt",
       }),
     );
   });
@@ -549,6 +569,45 @@ describe("bridge session cwd safety", () => {
 
     await manager.handleQueueItem(promptQueueItem());
     await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+      }),
+    );
+  });
+
+  test("clears pending tool timeout from a nested tool result", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          context.onEvent(nestedToolResultEvent(2));
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
 
     expect(cloud.results).toContainEqual(
       expect.objectContaining({
@@ -1490,6 +1549,8 @@ describe("bridge session cwd safety", () => {
 
   test("persists ACP continuation output after a choice response", async () => {
     const prompts: string[] = [];
+    const continuationPrompt =
+      "The user selected an option for this pending multiple-choice prompt:\n\nShould folder membership include descendants?\n\nSelected: Inherited membership (inherited)";
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
@@ -1503,7 +1564,7 @@ describe("bridge session cwd safety", () => {
             rawResult: { ok: true },
             sessionId: "session-1",
             text:
-              prompt === "Selected choice: option-a"
+              prompt === continuationPrompt
                 ? "continued after choice"
                 : "ready",
           };
@@ -1522,11 +1583,12 @@ describe("bridge session cwd safety", () => {
       approvalOutcome: "option-a",
       claimId: "claim-choice",
       id: "queue-choice",
+      prompt: continuationPrompt,
       threadId: "thread-1",
       type: "choice-response",
     });
 
-    expect(prompts).toEqual(["hello", "Selected choice: option-a"]);
+    expect(prompts).toEqual(["hello", continuationPrompt]);
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-choice",
       result: {
@@ -4106,6 +4168,28 @@ function toolResultEvent(sequence: number): NormalizedBridgeEvent {
         state: "output-available",
         toolCallId: "tool-1",
         toolName: "shell",
+      },
+      status: "streaming",
+      text: "tool finished",
+      type: "tool_result",
+    },
+    payload: { sessionUpdate: "tool_result", toolCallId: "tool-1" },
+    providerSequence: sequence,
+    source: "acp_bridge",
+  };
+}
+
+function nestedToolResultEvent(sequence: number): NormalizedBridgeEvent {
+  return {
+    eventType: "tool_result",
+    externalEventId: `session-1:${sequence}:tool_result`,
+    part: {
+      json: {
+        content: {
+          state: "output-available",
+          toolCallId: "tool-1",
+          toolName: "shell",
+        },
       },
       status: "streaming",
       text: "tool finished",
