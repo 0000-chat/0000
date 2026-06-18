@@ -1456,6 +1456,56 @@ describe("bridge supervisor claim gating", () => {
     ).not.toBe(bridgeHeartbeatSignature(status));
   });
 
+  test("heartbeat payload separates retained idle sessions from active work", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      capacity: { totalInFlight: 0 },
+      connected: true,
+      inFlightCommands: [],
+      recentErrors: [],
+      retainedSessions: [
+        {
+          lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 0),
+          queueDepth: 0,
+          runtimeProfileId: "codex:default",
+          sessionKey: "provider-session",
+          threadId: "thread-1",
+        },
+      ],
+      sessionQueues: [
+        {
+          lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 0),
+          queueDepth: 0,
+          runtimeProfileId: "codex:default",
+          sessionKey: "provider-session",
+          threadId: "thread-1",
+        },
+      ],
+    };
+
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      activeSessions: [],
+      capacity: { totalInFlight: 0 },
+      inFlightCommands: [],
+      retainedSessions: [
+        {
+          queueDepth: 0,
+          sessionKey: "provider-session",
+          threadId: "thread-1",
+        },
+      ],
+      sessionQueues: [
+        {
+          queueDepth: 0,
+          sessionKey: "provider-session",
+          threadId: "thread-1",
+        },
+      ],
+    });
+    expect(describeStatus(status, true)).toContain("retained sessions: 1");
+    expect(describeStatus(status, true)).toContain("active sessions: 0");
+  });
+
   test("dispatches claimed lifecycle queue commands", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];

@@ -1671,6 +1671,13 @@ describe("bridge session cwd safety", () => {
       runtimeProfileId: "codex:default",
       threadId: "thread-1",
     });
+    expect(status.retainedSessions).toEqual([
+      expect.objectContaining({
+        queueDepth: 0,
+        runtimeProfileId: "codex:default",
+        sessionKey: expect.stringContaining("provider-session"),
+      }),
+    ]);
     expect(status.activeSessions).toEqual([]);
     expect(status.liveness?.activeSessions).toEqual([]);
   });
