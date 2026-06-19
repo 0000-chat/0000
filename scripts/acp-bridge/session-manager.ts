@@ -1319,6 +1319,32 @@ export class BridgeSessionManager {
     this.clearToolCall(queueItemId, toolCallId);
   }
 
+  private clearPendingToolCallsIfAssistantOutputResumed(
+    queueItemId: string,
+    session: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    const partType = event.part?.type;
+    if (partType !== "text" && partType !== "thinking") {
+      return;
+    }
+    const queueTools = this.activeToolCalls.get(queueItemId);
+    if (!queueTools || queueTools.size === 0) {
+      return;
+    }
+    const clearedToolCallCount = queueTools.size;
+    this.clearToolCallsForQueueItem(queueItemId);
+    this.writeLog({
+      level: "debug",
+      event: "bridge.session.tool_calls_cleared_on_assistant_output",
+      queueId: queueItemId,
+      threadId: session.threadId,
+      agentSessionId: session.providerSessionKey,
+      bridgeProfileId: session.runtimeProfile?.id,
+      clearedToolCallCount,
+    });
+  }
+
   private trackPendingToolCall(
     queueItemId: string,
     session: BridgeSessionRecord,
@@ -2116,6 +2142,11 @@ export class BridgeSessionManager {
                 : "assistant_output",
             );
             this.recordToolEvent(eventItem.id, record, event);
+            this.clearPendingToolCallsIfAssistantOutputResumed(
+              eventItem.id,
+              record,
+              event,
+            );
             this.supervisor?.recordProviderEvent(
               this.supervisorWorkItem(eventItem, record),
               {

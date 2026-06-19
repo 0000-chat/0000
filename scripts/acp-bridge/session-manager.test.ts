@@ -583,6 +583,54 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("clears pending tool timeout when assistant output resumes after a tool call", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          context.onEvent(
+            streamChunkEvent("agent_thought_chunk", "continuing", 2),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        error: "tool_result_timeout",
+        event: "agent.turn.failed",
+      }),
+    );
+  });
+
   test("clears pending tool timeout from a nested tool result", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
