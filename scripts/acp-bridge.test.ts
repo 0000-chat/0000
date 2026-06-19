@@ -173,7 +173,7 @@ describe("bridge MCP helper configuration", () => {
           { name: "ZERO_CHAT_THREAD_ID", value: "thread_1" },
           { name: "ZERO_CHAT_BRIDGE_TOKEN", value: "token-a" },
         ],
-        name: "0000-chat",
+        name: "0000",
       },
     ]);
   });
