@@ -411,13 +411,13 @@ export function buildAgentToolSessionContextText(env: AgentToolMcpEnv): string {
 agentSessionId: ${env.agentSessionId}
 ${currentThreadLine}bridgeDeviceId: ${env.deviceId}
 appUrl: ${env.appUrl}
-mcpServer: 0000-chat
+mcpServer: 0000
 currentThreadTool: threads.current
 toolGuide: ${AGENT_TOOL_GUIDE_RESOURCE}`
 }
 
 export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
-  const server = new McpServer({ name: "0000-chat-agent-tools", version: "0.1.0" })
+  const server = new McpServer({ name: "0000-agent-tools", version: "0.1.0" })
 
   server.registerResource(
     "0000 Chat agent tool guide",
