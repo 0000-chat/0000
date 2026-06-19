@@ -108,6 +108,24 @@ describe("agent tools MCP server helpers", () => {
         threadId: "thread_abc",
       }),
     ).toContain("currentThreadId: thread_abc")
+    expect(
+      buildAgentToolSessionContextText({
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test/app",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+        threadId: "thread_abc",
+      }),
+    ).toContain("mcpServer: 0000\n")
+    expect(
+      buildAgentToolSessionContextText({
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test/app",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+        threadId: "thread_abc",
+      }),
+    ).not.toContain("mcpServer: 0000-chat")
   })
 
   test("keeps the public mailbox tool schema aligned with conversation replies", () => {

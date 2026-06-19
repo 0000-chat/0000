@@ -894,7 +894,7 @@ export function buildAgentToolsMcpServers(
           : []),
         { name: "ZERO_CHAT_BRIDGE_TOKEN", value: input.bridgeToken },
       ],
-      name: "0000-chat",
+      name: "0000",
     },
   ];
 }
