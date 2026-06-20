@@ -17,6 +17,7 @@ export type BridgeRuntimeProfile = {
   command: string[]
   status: BridgeRuntimeProfileStatus
   availableCommands?: BridgeRuntimeAvailableCommand[]
+  compatibility?: BridgeRuntimeCompatibility
   defaultCwd?: string
   hermesProfileName?: string
   models?: string[]
@@ -74,6 +75,43 @@ export type BridgeRuntimeProfile = {
   }
 }
 
+export type BridgeRuntimeCompatibility = {
+  mcpServerNameAliases?: Record<string, string>
+  toolCallPolicies?: BridgeRuntimeToolCallPolicy[]
+}
+
+export type BridgeRuntimeToolCallClass = "standard" | "subagent" | "long_running"
+
+export type BridgeRuntimeToolCallPolicy = {
+  id: string
+  timeoutMs?: number
+  toolClass: Exclude<BridgeRuntimeToolCallClass, "standard">
+  toolNamePatterns: string[]
+}
+
+export type BridgeToolCallTimeoutResolution = {
+  policyId: string
+  timeoutMs: number
+  toolClass: BridgeRuntimeToolCallClass
+}
+
+export const DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS = 30 * 60 * 1000
+
+const GENERIC_SUBAGENT_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
+  id: "generic-subagent-tool",
+  toolClass: "subagent",
+  toolNamePatterns: [
+    "^delegate(?::|_|-|\\b)",
+    "subagent",
+    "sub-agent",
+    "agent\\.run",
+    "^task(?::|_|-|\\b)",
+    "workflow",
+    "background",
+    "^worker(?::|_|-|\\b)",
+  ],
+}
+
 export function normalizeCommand(
   command: string | string[] | undefined,
   fallback: string,
@@ -111,6 +149,7 @@ export function synthesizeLegacyHermesProfile(
     label: "Hermes",
     command: normalizedCommand,
     status: "available",
+    compatibility: hermesRuntimeCompatibility(),
     identityRules: {
       cwdBoundSessions: true,
       cwdSwitchPolicy: "new_session_required",
@@ -122,6 +161,109 @@ export function synthesizeLegacyHermesProfile(
     capabilities: {
       sessionMcpServers: true,
     },
+  }
+}
+
+export function hermesRuntimeCompatibility(): BridgeRuntimeCompatibility {
+  return {
+    mcpServerNameAliases: {
+      "0000": "zero-chat",
+    },
+    toolCallPolicies: [
+      {
+        id: "hermes-delegate-subagent",
+        timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
+        toolClass: "subagent",
+        toolNamePatterns: ["^delegate(?::|_|-|\\b)", "^delegate_task$"],
+      },
+    ],
+  }
+}
+
+export function applyRuntimeMcpServerCompatibility<TServer extends { name: string }>(
+  servers: TServer[],
+  profile: BridgeRuntimeProfile | undefined,
+): TServer[] {
+  const aliases = profile?.compatibility?.mcpServerNameAliases
+  if (!aliases || Object.keys(aliases).length === 0) {
+    return servers
+  }
+  return servers.map((server) => {
+    const alias = aliases[server.name]
+    if (!alias || alias === server.name) {
+      return server
+    }
+    return { ...server, name: alias }
+  })
+}
+
+export function resolveToolCallTimeoutPolicy(input: {
+  defaultTimeoutMs: number
+  explicitTimeoutMs?: number
+  profile?: BridgeRuntimeProfile
+  requestTimeoutMs?: number
+  toolName: string
+}): BridgeToolCallTimeoutResolution {
+  if (input.explicitTimeoutMs !== undefined) {
+    return {
+      policyId: "explicit-tool-result-timeout",
+      timeoutMs: input.explicitTimeoutMs,
+      toolClass: "standard",
+    }
+  }
+
+  const runtimePolicy = input.profile?.compatibility?.toolCallPolicies?.find((policy) =>
+    toolCallPolicyMatches(policy, input.toolName),
+  )
+  const policy = runtimePolicy ?? (
+    toolCallPolicyMatches(GENERIC_SUBAGENT_TOOL_POLICY, input.toolName)
+      ? GENERIC_SUBAGENT_TOOL_POLICY
+      : undefined
+  )
+
+  if (!policy) {
+    return {
+      policyId: "default-tool-result-timeout",
+      timeoutMs: input.defaultTimeoutMs,
+      toolClass: "standard",
+    }
+  }
+
+  return {
+    policyId: policy.id,
+    timeoutMs: resolvePolicyTimeoutMs(policy, input),
+    toolClass: policy.toolClass,
+  }
+}
+
+function resolvePolicyTimeoutMs(
+  policy: BridgeRuntimeToolCallPolicy,
+  input: {
+    defaultTimeoutMs: number
+    requestTimeoutMs?: number
+  },
+): number {
+  let timeoutMs =
+    policy.timeoutMs ?? Math.max(input.defaultTimeoutMs, DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS)
+  if (input.requestTimeoutMs !== undefined && input.requestTimeoutMs > input.defaultTimeoutMs) {
+    timeoutMs = Math.min(timeoutMs, input.requestTimeoutMs)
+  }
+  return Math.max(1, timeoutMs)
+}
+
+function toolCallPolicyMatches(policy: BridgeRuntimeToolCallPolicy, toolName: string): boolean {
+  const normalizedToolName = toolName.trim()
+  if (!normalizedToolName) {
+    return false
+  }
+  return policy.toolNamePatterns.some((pattern) => patternMatchesToolName(pattern, normalizedToolName))
+}
+
+function patternMatchesToolName(pattern: string, toolName: string): boolean {
+  try {
+    return new RegExp(pattern, "i").test(toolName)
+  } catch {
+    return toolName.toLowerCase().includes(pattern.toLowerCase())
   }
 }
 

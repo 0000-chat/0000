@@ -415,6 +415,11 @@ describe("runtime discovery", () => {
     })
 
     expect(profiles.find((profile) => profile.kind === "hermes")).toMatchObject({
+      compatibility: {
+        mcpServerNameAliases: {
+          "0000": "zero-chat",
+        },
+      },
       maxSessions: 3,
       identityRules: {
         cwdBoundSessions: true,

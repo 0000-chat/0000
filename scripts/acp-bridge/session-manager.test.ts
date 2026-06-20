@@ -135,6 +135,56 @@ describe("bridge session cwd safety", () => {
     expect(mcpContexts[0]?.cwd).toBe("/Users/alice/private-project");
   });
 
+  test("applies runtime MCP server name aliases before creating sessions", async () => {
+    const sessionContexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createMcpServers: () => [
+        {
+          args: ["agent-tools-mcp.ts"],
+          command: "bun",
+          name: "0000",
+        },
+      ],
+      createSession: (context) => {
+        sessionContexts.push(context);
+        return fakeSession();
+      },
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          compatibility: {
+            mcpServerNameAliases: {
+              "0000": "zero-chat",
+            },
+          },
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(sessionContexts[0]?.mcpServers).toEqual([
+      {
+        args: ["agent-tools-mcp.ts"],
+        command: "bun",
+        name: "zero-chat",
+      },
+    ]);
+  });
+
   test("omits disabled queue cwd from MCP server context", async () => {
     const mcpContexts: Array<Pick<BridgeSessionContext, "cwd">> = [];
     const manager = new BridgeSessionManager({
@@ -542,6 +592,77 @@ describe("bridge session cwd safety", () => {
         toolCallId: "tool-1",
       }),
     );
+  });
+
+  test("uses runtime subagent tool policy when tracking pending tool calls", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "delegate: inspect OpenUI primitives"));
+          await new Promise(() => {});
+          throw new Error("unreachable");
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          compatibility: {
+            toolCallPolicies: [
+              {
+                id: "test-delegate-subagent",
+                timeoutMs: 30,
+                toolClass: "subagent",
+                toolNamePatterns: ["^delegate:"],
+              },
+            ],
+          },
+          id: "hermes:test",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    });
+
+    const handled = manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:test",
+    });
+    await eventually(() =>
+      expect(cloud.results).toContainEqual(
+        expect.objectContaining({
+          claimId: "claim-prompt",
+          id: "queue-prompt",
+          result: expect.objectContaining({
+            ok: false,
+            reasonCode: "tool_result_timeout",
+            terminal: true,
+          }),
+        }),
+      ),
+    );
+
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+        queueId: "queue-prompt",
+        reasonCode: "tool_result_timeout",
+        timeoutMs: 30,
+        toolCallId: "tool-1",
+        toolClass: "subagent",
+        toolName: "delegate: inspect OpenUI primitives",
+        toolPolicyId: "test-delegate-subagent",
+      }),
+    );
+    await handled;
   });
 
   test("clears pending tool timeout when the tool result arrives", async () => {
@@ -4187,7 +4308,7 @@ function streamChunkEvent(
   };
 }
 
-function toolCallEvent(sequence: number): NormalizedBridgeEvent {
+function toolCallEvent(sequence: number, toolName = "shell"): NormalizedBridgeEvent {
   return {
     eventType: "tool_call",
     externalEventId: `session-1:${sequence}:tool_call`,
@@ -4195,7 +4316,7 @@ function toolCallEvent(sequence: number): NormalizedBridgeEvent {
       json: {
         state: "input-available",
         toolCallId: "tool-1",
-        toolName: "shell",
+        toolName,
       },
       status: "streaming",
       text: "tool started",

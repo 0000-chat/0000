@@ -28,7 +28,9 @@ import type {
 } from "./event-normalizer";
 import {
   type BridgeRuntimeProfile,
+  applyRuntimeMcpServerCompatibility,
   findRuntimeProfile,
+  resolveToolCallTimeoutPolicy,
 } from "./runtime-profiles";
 import type {
   BridgeSupervisor,
@@ -353,6 +355,7 @@ export class BridgeSessionManager {
   private readonly idleSessionTtlMs: number;
   private readonly livenessTimeoutMs: number;
   private readonly toolResultTimeoutMs: number;
+  private readonly explicitToolResultTimeoutMs?: number;
   private readonly allowRemoteCwd: boolean;
   private readonly resumeEnabled: boolean;
   private readonly requireScopedIdentity: boolean;
@@ -412,6 +415,7 @@ export class BridgeSessionManager {
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0;
     this.livenessTimeoutMs =
       options.livenessTimeoutMs ?? DEFAULT_SESSION_LIVENESS_TIMEOUT_MS;
+    this.explicitToolResultTimeoutMs = options.toolResultTimeoutMs;
     this.toolResultTimeoutMs =
       options.toolResultTimeoutMs ?? DEFAULT_TOOL_RESULT_TIMEOUT_MS;
     this.allowRemoteCwd = options.allowRemoteCwd !== false;
@@ -1357,6 +1361,13 @@ export class BridgeSessionManager {
       this.activeToolCalls.set(queueItemId, queueTools);
     }
     const startedAt = Date.now();
+    const policy = resolveToolCallTimeoutPolicy({
+      defaultTimeoutMs: this.toolResultTimeoutMs,
+      explicitTimeoutMs: this.explicitToolResultTimeoutMs,
+      profile: session.runtimeProfile,
+      requestTimeoutMs: this.requestTimeoutMs,
+      toolName: tool.toolName,
+    });
     const timeout = setTimeout(() => {
       const activeTool = this.activeToolCalls.get(queueItemId)?.get(tool.toolCallId);
       if (!activeTool) {
@@ -1377,13 +1388,15 @@ export class BridgeSessionManager {
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
         reasonCode: "tool_result_timeout",
-        timeoutMs: this.toolResultTimeoutMs,
+        timeoutMs: policy.timeoutMs,
+        toolClass: policy.toolClass,
+        toolPolicyId: policy.policyId,
         ...details,
       });
       this.activeLivenessFailures.get(queueItemId)?.(
         new Error("ACP live session lost: tool_result_timeout"),
       );
-    }, this.toolResultTimeoutMs);
+    }, policy.timeoutMs);
     timeout.unref?.();
     queueTools.set(tool.toolCallId, {
       startedAt,
@@ -2122,13 +2135,16 @@ export class BridgeSessionManager {
         initialSessionId: this.resumeEnabled
           ? item.externalSessionId
           : undefined,
-        mcpServers: this.createMcpServers({
-          agentSessionId: item.agentSessionId,
-          cwd,
-          organizationId: item.organizationId,
-          sessionKey,
-          threadId,
-        }),
+        mcpServers: applyRuntimeMcpServerCompatibility(
+          this.createMcpServers({
+            agentSessionId: item.agentSessionId,
+            cwd,
+            organizationId: item.organizationId,
+            sessionKey,
+            threadId,
+          }),
+          runtimeProfile,
+        ),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
             const eventItem = this.currentQueueItemForSessionEvent(
