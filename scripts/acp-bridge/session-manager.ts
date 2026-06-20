@@ -28,6 +28,7 @@ import type {
 } from "./event-normalizer";
 import {
   type BridgeRuntimeProfile,
+  applyRuntimeMcpServerCompatibility,
   findRuntimeProfile,
 } from "./runtime-profiles";
 import type {
@@ -2122,13 +2123,16 @@ export class BridgeSessionManager {
         initialSessionId: this.resumeEnabled
           ? item.externalSessionId
           : undefined,
-        mcpServers: this.createMcpServers({
-          agentSessionId: item.agentSessionId,
-          cwd,
-          organizationId: item.organizationId,
-          sessionKey,
-          threadId,
-        }),
+        mcpServers: applyRuntimeMcpServerCompatibility(
+          this.createMcpServers({
+            agentSessionId: item.agentSessionId,
+            cwd,
+            organizationId: item.organizationId,
+            sessionKey,
+            threadId,
+          }),
+          runtimeProfile,
+        ),
         onEvent: (event) => {
           if (this.isCurrentSessionRecord(record)) {
             const eventItem = this.currentQueueItemForSessionEvent(

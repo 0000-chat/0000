@@ -1530,19 +1530,70 @@ function classifyUntrustedMessageChunks(events: NormalizedBridgeEvent[]): {
         : lastIndex,
     -1,
   )
-  const answerEvents: NormalizedBridgeEvent[] = []
-  const untrustedEvents: NormalizedBridgeEvent[] = []
+  const lastToolCallIndex = events.reduce(
+    (lastIndex, event, index) => (event.part?.type === "tool_call" ? index : lastIndex),
+    -1,
+  )
+  const textEvents: Array<{ event: NormalizedBridgeEvent; index: number }> = []
   events.forEach((event, index) => {
     if (event.source !== "acp_bridge" || event.part?.type !== "text") {
       return
     }
-    if (index > lastToolEventIndex) {
-      answerEvents.push(event)
+    textEvents.push({ event, index })
+  })
+  const answerEvents = textEvents
+    .filter(({ index }) => index > lastToolEventIndex)
+    .map(({ event }) => event)
+  if (answerEvents.length === 0 && lastToolCallIndex >= 0) {
+    answerEvents.push(...findTrailingTextRunAfterToolCall(events, lastToolCallIndex))
+  }
+  const answerEventSet = new Set(answerEvents)
+  const untrustedEvents = textEvents
+    .filter(({ event }) => !answerEventSet.has(event))
+    .map(({ event }) => event)
+  return { answerEvents, untrustedEvents }
+}
+
+function findTrailingTextRunAfterToolCall(
+  events: NormalizedBridgeEvent[],
+  lastToolCallIndex: number,
+): NormalizedBridgeEvent[] {
+  let trailingRun: NormalizedBridgeEvent[] = []
+  let currentRun: NormalizedBridgeEvent[] = []
+  let currentRunStart = -1
+
+  events.forEach((event, index) => {
+    if (event.source === "acp_bridge" && event.part?.type === "text") {
+      if (currentRun.length === 0) {
+        currentRunStart = index
+      }
+      currentRun.push(event)
       return
     }
-    untrustedEvents.push(event)
+    if (currentRun.length > 0) {
+      if (currentRunStart > lastToolCallIndex) {
+        trailingRun = currentRun
+      }
+      currentRun = []
+      currentRunStart = -1
+    }
   })
-  return { answerEvents, untrustedEvents }
+
+  if (currentRun.length > 0 && currentRunStart > lastToolCallIndex) {
+    trailingRun = currentRun
+  }
+  if (trailingRun.length === 0) {
+    return []
+  }
+
+  const lastTrailingEventIndex = events.lastIndexOf(trailingRun[trailingRun.length - 1])
+  const hasLaterToolCall = events
+    .slice(lastTrailingEventIndex + 1)
+    .some((event) => event.part?.type === "tool_call")
+  if (hasLaterToolCall) {
+    return []
+  }
+  return trailingRun
 }
 
 function reclassifyMessageChunkAsThinking(event: NormalizedBridgeEvent): NormalizedBridgeEvent {

@@ -120,6 +120,42 @@ describe("ACP final text extraction", () => {
     })
   })
 
+  test("keeps Codex ACP final chunks emitted before a late tool update", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "bunx @zed-industries/codex-acp@0.16.0",
+      runtimeClient: createFakeRuntimeClient({
+        updates: [
+          { content: { text: "private reasoning", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { name: "web_search", type: "tool_call" }, sessionUpdate: "tool_call" },
+          { content: { text: "Final", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          { content: { text: " answer", type: "text" }, sessionUpdate: "agent_message_chunk" },
+          {
+            content: { status: "completed", toolCallId: "tool-1", type: "tool_call_update" },
+            sessionUpdate: "tool_call_update",
+          },
+        ],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.text).toBe("Final answer")
+    expect(result.events.map((event) => event.eventType)).toEqual([
+      "agent_thought_chunk",
+      "tool_call",
+      "agent_message_chunk",
+      "agent_message_chunk",
+      "tool_call_update",
+    ])
+    expect(result.finalText).toMatchObject({
+      answerChunkCount: 2,
+      answerTextLength: 12,
+      reason: "codex_unclassified_message_chunks",
+      runtimeId: "codex",
+      withheld: false,
+    })
+  })
+
   test("keeps Codex ACP answer chunks when the turn has classified thought events", async () => {
     const session = new HermesAcpSession({
       agentCommand: ["bunx", "@zed-industries/codex-acp@0.16.0"],

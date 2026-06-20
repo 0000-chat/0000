@@ -17,6 +17,7 @@ export type BridgeRuntimeProfile = {
   command: string[]
   status: BridgeRuntimeProfileStatus
   availableCommands?: BridgeRuntimeAvailableCommand[]
+  compatibility?: BridgeRuntimeCompatibility
   defaultCwd?: string
   hermesProfileName?: string
   models?: string[]
@@ -74,6 +75,10 @@ export type BridgeRuntimeProfile = {
   }
 }
 
+export type BridgeRuntimeCompatibility = {
+  mcpServerNameAliases?: Record<string, string>
+}
+
 export function normalizeCommand(
   command: string | string[] | undefined,
   fallback: string,
@@ -111,6 +116,7 @@ export function synthesizeLegacyHermesProfile(
     label: "Hermes",
     command: normalizedCommand,
     status: "available",
+    compatibility: hermesRuntimeCompatibility(),
     identityRules: {
       cwdBoundSessions: true,
       cwdSwitchPolicy: "new_session_required",
@@ -123,6 +129,31 @@ export function synthesizeLegacyHermesProfile(
       sessionMcpServers: true,
     },
   }
+}
+
+export function hermesRuntimeCompatibility(): BridgeRuntimeCompatibility {
+  return {
+    mcpServerNameAliases: {
+      "0000": "zero-chat",
+    },
+  }
+}
+
+export function applyRuntimeMcpServerCompatibility<TServer extends { name: string }>(
+  servers: TServer[],
+  profile: BridgeRuntimeProfile | undefined,
+): TServer[] {
+  const aliases = profile?.compatibility?.mcpServerNameAliases
+  if (!aliases || Object.keys(aliases).length === 0) {
+    return servers
+  }
+  return servers.map((server) => {
+    const alias = aliases[server.name]
+    if (!alias || alias === server.name) {
+      return server
+    }
+    return { ...server, name: alias }
+  })
 }
 
 export function dedupeRuntimeProfiles(profiles: BridgeRuntimeProfile[]): BridgeRuntimeProfile[] {

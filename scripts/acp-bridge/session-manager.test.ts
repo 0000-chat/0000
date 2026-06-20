@@ -135,6 +135,56 @@ describe("bridge session cwd safety", () => {
     expect(mcpContexts[0]?.cwd).toBe("/Users/alice/private-project");
   });
 
+  test("applies runtime MCP server name aliases before creating sessions", async () => {
+    const sessionContexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createMcpServers: () => [
+        {
+          args: ["agent-tools-mcp.ts"],
+          command: "bun",
+          name: "0000",
+        },
+      ],
+      createSession: (context) => {
+        sessionContexts.push(context);
+        return fakeSession();
+      },
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          compatibility: {
+            mcpServerNameAliases: {
+              "0000": "zero-chat",
+            },
+          },
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(sessionContexts[0]?.mcpServers).toEqual([
+      {
+        args: ["agent-tools-mcp.ts"],
+        command: "bun",
+        name: "zero-chat",
+      },
+    ]);
+  });
+
   test("omits disabled queue cwd from MCP server context", async () => {
     const mcpContexts: Array<Pick<BridgeSessionContext, "cwd">> = [];
     const manager = new BridgeSessionManager({
