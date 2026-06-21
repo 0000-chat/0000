@@ -177,6 +177,8 @@ type BridgeSessionRecord = {
   sessionKey: string;
   threadId: string;
   cwd?: string;
+  mcpManifestHash?: string;
+  toolPolicyHash?: string;
   acp: ManagedAcpSession;
   agentName?: string;
   runtimeProfile?: BridgeRuntimeProfile;
@@ -235,6 +237,8 @@ export type BridgeSessionManagerOptions = {
   deviceId?: string;
   agentCommand?: string | string[];
   runtimeProfiles?: BridgeRuntimeProfile[];
+  currentMcpManifestHash?: string | (() => string | undefined);
+  currentToolPolicyHash?: string | (() => string | undefined);
   requestTimeoutMs?: number;
   createMcpServers?: (
     context: Pick<
@@ -339,6 +343,8 @@ export class BridgeSessionManager {
   private readonly deviceId?: string;
   private readonly agentCommand?: string | string[];
   private readonly runtimeProfiles: BridgeRuntimeProfile[];
+  private readonly getCurrentMcpManifestHash: () => string | undefined;
+  private readonly getCurrentToolPolicyHash: () => string | undefined;
   private readonly requestTimeoutMs?: number;
   private readonly createMcpServers: (
     context: Pick<
@@ -408,6 +414,12 @@ export class BridgeSessionManager {
     this.deviceId = options.deviceId;
     this.agentCommand = options.agentCommand;
     this.runtimeProfiles = options.runtimeProfiles ?? [];
+    this.getCurrentMcpManifestHash = createHashReader(
+      options.currentMcpManifestHash,
+    );
+    this.getCurrentToolPolicyHash = createHashReader(
+      options.currentToolPolicyHash,
+    );
     this.requestTimeoutMs = options.requestTimeoutMs;
     this.log = options.log;
     this.supervisor = options.supervisor;
@@ -2045,6 +2057,7 @@ export class BridgeSessionManager {
       providerSessionKey,
       threadId,
     );
+    const currentHashes = this.currentSessionHashes();
     const existing = this.sessions.get(sessionKey);
     if (existing) {
       existing.agentName =
@@ -2060,6 +2073,14 @@ export class BridgeSessionManager {
           requestedBridgeProfileId: item.bridgeProfileId,
           previousHermesProfileName: existing.hermesProfileName,
           requestedHermesProfileName: item.hermesProfileName,
+        });
+        await this.closeSession(sessionKey);
+      } else if (this.sessionHashesChanged(existing, currentHashes)) {
+        this.writeSessionHashChangeLog({
+          currentHashes,
+          existing,
+          queueId: item.id,
+          threadId,
         });
         await this.closeSession(sessionKey);
       } else {
@@ -2105,6 +2126,8 @@ export class BridgeSessionManager {
       sessionKey,
       threadId,
       cwd,
+      mcpManifestHash: currentHashes.mcpManifestHash,
+      toolPolicyHash: currentHashes.toolPolicyHash,
       agentName: normalizeAgentName(item.agentName),
       generation,
       providerSessionKey,
@@ -2222,6 +2245,54 @@ export class BridgeSessionManager {
     await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey);
     this.sessions.set(sessionKey, record);
     return record;
+  }
+
+  private currentSessionHashes(): {
+    mcpManifestHash?: string;
+    toolPolicyHash?: string;
+  } {
+    return {
+      mcpManifestHash: this.getCurrentMcpManifestHash(),
+      toolPolicyHash: this.getCurrentToolPolicyHash(),
+    };
+  }
+
+  private sessionHashesChanged(
+    session: BridgeSessionRecord,
+    currentHashes: {
+      mcpManifestHash?: string;
+      toolPolicyHash?: string;
+    },
+  ): boolean {
+    return (
+      session.mcpManifestHash !== currentHashes.mcpManifestHash ||
+      session.toolPolicyHash !== currentHashes.toolPolicyHash
+    );
+  }
+
+  private writeSessionHashChangeLog(input: {
+    existing: BridgeSessionRecord;
+    currentHashes: {
+      mcpManifestHash?: string;
+      toolPolicyHash?: string;
+    };
+    queueId: string;
+    threadId: string;
+  }): void {
+    this.log?.(
+      redactLogValue({
+        currentMcpManifestHash: input.currentHashes.mcpManifestHash,
+        currentToolPolicyHash: input.currentHashes.toolPolicyHash,
+        event: "bridge.session.mcp_manifest_changed",
+        level: "info",
+        previousMcpManifestHash: input.existing.mcpManifestHash,
+        previousToolPolicyHash: input.existing.toolPolicyHash,
+        queueId: input.queueId,
+        runtimeProfileId: input.existing.runtimeProfile?.id,
+        sessionKey: input.existing.sessionKey,
+        threadId: input.threadId,
+      }) as BridgeLogEntry,
+    );
   }
 
   private sessionMatchesExplicitRuntimeRequest(
@@ -3792,6 +3863,15 @@ function readFirstToolString(
     }
   }
   return undefined;
+}
+
+function createHashReader(
+  value: string | (() => string | undefined) | undefined,
+): () => string | undefined {
+  if (typeof value === "function") {
+    return value;
+  }
+  return () => value;
 }
 
 function readString(value: unknown): string | undefined {
