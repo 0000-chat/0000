@@ -7,9 +7,7 @@ import { buildZeroChatMcpGuideText } from "./acp-bridge/zero-chat-policy"
 
 export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "userPrompts.requestChoice",
-  "threads.current",
   "threads.list",
-  "threads.read",
   "messages.search",
   "settings.setDefaultApprovalLevel",
   "agents.list",
@@ -63,9 +61,13 @@ type AgentToolMcpEnv = {
   toolBaseUrl?: string
 }
 type AgentToolFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+type AgentToolHttpInvokeOptions = {
+  timeoutMs?: number
+}
 
 export const AGENT_TOOL_GUIDE_RESOURCE = "https://0000.chat/mcp/resources/agent-tools-guide"
 export const AGENT_TOOL_SESSION_CONTEXT_RESOURCE = "https://0000.chat/mcp/resources/session-context"
+const DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS = 30_000
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "userPrompts.requestChoice": {
@@ -78,9 +80,7 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     ),
     prompt: z.string(),
   },
-  "threads.current": {},
   "threads.list": { limit: z.number().optional() },
-  "threads.read": { threadId: z.string() },
   "messages.search": {
     limit: z.number().optional(),
     query: z.string(),
@@ -291,10 +291,7 @@ export const AGENT_TOOL_MCP_INPUT_SCHEMAS = Object.fromEntries(
 const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "userPrompts.requestChoice":
     "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
-  "threads.current":
-    "Read the exact current 0000 Chat thread, space, agent session, recent messages, and continuity identity for this agent run. Prefer this before threads.list for continue/resume/remember prompts.",
   "threads.list": "List recent 0000 Chat threads visible to this agent session.",
-  "threads.read": "Read one 0000 Chat thread and its cached messages.",
   "messages.search": "Search cached 0000 Chat messages.",
   "settings.setDefaultApprovalLevel":
     "Set the user's default approval mode. Use full_permissions only when the user explicitly asks to enable trusted local automation; this tool requires in-thread approval unless the current thread already has full permissions.",
@@ -370,27 +367,47 @@ export async function invokeAgentToolOverHttp(
   tool: string,
   input: unknown,
   fetchImpl: AgentToolFetch = fetch,
+  options: AgentToolHttpInvokeOptions = {},
 ): Promise<unknown> {
-  const response = await fetchImpl(buildEndpoint(env.toolBaseUrl ?? env.appUrl, "/api/agent-tools/invoke"), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${env.bridgeToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      agentSessionId: env.agentSessionId,
-      deviceId: env.deviceId,
-      input,
-      threadId: env.threadId,
-      tool,
-    }),
-  })
-  const text = await response.text()
-  const payload = text ? JSON.parse(text) : {}
-  if (!response.ok) {
-    return { error: payload.error ?? (text || "Agent tool request failed"), ok: false }
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS)
+  const abortController = new AbortController()
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        abortController.abort()
+        reject(new Error(`Agent tool request timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+    })
+    const requestPromise = (async () => {
+      const response = await fetchImpl(buildEndpoint(env.toolBaseUrl ?? env.appUrl, "/api/agent-tools/invoke"), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${env.bridgeToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          agentSessionId: env.agentSessionId,
+          deviceId: env.deviceId,
+          input,
+          threadId: env.threadId,
+          tool,
+        }),
+        signal: abortController.signal,
+      })
+      const text = await response.text()
+      const payload = text ? JSON.parse(text) : {}
+      if (!response.ok) {
+        return { error: payload.error ?? (text || "Agent tool request failed"), ok: false }
+      }
+      return payload
+    })()
+    return await Promise.race([requestPromise, timeoutPromise])
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error), ok: false }
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
   }
-  return payload
 }
 
 export function toMcpToolResult(result: unknown) {
@@ -412,7 +429,6 @@ agentSessionId: ${env.agentSessionId}
 ${currentThreadLine}bridgeDeviceId: ${env.deviceId}
 appUrl: ${env.appUrl}
 mcpServer: 0000
-currentThreadTool: threads.current
 toolGuide: ${AGENT_TOOL_GUIDE_RESOURCE}`
 }
 

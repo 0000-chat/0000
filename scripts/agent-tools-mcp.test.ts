@@ -16,9 +16,7 @@ describe("agent tools MCP server helpers", () => {
   test("lists the portable agent tool names", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toEqual([
       "userPrompts.requestChoice",
-      "threads.current",
       "threads.list",
-      "threads.read",
       "messages.search",
       "settings.setDefaultApprovalLevel",
       "agents.list",
@@ -71,8 +69,10 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("userPrompts.requestChoice")
     expect(buildAgentToolGuideText()).toContain("multiple-choice UI")
     expect(buildAgentToolGuideText()).toContain("spaces.archive")
-    expect(buildAgentToolGuideText()).toContain("threads.current")
-    expect(buildAgentToolGuideText()).toContain("call threads.current first")
+    expect(buildAgentToolGuideText()).toContain("threads.list")
+    expect(buildAgentToolGuideText()).not.toContain("threads.current")
+    expect(buildAgentToolGuideText()).not.toContain("threads.read")
+    expect(buildAgentToolGuideText()).not.toContain("call threads.current first")
     expect(buildAgentToolGuideText()).toContain("settings.setDefaultApprovalLevel")
     expect(buildAgentToolGuideText()).toContain("trusted local automation")
     expect(buildAgentToolGuideText()).toContain("in-thread approval")
@@ -117,6 +117,15 @@ describe("agent tools MCP server helpers", () => {
         threadId: "thread_abc",
       }),
     ).toContain("mcpServer: 0000\n")
+    expect(
+      buildAgentToolSessionContextText({
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test/app",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+        threadId: "thread_abc",
+      }),
+    ).not.toContain("currentThreadTool")
     expect(
       buildAgentToolSessionContextText({
         agentSessionId: "agent_session_1",
@@ -244,6 +253,32 @@ describe("agent tools MCP server helpers", () => {
         title: "Health",
       },
       tool: "apps.create",
+    })
+  })
+
+  test("returns an MCP error result when the app endpoint does not answer before timeout", async () => {
+    const result = await Promise.race([
+      invokeAgentToolOverHttp(
+        {
+          agentSessionId: "agent_session_1",
+          appUrl: "https://chat.example.test/app",
+          bridgeToken: "secret-token",
+          deviceId: "device_123",
+        },
+        "messages.search",
+        { query: "status" },
+        async () =>
+          new Promise<Response>(() => {
+            // Intentionally never resolves; invokeAgentToolOverHttp must abort it.
+          }),
+        { timeoutMs: 20 },
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("still-pending"), 100)),
+    ])
+
+    expect(result).toEqual({
+      error: "Agent tool request timed out after 20ms",
+      ok: false,
     })
   })
 
