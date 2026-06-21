@@ -64,10 +64,32 @@ type AgentToolFetch = (input: string | URL | Request, init?: RequestInit) => Pro
 type AgentToolHttpInvokeOptions = {
   timeoutMs?: number
 }
+type AgentToolInvokeFailureReasonCode =
+  | "APP_ERROR"
+  | "FETCH_ERROR"
+  | "HTTP_ERROR"
+  | "INVALID_JSON"
+  | "TIMEOUT"
+type AgentToolInvokeFailure = {
+  ok: false
+  error: string
+  reasonCode: AgentToolInvokeFailureReasonCode
+  retryable?: boolean
+  timeoutMs?: number
+  httpStatus?: number
+  tool?: string
+}
+type AgentToolInvokeSuccess = {
+  ok: true
+  result: unknown
+}
+type AgentToolInvokeResult = AgentToolInvokeFailure | AgentToolInvokeSuccess
 
 export const AGENT_TOOL_GUIDE_RESOURCE = "https://0000.chat/mcp/resources/agent-tools-guide"
 export const AGENT_TOOL_SESSION_CONTEXT_RESOURCE = "https://0000.chat/mcp/resources/session-context"
 const DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS = 30_000
+const MAX_ERROR_TEXT_LENGTH = 280
+const MAX_MCP_ERROR_JSON_LENGTH = 1_500
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "userPrompts.requestChoice": {
@@ -368,7 +390,7 @@ export async function invokeAgentToolOverHttp(
   input: unknown,
   fetchImpl: AgentToolFetch = fetch,
   options: AgentToolHttpInvokeOptions = {},
-): Promise<unknown> {
+): Promise<AgentToolInvokeResult | unknown> {
   const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS)
   const abortController = new AbortController()
   let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -395,16 +417,55 @@ export async function invokeAgentToolOverHttp(
         }),
         signal: abortController.signal,
       })
-      const text = await response.text()
-      const payload = text ? JSON.parse(text) : {}
       if (!response.ok) {
-        return { error: payload.error ?? (text || "Agent tool request failed"), ok: false }
+        return buildAgentToolInvokeFailure({
+          error: `Agent tool request failed with HTTP ${response.status}`,
+          httpStatus: response.status,
+          reasonCode: "HTTP_ERROR",
+          retryable: response.status >= 500 || response.status === 429,
+          tool,
+        })
+      }
+      const text = await response.text()
+      let payload: unknown = {}
+      if (text) {
+        try {
+          payload = JSON.parse(text)
+        } catch {
+          return buildAgentToolInvokeFailure({
+            error: "Agent tool response was not valid JSON",
+            reasonCode: "INVALID_JSON",
+            tool,
+          })
+        }
+      }
+      if (isErrorPayload(payload)) {
+        return buildAgentToolInvokeFailure({
+          error: payload.error,
+          reasonCode: "APP_ERROR",
+          retryable: typeof payload.retryable === "boolean" ? payload.retryable : undefined,
+          tool,
+        })
       }
       return payload
     })()
     return await Promise.race([requestPromise, timeoutPromise])
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error), ok: false }
+    if (abortController.signal.aborted) {
+      return buildAgentToolInvokeFailure({
+        error: `Agent tool request timed out after ${timeoutMs}ms`,
+        reasonCode: "TIMEOUT",
+        retryable: true,
+        timeoutMs,
+        tool,
+      })
+    }
+    return buildAgentToolInvokeFailure({
+      error: error instanceof Error ? error.message : String(error),
+      reasonCode: "FETCH_ERROR",
+      retryable: true,
+      tool,
+    })
   } finally {
     if (timeoutId) clearTimeout(timeoutId)
   }
@@ -412,8 +473,12 @@ export async function invokeAgentToolOverHttp(
 
 export function toMcpToolResult(result: unknown) {
   const record = result && typeof result === "object" ? (result as { ok?: unknown }) : undefined
+  const text =
+    record?.ok === false
+      ? JSON.stringify(boundToolFailureForMcp(result), null, 2)
+      : JSON.stringify(result, null, 2)
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+    content: [{ type: "text" as const, text }],
     ...(record?.ok === false ? { isError: true } : {}),
   }
 }
@@ -471,7 +536,20 @@ export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
         description: toolDescriptions[toolName],
         inputSchema: toolSchemas[toolName],
       },
-      async (input) => toMcpToolResult(await invokeAgentToolOverHttp(env, toolName, input)),
+      async (input) => {
+        try {
+          return toMcpToolResult(await invokeAgentToolOverHttp(env, toolName, input))
+        } catch (error) {
+          return toMcpToolResult(
+            buildAgentToolInvokeFailure({
+              error: error instanceof Error ? error.message : String(error),
+              reasonCode: "FETCH_ERROR",
+              retryable: false,
+              tool: toolName,
+            }),
+          )
+        }
+      },
     )
   }
 
@@ -503,6 +581,68 @@ function buildEndpoint(baseUrl: string, path: string): string {
   url.search = ""
   url.hash = ""
   return url.toString()
+}
+
+function buildAgentToolInvokeFailure(
+  failure: Omit<AgentToolInvokeFailure, "ok">,
+): AgentToolInvokeFailure {
+  return {
+    ok: false,
+    ...failure,
+    error: sanitizeErrorText(failure.error),
+  }
+}
+
+function sanitizeErrorText(input: string): string {
+  const redacted = input
+    .replace(/authorization\s*:\s*[^\s,]+/gi, "authorization: [redacted]")
+    .replace(/bearer\s+[^\s,]+/gi, "Bearer [redacted]")
+    .replace(/(bridgeToken|token|authToken|authorization)["']?\s*[:=]\s*["'][^"']+["']/gi, "$1: [redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (redacted.length <= MAX_ERROR_TEXT_LENGTH) {
+    return redacted
+  }
+  return `${redacted.slice(0, MAX_ERROR_TEXT_LENGTH - 12).trimEnd()} [truncated]`
+}
+
+function boundToolFailureForMcp(result: unknown): AgentToolInvokeFailure {
+  const failure = (result ?? {}) as Partial<AgentToolInvokeFailure>
+  const bounded: AgentToolInvokeFailure = {
+    error: sanitizeErrorText(typeof failure.error === "string" ? failure.error : "Agent tool request failed"),
+    ok: false,
+    reasonCode: failure.reasonCode ?? "APP_ERROR",
+    ...(typeof failure.retryable === "boolean" ? { retryable: failure.retryable } : {}),
+    ...(typeof failure.timeoutMs === "number" ? { timeoutMs: failure.timeoutMs } : {}),
+    ...(typeof failure.httpStatus === "number" ? { httpStatus: failure.httpStatus } : {}),
+    ...(typeof failure.tool === "string" ? { tool: failure.tool } : {}),
+  }
+  let text = JSON.stringify(bounded, null, 2)
+  if (text.length <= MAX_MCP_ERROR_JSON_LENGTH) {
+    return bounded
+  }
+  bounded.error = sanitizeErrorText(bounded.error.slice(0, MAX_ERROR_TEXT_LENGTH / 2))
+  text = JSON.stringify(bounded, null, 2)
+  if (text.length <= MAX_MCP_ERROR_JSON_LENGTH) {
+    return bounded
+  }
+  return {
+    error: "Agent tool request failed [truncated]",
+    ok: false,
+    reasonCode: bounded.reasonCode,
+    ...(typeof bounded.tool === "string" ? { tool: bounded.tool } : {}),
+  }
+}
+
+function isErrorPayload(payload: unknown): payload is { error: string; ok?: false; retryable?: boolean } {
+  return Boolean(
+    payload &&
+      typeof payload === "object" &&
+      "error" in payload &&
+      typeof (payload as { error?: unknown }).error === "string" &&
+      (!("ok" in payload) || (payload as { ok?: unknown }).ok === false),
+  )
 }
 
 if (import.meta.main) {

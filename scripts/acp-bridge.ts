@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
@@ -19,6 +19,13 @@ import {
   ConvexBridgeCloudClient,
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
+import {
+  AGENT_TOOL_GUIDE_RESOURCE,
+  AGENT_TOOL_MCP_INPUT_SCHEMAS,
+  AGENT_TOOL_MCP_TOOL_NAMES,
+  AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
+  buildAgentToolGuideText,
+} from "./agent-tools-mcp";
 import { ConvexBridgeHostAdapter } from "./acp-bridge/host-adapter";
 import {
   openBridgeSupervisor,
@@ -29,6 +36,10 @@ import {
   AcpBridgeProcessRegistry,
   type AcpBridgeProcessHealth,
 } from "./acp-bridge/process-registry";
+import {
+  BridgeSingletonGuard,
+  type BridgeSingletonStatus,
+} from "./acp-bridge/local-singleton-guard";
 import {
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
@@ -117,6 +128,33 @@ const DEFAULT_AGENT_SKILL_PATH = join(
 );
 export const BRIDGE_VERSION = "0.1.16";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
+const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
+const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
+
+export type BridgeRuntimeIdentity = {
+  bridgeVersion: string;
+  gitSha?: string;
+  instanceId: string;
+  mcpManifestHash: string;
+  pid: number;
+  processStartedAt: string;
+  toolPolicyHash: string;
+};
+
+type BridgeProcessHealth = AcpBridgeProcessHealth & {
+  registryPath?: string;
+  singletonOwner?: {
+    duplicateOwner?: {
+      instanceId?: string;
+      pid: number;
+      processStartedAt?: string;
+      updatedAt?: string;
+    };
+    lastReconciledAt?: string;
+    ownerPath: string;
+    status: BridgeSingletonStatus["status"];
+  };
+};
 
 export type BridgeCommandName =
   | "connect"
@@ -222,6 +260,7 @@ export type BridgeStatus = {
   };
   acpResumeEnabled?: boolean;
   acpIdleTtlMs?: number;
+  runtimeIdentity?: BridgeRuntimeIdentity;
   hermesProfiles?: HermesProfileSummary[];
   runtimeProfiles?: BridgeRuntimeProfile[];
   lastHermesProfileRefreshAt?: string;
@@ -238,7 +277,7 @@ export type BridgeStatus = {
   }>;
   retainedSessions?: BridgeSessionSummary[];
   sessionQueues?: BridgeSessionSummary[];
-  processHealth?: AcpBridgeProcessHealth & { registryPath?: string };
+  processHealth?: BridgeProcessHealth;
   runtimeConformance?: RuntimeConformanceSummary;
   liveness?: {
     activeSessions: Array<{
@@ -331,6 +370,7 @@ export type BridgeRegistrationStatus = {
   lastPollAt?: string;
   maxInFlight?: number;
   capacity?: BridgeStatus["capacity"];
+  runtimeIdentity?: BridgeStatus["runtimeIdentity"];
   activeSessions: string[];
   inFlightCommands?: BridgeStatus["inFlightCommands"];
   retainedSessions?: BridgeStatus["retainedSessions"];
@@ -419,6 +459,76 @@ function buildBridgeUpdateState(
   };
 }
 
+const BRIDGE_PROCESS_STARTED_AT = new Date().toISOString();
+const BRIDGE_PROCESS_INSTANCE_ID = randomUUID();
+const BRIDGE_PROCESS_START_TOKEN = readLinuxProcessStartToken(process.pid);
+const BRIDGE_GIT_SHA = resolveGitSha();
+const BRIDGE_RUNTIME_IDENTITY: BridgeRuntimeIdentity = {
+  bridgeVersion: BRIDGE_VERSION,
+  ...(BRIDGE_GIT_SHA ? { gitSha: BRIDGE_GIT_SHA } : {}),
+  instanceId: BRIDGE_PROCESS_INSTANCE_ID,
+  mcpManifestHash: hashStableBridgeValue(buildBridgeMcpManifestSummary()),
+  pid: process.pid,
+  processStartedAt: BRIDGE_PROCESS_STARTED_AT,
+  toolPolicyHash: hashStableBridgeValue(buildBridgeToolPolicySummary()),
+};
+
+function getBridgeRuntimeIdentity(): BridgeRuntimeIdentity {
+  return BRIDGE_RUNTIME_IDENTITY;
+}
+
+function buildBridgeMcpManifestSummary() {
+  return {
+    resources: [
+      AGENT_TOOL_GUIDE_RESOURCE,
+      AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
+    ],
+    serverName: BRIDGE_MCP_SERVER_NAME,
+    serverVersion: BRIDGE_MCP_SERVER_VERSION,
+    tools: AGENT_TOOL_MCP_TOOL_NAMES.map((toolName) => ({
+      inputFields: Object.keys(AGENT_TOOL_MCP_INPUT_SCHEMAS[toolName].shape).sort(),
+      name: toolName,
+    })),
+  };
+}
+
+function buildBridgeToolPolicySummary() {
+  return {
+    guideText: buildAgentToolGuideText(),
+    toolNames: [...AGENT_TOOL_MCP_TOOL_NAMES],
+  };
+}
+
+function hashStableBridgeValue(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function resolveGitSha(): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dirname(fileURLToPath(import.meta.url)),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function readLinuxProcessStartToken(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen < 0) {
+      return undefined;
+    }
+    const fields = stat.slice(closeParen + 2).trim().split(/\s+/);
+    return fields[19];
+  } catch {
+    return undefined;
+  }
+}
+
 export type BridgeControlCommandName = "updateWhenIdle" | "restartWhenIdle";
 
 export type BridgeControlCommandState = {
@@ -488,7 +598,7 @@ export type BridgeLoopIterationInput = {
   claimCommands?: typeof claimCommands;
   markCommandResult?: typeof markCommandResult;
   canClaimWork?: () => boolean;
-  getProcessHealth?: () => AcpBridgeProcessHealth;
+  getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
@@ -1385,6 +1495,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     log: FlushableBridgeLogger;
     manager: BridgeSessionManager;
     processRegistry: AcpBridgeProcessRegistry;
+    processRegistryPath: string;
+    singletonGuard: BridgeSingletonGuard;
     status: BridgeStatus;
     supervisor: BridgeSupervisor;
     wakeSignal: BridgeWakeSignal;
@@ -1470,9 +1582,20 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         parsed.flags,
         registration.deviceId,
       );
+      const singletonOwnerPath = getBridgeSingletonOwnerPath(
+        parsed.flags,
+        registration.deviceId,
+      );
       const processRegistry = new AcpBridgeProcessRegistry({
         maxProcesses: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
         path: processRegistryPath,
+      });
+      const singletonGuard = new BridgeSingletonGuard({
+        instanceId: getBridgeRuntimeIdentity().instanceId,
+        path: singletonOwnerPath,
+        processStartToken: BRIDGE_PROCESS_START_TOKEN,
+        processStartedAt: getBridgeRuntimeIdentity().processStartedAt,
+        registrationKey: registration.deviceId,
       });
       const supervisor = openBridgeSupervisor({
         bridgeDeviceId: registration.deviceId,
@@ -1490,6 +1613,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         deviceId: registration.deviceId,
         agentCommand,
         runtimeProfiles,
+        currentMcpManifestHash: () =>
+          getBridgeRuntimeIdentity().mcpManifestHash,
+        currentToolPolicyHash: () =>
+          getBridgeRuntimeIdentity().toolPolicyHash,
         requestTimeoutMs,
         toolResultTimeoutMs,
         resumeEnabled,
@@ -1547,15 +1674,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         capacity: initialCapacity,
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
+        runtimeIdentity: getBridgeRuntimeIdentity(),
         hermesProfiles,
         runtimeProfiles,
         activeSessions: [],
         inFlightCommands: [],
         sessionQueues: [],
-        processHealth: {
-          ...supervisor.getProcessHealth(),
-          registryPath: processRegistryPath,
-        },
+        processHealth: mergeBridgeProcessHealth(
+          supervisor.getProcessHealth(),
+          singletonGuard.getStatus(),
+          processRegistryPath,
+        ),
         runtimeConformance: runtimeConformanceSummary(),
         recentErrors: [],
         localJournal: bridgeSupervisorHealthStatus(supervisor),
@@ -1570,6 +1699,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         log,
         manager,
         processRegistry,
+        processRegistryPath,
+        singletonGuard,
         status,
         supervisor,
         wakeSignal,
@@ -1593,6 +1724,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       await context.wakeSignal.close();
       await context.manager.close();
       context.supervisor.close();
+      await context.singletonGuard.release();
       await context.log.flush();
       contexts.delete(deviceId);
     }
@@ -1677,6 +1809,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           context.supervisor.close();
         }
         await Promise.allSettled(context.inFlightCommands.values());
+        await context.singletonGuard.release();
         await context.log.flush();
       })();
       const shutdownResult =
@@ -1755,9 +1888,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       context.status.localJournal = bridgeSupervisorHealthStatus(
         context.supervisor,
       );
-      context.status.processHealth = context.supervisor.getProcessHealth();
+      const singletonStatus = await context.singletonGuard.reconcile();
+      context.status.processHealth = mergeBridgeProcessHealth(
+        context.supervisor.getProcessHealth(),
+        singletonStatus,
+        context.processRegistryPath,
+      );
       const processOrphanCleanupNow = Date.now();
       if (
+        singletonStatus.canClaim &&
         processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
         DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
       ) {
@@ -1790,7 +1929,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             error: message,
           });
         }
-        context.status.processHealth = context.supervisor.getProcessHealth();
+        context.status.processHealth = mergeBridgeProcessHealth(
+          context.supervisor.getProcessHealth(),
+          context.singletonGuard.getStatus(),
+          context.processRegistryPath,
+        );
       }
       await publishBridgeSupervisorHealthIfChanged(context);
       const watchdogFailures = context.supervisor.checkWatchdogs();
@@ -1828,7 +1971,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         recordLoopError: recordLoopError(context),
         statusPath,
         canClaimWork: () => context.supervisor.canClaimWork(),
-        getProcessHealth: () => context.supervisor.getProcessHealth(),
+        getProcessHealth: () =>
+          mergeBridgeProcessHealth(
+            context.supervisor.getProcessHealth(),
+            context.singletonGuard.getStatus(),
+            context.processRegistryPath,
+          ),
         getRuntimeConformance: runtimeConformanceSummary,
         writeStatus: persistAggregateStatus,
       });
@@ -1975,6 +2123,7 @@ function buildAggregateBridgeStatus(
     lastPollAt: status.lastPollAt,
     maxInFlight: status.maxInFlight,
     capacity: status.capacity,
+    runtimeIdentity: status.runtimeIdentity,
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands,
     retainedSessions: status.retainedSessions,
@@ -2000,6 +2149,7 @@ function buildAggregateBridgeStatus(
     lastPollAt: first?.status.lastPollAt,
     maxInFlight: capacity.bridgeMaxInFlight,
     capacity,
+    runtimeIdentity: first?.status.runtimeIdentity,
     acpResumeEnabled: first?.status.acpResumeEnabled,
     acpIdleTtlMs: first?.status.acpIdleTtlMs,
     hermesProfiles: first?.status.hermesProfiles,
@@ -2639,6 +2789,7 @@ export function bridgeHeartbeatSignature(
     | "liveness"
     | "availability"
     | "capacity"
+    | "runtimeIdentity"
     | "sessionQueues"
     | "updateState"
   >,
@@ -2658,6 +2809,7 @@ export function bridgeHeartbeatSignature(
       .sort((left, right) => left.id.localeCompare(right.id)),
     maxInFlight: status.maxInFlight,
     capacity: status.capacity,
+    runtimeIdentity: status.runtimeIdentity,
     processHealth: status.processHealth,
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
@@ -2713,7 +2865,7 @@ function syncBridgeRuntimeStatus(
   manager: BridgeLoopManager,
   maxInFlight: number,
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>,
-  processHealth?: AcpBridgeProcessHealth,
+  processHealth?: BridgeProcessHealth,
   runtimeConformance?: RuntimeConformanceSummary,
 ): void {
   const managerStatus = manager.getStatus();
@@ -3015,6 +3167,17 @@ function getBridgeProcessRegistryPath(
   );
 }
 
+function getBridgeSingletonOwnerPath(
+  flags: FlagMap,
+  deviceId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const registryPath = getBridgeProcessRegistryPath(flags, deviceId, env);
+  return registryPath.endsWith(".json")
+    ? registryPath.replace(/\.json$/, ".owner.json")
+    : `${registryPath}.owner.json`;
+}
+
 function sanitizeFileSegment(value: string): string {
   const sanitized = value
     .replace(/[^A-Za-z0-9._-]+/g, "_")
@@ -3038,6 +3201,28 @@ function bridgeSupervisorHealthStatus(
 
 function bridgeSupervisorHealthSignature(supervisor: BridgeSupervisor): string {
   return JSON.stringify(bridgeSupervisorHealthStatus(supervisor));
+}
+
+function mergeBridgeProcessHealth(
+  processHealth: BridgeProcessHealth,
+  singletonStatus: BridgeSingletonStatus,
+  registryPath?: string,
+): BridgeProcessHealth {
+  const singletonOwner = {
+    ownerPath: singletonStatus.ownerPath,
+    lastReconciledAt: singletonStatus.lastReconciledAt,
+    status: singletonStatus.status,
+    ...(singletonStatus.status === "duplicate_owner"
+      ? { duplicateOwner: singletonStatus.duplicateOwner }
+      : {}),
+  };
+  return {
+    ...processHealth,
+    canClaim: processHealth.canClaim && singletonStatus.canClaim,
+    ...(singletonStatus.canClaim ? {} : { status: "ambiguous" }),
+    ...(registryPath ? { registryPath } : {}),
+    singletonOwner,
+  };
 }
 
 async function publishBridgeSupervisorHealthIfChanged(context: {
@@ -3182,6 +3367,7 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     inFlightCommands: status.inFlightCommands ?? [],
     maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
     capacity: status.capacity,
+    runtimeIdentity: status.runtimeIdentity,
     processHealth: buildHeartbeatProcessHealthPayload(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
@@ -3216,6 +3402,7 @@ function buildHeartbeatProcessHealthPayload(
   const { startupReconciliation, ...rest } = processHealth;
   return {
     ...rest,
+    singletonOwner: processHealth.singletonOwner,
     startupReconciliation: startupReconciliation
       ? {
           ambiguousProcessCount: startupReconciliation.ambiguousProcessCount,
@@ -3346,8 +3533,10 @@ export async function sendHeartbeatWithClient(
     const response = await client.heartbeat<{
       control?: BridgeControlResponse;
     }>({
+      bridgeInstanceId: status.runtimeIdentity?.instanceId,
       capabilities: buildHeartbeatCapabilities(status),
       status: buildHeartbeatStatusPayload(status),
+      version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
     });
     return { ok: true, control: response.control };
   } catch (error) {

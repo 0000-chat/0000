@@ -932,6 +932,120 @@ describe("bridge session cwd safety", () => {
     ]);
   });
 
+  test("reuses an ACP session when manifest and tool-policy hashes match", async () => {
+    const cloud = fakeCloudClient();
+    const contexts: BridgeSessionContext[] = [];
+    let closeCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          close: async () => {
+            closeCount += 1;
+          },
+          cancel: async () => {},
+          sendUserMessage: async () => ({
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          }),
+        };
+      },
+      currentMcpManifestHash: "manifest-v1",
+      currentToolPolicyHash: "policy-v1",
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      claimId: "claim-2",
+      id: "queue-2",
+      prompt: "hello again",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(contexts).toHaveLength(1);
+    expect(closeCount).toBe(0);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-2",
+      result: { ok: true, text: "ok" },
+    });
+  });
+
+  test("recreates an ACP session when the stored tool-policy hash changes", async () => {
+    const cloud = fakeCloudClient();
+    const contexts: BridgeSessionContext[] = [];
+    const closedSessionKeys: string[] = [];
+    const logs: Array<Record<string, unknown>> = [];
+    let currentToolPolicyHash = "policy-v1";
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          close: async () => {
+            closedSessionKeys.push(context.sessionKey);
+          },
+          cancel: async () => {},
+          sendUserMessage: async () => ({
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: currentToolPolicyHash,
+          }),
+        };
+      },
+      currentMcpManifestHash: "manifest-v1",
+      currentToolPolicyHash: () => currentToolPolicyHash,
+      log: (entry) => logs.push(entry as Record<string, unknown>),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    currentToolPolicyHash = "policy-v2";
+
+    await manager.handleQueueItem({
+      claimId: "claim-2",
+      id: "queue-2",
+      prompt: "hello again",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(contexts).toHaveLength(2);
+    expect(closedSessionKeys).toEqual([contexts[0]?.sessionKey ?? ""]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        currentMcpManifestHash: "manifest-v1",
+        currentToolPolicyHash: "policy-v2",
+        event: "bridge.session.mcp_manifest_changed",
+        previousMcpManifestHash: "manifest-v1",
+        previousToolPolicyHash: "policy-v1",
+        queueId: "queue-2",
+        sessionKey: contexts[0]?.sessionKey,
+        threadId: "thread-1",
+      }),
+    );
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-2",
+      result: { ok: true, text: "policy-v2" },
+    });
+  });
+
   test("rejects session-creating work without a profile when multiple runtimes are available", async () => {
     const cloud = fakeCloudClient();
     const contexts: BridgeSessionContext[] = [];
