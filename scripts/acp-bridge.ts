@@ -127,7 +127,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.18";
+export const BRIDGE_VERSION = "0.1.19";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -3593,6 +3593,10 @@ export function parseHermesProfileListOutput(
       .map((line) => {
         const hasActiveMarker = /^\s*[◆*]/.test(line);
         const normalized = line.replace(/^(\s*)[◆*]\s*/, "$1 ");
+        const semanticParts = parseHermesProfileSemanticRow(normalized);
+        if (semanticParts) {
+          return semanticParts;
+        }
         const whitespaceParts = normalized.trim().split(/\s{2,}/).filter(Boolean);
         const columnParts =
           columns.length >= 4
@@ -3636,6 +3640,30 @@ export function parseHermesProfileListOutput(
       })
       .filter((profile) => profile !== undefined),
   );
+}
+
+function parseHermesProfileSemanticRow(
+  line: string,
+): HermesProfileSummary | undefined {
+  const tokens = line.trim().split(/\s+/).filter(Boolean);
+  const gatewayIndex = tokens.findIndex((token) =>
+    /^(running|stopped|starting|stopping|error)$/i.test(token),
+  );
+  if (gatewayIndex <= 1) {
+    return undefined;
+  }
+  const rawModel = tokens[gatewayIndex - 1];
+  const rawName = tokens.slice(0, gatewayIndex - 1).join(" ");
+  const name = normalizeHermesProfileNameColumn(rawName);
+  if (!name) {
+    return undefined;
+  }
+  return {
+    alias: normalizeHermesPlaceholder(tokens[gatewayIndex + 1]),
+    gateway: normalizeHermesPlaceholder(tokens[gatewayIndex]),
+    model: normalizeHermesPlaceholder(rawModel),
+    name,
+  };
 }
 
 function normalizeHermesProfileNameColumn(value: string): string {
