@@ -127,7 +127,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.17";
+export const BRIDGE_VERSION = "0.1.18";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -3591,7 +3591,8 @@ export function parseHermesProfileListOutput(
   return sanitizeHermesProfilesForCapabilities(
     rows
       .map((line) => {
-        const normalized = line.replace(/^(\s*)[◆*]\s*/, "$1");
+        const hasActiveMarker = /^\s*[◆*]/.test(line);
+        const normalized = line.replace(/^(\s*)[◆*]\s*/, "$1 ");
         const whitespaceParts = normalized.trim().split(/\s{2,}/).filter(Boolean);
         const columnParts =
           columns.length >= 4
@@ -3601,6 +3602,7 @@ export function parseHermesProfileListOutput(
               })
             : [];
         const parts =
+          hasActiveMarker ||
           (whitespaceParts[0]?.endsWith(" —") && whitespaceParts.length >= 3) ||
           (whitespaceParts[0] &&
           columnParts[0] &&
