@@ -1241,10 +1241,14 @@ export function buildPromptContentBlocks(
   const appSystemPromptBase = normalizedSystemPrompt
     ? `${HIDDEN_ZERO_CHAT_SYSTEM_PROMPT}\n\nSpace instructions from the user:\n${normalizedSystemPrompt}`
     : HIDDEN_ZERO_CHAT_SYSTEM_PROMPT
-  const appSystemPrompt =
-    continuity?.includeContinuityFallbackNote && normalizedThreadHistory
-      ? `${appSystemPromptBase}\n\nExternal ACP session continuity is unavailable for this turn, so a fresh ACP session is being used. Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
-      : appSystemPromptBase
+  const threadHistoryPrompt = normalizedThreadHistory
+    ? continuity?.includeContinuityFallbackNote
+      ? `External ACP session continuity is unavailable for this turn, so a fresh ACP session is being used. Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
+      : `Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
+    : undefined
+  const appSystemPrompt = threadHistoryPrompt
+    ? `${appSystemPromptBase}\n\n${threadHistoryPrompt}`
+    : appSystemPromptBase
 
   return [
     {

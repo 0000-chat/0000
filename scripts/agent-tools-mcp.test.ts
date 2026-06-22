@@ -98,6 +98,10 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("secrets.listAvailable")
     expect(buildAgentToolGuideText()).toContain("scripts.createDraft")
     expect(buildAgentToolGuideText()).toContain("Never request raw Convex credentials")
+    expect(buildAgentToolGuideText()).toContain(
+      "Do not call messages.search just to recover current-thread history",
+    )
+    expect(buildAgentToolGuideText()).not.toContain("use messages.search with that threadId")
 
     expect(
       buildAgentToolSessionContextText({

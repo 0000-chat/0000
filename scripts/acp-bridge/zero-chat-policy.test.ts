@@ -5,6 +5,7 @@ import path from "node:path"
 import {
   authorizeZeroChatFilesystemPath,
   buildZeroChatFilesystemDiagnostic,
+  buildZeroChatHiddenSystemPrompt,
 } from "./zero-chat-policy"
 
 const tempDirs: string[] = []
@@ -21,6 +22,15 @@ afterEach(async () => {
 })
 
 describe("zero chat filesystem policy", () => {
+  test("directs current-thread continuity away from messages.search recovery", () => {
+    const prompt = buildZeroChatHiddenSystemPrompt()
+
+    expect(prompt).toContain(
+      "Do not call messages.search just to recover current-thread history",
+    )
+    expect(prompt).toContain("first rely on the provided thread history")
+  })
+
   test("rejects relative request paths before resolving", async () => {
     const workspace = await makeTempWorkspace()
     let resolveCalls = 0
