@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
+  BRIDGE_VERSION,
   buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
   buildHeartbeatStatusPayload,
@@ -25,12 +26,16 @@ import {
   preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
   runBridgeLoopIteration,
+  sendHeartbeatWithClient,
   upsertBridgeRegistration,
   waitForRestartShutdownTask,
   writeBridgeConfigFile,
   writeBridgeStatusFile,
 } from "./acp-bridge";
-import { BridgeCloudHttpError } from "./acp-bridge/convex-http";
+import {
+  BridgeCloudHttpError,
+  type BridgeHeartbeatInput,
+} from "./acp-bridge/convex-http";
 import { openBridgeJournal } from "./acp-bridge/sqlite-journal";
 import {
   defaultAgentCommandForEnvironment,
@@ -1531,6 +1536,75 @@ describe("bridge supervisor claim gating", () => {
     });
     expect(describeStatus(status, true)).toContain("retained sessions: 1");
     expect(describeStatus(status, true)).toContain("active sessions: 0");
+  });
+
+  test("heartbeat payload and signature include runtime identity", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeIdentity: {
+        bridgeVersion: BRIDGE_VERSION,
+        gitSha: "abc123def456",
+        instanceId: "instance-1",
+        mcpManifestHash: "manifest-a",
+        pid: 4242,
+        processStartedAt: "2026-06-22T00:00:00.000Z",
+        toolPolicyHash: "policy-a",
+      },
+    };
+
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      runtimeIdentity: {
+        bridgeVersion: BRIDGE_VERSION,
+        gitSha: "abc123def456",
+        instanceId: "instance-1",
+        mcpManifestHash: "manifest-a",
+        pid: 4242,
+        processStartedAt: "2026-06-22T00:00:00.000Z",
+        toolPolicyHash: "policy-a",
+      },
+    });
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        runtimeIdentity: {
+          ...status.runtimeIdentity!,
+          toolPolicyHash: "policy-b",
+        },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("cloud heartbeat forwards bridge instance id and version from runtime identity", async () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeIdentity: {
+        bridgeVersion: BRIDGE_VERSION,
+        instanceId: "instance-bridge-1",
+        mcpManifestHash: "manifest-a",
+        pid: 4242,
+        processStartedAt: "2026-06-22T00:00:00.000Z",
+        toolPolicyHash: "policy-a",
+      },
+    };
+    let heartbeatInput: Record<string, unknown> | undefined;
+
+    await sendHeartbeatWithClient(bridgeRegistration(), status, {
+      heartbeat: async <TResponse = Record<string, unknown>>(
+        input: BridgeHeartbeatInput,
+      ) => {
+        heartbeatInput = input as Record<string, unknown>;
+        return {} as TResponse;
+      },
+    });
+
+    expect(heartbeatInput).toMatchObject({
+      bridgeInstanceId: "instance-bridge-1",
+      version: BRIDGE_VERSION,
+    });
   });
 
   test("dispatches claimed lifecycle queue commands", async () => {

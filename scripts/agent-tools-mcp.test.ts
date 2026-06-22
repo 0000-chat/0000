@@ -8,6 +8,7 @@ import {
   buildAgentToolMcpEnv,
   buildAgentToolGuideText,
   buildAgentToolSessionContextText,
+  createAgentToolsMcpServer,
   invokeAgentToolOverHttp,
   toMcpToolResult,
 } from "./agent-tools-mcp"
@@ -59,6 +60,10 @@ describe("agent tools MCP server helpers", () => {
       "scripts.search",
       "scripts.read",
     ])
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.list")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.get")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.current")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.read")
   })
 
   test("describes 0000 Chat context and tool usage through MCP resources", () => {
@@ -281,8 +286,129 @@ describe("agent tools MCP server helpers", () => {
     ])
 
     expect(result).toEqual({
+      reasonCode: "TIMEOUT",
       error: "Agent tool request timed out after 20ms",
       ok: false,
+      retryable: true,
+      timeoutMs: 20,
+      tool: "messages.search",
+    })
+  })
+
+  test("returns structured error details for non-2xx HTTP responses", async () => {
+    await expect(
+      invokeAgentToolOverHttp(
+        {
+          agentSessionId: "agent_session_1",
+          appUrl: "https://chat.example.test/app",
+          bridgeToken: "secret-token",
+          deviceId: "device_123",
+        },
+        "databases.get",
+        { tableIdOrSlug: "customers" },
+        async () =>
+          new Response("x".repeat(5_000), {
+            headers: { "content-type": "text/plain" },
+            status: 502,
+            statusText: "Bad Gateway",
+          }),
+      ),
+    ).resolves.toEqual({
+      error: "Agent tool request failed with HTTP 502",
+      httpStatus: 502,
+      ok: false,
+      reasonCode: "HTTP_ERROR",
+      retryable: true,
+      tool: "databases.get",
+    })
+  })
+
+  test("returns structured error details for invalid JSON responses", async () => {
+    await expect(
+      invokeAgentToolOverHttp(
+        {
+          agentSessionId: "agent_session_1",
+          appUrl: "https://chat.example.test/app",
+          bridgeToken: "secret-token",
+          deviceId: "device_123",
+        },
+        "threads.list",
+        { limit: 10 },
+        async () =>
+          new Response("{not-json", {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          }),
+      ),
+    ).resolves.toEqual({
+      error: "Agent tool response was not valid JSON",
+      ok: false,
+      reasonCode: "INVALID_JSON",
+      tool: "threads.list",
+    })
+  })
+
+  test("returns structured error details for app error payloads", async () => {
+    await expect(
+      invokeAgentToolOverHttp(
+        {
+          agentSessionId: "agent_session_1",
+          appUrl: "https://chat.example.test/app",
+          bridgeToken: "secret-token",
+          deviceId: "device_123",
+        },
+        "apps.create",
+        {
+          prompt: "Create an OpenUI app rooted at AppCanvas.",
+          spaceIdOrSlug: "projects",
+          title: "Health",
+        },
+        async () =>
+          new Response(
+            JSON.stringify({
+              error:
+                "Approval required for this write. " +
+                "Do not leak secrets. ".repeat(200),
+              ok: false,
+              retryable: false,
+            }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
+      ),
+    ).resolves.toEqual({
+      error:
+        "Approval required for this write. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do not leak secrets. Do [truncated]",
+      ok: false,
+      reasonCode: "APP_ERROR",
+      retryable: false,
+      tool: "apps.create",
+    })
+  })
+
+  test("returns structured error details for thrown fetch errors", async () => {
+    await expect(
+      invokeAgentToolOverHttp(
+        {
+          agentSessionId: "agent_session_1",
+          appUrl: "https://chat.example.test/app",
+          bridgeToken: "secret-token",
+          deviceId: "device_123",
+        },
+        "databases.listRows",
+        { tableIdOrSlug: "customers" },
+        async () => {
+          throw new Error("connect ECONNRESET while reaching bridge")
+        },
+      ),
+    ).resolves.toEqual({
+      error: "connect ECONNRESET while reaching bridge",
+      ok: false,
+      reasonCode: "FETCH_ERROR",
+      retryable: true,
+      tool: "databases.listRows",
     })
   })
 
@@ -293,8 +419,104 @@ describe("agent tools MCP server helpers", () => {
       ],
     })
     expect(toMcpToolResult({ error: "Denied", ok: false })).toEqual({
-      content: [{ type: "text", text: '{\n  "error": "Denied",\n  "ok": false\n}' }],
+      content: [
+        {
+          type: "text",
+          text: '{\n  "error": "Denied",\n  "ok": false,\n  "reasonCode": "APP_ERROR"\n}',
+        },
+      ],
       isError: true,
     })
+  })
+
+  test("bounds MCP error text and marks failures as errors", () => {
+    const result = toMcpToolResult({
+      error: "Approval required. " + "a".repeat(5_000),
+      ok: false,
+      reasonCode: "APP_ERROR",
+      tool: "apps.create",
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0]?.type).toBe("text")
+    expect(result.content[0]?.text.length).toBeLessThan(2_000)
+    expect(result.content[0]?.text).toContain('"reasonCode": "APP_ERROR"')
+    expect(result.content[0]?.text).toContain('"tool": "apps.create"')
+  })
+
+  test("registers the allowed tools and converts thrown handler failures into MCP error results", async () => {
+    const registeredToolNames: string[] = []
+    let databasesGetHandler:
+      | ((
+          input: unknown,
+        ) => Promise<{ content: Array<{ text: string; type: "text" }>; isError?: true }>)
+      | undefined
+    const prototype = Object.getPrototypeOf(createAgentToolsMcpServer({
+      agentSessionId: "bootstrap",
+      appUrl: "https://chat.example.test/app",
+      bridgeToken: "secret-token",
+      deviceId: "device_123",
+    }))
+    const originalRegisterTool = prototype.registerTool as (
+      name: string,
+      config: unknown,
+      cb: (input: unknown) => Promise<unknown>,
+    ) => void
+    const originalFetch = globalThis.fetch
+
+    try {
+      prototype.registerTool = function (
+        this: unknown,
+        name: string,
+        _config: unknown,
+        cb: (input: unknown) => Promise<{
+          content: Array<{ text: string; type: "text" }>
+          isError?: true
+        }>,
+      ) {
+        registeredToolNames.push(name)
+        if (name === "databases.get") {
+          databasesGetHandler = cb
+        }
+      }
+
+      createAgentToolsMcpServer({
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test/app",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+      })
+
+      globalThis.fetch = Object.assign(
+        async () => {
+          throw new Error("socket hang up")
+        },
+        { preconnect: originalFetch.preconnect },
+      ) as typeof fetch
+    } finally {
+      prototype.registerTool = originalRegisterTool
+    }
+
+    expect(registeredToolNames).toContain("threads.list")
+    expect(registeredToolNames).toContain("databases.get")
+    expect(registeredToolNames).not.toContain("threads.current")
+    expect(registeredToolNames).not.toContain("threads.read")
+
+    expect(databasesGetHandler).toBeDefined()
+
+    try {
+      const result = await databasesGetHandler?.({ tableIdOrSlug: "customers" })
+      expect(result).toEqual({
+        content: [
+          {
+            text: '{\n  "error": "socket hang up",\n  "ok": false,\n  "reasonCode": "FETCH_ERROR",\n  "retryable": true,\n  "tool": "databases.get"\n}',
+            type: "text",
+          },
+        ],
+        isError: true,
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
