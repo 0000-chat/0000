@@ -66,11 +66,17 @@ describe("Hermes profile discovery", () => {
     const profiles = parseHermesProfileListOutput(`
 Profile                     Model                        Gateway      Alias
 ────────────────────────────────────────────────────────────────────────────
+◆default                   gpt-5.5                      running      —            —
 nextpay-chief-of-staff —                            stopped      nextpay-chief-of-staff —
 ◆ nextpay-chief-of-staff    —                            —            —
 `);
 
     expect(profiles).toEqual([
+      {
+        gateway: "running",
+        model: "gpt-5.5",
+        name: "default",
+      },
       {
         gateway: "stopped",
         name: "nextpay-chief-of-staff",
