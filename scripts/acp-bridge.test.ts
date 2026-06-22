@@ -22,6 +22,7 @@ import {
   getLocalHardMaxInFlight,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  parseHermesProfileListOutput,
   parseBridgeArgs,
   preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
@@ -57,6 +58,28 @@ describe("bridge command parsing", () => {
       flags: { "app-url": "https://0000.chat" },
       positionals: ["CODE"],
     });
+  });
+});
+
+describe("Hermes profile discovery", () => {
+  test("parses long profile names without absorbing placeholder columns", () => {
+    const profiles = parseHermesProfileListOutput(`
+Profile                     Model                        Gateway      Alias
+────────────────────────────────────────────────────────────────────────────
+nextpay-chief-of-staff —                            stopped      nextpay-chief-of-staff —
+◆ nextpay-chief-of-staff    —                            —            —
+`);
+
+    expect(profiles).toEqual([
+      {
+        gateway: "stopped",
+        name: "nextpay-chief-of-staff",
+        alias: "nextpay-chief-of-staff",
+      },
+      {
+        name: "nextpay-chief-of-staff",
+      },
+    ]);
   });
 });
 
@@ -1369,6 +1392,99 @@ describe("bridge supervisor claim gating", () => {
         result: expect.objectContaining({
           error: "runtime_conformance_stale",
           ok: false,
+          retryable: true,
+        }),
+      },
+    ]);
+  });
+
+  test("rejects claimed Hermes profile work without exact launch-spec conformance", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const results: Array<{
+      command: Record<string, unknown>;
+      result: Record<string, unknown>;
+    }> = [];
+    let handled = false;
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => true,
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          bridgeProfileId: "hermes:default",
+          claimId: "claim-hermes-profile",
+          hermesProfileName: "nextpay-chief-of-staff",
+          id: "queue-hermes-profile",
+          prompt: "do not run",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getRuntimeConformance: () => ({
+        canClaim: true,
+        profiles: {
+          "hermes:default": {
+            canClaim: true,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+            diagnostics: [],
+            runtimeId: "hermes:default",
+            state: "passing",
+            strength: "init_only",
+          },
+        },
+        status: "healthy",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {
+          handled = true;
+        },
+      },
+      markCommandResult: async (_config, command, result) => {
+        results.push({
+          command: command as unknown as Record<string, unknown>,
+          result: result as Record<string, unknown>,
+        });
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(handled).toBe(false);
+    expect(results).toEqual([
+      {
+        command: expect.objectContaining({
+          bridgeProfileId: "hermes:default",
+          hermesProfileName: "nextpay-chief-of-staff",
+          id: "queue-hermes-profile",
+        }),
+        result: expect.objectContaining({
+          launchSpecKey:
+            "hermes:default|hermes-profile:nextpay-chief-of-staff",
+          ok: false,
+          reasonCode: "runtime_launch_spec_missing",
           retryable: true,
         }),
       },

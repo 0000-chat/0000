@@ -51,6 +51,7 @@ import {
   type HermesAcpMcpServer,
 } from "./acp-bridge/acp-session";
 import {
+  buildBridgeLaunchSpec,
   type BridgeQueueAttachment,
   BridgeSessionManager,
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
@@ -126,7 +127,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.16";
+export const BRIDGE_VERSION = "0.1.17";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -1474,16 +1475,31 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     baseAgentCommand: agentCommand,
     customCommands: customRuntimeCommands,
   }).catch(() => []);
+  const launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
+    hermesProfiles,
+    runtimeProfiles,
+  });
+  const conformanceProfiles = [...runtimeProfiles, ...launchSpecRuntimeProfiles];
   let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> = {};
   const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>();
-  const runtimeConformanceSummary = () =>
-    summarizeRuntimeConformance({
+  const runtimeConformanceSummary = () => {
+    const summary = summarizeRuntimeConformance({
       activeProfileIds: bridgeActiveRuntimeProfileIds(contexts.values()),
       now: Date.now(),
       profiles: runtimeProfiles,
       records: runtimeConformanceRecords,
       ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
     });
+    const launchSpecs = summarizeRuntimeConformance({
+      now: Date.now(),
+      profiles: launchSpecRuntimeProfiles,
+      records: runtimeConformanceRecords,
+      ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+    }).profiles;
+    return Object.keys(launchSpecs).length > 0
+      ? { ...summary, launchSpecs }
+      : summary;
+  };
 
   type RuntimeContext = {
     config: BridgeRegistration;
@@ -1552,7 +1568,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             }),
           profile,
         }),
-      profiles: runtimeProfiles,
+      profiles: conformanceProfiles,
       records: runtimeConformanceRecords,
       ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
     });
@@ -2100,6 +2116,38 @@ function bridgeActiveRuntimeProfileIds(
     ...bridgeInFlightRuntimeProfileIds(contextList),
     ...bridgeRunningSessionRuntimeProfileIds(contextList),
   ]);
+}
+
+function buildHermesLaunchSpecRuntimeProfiles(input: {
+  hermesProfiles: HermesProfileSummary[];
+  runtimeProfiles: BridgeRuntimeProfile[];
+}): BridgeRuntimeProfile[] {
+  const hermesRuntimeProfile = input.runtimeProfiles.find(
+    (profile) => profile.kind === "hermes" && profile.status === "available",
+  );
+  if (!hermesRuntimeProfile) {
+    return [];
+  }
+  return input.hermesProfiles.flatMap((profile) => {
+    const profileName = profile.name.trim();
+    if (!profileName) {
+      return [];
+    }
+    const launchSpec = buildBridgeLaunchSpec({
+      bridgeProfileId: hermesRuntimeProfile.id,
+      hermesProfileName: profileName,
+      runtimeProfile: hermesRuntimeProfile,
+    });
+    return [
+      {
+        ...hermesRuntimeProfile,
+        command: launchSpec.agentCommand,
+        hermesProfileName: profileName,
+        id: launchSpec.key,
+        label: `${hermesRuntimeProfile.label}: ${profileName}`,
+      },
+    ];
+  });
 }
 
 function buildAggregateBridgeStatus(
@@ -3281,14 +3329,33 @@ async function markCommandResult(
 function runtimeConformanceBlockForCommand(
   command: BridgeQueueCommand,
   runtimeConformance: RuntimeConformanceSummary | undefined,
-): { reasonCode: string; status: string } | undefined {
+): { launchSpecKey?: string; reasonCode: string; status: string } | undefined {
   if (!commandRequiresRuntimeConformance(command)) {
     return undefined;
   }
   if (!runtimeConformance || !command.bridgeProfileId) {
     return undefined;
   }
-  const profile = runtimeConformance.profiles[command.bridgeProfileId];
+  const runtimeProfileId = runtimeProfileIdForCommand(command);
+  const launchSpecKey = launchSpecKeyForCommand(command);
+  if (launchSpecKey) {
+    const launchSpec = runtimeConformance.launchSpecs?.[launchSpecKey];
+    if (!launchSpec) {
+      return {
+        launchSpecKey,
+        reasonCode: "runtime_launch_spec_missing",
+        status: runtimeConformance.status,
+      };
+    }
+    if (!launchSpec.canClaim) {
+      return {
+        launchSpecKey,
+        reasonCode: launchSpecReasonCode(launchSpec.reasonCode),
+        status: runtimeConformance.status,
+      };
+    }
+  }
+  const profile = runtimeConformance.profiles[runtimeProfileId];
   if (!profile) {
     return {
       reasonCode: "runtime_conformance_missing",
@@ -3304,6 +3371,47 @@ function runtimeConformanceBlockForCommand(
   };
 }
 
+function launchSpecKeyForCommand(command: BridgeQueueCommand): string | undefined {
+  const runtimeProfileId = runtimeProfileIdForCommand(command);
+  const profileName =
+    command.hermesProfileName?.trim() || legacyHermesProfileNameForCommand(command);
+  if (!profileName || runtimeProfileId !== "hermes:default") {
+    return undefined;
+  }
+  return `${runtimeProfileId}|hermes-profile:${profileName}`;
+}
+
+function runtimeProfileIdForCommand(command: BridgeQueueCommand): string {
+  return legacyHermesProfileNameForCommand(command) ? "hermes:default" : command.bridgeProfileId!;
+}
+
+function legacyHermesProfileNameForCommand(
+  command: BridgeQueueCommand,
+): string | undefined {
+  return command.bridgeProfileId?.startsWith("hermes:") &&
+    command.bridgeProfileId !== "hermes:default"
+    ? command.bridgeProfileId.slice("hermes:".length)
+    : undefined;
+}
+
+function launchSpecReasonCode(reasonCode: string | undefined): string {
+  switch (reasonCode) {
+    case "runtime_conformance_stale":
+      return "runtime_launch_spec_stale";
+    case "runtime_conformance_failed":
+      return "runtime_launch_spec_failed";
+    case "runtime_quarantined":
+      return "runtime_launch_spec_quarantined";
+    case "runtime_conformance_insufficient":
+      return "runtime_launch_spec_insufficient";
+    case "runtime_conformance_missing":
+    case undefined:
+      return "runtime_launch_spec_missing";
+    default:
+      return reasonCode;
+  }
+}
+
 function commandRequiresRuntimeConformance(command: BridgeQueueCommand): boolean {
   const type = command.type ?? command.kind;
   return type === "prompt" || type === "start-session";
@@ -3311,12 +3419,13 @@ function commandRequiresRuntimeConformance(command: BridgeQueueCommand): boolean
 
 function runtimeConformanceBlockResult(
   command: BridgeQueueCommand,
-  block: { reasonCode: string; status: string },
+  block: { launchSpecKey?: string; reasonCode: string; status: string },
 ): BridgeQueueResult {
   return {
     ...(command.claimId ? { claimId: command.claimId } : {}),
     bridgeProfileId: command.bridgeProfileId,
     error: block.reasonCode,
+    launchSpecKey: block.launchSpecKey,
     ok: false,
     reasonCode: block.reasonCode,
     retryable: true,
@@ -3456,31 +3565,87 @@ export function sanitizeHermesProfilesForCapabilities(
 export function parseHermesProfileListOutput(
   output: string,
 ): HermesProfileSummary[] {
-  const rows = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(
-      (line) => line && !line.startsWith("Profile") && !/^[─\s]+$/.test(line),
+  const lines = output.split(/\r?\n/);
+  const header = lines.find(
+    (line) =>
+      line.includes("Profile") &&
+      line.includes("Model") &&
+      line.includes("Gateway") &&
+      line.includes("Alias"),
+  );
+  const columns = header
+    ? ["Profile", "Model", "Gateway", "Alias", "Distribution"]
+        .map((label) => ({ label, index: header.indexOf(label) }))
+        .filter((column) => column.index >= 0)
+        .sort((left, right) => left.index - right.index)
+    : [];
+  const rows = lines.filter((line) => {
+    const trimmed = line.trim();
+    return (
+      trimmed &&
+      !trimmed.startsWith("Profile") &&
+      !/^[─\s]+$/.test(trimmed)
     );
+  });
 
   return sanitizeHermesProfilesForCapabilities(
     rows
       .map((line) => {
-        const normalized = line.replace(/^◆\s*/, "").replace(/^\*\s*/, "");
-        const parts = normalized.split(/\s{2,}/).filter(Boolean);
+        const normalized = line.replace(/^(\s*)[◆*]\s*/, "$1");
+        const whitespaceParts = normalized.trim().split(/\s{2,}/).filter(Boolean);
+        const columnParts =
+          columns.length >= 4
+            ? columns.map((column, index) => {
+                const next = columns[index + 1]?.index;
+                return normalized.slice(column.index, next).trim();
+              })
+            : [];
+        const parts =
+          (whitespaceParts[0]?.endsWith(" —") && whitespaceParts.length >= 3) ||
+          (whitespaceParts[0] &&
+          columnParts[0] &&
+          whitespaceParts[0].length > columnParts[0].length)
+            ? whitespaceParts
+            : columnParts.length >= 4
+              ? columnParts
+              : whitespaceParts;
         if (parts.length < 2) {
           return undefined;
         }
-        const [name, model, gateway, alias] = parts;
+        const [rawName, rawModel, rawGateway, rawAlias] = parts;
+        const overflowedProfileName =
+          rawName.endsWith(" —") && rawModel && rawModel !== "—";
+        const name = normalizeHermesProfileNameColumn(rawName);
+        const model = overflowedProfileName
+          ? undefined
+          : normalizeHermesPlaceholder(rawModel);
+        const gateway = overflowedProfileName
+          ? normalizeHermesPlaceholder(rawModel)
+          : normalizeHermesPlaceholder(rawGateway);
+        const alias = normalizeHermesPlaceholder(
+          (overflowedProfileName ? rawGateway : rawAlias)?.replace(/\s+—$/, ""),
+        );
         return {
-          alias: alias === "—" ? undefined : alias,
-          gateway: gateway === "—" ? undefined : gateway,
-          model: model === "—" ? undefined : model,
+          alias,
+          gateway,
+          model,
           name,
         };
       })
       .filter((profile) => profile !== undefined),
   );
+}
+
+function normalizeHermesProfileNameColumn(value: string): string {
+  return value.replace(/\s+—$/, "").trim();
+}
+
+function normalizeHermesPlaceholder(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "—") {
+    return undefined;
+  }
+  return trimmed;
 }
 
 async function discoverHermesProfiles(): Promise<HermesProfileSummary[]> {
