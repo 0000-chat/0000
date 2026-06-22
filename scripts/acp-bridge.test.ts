@@ -68,6 +68,7 @@ Profile                     Model                        Gateway      Alias
 ────────────────────────────────────────────────────────────────────────────
 ◆default                   gpt-5.5                      running      —            —
 nextpay-chief-of-staff —                            stopped      nextpay-chief-of-staff —
+nextpay-chief-of-staff gpt-5.5                      stopped      nextpay-chief-of-staff —
 ◆ nextpay-chief-of-staff    —                            —            —
 `);
 
@@ -79,6 +80,12 @@ nextpay-chief-of-staff —                            stopped      nextpay-chief
       },
       {
         gateway: "stopped",
+        name: "nextpay-chief-of-staff",
+        alias: "nextpay-chief-of-staff",
+      },
+      {
+        gateway: "stopped",
+        model: "gpt-5.5",
         name: "nextpay-chief-of-staff",
         alias: "nextpay-chief-of-staff",
       },
