@@ -29,6 +29,7 @@ import type {
 import {
   type BridgeRuntimeProfile,
   applyRuntimeMcpServerCompatibility,
+  commandKey,
   findRuntimeProfile,
   resolveToolCallTimeoutPolicy,
 } from "./runtime-profiles";
@@ -140,6 +141,8 @@ export type BridgeSessionContext = {
   agentCommand?: string | string[];
   agentSessionId?: string;
   bridgeProfileId?: string;
+  launchSpecKey?: string;
+  launchSpecSummary?: BridgeLaunchSpecSummary;
   runtimeProfile?: BridgeRuntimeProfile;
   sessionKey: string;
   threadId: string;
@@ -169,6 +172,8 @@ export type BridgeTerminalContext = {
   | "initialSessionId"
   | "organizationId"
   | "runtimeProfile"
+  | "launchSpecKey"
+  | "launchSpecSummary"
   | "sessionKey"
   | "threadId"
 >;
@@ -181,6 +186,8 @@ type BridgeSessionRecord = {
   toolPolicyHash?: string;
   acp: ManagedAcpSession;
   agentName?: string;
+  launchSpecKey?: string;
+  launchSpecSummary?: BridgeLaunchSpecSummary;
   runtimeProfile?: BridgeRuntimeProfile;
   hermesProfileName?: string;
   generation: number;
@@ -202,6 +209,20 @@ type BridgeSessionCloudClient = {
     result: Record<string, unknown>,
     claimId?: string,
   ): Promise<Record<string, unknown>>;
+};
+
+export type BridgeLaunchSpecSummary = {
+  command: string;
+  bridgeProfileId?: string;
+  hermesProfileName?: string;
+  runtimeKind: BridgeRuntimeProfile["kind"];
+};
+
+type BridgeLaunchSpec = {
+  agentCommand: string[];
+  key: string;
+  runtimeKind: BridgeRuntimeProfile["kind"];
+  summary: BridgeLaunchSpecSummary;
 };
 
 type EventWriteOutcome =
@@ -280,6 +301,8 @@ export type BridgeSessionManagerStatus = {
 export type BridgeSessionManagerSessionStatus = {
   sessionKey: string;
   threadId: string;
+  launchSpecKey?: string;
+  launchSpecSummary?: BridgeLaunchSpecSummary;
   runtimeProfileId?: string;
   runtimeLabel?: string;
   runtimeKind?: string;
@@ -336,6 +359,86 @@ export function resolveHermesProfileAgentCommand(
     profileName,
     ...command.slice(acpIndex),
   ];
+}
+
+export function buildBridgeLaunchSpec(input: {
+  baseAgentCommand?: string | string[];
+  bridgeProfileId?: string;
+  hermesProfileName?: string;
+  runtimeProfile?: BridgeRuntimeProfile;
+}): BridgeLaunchSpec {
+  const legacyHermesProfileName =
+    input.runtimeProfile?.id !== input.bridgeProfileId &&
+    input.bridgeProfileId?.startsWith("hermes:") &&
+    input.bridgeProfileId !== "hermes:default"
+      ? input.bridgeProfileId.slice("hermes:".length)
+      : undefined;
+  const profileName = input.hermesProfileName?.trim() || legacyHermesProfileName;
+  const runtimeProfile = input.runtimeProfile;
+  if (profileName && runtimeProfile && runtimeProfile.kind !== "hermes") {
+    throw new Error(
+      `ACP launch spec is incompatible: Hermes profile ${profileName} cannot use runtime ${runtimeProfile.id}`,
+    );
+  }
+  const baseCommand = runtimeProfile?.command ?? input.baseAgentCommand;
+  const agentCommand =
+    runtimeProfile?.kind === "hermes" || (!runtimeProfile && profileName)
+      ? resolveHermesProfileAgentCommand(baseCommand, profileName)
+      : Array.isArray(baseCommand)
+        ? [...baseCommand]
+        : splitCommand(baseCommand ?? "hermes acp");
+  const runtimeKind = runtimeProfile?.kind ?? inferRuntimeKind(agentCommand);
+  const baseKey =
+    runtimeProfile?.id ??
+    (legacyHermesProfileName ? "hermes:default" : input.bridgeProfileId) ??
+    commandKey(agentCommand);
+  const key = profileName
+    ? `${baseKey}|hermes-profile:${profileName}`
+    : baseKey;
+  return {
+    agentCommand,
+    key,
+    runtimeKind,
+    summary: removeUndefinedValues({
+      bridgeProfileId:
+        (legacyHermesProfileName ? "hermes:default" : input.bridgeProfileId) ??
+        runtimeProfile?.id,
+      command: summarizeLaunchCommand(agentCommand, profileName),
+      hermesProfileName: profileName,
+      runtimeKind,
+    }) as BridgeLaunchSpecSummary,
+  };
+}
+
+function inferRuntimeKind(command: string[]): BridgeRuntimeProfile["kind"] {
+  const executable = command[0]?.toLowerCase() ?? "";
+  const joined = command.join(" ").toLowerCase();
+  if (executable.includes("hermes") || joined.includes("hermes")) {
+    return "hermes";
+  }
+  if (joined.includes("codex")) {
+    return "codex";
+  }
+  if (joined.includes("claude")) {
+    return "claude-code";
+  }
+  if (joined.includes("openclaw")) {
+    return "openclaw";
+  }
+  return "unknown-acp";
+}
+
+function summarizeLaunchCommand(command: string[], hermesProfileName?: string): string {
+  if (!hermesProfileName) {
+    return command.join(" ");
+  }
+  return command
+    .map((part, index) =>
+      index > 0 && command[index - 1] === "-p"
+        ? "<hermes-profile>"
+        : part,
+    )
+    .join(" ");
 }
 
 export class BridgeSessionManager {
@@ -462,9 +565,11 @@ export class BridgeSessionManager {
       return {
         sessionKey: session.sessionKey,
         threadId: session.threadId,
+        launchSpecKey: session.launchSpecKey,
+        launchSpecSummary: session.launchSpecSummary,
         runtimeProfileId: session.runtimeProfile?.id,
         runtimeLabel: session.runtimeProfile?.label,
-        runtimeKind: session.runtimeProfile?.kind,
+        runtimeKind: session.launchSpecSummary?.runtimeKind ?? session.runtimeProfile?.kind,
         hermesProfileName: session.hermesProfileName,
         queueDepth:
           (queueState?.pendingQueueItemIds.length ?? 0) +
@@ -631,6 +736,8 @@ export class BridgeSessionManager {
       }
       const rawMessage = error instanceof Error ? error.message : String(error);
       const message = String(redactLogValue(rawMessage));
+      const startupFailure = classifyAcpStartupError(error);
+      const launchSpec = this.safeLaunchSpecForItem(item);
       this.writeLog({
         level: "error",
         event: "bridge.queue_item.error",
@@ -639,6 +746,14 @@ export class BridgeSessionManager {
         threadId: item.threadId,
         sessionId: item.sessionId,
         agentSessionId: item.agentSessionId,
+        bridgeProfileId: item.bridgeProfileId,
+        hermesProfileName: item.hermesProfileName
+          ? "<hermes-profile>"
+          : undefined,
+        launchSpecKey: redactLaunchSpecKey(launchSpec?.key),
+        launchSpecSummary: redactLaunchSpecSummary(launchSpec?.summary),
+        runtimeKind: launchSpec?.runtimeKind,
+        reasonCode: startupFailure?.reasonCode,
         error: message,
       });
       if (type === "prompt") {
@@ -646,13 +761,21 @@ export class BridgeSessionManager {
       }
       this.supervisor?.recordFailed(this.supervisorWorkItem(item), message);
       await this.drainEventWrites();
-      const terminal = isTerminalQueueItemError(type, rawMessage);
+      const terminal =
+        startupFailure?.terminal === true ||
+        isTerminalQueueItemError(type, rawMessage);
       await this.markQueueResult(
         item,
         terminal
           ? {
               ok: false,
               error: message,
+              reasonCode: startupFailure?.reasonCode,
+              bridgeProfileId: item.bridgeProfileId,
+              hermesProfileName: item.hermesProfileName,
+              launchSpecKey: launchSpec?.key,
+              launchSpecSummary: launchSpec?.summary,
+              runtimeKind: launchSpec?.runtimeKind,
               terminal,
             }
           : {
@@ -2091,12 +2214,13 @@ export class BridgeSessionManager {
     const generation = this.nextGeneration;
     this.nextGeneration += 1;
     const runtimeProfile = this.resolveRuntimeProfileForItem(item);
-    const agentCommand = runtimeProfile
-      ? runtimeProfile.command
-      : resolveHermesProfileAgentCommand(
-          this.agentCommand,
-          item.hermesProfileName,
-        );
+    const launchSpec = buildBridgeLaunchSpec({
+      baseAgentCommand: this.agentCommand,
+      bridgeProfileId: item.bridgeProfileId,
+      hermesProfileName: item.hermesProfileName,
+      runtimeProfile,
+    });
+    const agentCommand = launchSpec.agentCommand;
     const cwd = this.allowRemoteCwd ? item.cwd : undefined;
     const terminalScope = this.terminalScopeForSession({
       item,
@@ -2112,6 +2236,8 @@ export class BridgeSessionManager {
           cwd,
           generation,
           hermesProfileName: item.hermesProfileName,
+          launchSpecKey: launchSpec.key,
+          launchSpecSummary: launchSpec.summary,
           initialSessionId: this.resumeEnabled
             ? item.externalSessionId
             : undefined,
@@ -2135,9 +2261,13 @@ export class BridgeSessionManager {
       scopeKeyWithoutAgent,
       terminalScope,
       lastUsedAt: Date.now(),
+      launchSpecKey: launchSpec.key,
+      launchSpecSummary: launchSpec.summary,
       acp: this.createSession({
         agentCommand,
         bridgeProfileId: item.bridgeProfileId,
+        launchSpecKey: launchSpec.key,
+        launchSpecSummary: launchSpec.summary,
         runtimeProfile,
         sessionKey,
         threadId,
@@ -2151,6 +2281,7 @@ export class BridgeSessionManager {
           bridgeDeviceId: this.deviceId,
           claimId: item.claimId,
           hermesProfileName: item.hermesProfileName,
+          launchSpecKey: launchSpec.key,
           queueItemId: item.id,
           runtimeProfileId: runtimeProfile?.id ?? item.bridgeProfileId,
           sessionKey,
@@ -2307,7 +2438,15 @@ export class BridgeSessionManager {
       return false;
     }
     if (item.bridgeProfileId) {
-      return session.runtimeProfile?.id === item.bridgeProfileId;
+      if (session.runtimeProfile?.id === item.bridgeProfileId) {
+        return true;
+      }
+      return (
+        item.bridgeProfileId.startsWith("hermes:") &&
+        item.bridgeProfileId !== "hermes:default" &&
+        session.runtimeProfile?.id === "hermes:default" &&
+        session.hermesProfileName === item.bridgeProfileId.slice("hermes:".length)
+      );
     }
     if (item.hermesProfileName) {
       return session.hermesProfileName === item.hermesProfileName;
@@ -2319,9 +2458,13 @@ export class BridgeSessionManager {
     item: BridgeSessionQueueItem,
   ): BridgeRuntimeProfile | undefined {
     if (item.bridgeProfileId) {
-      const selected = this.runtimeProfiles.find(
-        (profile) => profile.id === item.bridgeProfileId,
-      );
+      const selected =
+        this.runtimeProfiles.find((profile) => profile.id === item.bridgeProfileId) ??
+        (item.bridgeProfileId.startsWith("hermes:") &&
+        item.bridgeProfileId !== "hermes:default"
+          ? this.runtimeProfiles.find((profile) => profile.id === "hermes:default")
+          : undefined);
+      const selectedProfileId = selected?.id ?? item.bridgeProfileId;
       if (!selected) {
         throw new Error(
           `Bridge runtime profile is unavailable: ${item.bridgeProfileId}`,
@@ -2332,7 +2475,7 @@ export class BridgeSessionManager {
           ? `: ${selected.diagnostics.reason}`
           : "";
         throw new Error(
-          `Bridge runtime profile is unavailable: ${item.bridgeProfileId}${reason}`,
+          `Bridge runtime profile is unavailable: ${selectedProfileId}${reason}`,
         );
       }
       return selected;
@@ -2349,6 +2492,28 @@ export class BridgeSessionManager {
       );
     }
     return findRuntimeProfile(this.runtimeProfiles, undefined);
+  }
+
+  private safeLaunchSpecForItem(
+    item: BridgeSessionQueueItem,
+  ): BridgeLaunchSpec | undefined {
+    try {
+      const runtimeProfile = item.bridgeProfileId
+        ? this.runtimeProfiles.find((profile) => profile.id === item.bridgeProfileId) ??
+          (item.bridgeProfileId.startsWith("hermes:") &&
+          item.bridgeProfileId !== "hermes:default"
+            ? this.runtimeProfiles.find((profile) => profile.id === "hermes:default")
+            : undefined)
+        : this.runtimeProfiles.find((profile) => profile.status === "available");
+      return buildBridgeLaunchSpec({
+        baseAgentCommand: this.agentCommand,
+        bridgeProfileId: item.bridgeProfileId,
+        hermesProfileName: item.hermesProfileName,
+        runtimeProfile,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   private isCurrentSessionRecord(record: BridgeSessionRecord): boolean {
@@ -3093,6 +3258,42 @@ function classifyPromptError(
     };
   }
   return { terminal: false };
+}
+
+function classifyAcpStartupError(
+  error: unknown,
+): { terminal: true; reasonCode: string } | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/launch spec is incompatible/i.test(message)) {
+    return { terminal: true, reasonCode: "launch_spec_incompatible" };
+  }
+  if (/ACP initialize failed:\s*ACP connection closed/i.test(message)) {
+    return { terminal: true, reasonCode: "initialize_closed" };
+  }
+  if (/ACP request timed out:\s*initialize/i.test(message)) {
+    return { terminal: true, reasonCode: "initialize_timeout" };
+  }
+  if (/runtime process exited/i.test(message)) {
+    return { terminal: true, reasonCode: "runtime_process_exited" };
+  }
+  return undefined;
+}
+
+function redactLaunchSpecKey(key: string | undefined): string | undefined {
+  return key?.replace(/\|hermes-profile:.+$/, "|hermes-profile:<hermes-profile>");
+}
+
+function redactLaunchSpecSummary(
+  summary: BridgeLaunchSpecSummary | undefined,
+): BridgeLaunchSpecSummary | undefined {
+  return summary
+    ? removeUndefinedValues({
+        ...summary,
+        hermesProfileName: summary.hermesProfileName
+          ? "<hermes-profile>"
+          : undefined,
+      }) as BridgeLaunchSpecSummary
+    : undefined;
 }
 
 function buildEmptyFinalResponseDiagnostic(

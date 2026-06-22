@@ -37,15 +37,18 @@ export type RuntimeConformanceSession = {
   start?(): Promise<string>
 }
 
+export type RuntimeConformanceProfileSummary = Record<
+  string,
+  RuntimeConformanceRecord & {
+    canClaim: boolean
+    reasonCode?: RuntimeConformanceReasonCode
+  }
+>
+
 export type RuntimeConformanceSummary = {
   canClaim: boolean
-  profiles: Record<
-    string,
-    RuntimeConformanceRecord & {
-      canClaim: boolean
-      reasonCode?: RuntimeConformanceReasonCode
-    }
-  >
+  launchSpecs?: RuntimeConformanceProfileSummary
+  profiles: RuntimeConformanceProfileSummary
   status: RuntimeConformanceHealthStatus
 }
 

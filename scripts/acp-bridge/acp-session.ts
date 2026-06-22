@@ -167,6 +167,7 @@ export type HermesAcpProcessRegistryMetadata = {
   bridgeDeviceId?: string
   claimId?: string
   hermesProfileName?: string
+  launchSpecKey?: string
   queueItemId?: string
   runtimeProfileId?: string
   sessionKey?: string
