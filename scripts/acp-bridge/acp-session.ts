@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
+import { homedir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildZeroChatHiddenSystemPrompt } from "./zero-chat-policy"
@@ -167,6 +168,7 @@ export type HermesAcpProcessRegistryMetadata = {
   bridgeDeviceId?: string
   claimId?: string
   hermesProfileName?: string
+  launchSpecKey?: string
   queueItemId?: string
   runtimeProfileId?: string
   sessionKey?: string
@@ -208,6 +210,19 @@ export const DEFAULT_ACP_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
 export const DEFAULT_ACP_PROCESS_EXIT_GRACE_MS = 2_500
 
 export const HIDDEN_ZERO_CHAT_SYSTEM_PROMPT = buildZeroChatHiddenSystemPrompt()
+
+export function expandLocalCwd(cwd: string | undefined): string | undefined {
+  if (!cwd) {
+    return undefined
+  }
+  if (cwd === "~") {
+    return homedir()
+  }
+  if (cwd.startsWith("~/")) {
+    return join(homedir(), cwd.slice(2))
+  }
+  return cwd
+}
 
 export class HermesAcpProcessError extends Error {
   constructor(message: string) {
@@ -281,7 +296,7 @@ export class HermesAcpSession {
     this.command = Array.isArray(options.agentCommand)
       ? [...options.agentCommand]
       : splitCommand(options.agentCommand ?? "hermes acp")
-    this.cwd = options.cwd
+    this.cwd = expandLocalCwd(options.cwd)
     this.initialSessionId = options.initialSessionId
     this.mcpServers = options.mcpServers ?? []
     this.processExitGraceMs = options.processExitGraceMs ?? DEFAULT_ACP_PROCESS_EXIT_GRACE_MS

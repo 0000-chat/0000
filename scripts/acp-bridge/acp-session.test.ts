@@ -6,6 +6,7 @@ import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientproto
 
 import {
   DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
+  expandLocalCwd,
   HermesAcpRuntimeAdapter,
   HermesAcpSession,
   resolveRuntimeConfigApplication,
@@ -681,6 +682,25 @@ describe("ACP runtime adapter boundary", () => {
       ok: true,
       capabilityUsed: "closeSession",
       nativeMethod: "process.kill",
+    })
+  })
+
+  test("expands tilde cwd before ACP session creation", async () => {
+    const requests: RuntimeRequest[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      cwd: "~/projects/nextpay",
+      runtimeClient: createFakeRuntimeClient({ requests, updates: [] }),
+    })
+
+    await session.start()
+
+    expect(requests).toContainEqual({
+      method: "session/new",
+      params: {
+        cwd: expandLocalCwd("~/projects/nextpay"),
+        mcpServers: [],
+      },
     })
   })
 
