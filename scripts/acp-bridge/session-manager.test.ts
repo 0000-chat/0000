@@ -185,6 +185,191 @@ describe("bridge session cwd safety", () => {
     ]);
   });
 
+  test("uses exact Hermes profile launch command when profile work is routed through hermes default", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return fakeSession();
+      },
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:default",
+      claimId: "claim-1",
+      hermesProfileName: "nextpay-chief-of-staff",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(contexts[0]?.agentCommand).toEqual([
+      "hermes",
+      "-p",
+      "nextpay-chief-of-staff",
+      "acp",
+    ]);
+    expect(contexts[0]?.launchSpecKey).toBe(
+      "hermes:default|hermes-profile:nextpay-chief-of-staff",
+    );
+    expect(contexts[0]?.launchSpecSummary).toMatchObject({
+      command: "hermes -p <hermes-profile> acp",
+      hermesProfileName: "nextpay-chief-of-staff",
+      runtimeKind: "hermes",
+    });
+  });
+
+  test("normalizes legacy Hermes profile bridge ids to the exact launch command", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return fakeSession();
+      },
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:nextpay-chief-of-staff",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(contexts[0]?.agentCommand).toEqual([
+      "hermes",
+      "-p",
+      "nextpay-chief-of-staff",
+      "acp",
+    ]);
+    expect(contexts[0]?.runtimeProfile?.id).toBe("hermes:default");
+    expect(contexts[0]?.launchSpecKey).toBe(
+      "hermes:default|hermes-profile:nextpay-chief-of-staff",
+    );
+  });
+
+  test("rejects Hermes profile names for non-Hermes runtime profiles", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => fakeSession(),
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "codex:codex-acp",
+      claimId: "claim-1",
+      hermesProfileName: "nextpay-chief-of-staff",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: {
+        ok: false,
+        reasonCode: "launch_spec_incompatible",
+        terminal: true,
+      },
+    });
+  });
+
+  test("terminalizes initialize connection-close startup failures with launch provenance", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => {
+        throw new Error("ACP initialize failed: ACP connection closed");
+      },
+      log: (entry) => logs.push(entry as Record<string, unknown>),
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      bridgeProfileId: "hermes:default",
+      claimId: "claim-1",
+      hermesProfileName: "nextpay-chief-of-staff",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: {
+        ok: false,
+        reasonCode: "initialize_closed",
+        terminal: true,
+        bridgeProfileId: "hermes:default",
+        hermesProfileName: "nextpay-chief-of-staff",
+        launchSpecKey:
+          "hermes:default|hermes-profile:nextpay-chief-of-staff",
+        runtimeKind: "hermes",
+      },
+    });
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        bridgeProfileId: "hermes:default",
+        event: "bridge.queue_item.error",
+        hermesProfileName: "<hermes-profile>",
+        launchSpecKey:
+          "hermes:default|hermes-profile:<hermes-profile>",
+        launchSpecSummary: expect.objectContaining({
+          command: "hermes -p <hermes-profile> acp",
+          hermesProfileName: "<hermes-profile>",
+        }),
+        reasonCode: "initialize_closed",
+        runtimeKind: "hermes",
+      }),
+    );
+  });
+
   test("omits disabled queue cwd from MCP server context", async () => {
     const mcpContexts: Array<Pick<BridgeSessionContext, "cwd">> = [];
     const manager = new BridgeSessionManager({
