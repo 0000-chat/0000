@@ -16,9 +16,23 @@ type UpdaterArgs = {
 }
 
 type UpdateState = {
+  controlCommandStatus?: Record<string, unknown>
   lifecycle?: string
+  pendingControlCommand?: undefined
   updateState?: Record<string, unknown>
 }
+
+type UpdaterDependencies = {
+  assertCleanCheckout?: (repoPath: string) => Promise<void>
+  listRemoteReleaseTags?: (repoPath: string) => Promise<string[]>
+  now?: () => number
+  runProcess?: typeof runProcess
+  spawnRestart?: (command: string[], options: { cwd: string }) => void
+  waitForParentExit?: (parentPid?: number) => Promise<void>
+}
+
+const MAX_STATUS_ERROR_LENGTH = 240
+const MAX_STATUS_TARGET_VERSION_LENGTH = 64
 
 function buildUpdaterUpdateState(
   status: string,
@@ -74,46 +88,82 @@ export function chooseLatestReleaseTag(
   return candidates[0]?.tag
 }
 
-export async function runBridgeUpdate(args: UpdaterArgs): Promise<void> {
-  await waitForParentExit(args.parentPid)
+export async function runBridgeUpdate(
+  args: UpdaterArgs,
+  deps: UpdaterDependencies = {},
+): Promise<void> {
+  const now = deps.now ?? Date.now
+  const waitForParentExitFn = deps.waitForParentExit ?? waitForParentExit
+  const assertCleanCheckoutFn = deps.assertCleanCheckout ?? assertCleanCheckout
+  const listRemoteReleaseTagsFn = deps.listRemoteReleaseTags ?? listRemoteReleaseTags
+  const runProcessFn = deps.runProcess ?? runProcess
+  const spawnRestart =
+    deps.spawnRestart ??
+    ((command: string[], options: { cwd: string }) => {
+      spawn(command[0], command.slice(1), {
+        cwd: options.cwd,
+        detached: true,
+        stdio: "ignore",
+      }).unref()
+    })
+  let targetVersion = boundStatusTargetVersion(args.currentVersion)
+
+  await waitForParentExitFn(args.parentPid)
   await writeUpdaterStatus(args.statusPath, {
+    controlCommandStatus: buildControlCommandStatus("executing", {
+      startedAt: now(),
+      targetVersion,
+    }),
     lifecycle: "updating",
+    pendingControlCommand: undefined,
     updateState: buildUpdaterUpdateState("installing", args.currentVersion, {
-      startedAt: Date.now(),
+      startedAt: now(),
     }),
   })
 
   try {
-    await assertCleanCheckout(args.repoPath)
-    const tags = await listRemoteReleaseTags(args.repoPath)
+    await assertCleanCheckoutFn(args.repoPath)
+    const tags = await listRemoteReleaseTagsFn(args.repoPath)
     const targetTag = chooseLatestReleaseTag(tags, args.currentVersion)
+    targetVersion = boundStatusTargetVersion(
+      targetTag?.replace(/^v/, "") ?? args.currentVersion,
+    )
     if (targetTag) {
-      await runProcess("git", ["-C", args.repoPath, "fetch", "--tags", "--force", "origin", targetTag])
-      await runProcess("git", ["-C", args.repoPath, "checkout", "--detach", targetTag])
-      await runProcess("bun", ["install"], { cwd: args.repoPath })
+      await runProcessFn("git", ["-C", args.repoPath, "fetch", "--tags", "--force", "origin", targetTag])
+      await runProcessFn("git", ["-C", args.repoPath, "checkout", "--detach", targetTag])
+      await runProcessFn("bun", ["install"], { cwd: args.repoPath })
     }
     await writeUpdaterStatus(args.statusPath, {
+      controlCommandStatus: buildControlCommandStatus("succeeded", {
+        completedAt: now(),
+        targetVersion,
+      }),
       lifecycle: "restarting",
+      pendingControlCommand: undefined,
       updateState: buildUpdaterUpdateState(targetTag ? "updated" : "upToDate", args.currentVersion, {
-        targetVersion: targetTag?.replace(/^v/, ""),
-        completedAt: Date.now(),
+        targetVersion,
+        completedAt: now(),
       }),
     })
   } catch (error) {
     await writeUpdaterStatus(args.statusPath, {
+      controlCommandStatus: buildControlCommandStatus("failed", {
+        error: boundStatusError(error),
+        failedAt: now(),
+        targetVersion,
+      }),
       lifecycle: "error",
+      pendingControlCommand: undefined,
       updateState: buildUpdaterUpdateState("failed", args.currentVersion, {
-        error: error instanceof Error ? error.message : String(error),
+        error: boundStatusError(error),
+        failedAt: now(),
+        targetVersion,
       }),
     })
     throw error
   }
 
-  spawn(args.restartCommand[0], args.restartCommand.slice(1), {
-    cwd: args.repoPath,
-    detached: true,
-    stdio: "ignore",
-  }).unref()
+  spawnRestart(args.restartCommand, { cwd: args.repoPath })
 }
 
 async function assertCleanCheckout(repoPath: string): Promise<void> {
@@ -199,12 +249,58 @@ async function writeUpdaterStatus(statusPath: string | undefined, patch: UpdateS
   const next = {
     ...existing,
     ...patch,
+    controlCommandStatus: patch.controlCommandStatus
+      ? {
+          ...(typeof existing.controlCommandStatus === "object" &&
+          existing.controlCommandStatus &&
+          !Array.isArray(existing.controlCommandStatus)
+            ? existing.controlCommandStatus
+            : {}),
+          ...patch.controlCommandStatus,
+        }
+      : existing.controlCommandStatus,
   }
   await mkdir(dirname(statusPath), { recursive: true, mode: 0o700 })
   const tempPath = `${statusPath}.${process.pid}.tmp`
   await writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: STATUS_MODE })
   await chmod(tempPath, STATUS_MODE)
   await rename(tempPath, statusPath)
+}
+
+function buildControlCommandStatus(
+  status: "executing" | "succeeded" | "failed",
+  patch: {
+    completedAt?: number
+    error?: string
+    failedAt?: number
+    startedAt?: number
+    targetVersion?: string
+  } = {},
+): Record<string, unknown> {
+  return {
+    command: "updateWhenIdle",
+    status,
+    ...(typeof patch.startedAt === "number" ? { startedAt: patch.startedAt } : {}),
+    ...(typeof patch.completedAt === "number" ? { completedAt: patch.completedAt } : {}),
+    ...(typeof patch.failedAt === "number" ? { failedAt: patch.failedAt } : {}),
+    ...(patch.targetVersion ? { targetVersion: patch.targetVersion } : {}),
+    ...(patch.error ? { error: patch.error } : {}),
+  }
+}
+
+function boundStatusTargetVersion(value: string | undefined): string | undefined {
+  return value?.trim().slice(0, MAX_STATUS_TARGET_VERSION_LENGTH) || undefined
+}
+
+function boundStatusError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return redactStatusText(message).slice(0, MAX_STATUS_ERROR_LENGTH)
+}
+
+function redactStatusText(value: string): string {
+  return value
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\b(token|secret|authorization)\s*=\s*\S+/gi, "$1=[redacted]")
 }
 
 function parseStableVersion(value: string): [number, number, number] | undefined {
