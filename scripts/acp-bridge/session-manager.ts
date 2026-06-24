@@ -1675,12 +1675,20 @@ export class BridgeSessionManager {
         throw new Error(`input response ${item.id} is missing response text`);
       }
       const threadId = item.threadId ?? item.sessionId;
-      if (!key && hasExplicitRuntimeScope(item)) {
+      const requestedSessionKey = this.sessionKeyForItem(item);
+      if (
+        !key &&
+        this.isTerminalInteractionResponseItem(item, requestedSessionKey, threadId)
+      ) {
+        await this.markStaleInteractionResponse(item, type);
+        return;
+      }
+      if (!key && this.hasActiveRuntimeConflictForItem(item)) {
         throw new Error(
           `input response ${item.id} does not match an active ACP session for the requested runtime`,
         );
       }
-      const sessionKey = key ?? threadId;
+      const sessionKey = key ?? requestedSessionKey ?? threadId;
       if (!sessionKey) {
         throw new Error(`input response ${item.id} is missing threadId`);
       }
@@ -1717,12 +1725,20 @@ export class BridgeSessionManager {
         throw new Error(`choice response ${item.id} is missing choice id`);
       }
       const threadId = item.threadId ?? item.sessionId;
-      if (!key && hasExplicitRuntimeScope(item)) {
+      const requestedSessionKey = this.sessionKeyForItem(item);
+      if (
+        !key &&
+        this.isTerminalInteractionResponseItem(item, requestedSessionKey, threadId)
+      ) {
+        await this.markStaleInteractionResponse(item, type);
+        return;
+      }
+      if (!key && this.hasActiveRuntimeConflictForItem(item)) {
         throw new Error(
           `choice response ${item.id} does not match an active ACP session for the requested runtime`,
         );
       }
-      const sessionKey = key ?? threadId;
+      const sessionKey = key ?? requestedSessionKey ?? threadId;
       if (!sessionKey) {
         throw new Error(`choice response ${item.id} is missing threadId`);
       }
@@ -1812,6 +1828,45 @@ export class BridgeSessionManager {
 
   private isTerminalInteractionSessionKey(sessionKey: string): boolean {
     return this.terminalInteractionSessionKeys.has(sessionKey);
+  }
+
+  private isTerminalInteractionResponseItem(
+    item: BridgeSessionQueueItem,
+    requestedSessionKey: string | undefined,
+    threadId: string | undefined,
+  ): boolean {
+    return [
+      requestedSessionKey,
+      threadId,
+      item.sessionId,
+      item.agentSessionId,
+    ].some((sessionKey) =>
+      sessionKey ? this.isTerminalInteractionSessionKey(sessionKey) : false,
+    );
+  }
+
+  private hasActiveRuntimeConflictForItem(item: BridgeSessionQueueItem): boolean {
+    if (!hasExplicitRuntimeScope(item)) {
+      return false;
+    }
+    const providerSessionKey = providerSessionKeyForItem(item);
+    const threadId = item.threadId ?? item.sessionId;
+    if (!providerSessionKey || !threadId) {
+      return false;
+    }
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(
+      item,
+      providerSessionKey,
+      threadId,
+    );
+    const scopeConversationId = item.mailboxConversationId ?? threadId;
+    return Array.from(this.sessions.values()).some(
+      (session) =>
+        (session.scopeKeyWithoutAgent === scopeKeyWithoutAgent ||
+          (session.providerSessionKey === providerSessionKey &&
+            session.scopeConversationId === scopeConversationId)) &&
+        !this.sessionMatchesExplicitRuntimeRequest(session, item),
+    );
   }
 
   private async waitForSession(
@@ -3116,7 +3171,15 @@ export class BridgeSessionManager {
       return exact;
     }
     if (hasExplicitRuntimeScope(item)) {
-      return undefined;
+      const scopedMatches = Array.from(this.sessions.values()).filter((session) =>
+        this.queueItemMatchesSessionRecord(item, session),
+      );
+      if (scopedMatches.length > 1) {
+        throw new Error(
+          `queue item ${item.id} matches multiple active ACP sessions; include organization and runtime scope`,
+        );
+      }
+      return scopedMatches[0]?.sessionKey;
     }
 
     const providerSessionKey = providerSessionKeyForItem(item);
