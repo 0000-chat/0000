@@ -4349,7 +4349,9 @@ function attachmentsFromUnknown(
   return attachments.length > 0 ? attachments : undefined;
 }
 
-function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
+export function normalizeQueueCommand(
+  raw: unknown,
+): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined;
   }
@@ -4361,6 +4363,21 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!id || !isQueueCommandType(type)) {
     return undefined;
   }
+  const payloadText = payload ? stringFromUnknown(payload.text) : undefined;
+  const payloadContinuationPrompt = payload
+    ? stringFromUnknown(payload.continuationPrompt)
+    : undefined;
+  const prompt =
+    stringFromUnknown(record.prompt) ??
+    (type === "choice-response"
+      ? (payloadContinuationPrompt ?? payloadText)
+      : undefined) ??
+    (type === "input-response"
+      ? (payloadText ?? payloadContinuationPrompt)
+      : undefined);
+  const approvalOutcome =
+    stringFromUnknown(record.approvalOutcome) ??
+    (type === "choice-response" ? payloadText : undefined);
   return {
     id,
     claimId: stringFromUnknown(record.claimId),
@@ -4370,11 +4387,11 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
     cwd: stringFromUnknown(record.cwd),
-    prompt: stringFromUnknown(record.prompt),
+    prompt,
     threadHistory: stringFromUnknown(record.threadHistory),
     systemPrompt: stringFromUnknown(record.systemPrompt),
     approvalId: stringFromUnknown(record.approvalId),
-    approvalOutcome: stringFromUnknown(record.approvalOutcome),
+    approvalOutcome,
     approvalReason: stringFromUnknown(record.approvalReason),
     approvalLevel:
       record.approvalLevel === "ask" ||

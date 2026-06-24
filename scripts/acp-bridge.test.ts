@@ -22,6 +22,7 @@ import {
   getLocalHardMaxInFlight,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  normalizeQueueCommand,
   parseHermesProfileListOutput,
   parseBridgeArgs,
   preparePendingAgentConnectionRequest,
@@ -58,6 +59,32 @@ describe("bridge command parsing", () => {
       command: "connect",
       flags: { "app-url": "https://0000.chat" },
       positionals: ["CODE"],
+    });
+  });
+
+  test("normalizes choice response payload text into legacy command fields", () => {
+    expect(
+      normalizeQueueCommand({
+        agentSessionId: "agent-session-1",
+        bridgeProfileId: "claude-code:claude-acp",
+        claimId: "claim-choice",
+        id: "queue-choice",
+        kind: "choice-response",
+        organizationId: "org-1",
+        payload: {
+          continuationPrompt:
+            "The user selected an option for this pending multiple-choice prompt.",
+          externalRequestId: "agent-choice:agent-session-1:123",
+          text: "enable_drive",
+        },
+        threadId: "thread-1",
+      }),
+    ).toMatchObject({
+      approvalOutcome: "enable_drive",
+      externalRequestId: "agent-choice:agent-session-1:123",
+      prompt:
+        "The user selected an option for this pending multiple-choice prompt.",
+      type: "choice-response",
     });
   });
 });
