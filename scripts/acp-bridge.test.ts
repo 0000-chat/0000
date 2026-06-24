@@ -17,6 +17,7 @@ import {
   ensureSecureBridgeConfigFile,
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
+  createBridgeWakeSignal,
   getAllowRemoteCwd,
   getAcpIdleTtlMs,
   getLocalHardMaxInFlight,
@@ -170,6 +171,57 @@ describe("bridge Convex URL resolution", () => {
         {},
       ),
     ).toBe("https://uncommon-starfish-672.convex.cloud");
+  });
+});
+
+describe("bridge wake subscription", () => {
+  test("activates a Convex work signal subscription after heartbeat provides a wake token", async () => {
+    let updateCallback: (() => void) | undefined;
+    const subscriptions: Array<{ args: Record<string, unknown>; query: unknown }> = [];
+    const closes: number[] = [];
+    const fakeClient = {
+      close: async () => {
+        closes.push(Date.now());
+      },
+      onUpdate: (query: unknown, args: Record<string, unknown>, callback: () => void) => {
+        subscriptions.push({ query, args });
+        updateCallback = callback;
+        return { unsubscribe: () => undefined };
+      },
+    };
+    const signal = createBridgeWakeSignal({
+      clientFactory: () => fakeClient,
+      config: {
+        appUrl: "https://0000.chat",
+        bridgeToken: "bridge-token",
+        deviceName: "Test Bridge",
+        deviceId: "bridge-public-1",
+        pairedAt: new Date().toISOString(),
+      },
+      convexUrl: "https://example.convex.cloud",
+      limit: 2,
+      log: Object.assign(() => undefined, { flush: async () => undefined }),
+    });
+
+    signal.updateWakeToken?.({
+      expiresAt: Date.now() + 60_000,
+      refreshAfterMs: 30_000,
+      token: "wake-token",
+    });
+
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]?.args).toEqual({
+      deviceId: "bridge-public-1",
+      limit: 2,
+      wakeToken: "wake-token",
+    });
+
+    const wait = signal.wait(5_000);
+    updateCallback?.();
+    await wait;
+    await signal.close();
+
+    expect(closes).toHaveLength(1);
   });
 });
 

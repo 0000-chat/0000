@@ -13,6 +13,8 @@ import {
 } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { ConvexClient } from "convex/browser";
+import { makeFunctionReference } from "convex/server";
 
 import {
   BridgeCloudHttpError,
@@ -237,6 +239,13 @@ type BridgeQueueCommand = BridgeSessionQueueItem;
 type BridgeWakeSignal = {
   wait(timeoutMs: number): Promise<void>;
   close(): Promise<void>;
+  updateWakeToken?(wake: BridgeWakeToken | undefined): void;
+};
+
+type BridgeWakeToken = {
+  token: string;
+  expiresAt: number;
+  refreshAfterMs: number;
 };
 
 export type BridgeStatus = {
@@ -603,6 +612,7 @@ export type BridgeLoopIterationInput = {
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
+  wakeSignal?: BridgeWakeSignal;
 };
 
 export type BridgeLoopIterationResult = {
@@ -1750,11 +1760,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     const signals = Array.from(contexts.values()).map(
       (context) => context.wakeSignal,
     );
+    const timeoutMs = totalInFlight() > 0 ? pollMs : Math.max(pollMs, 30_000);
     if (signals.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs));
       return;
     }
-    await Promise.race(signals.map((signal) => signal.wait(pollMs)));
+    await Promise.race(signals.map((signal) => signal.wait(timeoutMs)));
   };
 
   await ensureContexts();
@@ -1995,6 +2006,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           ),
         getRuntimeConformance: runtimeConformanceSummary,
         writeStatus: persistAggregateStatus,
+        wakeSignal: context.wakeSignal,
       });
       if (result.restartRequested) {
         await stop({
@@ -2463,11 +2475,15 @@ export async function runBridgeLoopIteration(
           activeSessionCount: input.manager.getStatus().activeSessions.length,
           error: message,
         });
-      } else if (
-        heartbeatResult.control?.settings ||
-        heartbeatResult.control?.refreshHermesProfiles ||
-        heartbeatResult.control?.refreshRuntimeProfiles ||
-        heartbeatResult.control?.command
+      } else {
+        input.wakeSignal?.updateWakeToken?.(heartbeatResult.wake);
+      }
+      if (
+        heartbeatResult.ok &&
+        (heartbeatResult.control?.settings ||
+          heartbeatResult.control?.refreshHermesProfiles ||
+          heartbeatResult.control?.refreshRuntimeProfiles ||
+          heartbeatResult.control?.command)
       ) {
         if (heartbeatResult.control.settings) {
           input.applySettingsControl?.(heartbeatResult.control.settings);
@@ -3443,7 +3459,7 @@ async function cleanupStaleClaims(
 }
 
 type BridgeHeartbeatSendResult =
-  | { ok: true; control?: BridgeControlResponse }
+  | { ok: true; control?: BridgeControlResponse; wake?: BridgeWakeToken }
   | {
       ok: false;
       error: BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 };
@@ -3697,13 +3713,14 @@ export async function sendHeartbeatWithClient(
   try {
     const response = await client.heartbeat<{
       control?: BridgeControlResponse;
+      wake?: BridgeWakeToken;
     }>({
       bridgeInstanceId: status.runtimeIdentity?.instanceId,
       capabilities: buildHeartbeatCapabilities(status),
       status: buildHeartbeatStatusPayload(status),
       version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
     });
-    return { ok: true, control: response.control };
+    return { ok: true, control: response.control, wake: response.wake };
   } catch (error) {
     if (isTransientHeartbeatError(error)) {
       return { ok: false, error };
@@ -3781,22 +3798,128 @@ function getBridgeLogUrl(
   return getFlag(flags, "log-url", env.ZERO_CHAT_BRIDGE_LOG_URL);
 }
 
-function createBridgeWakeSignal(input: {
+type BridgeWakeSignalClient = {
+  close: () => void | Promise<void>;
+  onUpdate: (
+    query: unknown,
+    args: Record<string, unknown>,
+    callback: () => void,
+    onError?: (error: unknown) => void,
+  ) => { unsubscribe?: () => void } | (() => void);
+};
+
+export function createBridgeWakeSignal(input: {
   config: BridgeConfig;
   convexUrl: string | undefined;
   limit: number;
   log: FlushableBridgeLogger;
+  clientFactory?: (url: string) => BridgeWakeSignalClient;
 }): BridgeWakeSignal {
+  if (!input.convexUrl) {
+    input.log({
+      level: "warn",
+      event: "bridge.subscription.disabled",
+      deviceId: input.config.deviceId,
+      reason: "missing_convex_url",
+      limit: input.limit,
+    });
+    return createTimeoutWakeSignal();
+  }
+
+  let closed = false;
+  let client: BridgeWakeSignalClient | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let activeToken: string | undefined;
+  const waiters = new Set<() => void>();
+  const clientFactory =
+    input.clientFactory ??
+    ((url: string) => new ConvexClient(url) as unknown as BridgeWakeSignalClient);
+
+  const wake = () => {
+    for (const resolve of Array.from(waiters)) {
+      waiters.delete(resolve);
+      resolve();
+    }
+  };
+  const teardownSubscription = async () => {
+    unsubscribe?.();
+    unsubscribe = undefined;
+    const previousClient = client;
+    client = undefined;
+    if (previousClient) {
+      await previousClient.close();
+    }
+  };
+  const subscribe = (wakeToken: BridgeWakeToken) => {
+    if (closed || wakeToken.token === activeToken) {
+      return;
+    }
+    void teardownSubscription();
+    activeToken = wakeToken.token;
+    client = clientFactory(input.convexUrl!);
+    const query = makeFunctionReference<"query">("bridgeOutboundQueue:workSignal");
+    const result = client.onUpdate(
+      query,
+      {
+        deviceId: input.config.deviceId,
+        wakeToken: wakeToken.token,
+        limit: input.limit,
+      },
+      wake,
+      (error) => {
+        input.log({
+          level: "warn",
+          event: "bridge.subscription.error",
+          deviceId: input.config.deviceId,
+          error: redactForOutput(error instanceof Error ? error.message : String(error)),
+        });
+      },
+    );
+    unsubscribe =
+      typeof result === "function" ? result : () => result.unsubscribe?.();
+    input.log({
+      level: "info",
+      event: "bridge.subscription.enabled",
+      deviceId: input.config.deviceId,
+      limit: input.limit,
+    });
+  };
+
   input.log({
-    level: input.convexUrl ? "info" : "warn",
-    event: "bridge.subscription.disabled",
+    level: "info",
+    event: "bridge.subscription.awaiting_wake_token",
     deviceId: input.config.deviceId,
-    reason: input.convexUrl
-      ? "public_bridge_uses_http_polling"
-      : "missing_convex_url",
     limit: input.limit,
   });
-  return createTimeoutWakeSignal();
+
+  return {
+    wait: async (timeoutMs: number) => {
+      if (closed) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          waiters.delete(resolve);
+          resolve();
+        }, timeoutMs);
+        waiters.add(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    },
+    close: async () => {
+      closed = true;
+      wake();
+      await teardownSubscription();
+    },
+    updateWakeToken: (wakeToken) => {
+      if (!wakeToken || wakeToken.expiresAt <= Date.now()) {
+        return;
+      }
+      subscribe(wakeToken);
+    },
+  };
 }
 
 function createTimeoutWakeSignal(): BridgeWakeSignal {
