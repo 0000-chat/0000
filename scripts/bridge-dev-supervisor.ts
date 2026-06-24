@@ -1,13 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process"
+import { createHash } from "node:crypto"
 import { existsSync, readFileSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs"
 import { homedir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 
+import type { BridgeLogEntry, BridgeLogger } from "./acp-bridge/bridge-log"
 import {
   shouldRestartBridgeForDevHotReload,
   type DevHotReloadStatus,
 } from "./acp-bridge/dev-hot-reload"
+import { createLocalAuditBridgeLogger } from "./acp-bridge/local-audit-log"
 
 type SupervisorConfig = {
   command: string[]
@@ -28,6 +31,7 @@ async function main() {
 
 class BridgeDevSupervisor {
   private child: ChildProcess | null = null
+  private readonly log: BridgeLogger = createLocalAuditBridgeLogger()
   private restartPending = false
   private restarting = false
   private stopped = false
@@ -38,6 +42,10 @@ class BridgeDevSupervisor {
   async run() {
     this.installSignalHandlers()
     this.installWatchers()
+    this.log(supervisorEvent("bridge.supervisor.started", this.config.command, {
+      reason: "initializing",
+      watchPathCount: this.config.watchPaths.length,
+    }))
     this.startBridge("initial start")
 
     while (!this.stopped) {
@@ -49,9 +57,8 @@ class BridgeDevSupervisor {
   }
 
   private installSignalHandlers() {
-    const stop = () => void this.stop()
-    process.once("SIGINT", stop)
-    process.once("SIGTERM", stop)
+    process.once("SIGINT", () => void this.stop("SIGINT"))
+    process.once("SIGTERM", () => void this.stop("SIGTERM"))
   }
 
   private installWatchers() {
@@ -59,6 +66,9 @@ class BridgeDevSupervisor {
       for (const directory of directoriesForWatchPath(resolve(watchPath))) {
         const watcher = watch(directory, { persistent: true }, () => {
           this.restartPending = true
+          this.log(supervisorEvent("bridge.supervisor.restart_requested", this.config.command, {
+            reason: "bridge files changed",
+          }))
         })
         this.watchers.push(watcher)
       }
@@ -75,7 +85,16 @@ class BridgeDevSupervisor {
       },
       stdio: "inherit",
     })
-    this.child.once("exit", () => {
+    this.log(supervisorEvent("bridge.supervisor.child_started", this.config.command, {
+      childPid: this.child.pid,
+      reason,
+    }))
+    this.child.once("exit", (exitCode, exitSignal) => {
+      this.log(buildSupervisorChildExitEvent(this.config.command, {
+        exitCode,
+        exitSignal,
+        reason,
+      }))
       this.child = null
       if (!this.stopped && !this.restarting) {
         this.startBridge("bridge process exited")
@@ -101,10 +120,20 @@ class BridgeDevSupervisor {
   private async restartBridge(reason: string) {
     const child = this.child
     if (child) {
+      this.log(supervisorEvent("bridge.supervisor.child_kill_sent", this.config.command, {
+        childPid: child.pid,
+        reason,
+        signal: "SIGTERM",
+      }))
       child.kill("SIGTERM")
       const exited = waitForExit(child)
       const timeout = delay(this.config.restartGraceMs).then(() => "timeout" as const)
       if ((await Promise.race([exited, timeout])) === "timeout") {
+        this.log(supervisorEvent("bridge.supervisor.child_kill_sent", this.config.command, {
+          childPid: child.pid,
+          reason,
+          signal: "SIGKILL",
+        }))
         child.kill("SIGKILL")
         await exited
       }
@@ -114,16 +143,54 @@ class BridgeDevSupervisor {
     }
   }
 
-  private async stop() {
+  private async stop(signal?: NodeJS.Signals) {
     this.stopped = true
+    this.log(supervisorEvent("bridge.supervisor.stop_requested", this.config.command, {
+      reason: "supervisor signal",
+      signal,
+    }))
     for (const watcher of this.watchers) {
       watcher.close()
     }
     const child = this.child
     if (child) {
+      this.log(supervisorEvent("bridge.supervisor.child_kill_sent", this.config.command, {
+        childPid: child.pid,
+        reason: "supervisor stopping",
+        signal: "SIGTERM",
+      }))
       child.kill("SIGTERM")
       await waitForExit(child)
     }
+    this.log(supervisorEvent("bridge.supervisor.stopped", this.config.command, {
+      reason: "stop completed",
+      signal,
+    }))
+  }
+}
+
+export function buildSupervisorChildExitEvent(
+  command: string[],
+  input: {
+    exitCode: number | null
+    exitSignal: NodeJS.Signals | null
+    reason: string
+  },
+): BridgeLogEntry {
+  return supervisorEvent("bridge.supervisor.child_exited", command, input)
+}
+
+export function supervisorEvent(
+  event: BridgeLogEntry["event"],
+  command: string[],
+  extra: Record<string, unknown> = {},
+): BridgeLogEntry {
+  return {
+    level: "info",
+    event,
+    service: "bridge-dev-supervisor",
+    ...commandAuditMetadata(command),
+    ...extra,
   }
 }
 
@@ -217,6 +284,14 @@ function waitForExit(child: ChildProcess): Promise<"exit"> {
     }
     child.once("exit", () => resolveExit("exit"))
   })
+}
+
+function commandAuditMetadata(command: string[]): Record<string, unknown> {
+  return {
+    commandArgCount: command.length,
+    commandBasename: command[0] ? basename(command[0]) : undefined,
+    commandHash: createHash("sha256").update(JSON.stringify(command)).digest("hex"),
+  }
 }
 
 if (import.meta.main) {
