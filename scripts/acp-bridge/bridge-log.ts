@@ -32,6 +32,7 @@ export const bridgeLogEventNames = [
   "agent.turn.failed",
   "agent.turn.started",
   "bridge.audit",
+  "bridge.audit.write_failed",
   "bridge.attachments.delivered",
   "bridge.attachments.received",
   "bridge.axiom_delivery.failed",
@@ -48,6 +49,7 @@ export const bridgeLogEventNames = [
   "bridge.hermes_profiles.refresh_error",
   "bridge.log_delivery.failed",
   "bridge.loop.error",
+  "bridge.exception",
   "bridge.process.orphan_cleanup",
   "bridge.process.orphan_cleanup_failed",
   "bridge.queue.claim_skipped",
@@ -73,9 +75,20 @@ export const bridgeLogEventNames = [
   "bridge.session.runtime_profile_changed",
   "bridge.session.tool_calls_cleared_on_assistant_output",
   "bridge.session.tool_result_timeout",
+  "bridge.signal.received",
+  "bridge.process.exiting",
   "bridge.start",
   "bridge.stop",
   "bridge.stop.timeout",
+  "bridge.supervisor.started",
+  "bridge.supervisor.child_started",
+  "bridge.supervisor.child_exited",
+  "bridge.supervisor.restart_requested",
+  "bridge.supervisor.child_kill_sent",
+  "bridge.supervisor.stop_requested",
+  "bridge.supervisor.stopped",
+  "bridge.systemd.unit_call",
+  "bridge.systemd.stop_snapshot",
   "bridge.subscription.disabled",
   "bridge.watchdog.terminalize_missed",
   "bridge.watchdog.quiet",
@@ -162,6 +175,22 @@ export function createStderrBridgeLogger(): BridgeLogger {
     });
     process.stderr.write(`${JSON.stringify(safeEntry)}\n`);
   };
+}
+
+export function createCompositeBridgeLogger(
+  loggers: FlushableBridgeLogger[],
+): FlushableBridgeLogger {
+  const logger = ((entry: BridgeLogEntry) => {
+    for (const childLogger of loggers) {
+      childLogger(entry);
+    }
+  }) as FlushableBridgeLogger;
+
+  logger.flush = async () => {
+    await Promise.allSettled(loggers.map((childLogger) => childLogger.flush()));
+  };
+
+  return logger;
 }
 
 export function createAxiomBridgeLogger(

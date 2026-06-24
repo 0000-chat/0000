@@ -41,10 +41,12 @@ import {
   type BridgeSingletonStatus,
 } from "./acp-bridge/local-singleton-guard";
 import {
+  createCompositeBridgeLogger,
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
   redactLogValue,
 } from "./acp-bridge/bridge-log";
+import { createLocalAuditBridgeLogger } from "./acp-bridge/local-audit-log";
 import {
   DEFAULT_ACP_REQUEST_TIMEOUT_MS,
   HermesAcpSession,
@@ -1623,11 +1625,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         contexts.get(registration.deviceId)!.config = registration;
         continue;
       }
-      const log = createWorkerBridgeLogger({
+      const workerLog = createWorkerBridgeLogger({
         bridgeToken: registration.bridgeToken,
         deviceId: registration.deviceId,
         logUrl,
       });
+      const log = createCompositeBridgeLogger([
+        workerLog,
+        createLocalAuditBridgeLogger(),
+      ]);
       const cloudClient = createCloudClient(registration);
       const hostAdapter = new ConvexBridgeHostAdapter(cloudClient);
       const processRegistryPath = getBridgeProcessRegistryPath(
@@ -1777,6 +1783,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         activeSessionCount: 0,
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
+        bridgeRuntimeIdentity: getBridgeRuntimeIdentity(),
+        processStartToken: BRIDGE_PROCESS_START_TOKEN,
+        runtimeConformance: runtimeConformanceSummary(),
       });
     }
     for (const [deviceId, context] of contexts) {
@@ -1838,7 +1847,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const stop = async (
     options: {
       forceRuntimeProcesses?: boolean;
+      reason?: string;
       shutdownTimeoutMs?: number;
+      signal?: NodeJS.Signals;
     } = {},
   ) => {
     if (stopping) {
@@ -1846,6 +1857,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     stopping = true;
     for (const context of contexts.values()) {
+      if (options.signal) {
+        context.log({
+          level: "info",
+          event: "bridge.signal.received",
+          deviceId: context.config.deviceId,
+          signal: options.signal,
+          reason: options.reason,
+        });
+      }
       context.status.connected = false;
       syncBridgeRuntimeStatus(
         context.status,
@@ -1861,6 +1881,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         event: "bridge.stop",
         deviceId: context.config.deviceId,
         activeSessionCount: context.manager.getStatus().activeSessions.length,
+        reason: options.reason,
+        signal: options.signal,
       });
       const shutdownTask = (async () => {
         await context.wakeSignal.close();
@@ -1890,6 +1912,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           timeoutMs: options.shutdownTimeoutMs,
         });
       }
+      context.log({
+        level: "info",
+        event: "bridge.process.exiting",
+        deviceId: context.config.deviceId,
+        reason: options.reason ?? "stop completed",
+        signal: options.signal,
+      });
+      await context.log.flush();
     }
     await persistAggregateStatus();
   };
@@ -1922,8 +1952,33 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     };
   };
 
-  process.once("SIGINT", () => void stop());
-  process.once("SIGTERM", () => void stop());
+  const logProcessException = (kind: string, error: unknown) => {
+    const message = redactForOutput(
+      error instanceof Error ? error.message : String(error),
+    );
+    for (const context of contexts.values()) {
+      context.log({
+        level: "error",
+        event: "bridge.exception",
+        deviceId: context.config.deviceId,
+        error: message,
+        exceptionKind: kind,
+      });
+    }
+  };
+
+  process.on("uncaughtExceptionMonitor", (error) => {
+    logProcessException("uncaughtException", error);
+  });
+  process.on("unhandledRejection", (error) => {
+    logProcessException("unhandledRejection", error);
+  });
+  process.once("SIGINT", () =>
+    void stop({ reason: "process signal", signal: "SIGINT" }),
+  );
+  process.once("SIGTERM", () =>
+    void stop({ reason: "process signal", signal: "SIGTERM" }),
+  );
 
   while (!stopping) {
     await ensureContexts();
@@ -2046,6 +2101,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       if (result.restartRequested) {
         await stop({
           forceRuntimeProcesses: true,
+          reason: "runtime restart requested",
           shutdownTimeoutMs: DEFAULT_RESTART_STOP_TIMEOUT_MS,
         });
         process.exit(0);
