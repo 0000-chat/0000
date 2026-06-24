@@ -4578,6 +4578,36 @@ describe("bridge session cwd safety", () => {
   });
 });
 
+describe("bridge event upload batching", () => {
+  test("does not split event batches after Convex overload", async () => {
+    const calls: unknown[][] = [];
+    const cloud = {
+      ...fakeCloudClient(),
+      appendEvents: async (events: unknown[]) => {
+        calls.push(events);
+        throw new Error("Too many concurrent requests");
+      },
+    };
+    const manager = new BridgeSessionManager({ cloudClient: cloud });
+    const appendBatch = (
+      manager as unknown as {
+        appendEventBatchWithFallback(events: unknown[]): Promise<{
+          count: number;
+          ok: boolean;
+        }>;
+      }
+    ).appendEventBatchWithFallback.bind(manager);
+
+    const result = await appendBatch([
+      { eventType: "agent_thought_chunk", threadId: "thread-1" },
+      { eventType: "agent_message_chunk", threadId: "thread-1" },
+    ]);
+
+    expect(result).toMatchObject({ ok: false, count: 2 });
+    expect(calls).toHaveLength(1);
+  });
+});
+
 function fakeCloudClient() {
   const events: Array<
     Array<{

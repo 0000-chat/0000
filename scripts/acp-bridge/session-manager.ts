@@ -3009,6 +3009,9 @@ export class BridgeSessionManager {
         eventCount: events.length,
         error: message,
       });
+      if (isBridgeEventUploadOverload(error)) {
+        return { ok: false, count: events.length, error: new Error(message) };
+      }
       if (events.length <= 1) {
         return { ok: false, count: events.length, error: new Error(message) };
       }
@@ -3269,6 +3272,26 @@ export class BridgeSessionManager {
       redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry,
     );
   }
+}
+
+function isBridgeEventUploadOverload(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status?: unknown }).status)
+      : undefined;
+  if (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /too many concurrent|concurrent requests|limited to \d+ concurrent|timeout|timed out/i.test(
+    message,
+  );
 }
 
 function isEmptyVisiblePromptResult(result: { text: string }): boolean {
