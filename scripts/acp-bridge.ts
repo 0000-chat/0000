@@ -127,7 +127,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.17";
+export const BRIDGE_VERSION = "0.1.21";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -247,6 +247,7 @@ export type BridgeStatus = {
   updateState?: BridgeUpdateState;
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
+  controlCommandStatus?: BridgeControlCommandStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastHeartbeatSignature?: string;
@@ -366,6 +367,7 @@ export type BridgeRegistrationStatus = {
   updateState?: BridgeUpdateState;
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
+  controlCommandStatus?: BridgeControlCommandStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastPollAt?: string;
@@ -537,6 +539,26 @@ export type BridgeControlCommandState = {
   requestedAt?: number;
 };
 
+export type BridgeControlCommandLifecycleStatus =
+  | "accepted"
+  | "waiting_for_idle"
+  | "executing"
+  | "succeeded"
+  | "failed";
+
+export type BridgeControlCommandStatus = {
+  command: BridgeControlCommandName;
+  status: BridgeControlCommandLifecycleStatus;
+  requestedAt?: number;
+  acceptedAt?: number;
+  startedAt?: number;
+  completedAt?: number;
+  failedAt?: number;
+  targetVersion?: string;
+  instanceId?: string;
+  error?: string;
+};
+
 export type HermesProfileSummary = {
   alias?: string;
   description?: string;
@@ -640,6 +662,9 @@ export type BridgeUpdaterLaunchInput = {
   restartCommand: string[];
   statusPath: string;
 };
+
+const MAX_CONTROL_COMMAND_ERROR_LENGTH = 240;
+const MAX_CONTROL_COMMAND_TARGET_VERSION_LENGTH = 64;
 
 export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
   const record = recordFromUnknown(raw);
@@ -1103,6 +1128,11 @@ export function describeStatus(
   if (status.lastStaleCleanupAt) {
     lines.push(
       `last stale cleanup: ${status.lastStaleCleanupAt} (released ${status.lastStaleCleanup?.released ?? 0}, inspected ${status.lastStaleCleanup?.inspected ?? 0})`,
+    );
+  }
+  if (status.controlCommandStatus) {
+    lines.push(
+      `control command: ${status.controlCommandStatus.command} (${status.controlCommandStatus.status})`,
     );
   }
   for (const command of status.inFlightCommands ?? []) {
@@ -1579,6 +1609,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
   const ensureContexts = async () => {
     const latestConfig = await readBridgeConfigFile(configPath);
+    let previousAggregateStatus: BridgeStatus | undefined;
+    if (existsSync(statusPath)) {
+      try {
+        previousAggregateStatus = await readJsonFile<BridgeStatus>(statusPath);
+      } catch {}
+    }
     const activeIds = new Set(
       latestConfig.registrations.map((registration) => registration.deviceId),
     );
@@ -1669,6 +1705,13 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         localHardMaxInFlight,
         DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
       );
+      const previousStatus =
+        previousAggregateStatus?.registrations?.find(
+          (candidate) => candidate.deviceId === registration.deviceId,
+        ) ??
+        (previousAggregateStatus?.deviceId === registration.deviceId
+          ? previousAggregateStatus
+          : undefined);
       const status: BridgeStatus = {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
@@ -1691,6 +1734,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
         runtimeIdentity: getBridgeRuntimeIdentity(),
+        controlCommandStatus: reconcileBridgeStartupControlCommandStatus(
+          previousStatus,
+          getBridgeRuntimeIdentity(),
+        ),
         hermesProfiles,
         runtimeProfiles,
         activeSessions: [],
@@ -2166,6 +2213,7 @@ function buildAggregateBridgeStatus(
     lifecycle: status.lifecycle,
     updateState: status.updateState,
     devHotReload: status.devHotReload,
+    controlCommandStatus: status.controlCommandStatus,
     lastStartedAt: status.lastStartedAt,
     lastHeartbeatAt: status.lastHeartbeatAt,
     lastPollAt: status.lastPollAt,
@@ -2192,6 +2240,7 @@ function buildAggregateBridgeStatus(
     lifecycle: first?.status.lifecycle,
     updateState: first?.status.updateState,
     devHotReload: first?.status.devHotReload,
+    controlCommandStatus: first?.status.controlCommandStatus,
     lastStartedAt: first?.status.lastStartedAt,
     lastHeartbeatAt: first?.status.lastHeartbeatAt,
     lastPollAt: first?.status.lastPollAt,
@@ -2243,6 +2292,105 @@ function normalizeControlCommand(
     requestedAt:
       typeof command.requestedAt === "number" ? command.requestedAt : undefined,
   };
+}
+
+function normalizeControlCommandStatus(
+  value?: BridgeControlCommandStatus,
+): BridgeControlCommandStatus | undefined {
+  if (
+    value?.command !== "restartWhenIdle" &&
+    value?.command !== "updateWhenIdle"
+  ) {
+    return undefined;
+  }
+  if (
+    value.status !== "accepted" &&
+    value.status !== "waiting_for_idle" &&
+    value.status !== "executing" &&
+    value.status !== "succeeded" &&
+    value.status !== "failed"
+  ) {
+    return undefined;
+  }
+  return compact({
+    acceptedAt:
+      typeof value.acceptedAt === "number" ? value.acceptedAt : undefined,
+    command: value.command,
+    completedAt:
+      typeof value.completedAt === "number" ? value.completedAt : undefined,
+    error: boundControlCommandError(value.error),
+    failedAt: typeof value.failedAt === "number" ? value.failedAt : undefined,
+    instanceId: stringFromUnknown(value.instanceId),
+    requestedAt:
+      typeof value.requestedAt === "number" ? value.requestedAt : undefined,
+    startedAt: typeof value.startedAt === "number" ? value.startedAt : undefined,
+    status: value.status,
+    targetVersion: boundControlCommandTargetVersion(value.targetVersion),
+  });
+}
+
+function buildControlCommandStatus(
+  command: BridgeControlCommandName,
+  status: BridgeControlCommandLifecycleStatus,
+  patch: Partial<BridgeControlCommandStatus> = {},
+): BridgeControlCommandStatus {
+  return compact({
+    acceptedAt:
+      typeof patch.acceptedAt === "number" ? patch.acceptedAt : undefined,
+    command,
+    completedAt:
+      typeof patch.completedAt === "number" ? patch.completedAt : undefined,
+    error: boundControlCommandError(patch.error),
+    failedAt: typeof patch.failedAt === "number" ? patch.failedAt : undefined,
+    instanceId: stringFromUnknown(patch.instanceId),
+    requestedAt:
+      typeof patch.requestedAt === "number" ? patch.requestedAt : undefined,
+    startedAt: typeof patch.startedAt === "number" ? patch.startedAt : undefined,
+    status,
+    targetVersion: boundControlCommandTargetVersion(patch.targetVersion),
+  });
+}
+
+function boundControlCommandError(value: unknown): string | undefined {
+  const text = stringFromUnknown(value);
+  if (!text) {
+    return undefined;
+  }
+  const bounded = redactForOutput(text).trim();
+  return bounded
+    ? bounded.slice(0, MAX_CONTROL_COMMAND_ERROR_LENGTH)
+    : undefined;
+}
+
+function boundControlCommandTargetVersion(value: unknown): string | undefined {
+  const text = stringFromUnknown(value)?.trim();
+  return text
+    ? text.slice(0, MAX_CONTROL_COMMAND_TARGET_VERSION_LENGTH)
+    : undefined;
+}
+
+export function reconcileBridgeStartupControlCommandStatus(
+  previousStatus: Pick<BridgeStatus, "controlCommandStatus"> | undefined,
+  runtimeIdentity: BridgeRuntimeIdentity = getBridgeRuntimeIdentity(),
+  now: () => number = Date.now,
+): BridgeControlCommandStatus | undefined {
+  const previous = normalizeControlCommandStatus(
+    previousStatus?.controlCommandStatus,
+  );
+  if (!previous) {
+    return undefined;
+  }
+  if (previous.status !== "executing") {
+    return previous;
+  }
+  return buildControlCommandStatus(previous.command, "succeeded", {
+    acceptedAt: previous.acceptedAt,
+    completedAt: now(),
+    instanceId: runtimeIdentity.instanceId,
+    requestedAt: previous.requestedAt,
+    startedAt: previous.startedAt,
+    targetVersion: previous.targetVersion,
+  });
 }
 
 async function launchBridgeUpdater(
@@ -2304,12 +2452,19 @@ export async function waitForRestartShutdownTask(
 async function applyPendingBridgeControlCommand(
   status: BridgeStatus,
   now: () => number,
-  input: Pick<BridgeLoopIterationInput, "launchUpdater" | "statusPath">,
+  input: Pick<
+    BridgeLoopIterationInput,
+    "launchUpdater" | "statusPath" | "writeStatus"
+  >,
 ): Promise<BridgeLoopIterationResult> {
   const command = normalizeControlCommand(status.pendingControlCommand);
   if (!command) {
     return { restartRequested: false };
   }
+  const persistStatus = input.writeStatus ?? writeStatus;
+  const acceptedAt = status.controlCommandStatus?.acceptedAt;
+  const requestedAt = command.requestedAt;
+  const startedAt = now();
 
   const idleDecision = shouldRestartBridgeForDevHotReload(status);
   if (!idleDecision.ready) {
@@ -2317,6 +2472,15 @@ async function applyPendingBridgeControlCommand(
     status.updateState = buildBridgeUpdateState("waitingForIdle", now(), {
       requestedAt: command.requestedAt,
     });
+    status.controlCommandStatus = buildControlCommandStatus(
+      command.command,
+      "waiting_for_idle",
+      {
+        acceptedAt,
+        requestedAt,
+      },
+    );
+    await persistStatus(input.statusPath, status);
     return { restartRequested: false };
   }
 
@@ -2324,9 +2488,20 @@ async function applyPendingBridgeControlCommand(
     status.lifecycle = "updating";
     status.updateState = buildBridgeUpdateState("installing", now(), {
       requestedAt: command.requestedAt,
-      startedAt: now(),
+      startedAt,
     });
     status.pendingControlCommand = undefined;
+    status.controlCommandStatus = buildControlCommandStatus(
+      command.command,
+      "executing",
+      {
+        acceptedAt,
+        requestedAt,
+        startedAt,
+        targetVersion: BRIDGE_VERSION,
+      },
+    );
+    await persistStatus(input.statusPath, status);
     try {
       const launchUpdater = input.launchUpdater ?? launchBridgeUpdater;
       await launchUpdater({
@@ -2341,6 +2516,19 @@ async function applyPendingBridgeControlCommand(
         requestedAt: command.requestedAt,
         error: error instanceof Error ? error.message : String(error),
       });
+      status.controlCommandStatus = buildControlCommandStatus(
+        command.command,
+        "failed",
+        {
+          acceptedAt,
+          error: error instanceof Error ? error.message : String(error),
+          failedAt: now(),
+          requestedAt,
+          startedAt,
+          targetVersion: BRIDGE_VERSION,
+        },
+      );
+      await persistStatus(input.statusPath, status);
       return { restartRequested: false };
     }
     return { restartRequested: true };
@@ -2349,9 +2537,19 @@ async function applyPendingBridgeControlCommand(
   status.lifecycle = "restarting";
   status.updateState = buildBridgeUpdateState("restarting", now(), {
     requestedAt: command.requestedAt,
-    startedAt: now(),
+    startedAt,
   });
   status.pendingControlCommand = undefined;
+  status.controlCommandStatus = buildControlCommandStatus(
+    command.command,
+    "executing",
+    {
+      acceptedAt,
+      requestedAt,
+      startedAt,
+    },
+  );
+  await persistStatus(input.statusPath, status);
   return { restartRequested: true };
 }
 
@@ -2478,7 +2676,18 @@ export async function runBridgeLoopIteration(
           heartbeatResult.control.command,
         );
         if (controlCommand) {
+          const acceptedAt = currentTime();
           input.status.pendingControlCommand = controlCommand;
+          input.status.controlCommandStatus = buildControlCommandStatus(
+            controlCommand.command,
+            "accepted",
+            {
+              acceptedAt,
+              instanceId: input.status.runtimeIdentity?.instanceId,
+              requestedAt: controlCommand.requestedAt,
+            },
+          );
+          await persistStatus(input.statusPath, input.status);
           restartResult = await applyPendingBridgeControlCommand(
             input.status,
             currentTime,
@@ -2563,6 +2772,9 @@ export async function runBridgeLoopIteration(
     if (restartResult.restartRequested) {
       syncBridgeStatus();
       await persistStatus(input.statusPath, input.status);
+      try {
+        await input.log.flush();
+      } catch {}
       return restartResult;
     }
     for (const watchdog of input.watchdogFailures ?? []) {
@@ -2831,6 +3043,7 @@ export function bridgeHeartbeatSignature(
     | "lastStaleCleanupAt"
     | "lastStaleCleanup"
     | "maxInFlight"
+    | "controlCommandStatus"
     | "pendingControlCommand"
     | "processHealth"
     | "runtimeConformance"
@@ -2878,6 +3091,7 @@ export function bridgeHeartbeatSignature(
       .sort((left, right) => left.sessionKey.localeCompare(right.sessionKey)),
     lifecycle: status.lifecycle,
     pendingControlCommand: status.pendingControlCommand,
+    controlCommandStatus: status.controlCommandStatus,
     updateState: status.updateState,
   });
 }
@@ -3471,6 +3685,7 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
       status: "upToDate",
       currentVersion: BRIDGE_VERSION,
     },
+    controlCommandStatus: status.controlCommandStatus,
     devHotReload: status.devHotReload,
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands ?? [],
@@ -3591,7 +3806,12 @@ export function parseHermesProfileListOutput(
   return sanitizeHermesProfilesForCapabilities(
     rows
       .map((line) => {
-        const normalized = line.replace(/^(\s*)[◆*]\s*/, "$1");
+        const hasActiveMarker = /^\s*[◆*]/.test(line);
+        const normalized = line.replace(/^(\s*)[◆*]\s*/, "$1 ");
+        const semanticParts = parseHermesProfileSemanticRow(normalized);
+        if (semanticParts) {
+          return semanticParts;
+        }
         const whitespaceParts = normalized.trim().split(/\s{2,}/).filter(Boolean);
         const columnParts =
           columns.length >= 4
@@ -3601,6 +3821,7 @@ export function parseHermesProfileListOutput(
               })
             : [];
         const parts =
+          hasActiveMarker ||
           (whitespaceParts[0]?.endsWith(" —") && whitespaceParts.length >= 3) ||
           (whitespaceParts[0] &&
           columnParts[0] &&
@@ -3634,6 +3855,30 @@ export function parseHermesProfileListOutput(
       })
       .filter((profile) => profile !== undefined),
   );
+}
+
+function parseHermesProfileSemanticRow(
+  line: string,
+): HermesProfileSummary | undefined {
+  const tokens = line.trim().split(/\s+/).filter(Boolean);
+  const gatewayIndex = tokens.findIndex((token) =>
+    /^(running|stopped|starting|stopping|error)$/i.test(token),
+  );
+  if (gatewayIndex <= 1) {
+    return undefined;
+  }
+  const rawModel = tokens[gatewayIndex - 1];
+  const rawName = tokens.slice(0, gatewayIndex - 1).join(" ");
+  const name = normalizeHermesProfileNameColumn(rawName);
+  if (!name) {
+    return undefined;
+  }
+  return {
+    alias: normalizeHermesPlaceholder(tokens[gatewayIndex + 1]),
+    gateway: normalizeHermesPlaceholder(tokens[gatewayIndex]),
+    model: normalizeHermesPlaceholder(rawModel),
+    name,
+  };
 }
 
 function normalizeHermesProfileNameColumn(value: string): string {

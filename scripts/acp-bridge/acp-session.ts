@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
+import { homedir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildZeroChatHiddenSystemPrompt } from "./zero-chat-policy"
@@ -210,6 +211,19 @@ export const DEFAULT_ACP_PROCESS_EXIT_GRACE_MS = 2_500
 
 export const HIDDEN_ZERO_CHAT_SYSTEM_PROMPT = buildZeroChatHiddenSystemPrompt()
 
+export function expandLocalCwd(cwd: string | undefined): string | undefined {
+  if (!cwd) {
+    return undefined
+  }
+  if (cwd === "~") {
+    return homedir()
+  }
+  if (cwd.startsWith("~/")) {
+    return join(homedir(), cwd.slice(2))
+  }
+  return cwd
+}
+
 export class HermesAcpProcessError extends Error {
   constructor(message: string) {
     super(message)
@@ -282,7 +296,7 @@ export class HermesAcpSession {
     this.command = Array.isArray(options.agentCommand)
       ? [...options.agentCommand]
       : splitCommand(options.agentCommand ?? "hermes acp")
-    this.cwd = options.cwd
+    this.cwd = expandLocalCwd(options.cwd)
     this.initialSessionId = options.initialSessionId
     this.mcpServers = options.mcpServers ?? []
     this.processExitGraceMs = options.processExitGraceMs ?? DEFAULT_ACP_PROCESS_EXIT_GRACE_MS
@@ -1242,10 +1256,14 @@ export function buildPromptContentBlocks(
   const appSystemPromptBase = normalizedSystemPrompt
     ? `${HIDDEN_ZERO_CHAT_SYSTEM_PROMPT}\n\nSpace instructions from the user:\n${normalizedSystemPrompt}`
     : HIDDEN_ZERO_CHAT_SYSTEM_PROMPT
-  const appSystemPrompt =
-    continuity?.includeContinuityFallbackNote && normalizedThreadHistory
-      ? `${appSystemPromptBase}\n\nExternal ACP session continuity is unavailable for this turn, so a fresh ACP session is being used. Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
-      : appSystemPromptBase
+  const threadHistoryPrompt = normalizedThreadHistory
+    ? continuity?.includeContinuityFallbackNote
+      ? `External ACP session continuity is unavailable for this turn, so a fresh ACP session is being used. Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
+      : `Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
+    : undefined
+  const appSystemPrompt = threadHistoryPrompt
+    ? `${appSystemPromptBase}\n\n${threadHistoryPrompt}`
+    : appSystemPromptBase
 
   return [
     {

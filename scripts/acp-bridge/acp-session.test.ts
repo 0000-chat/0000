@@ -6,6 +6,7 @@ import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientproto
 
 import {
   DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
+  expandLocalCwd,
   HermesAcpRuntimeAdapter,
   HermesAcpSession,
   resolveRuntimeConfigApplication,
@@ -86,6 +87,33 @@ describe("ACP final text extraction", () => {
       runtimeId: "codex",
       thoughtChunkCount: 0,
     })
+  })
+
+  test("includes supplied thread history in a fresh ACP session prompt", async () => {
+    const requests: RuntimeRequest[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.sendUserMessage("Can you repeat that but in a more simple way?", {
+      threadHistory:
+        "Current 0000 Chat context:\n- threadId: thread_123\n\nRecent thread history:\nUser: You were working on reviving thread context\nAssistant: The bridge should replay history",
+    })
+
+    const promptRequest = requests.find((request) => request.method === "session/prompt")
+    const params = promptRequest?.params as { prompt?: Array<Record<string, unknown>> } | undefined
+    const systemBlockText = params?.prompt?.find((block) => {
+      const meta = block._meta as Record<string, unknown> | undefined
+      return meta?.["0000.chat/role"] === "system"
+    })?.text
+
+    expect(systemBlockText).toContain("Recent thread history:")
+    expect(systemBlockText).toContain("User: You were working on reviving thread context")
+    expect(systemBlockText).toContain("Assistant: The bridge should replay history")
   })
 
   test("keeps Codex ACP final chunks emitted after completed tool activity", async () => {
@@ -654,6 +682,25 @@ describe("ACP runtime adapter boundary", () => {
       ok: true,
       capabilityUsed: "closeSession",
       nativeMethod: "process.kill",
+    })
+  })
+
+  test("expands tilde cwd before ACP session creation", async () => {
+    const requests: RuntimeRequest[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      cwd: "~/projects/nextpay",
+      runtimeClient: createFakeRuntimeClient({ requests, updates: [] }),
+    })
+
+    await session.start()
+
+    expect(requests).toContainEqual({
+      method: "session/new",
+      params: {
+        cwd: expandLocalCwd("~/projects/nextpay"),
+        mcpServers: [],
+      },
     })
   })
 
