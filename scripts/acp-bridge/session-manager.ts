@@ -75,6 +75,7 @@ export type BridgeSessionQueueItem = {
   approvalOutcome?: string;
   approvalReason?: string;
   approvalLevel?: "ask" | "full_permissions";
+  resumePolicy?: "live_callback" | "durable_continuation";
   externalRequestId?: string;
   externalSessionId?: string;
   organizationId?: string;
@@ -1702,12 +1703,20 @@ export class BridgeSessionManager {
         throw new Error(`input response ${item.id} is missing response text`);
       }
       const threadId = item.threadId ?? item.sessionId;
-      if (!key && hasExplicitRuntimeScope(item)) {
+      const requestedSessionKey = this.sessionKeyForItem(item);
+      if (
+        !key &&
+        this.isTerminalInteractionResponseItem(item, requestedSessionKey, threadId)
+      ) {
+        await this.markStaleInteractionResponse(item, type);
+        return;
+      }
+      if (!key && this.hasActiveRuntimeConflictForItem(item)) {
         throw new Error(
           `input response ${item.id} does not match an active ACP session for the requested runtime`,
         );
       }
-      const sessionKey = key ?? threadId;
+      const sessionKey = key ?? requestedSessionKey ?? threadId;
       if (!sessionKey) {
         throw new Error(`input response ${item.id} is missing threadId`);
       }
@@ -1744,16 +1753,30 @@ export class BridgeSessionManager {
         throw new Error(`choice response ${item.id} is missing choice id`);
       }
       const threadId = item.threadId ?? item.sessionId;
-      if (!key && hasExplicitRuntimeScope(item)) {
+      const requestedSessionKey = this.sessionKeyForItem(item);
+      const durableContinuation = isDurableContinuationChoiceResponse(item);
+      if (
+        !durableContinuation &&
+        !key &&
+        this.isTerminalInteractionResponseItem(item, requestedSessionKey, threadId)
+      ) {
+        await this.markStaleInteractionResponse(item, type);
+        return;
+      }
+      if (!key && this.hasActiveRuntimeConflictForItem(item)) {
         throw new Error(
           `choice response ${item.id} does not match an active ACP session for the requested runtime`,
         );
       }
-      const sessionKey = key ?? threadId;
+      const sessionKey = key ?? requestedSessionKey ?? threadId;
       if (!sessionKey) {
         throw new Error(`choice response ${item.id} is missing threadId`);
       }
-      if (!key && this.isTerminalInteractionSessionKey(sessionKey)) {
+      if (
+        !durableContinuation &&
+        !key &&
+        this.isTerminalInteractionSessionKey(sessionKey)
+      ) {
         await this.markStaleInteractionResponse(item, type);
         return;
       }
@@ -1839,6 +1862,45 @@ export class BridgeSessionManager {
 
   private isTerminalInteractionSessionKey(sessionKey: string): boolean {
     return this.terminalInteractionSessionKeys.has(sessionKey);
+  }
+
+  private isTerminalInteractionResponseItem(
+    item: BridgeSessionQueueItem,
+    requestedSessionKey: string | undefined,
+    threadId: string | undefined,
+  ): boolean {
+    return [
+      requestedSessionKey,
+      threadId,
+      item.sessionId,
+      item.agentSessionId,
+    ].some((sessionKey) =>
+      sessionKey ? this.isTerminalInteractionSessionKey(sessionKey) : false,
+    );
+  }
+
+  private hasActiveRuntimeConflictForItem(item: BridgeSessionQueueItem): boolean {
+    if (!hasExplicitRuntimeScope(item)) {
+      return false;
+    }
+    const providerSessionKey = providerSessionKeyForItem(item);
+    const threadId = item.threadId ?? item.sessionId;
+    if (!providerSessionKey || !threadId) {
+      return false;
+    }
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(
+      item,
+      providerSessionKey,
+      threadId,
+    );
+    const scopeConversationId = item.mailboxConversationId ?? threadId;
+    return Array.from(this.sessions.values()).some(
+      (session) =>
+        (session.scopeKeyWithoutAgent === scopeKeyWithoutAgent ||
+          (session.providerSessionKey === providerSessionKey &&
+            session.scopeConversationId === scopeConversationId)) &&
+        !this.sessionMatchesExplicitRuntimeRequest(session, item),
+    );
   }
 
   private async waitForSession(
@@ -2981,6 +3043,9 @@ export class BridgeSessionManager {
         eventCount: events.length,
         error: message,
       });
+      if (isBridgeEventUploadOverload(error)) {
+        return { ok: false, count: events.length, error: new Error(message) };
+      }
       if (events.length <= 1) {
         return { ok: false, count: events.length, error: new Error(message) };
       }
@@ -3143,7 +3208,15 @@ export class BridgeSessionManager {
       return exact;
     }
     if (hasExplicitRuntimeScope(item)) {
-      return undefined;
+      const scopedMatches = Array.from(this.sessions.values()).filter((session) =>
+        this.queueItemMatchesSessionRecord(item, session),
+      );
+      if (scopedMatches.length > 1) {
+        throw new Error(
+          `queue item ${item.id} matches multiple active ACP sessions; include organization and runtime scope`,
+        );
+      }
+      return scopedMatches[0]?.sessionKey;
     }
 
     const providerSessionKey = providerSessionKeyForItem(item);
@@ -3233,6 +3306,26 @@ export class BridgeSessionManager {
       redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry,
     );
   }
+}
+
+function isBridgeEventUploadOverload(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? Number((error as { status?: unknown }).status)
+      : undefined;
+  if (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /too many concurrent|concurrent requests|limited to \d+ concurrent|timeout|timed out/i.test(
+    message,
+  );
 }
 
 function isEmptyVisiblePromptResult(result: { text: string }): boolean {
@@ -3971,6 +4064,15 @@ function providerSessionKeyForItem(
 
 function hasExplicitRuntimeScope(item: BridgeSessionQueueItem): boolean {
   return Boolean(item.bridgeProfileId ?? item.hermesProfileName);
+}
+
+function isDurableContinuationChoiceResponse(
+  item: BridgeSessionQueueItem,
+): boolean {
+  return (
+    normalizeType(item) === "choice-response" &&
+    item.resumePolicy === "durable_continuation"
+  );
 }
 
 function applyRuntimeConfigFallback(

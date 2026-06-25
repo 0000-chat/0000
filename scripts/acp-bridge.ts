@@ -13,6 +13,8 @@ import {
 } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { ConvexClient } from "convex/browser";
+import { makeFunctionReference } from "convex/server";
 
 import {
   BridgeCloudHttpError,
@@ -41,10 +43,12 @@ import {
   type BridgeSingletonStatus,
 } from "./acp-bridge/local-singleton-guard";
 import {
+  createCompositeBridgeLogger,
   createWorkerBridgeLogger,
   type FlushableBridgeLogger,
   redactLogValue,
 } from "./acp-bridge/bridge-log";
+import { createLocalAuditBridgeLogger } from "./acp-bridge/local-audit-log";
 import {
   DEFAULT_ACP_REQUEST_TIMEOUT_MS,
   HermesAcpSession,
@@ -127,7 +131,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.20";
+export const BRIDGE_VERSION = "0.1.21";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -237,6 +241,13 @@ type BridgeQueueCommand = BridgeSessionQueueItem;
 type BridgeWakeSignal = {
   wait(timeoutMs: number): Promise<void>;
   close(): Promise<void>;
+  updateWakeToken?(wake: BridgeWakeToken | undefined): void;
+};
+
+type BridgeWakeToken = {
+  token: string;
+  expiresAt: number;
+  refreshAfterMs: number;
 };
 
 export type BridgeStatus = {
@@ -247,6 +258,7 @@ export type BridgeStatus = {
   updateState?: BridgeUpdateState;
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
+  controlCommandStatus?: BridgeControlCommandStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastHeartbeatSignature?: string;
@@ -366,6 +378,7 @@ export type BridgeRegistrationStatus = {
   updateState?: BridgeUpdateState;
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
+  controlCommandStatus?: BridgeControlCommandStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastPollAt?: string;
@@ -537,6 +550,26 @@ export type BridgeControlCommandState = {
   requestedAt?: number;
 };
 
+export type BridgeControlCommandLifecycleStatus =
+  | "accepted"
+  | "waiting_for_idle"
+  | "executing"
+  | "succeeded"
+  | "failed";
+
+export type BridgeControlCommandStatus = {
+  command: BridgeControlCommandName;
+  status: BridgeControlCommandLifecycleStatus;
+  requestedAt?: number;
+  acceptedAt?: number;
+  startedAt?: number;
+  completedAt?: number;
+  failedAt?: number;
+  targetVersion?: string;
+  instanceId?: string;
+  error?: string;
+};
+
 export type HermesProfileSummary = {
   alias?: string;
   description?: string;
@@ -603,6 +636,7 @@ export type BridgeLoopIterationInput = {
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
+  wakeSignal?: BridgeWakeSignal;
 };
 
 export type BridgeLoopIterationResult = {
@@ -640,6 +674,9 @@ export type BridgeUpdaterLaunchInput = {
   restartCommand: string[];
   statusPath: string;
 };
+
+const MAX_CONTROL_COMMAND_ERROR_LENGTH = 240;
+const MAX_CONTROL_COMMAND_TARGET_VERSION_LENGTH = 64;
 
 export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
   const record = recordFromUnknown(raw);
@@ -1129,6 +1166,11 @@ export function describeStatus(
       `last stale cleanup: ${status.lastStaleCleanupAt} (released ${status.lastStaleCleanup?.released ?? 0}, inspected ${status.lastStaleCleanup?.inspected ?? 0})`,
     );
   }
+  if (status.controlCommandStatus) {
+    lines.push(
+      `control command: ${status.controlCommandStatus.command} (${status.controlCommandStatus.status})`,
+    );
+  }
   for (const command of status.inFlightCommands ?? []) {
     lines.push(
       `  - ${command.id}${command.type ? ` (${command.type})` : ""}${command.threadId ? ` thread=${command.threadId}` : ""}`,
@@ -1604,6 +1646,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
   const ensureContexts = async () => {
     const latestConfig = await readBridgeConfigFile(configPath);
+    let previousAggregateStatus: BridgeStatus | undefined;
+    if (existsSync(statusPath)) {
+      try {
+        previousAggregateStatus = await readJsonFile<BridgeStatus>(statusPath);
+      } catch {}
+    }
     const activeIds = new Set(
       latestConfig.registrations.map((registration) => registration.deviceId),
     );
@@ -1612,11 +1660,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         contexts.get(registration.deviceId)!.config = registration;
         continue;
       }
-      const log = createWorkerBridgeLogger({
+      const workerLog = createWorkerBridgeLogger({
         bridgeToken: registration.bridgeToken,
         deviceId: registration.deviceId,
         logUrl,
       });
+      const log = createCompositeBridgeLogger([
+        workerLog,
+        createLocalAuditBridgeLogger(),
+      ]);
       const cloudClient = createCloudClient(registration);
       const hostAdapter = new ConvexBridgeHostAdapter(cloudClient);
       const processRegistryPath = getBridgeProcessRegistryPath(
@@ -1695,6 +1747,13 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         localHardMaxInFlight,
         DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
       );
+      const previousStatus =
+        previousAggregateStatus?.registrations?.find(
+          (candidate) => candidate.deviceId === registration.deviceId,
+        ) ??
+        (previousAggregateStatus?.deviceId === registration.deviceId
+          ? previousAggregateStatus
+          : undefined);
       const status: BridgeStatus = {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
@@ -1717,6 +1776,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
         runtimeIdentity: getBridgeRuntimeIdentity(),
+        controlCommandStatus: reconcileBridgeStartupControlCommandStatus(
+          previousStatus,
+          getBridgeRuntimeIdentity(),
+        ),
         hermesProfiles,
         runtimeProfiles,
         activeSessions: [],
@@ -1756,6 +1819,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         activeSessionCount: 0,
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
+        bridgeRuntimeIdentity: getBridgeRuntimeIdentity(),
+        processStartToken: BRIDGE_PROCESS_START_TOKEN,
+        runtimeConformance: runtimeConformanceSummary(),
       });
     }
     for (const [deviceId, context] of contexts) {
@@ -1776,11 +1842,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     const signals = Array.from(contexts.values()).map(
       (context) => context.wakeSignal,
     );
+    const timeoutMs = totalInFlight() > 0 ? pollMs : Math.max(pollMs, 30_000);
     if (signals.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs));
       return;
     }
-    await Promise.race(signals.map((signal) => signal.wait(pollMs)));
+    await Promise.race(signals.map((signal) => signal.wait(timeoutMs)));
   };
 
   await ensureContexts();
@@ -1817,7 +1884,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const stop = async (
     options: {
       forceRuntimeProcesses?: boolean;
+      reason?: string;
       shutdownTimeoutMs?: number;
+      signal?: NodeJS.Signals;
     } = {},
   ) => {
     if (stopping) {
@@ -1825,6 +1894,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     stopping = true;
     for (const context of contexts.values()) {
+      if (options.signal) {
+        context.log({
+          level: "info",
+          event: "bridge.signal.received",
+          deviceId: context.config.deviceId,
+          signal: options.signal,
+          reason: options.reason,
+        });
+      }
       context.status.connected = false;
       syncBridgeRuntimeStatus(
         context.status,
@@ -1840,6 +1918,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         event: "bridge.stop",
         deviceId: context.config.deviceId,
         activeSessionCount: context.manager.getStatus().activeSessions.length,
+        reason: options.reason,
+        signal: options.signal,
       });
       const shutdownTask = (async () => {
         await context.wakeSignal.close();
@@ -1869,6 +1949,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           timeoutMs: options.shutdownTimeoutMs,
         });
       }
+      context.log({
+        level: "info",
+        event: "bridge.process.exiting",
+        deviceId: context.config.deviceId,
+        reason: options.reason ?? "stop completed",
+        signal: options.signal,
+      });
+      await context.log.flush();
     }
     await persistAggregateStatus();
   };
@@ -1901,8 +1989,33 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     };
   };
 
-  process.once("SIGINT", () => void stop());
-  process.once("SIGTERM", () => void stop());
+  const logProcessException = (kind: string, error: unknown) => {
+    const message = redactForOutput(
+      error instanceof Error ? error.message : String(error),
+    );
+    for (const context of contexts.values()) {
+      context.log({
+        level: "error",
+        event: "bridge.exception",
+        deviceId: context.config.deviceId,
+        error: message,
+        exceptionKind: kind,
+      });
+    }
+  };
+
+  process.on("uncaughtExceptionMonitor", (error) => {
+    logProcessException("uncaughtException", error);
+  });
+  process.on("unhandledRejection", (error) => {
+    logProcessException("unhandledRejection", error);
+  });
+  process.once("SIGINT", () =>
+    void stop({ reason: "process signal", signal: "SIGINT" }),
+  );
+  process.once("SIGTERM", () =>
+    void stop({ reason: "process signal", signal: "SIGTERM" }),
+  );
 
   while (!stopping) {
     await ensureContexts();
@@ -2021,10 +2134,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           ),
         getRuntimeConformance: runtimeConformanceSummary,
         writeStatus: persistAggregateStatus,
+        wakeSignal: context.wakeSignal,
       });
       if (result.restartRequested) {
         await stop({
           forceRuntimeProcesses: true,
+          reason: "runtime restart requested",
           shutdownTimeoutMs: DEFAULT_RESTART_STOP_TIMEOUT_MS,
         });
         process.exit(0);
@@ -2192,6 +2307,7 @@ function buildAggregateBridgeStatus(
     lifecycle: status.lifecycle,
     updateState: status.updateState,
     devHotReload: status.devHotReload,
+    controlCommandStatus: status.controlCommandStatus,
     lastStartedAt: status.lastStartedAt,
     lastHeartbeatAt: status.lastHeartbeatAt,
     lastPollAt: status.lastPollAt,
@@ -2218,6 +2334,7 @@ function buildAggregateBridgeStatus(
     lifecycle: first?.status.lifecycle,
     updateState: first?.status.updateState,
     devHotReload: first?.status.devHotReload,
+    controlCommandStatus: first?.status.controlCommandStatus,
     lastStartedAt: first?.status.lastStartedAt,
     lastHeartbeatAt: first?.status.lastHeartbeatAt,
     lastPollAt: first?.status.lastPollAt,
@@ -2269,6 +2386,105 @@ function normalizeControlCommand(
     requestedAt:
       typeof command.requestedAt === "number" ? command.requestedAt : undefined,
   };
+}
+
+function normalizeControlCommandStatus(
+  value?: BridgeControlCommandStatus,
+): BridgeControlCommandStatus | undefined {
+  if (
+    value?.command !== "restartWhenIdle" &&
+    value?.command !== "updateWhenIdle"
+  ) {
+    return undefined;
+  }
+  if (
+    value.status !== "accepted" &&
+    value.status !== "waiting_for_idle" &&
+    value.status !== "executing" &&
+    value.status !== "succeeded" &&
+    value.status !== "failed"
+  ) {
+    return undefined;
+  }
+  return compact({
+    acceptedAt:
+      typeof value.acceptedAt === "number" ? value.acceptedAt : undefined,
+    command: value.command,
+    completedAt:
+      typeof value.completedAt === "number" ? value.completedAt : undefined,
+    error: boundControlCommandError(value.error),
+    failedAt: typeof value.failedAt === "number" ? value.failedAt : undefined,
+    instanceId: stringFromUnknown(value.instanceId),
+    requestedAt:
+      typeof value.requestedAt === "number" ? value.requestedAt : undefined,
+    startedAt: typeof value.startedAt === "number" ? value.startedAt : undefined,
+    status: value.status,
+    targetVersion: boundControlCommandTargetVersion(value.targetVersion),
+  });
+}
+
+function buildControlCommandStatus(
+  command: BridgeControlCommandName,
+  status: BridgeControlCommandLifecycleStatus,
+  patch: Partial<BridgeControlCommandStatus> = {},
+): BridgeControlCommandStatus {
+  return compact({
+    acceptedAt:
+      typeof patch.acceptedAt === "number" ? patch.acceptedAt : undefined,
+    command,
+    completedAt:
+      typeof patch.completedAt === "number" ? patch.completedAt : undefined,
+    error: boundControlCommandError(patch.error),
+    failedAt: typeof patch.failedAt === "number" ? patch.failedAt : undefined,
+    instanceId: stringFromUnknown(patch.instanceId),
+    requestedAt:
+      typeof patch.requestedAt === "number" ? patch.requestedAt : undefined,
+    startedAt: typeof patch.startedAt === "number" ? patch.startedAt : undefined,
+    status,
+    targetVersion: boundControlCommandTargetVersion(patch.targetVersion),
+  });
+}
+
+function boundControlCommandError(value: unknown): string | undefined {
+  const text = stringFromUnknown(value);
+  if (!text) {
+    return undefined;
+  }
+  const bounded = redactForOutput(text).trim();
+  return bounded
+    ? bounded.slice(0, MAX_CONTROL_COMMAND_ERROR_LENGTH)
+    : undefined;
+}
+
+function boundControlCommandTargetVersion(value: unknown): string | undefined {
+  const text = stringFromUnknown(value)?.trim();
+  return text
+    ? text.slice(0, MAX_CONTROL_COMMAND_TARGET_VERSION_LENGTH)
+    : undefined;
+}
+
+export function reconcileBridgeStartupControlCommandStatus(
+  previousStatus: Pick<BridgeStatus, "controlCommandStatus"> | undefined,
+  runtimeIdentity: BridgeRuntimeIdentity = getBridgeRuntimeIdentity(),
+  now: () => number = Date.now,
+): BridgeControlCommandStatus | undefined {
+  const previous = normalizeControlCommandStatus(
+    previousStatus?.controlCommandStatus,
+  );
+  if (!previous) {
+    return undefined;
+  }
+  if (previous.status !== "executing") {
+    return previous;
+  }
+  return buildControlCommandStatus(previous.command, "succeeded", {
+    acceptedAt: previous.acceptedAt,
+    completedAt: now(),
+    instanceId: runtimeIdentity.instanceId,
+    requestedAt: previous.requestedAt,
+    startedAt: previous.startedAt,
+    targetVersion: previous.targetVersion,
+  });
 }
 
 async function launchBridgeUpdater(
@@ -2330,12 +2546,19 @@ export async function waitForRestartShutdownTask(
 async function applyPendingBridgeControlCommand(
   status: BridgeStatus,
   now: () => number,
-  input: Pick<BridgeLoopIterationInput, "launchUpdater" | "statusPath">,
+  input: Pick<
+    BridgeLoopIterationInput,
+    "launchUpdater" | "statusPath" | "writeStatus"
+  >,
 ): Promise<BridgeLoopIterationResult> {
   const command = normalizeControlCommand(status.pendingControlCommand);
   if (!command) {
     return { restartRequested: false };
   }
+  const persistStatus = input.writeStatus ?? writeStatus;
+  const acceptedAt = status.controlCommandStatus?.acceptedAt;
+  const requestedAt = command.requestedAt;
+  const startedAt = now();
 
   const idleDecision = shouldRestartBridgeForDevHotReload(status);
   if (!idleDecision.ready) {
@@ -2343,6 +2566,15 @@ async function applyPendingBridgeControlCommand(
     status.updateState = buildBridgeUpdateState("waitingForIdle", now(), {
       requestedAt: command.requestedAt,
     });
+    status.controlCommandStatus = buildControlCommandStatus(
+      command.command,
+      "waiting_for_idle",
+      {
+        acceptedAt,
+        requestedAt,
+      },
+    );
+    await persistStatus(input.statusPath, status);
     return { restartRequested: false };
   }
 
@@ -2350,9 +2582,20 @@ async function applyPendingBridgeControlCommand(
     status.lifecycle = "updating";
     status.updateState = buildBridgeUpdateState("installing", now(), {
       requestedAt: command.requestedAt,
-      startedAt: now(),
+      startedAt,
     });
     status.pendingControlCommand = undefined;
+    status.controlCommandStatus = buildControlCommandStatus(
+      command.command,
+      "executing",
+      {
+        acceptedAt,
+        requestedAt,
+        startedAt,
+        targetVersion: BRIDGE_VERSION,
+      },
+    );
+    await persistStatus(input.statusPath, status);
     try {
       const launchUpdater = input.launchUpdater ?? launchBridgeUpdater;
       await launchUpdater({
@@ -2367,6 +2610,19 @@ async function applyPendingBridgeControlCommand(
         requestedAt: command.requestedAt,
         error: error instanceof Error ? error.message : String(error),
       });
+      status.controlCommandStatus = buildControlCommandStatus(
+        command.command,
+        "failed",
+        {
+          acceptedAt,
+          error: error instanceof Error ? error.message : String(error),
+          failedAt: now(),
+          requestedAt,
+          startedAt,
+          targetVersion: BRIDGE_VERSION,
+        },
+      );
+      await persistStatus(input.statusPath, status);
       return { restartRequested: false };
     }
     return { restartRequested: true };
@@ -2375,9 +2631,19 @@ async function applyPendingBridgeControlCommand(
   status.lifecycle = "restarting";
   status.updateState = buildBridgeUpdateState("restarting", now(), {
     requestedAt: command.requestedAt,
-    startedAt: now(),
+    startedAt,
   });
   status.pendingControlCommand = undefined;
+  status.controlCommandStatus = buildControlCommandStatus(
+    command.command,
+    "executing",
+    {
+      acceptedAt,
+      requestedAt,
+      startedAt,
+    },
+  );
+  await persistStatus(input.statusPath, status);
   return { restartRequested: true };
 }
 
@@ -2489,11 +2755,15 @@ export async function runBridgeLoopIteration(
           activeSessionCount: input.manager.getStatus().activeSessions.length,
           error: message,
         });
-      } else if (
-        heartbeatResult.control?.settings ||
-        heartbeatResult.control?.refreshHermesProfiles ||
-        heartbeatResult.control?.refreshRuntimeProfiles ||
-        heartbeatResult.control?.command
+      } else {
+        input.wakeSignal?.updateWakeToken?.(heartbeatResult.wake);
+      }
+      if (
+        heartbeatResult.ok &&
+        (heartbeatResult.control?.settings ||
+          heartbeatResult.control?.refreshHermesProfiles ||
+          heartbeatResult.control?.refreshRuntimeProfiles ||
+          heartbeatResult.control?.command)
       ) {
         if (heartbeatResult.control.settings) {
           input.applySettingsControl?.(heartbeatResult.control.settings);
@@ -2504,7 +2774,18 @@ export async function runBridgeLoopIteration(
           heartbeatResult.control.command,
         );
         if (controlCommand) {
+          const acceptedAt = currentTime();
           input.status.pendingControlCommand = controlCommand;
+          input.status.controlCommandStatus = buildControlCommandStatus(
+            controlCommand.command,
+            "accepted",
+            {
+              acceptedAt,
+              instanceId: input.status.runtimeIdentity?.instanceId,
+              requestedAt: controlCommand.requestedAt,
+            },
+          );
+          await persistStatus(input.statusPath, input.status);
           restartResult = await applyPendingBridgeControlCommand(
             input.status,
             currentTime,
@@ -2589,6 +2870,9 @@ export async function runBridgeLoopIteration(
     if (restartResult.restartRequested) {
       syncBridgeStatus();
       await persistStatus(input.statusPath, input.status);
+      try {
+        await input.log.flush();
+      } catch {}
       return restartResult;
     }
     for (const watchdog of input.watchdogFailures ?? []) {
@@ -2857,6 +3141,7 @@ export function bridgeHeartbeatSignature(
     | "lastStaleCleanupAt"
     | "lastStaleCleanup"
     | "maxInFlight"
+    | "controlCommandStatus"
     | "pendingControlCommand"
     | "processHealth"
     | "runtimeConformance"
@@ -2904,6 +3189,7 @@ export function bridgeHeartbeatSignature(
       .sort((left, right) => left.sessionKey.localeCompare(right.sessionKey)),
     lifecycle: status.lifecycle,
     pendingControlCommand: status.pendingControlCommand,
+    controlCommandStatus: status.controlCommandStatus,
     updateState: status.updateState,
   });
 }
@@ -3469,7 +3755,7 @@ async function cleanupStaleClaims(
 }
 
 type BridgeHeartbeatSendResult =
-  | { ok: true; control?: BridgeControlResponse }
+  | { ok: true; control?: BridgeControlResponse; wake?: BridgeWakeToken }
   | {
       ok: false;
       error: BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 };
@@ -3497,6 +3783,7 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
       status: "upToDate",
       currentVersion: BRIDGE_VERSION,
     },
+    controlCommandStatus: status.controlCommandStatus,
     devHotReload: status.devHotReload,
     activeSessions: status.activeSessions,
     inFlightCommands: status.inFlightCommands ?? [],
@@ -3753,13 +4040,14 @@ export async function sendHeartbeatWithClient(
   try {
     const response = await client.heartbeat<{
       control?: BridgeControlResponse;
+      wake?: BridgeWakeToken;
     }>({
       bridgeInstanceId: status.runtimeIdentity?.instanceId,
       capabilities: buildHeartbeatCapabilities(status),
       status: buildHeartbeatStatusPayload(status),
       version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
     });
-    return { ok: true, control: response.control };
+    return { ok: true, control: response.control, wake: response.wake };
   } catch (error) {
     if (isTransientHeartbeatError(error)) {
       return { ok: false, error };
@@ -3837,22 +4125,128 @@ function getBridgeLogUrl(
   return getFlag(flags, "log-url", env.ZERO_CHAT_BRIDGE_LOG_URL);
 }
 
-function createBridgeWakeSignal(input: {
+type BridgeWakeSignalClient = {
+  close: () => void | Promise<void>;
+  onUpdate: (
+    query: unknown,
+    args: Record<string, unknown>,
+    callback: () => void,
+    onError?: (error: unknown) => void,
+  ) => { unsubscribe?: () => void } | (() => void);
+};
+
+export function createBridgeWakeSignal(input: {
   config: BridgeConfig;
   convexUrl: string | undefined;
   limit: number;
   log: FlushableBridgeLogger;
+  clientFactory?: (url: string) => BridgeWakeSignalClient;
 }): BridgeWakeSignal {
+  if (!input.convexUrl) {
+    input.log({
+      level: "warn",
+      event: "bridge.subscription.disabled",
+      deviceId: input.config.deviceId,
+      reason: "missing_convex_url",
+      limit: input.limit,
+    });
+    return createTimeoutWakeSignal();
+  }
+
+  let closed = false;
+  let client: BridgeWakeSignalClient | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let activeToken: string | undefined;
+  const waiters = new Set<() => void>();
+  const clientFactory =
+    input.clientFactory ??
+    ((url: string) => new ConvexClient(url) as unknown as BridgeWakeSignalClient);
+
+  const wake = () => {
+    for (const resolve of Array.from(waiters)) {
+      waiters.delete(resolve);
+      resolve();
+    }
+  };
+  const teardownSubscription = async () => {
+    unsubscribe?.();
+    unsubscribe = undefined;
+    const previousClient = client;
+    client = undefined;
+    if (previousClient) {
+      await previousClient.close();
+    }
+  };
+  const subscribe = (wakeToken: BridgeWakeToken) => {
+    if (closed || wakeToken.token === activeToken) {
+      return;
+    }
+    void teardownSubscription();
+    activeToken = wakeToken.token;
+    client = clientFactory(input.convexUrl!);
+    const query = makeFunctionReference<"query">("bridgeOutboundQueue:workSignal");
+    const result = client.onUpdate(
+      query,
+      {
+        deviceId: input.config.deviceId,
+        wakeToken: wakeToken.token,
+        limit: input.limit,
+      },
+      wake,
+      (error) => {
+        input.log({
+          level: "warn",
+          event: "bridge.subscription.error",
+          deviceId: input.config.deviceId,
+          error: redactForOutput(error instanceof Error ? error.message : String(error)),
+        });
+      },
+    );
+    unsubscribe =
+      typeof result === "function" ? result : () => result.unsubscribe?.();
+    input.log({
+      level: "info",
+      event: "bridge.subscription.enabled",
+      deviceId: input.config.deviceId,
+      limit: input.limit,
+    });
+  };
+
   input.log({
-    level: input.convexUrl ? "info" : "warn",
-    event: "bridge.subscription.disabled",
+    level: "info",
+    event: "bridge.subscription.awaiting_wake_token",
     deviceId: input.config.deviceId,
-    reason: input.convexUrl
-      ? "public_bridge_uses_http_polling"
-      : "missing_convex_url",
     limit: input.limit,
   });
-  return createTimeoutWakeSignal();
+
+  return {
+    wait: async (timeoutMs: number) => {
+      if (closed) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          waiters.delete(resolve);
+          resolve();
+        }, timeoutMs);
+        waiters.add(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    },
+    close: async () => {
+      closed = true;
+      wake();
+      await teardownSubscription();
+    },
+    updateWakeToken: (wakeToken) => {
+      if (!wakeToken || wakeToken.expiresAt <= Date.now()) {
+        return;
+      }
+      subscribe(wakeToken);
+    },
+  };
 }
 
 function createTimeoutWakeSignal(): BridgeWakeSignal {
@@ -4160,7 +4554,9 @@ function attachmentsFromUnknown(
   return attachments.length > 0 ? attachments : undefined;
 }
 
-function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
+export function normalizeQueueCommand(
+  raw: unknown,
+): BridgeQueueCommand | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined;
   }
@@ -4172,6 +4568,21 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
   if (!id || !isQueueCommandType(type)) {
     return undefined;
   }
+  const payloadText = payload ? stringFromUnknown(payload.text) : undefined;
+  const payloadContinuationPrompt = payload
+    ? stringFromUnknown(payload.continuationPrompt)
+    : undefined;
+  const prompt =
+    stringFromUnknown(record.prompt) ??
+    (type === "choice-response"
+      ? (payloadContinuationPrompt ?? payloadText)
+      : undefined) ??
+    (type === "input-response"
+      ? (payloadText ?? payloadContinuationPrompt)
+      : undefined);
+  const approvalOutcome =
+    stringFromUnknown(record.approvalOutcome) ??
+    (type === "choice-response" ? payloadText : undefined);
   return {
     id,
     claimId: stringFromUnknown(record.claimId),
@@ -4181,16 +4592,21 @@ function normalizeQueueCommand(raw: unknown): BridgeQueueCommand | undefined {
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
     cwd: stringFromUnknown(record.cwd),
-    prompt: stringFromUnknown(record.prompt),
+    prompt,
     threadHistory: stringFromUnknown(record.threadHistory),
     systemPrompt: stringFromUnknown(record.systemPrompt),
     approvalId: stringFromUnknown(record.approvalId),
-    approvalOutcome: stringFromUnknown(record.approvalOutcome),
+    approvalOutcome,
     approvalReason: stringFromUnknown(record.approvalReason),
     approvalLevel:
       record.approvalLevel === "ask" ||
       record.approvalLevel === "full_permissions"
         ? record.approvalLevel
+        : undefined,
+    resumePolicy:
+      record.resumePolicy === "live_callback" ||
+      record.resumePolicy === "durable_continuation"
+        ? record.resumePolicy
         : undefined,
     externalRequestId: stringFromUnknown(record.externalRequestId),
     externalSessionId: stringFromUnknown(record.externalSessionId),

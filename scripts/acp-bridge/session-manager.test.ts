@@ -1667,6 +1667,59 @@ describe("bridge session cwd safety", () => {
     ]);
   });
 
+  test("continues durable choice responses after the ACP session terminalizes", async () => {
+    const prompts: string[] = [];
+    const continuationPrompt =
+      "The user selected an option for this pending multiple-choice prompt:\n\nHow should I enumerate the files?\n\nSelected: Enable Drive API (enable_drive)";
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt);
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text:
+              prompt === continuationPrompt
+                ? "continuing after durable choice"
+                : "",
+          };
+        },
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-terminal",
+      id: "queue-terminal",
+      prompt: "terminalize",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      approvalOutcome: "enable_drive",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      prompt: continuationPrompt,
+      resumePolicy: "durable_continuation",
+      threadId: "thread-1",
+      type: "choice-response",
+    });
+
+    expect(prompts).toEqual(["terminalize", continuationPrompt]);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-choice",
+      result: {
+        choiceId: "enable_drive",
+        ok: true,
+        text: "continuing after durable choice",
+      },
+    });
+  });
+
   test("bounds remembered terminal interaction session keys", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({
@@ -2522,6 +2575,85 @@ describe("bridge session cwd safety", () => {
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-choice",
       result: { choiceId: "option-a", ok: true, text: "continued after idle" },
+    });
+  });
+
+  test("runtime-scoped choice response resumes after the original ACP session idles closed", async () => {
+    const prompts: string[] = [];
+    const closedSessions: string[] = [];
+    let sessionCount = 0;
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      deviceId: "device-1",
+      idleSessionTtlMs: 1,
+      createSession: () => {
+        sessionCount += 1;
+        const sessionId = `session-${sessionCount}`;
+        return {
+          close: async () => {
+            closedSessions.push(sessionId);
+          },
+          cancel: async () => {},
+          sendUserMessage: async (prompt) => {
+            prompts.push(prompt);
+            return {
+              events: [],
+              rawResult: { ok: true },
+              sessionId,
+              text:
+                prompt === "Selected choice: option-a"
+                  ? "continued after scoped idle"
+                  : "ready",
+            };
+          },
+        };
+      },
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["claude", "acp"],
+          id: "claude-code:claude-acp",
+          kind: "claude-code",
+          label: "Claude Code",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      bridgeProfileId: "claude-code:claude-acp",
+      claimId: "claim-prompt",
+      id: "queue-prompt",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      approvalOutcome: "option-a",
+      bridgeProfileId: "claude-code:claude-acp",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "choice-response",
+    });
+
+    expect(closedSessions).toContain("session-1");
+    expect(sessionCount).toBe(2);
+    expect(prompts).toEqual(["hello", "Selected choice: option-a"]);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-choice",
+      result: {
+        choiceId: "option-a",
+        ok: true,
+        text: "continued after scoped idle",
+      },
     });
   });
 
@@ -4517,6 +4649,36 @@ describe("bridge session cwd safety", () => {
       },
     });
     expect(manager.getStatus().liveness?.activeSessions).toEqual([]);
+  });
+});
+
+describe("bridge event upload batching", () => {
+  test("does not split event batches after Convex overload", async () => {
+    const calls: unknown[][] = [];
+    const cloud = {
+      ...fakeCloudClient(),
+      appendEvents: async (events: unknown[]) => {
+        calls.push(events);
+        throw new Error("Too many concurrent requests");
+      },
+    };
+    const manager = new BridgeSessionManager({ cloudClient: cloud });
+    const appendBatch = (
+      manager as unknown as {
+        appendEventBatchWithFallback(events: unknown[]): Promise<{
+          count: number;
+          ok: boolean;
+        }>;
+      }
+    ).appendEventBatchWithFallback.bind(manager);
+
+    const result = await appendBatch([
+      { eventType: "agent_thought_chunk", threadId: "thread-1" },
+      { eventType: "agent_message_chunk", threadId: "thread-1" },
+    ]);
+
+    expect(result).toMatchObject({ ok: false, count: 2 });
+    expect(calls).toHaveLength(1);
   });
 });
 

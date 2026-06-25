@@ -17,6 +17,7 @@ import {
   ensureSecureBridgeConfigFile,
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
+  createBridgeWakeSignal,
   getAllowRemoteCwd,
   getAcpIdleTtlMs,
   getExplicitToolResultTimeoutMs,
@@ -24,10 +25,12 @@ import {
   getToolResultTimeoutMs,
   getConvexUrl,
   normalizeBridgeConfigFile,
+  normalizeQueueCommand,
   parseHermesProfileListOutput,
   parseBridgeArgs,
   preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
+  reconcileBridgeStartupControlCommandStatus,
   runBridgeLoopIteration,
   sendHeartbeatWithClient,
   upsertBridgeRegistration,
@@ -59,6 +62,34 @@ describe("bridge command parsing", () => {
       command: "connect",
       flags: { "app-url": "https://0000.chat" },
       positionals: ["CODE"],
+    });
+  });
+
+  test("normalizes choice response payload text into legacy command fields", () => {
+    expect(
+      normalizeQueueCommand({
+        agentSessionId: "agent-session-1",
+        bridgeProfileId: "claude-code:claude-acp",
+        claimId: "claim-choice",
+        id: "queue-choice",
+        kind: "choice-response",
+        organizationId: "org-1",
+        payload: {
+          continuationPrompt:
+            "The user selected an option for this pending multiple-choice prompt.",
+          externalRequestId: "agent-choice:agent-session-1:123",
+          resumePolicy: "durable_continuation",
+          text: "enable_drive",
+        },
+        threadId: "thread-1",
+      }),
+    ).toMatchObject({
+      approvalOutcome: "enable_drive",
+      externalRequestId: "agent-choice:agent-session-1:123",
+      prompt:
+        "The user selected an option for this pending multiple-choice prompt.",
+      resumePolicy: "durable_continuation",
+      type: "choice-response",
     });
   });
 });
@@ -163,6 +194,207 @@ describe("bridge restart shutdown", () => {
   });
 });
 
+describe("bridge control command lifecycle", () => {
+  test("persists accepted and waiting_for_idle for restartWhenIdle while work is still active", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const writes: BridgeStatus[] = [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      sessionQueues: [
+        {
+          queueDepth: 1,
+          runningQueueItemId: "queue_1",
+          sessionKey: "session_1",
+          threadId: "thread_1",
+        },
+      ],
+    };
+
+    const result = await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [
+            {
+              lastUsedAt: Date.UTC(2026, 5, 22, 8, 59, 0),
+              queueDepth: 1,
+              runningQueueItemId: "queue_1",
+              sessionKey: "session_1",
+              threadId: "thread_1",
+            },
+          ],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 22, 9, 0, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        control: {
+          command: {
+            command: "restartWhenIdle",
+            requestedAt: Date.UTC(2026, 5, 22, 8, 59, 0),
+          },
+        },
+        ok: true,
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async (_path, nextStatus) => {
+        writes.push(JSON.parse(JSON.stringify(nextStatus)) as BridgeStatus);
+      },
+    });
+
+    expect(result.restartRequested).toBe(false);
+    expect(writes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          controlCommandStatus: expect.objectContaining({
+            command: "restartWhenIdle",
+            status: "accepted",
+          }),
+          pendingControlCommand: expect.objectContaining({
+            command: "restartWhenIdle",
+          }),
+        }),
+        expect.objectContaining({
+          controlCommandStatus: expect.objectContaining({
+            command: "restartWhenIdle",
+            status: "waiting_for_idle",
+          }),
+          lifecycle: "draining",
+          pendingControlCommand: expect.objectContaining({
+            command: "restartWhenIdle",
+          }),
+        }),
+      ]),
+    );
+    expect(buildHeartbeatStatusPayload(status)).toMatchObject({
+      controlCommandStatus: {
+        command: "restartWhenIdle",
+        status: "waiting_for_idle",
+      },
+    });
+  });
+
+  test("persists executing restartWhenIdle and flushes logs before returning restartRequested", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const writes: BridgeStatus[] = [];
+    let flushCount = 0;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    const result = await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, {
+        flush: async () => {
+          flushCount += 1;
+        },
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 22, 9, 5, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        control: {
+          command: {
+            command: "restartWhenIdle",
+            requestedAt: Date.UTC(2026, 5, 22, 9, 4, 0),
+          },
+        },
+        ok: true,
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async (_path, nextStatus) => {
+        writes.push(JSON.parse(JSON.stringify(nextStatus)) as BridgeStatus);
+      },
+    });
+
+    expect(result.restartRequested).toBe(true);
+    expect(flushCount).toBe(1);
+    const executingWrite = writes.find(
+      (write) => write.controlCommandStatus?.status === "executing",
+    );
+    expect(executingWrite).toMatchObject({
+      controlCommandStatus: {
+        command: "restartWhenIdle",
+        status: "executing",
+      },
+      lifecycle: "restarting",
+    });
+    expect(executingWrite?.pendingControlCommand).toBeUndefined();
+    expect(status.controlCommandStatus).toMatchObject({
+      command: "restartWhenIdle",
+      status: "executing",
+    });
+  });
+
+  test("marks an executing control command as succeeded on the next startup", () => {
+    const nextStatus = reconcileBridgeStartupControlCommandStatus(
+      {
+        controlCommandStatus: {
+          acceptedAt: Date.UTC(2026, 5, 22, 8, 58, 0),
+          command: "restartWhenIdle",
+          requestedAt: Date.UTC(2026, 5, 22, 8, 57, 0),
+          startedAt: Date.UTC(2026, 5, 22, 8, 59, 0),
+          status: "executing",
+        },
+      },
+      {
+        bridgeVersion: BRIDGE_VERSION,
+        instanceId: "bridge-instance-next",
+        mcpManifestHash: "manifest",
+        pid: 1234,
+        processStartedAt: "2026-06-22T09:00:00.000Z",
+        toolPolicyHash: "policy",
+      },
+      () => Date.UTC(2026, 5, 22, 9, 0, 0),
+    );
+
+    expect(nextStatus).toMatchObject({
+      acceptedAt: Date.UTC(2026, 5, 22, 8, 58, 0),
+      command: "restartWhenIdle",
+      completedAt: Date.UTC(2026, 5, 22, 9, 0, 0),
+      instanceId: "bridge-instance-next",
+      requestedAt: Date.UTC(2026, 5, 22, 8, 57, 0),
+      startedAt: Date.UTC(2026, 5, 22, 8, 59, 0),
+      status: "succeeded",
+    });
+  });
+});
+
 describe("bridge Convex URL resolution", () => {
   test("derives a Convex cloud URL from a Convex site URL", () => {
     expect(deriveConvexCloudUrl("https://example-123.convex.site")).toBe(
@@ -197,6 +429,57 @@ describe("bridge Convex URL resolution", () => {
         {},
       ),
     ).toBe("https://uncommon-starfish-672.convex.cloud");
+  });
+});
+
+describe("bridge wake subscription", () => {
+  test("activates a Convex work signal subscription after heartbeat provides a wake token", async () => {
+    let updateCallback: (() => void) | undefined;
+    const subscriptions: Array<{ args: Record<string, unknown>; query: unknown }> = [];
+    const closes: number[] = [];
+    const fakeClient = {
+      close: async () => {
+        closes.push(Date.now());
+      },
+      onUpdate: (query: unknown, args: Record<string, unknown>, callback: () => void) => {
+        subscriptions.push({ query, args });
+        updateCallback = callback;
+        return { unsubscribe: () => undefined };
+      },
+    };
+    const signal = createBridgeWakeSignal({
+      clientFactory: () => fakeClient,
+      config: {
+        appUrl: "https://0000.chat",
+        bridgeToken: "bridge-token",
+        deviceName: "Test Bridge",
+        deviceId: "bridge-public-1",
+        pairedAt: new Date().toISOString(),
+      },
+      convexUrl: "https://example.convex.cloud",
+      limit: 2,
+      log: Object.assign(() => undefined, { flush: async () => undefined }),
+    });
+
+    signal.updateWakeToken?.({
+      expiresAt: Date.now() + 60_000,
+      refreshAfterMs: 30_000,
+      token: "wake-token",
+    });
+
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]?.args).toEqual({
+      deviceId: "bridge-public-1",
+      limit: 2,
+      wakeToken: "wake-token",
+    });
+
+    const wait = signal.wait(5_000);
+    updateCallback?.();
+    await wait;
+    await signal.close();
+
+    expect(closes).toHaveLength(1);
   });
 });
 

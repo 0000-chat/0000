@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
-import { createWorkerBridgeLogger, redactLogValue } from "./acp-bridge/bridge-log"
+import {
+  createCompositeBridgeLogger,
+  createWorkerBridgeLogger,
+  redactLogValue,
+  type FlushableBridgeLogger,
+} from "./acp-bridge/bridge-log"
 
 describe("bridge log privacy", () => {
   test("redacts sensitive object fields and nested prompt content", () => {
@@ -87,5 +92,29 @@ describe("bridge log privacy", () => {
     await logger.flush()
 
     expect(deliveryCount).toBe(0)
+  })
+
+  test("composite logger writes and flushes all child loggers", async () => {
+    const events: string[] = []
+    const flushed: string[] = []
+    const first = ((entry) => {
+      events.push(`first:${entry.event}`)
+    }) as FlushableBridgeLogger
+    first.flush = async () => {
+      flushed.push("first")
+    }
+    const second = ((entry) => {
+      events.push(`second:${entry.event}`)
+    }) as FlushableBridgeLogger
+    second.flush = async () => {
+      flushed.push("second")
+    }
+
+    const logger = createCompositeBridgeLogger([first, second])
+    logger({ event: "bridge.audit", level: "info" })
+    await logger.flush()
+
+    expect(events).toEqual(["first:bridge.audit", "second:bridge.audit"])
+    expect(flushed.sort()).toEqual(["first", "second"])
   })
 })
