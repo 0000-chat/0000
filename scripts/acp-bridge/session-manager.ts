@@ -74,6 +74,7 @@ export type BridgeSessionQueueItem = {
   approvalOutcome?: string;
   approvalReason?: string;
   approvalLevel?: "ask" | "full_permissions";
+  resumePolicy?: "live_callback" | "durable_continuation";
   externalRequestId?: string;
   externalSessionId?: string;
   organizationId?: string;
@@ -1726,7 +1727,9 @@ export class BridgeSessionManager {
       }
       const threadId = item.threadId ?? item.sessionId;
       const requestedSessionKey = this.sessionKeyForItem(item);
+      const durableContinuation = isDurableContinuationChoiceResponse(item);
       if (
+        !durableContinuation &&
         !key &&
         this.isTerminalInteractionResponseItem(item, requestedSessionKey, threadId)
       ) {
@@ -1742,7 +1745,11 @@ export class BridgeSessionManager {
       if (!sessionKey) {
         throw new Error(`choice response ${item.id} is missing threadId`);
       }
-      if (!key && this.isTerminalInteractionSessionKey(sessionKey)) {
+      if (
+        !durableContinuation &&
+        !key &&
+        this.isTerminalInteractionSessionKey(sessionKey)
+      ) {
         await this.markStaleInteractionResponse(item, type);
         return;
       }
@@ -4012,6 +4019,15 @@ function providerSessionKeyForItem(
 
 function hasExplicitRuntimeScope(item: BridgeSessionQueueItem): boolean {
   return Boolean(item.bridgeProfileId ?? item.hermesProfileName);
+}
+
+function isDurableContinuationChoiceResponse(
+  item: BridgeSessionQueueItem,
+): boolean {
+  return (
+    normalizeType(item) === "choice-response" &&
+    item.resumePolicy === "durable_continuation"
+  );
 }
 
 function applyRuntimeConfigFallback(

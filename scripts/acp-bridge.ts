@@ -4577,6 +4577,11 @@ export function normalizeQueueCommand(
       record.approvalLevel === "full_permissions"
         ? record.approvalLevel
         : undefined,
+    resumePolicy:
+      record.resumePolicy === "live_callback" ||
+      record.resumePolicy === "durable_continuation"
+        ? record.resumePolicy
+        : undefined,
     externalRequestId: stringFromUnknown(record.externalRequestId),
     externalSessionId: stringFromUnknown(record.externalSessionId),
     agentName: stringFromUnknown(record.agentName),
