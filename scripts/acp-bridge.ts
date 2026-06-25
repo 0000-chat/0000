@@ -848,11 +848,7 @@ export function getToolResultTimeoutMs(
   flags: FlagMap,
   env: NodeJS.ProcessEnv = process.env,
 ): number {
-  const rawValue = getFlag(
-    flags,
-    "tool-result-timeout-ms",
-    env.ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS,
-  );
+  const rawValue = getRawToolResultTimeoutMs(flags, env);
   if (rawValue === undefined) {
     return DEFAULT_TOOL_RESULT_TIMEOUT_MS;
   }
@@ -864,6 +860,34 @@ export function getToolResultTimeoutMs(
     );
   }
   return timeoutMs;
+}
+
+export function getExplicitToolResultTimeoutMs(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  const rawValue = getRawToolResultTimeoutMs(flags, env);
+  if (rawValue === undefined) {
+    return undefined;
+  }
+  const timeoutMs = Number(rawValue);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(
+      "tool-result-timeout-ms must be a positive number of milliseconds",
+    );
+  }
+  return timeoutMs;
+}
+
+function getRawToolResultTimeoutMs(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  return getFlag(
+    flags,
+    "tool-result-timeout-ms",
+    env.ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS,
+  );
 }
 
 export function getLocalHardMaxInFlight(
@@ -1466,6 +1490,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   ).map((command) => splitCommand(command));
   const requestTimeoutMs = getRequestTimeoutMs(parsed.flags);
   const toolResultTimeoutMs = getToolResultTimeoutMs(parsed.flags);
+  const explicitToolResultTimeoutMs = getExplicitToolResultTimeoutMs(parsed.flags);
   const resumeEnabled = getAcpResumeEnabled(parsed.flags);
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags);
   const allowRemoteCwd = getAllowRemoteCwd(parsed.flags);
@@ -1634,6 +1659,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         currentToolPolicyHash: () =>
           getBridgeRuntimeIdentity().toolPolicyHash,
         requestTimeoutMs,
+        explicitToolResultTimeoutMs,
         toolResultTimeoutMs,
         resumeEnabled,
         idleSessionTtlMs,

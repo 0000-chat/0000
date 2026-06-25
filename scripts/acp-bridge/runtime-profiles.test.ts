@@ -55,7 +55,7 @@ describe("runtime profile compatibility", () => {
     })
   })
 
-  test("keeps explicit bridge tool timeout overrides authoritative", () => {
+  test("keeps subagent classification when explicit bridge tool timeout overrides duration", () => {
     const profile: BridgeRuntimeProfile = {
       capabilities: {},
       command: ["hermes", "acp"],
@@ -74,9 +74,34 @@ describe("runtime profile compatibility", () => {
         toolName: "delegate_task",
       }),
     ).toEqual({
-      policyId: "explicit-tool-result-timeout",
+      policyId: "hermes-delegate-subagent",
       timeoutMs: 5,
-      toolClass: "standard",
+      toolClass: "subagent",
+    })
+  })
+
+  test("classifies terminal validation commands as long-running under explicit bridge timeout", () => {
+    const profile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      compatibility: hermesRuntimeCompatibility(),
+      id: "hermes:test",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    }
+
+    expect(
+      resolveToolCallTimeoutPolicy({
+        defaultTimeoutMs: 300_000,
+        explicitTimeoutMs: 300_000,
+        profile,
+        toolName: "terminal: HOME=/home/ubuntu bun run quality:gate",
+      }),
+    ).toEqual({
+      policyId: "generic-long-running-terminal-tool",
+      timeoutMs: 300_000,
+      toolClass: "long_running",
     })
   })
 })

@@ -649,7 +649,7 @@ describe("bridge session cwd safety", () => {
         },
         cancel: async () => {},
         sendUserMessage: async () => {
-          context.onEvent(toolCallEvent(1));
+          context.onEvent(toolCallEvent(1, "Tool: 0000/messages.search"));
           await new Promise(() => {});
           throw new Error("unreachable");
         },
@@ -673,6 +673,27 @@ describe("bridge session cwd safety", () => {
         }),
       ),
     );
+    const timeoutResult = cloud.results.find((result) => result.id === "queue-prompt")
+      ?.result as Record<string, unknown>;
+    expect(timeoutResult).toEqual(
+      expect.objectContaining({
+        ageMs: expect.any(Number),
+        agentSessionId: "provider-session",
+        bridgeProfileId: undefined,
+        failureClass: "tool_result_propagation_lost",
+        pendingToolCount: 1,
+        queueItemId: "queue-prompt",
+        reasonCode: "tool_result_timeout",
+        terminal: true,
+        threadId: "thread-1",
+        timeoutMs: 5,
+        toolCallId: "tool-1",
+        toolClass: "standard",
+        toolName: "Tool: 0000/messages.search",
+        toolPolicyId: "explicit-tool-result-timeout",
+      }),
+    );
+    expect(timeoutResult.ageMs as number).toBeGreaterThanOrEqual(5);
 
     expect(closeCount).toBe(1);
     expect(manager.getStatus().sessions).toEqual([]);

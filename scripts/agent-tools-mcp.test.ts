@@ -10,6 +10,7 @@ import {
   buildAgentToolSessionContextText,
   createAgentToolsMcpServer,
   invokeAgentToolOverHttp,
+  resolveAgentToolTimeoutMs,
   toMcpToolResult,
 } from "./agent-tools-mcp"
 
@@ -64,6 +65,15 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.get")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.current")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.read")
+  })
+
+  test("resolves per-tool deadlines for standard 0000 tools", () => {
+    expect(resolveAgentToolTimeoutMs("messages.search")).toBe(30_000)
+    expect(resolveAgentToolTimeoutMs("threads.list")).toBe(20_000)
+    expect(resolveAgentToolTimeoutMs("databases.get")).toBe(20_000)
+    expect(resolveAgentToolTimeoutMs("databases.searchRows")).toBe(30_000)
+    expect(resolveAgentToolTimeoutMs("apps.generateFromRevision")).toBe(30_000)
+    expect(resolveAgentToolTimeoutMs("messages.search", { timeoutMs: 25 })).toBe(25)
   })
 
   test("describes 0000 Chat context and tool usage through MCP resources", () => {
@@ -286,10 +296,11 @@ describe("agent tools MCP server helpers", () => {
     ])
 
     expect(result).toEqual({
-      reasonCode: "TIMEOUT",
+      reasonCode: "TOOL_TIMEOUT",
       error: "Agent tool request timed out after 20ms",
       ok: false,
       retryable: true,
+      safeToRetry: true,
       timeoutMs: 20,
       tool: "messages.search",
     })

@@ -27,6 +27,7 @@ import type {
   NormalizedBridgeEvent,
 } from "./event-normalizer";
 import {
+  type BridgeRuntimeToolCallClass,
   type BridgeRuntimeProfile,
   applyRuntimeMcpServerCompatibility,
   commandKey,
@@ -233,13 +234,26 @@ type ActiveToolCall = {
   startedAt: number;
   timeout: ReturnType<typeof setTimeout>;
   toolCallId: string;
+  toolClass: BridgeRuntimeToolCallClass;
   toolName: string;
+  toolPolicyId: string;
+  timeoutMs: number;
 };
 
 type ToolResultTimeoutDetails = {
   ageMs: number;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  failureClass?: "tool_result_propagation_lost";
+  pendingToolCount: number;
+  queueItemId: string;
+  reasonCode: "tool_result_timeout";
+  threadId?: string;
+  timeoutMs: number;
   toolCallId: string;
+  toolClass: BridgeRuntimeToolCallClass;
   toolName: string;
+  toolPolicyId: string;
 };
 
 const EVENT_BATCH_MAX_SIZE = 25;
@@ -275,6 +289,7 @@ export type BridgeSessionManagerOptions = {
   log?: BridgeLogger;
   livenessTimeoutMs?: number;
   toolResultTimeoutMs?: number;
+  explicitToolResultTimeoutMs?: number;
   supervisor?: BridgeSupervisor;
   processRegistry?: Pick<
     AcpBridgeProcessRegistryLike,
@@ -530,7 +545,10 @@ export class BridgeSessionManager {
     this.idleSessionTtlMs = options.idleSessionTtlMs ?? 0;
     this.livenessTimeoutMs =
       options.livenessTimeoutMs ?? DEFAULT_SESSION_LIVENESS_TIMEOUT_MS;
-    this.explicitToolResultTimeoutMs = options.toolResultTimeoutMs;
+    this.explicitToolResultTimeoutMs =
+      "explicitToolResultTimeoutMs" in options
+        ? options.explicitToolResultTimeoutMs
+        : options.toolResultTimeoutMs;
     this.toolResultTimeoutMs =
       options.toolResultTimeoutMs ?? DEFAULT_TOOL_RESULT_TIMEOUT_MS;
     this.allowRemoteCwd = options.allowRemoteCwd !== false;
@@ -1509,10 +1527,20 @@ export class BridgeSessionManager {
         return;
       }
       const ageMs = Date.now() - activeTool.startedAt;
-      const details = {
+      const details: ToolResultTimeoutDetails = {
         ageMs,
+        agentSessionId: session.providerSessionKey,
+        bridgeProfileId: session.runtimeProfile?.id,
+        failureClass: classifyToolResultTimeoutFailureClass(activeTool),
+        pendingToolCount: this.activeToolCalls.get(queueItemId)?.size ?? 0,
+        queueItemId,
+        reasonCode: "tool_result_timeout",
+        threadId: session.threadId,
+        timeoutMs: activeTool.timeoutMs,
         toolCallId: activeTool.toolCallId,
+        toolClass: activeTool.toolClass,
         toolName: activeTool.toolName,
+        toolPolicyId: activeTool.toolPolicyId,
       };
       this.activeToolTimeoutFailures.set(queueItemId, details);
       this.writeLog({
@@ -1522,10 +1550,6 @@ export class BridgeSessionManager {
         threadId: session.threadId,
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
-        reasonCode: "tool_result_timeout",
-        timeoutMs: policy.timeoutMs,
-        toolClass: policy.toolClass,
-        toolPolicyId: policy.policyId,
         ...details,
       });
       this.activeLivenessFailures.get(queueItemId)?.(
@@ -1537,7 +1561,10 @@ export class BridgeSessionManager {
       startedAt,
       timeout,
       toolCallId: tool.toolCallId,
+      toolClass: policy.toolClass,
       toolName: tool.toolName,
+      toolPolicyId: policy.policyId,
+      timeoutMs: policy.timeoutMs,
     });
   }
 
@@ -3210,6 +3237,24 @@ export class BridgeSessionManager {
 
 function isEmptyVisiblePromptResult(result: { text: string }): boolean {
   return result.text.trim().length === 0;
+}
+
+function classifyToolResultTimeoutFailureClass(
+  tool: Pick<ActiveToolCall, "toolClass" | "toolName">,
+): ToolResultTimeoutDetails["failureClass"] {
+  if (tool.toolClass === "standard" && isZeroChatToolName(tool.toolName)) {
+    return "tool_result_propagation_lost";
+  }
+  return undefined;
+}
+
+function isZeroChatToolName(toolName: string): boolean {
+  return (
+    toolName.startsWith("0000/") ||
+    toolName.startsWith("0000.") ||
+    toolName.includes(" 0000/") ||
+    toolName.includes(": 0000/")
+  );
 }
 
 function classifyPromptError(

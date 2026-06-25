@@ -112,6 +112,16 @@ const GENERIC_SUBAGENT_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
   ],
 }
 
+const GENERIC_LONG_RUNNING_TERMINAL_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
+  id: "generic-long-running-terminal-tool",
+  toolClass: "long_running",
+  toolNamePatterns: [
+    "^terminal(?::|_|-|\\b)",
+    "\\b(?:bun|npm|pnpm|yarn)\\s+run\\s+(?:quality:gate|work:finish|typecheck|build)\\b",
+    "\\bgh\\s+run\\s+watch\\b",
+  ],
+}
+
 export function normalizeCommand(
   command: string | string[] | undefined,
   fallback: string,
@@ -204,24 +214,30 @@ export function resolveToolCallTimeoutPolicy(input: {
   requestTimeoutMs?: number
   toolName: string
 }): BridgeToolCallTimeoutResolution {
-  if (input.explicitTimeoutMs !== undefined) {
-    return {
-      policyId: "explicit-tool-result-timeout",
-      timeoutMs: input.explicitTimeoutMs,
-      toolClass: "standard",
-    }
-  }
-
   const runtimePolicy = input.profile?.compatibility?.toolCallPolicies?.find((policy) =>
     toolCallPolicyMatches(policy, input.toolName),
   )
-  const policy = runtimePolicy ?? (
-    toolCallPolicyMatches(GENERIC_SUBAGENT_TOOL_POLICY, input.toolName)
-      ? GENERIC_SUBAGENT_TOOL_POLICY
-      : undefined
-  )
+  const policy =
+    runtimePolicy ??
+    (
+      toolCallPolicyMatches(GENERIC_SUBAGENT_TOOL_POLICY, input.toolName)
+        ? GENERIC_SUBAGENT_TOOL_POLICY
+        : undefined
+    ) ??
+    (
+      toolCallPolicyMatches(GENERIC_LONG_RUNNING_TERMINAL_TOOL_POLICY, input.toolName)
+        ? GENERIC_LONG_RUNNING_TERMINAL_TOOL_POLICY
+        : undefined
+    )
 
   if (!policy) {
+    if (input.explicitTimeoutMs !== undefined) {
+      return {
+        policyId: "explicit-tool-result-timeout",
+        timeoutMs: input.explicitTimeoutMs,
+        toolClass: "standard",
+      }
+    }
     return {
       policyId: "default-tool-result-timeout",
       timeoutMs: input.defaultTimeoutMs,
@@ -231,7 +247,7 @@ export function resolveToolCallTimeoutPolicy(input: {
 
   return {
     policyId: policy.id,
-    timeoutMs: resolvePolicyTimeoutMs(policy, input),
+    timeoutMs: input.explicitTimeoutMs ?? resolvePolicyTimeoutMs(policy, input),
     toolClass: policy.toolClass,
   }
 }

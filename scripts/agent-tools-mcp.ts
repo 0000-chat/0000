@@ -69,12 +69,13 @@ type AgentToolInvokeFailureReasonCode =
   | "FETCH_ERROR"
   | "HTTP_ERROR"
   | "INVALID_JSON"
-  | "TIMEOUT"
+  | "TOOL_TIMEOUT"
 type AgentToolInvokeFailure = {
   ok: false
   error: string
   reasonCode: AgentToolInvokeFailureReasonCode
   retryable?: boolean
+  safeToRetry?: boolean
   timeoutMs?: number
   httpStatus?: number
   tool?: string
@@ -88,8 +89,28 @@ type AgentToolInvokeResult = AgentToolInvokeFailure | AgentToolInvokeSuccess
 export const AGENT_TOOL_GUIDE_RESOURCE = "https://0000.chat/mcp/resources/agent-tools-guide"
 export const AGENT_TOOL_SESSION_CONTEXT_RESOURCE = "https://0000.chat/mcp/resources/session-context"
 const DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS = 30_000
+const AGENT_TOOL_TIMEOUTS_MS: Partial<Record<AgentToolMcpToolName, number>> = {
+  "databases.get": 20_000,
+  "databases.listRows": 30_000,
+  "databases.searchRows": 30_000,
+  "messages.search": 30_000,
+  "threads.list": 20_000,
+}
 const MAX_ERROR_TEXT_LENGTH = 280
 const MAX_MCP_ERROR_JSON_LENGTH = 1_500
+
+export function resolveAgentToolTimeoutMs(
+  tool: string,
+  options: AgentToolHttpInvokeOptions = {},
+): number {
+  if (options.timeoutMs !== undefined) {
+    return Math.max(1, options.timeoutMs)
+  }
+  return Math.max(
+    1,
+    AGENT_TOOL_TIMEOUTS_MS[tool as AgentToolMcpToolName] ?? DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS,
+  )
+}
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "userPrompts.requestChoice": {
@@ -391,7 +412,7 @@ export async function invokeAgentToolOverHttp(
   fetchImpl: AgentToolFetch = fetch,
   options: AgentToolHttpInvokeOptions = {},
 ): Promise<AgentToolInvokeResult | unknown> {
-  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS)
+  const timeoutMs = resolveAgentToolTimeoutMs(tool, options)
   const abortController = new AbortController()
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
@@ -454,8 +475,9 @@ export async function invokeAgentToolOverHttp(
     if (abortController.signal.aborted) {
       return buildAgentToolInvokeFailure({
         error: `Agent tool request timed out after ${timeoutMs}ms`,
-        reasonCode: "TIMEOUT",
+        reasonCode: "TOOL_TIMEOUT",
         retryable: true,
+        safeToRetry: true,
         timeoutMs,
         tool,
       })
@@ -614,6 +636,7 @@ function boundToolFailureForMcp(result: unknown): AgentToolInvokeFailure {
     ok: false,
     reasonCode: failure.reasonCode ?? "APP_ERROR",
     ...(typeof failure.retryable === "boolean" ? { retryable: failure.retryable } : {}),
+    ...(typeof failure.safeToRetry === "boolean" ? { safeToRetry: failure.safeToRetry } : {}),
     ...(typeof failure.timeoutMs === "number" ? { timeoutMs: failure.timeoutMs } : {}),
     ...(typeof failure.httpStatus === "number" ? { httpStatus: failure.httpStatus } : {}),
     ...(typeof failure.tool === "string" ? { tool: failure.tool } : {}),

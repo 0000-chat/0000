@@ -19,7 +19,9 @@ import {
   buildStartupSecuritySummary,
   getAllowRemoteCwd,
   getAcpIdleTtlMs,
+  getExplicitToolResultTimeoutMs,
   getLocalHardMaxInFlight,
+  getToolResultTimeoutMs,
   getConvexUrl,
   normalizeBridgeConfigFile,
   parseHermesProfileListOutput,
@@ -119,6 +121,18 @@ describe("bridge capacity configuration", () => {
         { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
       ),
     ).toBe(9);
+  });
+
+  test("does not treat the default tool result timeout as an explicit override", () => {
+    expect(getToolResultTimeoutMs({}, {})).toBe(5 * 60_000);
+    expect(getExplicitToolResultTimeoutMs({}, {})).toBeUndefined();
+    expect(
+      getExplicitToolResultTimeoutMs(
+        {},
+        { ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS: "1234" },
+      ),
+    ).toBe(1234);
+    expect(getExplicitToolResultTimeoutMs({ "tool-result-timeout-ms": "5678" }, {})).toBe(5678);
   });
 });
 
