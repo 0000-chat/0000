@@ -90,6 +90,54 @@ describe("bridge command parsing", () => {
       type: "choice-response",
     });
   });
+
+  test("normalizes safe code attribution metadata from queue commands", () => {
+    expect(
+      normalizeQueueCommand({
+        codeAttribution: {
+          gitAuthorEmail: "don@users.noreply.github.com",
+          gitAuthorName: "Don",
+          githubLogin: "don",
+          provider: "github",
+          providerAccountId: "12345",
+          requestedByUserId: "user_123",
+          source: "github-linked-account",
+          accessToken: "must-not-survive",
+        },
+        claimId: "claim-1",
+        id: "queue-1",
+        kind: "prompt",
+        prompt: "Ship it",
+        threadId: "thread-1",
+      }),
+    ).toMatchObject({
+      codeAttribution: {
+        gitAuthorEmail: "don@users.noreply.github.com",
+        gitAuthorName: "Don",
+        githubLogin: "don",
+        provider: "github",
+        providerAccountId: "12345",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
+      type: "prompt",
+    });
+    expect(
+      JSON.stringify(
+        normalizeQueueCommand({
+          codeAttribution: {
+            accessToken: "must-not-survive",
+            gitAuthorEmail: "don@users.noreply.github.com",
+            gitAuthorName: "Don",
+            source: "github-linked-account",
+          },
+          id: "queue-1",
+          kind: "prompt",
+          prompt: "Ship it",
+        }),
+      ),
+    ).not.toContain("must-not-survive");
+  });
 });
 
 describe("Hermes profile discovery", () => {

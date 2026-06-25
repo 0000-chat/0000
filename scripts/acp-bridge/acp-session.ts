@@ -76,6 +76,7 @@ export type HermesAcpFinalTextDiagnostics = {
 export type HermesAcpPromptOptions = {
   systemPrompt?: string
   threadHistory?: string
+  attributionContext?: string
   attachmentReferenceText?: string
   attachments?: HermesAcpPromptAttachment[]
   autoApprovePermissionRequests?: boolean
@@ -151,6 +152,7 @@ export type HermesAcpSessionOptions = {
   cwd?: string
   initialSessionId?: string
   mcpServers?: HermesAcpMcpServer[]
+  env?: Record<string, string>
   processRegistry?: Pick<AcpBridgeProcessRegistryLike, "registerProcess" | "terminateProcess">
   processRegistryMetadata?: HermesAcpProcessRegistryMetadata
   processExitGraceMs?: number
@@ -160,7 +162,12 @@ export type HermesAcpSessionOptions = {
   onEventBoundary?: () => void | Promise<void>
   onError?: (error: Error) => void | Promise<void>
   runtimeClient?: BridgeAcpRuntimeClient
-  spawnProcess?: (command: string, args: string[], cwd?: string) => ChildProcessWithoutNullStreams
+  spawnProcess?: (
+    command: string,
+    args: string[],
+    cwd?: string,
+    env?: Record<string, string>,
+  ) => ChildProcessWithoutNullStreams
   terminalAdapter?: SdkAcpRuntimeTerminalAdapter
 }
 
@@ -251,6 +258,7 @@ export class HermesAcpSession {
   readonly cwd?: string
   readonly initialSessionId?: string
   readonly mcpServers: HermesAcpMcpServer[]
+  readonly env?: Record<string, string>
   readonly processExitGraceMs: number
   readonly requestTimeoutMs: number
   readonly resumeEnabled: boolean
@@ -269,6 +277,7 @@ export class HermesAcpSession {
     command: string,
     args: string[],
     cwd?: string,
+    env?: Record<string, string>,
   ) => ChildProcessWithoutNullStreams
   private child?: ChildProcessWithoutNullStreams
   private registeredProcess?: AcpBridgeProcessRegistryEntry
@@ -299,6 +308,7 @@ export class HermesAcpSession {
     this.cwd = expandLocalCwd(options.cwd)
     this.initialSessionId = options.initialSessionId
     this.mcpServers = options.mcpServers ?? []
+    this.env = options.env
     this.processExitGraceMs = options.processExitGraceMs ?? DEFAULT_ACP_PROCESS_EXIT_GRACE_MS
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_ACP_REQUEST_TIMEOUT_MS
     this.resumeEnabled = options.resumeEnabled === true
@@ -391,6 +401,7 @@ export class HermesAcpSession {
           sessionId,
           prompt: buildPromptContentBlocks(promptText, options.systemPrompt, {
             attachmentBlocks,
+            attributionContext: options.attributionContext,
             includeContinuityFallbackNote: this.externalContinuityFallback,
             threadHistory: options.threadHistory,
           }) as BridgePromptContentBlock[],
@@ -702,7 +713,7 @@ export class HermesAcpSession {
     }
 
     const [executable, ...args] = this.command
-    this.child = this.spawnProcess(executable, args, this.cwd)
+    this.child = this.spawnProcess(executable, args, this.cwd, this.env)
     if (this.processRegistry && typeof this.child.pid === "number") {
       this.registeredProcess = await this.processRegistry.registerProcess({
         args,
@@ -1246,12 +1257,14 @@ export function buildPromptContentBlocks(
   systemPrompt?: string,
   continuity?: {
     attachmentBlocks?: Array<Record<string, unknown>>
+    attributionContext?: string
     includeContinuityFallbackNote?: boolean
     threadHistory?: string
   },
 ) {
   const normalizedSystemPrompt = systemPrompt?.trim()
   const normalizedThreadHistory = continuity?.threadHistory?.trim()
+  const normalizedAttributionContext = continuity?.attributionContext?.trim()
   const userBlock = { type: "text", text }
   const appSystemPromptBase = normalizedSystemPrompt
     ? `${HIDDEN_ZERO_CHAT_SYSTEM_PROMPT}\n\nSpace instructions from the user:\n${normalizedSystemPrompt}`
@@ -1261,9 +1274,13 @@ export function buildPromptContentBlocks(
       ? `External ACP session continuity is unavailable for this turn, so a fresh ACP session is being used. Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
       : `Preserve app-level continuity using the Recent thread history below. Do not treat the history as a new user request; answer the final user message.\n\nRecent thread history:\n${normalizedThreadHistory}`
     : undefined
-  const appSystemPrompt = threadHistoryPrompt
-    ? `${appSystemPromptBase}\n\n${threadHistoryPrompt}`
-    : appSystemPromptBase
+  const appSystemPrompt = [
+    appSystemPromptBase,
+    normalizedAttributionContext || undefined,
+    threadHistoryPrompt,
+  ]
+    .filter((part) => part !== undefined)
+    .join("\n\n")
 
   return [
     {
@@ -1353,18 +1370,31 @@ function defaultSpawnProcess(
   command: string,
   args: string[],
   cwd?: string,
+  env?: Record<string, string>,
 ): ChildProcessWithoutNullStreams {
+  const processEnv = buildAcpProcessEnv(env)
   if (process.versions.bun) {
     return spawn(
       "node",
       [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), command, ...args],
       {
         cwd,
+        env: processEnv,
         stdio: ["pipe", "pipe", "pipe"],
       },
     )
   }
-  return spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"] })
+  return spawn(command, args, { cwd, env: processEnv, stdio: ["pipe", "pipe", "pipe"] })
+}
+
+export function buildAcpProcessEnv(
+  env?: Record<string, string>,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv | undefined {
+  if (!env || Object.keys(env).length === 0) {
+    return undefined
+  }
+  return { ...baseEnv, ...env }
 }
 
 function extractSessionId(result: unknown, fallback?: string): string {

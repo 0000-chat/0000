@@ -61,6 +61,7 @@ import {
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
   type BridgeSessionQueueItem,
 } from "./acp-bridge/session-manager";
+import { codeAttributionFromUnknown } from "./acp-bridge/git-attribution";
 import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./acp-bridge/runtime-discovery";
 import {
   defaultAgentCommandForEnvironment,
@@ -4565,6 +4566,7 @@ export function normalizeQueueCommand(
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
+    codeAttribution: codeAttributionFromUnknown(record.codeAttribution),
     cwd: stringFromUnknown(record.cwd),
     prompt,
     threadHistory: stringFromUnknown(record.threadHistory),
