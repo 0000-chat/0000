@@ -997,6 +997,58 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("does not terminalize stale tool timeouts after later provider progress", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "read: file", "tool-old"));
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          context.onEvent(toolCallEvent(2, "patch (replace): file", "tool-new"));
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          context.onEvent(toolResultEvent(3, "tool-new"));
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 30,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout_superseded",
+        queueId: "queue-prompt",
+        reasonCode: "superseded_by_later_provider_progress",
+        toolCallId: "tool-old",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        error: "tool_result_timeout",
+        event: "agent.turn.failed",
+      }),
+    );
+  });
+
   test("attributes late reused-session events to the most recent turn", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
@@ -4790,41 +4842,48 @@ function streamChunkEvent(
   };
 }
 
-function toolCallEvent(sequence: number, toolName = "shell"): NormalizedBridgeEvent {
+function toolCallEvent(
+  sequence: number,
+  toolName = "shell",
+  toolCallId = "tool-1",
+): NormalizedBridgeEvent {
   return {
     eventType: "tool_call",
     externalEventId: `session-1:${sequence}:tool_call`,
     part: {
       json: {
         state: "input-available",
-        toolCallId: "tool-1",
+        toolCallId,
         toolName,
       },
       status: "streaming",
       text: "tool started",
       type: "tool_call",
     },
-    payload: { sessionUpdate: "tool_call", toolCallId: "tool-1" },
+    payload: { sessionUpdate: "tool_call", toolCallId },
     providerSequence: sequence,
     source: "acp_bridge",
   };
 }
 
-function toolResultEvent(sequence: number): NormalizedBridgeEvent {
+function toolResultEvent(
+  sequence: number,
+  toolCallId = "tool-1",
+): NormalizedBridgeEvent {
   return {
     eventType: "tool_result",
     externalEventId: `session-1:${sequence}:tool_result`,
     part: {
       json: {
         state: "output-available",
-        toolCallId: "tool-1",
+        toolCallId,
         toolName: "shell",
       },
       status: "streaming",
       text: "tool finished",
       type: "tool_result",
     },
-    payload: { sessionUpdate: "tool_result", toolCallId: "tool-1" },
+    payload: { sessionUpdate: "tool_result", toolCallId },
     providerSequence: sequence,
     source: "acp_bridge",
   };

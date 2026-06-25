@@ -1527,6 +1527,29 @@ export class BridgeSessionManager {
       if (!activeTool) {
         return;
       }
+      const liveness = this.activeLiveness.get(queueItemId);
+      if (
+        liveness &&
+        liveness.lastMeaningfulEventAt > activeTool.startedAt
+      ) {
+        this.clearToolCall(queueItemId, activeTool.toolCallId);
+        this.writeLog({
+          level: "debug",
+          event: "bridge.session.tool_result_timeout_superseded",
+          queueId: queueItemId,
+          threadId: session.threadId,
+          agentSessionId: session.providerSessionKey,
+          bridgeProfileId: session.runtimeProfile?.id,
+          lastMeaningfulEventAt: new Date(
+            liveness.lastMeaningfulEventAt,
+          ).toISOString(),
+          pendingToolCount: this.activeToolCalls.get(queueItemId)?.size ?? 0,
+          reasonCode: "superseded_by_later_provider_progress",
+          toolCallId: activeTool.toolCallId,
+          toolName: activeTool.toolName,
+        });
+        return;
+      }
       const ageMs = Date.now() - activeTool.startedAt;
       const details: ToolResultTimeoutDetails = {
         ageMs,
