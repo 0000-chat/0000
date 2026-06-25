@@ -602,6 +602,15 @@ describe("bridge session cwd safety", () => {
     await manager.handleQueueItem({
       bridgeProfileId: "codex:codex-acp",
       claimId: "claim-1",
+      codeAttribution: {
+        gitAuthorEmail: "don@users.noreply.github.com",
+        gitAuthorName: "Don",
+        githubLogin: "don",
+        provider: "github",
+        providerAccountId: "12345",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
       id: "queue-1",
       prompt: "hello",
       threadId: "thread-1",
@@ -611,6 +620,14 @@ describe("bridge session cwd safety", () => {
     expect(cloud.events[0]?.[0]?.normalizedPayload).toMatchObject({
       text: "Agent started this run.",
     });
+    expect(cloud.events[0]?.[0]?.rawPayload).toMatchObject({
+      codeAttribution: {
+        githubLogin: "don",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
+    });
+    expect(JSON.stringify(cloud.events[0]?.[0])).not.toContain("accessToken");
   });
 
   test("mirrors prompt lifecycle into the shadow supervisor", async () => {

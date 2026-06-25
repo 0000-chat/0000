@@ -986,7 +986,11 @@ export class BridgeSessionManager {
       externalEventId: `${item.id}:message_started`,
       source: "bridge",
       eventType: "message_started",
-      payload: { queueId: item.id, queueType: normalizeType(item) },
+      payload: {
+        codeAttribution: item.codeAttribution,
+        queueId: item.id,
+        queueType: normalizeType(item),
+      },
       part: {
         type: "event",
         text: `${displayNameForSessionStart(session)} started this run.`,
