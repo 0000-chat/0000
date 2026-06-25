@@ -1646,6 +1646,59 @@ describe("bridge session cwd safety", () => {
     ]);
   });
 
+  test("continues durable choice responses after the ACP session terminalizes", async () => {
+    const prompts: string[] = [];
+    const continuationPrompt =
+      "The user selected an option for this pending multiple-choice prompt:\n\nHow should I enumerate the files?\n\nSelected: Enable Drive API (enable_drive)";
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt);
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text:
+              prompt === continuationPrompt
+                ? "continuing after durable choice"
+                : "",
+          };
+        },
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-terminal",
+      id: "queue-terminal",
+      prompt: "terminalize",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      approvalOutcome: "enable_drive",
+      claimId: "claim-choice",
+      id: "queue-choice",
+      prompt: continuationPrompt,
+      resumePolicy: "durable_continuation",
+      threadId: "thread-1",
+      type: "choice-response",
+    });
+
+    expect(prompts).toEqual(["terminalize", continuationPrompt]);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-choice",
+      result: {
+        choiceId: "enable_drive",
+        ok: true,
+        text: "continuing after durable choice",
+      },
+    });
+  });
+
   test("bounds remembered terminal interaction session keys", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({

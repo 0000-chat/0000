@@ -76,6 +76,7 @@ describe("bridge command parsing", () => {
           continuationPrompt:
             "The user selected an option for this pending multiple-choice prompt.",
           externalRequestId: "agent-choice:agent-session-1:123",
+          resumePolicy: "durable_continuation",
           text: "enable_drive",
         },
         threadId: "thread-1",
@@ -85,6 +86,7 @@ describe("bridge command parsing", () => {
       externalRequestId: "agent-choice:agent-session-1:123",
       prompt:
         "The user selected an option for this pending multiple-choice prompt.",
+      resumePolicy: "durable_continuation",
       type: "choice-response",
     });
   });
