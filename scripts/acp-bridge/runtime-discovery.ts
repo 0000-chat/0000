@@ -679,7 +679,7 @@ export function discoverLocalAcpCommands(
       terminateSpawnedAcpCommand(child)
       resolve(commands)
     }
-    const timeout = setTimeout(() => settle([]), 5000)
+    const timeout = setTimeout(() => settle([]), 15_000)
     child.on("error", () => settle([]))
     child.on("close", () => settle([]))
     const client = SdkAcpRuntimeClient.fromChildProcess(
@@ -698,12 +698,17 @@ export function discoverLocalAcpCommands(
   })
 }
 
-function commandsFromSessionUpdate(value: unknown): BridgeRuntimeAvailableCommand[] {
+export function commandsFromSessionUpdate(value: unknown): BridgeRuntimeAvailableCommand[] {
   const update = recordFromUnknown(value)
   if (update.sessionUpdate !== "available_commands_update") {
     return []
   }
-  return normalizeAvailableCommands(arrayFromUnknown(update.availableCommands)) ?? []
+  return (
+    normalizeAvailableCommands(
+      arrayFromUnknown(update.availableCommands) ??
+        arrayFromUnknown(update.available_commands),
+    ) ?? []
+  )
 }
 
 function firstLine(value: string): string | undefined {

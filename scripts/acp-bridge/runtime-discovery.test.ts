@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs"
 import { chmod, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import {
   capabilitiesFromInitializeResult,
+  commandsFromSessionUpdate,
   discoverRuntimeProfiles,
   resolveExecutableForSpawn,
   runtimeDiscoveryEnv,
@@ -12,6 +14,30 @@ import {
 const noDiscoveredCommands = async () => []
 
 describe("runtime discovery", () => {
+  test("extracts ACP slash command updates from snake_case and camelCase SDK fields", () => {
+    const runtimeDiscoverySource = readFileSync(
+      new URL("./runtime-discovery.ts", import.meta.url),
+      "utf8",
+    )
+    expect(runtimeDiscoverySource).toContain("setTimeout(() => settle([]), 15_000)")
+    expect(
+      commandsFromSessionUpdate({
+        sessionUpdate: "available_commands_update",
+        available_commands: [
+          { name: "/learn", description: "Save a reusable lesson", input: { hint: "what to learn" } },
+        ],
+      }),
+    ).toEqual([
+      { name: "learn", description: "Save a reusable lesson", inputHint: "what to learn" },
+    ])
+    expect(
+      commandsFromSessionUpdate({
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "status", description: "Show status" }],
+      }),
+    ).toEqual([{ name: "status", description: "Show status" }])
+  })
+
   test("resolves ACP executables before the Bun node proxy can lose shim PATH entries", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-bin-"))
     const executablePath = join(tempDir, "shim-runtime")
