@@ -29,6 +29,7 @@ ${ZERO_CHAT_APP_CONTEXT_POLICY}
 Use the 0000-chat MCP tools for 0000 Chat data and actions:
 - userPrompts.requestChoice (ask the user a structured multiple-choice question; use this instead of printing a lettered list when you need the multiple-choice UI or decision-needed thread icon)
 - threads.list
+- threads.create (create a new thread in a space; pass agentIdOrSlug to assign another usable agent, or agentIdOrSlug:"self" for the calling agent)
 - messages.search
 - settings.setDefaultApprovalLevel (use only when the user explicitly asks to change their default approval mode, such as enabling trusted local automation; it requires in-thread approval unless this thread already has full permissions)
 - agents.list, agents.sendMailboxMessage (use for agent-to-agent handoffs; sendMailboxMessage records durable mailbox handoffs and supports responsePolicy values fire-and-forget, reply-allowed, and reply-requested. Replies must reference parentMailboxMessageId and stay within maxHops; mailbox delivery does not automatically start or loop another agent session)
