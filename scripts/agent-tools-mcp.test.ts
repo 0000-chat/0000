@@ -18,6 +18,7 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toEqual([
       "userPrompts.requestChoice",
       "threads.list",
+      "threads.create",
       "messages.search",
       "settings.setDefaultApprovalLevel",
       "agents.list",
@@ -61,6 +62,7 @@ describe("agent tools MCP server helpers", () => {
       "scripts.read",
     ])
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.list")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.create")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.get")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.current")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.read")
@@ -75,6 +77,8 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("multiple-choice UI")
     expect(buildAgentToolGuideText()).toContain("spaces.archive")
     expect(buildAgentToolGuideText()).toContain("threads.list")
+    expect(buildAgentToolGuideText()).toContain("threads.create")
+    expect(buildAgentToolGuideText()).toContain("agentIdOrSlug")
     expect(buildAgentToolGuideText()).not.toContain("threads.current")
     expect(buildAgentToolGuideText()).not.toContain("threads.read")
     expect(buildAgentToolGuideText()).not.toContain("call threads.current first")
@@ -144,6 +148,23 @@ describe("agent tools MCP server helpers", () => {
         threadId: "thread_abc",
       }),
     ).not.toContain("mcpServer: 0000-chat")
+  })
+
+  test("validates thread creation schema including self assignment", () => {
+    const schema = AGENT_TOOL_MCP_INPUT_SCHEMAS["threads.create"]
+
+    expect(schema.safeParse({
+      agentIdOrSlug: "self",
+      approvalLevel: "full_permissions",
+      clientThreadId: "client-thread-123",
+      initialUserMessage: "Start here only if requested.",
+      requireAgentSession: true,
+      spaceIdOrSlug: "build",
+      summary: "Follow-up context",
+      title: "Follow-up thread",
+    }).success).toBe(true)
+    expect(schema.safeParse({ title: "Missing space" }).success).toBe(false)
+    expect(schema.safeParse({ approvalLevel: "always", spaceIdOrSlug: "build" }).success).toBe(false)
   })
 
   test("keeps the public mailbox tool schema aligned with conversation replies", () => {
