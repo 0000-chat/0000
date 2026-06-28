@@ -99,7 +99,7 @@ describe("ACP final text extraction", () => {
       }),
     })
 
-    await session.sendUserMessage("Can you repeat that but in a more simple way?", {
+    const result = await session.sendUserMessage("Can you repeat that but in a more simple way?", {
       threadHistory:
         "Current 0000 Chat context:\n- threadId: thread_123\n\nRecent thread history:\nUser: You were working on reviving thread context\nAssistant: The bridge should replay history",
     })
@@ -114,6 +114,116 @@ describe("ACP final text extraction", () => {
     expect(systemBlockText).toContain("Recent thread history:")
     expect(systemBlockText).toContain("User: You were working on reviving thread context")
     expect(systemBlockText).toContain("Assistant: The bridge should replay history")
+    expect(result.continuityMode).toBe("checkpoint")
+    expect(result.threadHistoryInjected).toBe(true)
+  })
+
+  test("omits supplied thread history when reusing a hot ACP session", async () => {
+    const requests: RuntimeRequest[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.sendUserMessage("First turn")
+    const result = await session.sendUserMessage("Follow-up turn", {
+      threadHistory:
+        "Recent thread history:\nUser: prior context\nAssistant: prior answer",
+    })
+
+    const promptRequests = requests.filter(
+      (request) => request.method === "session/prompt",
+    )
+    const secondPromptParams = promptRequests[1]?.params as
+      | { prompt?: Array<Record<string, unknown>> }
+      | undefined
+    const systemBlockText = secondPromptParams?.prompt?.find((block) => {
+      const meta = block._meta as Record<string, unknown> | undefined
+      return meta?.["0000.chat/role"] === "system"
+    })?.text
+
+    expect(systemBlockText).not.toContain("Recent thread history:")
+    expect(systemBlockText).not.toContain("User: prior context")
+    expect(result.continuityMode).toBe("hot")
+    expect(result.threadHistoryInjected).toBe(false)
+  })
+
+  test("omits supplied thread history after native ACP session load succeeds", async () => {
+    const requests: RuntimeRequest[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      initialSessionId: "external-session-1",
+      resumeEnabled: true,
+      runtimeClient: createFakeRuntimeClient({
+        initializeResult: {
+          agentCapabilities: { loadSession: true, sessionCapabilities: {} },
+          protocolVersion: 1,
+        },
+        requests,
+        updates: [],
+      }),
+    })
+
+    const result = await session.sendUserMessage("Continue the work", {
+      threadHistory:
+        "Recent thread history:\nUser: checkpoint context\nAssistant: checkpoint answer",
+    })
+
+    expect(requests.some((request) => request.method === "session/load")).toBe(
+      true,
+    )
+    const promptRequest = requests.find(
+      (request) => request.method === "session/prompt",
+    )
+    const params = promptRequest?.params as
+      | { prompt?: Array<Record<string, unknown>> }
+      | undefined
+    const systemBlockText = params?.prompt?.find((block) => {
+      const meta = block._meta as Record<string, unknown> | undefined
+      return meta?.["0000.chat/role"] === "system"
+    })?.text
+
+    expect(systemBlockText).not.toContain("Recent thread history:")
+    expect(systemBlockText).not.toContain("User: checkpoint context")
+    expect(result.continuityMode).toBe("native")
+    expect(result.threadHistoryInjected).toBe(false)
+    expect(result.externalContinuity).toEqual({
+      attempted: true,
+      fallback: false,
+      loaded: true,
+    })
+  })
+
+  test("extracts provider token usage from prompt results", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({
+        promptResult: {
+          model: "gpt-5",
+          stopReason: "end_turn",
+          usage: {
+            input_tokens: 120,
+            input_tokens_details: { cached_tokens: 96 },
+            output_tokens: 30,
+            total_tokens: 150,
+          },
+        },
+        updates: [],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.usage).toEqual({
+      cachedInputTokens: 96,
+      inputTokens: 120,
+      modelId: "gpt-5",
+      outputTokens: 30,
+      totalTokens: 150,
+    })
   })
 
   test("keeps Codex ACP final chunks emitted after completed tool activity", async () => {
