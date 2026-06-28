@@ -19,7 +19,7 @@
     "quality": "bun test && bun run typecheck && bun run observability:check"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.25.0",
+    "@agentclientprotocol/sdk": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "convex": "^1.39.1",
     "zod": "^4.4.3"
