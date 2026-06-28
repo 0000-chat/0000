@@ -110,6 +110,7 @@ const DEFAULT_RESULT_PATH = "/api/agent-bridge/queue/result";
 const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
+const DEFAULT_IDLE_HEARTBEAT_MS = 5 * 60_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
 const DEFAULT_RESTART_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
@@ -131,7 +132,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.22";
+export const BRIDGE_VERSION = "0.1.23";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -238,9 +239,14 @@ type ProposedAgentProfile = {
 
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
+type BridgeWakeWaitResult = "signal" | "timeout";
+type BridgeLoopPollReason = "active" | "startup" | "timer" | "wake";
+
 type BridgeWakeSignal = {
-  wait(timeoutMs: number): Promise<void>;
+  wait(timeoutMs: number): Promise<BridgeWakeWaitResult>;
   close(): Promise<void>;
+  isWakeSubscriptionActive?(): boolean;
+  nextWakeTokenRefreshAt?(): number | undefined;
   updateWakeToken?(wake: BridgeWakeToken | undefined): void;
 };
 
@@ -634,6 +640,7 @@ export type BridgeLoopIterationInput = {
   canClaimWork?: () => boolean;
   getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
+  pollReason?: BridgeLoopPollReason;
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
   wakeSignal?: BridgeWakeSignal;
@@ -1812,16 +1819,40 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     await persistAggregateStatus();
   };
-  const waitForAnyWakeSignal = async () => {
+  const idleWakeSignalTimeoutMs = () => {
+    const fallbackMs = Math.max(pollMs, 30_000);
+    let nextRefreshAt = Number.POSITIVE_INFINITY;
+    for (const context of contexts.values()) {
+      if (!context.wakeSignal.isWakeSubscriptionActive?.()) {
+        return fallbackMs;
+      }
+      const refreshAt = context.wakeSignal.nextWakeTokenRefreshAt?.();
+      if (typeof refreshAt !== "number" || !Number.isFinite(refreshAt)) {
+        return fallbackMs;
+      }
+      nextRefreshAt = Math.min(nextRefreshAt, refreshAt);
+    }
+    if (!Number.isFinite(nextRefreshAt)) {
+      return fallbackMs;
+    }
+    const refreshDelayMs = nextRefreshAt - Date.now();
+    return refreshDelayMs > 0
+      ? Math.max(Math.min(refreshDelayMs, DEFAULT_IDLE_HEARTBEAT_MS), pollMs)
+      : fallbackMs;
+  };
+  const waitForAnyWakeSignal = async (): Promise<BridgeLoopPollReason> => {
     const signals = Array.from(contexts.values()).map(
       (context) => context.wakeSignal,
     );
-    const timeoutMs = totalInFlight() > 0 ? pollMs : Math.max(pollMs, 30_000);
+    const timeoutMs = totalInFlight() > 0 ? pollMs : idleWakeSignalTimeoutMs();
     if (signals.length === 0) {
       await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-      return;
+      return "timer";
     }
-    await Promise.race(signals.map((signal) => signal.wait(timeoutMs)));
+    const result = await Promise.race(
+      signals.map((signal) => signal.wait(timeoutMs)),
+    );
+    return result === "signal" ? "wake" : "timer";
   };
 
   await ensureContexts();
@@ -1991,10 +2022,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     void stop({ reason: "process signal", signal: "SIGTERM" }),
   );
 
+  let nextPollReason: BridgeLoopPollReason = "startup";
   while (!stopping) {
     await ensureContexts();
     await refreshRuntimeConformanceIfStale();
+    const loopPollReason =
+      totalInFlight() > 0 ? "active" : nextPollReason;
     for (const context of contexts.values()) {
+      const pollReason =
+        loopPollReason === "timer" &&
+        !context.wakeSignal.isWakeSubscriptionActive?.()
+          ? "wake"
+          : loopPollReason;
       const bridgeCapacity = buildBridgeCapacitySnapshot(
         contexts.values(),
         localHardMaxInFlight,
@@ -2109,6 +2148,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         getRuntimeConformance: runtimeConformanceSummary,
         writeStatus: persistAggregateStatus,
         wakeSignal: context.wakeSignal,
+        heartbeatIntervalMs:
+          pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
+        pollReason,
       });
       if (result.restartRequested) {
         await stop({
@@ -2119,7 +2161,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         process.exit(0);
       }
     }
-    await waitForAnyWakeSignal();
+    nextPollReason = await waitForAnyWakeSignal();
   }
 }
 
@@ -2635,6 +2677,7 @@ export async function runBridgeLoopIteration(
   const persistStatus = input.writeStatus ?? writeStatus;
   const currentTime = input.now ?? Date.now;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
+  const pollReason = input.pollReason ?? "wake";
 
   const syncBridgeStatus = () => {
     syncBridgeRuntimeStatus(
@@ -2891,7 +2934,9 @@ export async function runBridgeLoopIteration(
       await persistStatus(input.statusPath, input.status);
     }
     const availableSlots = input.maxInFlight - input.inFlightCommands.size;
-    if (availableSlots > 0) {
+    const shouldPollQueue =
+      pollReason !== "timer" || input.inFlightCommands.size > 0;
+    if (availableSlots > 0 && shouldPollQueue) {
       let processHealth = input.getProcessHealth?.();
       if (processHealth) {
         input.status.processHealth = processHealth;
@@ -4131,6 +4176,8 @@ export function createBridgeWakeSignal(input: {
   let client: BridgeWakeSignalClient | undefined;
   let unsubscribe: (() => void) | undefined;
   let activeToken: string | undefined;
+  let activeTokenExpiresAt: number | undefined;
+  let activeTokenRefreshAt: number | undefined;
   const waiters = new Set<() => void>();
   const clientFactory =
     input.clientFactory ??
@@ -4142,7 +4189,7 @@ export function createBridgeWakeSignal(input: {
       resolve();
     }
   };
-  const teardownSubscription = async () => {
+  const teardownSubscription = async (clearState = false) => {
     unsubscribe?.();
     unsubscribe = undefined;
     const previousClient = client;
@@ -4150,13 +4197,25 @@ export function createBridgeWakeSignal(input: {
     if (previousClient) {
       await previousClient.close();
     }
+    if (clearState) {
+      activeToken = undefined;
+      activeTokenExpiresAt = undefined;
+      activeTokenRefreshAt = undefined;
+    }
   };
   const subscribe = (wakeToken: BridgeWakeToken) => {
     if (closed || wakeToken.token === activeToken) {
       return;
     }
     void teardownSubscription();
+    const now = Date.now();
+    const refreshAfterMs = Math.max(
+      1,
+      Math.min(wakeToken.refreshAfterMs, wakeToken.expiresAt - now),
+    );
     activeToken = wakeToken.token;
+    activeTokenExpiresAt = wakeToken.expiresAt;
+    activeTokenRefreshAt = now + refreshAfterMs;
     client = clientFactory(input.convexUrl!);
     const query = makeFunctionReference<"query">("bridgeOutboundQueue:workSignal");
     const result = client.onUpdate(
@@ -4196,24 +4255,31 @@ export function createBridgeWakeSignal(input: {
   return {
     wait: async (timeoutMs: number) => {
       if (closed) {
-        return;
+        return "timeout";
       }
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => {
-          waiters.delete(resolve);
-          resolve();
-        }, timeoutMs);
-        waiters.add(() => {
+      return await new Promise<BridgeWakeWaitResult>((resolve) => {
+        const onWake = () => {
           clearTimeout(timeout);
-          resolve();
-        });
+          resolve("signal");
+        };
+        const timeout = setTimeout(() => {
+          waiters.delete(onWake);
+          resolve("timeout");
+        }, timeoutMs);
+        waiters.add(onWake);
       });
     },
     close: async () => {
       closed = true;
       wake();
-      await teardownSubscription();
+      await teardownSubscription(true);
     },
+    isWakeSubscriptionActive: () =>
+      !closed &&
+      Boolean(unsubscribe) &&
+      typeof activeTokenExpiresAt === "number" &&
+      activeTokenExpiresAt > Date.now(),
+    nextWakeTokenRefreshAt: () => activeTokenRefreshAt,
     updateWakeToken: (wakeToken) => {
       if (!wakeToken || wakeToken.expiresAt <= Date.now()) {
         return;
@@ -4230,6 +4296,7 @@ function createTimeoutWakeSignal(): BridgeWakeSignal {
       if (!closed) {
         await sleep(timeoutMs);
       }
+      return "timeout";
     },
     close: async () => {
       closed = true;

@@ -1259,6 +1259,65 @@ describe("bridge supervisor claim gating", () => {
     });
   });
 
+  test("idle timer refreshes heartbeat without polling the queue", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const now = Date.UTC(2026, 5, 5, 10, 10, 0);
+    let heartbeatCount = 0;
+    let cleanupRan = false;
+    let claimed = false;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      lastHeartbeatAt: new Date(now - 5 * 60_000 - 1).toISOString(),
+      recentErrors: [],
+    };
+    status.lastHeartbeatSignature = bridgeHeartbeatSignature(status);
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => {
+        claimed = true;
+        return [];
+      },
+      cleanupStaleClaims: async () => {
+        cleanupRan = true;
+        return { inspected: 0, released: 0 };
+      },
+      config: bridgeRegistration(),
+      heartbeatIntervalMs: 5 * 60_000,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => now,
+      pollReason: "timer",
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1;
+        return { ok: true };
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(heartbeatCount).toBe(1);
+    expect(cleanupRan).toBe(false);
+    expect(claimed).toBe(false);
+    expect(status.lastPollAt).toBeUndefined();
+  });
+
   test("skips queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
