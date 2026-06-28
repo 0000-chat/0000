@@ -1470,6 +1470,113 @@ describe("bridge session cwd safety", () => {
     });
   });
 
+  test("persists ACP continuity metadata in prompt results", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          continuityMode: "native" as const,
+          events: [],
+          externalContinuity: {
+            attempted: true,
+            fallback: false,
+            loaded: true,
+          },
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ok",
+          threadHistoryInjected: false,
+        }),
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadHistory: "Recent thread history:\nUser: cached context",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: {
+        acpContinuityMode: "native",
+        acpExternalContinuity: {
+          attempted: true,
+          fallback: false,
+          loaded: true,
+        },
+        acpThreadHistoryInjected: false,
+        ok: true,
+      },
+    });
+  });
+
+  test("persists ACP usage metadata and usage update events in prompt results", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ok",
+          usage: {
+            cachedInputTokens: 96,
+            inputTokens: 120,
+            modelId: "gpt-5",
+            outputTokens: 30,
+            totalTokens: 150,
+          },
+        }),
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: {
+        acpUsage: {
+          cachedInputTokens: 96,
+          inputTokens: 120,
+          modelId: "gpt-5",
+          outputTokens: 30,
+          totalTokens: 150,
+        },
+        ok: true,
+      },
+    });
+    const usageEvent = flattenPersistedEvents(cloud.events).find(
+      (event) => event.eventType === "usage_update",
+    );
+    expect(usageEvent?.eventType).toBe("usage_update");
+    expect(usageEvent?.normalizedPayload).toMatchObject({
+      json: {
+        cachedInputTokens: 96,
+        inputTokens: 120,
+        modelId: "gpt-5",
+        outputTokens: 30,
+        totalTokens: 150,
+      },
+      type: "event",
+    });
+  });
+
   test("applies runtime config fallback metadata before prompt delivery", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({

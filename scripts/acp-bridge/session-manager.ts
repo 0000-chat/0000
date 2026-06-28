@@ -1143,6 +1143,24 @@ export class BridgeSessionManager {
         status: "complete",
       },
     });
+    if (result.usage) {
+      this.enqueueEventWrite(session, {
+        externalEventId: `${item.id}:usage_update`,
+        source: "bridge",
+        eventType: "usage_update",
+        payload: {
+          ...result.usage,
+          queueId: item.id,
+          queueType: normalizeType(item),
+        },
+        part: {
+          type: "event",
+          text: "ACP usage updated.",
+          json: result.usage,
+          status: "complete",
+        },
+      });
+    }
     if (result.finalText?.withheld) {
       this.writeLog({
         level: "warn",
@@ -1168,13 +1186,22 @@ export class BridgeSessionManager {
       result.events,
     );
     await this.drainEventWrites();
-    const finalResultMetadata =
-      result.attachmentDeliveryMode && resultMetadata
-        ? {
-            ...resultMetadata,
-            attachmentDeliveryMode: result.attachmentDeliveryMode,
-          }
-        : resultMetadata;
+    const finalResultMetadata = {
+      ...resultMetadata,
+      ...(result.attachmentDeliveryMode
+        ? { attachmentDeliveryMode: result.attachmentDeliveryMode }
+        : {}),
+      ...(result.continuityMode
+        ? { acpContinuityMode: result.continuityMode }
+        : {}),
+      ...(typeof result.threadHistoryInjected === "boolean"
+        ? { acpThreadHistoryInjected: result.threadHistoryInjected }
+        : {}),
+      ...(result.externalContinuity
+        ? { acpExternalContinuity: result.externalContinuity }
+        : {}),
+      ...(result.usage ? { acpUsage: result.usage } : {}),
+    };
     if (result.attachmentDeliveryMode && baseResultMetadata?.attachmentCount) {
       this.writeLog({
         level: "info",
