@@ -20,6 +20,7 @@ import {
   BridgeCloudHttpError,
   BridgeCloudRequestTimeoutError,
   ConvexBridgeCloudClient,
+  type BridgeQueueClaimInput,
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
 import {
@@ -147,7 +148,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.31";
+export const BRIDGE_VERSION = "0.1.32";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -4041,7 +4042,13 @@ export async function runBridgeLoopIteration(
       const availableSlots = maxInFlight - input.inFlightCommands.size;
       const shouldPollQueue =
         pollReason !== "timer" || input.inFlightCommands.size > 0;
-      if (availableSlots > 0 && shouldPollQueue) {
+      const claimInput: BridgeQueueClaimInput | undefined =
+        availableSlots > 0
+          ? { limit: availableSlots }
+          : input.inFlightCommands.size > 0
+            ? { lane: "control", limit: 1 }
+            : undefined;
+      if (claimInput && shouldPollQueue) {
         let processHealth = input.getProcessHealth?.();
         if (processHealth) {
           input.status.processHealth = processHealth;
@@ -4052,7 +4059,7 @@ export async function runBridgeLoopIteration(
           input.status.runtimeConformance = runtimeConformance;
         }
         const now = currentTime();
-        if (now - input.lastStaleCleanupAt >= 60_000) {
+        if (availableSlots > 0 && now - input.lastStaleCleanupAt >= 60_000) {
           input.setLastStaleCleanupAt(now);
           const cleanupResult = await cleanupStaleClaimsWithTimeout({
             cleanup,
@@ -4150,7 +4157,12 @@ export async function runBridgeLoopIteration(
           return { restartRequested: false };
         }
         input.status.lastPollAt = new Date(now).toISOString();
-        const commands = await claim(input.config, availableSlots);
+        const commands = await claim(
+          input.config,
+          claimInput.lane
+            ? claimInput
+            : (claimInput.limit ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS),
+        );
         if (commands.length > 0) {
           input.log({
             level: "info",
@@ -4881,10 +4893,11 @@ async function publishBridgeSupervisorHealthIfChanged(context: {
 
 async function claimCommands(
   config: BridgeConfig,
-  limit = DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+  input: number | BridgeQueueClaimInput = DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
 ): Promise<BridgeQueueCommand[]> {
   const adapter = new ConvexBridgeHostAdapter(createCloudClient(config));
-  const response = await adapter.claimWork({ limit });
+  const claimInput = typeof input === "number" ? { limit: input } : input;
+  const response = await adapter.claimWork(claimInput);
   const rawResponse = response.raw as QueueClaimResponse;
   const rawCommands = Array.isArray(rawResponse.commands)
     ? rawResponse.commands
