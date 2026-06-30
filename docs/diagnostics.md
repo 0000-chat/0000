@@ -9,6 +9,7 @@ thread end to end.
 | --- | --- |
 | Local stdout/stderr | Immediate bridge process output |
 | `~/.0000/bridge-status.json` | Current local heartbeat and active work projection |
+| `~/.0000/restart-handoff.json` | Short-lived restart/update handoff hints consumed on next startup |
 | SQLite journal | Durable queue, session, lifecycle, and result breadcrumbs |
 | ACP process registry | Durable child-process ownership records used for restart recovery |
 | Host diagnostics endpoint | Host-visible bridge diagnostic records |
@@ -46,11 +47,27 @@ Examples:
 Never forward raw tokens, cookies, auth headers, full prompts, or full provider
 payloads in diagnostics.
 
+## Restart Handoff
+
+Before an intentional restart or bridge-managed update, the bridge writes a
+short-lived `~/.0000/restart-handoff.json` file with owner-only permissions. On
+startup the bridge consumes and deletes a valid file, then reports a
+`restartHandoff` summary in local status and heartbeat payloads.
+
+The handoff is scoped by bridge device id plus an app URL hash so multiple
+organizations and multiple bridge processes on the same machine do not share
+credentials or profile state. It may include target version/status metadata,
+runtime profile ids, thread ids, and recent session warmup hints. It must not
+include bridge tokens, auth headers, raw prompts, full user content, or provider
+secrets. Stale, invalid, schema-mismatched, or wrong-registration handoff files
+are ignored safely.
+
 ## Debug Runbook
 
 1. Start with the host thread and queue item status.
 2. Match the queue item to bridge diagnostics by queue item id and trace id.
-3. Check `bridge-status.json` for active sessions and runtime profile state.
+3. Check `bridge-status.json` for active sessions, runtime profile state, and
+   any consumed `restartHandoff` summary.
 4. Check `processHealth` in `bridge-status.json`. `canClaim: false`,
    `ambiguousProcessCount > 0`, or `processCapExceeded: true` means the bridge
    intentionally stopped claiming queue work until local ownership is safe.

@@ -104,6 +104,11 @@ export {
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json");
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json");
+const DEFAULT_RESTART_HANDOFF_PATH = join(
+  homedir(),
+  ".0000",
+  "restart-handoff.json",
+);
 const DEFAULT_JOURNAL_DIR = join(homedir(), ".0000", "bridge-journals");
 const DEFAULT_PROCESS_REGISTRY_DIR = join(
   homedir(),
@@ -145,6 +150,10 @@ export const BRIDGE_VERSION = "0.1.28";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
+const BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION = 1;
+const BRIDGE_RESTART_HANDOFF_TTL_MS = 10 * 60_000;
+const BRIDGE_RESTART_HANDOFF_MAX_SESSIONS = 12;
+const BRIDGE_RESTART_HANDOFF_MAX_PROFILES = 24;
 
 export type BridgeRuntimeIdentity = {
   bridgeVersion: string;
@@ -276,6 +285,7 @@ export type BridgeStatus = {
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
   controlCommandStatus?: BridgeControlCommandStatus;
+  restartHandoff?: BridgeRestartHandoffStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastHeartbeatSignature?: string;
@@ -344,6 +354,20 @@ export type BridgeStatus = {
   };
 };
 
+export type BridgeRestartHandoffStatus = {
+  consumedAt: string;
+  createdAt: string;
+  reason: BridgeRestartHandoffReason;
+  status?: string;
+  targetVersion?: string;
+  runtimeProfileIds: string[];
+  startupPriorityRuntimeProfileIds: string[];
+  sessionWarmupHints: Array<{
+    runtimeProfileId?: string;
+    threadId: string;
+  }>;
+};
+
 type BridgeSessionSummary = {
   sessionKey: string;
   threadId: string;
@@ -396,6 +420,7 @@ export type BridgeRegistrationStatus = {
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
   controlCommandStatus?: BridgeControlCommandStatus;
+  restartHandoff?: BridgeRestartHandoffStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastPollAt?: string;
@@ -424,6 +449,33 @@ export type BridgeRegistrationStatus = {
   lastStaleCleanup?: BridgeStatus["lastStaleCleanup"];
   recentErrors: string[];
   registrationFailure?: BridgeRegistrationFailure;
+};
+
+export type BridgeRestartHandoffReason =
+  | "restartWhenIdle"
+  | "updateWhenIdle"
+  | "runtimeProfileRefresh";
+
+export type BridgeRestartHandoffEntry = {
+  appUrlHash: string;
+  deviceId: string;
+  runtimeProfileIds: string[];
+  sessionWarmupHints: Array<{
+    lastUsedAt?: number;
+    runtimeProfileId?: string;
+    threadId: string;
+  }>;
+};
+
+export type BridgeRestartHandoff = {
+  schemaVersion: 1;
+  bridgeVersion: string;
+  createdAt: number;
+  expiresAt: number;
+  reason: BridgeRestartHandoffReason;
+  status?: string;
+  targetVersion?: string;
+  entries: BridgeRestartHandoffEntry[];
 };
 
 export type BridgeRegistrationFailure = {
@@ -678,11 +730,13 @@ export type BridgeLoopIterationInput = {
   canClaimWork?: () => boolean;
   getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
+  isProcessIdleForRestart?: () => boolean;
   pollReason?: BridgeLoopPollReason;
   reserveClaimSlots?: () => BridgeClaimSlotReservation;
   warmRuntimeProfileIds?: string[];
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
+  restartHandoffPath?: string;
   wakeSignal?: BridgeWakeSignal;
 };
 
@@ -708,11 +762,15 @@ export async function runBridgeRegistrationScheduler<TContext>(
   input: BridgeRegistrationSchedulerInput<TContext>,
 ): Promise<void> {
   let nextPollReason: BridgeLoopPollReason = "startup";
+  let processRestartPending = false;
   while (input.isActive(input.context)) {
     const pollReason =
       input.totalInFlight() > 0 ? "active" : nextPollReason;
     const result = await input.runContextPass(input.context, pollReason);
     if (result.restartRequested) {
+      processRestartPending = true;
+    }
+    if (processRestartPending && input.totalInFlight() === 0) {
       await input.onRestartRequested(input.context);
       return;
     }
@@ -751,6 +809,7 @@ function processPressureCleanupRequest(
 export type BridgeUpdaterLaunchInput = {
   currentVersion: string;
   requestedAt?: number;
+  restartHandoffPath: string;
   restartCommand: string[];
   statusPath: string;
 };
@@ -1228,6 +1287,11 @@ export function describeStatus(
       if (registration.lastPollAt) {
         lines.push(`    last queue poll: ${registration.lastPollAt}`);
       }
+      if (registration.restartHandoff) {
+        lines.push(
+          `    restart handoff: consumed ${registration.restartHandoff.sessionWarmupHints.length} session hint${registration.restartHandoff.sessionWarmupHints.length === 1 ? "" : "s"}${registration.restartHandoff.targetVersion ? ` target=${registration.restartHandoff.targetVersion}` : ""}`,
+        );
+      }
       if (registration.recentErrors.length > 0) {
         lines.push("    recent errors:");
         for (const error of registration.recentErrors.slice(-3)) {
@@ -1269,6 +1333,11 @@ export function describeStatus(
   if (status.controlCommandStatus) {
     lines.push(
       `control command: ${status.controlCommandStatus.command} (${status.controlCommandStatus.status})`,
+    );
+  }
+  if (status.restartHandoff) {
+    lines.push(
+      `restart handoff: consumed ${status.restartHandoff.sessionWarmupHints.length} session hint${status.restartHandoff.sessionWarmupHints.length === 1 ? "" : "s"}${status.restartHandoff.targetVersion ? ` target=${status.restartHandoff.targetVersion}` : ""}`,
     );
   }
   for (const command of status.inFlightCommands ?? []) {
@@ -1629,6 +1698,7 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
 async function startBridge(parsed: ParsedBridgeArgs) {
   const configPath = getConfigPath(parsed.flags);
   const statusPath = getStatusPath(parsed.flags);
+  const restartHandoffPath = getRestartHandoffPath(parsed.flags);
   await ensureSecureBridgeConfigFile(configPath);
   await readBridgeConfigFile(configPath);
   const pollMs = Number(
@@ -1684,6 +1754,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       record.checkedAt,
     ]),
   );
+  const conformanceProfiles = () => [
+    ...runtimeProfiles,
+    ...launchSpecRuntimeProfiles,
+  ];
   const runtimeConformanceSummary = () => {
     const summary = summarizeRuntimeConformance({
       activeProfileIds: bridgeActiveRuntimeProfileIds(contexts.values()),
@@ -1728,6 +1802,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   let stopping = false;
   let reservedClaimSlots = 0;
   let startupRuntimeCatalogRefreshScheduled = false;
+  let consumedRestartHandoff: BridgeRestartHandoff | undefined;
+  let restartHandoffConsumed = false;
+  let startupRuntimeConformancePriorityProfileIds: string[] = [];
 
   const aggregateStatus = () =>
     buildAggregateBridgeStatus(
@@ -1790,7 +1867,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             }),
           profile,
         }),
-      profiles: [...runtimeProfiles, ...launchSpecRuntimeProfiles],
+      profiles: conformanceProfiles(),
+      priorityProfileIds: startupRuntimeConformancePriorityProfileIds,
       records: runtimeConformanceRecords,
       ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
     });
@@ -1832,7 +1910,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           context.status.updateState = buildBridgeUpdateState(
             "waitingForIdle",
             Date.now(),
-            { requestedAt: context.status.pendingControlCommand.requestedAt },
+            {
+              requestedAt: context.status.pendingControlCommand.requestedAt,
+              targetVersion: BRIDGE_VERSION,
+            },
           );
         }
       }
@@ -1843,6 +1924,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
   const ensureContexts = async () => {
     const latestConfig = await readBridgeConfigFile(configPath);
+    if (!restartHandoffConsumed) {
+      restartHandoffConsumed = true;
+      consumedRestartHandoff = await consumeBridgeRestartHandoffFile({
+        path: restartHandoffPath,
+        registrations: latestConfig.registrations,
+      });
+      startupRuntimeConformancePriorityProfileIds =
+        consumedRestartHandoffPriorityProfileIds(consumedRestartHandoff);
+    }
     let previousAggregateStatus: BridgeStatus | undefined;
     if (existsSync(statusPath)) {
       try {
@@ -1953,6 +2043,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         (previousAggregateStatus?.deviceId === registration.deviceId
           ? previousAggregateStatus
           : undefined);
+      const handoffEntry = consumedRestartHandoff?.entries.find(
+        (entry) => entry.deviceId === registration.deviceId,
+      );
       const status: BridgeStatus = {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
@@ -1979,6 +2072,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           previousStatus,
           getBridgeRuntimeIdentity(),
         ),
+        restartHandoff:
+          consumedRestartHandoff && handoffEntry
+            ? buildRestartHandoffStatus(
+                consumedRestartHandoff,
+                handoffEntry,
+                Date.now(),
+              )
+            : undefined,
         hermesProfiles,
         runtimeProfiles,
         activeSessions: [],
@@ -2022,6 +2123,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         bridgeRuntimeIdentity: getBridgeRuntimeIdentity(),
         processStartToken: BRIDGE_PROCESS_START_TOKEN,
         runtimeConformance: runtimeConformanceSummary(),
+        restartHandoffConsumed: Boolean(handoffEntry),
+        restartHandoffSessionHintCount:
+          handoffEntry?.sessionWarmupHints.length,
       });
     }
     for (const [deviceId, context] of contexts) {
@@ -2394,6 +2498,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
       pollReason,
       reserveClaimSlots: () => reserveClaimSlotsForContext(context),
+      restartHandoffPath,
+      isProcessIdleForRestart: () => totalInFlight() === 0,
     });
   };
 
@@ -2408,6 +2514,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         !candidate.closing &&
         contexts.get(candidate.config.deviceId) === candidate,
       onRestartRequested: async (candidate) => {
+        await persistRestartHandoffForStatuses(restartHandoffPath, {
+          reason: restartHandoffReasonForStatus(candidate.status),
+          status: candidate.status.updateState?.status ?? "restarting",
+          statuses: Array.from(contexts.values()).map(
+            (context) => context.status,
+          ),
+          targetVersion:
+            candidate.status.controlCommandStatus?.targetVersion ??
+            candidate.status.updateState?.targetVersion ??
+            BRIDGE_VERSION,
+        });
         await stop({
           forceRuntimeProcesses: true,
           reason: "runtime restart requested",
@@ -2455,6 +2572,7 @@ export async function refreshRuntimeConformanceProfilesForTest(input: {
     profile: BridgeRuntimeProfile,
   ) => Promise<RuntimeConformanceRecord>;
   profiles: BridgeRuntimeProfile[];
+  priorityProfileIds?: string[];
   records: Record<string, RuntimeConformanceRecord>;
   ttlMs: number;
 }): Promise<Record<string, RuntimeConformanceRecord>> {
@@ -2480,20 +2598,24 @@ async function refreshRuntimeConformanceProfiles(input: {
     profile: BridgeRuntimeProfile,
   ) => Promise<RuntimeConformanceRecord>;
   profiles: BridgeRuntimeProfile[];
+  priorityProfileIds?: string[];
   records: Record<string, RuntimeConformanceRecord>;
   ttlMs: number;
 }): Promise<{ records: Record<string, RuntimeConformanceRecord> }> {
   const nextRecords = { ...input.records };
-  for (const profile of input.profiles.filter(
-    (candidate) => candidate.status === "available",
-  )) {
+  const priorityProfileIds = new Set(input.priorityProfileIds ?? []);
+  const profiles = prioritizeRuntimeConformanceProfiles(
+    input.profiles.filter((candidate) => candidate.status === "available"),
+    input.priorityProfileIds ?? [],
+  );
+  for (const profile of profiles) {
     const lastProbeAt =
       input.lastProbeAtByProfile.get(profile.id) ??
       nextRecords[profile.id]?.checkedAt ??
       0;
     if (
       shouldRefreshRuntimeConformanceProfile({
-        force: input.force,
+        force: input.force || priorityProfileIds.has(profile.id),
         inFlightProfileIds: input.getInFlightProfileIds(),
         lastProbeAt,
         now: input.now(),
@@ -2508,6 +2630,31 @@ async function refreshRuntimeConformanceProfiles(input: {
     }
   }
   return { records: nextRecords };
+}
+
+function prioritizeRuntimeConformanceProfiles(
+  profiles: BridgeRuntimeProfile[],
+  priorityProfileIds: string[],
+): BridgeRuntimeProfile[] {
+  if (priorityProfileIds.length === 0) {
+    return profiles;
+  }
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+  const prioritized: BridgeRuntimeProfile[] = [];
+  const seen = new Set<string>();
+  for (const profileId of priorityProfileIds) {
+    const profile = byId.get(profileId);
+    if (profile && !seen.has(profile.id)) {
+      prioritized.push(profile);
+      seen.add(profile.id);
+    }
+  }
+  for (const profile of profiles) {
+    if (!seen.has(profile.id)) {
+      prioritized.push(profile);
+    }
+  }
+  return prioritized;
 }
 
 function bridgeInFlightRuntimeProfileIds(
@@ -2606,6 +2753,7 @@ function buildAggregateBridgeStatus(
     updateState: status.updateState,
     devHotReload: status.devHotReload,
     controlCommandStatus: status.controlCommandStatus,
+    restartHandoff: status.restartHandoff,
     lastStartedAt: status.lastStartedAt,
     lastHeartbeatAt: status.lastHeartbeatAt,
     lastPollAt: status.lastPollAt,
@@ -2633,6 +2781,7 @@ function buildAggregateBridgeStatus(
     updateState: first?.status.updateState,
     devHotReload: first?.status.devHotReload,
     controlCommandStatus: first?.status.controlCommandStatus,
+    restartHandoff: first?.status.restartHandoff,
     lastStartedAt: first?.status.lastStartedAt,
     lastHeartbeatAt: first?.status.lastHeartbeatAt,
     lastPollAt: first?.status.lastPollAt,
@@ -2761,6 +2910,312 @@ function boundControlCommandTargetVersion(value: unknown): string | undefined {
     : undefined;
 }
 
+function bridgeRestartHandoffAppUrlHash(appUrl: string): string {
+  return createHash("sha256").update(appUrl).digest("hex").slice(0, 32);
+}
+
+export function buildBridgeRestartHandoff(input: {
+  createdAt?: number;
+  reason: BridgeRestartHandoffReason;
+  status?: string;
+  statuses: BridgeStatus[];
+  targetVersion?: string;
+}): BridgeRestartHandoff {
+  const createdAt = input.createdAt ?? Date.now();
+  return {
+    schemaVersion: BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION,
+    bridgeVersion: BRIDGE_VERSION,
+    createdAt,
+    expiresAt: createdAt + BRIDGE_RESTART_HANDOFF_TTL_MS,
+    reason: input.reason,
+    status: boundRestartHandoffStatus(input.status),
+    targetVersion: boundControlCommandTargetVersion(input.targetVersion),
+    entries: input.statuses
+      .map((status) => buildBridgeRestartHandoffEntry(status))
+      .filter(
+        (entry): entry is BridgeRestartHandoffEntry => entry !== undefined,
+      ),
+  };
+}
+
+function buildBridgeRestartHandoffEntry(
+  status: BridgeStatus,
+): BridgeRestartHandoffEntry | undefined {
+  if (!status.deviceId || !status.appUrl) {
+    return undefined;
+  }
+  const runtimeProfileIds = Array.from(
+    new Set([
+      ...(status.runtimeProfiles ?? []).map((profile) => profile.id),
+      ...(status.sessionQueues ?? [])
+        .map((session) => session.runtimeProfileId)
+        .filter((id): id is string => Boolean(id)),
+    ]),
+  )
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+  const sessionWarmupHints = (status.sessionQueues ?? [])
+    .filter((session) => session.threadId.trim())
+    .map((session) =>
+      compact({
+        lastUsedAt:
+          typeof session.lastUsedAt === "number" &&
+          Number.isFinite(session.lastUsedAt)
+            ? session.lastUsedAt
+            : undefined,
+        runtimeProfileId: session.runtimeProfileId,
+        threadId: session.threadId,
+      }),
+    )
+    .sort((left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0))
+    .slice(0, BRIDGE_RESTART_HANDOFF_MAX_SESSIONS);
+  return {
+    appUrlHash: bridgeRestartHandoffAppUrlHash(status.appUrl),
+    deviceId: status.deviceId,
+    runtimeProfileIds,
+    sessionWarmupHints,
+  };
+}
+
+export async function writeBridgeRestartHandoffFile(
+  path: string,
+  value: unknown,
+): Promise<void> {
+  await writeSecureJsonFile(path, value);
+}
+
+export async function consumeBridgeRestartHandoffFile(input: {
+  now?: () => number;
+  path: string;
+  registrations: BridgeRegistration[];
+}): Promise<BridgeRestartHandoff | undefined> {
+  if (!existsSync(input.path)) {
+    return undefined;
+  }
+  let raw: unknown;
+  try {
+    raw = await readJsonFile<unknown>(input.path);
+  } catch {
+    await unlinkIfExists(input.path);
+    return undefined;
+  }
+  const metadata = normalizeBridgeRestartHandoffMetadata(raw, input.now);
+  if (!metadata) {
+    await unlinkIfExists(input.path);
+    return undefined;
+  }
+  const record = recordFromUnknown(raw);
+  const validEntries = arrayOfRecords(record?.entries).flatMap((entry) => {
+    const normalized = normalizeBridgeRestartHandoffEntry(entry);
+    return normalized ? [normalized] : [];
+  });
+  if (validEntries.length === 0) {
+    await unlinkIfExists(input.path);
+    return undefined;
+  }
+  const registrationScopes = bridgeRestartHandoffRegistrationScopes(
+    input.registrations,
+  );
+  const consumedEntries = validEntries.filter((entry) =>
+    bridgeRestartHandoffEntryMatches(entry, registrationScopes),
+  );
+  if (consumedEntries.length === 0) {
+    return undefined;
+  }
+  const remainingEntries = validEntries.filter(
+    (entry) => !bridgeRestartHandoffEntryMatches(entry, registrationScopes),
+  );
+  if (remainingEntries.length === 0) {
+    await unlinkIfExists(input.path);
+  } else {
+    await writeBridgeRestartHandoffFile(input.path, {
+      ...metadata,
+      entries: remainingEntries,
+    });
+  }
+  return {
+    ...metadata,
+    entries: consumedEntries,
+  };
+}
+
+function normalizeBridgeRestartHandoffMetadata(
+  raw: unknown,
+  now: () => number = Date.now,
+): Omit<BridgeRestartHandoff, "entries"> | undefined {
+  const record = recordFromUnknown(raw);
+  if (
+    !record ||
+    record.schemaVersion !== BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION ||
+    !stringFromUnknown(record.bridgeVersion)
+  ) {
+    return undefined;
+  }
+  const createdAt = numberFromUnknown(record.createdAt);
+  const expiresAt = numberFromUnknown(record.expiresAt);
+  if (
+    createdAt === undefined ||
+    expiresAt === undefined ||
+    createdAt > now() + 60_000 ||
+    expiresAt < now()
+  ) {
+    return undefined;
+  }
+  const reason = normalizeBridgeRestartHandoffReason(record.reason);
+  if (!reason) {
+    return undefined;
+  }
+  return {
+    schemaVersion: BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION,
+    bridgeVersion: stringFromUnknown(record.bridgeVersion) ?? BRIDGE_VERSION,
+    createdAt,
+    expiresAt,
+    reason,
+    status: boundRestartHandoffStatus(record.status),
+    targetVersion: boundControlCommandTargetVersion(record.targetVersion),
+  };
+}
+
+function bridgeRestartHandoffRegistrationScopes(
+  registrations: BridgeRegistration[],
+): Map<string, string> {
+  return new Map(
+    registrations.map((registration) => [
+      registration.deviceId,
+      bridgeRestartHandoffAppUrlHash(registration.appUrl),
+    ]),
+  );
+}
+
+function bridgeRestartHandoffEntryMatches(
+  entry: BridgeRestartHandoffEntry,
+  registrationScopes: Map<string, string>,
+): boolean {
+  return registrationScopes.get(entry.deviceId) === entry.appUrlHash;
+}
+
+function boundRestartHandoffStatus(value: unknown): string | undefined {
+  const text = stringFromUnknown(value)?.trim();
+  return text ? text.slice(0, 64) : undefined;
+}
+
+function normalizeBridgeRestartHandoffReason(
+  value: unknown,
+): BridgeRestartHandoffReason | undefined {
+  return value === "restartWhenIdle" ||
+    value === "updateWhenIdle" ||
+    value === "runtimeProfileRefresh"
+    ? value
+    : undefined;
+}
+
+function normalizeBridgeRestartHandoffEntry(
+  record: Record<string, unknown>,
+): BridgeRestartHandoffEntry | undefined {
+  const deviceId = stringFromUnknown(record.deviceId);
+  const appUrlHash = stringFromUnknown(record.appUrlHash);
+  if (!deviceId || !appUrlHash) {
+    return undefined;
+  }
+  const runtimeProfileIds = Array.from(
+    new Set(
+      (stringArrayFromUnknown(record.runtimeProfileIds) ?? [])
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+  const sessionWarmupHints: BridgeRestartHandoffEntry["sessionWarmupHints"] =
+    [];
+  for (const hint of arrayOfRecords(record.sessionWarmupHints)) {
+    const threadId = stringFromUnknown(hint.threadId)?.trim();
+    if (!threadId) {
+      continue;
+    }
+    const lastUsedAt = numberFromUnknown(hint.lastUsedAt);
+    const runtimeProfileId = stringFromUnknown(hint.runtimeProfileId);
+    sessionWarmupHints.push({
+      ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
+      ...(runtimeProfileId ? { runtimeProfileId } : {}),
+      threadId,
+    });
+    if (sessionWarmupHints.length >= BRIDGE_RESTART_HANDOFF_MAX_SESSIONS) {
+      break;
+    }
+  }
+  return {
+    appUrlHash,
+    deviceId,
+    runtimeProfileIds,
+    sessionWarmupHints,
+  };
+}
+
+function buildRestartHandoffStatus(
+  handoff: BridgeRestartHandoff,
+  entry: BridgeRestartHandoffEntry,
+  now: number,
+): BridgeRestartHandoffStatus {
+  return {
+    consumedAt: new Date(now).toISOString(),
+    createdAt: new Date(handoff.createdAt).toISOString(),
+    reason: handoff.reason,
+    status: handoff.status,
+    targetVersion: handoff.targetVersion,
+    runtimeProfileIds: entry.runtimeProfileIds,
+    startupPriorityRuntimeProfileIds:
+      restartHandoffEntryPriorityProfileIds(entry),
+    sessionWarmupHints: entry.sessionWarmupHints.map((hint) =>
+      compact({
+        runtimeProfileId: hint.runtimeProfileId,
+        threadId: hint.threadId,
+      }),
+    ),
+  };
+}
+
+function consumedRestartHandoffPriorityProfileIds(
+  handoff: BridgeRestartHandoff | undefined,
+): string[] {
+  if (!handoff) {
+    return [];
+  }
+  return Array.from(
+    new Set(handoff.entries.flatMap((entry) => restartHandoffEntryPriorityProfileIds(entry))),
+  );
+}
+
+function restartHandoffEntryPriorityProfileIds(
+  entry: BridgeRestartHandoffEntry,
+): string[] {
+  return Array.from(
+    new Set(
+      [
+        ...entry.runtimeProfileIds,
+        ...entry.sessionWarmupHints
+          .map((hint) => hint.runtimeProfileId)
+          .filter((id): id is string => Boolean(id)),
+      ]
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+}
+
+async function unlinkIfExists(path: string): Promise<void> {
+  await unlink(path).catch((error: unknown) => {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  });
+}
+
 export function reconcileBridgeStartupControlCommandStatus(
   previousStatus: Pick<BridgeStatus, "controlCommandStatus"> | undefined,
   runtimeIdentity: BridgeRuntimeIdentity = getBridgeRuntimeIdentity(),
@@ -2774,6 +3229,20 @@ export function reconcileBridgeStartupControlCommandStatus(
   }
   if (previous.status !== "executing") {
     return previous;
+  }
+  if (
+    previous.targetVersion &&
+    runtimeIdentity.bridgeVersion !== previous.targetVersion
+  ) {
+    return buildControlCommandStatus(previous.command, "failed", {
+      acceptedAt: previous.acceptedAt,
+      error: `Bridge restarted on version ${runtimeIdentity.bridgeVersion}, not target version ${previous.targetVersion}`,
+      failedAt: now(),
+      instanceId: runtimeIdentity.instanceId,
+      requestedAt: previous.requestedAt,
+      startedAt: previous.startedAt,
+      targetVersion: previous.targetVersion,
+    });
   }
   return buildControlCommandStatus(previous.command, "succeeded", {
     acceptedAt: previous.acceptedAt,
@@ -2802,6 +3271,8 @@ async function launchBridgeUpdater(
     input.currentVersion,
     "--parent-pid",
     String(process.pid),
+    "--restart-handoff-path",
+    input.restartHandoffPath,
     ...buildRestartCommandArgs(input.restartCommand),
   ];
   const child = spawn(process.execPath, args, {
@@ -2846,7 +3317,11 @@ async function applyPendingBridgeControlCommand(
   now: () => number,
   input: Pick<
     BridgeLoopIterationInput,
-    "launchUpdater" | "statusPath" | "writeStatus"
+    | "isProcessIdleForRestart"
+    | "launchUpdater"
+    | "restartHandoffPath"
+    | "statusPath"
+    | "writeStatus"
   >,
 ): Promise<BridgeLoopIterationResult> {
   const command = normalizeControlCommand(status.pendingControlCommand);
@@ -2859,7 +3334,8 @@ async function applyPendingBridgeControlCommand(
   const startedAt = now();
 
   const idleDecision = shouldRestartBridgeForDevHotReload(status);
-  if (!idleDecision.ready) {
+  const processIdle = input.isProcessIdleForRestart?.() ?? true;
+  if (!idleDecision.ready || !processIdle) {
     status.lifecycle = "draining";
     status.updateState = buildBridgeUpdateState("waitingForIdle", now(), {
       requestedAt: command.requestedAt,
@@ -2894,11 +3370,18 @@ async function applyPendingBridgeControlCommand(
       },
     );
     await persistStatus(input.statusPath, status);
+    await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+      reason: "updateWhenIdle",
+      status: "installing",
+      statuses: [status],
+      targetVersion: BRIDGE_VERSION,
+    });
     try {
       const launchUpdater = input.launchUpdater ?? launchBridgeUpdater;
       await launchUpdater({
         currentVersion: BRIDGE_VERSION,
         requestedAt: command.requestedAt,
+        restartHandoffPath: input.restartHandoffPath ?? DEFAULT_RESTART_HANDOFF_PATH,
         restartCommand: getBridgeRestartCommand(),
         statusPath: input.statusPath,
       });
@@ -2930,6 +3413,7 @@ async function applyPendingBridgeControlCommand(
   status.updateState = buildBridgeUpdateState("restarting", now(), {
     requestedAt: command.requestedAt,
     startedAt,
+    targetVersion: BRIDGE_VERSION,
   });
   status.pendingControlCommand = undefined;
   status.controlCommandStatus = buildControlCommandStatus(
@@ -2939,10 +3423,48 @@ async function applyPendingBridgeControlCommand(
       acceptedAt,
       requestedAt,
       startedAt,
+      targetVersion: BRIDGE_VERSION,
     },
   );
   await persistStatus(input.statusPath, status);
+  await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+    reason: "restartWhenIdle",
+    status: "restarting",
+    statuses: [status],
+    targetVersion: BRIDGE_VERSION,
+  });
   return { restartRequested: true };
+}
+
+async function persistRestartHandoffForStatuses(
+  path: string | undefined,
+  input: {
+    reason: BridgeRestartHandoffReason;
+    status?: string;
+    statuses: BridgeStatus[];
+    targetVersion?: string;
+  },
+): Promise<void> {
+  if (!path) {
+    return;
+  }
+  const handoff = buildBridgeRestartHandoff(input);
+  if (handoff.entries.length === 0) {
+    return;
+  }
+  await writeBridgeRestartHandoffFile(path, handoff);
+}
+
+function restartHandoffReasonForStatus(
+  status: BridgeStatus,
+): BridgeRestartHandoffReason {
+  if (status.controlCommandStatus?.command === "updateWhenIdle") {
+    return "updateWhenIdle";
+  }
+  if (status.controlCommandStatus?.command === "restartWhenIdle") {
+    return "restartWhenIdle";
+  }
+  return "runtimeProfileRefresh";
 }
 
 function buildWatchdogTerminalizationMetadata(
@@ -3129,6 +3651,39 @@ export async function runBridgeLoopIteration(
       currentTime,
       input,
     );
+    if (
+      !restartResult.restartRequested &&
+      !input.status.pendingControlCommand &&
+      input.status.lifecycle === "draining" &&
+      input.status.updateState?.status === "waitingForIdle" &&
+      input.isProcessIdleForRestart?.() !== false
+    ) {
+      input.status.lifecycle = "restarting";
+      input.status.updateState = buildBridgeUpdateState(
+        "restarting",
+        currentTime(),
+        {
+          requestedAt: input.status.updateState.requestedAt,
+          startedAt: currentTime(),
+          targetVersion: BRIDGE_VERSION,
+        },
+      );
+      await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+        reason: "runtimeProfileRefresh",
+        status: "restarting",
+        statuses: [input.status],
+        targetVersion: BRIDGE_VERSION,
+      });
+      restartResult = { restartRequested: true };
+    }
+    if (
+      !restartResult.restartRequested &&
+      input.status.controlCommandStatus?.status === "waiting_for_idle"
+    ) {
+      syncBridgeStatus();
+      await persistStatus(input.statusPath, input.status);
+      return restartResult;
+    }
     const heartbeatNow = currentTime();
     const heartbeatSignature = bridgeHeartbeatSignature(input.status);
     if (
@@ -3225,17 +3780,34 @@ export async function runBridgeLoopIteration(
               runtimeCommandChanged: runtimeCatalogChanged,
             });
             if (runtimeCatalogChanged) {
-              input.status.lifecycle = "restarting";
-              input.status.updateState = buildBridgeUpdateState(
-                "restarting",
-                currentTime(),
-              );
-              restartResult = { restartRequested: true };
-              input.log({
-                level: "info",
-                event: "bridge.runtime_profiles.restart_requested",
-                deviceId: input.config.deviceId,
-              });
+              const processIdle = input.isProcessIdleForRestart?.() ?? true;
+              if (processIdle) {
+                input.status.lifecycle = "restarting";
+                input.status.updateState = buildBridgeUpdateState(
+                  "restarting",
+                  currentTime(),
+                  { targetVersion: BRIDGE_VERSION },
+                );
+                restartResult = { restartRequested: true };
+                input.log({
+                  level: "info",
+                  event: "bridge.runtime_profiles.restart_requested",
+                  deviceId: input.config.deviceId,
+                });
+                await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+                  reason: "runtimeProfileRefresh",
+                  status: "restarting",
+                  statuses: [input.status],
+                  targetVersion: BRIDGE_VERSION,
+                });
+              } else {
+                input.status.lifecycle = "draining";
+                input.status.updateState = buildBridgeUpdateState(
+                  "waitingForIdle",
+                  currentTime(),
+                  { targetVersion: BRIDGE_VERSION },
+                );
+              }
             }
             await persistStatus(input.statusPath, input.status);
             const refreshHeartbeatResult = await heartbeat(
@@ -3622,6 +4194,7 @@ export function bridgeHeartbeatSignature(
     | "lastStaleCleanup"
     | "maxInFlight"
     | "controlCommandStatus"
+    | "restartHandoff"
     | "pendingControlCommand"
     | "processHealth"
     | "runtimeConformance"
@@ -3670,6 +4243,16 @@ export function bridgeHeartbeatSignature(
     lifecycle: status.lifecycle,
     pendingControlCommand: status.pendingControlCommand,
     controlCommandStatus: status.controlCommandStatus,
+    restartHandoff: status.restartHandoff
+      ? {
+          reason: status.restartHandoff.reason,
+          status: status.restartHandoff.status,
+          targetVersion: status.restartHandoff.targetVersion,
+          runtimeProfileIds: status.restartHandoff.runtimeProfileIds,
+          sessionWarmupHintCount:
+            status.restartHandoff.sessionWarmupHints.length,
+        }
+      : undefined,
     updateState: status.updateState,
   });
 }
@@ -3970,7 +4553,34 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES   Comma-separated runtime profile ids to warm from recent scoped sessions (default: disabled)\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS Bridge cloud API timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
+  return [
+    "0000 Chat ACP bridge",
+    "",
+    "Usage:",
+    `  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]`,
+    "  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]",
+    `  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]`,
+    "  bun scripts/acp-bridge.ts status",
+    "  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]",
+    "",
+    "Environment:",
+    "  ZERO_CHAT_APP_URL                         Default app URL for connect or pair",
+    "  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect",
+    `  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})`,
+    `  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})`,
+    "  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations",
+    "  ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES   Comma-separated runtime profile ids to warm from recent scoped sessions (default: disabled)",
+    `  ZERO_CHAT_RUNTIME_CATALOG_CACHE          Runtime catalog cache path (default: ${DEFAULT_RUNTIME_CATALOG_CACHE_PATH})`,
+    "  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds",
+    "  ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS Bridge cloud API timeout in milliseconds",
+    "  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds",
+    "  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)",
+    `  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)`,
+    `  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)`,
+    `  ZERO_CHAT_BRIDGE_RESTART_HANDOFF         Override restart handoff path (default: ${DEFAULT_RESTART_HANDOFF_PATH})`,
+    "  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)",
+    "",
+  ].join("\n");
 }
 
 function getStatusPath(
@@ -4004,6 +4614,19 @@ function runtimeCatalogCommandKeys(input: {
     splitCommand(input.agentCommand),
     ...input.customRuntimeCommands,
   ].filter((command) => command.length > 0);
+}
+
+function getRestartHandoffPath(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return (
+    getFlag(
+      flags,
+      "restart-handoff-file",
+      env.ZERO_CHAT_BRIDGE_RESTART_HANDOFF,
+    ) ?? DEFAULT_RESTART_HANDOFF_PATH
+  );
 }
 
 function getBridgeJournalPath(
@@ -4358,6 +4981,18 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
     capacity: status.capacity,
     runtimeIdentity: status.runtimeIdentity,
+    restartHandoff: status.restartHandoff
+      ? {
+          consumedAt: status.restartHandoff.consumedAt,
+          createdAt: status.restartHandoff.createdAt,
+          reason: status.restartHandoff.reason,
+          status: status.restartHandoff.status,
+          targetVersion: status.restartHandoff.targetVersion,
+          runtimeProfileIds: status.restartHandoff.runtimeProfileIds,
+          sessionWarmupHintCount:
+            status.restartHandoff.sessionWarmupHints.length,
+        }
+      : undefined,
     processHealth: buildHeartbeatProcessHealthPayload(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,

@@ -13,6 +13,14 @@ directly.
 The updater is responsible for moving between compatible source releases and
 preserving local pairing files under `~/.0000/`.
 
+Before handing control to the updater or restarting directly, the bridge writes
+a privacy-safe restart handoff at `~/.0000/restart-handoff.json`. The updater
+refreshes the handoff and status file with the discovered target version before
+spawning the restarted bridge. The next bridge startup consumes the handoff to
+prioritize runtime/profile refresh and recent session warmup hints, then deletes
+the file. Operators can override the path with
+`ZERO_CHAT_BRIDGE_RESTART_HANDOFF` or `--restart-handoff-file`.
+
 ## Manual Update
 
 For development or recovery:
