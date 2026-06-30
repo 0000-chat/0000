@@ -55,6 +55,7 @@ export const bridgeLogEventNames = [
   "bridge.queue.claim_skipped",
   "bridge.queue.claimed",
   "bridge.queue.cleanup_stale",
+  "bridge.queue.cleanup_stale_timeout",
   "bridge.registration.claim_skipped",
   "bridge.registration.disabled",
   "bridge.queue_item.complete",
