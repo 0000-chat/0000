@@ -66,6 +66,27 @@ describe("runtime discovery", () => {
     })
   })
 
+  test("normalizes ACP available commands from snake_case session updates", async () => {
+    const profiles = await discoverRuntimeProfiles({
+      baseAgentCommand: "hermes acp",
+      probeAcpCommand: async () => ({ ok: true }),
+      discoverAcpCommands: async () => [
+        { name: "learn", description: "Learn a reusable skill", inputHint: "what to learn" },
+      ],
+      runCommand: async (command) => {
+        const key = command.join(" ")
+        if (key === "command -v hermes") {
+          return { ok: true, stdout: "/home/dev/.local/bin/hermes\n" }
+        }
+        return { ok: false, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(profiles.find((profile) => profile.id === "hermes:default")?.availableCommands).toEqual([
+      { name: "learn", description: "Learn a reusable skill", inputHint: "what to learn" },
+    ])
+  })
+
   test("adds common user tool directories to child process PATH", () => {
     const env = runtimeDiscoveryEnv({ HOME: "/home/dev", PATH: "/usr/bin", TERM: "dumb" })
 
