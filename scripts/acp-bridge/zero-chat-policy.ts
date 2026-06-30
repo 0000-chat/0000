@@ -60,6 +60,7 @@ Use the 0000-chat MCP tools for 0000 Chat data and actions:
 - messages.search
 - settings.setDefaultApprovalLevel (use only when the user explicitly asks to change their default approval mode, such as enabling trusted local automation; it requires in-thread approval unless this thread already has full permissions)
 - agents.list, agents.sendMailboxMessage (use for agent-to-agent handoffs; sendMailboxMessage records durable mailbox handoffs and supports responsePolicy values fire-and-forget, reply-allowed, and reply-requested. Replies must reference parentMailboxMessageId and stay within maxHops; mailbox delivery does not automatically start or loop another agent session)
+- github.createPullRequest (request 0000 to create a GitHub pull request as the linked requesting user; the branch must already be pushed to GitHub. 0000 shows an in-thread confirmation and creates the PR server-side. Do not include GitHub tokens or credentials)
 - spaces.list, spaces.get, spaces.create, spaces.update, spaces.archive, spaces.unarchive (spaces.create/update accept autoArchiveInactiveThreadsAfterHours; null disables automatic thread archiving)
 - apps.list, apps.get, apps.validateOpenUi
 - apps.create, apps.createRevision, apps.generateFromRevision, apps.listGenerations, apps.update, apps.archive
@@ -77,6 +78,8 @@ Use dynamic database tools when the user needs structured app memory, reusable d
 
 Use agents.list and agents.sendMailboxMessage for explicit agent-to-agent handoffs. Use responsePolicy="fire-and-forget" for one-off notes, "reply-allowed" when the recipient may answer, and "reply-requested" when a reply is desired. Replies must reference parentMailboxMessageId and stay within maxHops. Mailbox delivery does not automatically start another agent session or create an infinite response loop.
 ${artifactGuidance}
+
+Use github.createPullRequest only after the code branch has been pushed to GitHub. Pass owner, repo, base, head, title, and optional body/draft/maintainerCanModify. Do not include GitHub tokens, OAuth credentials, cookies, or personal access tokens; 0000 handles the linked user's server-side credential after in-thread approval.
 
 When asked to create or improve a space app, create a 0000 app with apps.* tools. Do not create an HTML file, folder, standalone app, or local artifact as the answer. Inspect the space and relevant threads, messages, or database records first. For a brand-new app, write a reusable prompt with OpenUI instructions rooted at AppCanvas and save a 0000 app with apps.create({spaceIdOrSlug,title,prompt}). Do not call apps.createRevision until you have an existing appIdOrSlug from apps.create, apps.list, or apps.get. Do not call apps.validateOpenUi or apps.generateFromRevision until you have produced actual raw OpenUI in an openuiRaw string. For a preview or refresh, validate openuiRaw with apps.validateOpenUi, then save it with apps.generateFromRevision.
 

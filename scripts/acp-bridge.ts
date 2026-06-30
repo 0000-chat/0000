@@ -65,6 +65,7 @@ import {
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
   type BridgeSessionQueueItem,
 } from "./acp-bridge/session-manager";
+import { codeAttributionFromUnknown } from "./acp-bridge/git-attribution";
 import { discoverRuntimeProfiles as discoverBridgeRuntimeProfiles } from "./acp-bridge/runtime-discovery";
 import {
   defaultAgentCommandForEnvironment,
@@ -148,7 +149,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.32";
+export const BRIDGE_VERSION = "0.1.33";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -1172,7 +1173,7 @@ export function buildBridgeCapacitySnapshot(
     (sum, context) => sum + retainedBridgeSessionCount(context.manager),
     0,
   );
-  const processSlotUsage = totalInFlight + retainedSessionCount;
+  const processSlotUsage = totalInFlight;
   return {
     bridgeConfiguredMaxInFlight,
     bridgeMaxInFlight,
@@ -1939,6 +1940,29 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       context.status.runtimeConformance = runtimeConformanceSummary();
     }
   };
+  const recordSuccessfulRuntimeConformance = (
+    item: { bridgeProfileId?: string; hermesProfileName?: string; kind?: string; type?: string },
+    result: Record<string, unknown>,
+  ) => {
+    if (result.ok !== true) {
+      return;
+    }
+    const records = runtimeConformanceRecordsForSuccessfulCommand(item);
+    if (Object.keys(records).length === 0) {
+      return;
+    }
+    runtimeConformanceRecords = {
+      ...runtimeConformanceRecords,
+      ...records,
+    };
+    for (const [profileId, record] of Object.entries(records)) {
+      lastRuntimeConformanceProbeAtByProfile.set(profileId, record.checkedAt);
+    }
+    for (const context of contexts.values()) {
+      context.status.runtimeConformance = runtimeConformanceSummary();
+    }
+    void persistRuntimeCatalogCache();
+  };
   const refreshRuntimeCatalogInBackground = () => {
     void (async () => {
       const nextHermesProfiles = await discoverHermesProfiles().catch(
@@ -2087,6 +2111,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         allowRemoteCwd,
         processRegistry,
         supervisor,
+        onQueueResultMarked: recordSuccessfulRuntimeConformance,
       });
       const wakeSignal = createBridgeWakeSignal({
         config: registration,
@@ -2433,9 +2458,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     );
     const availableOrgSlots = Math.max(
       0,
-      context.orgMaxInFlight -
-        context.inFlightCommands.size -
-        retainedBridgeSessionCount(context.manager),
+      context.orgMaxInFlight - context.inFlightCommands.size,
     );
     const reservedSlots = Math.min(availableOrgSlots, availableProcessSlots);
     reservedClaimSlots += reservedSlots;
@@ -4952,18 +4975,67 @@ function runtimeConformanceBlockForCommand(
   }
   const profile = runtimeConformance.profiles[runtimeProfileId];
   if (!profile) {
-    return {
-      reasonCode: "runtime_conformance_missing",
-      status: runtimeConformance.status,
-    };
+    return undefined;
   }
   if (profile.canClaim) {
+    return undefined;
+  }
+  if (isSoftRuntimeConformanceBlock(profile)) {
     return undefined;
   }
   return {
     reasonCode: profile.reasonCode ?? "runtime_conformance_missing",
     status: runtimeConformance.status,
   };
+}
+
+export function runtimeConformanceRecordsForSuccessfulCommand(
+  command: {
+    bridgeProfileId?: string;
+    hermesProfileName?: string;
+    kind?: string;
+    type?: string;
+    [key: string]: unknown;
+  },
+  checkedAt = Date.now(),
+): Record<string, RuntimeConformanceRecord> {
+  if (!command.bridgeProfileId) {
+    return {};
+  }
+  const queueCommand = command as BridgeQueueCommand;
+  if (!commandRequiresRuntimeConformance(queueCommand)) {
+    return {};
+  }
+  const profileIds = new Set([runtimeProfileIdForCommand(queueCommand)]);
+  const launchSpecKey = launchSpecKeyForCommand(queueCommand);
+  if (launchSpecKey) {
+    profileIds.add(launchSpecKey);
+  }
+  return Object.fromEntries(
+    Array.from(profileIds).map((runtimeId) => [
+      runtimeId,
+      {
+        checkedAt,
+        diagnostics: [],
+        runtimeId,
+        state: "passing" as const,
+        strength: "init_only" as const,
+      },
+    ]),
+  );
+}
+
+function isSoftRuntimeConformanceBlock(record: {
+  reasonCode?: string;
+  state?: string;
+}): boolean {
+  if (record.reasonCode === "runtime_conformance_missing") {
+    return true;
+  }
+  return (
+    record.reasonCode === "runtime_conformance_stale" &&
+    record.state === "passing"
+  );
 }
 
 function launchSpecKeyForCommand(command: BridgeQueueCommand): string | undefined {
@@ -5125,10 +5197,7 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
   return {
     connected: status.connected,
     lifecycle: status.lifecycle ?? "running",
-    updateState: status.updateState ?? {
-      status: "upToDate",
-      currentVersion: BRIDGE_VERSION,
-    },
+    updateState: buildHeartbeatUpdateStatePayload(status.updateState),
     controlCommandStatus: status.controlCommandStatus,
     devHotReload: status.devHotReload,
     activeSessions: status.activeSessions,
@@ -5171,6 +5240,17 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     lastStaleCleanup: status.lastStaleCleanup,
     recentErrors: status.recentErrors.slice(-5),
   };
+}
+
+function buildHeartbeatUpdateStatePayload(updateState: BridgeStatus["updateState"]) {
+  const payload = {
+    ...(updateState ?? {
+      status: "upToDate" as const,
+      currentVersion: BRIDGE_VERSION,
+    }),
+  };
+  delete (payload as { startedAt?: number }).startedAt;
+  return payload;
 }
 
 function buildHeartbeatProcessHealthPayload(
@@ -6022,6 +6102,7 @@ export function normalizeQueueCommand(
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
+    codeAttribution: codeAttributionFromUnknown(record.codeAttribution),
     cwd: stringFromUnknown(record.cwd),
     prompt,
     threadHistory: stringFromUnknown(record.threadHistory),

@@ -18,6 +18,13 @@ import {
   type BridgeLogger,
   redactLogValue,
 } from "./bridge-log";
+import {
+  attributionPromptContext,
+  attributionSessionKeyPart,
+  gitAuthorEnv,
+  sanitizeGitAuthor,
+  type BridgeCodeAttribution,
+} from "./git-attribution";
 import type {
   AgentAttachmentUploadInput,
   BridgeEventInput,
@@ -66,6 +73,7 @@ export type BridgeSessionQueueItem = {
   threadId?: string;
   sessionId?: string;
   agentSessionId?: string;
+  codeAttribution?: BridgeCodeAttribution;
   cwd?: string;
   prompt?: string;
   threadHistory?: string;
@@ -123,6 +131,7 @@ export type ManagedAcpSession = {
       threadHistory?: string;
       attachmentReferenceText?: string;
       attachments?: HermesAcpPromptAttachment[];
+      attributionContext?: string;
       autoApprovePermissionRequests?: boolean;
       runtimeConfig?: Record<string, string>;
     },
@@ -159,6 +168,7 @@ export type BridgeSessionContext = {
   terminalAdapter?: SdkAcpRuntimeTerminalAdapter;
   terminalScope?: TerminalHandleScope;
   processRegistryMetadata?: HermesAcpProcessRegistryMetadata;
+  gitAuthorEnv?: Record<string, string>;
   onEvent: (event: NormalizedBridgeEvent) => void;
   onEventBoundary?: () => void;
   onError: (error: Error) => void;
@@ -331,6 +341,10 @@ export type BridgeSessionManagerOptions = {
     context: BridgeTerminalContext,
     params: CreateTerminalRequest,
   ) => Promise<SdkAcpRuntimeTerminalHandle>;
+  onQueueResultMarked?: (
+    item: BridgeSessionQueueItem,
+    result: Record<string, unknown>,
+  ) => void;
 };
 
 export type BridgeSessionManagerStatus = {
@@ -549,6 +563,10 @@ export class BridgeSessionManager {
         params: CreateTerminalRequest,
       ) => Promise<SdkAcpRuntimeTerminalHandle>)
     | undefined;
+  private readonly onQueueResultMarked?: (
+    item: BridgeSessionQueueItem,
+    result: Record<string, unknown>,
+  ) => void;
   private readonly createSession: (
     context: BridgeSessionContext,
   ) => ManagedAcpSession;
@@ -619,6 +637,7 @@ export class BridgeSessionManager {
     this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
     this.terminalRegistry = options.terminalRegistry;
     this.createTerminal = options.createTerminal;
+    this.onQueueResultMarked = options.onQueueResultMarked;
     this.createMcpServers = options.createMcpServers ?? (() => []);
     this.createSession =
       options.createSession ??
@@ -626,6 +645,7 @@ export class BridgeSessionManager {
         new HermesAcpSession({
           agentCommand: context.agentCommand,
           cwd: context.cwd,
+          env: context.gitAuthorEnv,
           initialSessionId: context.initialSessionId,
           mcpServers: context.mcpServers,
           processRegistry: this.processRegistry,
@@ -1104,6 +1124,7 @@ export class BridgeSessionManager {
       attachmentReferenceTextForPrompt(attachments);
     const threadHistory = normalizeThreadHistory(item.threadHistory);
     const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
+    const attributionContext = attributionPromptContext(item);
     const autoApprovePermissionRequests =
       item.approvalLevel === "full_permissions";
     if (attachments.length > 0) {
@@ -1126,6 +1147,7 @@ export class BridgeSessionManager {
       this.handlePromptNow(item, promptText, {
         attachmentReferenceText,
         attachments,
+        attributionContext,
         autoApprovePermissionRequests,
         resultMetadata:
           attachments.length > 0
@@ -1153,6 +1175,7 @@ export class BridgeSessionManager {
       threadHistory?: string;
       attachmentReferenceText?: string;
       attachments?: HermesAcpPromptAttachment[];
+      attributionContext?: string;
       autoApprovePermissionRequests?: boolean;
       resultMetadata?: Record<string, unknown>;
       sessionKey?: string;
@@ -1179,7 +1202,11 @@ export class BridgeSessionManager {
       externalEventId: `${item.id}:message_started`,
       source: "bridge",
       eventType: "message_started",
-      payload: { queueId: item.id, queueType: normalizeType(item) },
+      payload: {
+        codeAttribution: item.codeAttribution,
+        queueId: item.id,
+        queueType: normalizeType(item),
+      },
       part: {
         type: "event",
         text: `${displayNameForSessionStart(session)} started this run.`,
@@ -2341,6 +2368,7 @@ export class BridgeSessionManager {
       item.claimId ? { ...result, claimId: item.claimId } : result,
       item.claimId,
     );
+    this.onQueueResultMarked?.(item, result);
   }
 
   private async closeSession(
@@ -2527,6 +2555,8 @@ export class BridgeSessionManager {
       runtimeProfile,
     });
     const agentCommand = launchSpec.agentCommand;
+    const gitAuthor = sanitizeGitAuthor(item);
+    const gitAuthorProcessEnv = gitAuthor ? gitAuthorEnv(gitAuthor) : undefined;
     const cwd = this.allowRemoteCwd ? item.cwd : undefined;
     const terminalScope = this.terminalScopeForSession({
       item,
@@ -2579,6 +2609,7 @@ export class BridgeSessionManager {
         sessionKey,
         threadId,
         cwd,
+        gitAuthorEnv: gitAuthorProcessEnv,
         hermesProfileName: item.hermesProfileName,
         agentSessionId: item.agentSessionId,
         organizationId: item.organizationId,
@@ -3597,7 +3628,9 @@ export class BridgeSessionManager {
         "unknown-agent",
       item.mailboxConversationId ?? threadId,
       providerSessionKey,
+      attributionSessionKeyPart(item),
     ]
+      .filter((part) => part !== undefined)
       .map(encodeSessionKeyPart)
       .join(":");
   }

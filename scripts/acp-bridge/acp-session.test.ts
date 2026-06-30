@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test"
 import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientprotocol/sdk"
 
 import {
+  buildAcpProcessEnv,
   DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
   expandLocalCwd,
   HermesAcpRuntimeAdapter,
@@ -36,6 +37,18 @@ type FakeRuntimeUpdate = Record<string, unknown>
 type DelayedFakeRuntimeUpdate = { delayMs: number; update: FakeRuntimeUpdate }
 
 describe("ACP final text extraction", () => {
+  test("merges git author env without setting committer identity", () => {
+    const env = buildAcpProcessEnv({
+      GIT_AUTHOR_EMAIL: "don@users.noreply.github.com",
+      GIT_AUTHOR_NAME: "Don",
+    }, {});
+
+    expect(env?.GIT_AUTHOR_EMAIL).toBe("don@users.noreply.github.com");
+    expect(env?.GIT_AUTHOR_NAME).toBe("Don");
+    expect(env?.GIT_COMMITTER_EMAIL).toBeUndefined();
+    expect(env?.GIT_COMMITTER_NAME).toBeUndefined();
+  });
+
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
       agentCommand: "bunx @zed-industries/codex-acp@0.16.0",

@@ -19,6 +19,7 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "settings.setDefaultApprovalLevel",
   "agents.list",
   "agents.sendMailboxMessage",
+  "github.createPullRequest",
   "spaces.list",
   "spaces.get",
   "spaces.create",
@@ -154,6 +155,16 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     responsePolicy: z.enum(["fire-and-forget", "reply-allowed", "reply-requested"]).optional(),
     subject: z.string(),
     toAgentIdOrSlug: z.string(),
+  },
+  "github.createPullRequest": {
+    base: z.string(),
+    body: z.string().optional(),
+    draft: z.boolean().optional(),
+    head: z.string(),
+    maintainerCanModify: z.boolean().optional(),
+    owner: z.string(),
+    repo: z.string(),
+    title: z.string(),
   },
   "spaces.list": { includeArchived: z.boolean().optional(), limit: z.number().optional() },
   "spaces.get": { includeArchived: z.boolean().optional(), spaceIdOrSlug: z.string() },
@@ -418,6 +429,8 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
     "List mailbox-capable agents in the current organization so you can address agent-to-agent handoffs by id or slug.",
   "agents.sendMailboxMessage":
     "Send a mailbox message from the current agent to another agent in the same organization. Use responsePolicy='fire-and-forget' for one-off handoffs, 'reply-allowed' when the recipient may answer, and 'reply-requested' when a reply is desired. Replies must pass parentMailboxMessageId and stay within maxHops; this records the handoff but does not automatically start another ACP session.",
+  "github.createPullRequest":
+    "Request creation of a GitHub pull request as the linked requesting user. The branch must already be pushed to GitHub. 0000 will show an in-thread confirmation and then create the PR server-side; do not include GitHub tokens or credentials.",
   "spaces.list": "List spaces in 0000 Chat.",
   "spaces.get": "Read one 0000 Chat space by id or slug.",
   "spaces.create":

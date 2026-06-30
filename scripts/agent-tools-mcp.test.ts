@@ -25,6 +25,7 @@ describe("agent tools MCP server helpers", () => {
       "settings.setDefaultApprovalLevel",
       "agents.list",
       "agents.sendMailboxMessage",
+      "github.createPullRequest",
       "spaces.list",
       "spaces.get",
       "spaces.create",
@@ -97,6 +98,9 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("agents.list")
     expect(buildAgentToolGuideText()).toContain("agent-to-agent handoffs")
     expect(buildAgentToolGuideText()).toContain("agents.sendMailboxMessage")
+    expect(buildAgentToolGuideText()).toContain("github.createPullRequest")
+    expect(buildAgentToolGuideText()).toContain("branch must already be pushed")
+    expect(buildAgentToolGuideText()).toContain("Do not include GitHub tokens")
     expect(buildAgentToolGuideText()).toContain("autoArchiveInactiveThreadsAfterHours")
     expect(buildAgentToolGuideText()).toContain("apps.create")
     expect(buildAgentToolGuideText()).toContain("brand-new app")
@@ -165,6 +169,32 @@ describe("agent tools MCP server helpers", () => {
         threadId: "thread_abc",
       }),
     ).not.toContain("mcpServer: 0000-chat")
+  })
+
+  test("keeps the GitHub pull request creation schema token-free", () => {
+    const schema = AGENT_TOOL_MCP_INPUT_SCHEMAS["github.createPullRequest"]
+
+    expect(schema.safeParse({
+      base: "main",
+      body: "Please review.",
+      draft: true,
+      head: "codex/github-pr-user-flow",
+      maintainerCanModify: false,
+      owner: "0000-chat",
+      repo: "0000",
+      title: "Add GitHub PR creation flow",
+    }).success).toBe(true)
+
+    const parsed = schema.parse({
+      accessToken: "ghu_secret",
+      base: "main",
+      head: "codex/github-pr-user-flow",
+      owner: "0000-chat",
+      repo: "0000",
+      title: "Add GitHub PR creation flow",
+    })
+    expect(JSON.stringify(parsed)).not.toContain("accessToken")
+    expect(JSON.stringify(parsed)).not.toContain("ghu_secret")
   })
 
   test("validates thread creation schema including self assignment", () => {

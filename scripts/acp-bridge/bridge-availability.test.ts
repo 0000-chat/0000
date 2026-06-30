@@ -59,4 +59,28 @@ describe("bridge availability", () => {
       status: "degraded",
     })
   })
+
+  test("stale runtime conformance degrades without blocking fresh claims", () => {
+    expect(
+      deriveBridgeAvailability({
+        connected: true,
+        processHealth: { canClaim: true, status: "healthy" },
+        runtimeConformance: {
+          canClaim: false,
+          profiles: {
+            "codex:codex-acp": {
+              canClaim: false,
+              reasonCode: "runtime_conformance_stale",
+              state: "passing",
+            },
+          },
+          status: "unavailable",
+        },
+      }),
+    ).toEqual({
+      canClaim: true,
+      reasonCode: "runtime_conformance_refresh_needed",
+      status: "degraded",
+    })
+  })
 })

@@ -436,6 +436,108 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("passes linked GitHub attribution into session env and hidden prompt context", async () => {
+    const sessionContexts: BridgeSessionContext[] = [];
+    const promptOptions: Array<Record<string, unknown> | undefined> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        sessionContexts.push(context);
+        return {
+          ...fakeSession(),
+          sendUserMessage: async (_prompt, options) => {
+            promptOptions.push(options as Record<string, unknown> | undefined);
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: "ok",
+            };
+          },
+        };
+      },
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-1",
+      codeAttribution: {
+        gitAuthorEmail: "don@users.noreply.github.com",
+        gitAuthorName: "Don",
+        githubLogin: "don",
+        provider: "github",
+        providerAccountId: "12345",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
+      id: "queue-1",
+      organizationId: "org_123",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(sessionContexts[0]?.gitAuthorEnv).toEqual({
+      GIT_AUTHOR_EMAIL: "don@users.noreply.github.com",
+      GIT_AUTHOR_NAME: "Don",
+    });
+    expect(sessionContexts[0]?.sessionKey).toContain("git-author");
+    expect(promptOptions[0]?.attributionContext).toContain("GitHub @don");
+    expect(JSON.stringify(promptOptions[0])).not.toContain("accessToken");
+  });
+
+  test("starts a new retained session when linked git author changes", async () => {
+    const sessionContexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        sessionContexts.push(context);
+        return fakeSession();
+      },
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-1",
+      codeAttribution: {
+        gitAuthorEmail: "don@users.noreply.github.com",
+        gitAuthorName: "Don",
+        githubLogin: "don",
+        provider: "github",
+        providerAccountId: "12345",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
+      id: "queue-1",
+      organizationId: "org_123",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-2",
+      codeAttribution: {
+        gitAuthorEmail: "alex@users.noreply.github.com",
+        gitAuthorName: "Alex",
+        githubLogin: "alex",
+        provider: "github",
+        providerAccountId: "67890",
+        requestedByUserId: "user_456",
+        source: "github-linked-account",
+      },
+      id: "queue-2",
+      organizationId: "org_123",
+      prompt: "hello again",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(sessionContexts).toHaveLength(2);
+    expect(new Set(sessionContexts.map((context) => context.sessionKey)).size).toBe(2);
+  });
+
   test("strict scoped identity rejects missing organization or agent session ids", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({
@@ -500,6 +602,15 @@ describe("bridge session cwd safety", () => {
     await manager.handleQueueItem({
       bridgeProfileId: "codex:codex-acp",
       claimId: "claim-1",
+      codeAttribution: {
+        gitAuthorEmail: "don@users.noreply.github.com",
+        gitAuthorName: "Don",
+        githubLogin: "don",
+        provider: "github",
+        providerAccountId: "12345",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
       id: "queue-1",
       prompt: "hello",
       threadId: "thread-1",
@@ -509,6 +620,14 @@ describe("bridge session cwd safety", () => {
     expect(cloud.events[0]?.[0]?.normalizedPayload).toMatchObject({
       text: "Agent started this run.",
     });
+    expect(cloud.events[0]?.[0]?.rawPayload).toMatchObject({
+      codeAttribution: {
+        githubLogin: "don",
+        requestedByUserId: "user_123",
+        source: "github-linked-account",
+      },
+    });
+    expect(JSON.stringify(cloud.events[0]?.[0])).not.toContain("accessToken");
   });
 
   test("mirrors prompt lifecycle into the shadow supervisor", async () => {
