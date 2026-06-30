@@ -3,11 +3,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod/v4"
 
-import { buildZeroChatMcpGuideText } from "./acp-bridge/zero-chat-policy"
+import {
+  ARTIFACTS_FEATURE_FLAG_KEY,
+  buildZeroChatMcpGuideText,
+  type ZeroChatPolicyOptions,
+} from "./acp-bridge/zero-chat-policy"
+
+export { ARTIFACTS_FEATURE_FLAG_KEY }
 
 export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "userPrompts.requestChoice",
   "threads.list",
+  "threads.create",
   "messages.search",
   "settings.setDefaultApprovalLevel",
   "agents.list",
@@ -46,6 +53,13 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "databases.deleteRow",
   "secrets.put",
   "secrets.listAvailable",
+  "artifacts.create",
+  "artifacts.createUploadIntent",
+  "artifacts.completeUpload",
+  "artifacts.search",
+  "artifacts.read",
+  "artifacts.getContentUrl",
+  "artifacts.link",
   "scripts.createDraft",
   "scripts.updateDraft",
   "scripts.search",
@@ -58,6 +72,7 @@ type AgentToolMcpEnv = {
   appUrl: string
   bridgeToken: string
   deviceId: string
+  enabledFeatureFlags?: readonly string[]
   threadId?: string
   toolBaseUrl?: string
 }
@@ -91,6 +106,16 @@ export const AGENT_TOOL_SESSION_CONTEXT_RESOURCE = "https://0000.chat/mcp/resour
 const DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS = 30_000
 const MAX_ERROR_TEXT_LENGTH = 280
 const MAX_MCP_ERROR_JSON_LENGTH = 1_500
+const ARTIFACT_TOOL_NAMES = new Set<AgentToolMcpToolName>([
+  "artifacts.create",
+  "artifacts.createUploadIntent",
+  "artifacts.completeUpload",
+  "artifacts.search",
+  "artifacts.read",
+  "artifacts.getContentUrl",
+  "artifacts.link",
+])
+const DEFINED_FEATURE_FLAGS = new Set([ARTIFACTS_FEATURE_FLAG_KEY])
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "userPrompts.requestChoice": {
@@ -104,6 +129,16 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     prompt: z.string(),
   },
   "threads.list": { limit: z.number().optional() },
+  "threads.create": {
+    agentIdOrSlug: z.string().optional(),
+    approvalLevel: z.enum(["ask", "full_permissions"]).optional(),
+    clientThreadId: z.string().optional(),
+    initialUserMessage: z.string().optional(),
+    requireAgentSession: z.boolean().optional(),
+    spaceIdOrSlug: z.string(),
+    summary: z.string().optional(),
+    title: z.string().optional(),
+  },
   "messages.search": {
     limit: z.number().optional(),
     query: z.string(),
@@ -292,6 +327,66 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     query: z.string().optional(),
     scopes: z.array(z.enum(["user", "organization"])).optional(),
   },
+  "artifacts.create": {
+    content: z.string(),
+    contentHash: z.string().optional(),
+    format: z.enum(["text/markdown", "text/typescript", "application/json", "binary"]),
+    kind: z.enum(["document", "action", "app", "file", "report"]),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    slug: z.string().optional(),
+    spaceId: z.string().optional(),
+    summary: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    title: z.string(),
+    versionMetadata: z.record(z.string(), z.unknown()).optional(),
+    visibility: z.enum(["organization", "space", "restricted"]).optional(),
+  },
+  "artifacts.createUploadIntent": {
+    extension: z.string().optional(),
+    format: z.enum(["text/markdown", "text/typescript", "application/json", "binary"]),
+    kind: z.enum(["document", "action", "app", "file", "report"]),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    slug: z.string().optional(),
+    spaceId: z.string().optional(),
+    summary: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    title: z.string(),
+    versionMetadata: z.record(z.string(), z.unknown()).optional(),
+    visibility: z.enum(["organization", "space", "restricted"]).optional(),
+  },
+  "artifacts.completeUpload": {
+    artifactId: z.string(),
+    byteLength: z.number(),
+    contentHash: z.string(),
+    versionId: z.string(),
+  },
+  "artifacts.search": {
+    kind: z.enum(["document", "action", "app", "file", "report"]).optional(),
+    limit: z.number().optional(),
+    query: z.string().optional(),
+    spaceId: z.string().optional(),
+    status: z.enum(["draft", "active", "archived", "pendingDeletion"]).optional(),
+  },
+  "artifacts.read": {
+    artifactId: z.string().optional(),
+    slug: z.string().optional(),
+  },
+  "artifacts.getContentUrl": {
+    artifactId: z.string().optional(),
+    expiresIn: z.number().optional(),
+    slug: z.string().optional(),
+    versionId: z.string().optional(),
+  },
+  "artifacts.link": {
+    artifactId: z.string(),
+    fieldKey: z.string().optional(),
+    relationship: z.enum(["source", "reference", "result", "embedded", "mentioned"]),
+    rowId: z.string().optional(),
+    tableId: z.string().optional(),
+    targetId: z.string(),
+    targetType: z.enum(["thread", "message", "space", "database_row", "database_table", "action", "app"]),
+    targetVersionId: z.string().optional(),
+  },
   "scripts.createDraft": {
     code: z.string(),
     description: z.string(),
@@ -325,6 +420,8 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "userPrompts.requestChoice":
     "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
   "threads.list": "List recent 0000 Chat threads visible to this agent session.",
+  "threads.create":
+    "Create a new 0000 Chat thread in a space. By default this creates a thread and agent session without messages; pass agentIdOrSlug to assign the thread to another usable agent, or pass agentIdOrSlug: \"self\" to assign it to the calling agent. Pass initialUserMessage only when the user explicitly wants that text carried into the new thread as the first user message.",
   "messages.search": "Search cached 0000 Chat messages.",
   "settings.setDefaultApprovalLevel":
     "Set the user's default approval mode. Use full_permissions only when the user explicitly asks to enable trusted local automation; this tool requires in-thread approval unless the current thread already has full permissions.",
@@ -380,6 +477,20 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
     "Encrypt and store a 0000 Chat user or organization secret. The value is sent to 0000 Chat for encrypted storage and is redacted from approvals and tool logs.",
   "secrets.listAvailable":
     "List metadata for secrets available to generated scripts without revealing values.",
+  "artifacts.create":
+    "Create a small durable org-visible artifact inline. Use this for markdown notes, plans, JSON, and other durable content that should live in 0000 Chat instead of local files.",
+  "artifacts.createUploadIntent":
+    "Create an R2 upload intent for a large durable artifact. Upload the content to the returned uploadUrl, then call artifacts.completeUpload with the byte length and content hash.",
+  "artifacts.completeUpload":
+    "Use after artifacts.createUploadIntent and a successful R2 upload to mark the pending artifact version as available.",
+  "artifacts.search":
+    "Search durable artifacts in the current organization. Use this before creating local files when looking for existing plans, reports, exported files, or generated content.",
+  "artifacts.read":
+    "Read artifact metadata and current version metadata by id or slug. Use artifacts.getContentUrl for R2-backed content bytes.",
+  "artifacts.getContentUrl":
+    "Get a short-lived read URL for an R2-backed artifact version. Use artifacts.read first when you need metadata or the current version id.",
+  "artifacts.link":
+    "Use when an artifact should be attached to a first-class 0000 object such as a thread, message, space, database row, script, or app.",
   "scripts.createDraft": "Create a reusable generated script draft and first version.",
   "scripts.updateDraft": "Update a reusable generated script draft by creating a new draft version.",
   "scripts.search": "Search reusable generated script artifacts in the current organization.",
@@ -391,6 +502,7 @@ export function buildAgentToolMcpEnv(env: NodeJS.ProcessEnv): AgentToolMcpEnv {
     appUrl: requiredEnv(env, "ZERO_CHAT_APP_URL"),
     bridgeToken: requiredEnv(env, "ZERO_CHAT_BRIDGE_TOKEN"),
     deviceId: requiredEnv(env, "ZERO_CHAT_BRIDGE_DEVICE_ID"),
+    enabledFeatureFlags: parseAgentToolMcpFeatureFlags(env.ZERO_CHAT_ENABLED_FEATURE_FLAGS),
     agentSessionId: requiredEnv(env, "ZERO_CHAT_AGENT_SESSION_ID"),
     threadId: optionalEnv(env, "ZERO_CHAT_THREAD_ID"),
     toolBaseUrl: optionalEnv(env, "ZERO_CHAT_AGENT_TOOLS_URL"),
@@ -496,8 +608,29 @@ export function toMcpToolResult(result: unknown) {
   }
 }
 
-export function buildAgentToolGuideText(): string {
-  return buildZeroChatMcpGuideText()
+export function parseAgentToolMcpFeatureFlags(value: string | undefined): string[] {
+  if (!value?.trim()) return []
+  const featureFlags: string[] = []
+  for (const rawFeatureFlag of value.split(",")) {
+    const featureFlag = rawFeatureFlag.trim().toLowerCase()
+    if (!featureFlag) continue
+    if (!DEFINED_FEATURE_FLAGS.has(featureFlag)) {
+      throw new Error(`ZERO_CHAT_ENABLED_FEATURE_FLAGS contains unknown feature flag "${rawFeatureFlag.trim()}"`)
+    }
+    if (!featureFlags.includes(featureFlag)) featureFlags.push(featureFlag)
+  }
+  return featureFlags
+}
+
+export function getVisibleAgentToolMcpToolNames(
+  enabledFeatureFlags: readonly string[] = [],
+): AgentToolMcpToolName[] {
+  const artifactsEnabled = enabledFeatureFlags.includes(ARTIFACTS_FEATURE_FLAG_KEY)
+  return AGENT_TOOL_MCP_TOOL_NAMES.filter((toolName) => artifactsEnabled || !ARTIFACT_TOOL_NAMES.has(toolName))
+}
+
+export function buildAgentToolGuideText(options: ZeroChatPolicyOptions = {}): string {
+  return buildZeroChatMcpGuideText({ enabledFeatureFlags: options.enabledFeatureFlags })
 }
 
 export function buildAgentToolSessionContextText(env: AgentToolMcpEnv): string {
@@ -507,6 +640,7 @@ agentSessionId: ${env.agentSessionId}
 ${currentThreadLine}bridgeDeviceId: ${env.deviceId}
 appUrl: ${env.appUrl}
 mcpServer: 0000
+enabledFeatureFlags: ${env.enabledFeatureFlags?.length ? env.enabledFeatureFlags.join(",") : "(none)"}
 toolGuide: ${AGENT_TOOL_GUIDE_RESOURCE}`
 }
 
@@ -521,7 +655,12 @@ export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
       mimeType: "text/plain",
     },
     async () => ({
-      contents: [{ text: buildAgentToolGuideText(), uri: AGENT_TOOL_GUIDE_RESOURCE }],
+      contents: [
+        {
+          text: buildAgentToolGuideText({ enabledFeatureFlags: env.enabledFeatureFlags }),
+          uri: AGENT_TOOL_GUIDE_RESOURCE,
+        },
+      ],
     }),
   )
 
@@ -542,7 +681,7 @@ export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
     }),
   )
 
-  for (const toolName of AGENT_TOOL_MCP_TOOL_NAMES) {
+  for (const toolName of getVisibleAgentToolMcpToolNames(env.enabledFeatureFlags)) {
     server.registerTool(
       toolName,
       {

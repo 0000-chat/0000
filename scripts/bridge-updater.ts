@@ -11,6 +11,7 @@ type UpdaterArgs = {
   currentVersion?: string
   parentPid?: number
   repoPath: string
+  restartHandoffPath?: string
   restartCommand: string[]
   statusPath?: string
 }
@@ -33,6 +34,7 @@ type UpdaterDependencies = {
 
 const MAX_STATUS_ERROR_LENGTH = 240
 const MAX_STATUS_TARGET_VERSION_LENGTH = 64
+const RESTART_HANDOFF_TTL_MS = 10 * 60_000
 
 function buildUpdaterUpdateState(
   status: string,
@@ -133,6 +135,11 @@ export async function runBridgeUpdate(
       await runProcessFn("git", ["-C", args.repoPath, "checkout", "--detach", targetTag])
       await runProcessFn("bun", ["install"], { cwd: args.repoPath })
     }
+    await updateRestartHandoffTargetVersion(args.restartHandoffPath, {
+      status: targetTag ? "updated" : "upToDate",
+      targetVersion,
+      updatedAt: now(),
+    })
     await writeUpdaterStatus(args.statusPath, {
       controlCommandStatus: buildControlCommandStatus("succeeded", {
         completedAt: now(),
@@ -235,8 +242,39 @@ function parseUpdaterArgs(argv: string[]): UpdaterArgs {
     parentPid: Number.isFinite(parentPid) ? parentPid : undefined,
     repoPath,
     restartCommand,
+    restartHandoffPath: values.get("restart-handoff-path"),
     statusPath: values.get("status-path"),
   }
+}
+
+async function updateRestartHandoffTargetVersion(
+  path: string | undefined,
+  patch: { status: string; targetVersion?: string; updatedAt: number },
+): Promise<void> {
+  if (!path || !existsSync(path)) {
+    return
+  }
+  let existing: unknown
+  try {
+    existing = JSON.parse(await readFile(path, "utf8"))
+  } catch {
+    return
+  }
+  if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+    return
+  }
+  const next = {
+    ...(existing as Record<string, unknown>),
+    createdAt: patch.updatedAt,
+    expiresAt: patch.updatedAt + RESTART_HANDOFF_TTL_MS,
+    status: patch.status,
+    ...(patch.targetVersion ? { targetVersion: patch.targetVersion } : {}),
+  }
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  const tempPath = `${path}.${process.pid}.tmp`
+  await writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: STATUS_MODE })
+  await chmod(tempPath, STATUS_MODE)
+  await rename(tempPath, path)
 }
 
 async function writeUpdaterStatus(statusPath: string | undefined, patch: UpdateState) {

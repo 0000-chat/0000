@@ -18,7 +18,9 @@ import { makeFunctionReference } from "convex/server";
 
 import {
   BridgeCloudHttpError,
+  BridgeCloudRequestTimeoutError,
   ConvexBridgeCloudClient,
+  type BridgeQueueClaimInput,
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
 import {
@@ -58,6 +60,8 @@ import {
   buildBridgeLaunchSpec,
   type BridgeQueueAttachment,
   BridgeSessionManager,
+  type BridgeSessionManagerStatus,
+  type BridgeTerminalizationMetadata,
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
   type BridgeSessionQueueItem,
 } from "./acp-bridge/session-manager";
@@ -87,6 +91,11 @@ import {
   type RuntimeConformanceRecord,
   type RuntimeConformanceSummary,
 } from "./acp-bridge/runtime-conformance";
+import {
+  DEFAULT_RUNTIME_CATALOG_CACHE_PATH,
+  loadRuntimeCatalogCache,
+  writeRuntimeCatalogCache,
+} from "./acp-bridge/runtime-catalog-cache";
 export {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -98,6 +107,11 @@ export {
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json");
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json");
+const DEFAULT_RESTART_HANDOFF_PATH = join(
+  homedir(),
+  ".0000",
+  "restart-handoff.json",
+);
 const DEFAULT_JOURNAL_DIR = join(homedir(), ".0000", "bridge-journals");
 const DEFAULT_PROCESS_REGISTRY_DIR = join(
   homedir(),
@@ -111,7 +125,10 @@ const DEFAULT_RESULT_PATH = "/api/agent-bridge/queue/result";
 const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
+const DEFAULT_IDLE_HEARTBEAT_MS = 5 * 60_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
+const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_STALE_CLEANUP_TIMEOUT_MS = 2_000;
 const DEFAULT_RESTART_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
@@ -132,10 +149,14 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.21";
+export const BRIDGE_VERSION = "0.1.32";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
+const BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION = 1;
+const BRIDGE_RESTART_HANDOFF_TTL_MS = 10 * 60_000;
+const BRIDGE_RESTART_HANDOFF_MAX_SESSIONS = 12;
+const BRIDGE_RESTART_HANDOFF_MAX_PROFILES = 24;
 
 export type BridgeRuntimeIdentity = {
   bridgeVersion: string;
@@ -186,6 +207,7 @@ export type BridgeRegistration = {
   deviceName: string;
   pairedAt: string;
   bridgeApiUrl?: string;
+  enabledFeatureFlags?: string[];
   logIngestUrl?: string;
 };
 
@@ -203,6 +225,7 @@ type PairResponse = {
   bridgeToken?: unknown;
   token?: unknown;
   bridgeApiUrl?: unknown;
+  enabledFeatureFlags?: unknown;
   endpoint?: unknown;
   logIngestUrl?: unknown;
   logUrl?: unknown;
@@ -239,9 +262,14 @@ type ProposedAgentProfile = {
 
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
+type BridgeWakeWaitResult = "signal" | "timeout";
+export type BridgeLoopPollReason = "active" | "startup" | "timer" | "wake";
+
 type BridgeWakeSignal = {
-  wait(timeoutMs: number): Promise<void>;
+  wait(timeoutMs: number): Promise<BridgeWakeWaitResult>;
   close(): Promise<void>;
+  isWakeSubscriptionActive?(): boolean;
+  nextWakeTokenRefreshAt?(): number | undefined;
   updateWakeToken?(wake: BridgeWakeToken | undefined): void;
 };
 
@@ -260,6 +288,7 @@ export type BridgeStatus = {
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
   controlCommandStatus?: BridgeControlCommandStatus;
+  restartHandoff?: BridgeRestartHandoffStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastHeartbeatSignature?: string;
@@ -269,6 +298,8 @@ export type BridgeStatus = {
     orgMaxInFlight?: number;
     bridgeConfiguredMaxInFlight?: number;
     bridgeMaxInFlight?: number;
+    processSlotUsage?: number;
+    retainedSessionCount?: number;
     totalInFlight?: number;
     localHardMaxInFlight?: number;
   };
@@ -328,9 +359,26 @@ export type BridgeStatus = {
   };
 };
 
+export type BridgeRestartHandoffStatus = {
+  consumedAt: string;
+  createdAt: string;
+  reason: BridgeRestartHandoffReason;
+  status?: string;
+  targetVersion?: string;
+  runtimeProfileIds: string[];
+  startupPriorityRuntimeProfileIds: string[];
+  sessionWarmupHints: Array<{
+    runtimeProfileId?: string;
+    threadId: string;
+  }>;
+};
+
 type BridgeSessionSummary = {
   sessionKey: string;
   threadId: string;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  organizationId?: string;
   runtimeProfileId?: string;
   runtimeLabel?: string;
   runtimeKind?: string;
@@ -380,6 +428,7 @@ export type BridgeRegistrationStatus = {
   devHotReload?: BridgeDevHotReloadStatus;
   pendingControlCommand?: BridgeControlCommandState;
   controlCommandStatus?: BridgeControlCommandStatus;
+  restartHandoff?: BridgeRestartHandoffStatus;
   lastStartedAt?: string;
   lastHeartbeatAt?: string;
   lastPollAt?: string;
@@ -408,6 +457,38 @@ export type BridgeRegistrationStatus = {
   lastStaleCleanup?: BridgeStatus["lastStaleCleanup"];
   recentErrors: string[];
   registrationFailure?: BridgeRegistrationFailure;
+};
+
+export type BridgeRestartHandoffReason =
+  | "restartWhenIdle"
+  | "updateWhenIdle"
+  | "runtimeProfileRefresh";
+
+export type BridgeRestartHandoffEntry = {
+  appUrlHash: string;
+  deviceId: string;
+  runtimeProfileIds: string[];
+  sessionWarmupHints: Array<{
+    agentSessionId?: string;
+    bridgeProfileId?: string;
+    hermesProfileName?: string;
+    lastUsedAt?: number;
+    organizationId?: string;
+    runtimeProfileId?: string;
+    sessionId?: string;
+    threadId: string;
+  }>;
+};
+
+export type BridgeRestartHandoff = {
+  schemaVersion: 1;
+  bridgeVersion: string;
+  createdAt: number;
+  expiresAt: number;
+  reason: BridgeRestartHandoffReason;
+  status?: string;
+  targetVersion?: string;
+  entries: BridgeRestartHandoffEntry[];
 };
 
 export type BridgeRegistrationFailure = {
@@ -585,25 +666,51 @@ type AgentToolsMcpServerInput = {
   agentToolsUrl?: string;
   bridgeToken: string;
   deviceId: string;
+  enabledFeatureFlags?: string[];
   threadId?: string;
 };
 
-type InFlightCommandMetadata = {
+type InFlightCommandMetadata = BridgeTerminalizationMetadata & {
   id: string;
   type?: string;
   threadId?: string;
   sessionId?: string;
   agentSessionId?: string;
   bridgeProfileId?: string;
+  createdAt?: string;
+  createdAtMs?: number;
+  claimedAt?: string;
+  claimedAtMs?: number;
   startedAt: string;
 };
+
+type BridgeLoopWatchdogResult =
+  | (Extract<BridgeWatchdogResult, { checkpoint: "quiet" }> &
+      BridgeTerminalizationMetadata)
+  | (Omit<
+      Extract<BridgeWatchdogResult, { checkpoint: "failed" }>,
+      "reasonCode"
+    > & {
+      reasonCode: string;
+    } & BridgeTerminalizationMetadata);
 
 type BridgeLoopManager = Pick<
   BridgeSessionManager,
   "getStatus" | "handleQueueItem"
 > & {
   closeIdleSessionsForProcessPressure?: BridgeSessionManager["closeIdleSessionsForProcessPressure"];
-  failActiveQueueItem?: BridgeSessionManager["failActiveQueueItem"];
+  seedWarmRuntimeSessions?: BridgeSessionManager["seedWarmRuntimeSessions"];
+  warmRuntimeSessions?: BridgeSessionManager["warmRuntimeSessions"];
+  failActiveQueueItem?: (
+    queueItemId: string,
+    reasonCode: string,
+    metadata?: BridgeTerminalizationMetadata,
+  ) => Promise<boolean>;
+};
+
+type BridgeClaimSlotReservation = {
+  maxInFlight: number;
+  release: () => void;
 };
 
 export type BridgeLoopIterationInput = {
@@ -618,9 +725,11 @@ export type BridgeLoopIterationInput = {
   manager: BridgeLoopManager;
   inFlightCommands: Map<string, Promise<void>>;
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
-  watchdogFailures?: BridgeWatchdogResult[];
+  watchdogFailures?: BridgeLoopWatchdogResult[];
   lastStaleCleanupAt: number;
   setLastStaleCleanupAt: (value: number) => void;
+  staleCleanupTimeoutMs?: number;
+  cloudRequestTimeoutMs?: number;
   log: FlushableBridgeLogger;
   recordLoopError: (error: unknown) => Promise<void>;
   statusPath: string;
@@ -635,14 +744,83 @@ export type BridgeLoopIterationInput = {
   canClaimWork?: () => boolean;
   getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
+  isProcessIdleForRestart?: () => boolean;
+  applyFeatureFlagsControl?: (
+    enabledFeatureFlags: string[],
+  ) => Promise<void> | void;
+  pollReason?: BridgeLoopPollReason;
+  reserveClaimSlots?: () => BridgeClaimSlotReservation;
+  warmRuntimeProfileIds?: string[];
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
+  restartHandoffPath?: string;
   wakeSignal?: BridgeWakeSignal;
 };
 
 export type BridgeLoopIterationResult = {
   restartRequested: boolean;
 };
+
+export type BridgeRegistrationSchedulerInput<TContext> = {
+  context: TContext;
+  isActive: (context: TContext) => boolean;
+  onRestartRequested: (context: TContext) => Promise<void>;
+  runContextPass: (
+    context: TContext,
+    pollReason: BridgeLoopPollReason,
+  ) => Promise<BridgeLoopIterationResult>;
+  totalInFlight: () => number;
+  waitForWakeSignal: (
+    context: TContext,
+  ) => Promise<BridgeLoopPollReason>;
+};
+
+export async function runBridgeRegistrationScheduler<TContext>(
+  input: BridgeRegistrationSchedulerInput<TContext>,
+): Promise<void> {
+  let nextPollReason: BridgeLoopPollReason = "startup";
+  let processRestartPending = false;
+  while (input.isActive(input.context)) {
+    const pollReason =
+      input.totalInFlight() > 0 ? "active" : nextPollReason;
+    const result = await input.runContextPass(input.context, pollReason);
+    if (result.restartRequested) {
+      processRestartPending = true;
+    }
+    if (processRestartPending && input.totalInFlight() === 0) {
+      await input.onRestartRequested(input.context);
+      return;
+    }
+    if (!input.isActive(input.context)) {
+      return;
+    }
+    nextPollReason = await input.waitForWakeSignal(input.context);
+  }
+}
+
+export function shouldCleanupBridgeOrphanedProcesses(input: {
+  inFlightCommandCount: number;
+  managerStatus: Pick<
+    BridgeSessionManagerStatus,
+    "activeSessions" | "sessions"
+  >;
+  singletonCanClaim: boolean;
+}): boolean {
+  if (!input.singletonCanClaim) {
+    return false;
+  }
+  if (input.inFlightCommandCount > 0) {
+    return false;
+  }
+  if (input.managerStatus.activeSessions.length > 0) {
+    return false;
+  }
+  return !input.managerStatus.sessions.some(
+    (session) =>
+      Boolean(session.runningQueueItemId) ||
+      (typeof session.queueDepth === "number" && session.queueDepth > 0),
+  );
+}
 
 function processPressureCleanupRequest(
   processHealth: BridgeStatus["processHealth"],
@@ -672,6 +850,7 @@ function processPressureCleanupRequest(
 export type BridgeUpdaterLaunchInput = {
   currentVersion: string;
   requestedAt?: number;
+  restartHandoffPath: string;
   restartCommand: string[];
   statusPath: string;
 };
@@ -728,6 +907,7 @@ function normalizeBridgeRegistration(raw: unknown): BridgeRegistration {
     bridgeToken,
     deviceId,
     deviceName,
+    enabledFeatureFlags: stringArrayFromUnknown(record.enabledFeatureFlags),
     logIngestUrl: stringFromUnknown(record.logIngestUrl),
     pairedAt,
   });
@@ -882,6 +1062,28 @@ export function getRequestTimeoutMs(
   return timeoutMs;
 }
 
+export function getCloudRequestTimeoutMs(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const rawValue = getFlag(
+    flags,
+    "cloud-request-timeout-ms",
+    env.ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS,
+  );
+  if (rawValue === undefined) {
+    return DEFAULT_CLOUD_REQUEST_TIMEOUT_MS;
+  }
+
+  const timeoutMs = Number(rawValue);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(
+      "cloud-request-timeout-ms must be a positive number of milliseconds",
+    );
+  }
+  return timeoutMs;
+}
+
 export function getToolResultTimeoutMs(
   flags: FlagMap,
   env: NodeJS.ProcessEnv = process.env,
@@ -946,9 +1148,10 @@ function normalizeControlUpdatedAt(value: unknown): number | undefined {
     : undefined;
 }
 
-function buildBridgeCapacitySnapshot(
+export function buildBridgeCapacitySnapshot(
   contexts: Iterable<{
     inFlightCommands: Map<string, Promise<void>>;
+    manager?: Pick<BridgeLoopManager, "getStatus">;
     orgMaxInFlight: number;
   }>,
   localHardMaxInFlight: number | undefined,
@@ -966,14 +1169,34 @@ function buildBridgeCapacitySnapshot(
     (sum, context) => sum + context.inFlightCommands.size,
     0,
   );
+  const retainedSessionCount = list.reduce(
+    (sum, context) => sum + retainedBridgeSessionCount(context.manager),
+    0,
+  );
+  const processSlotUsage = totalInFlight + retainedSessionCount;
   return {
     bridgeConfiguredMaxInFlight,
     bridgeMaxInFlight,
+    processSlotUsage,
+    retainedSessionCount,
     totalInFlight,
     ...(localHardMaxInFlight === undefined
       ? {}
       : { localHardMaxInFlight }),
   };
+}
+
+function retainedBridgeSessionCount(
+  manager: Pick<BridgeLoopManager, "getStatus"> | undefined,
+): number {
+  if (!manager) {
+    return 0;
+  }
+  const status = manager.getStatus();
+  const activeSessionKeys = new Set(status.activeSessions);
+  return status.sessions.filter(
+    (session) => !activeSessionKeys.has(session.sessionKey),
+  ).length;
 }
 
 export function getAllowRemoteCwd(
@@ -989,6 +1212,19 @@ export function getAllowRemoteCwd(
     return DEFAULT_ALLOW_REMOTE_CWD;
   }
   return rawValue === "1" || rawValue === "true" || rawValue === "yes";
+}
+
+export function getWarmRuntimeProfileIds(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const profileIds = [
+    ...splitCommaSeparatedList(env.ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES),
+    ...getRepeatedFlags(flags, "warm-runtime-profile").flatMap(
+      splitCommaSeparatedList,
+    ),
+  ];
+  return Array.from(new Set(profileIds));
 }
 
 export function deriveConvexCloudUrl(appUrl: string): string | undefined {
@@ -1040,6 +1276,14 @@ export function buildAgentToolsMcpServers(
         { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: input.deviceId },
         ...(input.threadId
           ? [{ name: "ZERO_CHAT_THREAD_ID", value: input.threadId }]
+          : []),
+        ...(input.enabledFeatureFlags?.length
+          ? [
+              {
+                name: "ZERO_CHAT_ENABLED_FEATURE_FLAGS",
+                value: input.enabledFeatureFlags.join(","),
+              },
+            ]
           : []),
         { name: "ZERO_CHAT_BRIDGE_TOKEN", value: input.bridgeToken },
       ],
@@ -1105,6 +1349,11 @@ export function describeStatus(
       if (registration.lastPollAt) {
         lines.push(`    last queue poll: ${registration.lastPollAt}`);
       }
+      if (registration.restartHandoff) {
+        lines.push(
+          `    restart handoff: consumed ${registration.restartHandoff.sessionWarmupHints.length} session hint${registration.restartHandoff.sessionWarmupHints.length === 1 ? "" : "s"}${registration.restartHandoff.targetVersion ? ` target=${registration.restartHandoff.targetVersion}` : ""}`,
+        );
+      }
       if (registration.recentErrors.length > 0) {
         lines.push("    recent errors:");
         for (const error of registration.recentErrors.slice(-3)) {
@@ -1146,6 +1395,11 @@ export function describeStatus(
   if (status.controlCommandStatus) {
     lines.push(
       `control command: ${status.controlCommandStatus.command} (${status.controlCommandStatus.status})`,
+    );
+  }
+  if (status.restartHandoff) {
+    lines.push(
+      `restart handoff: consumed ${status.restartHandoff.sessionWarmupHints.length} session hint${status.restartHandoff.sessionWarmupHints.length === 1 ? "" : "s"}${status.restartHandoff.targetVersion ? ` target=${status.restartHandoff.targetVersion}` : ""}`,
     );
   }
   for (const command of status.inFlightCommands ?? []) {
@@ -1211,6 +1465,16 @@ export function buildEndpoint(baseUrl: string, path: string): string {
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+function splitCommaSeparatedList(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 export function splitCommand(command: string): string[] {
@@ -1372,6 +1636,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
     bridgeToken,
     deviceId,
     deviceName: proposedProfile.proposedAgentName,
+    enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
     pairedAt: new Date().toISOString(),
   };
 
@@ -1458,6 +1723,7 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
     bridgeToken,
     appUrl,
     deviceName,
+    enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
     pairedAt: new Date().toISOString(),
   };
 
@@ -1494,6 +1760,7 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
 async function startBridge(parsed: ParsedBridgeArgs) {
   const configPath = getConfigPath(parsed.flags);
   const statusPath = getStatusPath(parsed.flags);
+  const restartHandoffPath = getRestartHandoffPath(parsed.flags);
   await ensureSecureBridgeConfigFile(configPath);
   await readBridgeConfigFile(configPath);
   const pollMs = Number(
@@ -1508,23 +1775,51 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     "runtime-command",
   ).map((command) => splitCommand(command));
   const requestTimeoutMs = getRequestTimeoutMs(parsed.flags);
+  const cloudRequestTimeoutMs = getCloudRequestTimeoutMs(parsed.flags);
   const toolResultTimeoutMs = getToolResultTimeoutMs(parsed.flags);
   const resumeEnabled = getAcpResumeEnabled(parsed.flags);
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags);
   const allowRemoteCwd = getAllowRemoteCwd(parsed.flags);
+  const warmRuntimeProfileIds = getWarmRuntimeProfileIds(
+    parsed.flags,
+    process.env,
+  );
   const logUrl = getBridgeLogUrl(parsed.flags, process.env);
+  const runtimeCatalogCachePath = getRuntimeCatalogCachePath(parsed.flags);
+  const runtimeCommandKeys = runtimeCatalogCommandKeys({
+    agentCommand,
+    customRuntimeCommands,
+  });
+  const cachedRuntimeCatalog = await loadRuntimeCatalogCache({
+    bridgeVersion: BRIDGE_VERSION,
+    cachePath: runtimeCatalogCachePath,
+    now: Date.now(),
+    runtimeCommandKeys,
+    ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+  }).catch(() => null);
   const hermesProfiles = await discoverHermesProfiles().catch(() => []);
-  const runtimeProfiles = await discoverBridgeRuntimeProfiles({
-    baseAgentCommand: agentCommand,
-    customCommands: customRuntimeCommands,
-  }).catch(() => []);
-  const launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
+  let runtimeProfiles =
+    cachedRuntimeCatalog?.profiles ??
+    (await discoverBridgeRuntimeProfiles({
+      baseAgentCommand: agentCommand,
+      customCommands: customRuntimeCommands,
+    }).catch(() => []));
+  let launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
     hermesProfiles,
     runtimeProfiles,
   });
-  const conformanceProfiles = [...runtimeProfiles, ...launchSpecRuntimeProfiles];
-  let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> = {};
-  const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>();
+  let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> =
+    cachedRuntimeCatalog?.conformanceRecords ?? {};
+  const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>(
+    Object.entries(runtimeConformanceRecords).map(([profileId, record]) => [
+      profileId,
+      record.checkedAt,
+    ]),
+  );
+  const conformanceProfiles = () => [
+    ...runtimeProfiles,
+    ...launchSpecRuntimeProfiles,
+  ];
   const runtimeConformanceSummary = () => {
     const summary = summarizeRuntimeConformance({
       activeProfileIds: bridgeActiveRuntimeProfileIds(contexts.values()),
@@ -1545,6 +1840,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
 
   type RuntimeContext = {
+    closing: boolean;
     config: BridgeRegistration;
     inFlightCommands: Map<string, Promise<void>>;
     inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
@@ -1559,26 +1855,48 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     status: BridgeStatus;
     supervisor: BridgeSupervisor;
     wakeSignal: BridgeWakeSignal;
+    loopTask?: Promise<void>;
     orgMaxInFlight: number;
     orgMaxInFlightUpdatedAt?: number;
   };
 
   const contexts = new Map<string, RuntimeContext>();
   let stopping = false;
+  let reservedClaimSlots = 0;
+  let startupRuntimeCatalogRefreshScheduled = false;
+  let consumedRestartHandoff: BridgeRestartHandoff | undefined;
+  let restartHandoffConsumed = false;
+  let startupRuntimeConformancePriorityProfileIds: string[] = [];
 
   const aggregateStatus = () =>
     buildAggregateBridgeStatus(
       Array.from(contexts.values()),
       buildBridgeCapacitySnapshot(contexts.values(), localHardMaxInFlight),
     );
+  let aggregateStatusWrite: Promise<void> = Promise.resolve();
   const persistAggregateStatus = async () => {
-    await writeStatus(statusPath, aggregateStatus());
+    const write = aggregateStatusWrite
+      .catch(() => undefined)
+      .then(() => writeStatus(statusPath, aggregateStatus()));
+    aggregateStatusWrite = write;
+    await write;
   };
   const totalInFlight = () =>
     Array.from(contexts.values()).reduce(
       (count, context) => count + context.inFlightCommands.size,
       0,
     );
+  const persistRuntimeCatalogCache = async () => {
+    await writeRuntimeCatalogCache({
+      bridgeVersion: BRIDGE_VERSION,
+      cachePath: runtimeCatalogCachePath,
+      conformanceRecords: runtimeConformanceRecords,
+      now: Date.now(),
+      profiles: runtimeProfiles,
+      runtimeCommandKeys,
+      ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+    }).catch(() => undefined);
+  };
   const refreshRuntimeConformanceIfStale = async (
     options: { force?: boolean } = {},
   ) => {
@@ -1611,17 +1929,72 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             }),
           profile,
         }),
-      profiles: conformanceProfiles,
+      profiles: conformanceProfiles(),
+      priorityProfileIds: startupRuntimeConformancePriorityProfileIds,
       records: runtimeConformanceRecords,
       ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
     });
     runtimeConformanceRecords = refreshed.records;
+    await persistRuntimeCatalogCache();
     for (const context of contexts.values()) {
       context.status.runtimeConformance = runtimeConformanceSummary();
     }
   };
+  const refreshRuntimeCatalogInBackground = () => {
+    void (async () => {
+      const nextHermesProfiles = await discoverHermesProfiles().catch(
+        () => hermesProfiles,
+      );
+      const discoveredRuntimeProfiles = await discoverBridgeRuntimeProfiles({
+        baseAgentCommand: agentCommand,
+        customCommands: customRuntimeCommands,
+      }).catch(() => runtimeProfiles);
+      const runtimeCatalogChanged = runtimeProfilesChanged(
+        runtimeProfiles,
+        discoveredRuntimeProfiles,
+      );
+      runtimeProfiles = discoveredRuntimeProfiles;
+      launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
+        hermesProfiles: nextHermesProfiles,
+        runtimeProfiles,
+      });
+      for (const context of contexts.values()) {
+        context.status.hermesProfiles = nextHermesProfiles;
+        context.status.runtimeProfiles = runtimeProfiles;
+        context.status.lastHermesProfileRefreshAt = new Date().toISOString();
+        context.status.lastRuntimeProfileRefreshAt = new Date().toISOString();
+        if (runtimeCatalogChanged) {
+          context.status.lifecycle = "restartPending";
+          context.status.pendingControlCommand = {
+            command: "restartWhenIdle",
+            requestedAt: Date.now(),
+          };
+          context.status.updateState = buildBridgeUpdateState(
+            "waitingForIdle",
+            Date.now(),
+            {
+              requestedAt: context.status.pendingControlCommand.requestedAt,
+              targetVersion: BRIDGE_VERSION,
+            },
+          );
+        }
+      }
+      if (!runtimeCatalogChanged) {
+        await refreshRuntimeConformanceIfStale({ force: true });
+      }
+    })().catch(() => undefined);
+  };
   const ensureContexts = async () => {
     const latestConfig = await readBridgeConfigFile(configPath);
+    if (!restartHandoffConsumed) {
+      restartHandoffConsumed = true;
+      consumedRestartHandoff = await consumeBridgeRestartHandoffFile({
+        path: restartHandoffPath,
+        registrations: latestConfig.registrations,
+      });
+      startupRuntimeConformancePriorityProfileIds =
+        consumedRestartHandoffPriorityProfileIds(consumedRestartHandoff);
+    }
     let previousAggregateStatus: BridgeStatus | undefined;
     if (existsSync(statusPath)) {
       try {
@@ -1645,7 +2018,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         workerLog,
         createLocalAuditBridgeLogger(),
       ]);
-      const cloudClient = createCloudClient(registration);
+      const cloudClient = createCloudClient(registration, {
+        requestTimeoutMs: cloudRequestTimeoutMs,
+      });
       const hostAdapter = new ConvexBridgeHostAdapter(cloudClient);
       const processRegistryPath = getBridgeProcessRegistryPath(
         parsed.flags,
@@ -1677,6 +2052,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         bridgeDeviceId: registration.deviceId,
       });
       await supervisor.replayOutboxBeforeClaiming();
+      let runtimeContext: RuntimeContext | undefined;
       const manager = new BridgeSessionManager({
         cloudClient,
         deviceId: registration.deviceId,
@@ -1692,6 +2068,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         idleSessionTtlMs,
         requireScopedIdentity: true,
         createMcpServers: ({ agentSessionId, threadId }) => {
+          const currentRegistration = runtimeContext?.config ?? registration;
           if (!agentSessionId) {
             throw new Error(
               "agent tool MCP context is missing agentSessionId; reconnect the agent",
@@ -1699,10 +2076,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           }
           return buildAgentToolsMcpServers({
             agentSessionId,
-            appUrl: registration.appUrl,
-            agentToolsUrl: registration.appUrl,
-            bridgeToken: registration.bridgeToken,
-            deviceId: registration.deviceId,
+            appUrl: currentRegistration.appUrl,
+            agentToolsUrl: currentRegistration.appUrl,
+            bridgeToken: currentRegistration.bridgeToken,
+            deviceId: currentRegistration.deviceId,
+            enabledFeatureFlags: currentRegistration.enabledFeatureFlags,
             threadId,
           });
         },
@@ -1729,6 +2107,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         (previousAggregateStatus?.deviceId === registration.deviceId
           ? previousAggregateStatus
           : undefined);
+      const handoffEntry = consumedRestartHandoff?.entries.find(
+        (entry) => entry.deviceId === registration.deviceId,
+      );
       const status: BridgeStatus = {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
@@ -1755,6 +2136,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           previousStatus,
           getBridgeRuntimeIdentity(),
         ),
+        restartHandoff:
+          consumedRestartHandoff && handoffEntry
+            ? buildRestartHandoffStatus(
+                consumedRestartHandoff,
+                handoffEntry,
+                Date.now(),
+              )
+            : undefined,
         hermesProfiles,
         runtimeProfiles,
         activeSessions: [],
@@ -1770,6 +2159,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         localJournal: bridgeSupervisorHealthStatus(supervisor),
       };
       const context: RuntimeContext = {
+        closing: false,
         config: registration,
         inFlightCommands: new Map(),
         inFlightCommandMetadata: new Map(),
@@ -1786,6 +2176,16 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         wakeSignal,
         orgMaxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
       };
+      runtimeContext = context;
+      const restartHandoffSeededSessionCount =
+        handoffEntry && manager.seedWarmRuntimeSessions
+          ? manager.seedWarmRuntimeSessions({
+              candidates: handoffEntry.sessionWarmupHints.map((hint) => ({
+                ...hint,
+                bridgeProfileId: hint.bridgeProfileId ?? hint.runtimeProfileId,
+              })),
+            })
+          : 0;
       contexts.set(registration.deviceId, context);
       log({
         level: "info",
@@ -1797,14 +2197,20 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         bridgeRuntimeIdentity: getBridgeRuntimeIdentity(),
         processStartToken: BRIDGE_PROCESS_START_TOKEN,
         runtimeConformance: runtimeConformanceSummary(),
+        restartHandoffConsumed: Boolean(handoffEntry),
+        restartHandoffSeededSessionCount,
+        restartHandoffSessionHintCount:
+          handoffEntry?.sessionWarmupHints.length,
       });
     }
     for (const [deviceId, context] of contexts) {
       if (activeIds.has(deviceId) || context.inFlightCommands.size > 0) {
         continue;
       }
+      context.closing = true;
       context.status.connected = false;
       await context.wakeSignal.close();
+      await context.loopTask?.catch(() => undefined);
       await context.manager.close();
       context.supervisor.close();
       await context.singletonGuard.release();
@@ -1813,16 +2219,27 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     await persistAggregateStatus();
   };
-  const waitForAnyWakeSignal = async () => {
-    const signals = Array.from(contexts.values()).map(
-      (context) => context.wakeSignal,
-    );
-    const timeoutMs = totalInFlight() > 0 ? pollMs : Math.max(pollMs, 30_000);
-    if (signals.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-      return;
+  const idleWakeSignalTimeoutMs = (context: RuntimeContext) => {
+    const fallbackMs = Math.max(pollMs, 30_000);
+    if (!context.wakeSignal.isWakeSubscriptionActive?.()) {
+      return fallbackMs;
     }
-    await Promise.race(signals.map((signal) => signal.wait(timeoutMs)));
+    const refreshAt = context.wakeSignal.nextWakeTokenRefreshAt?.();
+    if (typeof refreshAt !== "number" || !Number.isFinite(refreshAt)) {
+      return fallbackMs;
+    }
+    const refreshDelayMs = refreshAt - Date.now();
+    return refreshDelayMs > 0
+      ? Math.max(Math.min(refreshDelayMs, DEFAULT_IDLE_HEARTBEAT_MS), pollMs)
+      : fallbackMs;
+  };
+  const waitForContextWakeSignal = async (
+    context: RuntimeContext,
+  ): Promise<BridgeLoopPollReason> => {
+    const timeoutMs =
+      totalInFlight() > 0 ? pollMs : idleWakeSignalTimeoutMs(context);
+    const result = await context.wakeSignal.wait(timeoutMs);
+    return result === "signal" ? "wake" : "timer";
   };
 
   await ensureContexts();
@@ -1862,12 +2279,16 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       reason?: string;
       shutdownTimeoutMs?: number;
       signal?: NodeJS.Signals;
+      skipLoopTask?: Promise<void>;
     } = {},
   ) => {
     if (stopping) {
       return;
     }
     stopping = true;
+    for (const context of contexts.values()) {
+      context.closing = true;
+    }
     for (const context of contexts.values()) {
       if (options.signal) {
         context.log({
@@ -1898,6 +2319,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       });
       const shutdownTask = (async () => {
         await context.wakeSignal.close();
+        if (
+          context.loopTask &&
+          context.loopTask !== options.skipLoopTask
+        ) {
+          await context.loopTask.catch(() => undefined);
+        }
         if (options.forceRuntimeProcesses) {
           context.supervisor.close();
         }
@@ -1992,135 +2419,235 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     void stop({ reason: "process signal", signal: "SIGTERM" }),
   );
 
-  while (!stopping) {
-    await ensureContexts();
-    await refreshRuntimeConformanceIfStale();
-    for (const context of contexts.values()) {
-      const bridgeCapacity = buildBridgeCapacitySnapshot(
-        contexts.values(),
-        localHardMaxInFlight,
-      );
-      const availableProcessSlots = Math.max(
-        0,
-        (bridgeCapacity.bridgeMaxInFlight ?? 0) - totalInFlight(),
-      );
-      const availableOrgSlots = Math.max(
-        0,
-        context.orgMaxInFlight - context.inFlightCommands.size,
-      );
-      const effectiveMaxInFlight =
-        context.inFlightCommands.size +
-        Math.min(availableOrgSlots, availableProcessSlots);
-      context.status.capacity = {
-        ...bridgeCapacity,
-        orgMaxInFlight: context.orgMaxInFlight,
-      };
-      context.status.localJournal = bridgeSupervisorHealthStatus(
-        context.supervisor,
-      );
-      const singletonStatus = await context.singletonGuard.reconcile();
-      context.status.processHealth = mergeBridgeProcessHealth(
-        context.supervisor.getProcessHealth(),
-        singletonStatus,
-        context.processRegistryPath,
-      );
-      const processOrphanCleanupNow = Date.now();
-      if (
-        singletonStatus.canClaim &&
-        processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
-        DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
-      ) {
-        context.lastProcessOrphanCleanupAt = processOrphanCleanupNow;
-        try {
-          const orphanCleanup =
-            await context.supervisor.cleanupOrphanedProcesses();
-          if (
-            orphanCleanup &&
-            (orphanCleanup.orphanedProcessCount > 0 ||
-              orphanCleanup.terminatedOrphanedProcessCount > 0)
-          ) {
-            context.log({
-              level: "warn",
-              event: "bridge.process.orphan_cleanup",
-              deviceId: context.config.deviceId,
-              orphanedProcessCount: orphanCleanup.orphanedProcessCount,
-              terminatedOrphanedProcessCount:
-                orphanCleanup.terminatedOrphanedProcessCount,
-            });
-          }
-        } catch (error) {
-          const message = redactForOutput(
-            error instanceof Error ? error.message : String(error),
-          );
+  const reserveClaimSlotsForContext = (
+    context: RuntimeContext,
+  ): BridgeClaimSlotReservation => {
+    const bridgeCapacity = buildBridgeCapacitySnapshot(
+      contexts.values(),
+      localHardMaxInFlight,
+    );
+    const availableProcessSlots = Math.max(
+      0,
+      (bridgeCapacity.bridgeMaxInFlight ?? 0) -
+        (bridgeCapacity.processSlotUsage ?? totalInFlight()) -
+        reservedClaimSlots,
+    );
+    const availableOrgSlots = Math.max(
+      0,
+      context.orgMaxInFlight -
+        context.inFlightCommands.size -
+        retainedBridgeSessionCount(context.manager),
+    );
+    const reservedSlots = Math.min(availableOrgSlots, availableProcessSlots);
+    reservedClaimSlots += reservedSlots;
+    let released = false;
+    return {
+      maxInFlight: context.inFlightCommands.size + reservedSlots,
+      release: () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        reservedClaimSlots = Math.max(0, reservedClaimSlots - reservedSlots);
+      },
+    };
+  };
+
+  const runContextLoopPass = async (
+    context: RuntimeContext,
+    loopPollReason: BridgeLoopPollReason,
+  ): Promise<BridgeLoopIterationResult> => {
+    const pollReason =
+      loopPollReason === "timer" &&
+      !context.wakeSignal.isWakeSubscriptionActive?.()
+        ? "wake"
+        : loopPollReason;
+    const bridgeCapacity = buildBridgeCapacitySnapshot(
+      contexts.values(),
+      localHardMaxInFlight,
+    );
+    context.status.capacity = {
+      ...bridgeCapacity,
+      orgMaxInFlight: context.orgMaxInFlight,
+    };
+    context.status.localJournal = bridgeSupervisorHealthStatus(
+      context.supervisor,
+    );
+    const singletonStatus = await context.singletonGuard.reconcile();
+    context.status.processHealth = mergeBridgeProcessHealth(
+      context.supervisor.getProcessHealth(),
+      singletonStatus,
+      context.processRegistryPath,
+    );
+    const processOrphanCleanupNow = Date.now();
+    if (
+      shouldCleanupBridgeOrphanedProcesses({
+        inFlightCommandCount: context.inFlightCommands.size,
+        managerStatus: context.manager.getStatus(),
+        singletonCanClaim: singletonStatus.canClaim,
+      }) &&
+      processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
+      DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
+    ) {
+      context.lastProcessOrphanCleanupAt = processOrphanCleanupNow;
+      try {
+        const orphanCleanup =
+          await context.supervisor.cleanupOrphanedProcesses();
+        if (
+          orphanCleanup &&
+          (orphanCleanup.orphanedProcessCount > 0 ||
+            orphanCleanup.terminatedOrphanedProcessCount > 0)
+        ) {
           context.log({
             level: "warn",
-            event: "bridge.process.orphan_cleanup_failed",
+            event: "bridge.process.orphan_cleanup",
             deviceId: context.config.deviceId,
-            error: message,
+            orphanedProcessCount: orphanCleanup.orphanedProcessCount,
+            terminatedOrphanedProcessCount:
+              orphanCleanup.terminatedOrphanedProcessCount,
           });
         }
-        context.status.processHealth = mergeBridgeProcessHealth(
+      } catch (error) {
+        const message = redactForOutput(
+          error instanceof Error ? error.message : String(error),
+        );
+        context.log({
+          level: "warn",
+          event: "bridge.process.orphan_cleanup_failed",
+          deviceId: context.config.deviceId,
+          error: message,
+        });
+      }
+      context.status.processHealth = mergeBridgeProcessHealth(
+        context.supervisor.getProcessHealth(),
+        context.singletonGuard.getStatus(),
+        context.processRegistryPath,
+      );
+    }
+    await publishBridgeSupervisorHealthIfChanged(context);
+    const watchdogFailures = context.supervisor.checkWatchdogs();
+    for (const watchdog of watchdogFailures) {
+      if (watchdog.checkpoint === "quiet") {
+        continue;
+      }
+      context.log({
+        level: "warn",
+        event: "bridge.watchdog.timeout",
+        deviceId: context.config.deviceId,
+        queueId: watchdog.queueItemId,
+        reason: watchdog.reasonCode,
+      });
+    }
+    return await runBridgeLoopIteration({
+      config: context.config,
+      agentCommand,
+      runtimeCommands: customRuntimeCommands,
+      status: context.status,
+      maxInFlight: context.inFlightCommands.size,
+      getStatusMaxInFlight: () => context.orgMaxInFlight,
+      manager: context.manager,
+      inFlightCommands: context.inFlightCommands,
+      inFlightCommandMetadata: context.inFlightCommandMetadata,
+      watchdogFailures,
+      lastStaleCleanupAt: context.lastStaleCleanupAt,
+      setLastStaleCleanupAt: (value) => {
+        context.lastStaleCleanupAt = value;
+      },
+      staleCleanupTimeoutMs: Math.min(
+        cloudRequestTimeoutMs,
+        DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+      ),
+      cloudRequestTimeoutMs,
+      applySettingsControl: (settings) => {
+        applyBridgeSettingsControl(context, settings);
+      },
+      applyFeatureFlagsControl: async () => {
+        await appendBridgeRegistration(configPath, context.config);
+      },
+      log: context.log,
+      recordLoopError: recordLoopError(context),
+      statusPath,
+      canClaimWork: () => context.supervisor.canClaimWork(),
+      getProcessHealth: () =>
+        mergeBridgeProcessHealth(
           context.supervisor.getProcessHealth(),
           context.singletonGuard.getStatus(),
           context.processRegistryPath,
-        );
-      }
-      await publishBridgeSupervisorHealthIfChanged(context);
-      const watchdogFailures = context.supervisor.checkWatchdogs();
-      for (const watchdog of watchdogFailures) {
-        if (watchdog.checkpoint === "quiet") {
-          continue;
-        }
-        context.log({
-          level: "warn",
-          event: "bridge.watchdog.timeout",
-          deviceId: context.config.deviceId,
-          queueId: watchdog.queueItemId,
-          reason: watchdog.reasonCode,
-        });
-      }
-      const result = await runBridgeLoopIteration({
-        config: context.config,
-        agentCommand,
-        runtimeCommands: customRuntimeCommands,
-        status: context.status,
-        maxInFlight: effectiveMaxInFlight,
-        getStatusMaxInFlight: () => context.orgMaxInFlight,
-        manager: context.manager,
-        inFlightCommands: context.inFlightCommands,
-        inFlightCommandMetadata: context.inFlightCommandMetadata,
-        watchdogFailures,
-        lastStaleCleanupAt: context.lastStaleCleanupAt,
-        setLastStaleCleanupAt: (value) => {
-          context.lastStaleCleanupAt = value;
-        },
-        applySettingsControl: (settings) => {
-          applyBridgeSettingsControl(context, settings);
-        },
-        log: context.log,
-        recordLoopError: recordLoopError(context),
-        statusPath,
-        canClaimWork: () => context.supervisor.canClaimWork(),
-        getProcessHealth: () =>
-          mergeBridgeProcessHealth(
-            context.supervisor.getProcessHealth(),
-            context.singletonGuard.getStatus(),
-            context.processRegistryPath,
+        ),
+      getRuntimeConformance: runtimeConformanceSummary,
+      writeStatus: persistAggregateStatus,
+      wakeSignal: context.wakeSignal,
+      warmRuntimeProfileIds: bridgeWarmRuntimeProfileIdsForStatus(
+        warmRuntimeProfileIds,
+        context.status,
+      ),
+      heartbeatIntervalMs:
+        pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
+      pollReason,
+      reserveClaimSlots: () => reserveClaimSlotsForContext(context),
+      restartHandoffPath,
+      isProcessIdleForRestart: () => totalInFlight() === 0,
+    });
+  };
+
+  const startContextLoop = (context: RuntimeContext) => {
+    if (context.loopTask || context.closing) {
+      return;
+    }
+    const task = runBridgeRegistrationScheduler({
+      context,
+      isActive: (candidate) =>
+        !stopping &&
+        !candidate.closing &&
+        contexts.get(candidate.config.deviceId) === candidate,
+      onRestartRequested: async (candidate) => {
+        await persistRestartHandoffForStatuses(restartHandoffPath, {
+          reason: restartHandoffReasonForStatus(candidate.status),
+          status: candidate.status.updateState?.status ?? "restarting",
+          statuses: Array.from(contexts.values()).map(
+            (context) => context.status,
           ),
-        getRuntimeConformance: runtimeConformanceSummary,
-        writeStatus: persistAggregateStatus,
-        wakeSignal: context.wakeSignal,
-      });
-      if (result.restartRequested) {
+          targetVersion:
+            candidate.status.controlCommandStatus?.targetVersion ??
+            candidate.status.updateState?.targetVersion ??
+            BRIDGE_VERSION,
+        });
         await stop({
           forceRuntimeProcesses: true,
           reason: "runtime restart requested",
           shutdownTimeoutMs: DEFAULT_RESTART_STOP_TIMEOUT_MS,
+          skipLoopTask: candidate.loopTask,
         });
         process.exit(0);
-      }
+      },
+      runContextPass: runContextLoopPass,
+      totalInFlight,
+      waitForWakeSignal: waitForContextWakeSignal,
+    })
+      .catch(recordLoopError(context))
+      .finally(() => {
+        if (context.loopTask === task) {
+          context.loopTask = undefined;
+        }
+      });
+    context.loopTask = task;
+  };
+
+  const startContextLoops = () => {
+    for (const context of contexts.values()) {
+      startContextLoop(context);
     }
-    await waitForAnyWakeSignal();
+  };
+
+  while (!stopping) {
+    await ensureContexts();
+    await refreshRuntimeConformanceIfStale();
+    startContextLoops();
+    if (cachedRuntimeCatalog && !startupRuntimeCatalogRefreshScheduled) {
+      startupRuntimeCatalogRefreshScheduled = true;
+      refreshRuntimeCatalogInBackground();
+    }
+    await sleep(pollMs);
   }
 }
 
@@ -2132,6 +2659,7 @@ export async function refreshRuntimeConformanceProfilesForTest(input: {
     profile: BridgeRuntimeProfile,
   ) => Promise<RuntimeConformanceRecord>;
   profiles: BridgeRuntimeProfile[];
+  priorityProfileIds?: string[];
   records: Record<string, RuntimeConformanceRecord>;
   ttlMs: number;
 }): Promise<Record<string, RuntimeConformanceRecord>> {
@@ -2157,20 +2685,24 @@ async function refreshRuntimeConformanceProfiles(input: {
     profile: BridgeRuntimeProfile,
   ) => Promise<RuntimeConformanceRecord>;
   profiles: BridgeRuntimeProfile[];
+  priorityProfileIds?: string[];
   records: Record<string, RuntimeConformanceRecord>;
   ttlMs: number;
 }): Promise<{ records: Record<string, RuntimeConformanceRecord> }> {
   const nextRecords = { ...input.records };
-  for (const profile of input.profiles.filter(
-    (candidate) => candidate.status === "available",
-  )) {
+  const priorityProfileIds = new Set(input.priorityProfileIds ?? []);
+  const profiles = prioritizeRuntimeConformanceProfiles(
+    input.profiles.filter((candidate) => candidate.status === "available"),
+    input.priorityProfileIds ?? [],
+  );
+  for (const profile of profiles) {
     const lastProbeAt =
       input.lastProbeAtByProfile.get(profile.id) ??
       nextRecords[profile.id]?.checkedAt ??
       0;
     if (
       shouldRefreshRuntimeConformanceProfile({
-        force: input.force,
+        force: input.force || priorityProfileIds.has(profile.id),
         inFlightProfileIds: input.getInFlightProfileIds(),
         lastProbeAt,
         now: input.now(),
@@ -2185,6 +2717,31 @@ async function refreshRuntimeConformanceProfiles(input: {
     }
   }
   return { records: nextRecords };
+}
+
+function prioritizeRuntimeConformanceProfiles(
+  profiles: BridgeRuntimeProfile[],
+  priorityProfileIds: string[],
+): BridgeRuntimeProfile[] {
+  if (priorityProfileIds.length === 0) {
+    return profiles;
+  }
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+  const prioritized: BridgeRuntimeProfile[] = [];
+  const seen = new Set<string>();
+  for (const profileId of priorityProfileIds) {
+    const profile = byId.get(profileId);
+    if (profile && !seen.has(profile.id)) {
+      prioritized.push(profile);
+      seen.add(profile.id);
+    }
+  }
+  for (const profile of profiles) {
+    if (!seen.has(profile.id)) {
+      prioritized.push(profile);
+    }
+  }
+  return prioritized;
 }
 
 function bridgeInFlightRuntimeProfileIds(
@@ -2283,6 +2840,7 @@ function buildAggregateBridgeStatus(
     updateState: status.updateState,
     devHotReload: status.devHotReload,
     controlCommandStatus: status.controlCommandStatus,
+    restartHandoff: status.restartHandoff,
     lastStartedAt: status.lastStartedAt,
     lastHeartbeatAt: status.lastHeartbeatAt,
     lastPollAt: status.lastPollAt,
@@ -2310,6 +2868,7 @@ function buildAggregateBridgeStatus(
     updateState: first?.status.updateState,
     devHotReload: first?.status.devHotReload,
     controlCommandStatus: first?.status.controlCommandStatus,
+    restartHandoff: first?.status.restartHandoff,
     lastStartedAt: first?.status.lastStartedAt,
     lastHeartbeatAt: first?.status.lastHeartbeatAt,
     lastPollAt: first?.status.lastPollAt,
@@ -2438,6 +2997,340 @@ function boundControlCommandTargetVersion(value: unknown): string | undefined {
     : undefined;
 }
 
+function bridgeRestartHandoffAppUrlHash(appUrl: string): string {
+  return createHash("sha256").update(appUrl).digest("hex").slice(0, 32);
+}
+
+export function buildBridgeRestartHandoff(input: {
+  createdAt?: number;
+  reason: BridgeRestartHandoffReason;
+  status?: string;
+  statuses: BridgeStatus[];
+  targetVersion?: string;
+}): BridgeRestartHandoff {
+  const createdAt = input.createdAt ?? Date.now();
+  return {
+    schemaVersion: BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION,
+    bridgeVersion: BRIDGE_VERSION,
+    createdAt,
+    expiresAt: createdAt + BRIDGE_RESTART_HANDOFF_TTL_MS,
+    reason: input.reason,
+    status: boundRestartHandoffStatus(input.status),
+    targetVersion: boundControlCommandTargetVersion(input.targetVersion),
+    entries: input.statuses
+      .map((status) => buildBridgeRestartHandoffEntry(status))
+      .filter(
+        (entry): entry is BridgeRestartHandoffEntry => entry !== undefined,
+      ),
+  };
+}
+
+function buildBridgeRestartHandoffEntry(
+  status: BridgeStatus,
+): BridgeRestartHandoffEntry | undefined {
+  if (!status.deviceId || !status.appUrl) {
+    return undefined;
+  }
+  const runtimeProfileIds = Array.from(
+    new Set([
+      ...(status.runtimeProfiles ?? []).map((profile) => profile.id),
+      ...(status.sessionQueues ?? [])
+        .map((session) => session.runtimeProfileId)
+        .filter((id): id is string => Boolean(id)),
+    ]),
+  )
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+  const sessionWarmupHints = (status.sessionQueues ?? [])
+    .filter((session) => session.threadId.trim())
+    .map((session) =>
+      compact({
+        agentSessionId: session.agentSessionId,
+        bridgeProfileId: session.bridgeProfileId ?? session.runtimeProfileId,
+        hermesProfileName: session.hermesProfileName,
+        lastUsedAt:
+          typeof session.lastUsedAt === "number" &&
+          Number.isFinite(session.lastUsedAt)
+            ? session.lastUsedAt
+            : undefined,
+        organizationId: session.organizationId,
+        runtimeProfileId: session.runtimeProfileId,
+        threadId: session.threadId,
+      }),
+    )
+    .sort((left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0))
+    .slice(0, BRIDGE_RESTART_HANDOFF_MAX_SESSIONS);
+  return {
+    appUrlHash: bridgeRestartHandoffAppUrlHash(status.appUrl),
+    deviceId: status.deviceId,
+    runtimeProfileIds,
+    sessionWarmupHints,
+  };
+}
+
+export async function writeBridgeRestartHandoffFile(
+  path: string,
+  value: unknown,
+): Promise<void> {
+  await writeSecureJsonFile(path, value);
+}
+
+export async function consumeBridgeRestartHandoffFile(input: {
+  now?: () => number;
+  path: string;
+  registrations: BridgeRegistration[];
+}): Promise<BridgeRestartHandoff | undefined> {
+  if (!existsSync(input.path)) {
+    return undefined;
+  }
+  let raw: unknown;
+  try {
+    raw = await readJsonFile<unknown>(input.path);
+  } catch {
+    await unlinkIfExists(input.path);
+    return undefined;
+  }
+  const metadata = normalizeBridgeRestartHandoffMetadata(raw, input.now);
+  if (!metadata) {
+    await unlinkIfExists(input.path);
+    return undefined;
+  }
+  const record = recordFromUnknown(raw);
+  const validEntries = arrayOfRecords(record?.entries).flatMap((entry) => {
+    const normalized = normalizeBridgeRestartHandoffEntry(entry);
+    return normalized ? [normalized] : [];
+  });
+  if (validEntries.length === 0) {
+    await unlinkIfExists(input.path);
+    return undefined;
+  }
+  const registrationScopes = bridgeRestartHandoffRegistrationScopes(
+    input.registrations,
+  );
+  const consumedEntries = validEntries.filter((entry) =>
+    bridgeRestartHandoffEntryMatches(entry, registrationScopes),
+  );
+  if (consumedEntries.length === 0) {
+    return undefined;
+  }
+  const remainingEntries = validEntries.filter(
+    (entry) => !bridgeRestartHandoffEntryMatches(entry, registrationScopes),
+  );
+  if (remainingEntries.length === 0) {
+    await unlinkIfExists(input.path);
+  } else {
+    await writeBridgeRestartHandoffFile(input.path, {
+      ...metadata,
+      entries: remainingEntries,
+    });
+  }
+  return {
+    ...metadata,
+    entries: consumedEntries,
+  };
+}
+
+function normalizeBridgeRestartHandoffMetadata(
+  raw: unknown,
+  now: () => number = Date.now,
+): Omit<BridgeRestartHandoff, "entries"> | undefined {
+  const record = recordFromUnknown(raw);
+  if (
+    !record ||
+    record.schemaVersion !== BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION ||
+    !stringFromUnknown(record.bridgeVersion)
+  ) {
+    return undefined;
+  }
+  const createdAt = numberFromUnknown(record.createdAt);
+  const expiresAt = numberFromUnknown(record.expiresAt);
+  if (
+    createdAt === undefined ||
+    expiresAt === undefined ||
+    createdAt > now() + 60_000 ||
+    expiresAt < now()
+  ) {
+    return undefined;
+  }
+  const reason = normalizeBridgeRestartHandoffReason(record.reason);
+  if (!reason) {
+    return undefined;
+  }
+  return {
+    schemaVersion: BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION,
+    bridgeVersion: stringFromUnknown(record.bridgeVersion) ?? BRIDGE_VERSION,
+    createdAt,
+    expiresAt,
+    reason,
+    status: boundRestartHandoffStatus(record.status),
+    targetVersion: boundControlCommandTargetVersion(record.targetVersion),
+  };
+}
+
+function bridgeRestartHandoffRegistrationScopes(
+  registrations: BridgeRegistration[],
+): Map<string, string> {
+  return new Map(
+    registrations.map((registration) => [
+      registration.deviceId,
+      bridgeRestartHandoffAppUrlHash(registration.appUrl),
+    ]),
+  );
+}
+
+function bridgeRestartHandoffEntryMatches(
+  entry: BridgeRestartHandoffEntry,
+  registrationScopes: Map<string, string>,
+): boolean {
+  return registrationScopes.get(entry.deviceId) === entry.appUrlHash;
+}
+
+function boundRestartHandoffStatus(value: unknown): string | undefined {
+  const text = stringFromUnknown(value)?.trim();
+  return text ? text.slice(0, 64) : undefined;
+}
+
+function normalizeBridgeRestartHandoffReason(
+  value: unknown,
+): BridgeRestartHandoffReason | undefined {
+  return value === "restartWhenIdle" ||
+    value === "updateWhenIdle" ||
+    value === "runtimeProfileRefresh"
+    ? value
+    : undefined;
+}
+
+function normalizeBridgeRestartHandoffEntry(
+  record: Record<string, unknown>,
+): BridgeRestartHandoffEntry | undefined {
+  const deviceId = stringFromUnknown(record.deviceId);
+  const appUrlHash = stringFromUnknown(record.appUrlHash);
+  if (!deviceId || !appUrlHash) {
+    return undefined;
+  }
+  const runtimeProfileIds = Array.from(
+    new Set(
+      (stringArrayFromUnknown(record.runtimeProfileIds) ?? [])
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+  const sessionWarmupHints: BridgeRestartHandoffEntry["sessionWarmupHints"] =
+    [];
+  for (const hint of arrayOfRecords(record.sessionWarmupHints)) {
+    const threadId = stringFromUnknown(hint.threadId)?.trim();
+    if (!threadId) {
+      continue;
+    }
+    const agentSessionId = stringFromUnknown(hint.agentSessionId)?.trim();
+    const bridgeProfileId = stringFromUnknown(hint.bridgeProfileId)?.trim();
+    const hermesProfileName = stringFromUnknown(hint.hermesProfileName)?.trim();
+    const lastUsedAt = numberFromUnknown(hint.lastUsedAt);
+    const runtimeProfileId = stringFromUnknown(hint.runtimeProfileId);
+    const organizationId = stringFromUnknown(hint.organizationId)?.trim();
+    const sessionId = stringFromUnknown(hint.sessionId)?.trim();
+    sessionWarmupHints.push({
+      ...(agentSessionId ? { agentSessionId } : {}),
+      ...(bridgeProfileId ? { bridgeProfileId } : {}),
+      ...(hermesProfileName ? { hermesProfileName } : {}),
+      ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
+      ...(organizationId ? { organizationId } : {}),
+      ...(runtimeProfileId ? { runtimeProfileId } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      threadId,
+    });
+    if (sessionWarmupHints.length >= BRIDGE_RESTART_HANDOFF_MAX_SESSIONS) {
+      break;
+    }
+  }
+  return {
+    appUrlHash,
+    deviceId,
+    runtimeProfileIds,
+    sessionWarmupHints,
+  };
+}
+
+function buildRestartHandoffStatus(
+  handoff: BridgeRestartHandoff,
+  entry: BridgeRestartHandoffEntry,
+  now: number,
+): BridgeRestartHandoffStatus {
+  return {
+    consumedAt: new Date(now).toISOString(),
+    createdAt: new Date(handoff.createdAt).toISOString(),
+    reason: handoff.reason,
+    status: handoff.status,
+    targetVersion: handoff.targetVersion,
+    runtimeProfileIds: entry.runtimeProfileIds,
+    startupPriorityRuntimeProfileIds:
+      restartHandoffEntryPriorityProfileIds(entry),
+    sessionWarmupHints: entry.sessionWarmupHints.map((hint) =>
+      compact({
+        runtimeProfileId: hint.runtimeProfileId,
+        threadId: hint.threadId,
+      }),
+    ),
+  };
+}
+
+function consumedRestartHandoffPriorityProfileIds(
+  handoff: BridgeRestartHandoff | undefined,
+): string[] {
+  if (!handoff) {
+    return [];
+  }
+  return Array.from(
+    new Set(handoff.entries.flatMap((entry) => restartHandoffEntryPriorityProfileIds(entry))),
+  );
+}
+
+function restartHandoffEntryPriorityProfileIds(
+  entry: BridgeRestartHandoffEntry,
+): string[] {
+  return Array.from(
+    new Set(
+      [
+        ...entry.runtimeProfileIds,
+        ...entry.sessionWarmupHints
+          .flatMap((hint) => [hint.runtimeProfileId, hint.bridgeProfileId])
+          .filter((id): id is string => Boolean(id)),
+      ]
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+}
+
+function bridgeWarmRuntimeProfileIdsForStatus(
+  configuredProfileIds: string[],
+  status: BridgeStatus,
+): string[] {
+  return Array.from(
+    new Set([
+      ...configuredProfileIds,
+      ...(status.restartHandoff?.startupPriorityRuntimeProfileIds ?? []),
+    ]),
+  )
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
+async function unlinkIfExists(path: string): Promise<void> {
+  await unlink(path).catch((error: unknown) => {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  });
+}
+
 export function reconcileBridgeStartupControlCommandStatus(
   previousStatus: Pick<BridgeStatus, "controlCommandStatus"> | undefined,
   runtimeIdentity: BridgeRuntimeIdentity = getBridgeRuntimeIdentity(),
@@ -2451,6 +3344,20 @@ export function reconcileBridgeStartupControlCommandStatus(
   }
   if (previous.status !== "executing") {
     return previous;
+  }
+  if (
+    previous.targetVersion &&
+    runtimeIdentity.bridgeVersion !== previous.targetVersion
+  ) {
+    return buildControlCommandStatus(previous.command, "failed", {
+      acceptedAt: previous.acceptedAt,
+      error: `Bridge restarted on version ${runtimeIdentity.bridgeVersion}, not target version ${previous.targetVersion}`,
+      failedAt: now(),
+      instanceId: runtimeIdentity.instanceId,
+      requestedAt: previous.requestedAt,
+      startedAt: previous.startedAt,
+      targetVersion: previous.targetVersion,
+    });
   }
   return buildControlCommandStatus(previous.command, "succeeded", {
     acceptedAt: previous.acceptedAt,
@@ -2479,6 +3386,8 @@ async function launchBridgeUpdater(
     input.currentVersion,
     "--parent-pid",
     String(process.pid),
+    "--restart-handoff-path",
+    input.restartHandoffPath,
     ...buildRestartCommandArgs(input.restartCommand),
   ];
   const child = spawn(process.execPath, args, {
@@ -2523,7 +3432,11 @@ async function applyPendingBridgeControlCommand(
   now: () => number,
   input: Pick<
     BridgeLoopIterationInput,
-    "launchUpdater" | "statusPath" | "writeStatus"
+    | "isProcessIdleForRestart"
+    | "launchUpdater"
+    | "restartHandoffPath"
+    | "statusPath"
+    | "writeStatus"
   >,
 ): Promise<BridgeLoopIterationResult> {
   const command = normalizeControlCommand(status.pendingControlCommand);
@@ -2536,7 +3449,8 @@ async function applyPendingBridgeControlCommand(
   const startedAt = now();
 
   const idleDecision = shouldRestartBridgeForDevHotReload(status);
-  if (!idleDecision.ready) {
+  const processIdle = input.isProcessIdleForRestart?.() ?? true;
+  if (!idleDecision.ready || !processIdle) {
     status.lifecycle = "draining";
     status.updateState = buildBridgeUpdateState("waitingForIdle", now(), {
       requestedAt: command.requestedAt,
@@ -2571,11 +3485,18 @@ async function applyPendingBridgeControlCommand(
       },
     );
     await persistStatus(input.statusPath, status);
+    await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+      reason: "updateWhenIdle",
+      status: "installing",
+      statuses: [status],
+      targetVersion: BRIDGE_VERSION,
+    });
     try {
       const launchUpdater = input.launchUpdater ?? launchBridgeUpdater;
       await launchUpdater({
         currentVersion: BRIDGE_VERSION,
         requestedAt: command.requestedAt,
+        restartHandoffPath: input.restartHandoffPath ?? DEFAULT_RESTART_HANDOFF_PATH,
         restartCommand: getBridgeRestartCommand(),
         statusPath: input.statusPath,
       });
@@ -2607,6 +3528,7 @@ async function applyPendingBridgeControlCommand(
   status.updateState = buildBridgeUpdateState("restarting", now(), {
     requestedAt: command.requestedAt,
     startedAt,
+    targetVersion: BRIDGE_VERSION,
   });
   status.pendingControlCommand = undefined;
   status.controlCommandStatus = buildControlCommandStatus(
@@ -2616,10 +3538,119 @@ async function applyPendingBridgeControlCommand(
       acceptedAt,
       requestedAt,
       startedAt,
+      targetVersion: BRIDGE_VERSION,
     },
   );
   await persistStatus(input.statusPath, status);
+  await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+    reason: "restartWhenIdle",
+    status: "restarting",
+    statuses: [status],
+    targetVersion: BRIDGE_VERSION,
+  });
   return { restartRequested: true };
+}
+
+async function persistRestartHandoffForStatuses(
+  path: string | undefined,
+  input: {
+    reason: BridgeRestartHandoffReason;
+    status?: string;
+    statuses: BridgeStatus[];
+    targetVersion?: string;
+  },
+): Promise<void> {
+  if (!path) {
+    return;
+  }
+  const handoff = buildBridgeRestartHandoff(input);
+  if (handoff.entries.length === 0) {
+    return;
+  }
+  await writeBridgeRestartHandoffFile(path, handoff);
+}
+
+function restartHandoffReasonForStatus(
+  status: BridgeStatus,
+): BridgeRestartHandoffReason {
+  if (status.controlCommandStatus?.command === "updateWhenIdle") {
+    return "updateWhenIdle";
+  }
+  if (status.controlCommandStatus?.command === "restartWhenIdle") {
+    return "restartWhenIdle";
+  }
+  return "runtimeProfileRefresh";
+}
+
+function buildWatchdogTerminalizationMetadata(
+  watchdog: BridgeLoopWatchdogResult,
+  inFlight: InFlightCommandMetadata | undefined,
+  now: number,
+): BridgeTerminalizationMetadata | undefined {
+  if (
+    watchdog.checkpoint === "quiet" ||
+    watchdog.reasonCode !== "tool_result_timeout"
+  ) {
+    return undefined;
+  }
+  const metadata: BridgeTerminalizationMetadata = {
+    reasonCode: watchdog.reasonCode,
+  };
+  let hasStructuredMetadata = false;
+
+  const addString = (
+    key:
+      | "failureClass"
+      | "toolCallId"
+      | "toolClass"
+      | "toolName"
+      | "toolPolicyId",
+    value: string | undefined,
+  ) => {
+    const normalized = value?.trim();
+    if (!normalized) {
+      return;
+    }
+    metadata[key] = normalized;
+    hasStructuredMetadata = true;
+  };
+  const addNumber = (
+    key: "ageMs" | "timeoutMs",
+    value: number | undefined,
+  ) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return;
+    }
+    metadata[key] = value;
+    hasStructuredMetadata = true;
+  };
+
+  addString("failureClass", watchdog.failureClass ?? inFlight?.failureClass);
+  addString("toolCallId", watchdog.toolCallId ?? inFlight?.toolCallId);
+  addString("toolName", watchdog.toolName ?? inFlight?.toolName);
+  addString("toolClass", watchdog.toolClass ?? inFlight?.toolClass);
+  addString("toolPolicyId", watchdog.toolPolicyId ?? inFlight?.toolPolicyId);
+  addNumber("timeoutMs", watchdog.timeoutMs ?? inFlight?.timeoutMs);
+  addNumber(
+    "ageMs",
+    watchdog.ageMs ?? inFlight?.ageMs ?? ageMsFromStartedAt(inFlight, now),
+  );
+
+  return hasStructuredMetadata ? metadata : undefined;
+}
+
+function ageMsFromStartedAt(
+  inFlight: InFlightCommandMetadata | undefined,
+  now: number,
+): number | undefined {
+  if (!inFlight?.startedAt) {
+    return undefined;
+  }
+  const startedAtMs = Date.parse(inFlight.startedAt);
+  if (!Number.isFinite(startedAtMs)) {
+    return undefined;
+  }
+  return Math.max(0, now - startedAtMs);
 }
 
 export async function runBridgeLoopIteration(
@@ -2636,6 +3667,7 @@ export async function runBridgeLoopIteration(
   const persistStatus = input.writeStatus ?? writeStatus;
   const currentTime = input.now ?? Date.now;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
+  const pollReason = input.pollReason ?? "wake";
 
   const syncBridgeStatus = () => {
     syncBridgeRuntimeStatus(
@@ -2650,6 +3682,30 @@ export async function runBridgeLoopIteration(
     );
   };
   const runCommand = (command: BridgeQueueCommand) => {
+    const localDispatchAtMs = currentTime();
+    const claimedAtMs =
+      command.claimedAtMs ??
+      timestampMsFromUnknown(command.claimedAt) ??
+      localDispatchAtMs;
+    const claimedAt =
+      command.claimedAt ??
+      (claimedAtMs === undefined
+        ? undefined
+        : new Date(claimedAtMs).toISOString());
+    const createdAtMs =
+      command.createdAtMs ?? timestampMsFromUnknown(command.createdAt);
+    const createdAt =
+      command.createdAt ??
+      (createdAtMs === undefined
+        ? undefined
+        : new Date(createdAtMs).toISOString());
+    const commandWithTiming: BridgeQueueCommand = {
+      ...command,
+      createdAt,
+      createdAtMs,
+      claimedAt,
+      claimedAtMs,
+    };
     input.inFlightCommandMetadata.set(command.id, {
       id: command.id,
       type: command.type ?? command.kind,
@@ -2657,7 +3713,11 @@ export async function runBridgeLoopIteration(
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
       bridgeProfileId: command.bridgeProfileId,
-      startedAt: new Date(currentTime()).toISOString(),
+      createdAt,
+      createdAtMs,
+      claimedAt,
+      claimedAtMs,
+      startedAt: new Date(localDispatchAtMs).toISOString(),
     });
     input.log({
       level: "info",
@@ -2670,7 +3730,7 @@ export async function runBridgeLoopIteration(
       agentSessionId: command.agentSessionId,
     });
     const task = input.manager
-      .handleQueueItem(command)
+      .handleQueueItem(commandWithTiming)
       .catch(input.recordLoopError)
       .finally(() => {
         const wasInFlight = input.inFlightCommands.delete(command.id);
@@ -2706,6 +3766,39 @@ export async function runBridgeLoopIteration(
       currentTime,
       input,
     );
+    if (
+      !restartResult.restartRequested &&
+      !input.status.pendingControlCommand &&
+      input.status.lifecycle === "draining" &&
+      input.status.updateState?.status === "waitingForIdle" &&
+      input.isProcessIdleForRestart?.() !== false
+    ) {
+      input.status.lifecycle = "restarting";
+      input.status.updateState = buildBridgeUpdateState(
+        "restarting",
+        currentTime(),
+        {
+          requestedAt: input.status.updateState.requestedAt,
+          startedAt: currentTime(),
+          targetVersion: BRIDGE_VERSION,
+        },
+      );
+      await persistRestartHandoffForStatuses(input.restartHandoffPath, {
+        reason: "runtimeProfileRefresh",
+        status: "restarting",
+        statuses: [input.status],
+        targetVersion: BRIDGE_VERSION,
+      });
+      restartResult = { restartRequested: true };
+    }
+    if (
+      !restartResult.restartRequested &&
+      input.status.controlCommandStatus?.status === "waiting_for_idle"
+    ) {
+      syncBridgeStatus();
+      await persistStatus(input.statusPath, input.status);
+      return restartResult;
+    }
     const heartbeatNow = currentTime();
     const heartbeatSignature = bridgeHeartbeatSignature(input.status);
     if (
@@ -2732,6 +3825,22 @@ export async function runBridgeLoopIteration(
         });
       } else {
         input.wakeSignal?.updateWakeToken?.(heartbeatResult.wake);
+      }
+      if (
+        heartbeatResult.ok &&
+        heartbeatResult.enabledFeatureFlags !== undefined &&
+        !stringArraysEqual(
+          input.config.enabledFeatureFlags ?? [],
+          heartbeatResult.enabledFeatureFlags,
+        )
+      ) {
+        input.config.enabledFeatureFlags =
+          heartbeatResult.enabledFeatureFlags.length > 0
+            ? [...heartbeatResult.enabledFeatureFlags]
+            : undefined;
+        await input.applyFeatureFlagsControl?.([
+          ...heartbeatResult.enabledFeatureFlags,
+        ]);
       }
       if (
         heartbeatResult.ok &&
@@ -2789,7 +3898,7 @@ export async function runBridgeLoopIteration(
             const refreshedAt = new Date(currentTime()).toISOString();
             input.status.lastHermesProfileRefreshAt = refreshedAt;
             input.status.lastRuntimeProfileRefreshAt = refreshedAt;
-            const runtimeCommandChanged = runtimeProfileCommandsChanged(
+            const runtimeCatalogChanged = runtimeProfilesChanged(
               previousRuntimeProfiles,
               refreshedRuntimeProfiles,
             );
@@ -2799,19 +3908,39 @@ export async function runBridgeLoopIteration(
               deviceId: input.config.deviceId,
               profileCount: input.status.hermesProfiles.length,
               runtimeProfileCount: refreshedRuntimeProfiles.length,
-              runtimeCommandChanged,
+              runtimeCommandChanged: runtimeCatalogChanged,
             });
-            if (runtimeCommandChanged) {
-              input.status.lifecycle = "restarting";
-              input.status.updateState = buildBridgeUpdateState(
-                "restarting",
-                currentTime(),
+            if (runtimeCatalogChanged) {
+              const requestedAt =
+                typeof heartbeatResult.control.refreshRuntimeProfiles
+                  ?.requestedAt === "number"
+                  ? heartbeatResult.control.refreshRuntimeProfiles.requestedAt
+                  : currentTime();
+              const acceptedAt = currentTime();
+              input.status.pendingControlCommand = {
+                command: "restartWhenIdle",
+                requestedAt,
+              };
+              input.status.controlCommandStatus = buildControlCommandStatus(
+                "restartWhenIdle",
+                "accepted",
+                {
+                  acceptedAt,
+                  instanceId: input.status.runtimeIdentity?.instanceId,
+                  requestedAt,
+                },
               );
-              restartResult = { restartRequested: true };
+              await persistStatus(input.statusPath, input.status);
+              restartResult = await applyPendingBridgeControlCommand(
+                input.status,
+                currentTime,
+                input,
+              );
               input.log({
                 level: "info",
                 event: "bridge.runtime_profiles.restart_requested",
                 deviceId: input.config.deviceId,
+                restartRequested: restartResult.restartRequested,
               });
             }
             await persistStatus(input.statusPath, input.status);
@@ -2850,6 +3979,11 @@ export async function runBridgeLoopIteration(
       } catch {}
       return restartResult;
     }
+    if (normalizeControlCommand(input.status.pendingControlCommand)) {
+      syncBridgeStatus();
+      await persistStatus(input.statusPath, input.status);
+      return { restartRequested: false };
+    }
     for (const watchdog of input.watchdogFailures ?? []) {
       if (watchdog.checkpoint === "quiet") {
         input.log({
@@ -2864,10 +3998,16 @@ export async function runBridgeLoopIteration(
         await persistStatus(input.statusPath, input.status);
         continue;
       }
+      const terminalizationMetadata = buildWatchdogTerminalizationMetadata(
+        watchdog,
+        input.inFlightCommandMetadata.get(watchdog.queueItemId),
+        currentTime(),
+      );
       const terminalized =
         (await input.manager.failActiveQueueItem?.(
           watchdog.queueItemId,
           watchdog.reasonCode,
+          terminalizationMetadata,
         )) ?? false;
       if (!terminalized) {
         input.log({
@@ -2888,139 +4028,226 @@ export async function runBridgeLoopIteration(
         deviceId: input.config.deviceId,
         queueId: watchdog.queueItemId,
         reason: watchdog.reasonCode,
+        ...terminalizationMetadata,
       });
       await persistStatus(input.statusPath, input.status);
     }
-    const availableSlots = input.maxInFlight - input.inFlightCommands.size;
-    if (availableSlots > 0) {
-      let processHealth = input.getProcessHealth?.();
-      if (processHealth) {
-        input.status.processHealth = processHealth;
-      }
-      const runtimeConformance =
-        input.getRuntimeConformance?.() ?? input.status.runtimeConformance;
-      if (runtimeConformance) {
-        input.status.runtimeConformance = runtimeConformance;
-      }
-      const now = currentTime();
-      if (now - input.lastStaleCleanupAt >= 60_000) {
-        input.setLastStaleCleanupAt(now);
-        const cleanupResult = await cleanup(input.config, {
-          limit: availableSlots,
-        });
-        input.status.lastStaleCleanupAt = new Date(now).toISOString();
-        input.status.lastStaleCleanup = {
-          inspected:
-            typeof cleanupResult.inspected === "number"
-              ? cleanupResult.inspected
-              : undefined,
-          released:
-            typeof cleanupResult.released === "number"
-              ? cleanupResult.released
-              : undefined,
-        };
-        if (
-          typeof cleanupResult.released === "number" &&
-          cleanupResult.released > 0
-        ) {
-          input.log({
-            level: "info",
-            event: "bridge.queue.cleanup_stale",
-            deviceId: input.config.deviceId,
-            released: cleanupResult.released,
-            inspected: cleanupResult.inspected,
-          });
+    if (normalizeControlCommand(input.status.pendingControlCommand)) {
+      syncBridgeStatus();
+      await persistStatus(input.statusPath, input.status);
+      return { restartRequested: false };
+    }
+    const claimReservation = input.reserveClaimSlots?.();
+    try {
+      const maxInFlight = claimReservation?.maxInFlight ?? input.maxInFlight;
+      const availableSlots = maxInFlight - input.inFlightCommands.size;
+      const shouldPollQueue =
+        pollReason !== "timer" || input.inFlightCommands.size > 0;
+      const claimInput: BridgeQueueClaimInput | undefined =
+        availableSlots > 0
+          ? { limit: availableSlots }
+          : input.inFlightCommands.size > 0
+            ? { lane: "control", limit: 1 }
+            : undefined;
+      if (claimInput && shouldPollQueue) {
+        let processHealth = input.getProcessHealth?.();
+        if (processHealth) {
+          input.status.processHealth = processHealth;
         }
-      }
-      const pressureCleanupRequest =
-        processPressureCleanupRequest(processHealth);
-      if (
-        pressureCleanupRequest &&
-        input.manager.closeIdleSessionsForProcessPressure
-      ) {
-        const childCountBefore = processHealth?.childCount;
-        const processCapBefore = processHealth?.processCap;
-        const closedSessionCount =
-          await input.manager.closeIdleSessionsForProcessPressure(
-            pressureCleanupRequest,
-          );
-        if (closedSessionCount > 0) {
-          processHealth = input.getProcessHealth?.() ?? processHealth;
-          if (processHealth) {
-            input.status.processHealth = processHealth;
+        const runtimeConformance =
+          input.getRuntimeConformance?.() ?? input.status.runtimeConformance;
+        if (runtimeConformance) {
+          input.status.runtimeConformance = runtimeConformance;
+        }
+        const now = currentTime();
+        if (availableSlots > 0 && now - input.lastStaleCleanupAt >= 60_000) {
+          input.setLastStaleCleanupAt(now);
+          const cleanupResult = await cleanupStaleClaimsWithTimeout({
+            cleanup,
+            config: input.config,
+            limit: availableSlots,
+            log: input.log,
+            requestTimeoutMs: Math.min(
+              input.cloudRequestTimeoutMs ?? DEFAULT_CLOUD_REQUEST_TIMEOUT_MS,
+              input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+            ),
+            timeoutMs:
+              input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+          });
+          input.status.lastStaleCleanupAt = new Date(now).toISOString();
+          if (cleanupResult) {
+            input.status.lastStaleCleanup = {
+              inspected:
+                typeof cleanupResult.inspected === "number"
+                  ? cleanupResult.inspected
+                  : undefined,
+              released:
+                typeof cleanupResult.released === "number"
+                  ? cleanupResult.released
+                  : undefined,
+            };
+            if (
+              typeof cleanupResult.released === "number" &&
+              cleanupResult.released > 0
+            ) {
+              input.log({
+                level: "info",
+                event: "bridge.queue.cleanup_stale",
+                deviceId: input.config.deviceId,
+                released: cleanupResult.released,
+                inspected: cleanupResult.inspected,
+              });
+            }
           }
-          input.log({
-            level: "info",
-            event: "bridge.lifecycle.idle_pressure_close",
-            deviceId: input.config.deviceId,
-            closedSessionCount,
-            targetFreeProcessSlots:
-              pressureCleanupRequest.targetFreeProcessSlots,
-            maxSessionsToClose: pressureCleanupRequest.maxSessionsToClose,
-            childCountBefore,
-            childCountAfter: processHealth?.childCount,
-            processCap: processHealth?.processCap ?? processCapBefore,
-          });
         }
-      }
-      if (processHealth && !processHealth.canClaim) {
-        input.log({
-          level: "warn",
-          event: "bridge.queue.claim_skipped",
-          deviceId: input.config.deviceId,
-          reason: "process_health_unsafe",
-          processHealthStatus: processHealth.status,
-          childCount: processHealth.childCount,
-          ambiguousProcessCount: processHealth.ambiguousProcessCount,
-          processCapExceeded: processHealth.processCapExceeded,
-        });
-        syncBridgeStatus();
-        await persistStatus(input.statusPath, input.status);
-        return { restartRequested: false };
-      }
-      if (input.canClaimWork && !input.canClaimWork()) {
-        input.log({
-          level: "warn",
-          event: "bridge.queue.claim_skipped",
-          deviceId: input.config.deviceId,
-          reason: "local_journal_hard_failed",
-        });
-        syncBridgeStatus();
-        await persistStatus(input.statusPath, input.status);
-        return { restartRequested: false };
-      }
-      input.status.lastPollAt = new Date(now).toISOString();
-      const commands = await claim(input.config, availableSlots);
-      if (commands.length > 0) {
-        input.log({
-          level: "info",
-          event: "bridge.queue.claimed",
-          deviceId: input.config.deviceId,
-          commandCount: commands.length,
-        });
-      }
-      for (const command of commands) {
-        const conformanceBlock = runtimeConformanceBlockForCommand(
-          command,
-          runtimeConformance,
-        );
-        if (conformanceBlock) {
-          const result = runtimeConformanceBlockResult(command, conformanceBlock);
-          await markResult(input.config, command, result);
+        const pressureCleanupRequest =
+          processPressureCleanupRequest(processHealth);
+        if (
+          pressureCleanupRequest &&
+          input.manager.closeIdleSessionsForProcessPressure
+        ) {
+          const childCountBefore = processHealth?.childCount;
+          const processCapBefore = processHealth?.processCap;
+          const closedSessionCount =
+            await input.manager.closeIdleSessionsForProcessPressure(
+              pressureCleanupRequest,
+            );
+          if (closedSessionCount > 0) {
+            processHealth = input.getProcessHealth?.() ?? processHealth;
+            if (processHealth) {
+              input.status.processHealth = processHealth;
+            }
+            input.log({
+              level: "info",
+              event: "bridge.lifecycle.idle_pressure_close",
+              deviceId: input.config.deviceId,
+              closedSessionCount,
+              targetFreeProcessSlots:
+                pressureCleanupRequest.targetFreeProcessSlots,
+              maxSessionsToClose: pressureCleanupRequest.maxSessionsToClose,
+              childCountBefore,
+              childCountAfter: processHealth?.childCount,
+              processCap: processHealth?.processCap ?? processCapBefore,
+            });
+          }
+        }
+        if (processHealth && !processHealth.canClaim) {
           input.log({
             level: "warn",
             event: "bridge.queue.claim_skipped",
             deviceId: input.config.deviceId,
-            queueId: command.id,
-            queueType: command.type ?? command.kind,
-            bridgeProfileId: command.bridgeProfileId,
-            reason: conformanceBlock.reasonCode,
-            runtimeConformanceStatus: conformanceBlock.status,
+            reason: "process_health_unsafe",
+            processHealthStatus: processHealth.status,
+            childCount: processHealth.childCount,
+            ambiguousProcessCount: processHealth.ambiguousProcessCount,
+            processCapExceeded: processHealth.processCapExceeded,
           });
-          continue;
+          syncBridgeStatus();
+          await persistStatus(input.statusPath, input.status);
+          return { restartRequested: false };
         }
-        runCommand(command);
+        if (input.canClaimWork && !input.canClaimWork()) {
+          input.log({
+            level: "warn",
+            event: "bridge.queue.claim_skipped",
+            deviceId: input.config.deviceId,
+            reason: "local_journal_hard_failed",
+          });
+          syncBridgeStatus();
+          await persistStatus(input.statusPath, input.status);
+          return { restartRequested: false };
+        }
+        input.status.lastPollAt = new Date(now).toISOString();
+        const commands = await claim(
+          input.config,
+          claimInput.lane
+            ? claimInput
+            : (claimInput.limit ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS),
+        );
+        if (commands.length > 0) {
+          input.log({
+            level: "info",
+            event: "bridge.queue.claimed",
+            deviceId: input.config.deviceId,
+            commandCount: commands.length,
+          });
+        }
+        let dispatchedCommandCount = 0;
+        for (const command of commands) {
+          const conformanceBlock = runtimeConformanceBlockForCommand(
+            command,
+            runtimeConformance,
+          );
+          if (conformanceBlock) {
+            const result = runtimeConformanceBlockResult(
+              command,
+              conformanceBlock,
+            );
+            await markResult(input.config, command, result);
+            input.log({
+              level: "warn",
+              event: "bridge.queue.claim_skipped",
+              deviceId: input.config.deviceId,
+              queueId: command.id,
+              queueType: command.type ?? command.kind,
+              bridgeProfileId: command.bridgeProfileId,
+              reason: conformanceBlock.reasonCode,
+              runtimeConformanceStatus: conformanceBlock.status,
+            });
+            continue;
+          }
+          runCommand(command);
+          dispatchedCommandCount += 1;
+        }
+        const warmRuntimeProfileIds = input.warmRuntimeProfileIds ?? [];
+        const processWarmCapacity =
+          processHealth && typeof processHealth.processCap === "number"
+            ? Math.max(0, processHealth.processCap - processHealth.childCount)
+            : Number.POSITIVE_INFINITY;
+        const warmCapacity = Math.min(
+          Math.max(0, maxInFlight - input.inFlightCommands.size),
+          processWarmCapacity,
+        );
+        if (
+          warmRuntimeProfileIds.length > 0 &&
+          dispatchedCommandCount === 0 &&
+          warmCapacity > 0 &&
+          input.manager.warmRuntimeSessions
+        ) {
+          const warmedCount = await input.manager.warmRuntimeSessions({
+            canStartSession: () => {
+              const latestProcessHealth =
+                input.getProcessHealth?.() ?? processHealth;
+              if (!latestProcessHealth) {
+                return true;
+              }
+              if (!latestProcessHealth.canClaim) {
+                return false;
+              }
+              if (
+                typeof latestProcessHealth.processCap === "number" &&
+                latestProcessHealth.childCount >= latestProcessHealth.processCap
+              ) {
+                return false;
+              }
+              return true;
+            },
+            maxSessions: warmCapacity,
+            runtimeProfileIds: warmRuntimeProfileIds,
+          });
+          if (warmedCount > 0) {
+            input.log({
+              level: "info",
+              event: "bridge.session.warm_runtime_profiles",
+              deviceId: input.config.deviceId,
+              warmedCount,
+              runtimeProfileCount: warmRuntimeProfileIds.length,
+            });
+          }
+        }
       }
+    } finally {
+      claimReservation?.release();
     }
     syncBridgeStatus();
     await persistStatus(input.statusPath, input.status);
@@ -3117,6 +4344,7 @@ export function bridgeHeartbeatSignature(
     | "lastStaleCleanup"
     | "maxInFlight"
     | "controlCommandStatus"
+    | "restartHandoff"
     | "pendingControlCommand"
     | "processHealth"
     | "runtimeConformance"
@@ -3165,18 +4393,28 @@ export function bridgeHeartbeatSignature(
     lifecycle: status.lifecycle,
     pendingControlCommand: status.pendingControlCommand,
     controlCommandStatus: status.controlCommandStatus,
+    restartHandoff: status.restartHandoff
+      ? {
+          reason: status.restartHandoff.reason,
+          status: status.restartHandoff.status,
+          targetVersion: status.restartHandoff.targetVersion,
+          runtimeProfileIds: status.restartHandoff.runtimeProfileIds,
+          sessionWarmupHintCount:
+            status.restartHandoff.sessionWarmupHints.length,
+        }
+      : undefined,
     updateState: status.updateState,
   });
 }
 
-function runtimeProfileCommandsChanged(
+function runtimeProfilesChanged(
   previousProfiles: BridgeRuntimeProfile[],
   refreshedProfiles: BridgeRuntimeProfile[],
 ): boolean {
   const previousById = new Map(
     previousProfiles.map((profile) => [
       profile.id,
-      profile.command.join("\u0000"),
+      runtimeProfileCatalogSignature(profile),
     ]),
   );
   const refreshedIds = new Set(refreshedProfiles.map((profile) => profile.id));
@@ -3184,15 +4422,22 @@ function runtimeProfileCommandsChanged(
     return true;
   }
   for (const profile of refreshedProfiles) {
-    const previousCommand = previousById.get(profile.id);
+    const previousSignature = previousById.get(profile.id);
     if (
-      previousCommand === undefined ||
-      previousCommand !== profile.command.join("\u0000")
+      previousSignature === undefined ||
+      previousSignature !== runtimeProfileCatalogSignature(profile)
     ) {
       return true;
     }
   }
   return false;
+}
+
+function runtimeProfileCatalogSignature(profile: BridgeRuntimeProfile): string {
+  return JSON.stringify({
+    capabilities: profile.capabilities,
+    command: profile.command,
+  });
 }
 
 function syncBridgeRuntimeStatus(
@@ -3458,7 +4703,34 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
+  return [
+    "0000 Chat ACP bridge",
+    "",
+    "Usage:",
+    `  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]`,
+    "  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]",
+    `  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]`,
+    "  bun scripts/acp-bridge.ts status",
+    "  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]",
+    "",
+    "Environment:",
+    "  ZERO_CHAT_APP_URL                         Default app URL for connect or pair",
+    "  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect",
+    `  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})`,
+    `  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})`,
+    "  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations",
+    "  ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES   Comma-separated runtime profile ids to warm from recent scoped sessions (default: disabled)",
+    `  ZERO_CHAT_RUNTIME_CATALOG_CACHE          Runtime catalog cache path (default: ${DEFAULT_RUNTIME_CATALOG_CACHE_PATH})`,
+    "  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds",
+    "  ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS Bridge cloud API timeout in milliseconds",
+    "  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds",
+    "  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)",
+    `  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)`,
+    `  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)`,
+    `  ZERO_CHAT_BRIDGE_RESTART_HANDOFF         Override restart handoff path (default: ${DEFAULT_RESTART_HANDOFF_PATH})`,
+    "  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)",
+    "",
+  ].join("\n");
 }
 
 function getStatusPath(
@@ -3468,6 +4740,42 @@ function getStatusPath(
   return (
     getFlag(flags, "status-file", env.ZERO_CHAT_BRIDGE_STATUS) ??
     DEFAULT_STATUS_PATH
+  );
+}
+
+function getRuntimeCatalogCachePath(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return (
+    getFlag(
+      flags,
+      "runtime-catalog-cache",
+      env.ZERO_CHAT_RUNTIME_CATALOG_CACHE,
+    ) ?? DEFAULT_RUNTIME_CATALOG_CACHE_PATH
+  );
+}
+
+function runtimeCatalogCommandKeys(input: {
+  agentCommand: string;
+  customRuntimeCommands: string[][];
+}): string[][] {
+  return [
+    splitCommand(input.agentCommand),
+    ...input.customRuntimeCommands,
+  ].filter((command) => command.length > 0);
+}
+
+function getRestartHandoffPath(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return (
+    getFlag(
+      flags,
+      "restart-handoff-file",
+      env.ZERO_CHAT_BRIDGE_RESTART_HANDOFF,
+    ) ?? DEFAULT_RESTART_HANDOFF_PATH
   );
 }
 
@@ -3586,10 +4894,11 @@ async function publishBridgeSupervisorHealthIfChanged(context: {
 
 async function claimCommands(
   config: BridgeConfig,
-  limit = DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+  input: number | BridgeQueueClaimInput = DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
 ): Promise<BridgeQueueCommand[]> {
   const adapter = new ConvexBridgeHostAdapter(createCloudClient(config));
-  const response = await adapter.claimWork({ limit });
+  const claimInput = typeof input === "number" ? { limit: input } : input;
+  const response = await adapter.claimWork(claimInput);
   const rawResponse = response.raw as QueueClaimResponse;
   const rawCommands = Array.isArray(rawResponse.commands)
     ? rawResponse.commands
@@ -3720,20 +5029,83 @@ function runtimeConformanceBlockResult(
   };
 }
 
+async function cleanupStaleClaimsWithTimeout(input: {
+  cleanup: typeof cleanupStaleClaims;
+  config: BridgeConfig;
+  limit: number;
+  log: FlushableBridgeLogger;
+  requestTimeoutMs: number;
+  timeoutMs: number;
+}): Promise<QueueCleanupResponse | undefined> {
+  const timeoutMs = Math.max(1, input.timeoutMs);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let timeoutLogged = false;
+  const logTimeout = () => {
+    if (timeoutLogged) {
+      return;
+    }
+    timeoutLogged = true;
+    input.log({
+      level: "warn",
+      event: "bridge.queue.cleanup_stale_timeout",
+      deviceId: input.config.deviceId,
+      timeoutMs,
+    });
+  };
+
+  const cleanupTask = input
+    .cleanup(input.config, {
+      limit: input.limit,
+      requestTimeoutMs: input.requestTimeoutMs,
+    })
+    .catch((error) => {
+      if (timedOut || error instanceof BridgeCloudRequestTimeoutError) {
+        logTimeout();
+        return undefined;
+      }
+      throw error;
+    });
+  const timeoutTask = new Promise<undefined>((resolve) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      logTimeout();
+      resolve(undefined);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([cleanupTask, timeoutTask]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 async function cleanupStaleClaims(
   config: BridgeConfig,
-  input: { limit?: number } = {},
+  input: { limit?: number; requestTimeoutMs?: number } = {},
 ): Promise<QueueCleanupResponse> {
+  const { requestTimeoutMs, ...body } = input;
   return await createCloudClient(
     config,
-  ).cleanupStaleClaims<QueueCleanupResponse>(input);
+    { requestTimeoutMs },
+  ).cleanupStaleClaims<QueueCleanupResponse>(body);
 }
 
 type BridgeHeartbeatSendResult =
-  | { ok: true; control?: BridgeControlResponse; wake?: BridgeWakeToken }
+  | {
+      ok: true;
+      control?: BridgeControlResponse;
+      enabledFeatureFlags?: string[];
+      wake?: BridgeWakeToken;
+    }
   | {
       ok: false;
-      error: BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 };
+      error:
+        | (BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 })
+        | BridgeCloudRequestTimeoutError;
     };
 
 type BridgeControlResponse = {
@@ -3765,6 +5137,18 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
     capacity: status.capacity,
     runtimeIdentity: status.runtimeIdentity,
+    restartHandoff: status.restartHandoff
+      ? {
+          consumedAt: status.restartHandoff.consumedAt,
+          createdAt: status.restartHandoff.createdAt,
+          reason: status.restartHandoff.reason,
+          status: status.restartHandoff.status,
+          targetVersion: status.restartHandoff.targetVersion,
+          runtimeProfileIds: status.restartHandoff.runtimeProfileIds,
+          sessionWarmupHintCount:
+            status.restartHandoff.sessionWarmupHints.length,
+        }
+      : undefined,
     processHealth: buildHeartbeatProcessHealthPayload(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
@@ -4015,6 +5399,7 @@ export async function sendHeartbeatWithClient(
   try {
     const response = await client.heartbeat<{
       control?: BridgeControlResponse;
+      enabledFeatureFlags?: unknown;
       wake?: BridgeWakeToken;
     }>({
       bridgeInstanceId: status.runtimeIdentity?.instanceId,
@@ -4022,7 +5407,14 @@ export async function sendHeartbeatWithClient(
       status: buildHeartbeatStatusPayload(status),
       version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
     });
-    return { ok: true, control: response.control, wake: response.wake };
+    return {
+      ok: true,
+      control: response.control,
+      enabledFeatureFlags: stringArrayFromUnknownAllowEmpty(
+        response.enabledFeatureFlags,
+      ),
+      wake: response.wake,
+    };
   } catch (error) {
     if (isTransientHeartbeatError(error)) {
       return { ok: false, error };
@@ -4067,7 +5459,12 @@ function looksSensitiveProfileText(value: string): boolean {
 
 export function isTransientHeartbeatError(
   error: unknown,
-): error is BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 } {
+): error is
+  | (BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 })
+  | BridgeCloudRequestTimeoutError {
+  if (error instanceof BridgeCloudRequestTimeoutError) {
+    return true;
+  }
   return (
     error instanceof BridgeCloudHttpError &&
     (error.status === 500 ||
@@ -4077,13 +5474,18 @@ export function isTransientHeartbeatError(
   );
 }
 
-function createCloudClient(config: BridgeConfig): ConvexBridgeCloudClient {
+function createCloudClient(
+  config: BridgeConfig,
+  options: { requestTimeoutMs?: number } = {},
+): ConvexBridgeCloudClient {
   return new ConvexBridgeCloudClient({
     appUrl: config.appUrl,
     bridgeApiUrl: config.bridgeApiUrl,
     logIngestUrl: config.logIngestUrl,
     deviceId: config.deviceId,
     bridgeToken: config.bridgeToken,
+    requestTimeoutMs:
+      options.requestTimeoutMs ?? getCloudRequestTimeoutMs({}, process.env),
     paths: {
       heartbeat: DEFAULT_HEARTBEAT_PATH,
       queueClaim: DEFAULT_CLAIM_PATH,
@@ -4132,6 +5534,8 @@ export function createBridgeWakeSignal(input: {
   let client: BridgeWakeSignalClient | undefined;
   let unsubscribe: (() => void) | undefined;
   let activeToken: string | undefined;
+  let activeTokenExpiresAt: number | undefined;
+  let activeTokenRefreshAt: number | undefined;
   const waiters = new Set<() => void>();
   const clientFactory =
     input.clientFactory ??
@@ -4143,7 +5547,7 @@ export function createBridgeWakeSignal(input: {
       resolve();
     }
   };
-  const teardownSubscription = async () => {
+  const teardownSubscription = async (clearState = false) => {
     unsubscribe?.();
     unsubscribe = undefined;
     const previousClient = client;
@@ -4151,13 +5555,25 @@ export function createBridgeWakeSignal(input: {
     if (previousClient) {
       await previousClient.close();
     }
+    if (clearState) {
+      activeToken = undefined;
+      activeTokenExpiresAt = undefined;
+      activeTokenRefreshAt = undefined;
+    }
   };
   const subscribe = (wakeToken: BridgeWakeToken) => {
     if (closed || wakeToken.token === activeToken) {
       return;
     }
     void teardownSubscription();
+    const now = Date.now();
+    const refreshAfterMs = Math.max(
+      1,
+      Math.min(wakeToken.refreshAfterMs, wakeToken.expiresAt - now),
+    );
     activeToken = wakeToken.token;
+    activeTokenExpiresAt = wakeToken.expiresAt;
+    activeTokenRefreshAt = now + refreshAfterMs;
     client = clientFactory(input.convexUrl!);
     const query = makeFunctionReference<"query">("bridgeOutboundQueue:workSignal");
     const result = client.onUpdate(
@@ -4197,24 +5613,31 @@ export function createBridgeWakeSignal(input: {
   return {
     wait: async (timeoutMs: number) => {
       if (closed) {
-        return;
+        return "timeout";
       }
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => {
-          waiters.delete(resolve);
-          resolve();
-        }, timeoutMs);
-        waiters.add(() => {
+      return await new Promise<BridgeWakeWaitResult>((resolve) => {
+        const onWake = () => {
           clearTimeout(timeout);
-          resolve();
-        });
+          resolve("signal");
+        };
+        const timeout = setTimeout(() => {
+          waiters.delete(onWake);
+          resolve("timeout");
+        }, timeoutMs);
+        waiters.add(onWake);
       });
     },
     close: async () => {
       closed = true;
       wake();
-      await teardownSubscription();
+      await teardownSubscription(true);
     },
+    isWakeSubscriptionActive: () =>
+      !closed &&
+      Boolean(unsubscribe) &&
+      typeof activeTokenExpiresAt === "number" &&
+      activeTokenExpiresAt > Date.now(),
+    nextWakeTokenRefreshAt: () => activeTokenRefreshAt,
     updateWakeToken: (wakeToken) => {
       if (!wakeToken || wakeToken.expiresAt <= Date.now()) {
         return;
@@ -4226,14 +5649,34 @@ export function createBridgeWakeSignal(input: {
 
 function createTimeoutWakeSignal(): BridgeWakeSignal {
   let closed = false;
+  const waiters = new Set<() => void>();
+  const wake = () => {
+    for (const resolve of Array.from(waiters)) {
+      waiters.delete(resolve);
+      resolve();
+    }
+  };
   return {
     wait: async (timeoutMs: number) => {
-      if (!closed) {
-        await sleep(timeoutMs);
+      if (closed) {
+        return "timeout";
       }
+      await new Promise<void>((resolve) => {
+        const onWake = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+        const timeout = setTimeout(() => {
+          waiters.delete(onWake);
+          resolve();
+        }, timeoutMs);
+        waiters.add(onWake);
+      });
+      return "timeout";
     },
     close: async () => {
       closed = true;
+      wake();
     },
   };
 }
@@ -4558,9 +6001,23 @@ export function normalizeQueueCommand(
   const approvalOutcome =
     stringFromUnknown(record.approvalOutcome) ??
     (type === "choice-response" ? payloadText : undefined);
+  const createdAtMs = timestampMsFromUnknown(record.createdAt);
+  const claimedAtMs = timestampMsFromUnknown(record.claimedAt);
   return {
     id,
     claimId: stringFromUnknown(record.claimId),
+    claimedAt:
+      stringFromUnknown(record.claimedAt) ??
+      (claimedAtMs === undefined
+        ? undefined
+        : new Date(claimedAtMs).toISOString()),
+    claimedAtMs,
+    createdAt:
+      stringFromUnknown(record.createdAt) ??
+      (createdAtMs === undefined
+        ? undefined
+        : new Date(createdAtMs).toISOString()),
+    createdAtMs,
     type,
     attachments: attachmentsFromUnknown(record.attachments),
     threadId: stringFromUnknown(record.threadId),
@@ -4647,10 +6104,45 @@ function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function stringArrayFromUnknown(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+  return result.length > 0 ? result : undefined;
+}
+
+function stringArrayFromUnknownAllowEmpty(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean),
+    ),
+  );
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]) {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
 function numberFromUnknown(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+function timestampMsFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function stringRecordFromUnknown(

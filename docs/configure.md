@@ -57,6 +57,7 @@ The bridge writes:
 | --- | --- |
 | `~/.0000/bridge.json` | Pairing token and host URL |
 | `~/.0000/bridge-status.json` | Local heartbeat/status projection |
+| `~/.0000/restart-handoff.json` | Short-lived restart/update handoff hints |
 | `~/.0000/bridge.sqlite` | Durable supervisor state and journal, when enabled |
 
 These files are user-local state and must stay out of source control.

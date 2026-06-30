@@ -20,6 +20,7 @@ export type BridgeCloudClientOptions = {
   logIngestUrl?: string
   paths?: Partial<typeof DEFAULT_BRIDGE_PATHS>
   fetch?: BridgeFetch
+  requestTimeoutMs?: number
 }
 
 export type BridgeHeartbeatInput = {
@@ -35,6 +36,7 @@ export type BridgeQueuePollInput = {
 }
 
 export type BridgeQueueClaimInput = {
+  lane?: "any" | "control"
   limit?: number
   queueItemIds?: string[]
 }
@@ -128,6 +130,20 @@ export class BridgeCloudHttpError extends Error {
   }
 }
 
+export class BridgeCloudRequestTimeoutError extends Error {
+  readonly method: string
+  readonly timeoutMs: number
+  readonly url: string
+
+  constructor(method: string, url: string, timeoutMs: number) {
+    super(`${method} ${url} timed out after ${timeoutMs}ms`)
+    this.name = "BridgeCloudRequestTimeoutError"
+    this.method = method
+    this.timeoutMs = timeoutMs
+    this.url = url
+  }
+}
+
 export class ConvexBridgeCloudClient {
   readonly appUrl: string
   readonly bridgeApiUrl?: string
@@ -137,6 +153,7 @@ export class ConvexBridgeCloudClient {
   private readonly logIngestUrl?: string
   private readonly paths: typeof DEFAULT_BRIDGE_PATHS
   private readonly fetchImpl: BridgeFetch
+  private readonly requestTimeoutMs?: number
 
   constructor(options: BridgeCloudClientOptions) {
     this.appUrl = options.appUrl
@@ -146,6 +163,7 @@ export class ConvexBridgeCloudClient {
     this.logIngestUrl = options.logIngestUrl
     this.paths = { ...DEFAULT_BRIDGE_PATHS, ...options.paths }
     this.fetchImpl = options.fetch ?? fetch
+    this.requestTimeoutMs = options.requestTimeoutMs
   }
 
   async heartbeat<TResponse = Record<string, unknown>>(
@@ -243,7 +261,7 @@ export class ConvexBridgeCloudClient {
     })
     form.set("file", blob, input.filename)
 
-    const response = await this.fetchImpl(endpoint, {
+    const response = await this.fetchWithTimeout("POST", endpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.bridgeToken}`,
@@ -265,7 +283,7 @@ export class ConvexBridgeCloudClient {
     }
 
     const endpoint = buildBridgeEndpoint(this.appUrl, this.paths.agentAttachments)
-    const response = await this.fetchImpl(endpoint, {
+    const response = await this.fetchWithTimeout("DELETE", endpoint, {
       method: "DELETE",
       headers: {
         authorization: `Bearer ${this.bridgeToken}`,
@@ -330,7 +348,7 @@ export class ConvexBridgeCloudClient {
     if (!endpoint) {
       return {} as TResponse
     }
-    const response = await this.fetchImpl(endpoint, {
+    const response = await this.fetchWithTimeout("POST", endpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.bridgeToken}`,
@@ -355,7 +373,7 @@ export class ConvexBridgeCloudClient {
     body: unknown,
   ): Promise<TResponse> {
     const endpoint = buildBridgeEndpoint(baseUrl, path)
-    const response = await this.fetchImpl(endpoint, {
+    const response = await this.fetchWithTimeout("POST", endpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.bridgeToken}`,
@@ -365,6 +383,43 @@ export class ConvexBridgeCloudClient {
     })
 
     return await readJsonResponse<TResponse>("POST", endpoint, response)
+  }
+
+  private async fetchWithTimeout(
+    method: string,
+    endpoint: string,
+    init: RequestInit,
+  ): Promise<Response> {
+    const timeoutMs = this.requestTimeoutMs
+    if (timeoutMs === undefined || timeoutMs <= 0) {
+      return await this.fetchImpl(endpoint, init)
+    }
+
+    const controller = new AbortController()
+    const request = this.fetchImpl(endpoint, {
+      ...init,
+      signal: controller.signal,
+    }).catch((error) => {
+      if (controller.signal.aborted) {
+        throw new BridgeCloudRequestTimeoutError(method, endpoint, timeoutMs)
+      }
+      throw error
+    })
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const timeoutResult = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort()
+        reject(new BridgeCloudRequestTimeoutError(method, endpoint, timeoutMs))
+      }, timeoutMs)
+    })
+
+    try {
+      return await Promise.race([request, timeoutResult])
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+    }
   }
 }
 

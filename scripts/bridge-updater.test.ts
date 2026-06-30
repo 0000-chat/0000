@@ -82,6 +82,68 @@ describe("bridge updater restart command", () => {
     )
   })
 
+  test("reports target-version intent before spawning the restarted bridge", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-updater-"))
+    const handoffPath = join(dir, "restart-handoff.json")
+    const statusPath = join(dir, "bridge-status.json")
+    let statusAtRestart: Record<string, unknown> | undefined
+    await writeFile(
+      handoffPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        bridgeVersion: "0.1.20",
+        createdAt: Date.UTC(2026, 5, 22, 9, 9, 0),
+        expiresAt: Date.UTC(2026, 5, 22, 9, 19, 0),
+        reason: "updateWhenIdle",
+        targetVersion: "0.1.20",
+        entries: [],
+      })}\n`,
+      "utf8",
+    )
+
+    await runBridgeUpdate(
+      {
+        currentVersion: "0.1.20",
+        repoPath: dir,
+        restartHandoffPath: handoffPath,
+        restartCommand: ["bun", "scripts/acp-bridge.ts", "start"],
+        statusPath,
+      },
+      {
+        assertCleanCheckout: async () => {},
+        listRemoteReleaseTags: async () => ["abc refs/tags/v0.1.21^{}"],
+        now: () => Date.UTC(2026, 5, 22, 9, 10, 0),
+        runProcess: async () => ({ stderr: "", stdout: "" }),
+        spawnRestart: () => {
+          statusAtRestart = JSON.parse(readFileSync(statusPath, "utf8")) as Record<string, unknown>
+        },
+        waitForParentExit: async () => {},
+      },
+    )
+
+    expect(statusAtRestart?.controlCommandStatus).toEqual(
+      expect.objectContaining({
+        command: "updateWhenIdle",
+        status: "succeeded",
+        targetVersion: "0.1.21",
+      }),
+    )
+    expect(statusAtRestart?.updateState).toEqual(
+      expect.objectContaining({
+        status: "updated",
+        targetVersion: "0.1.21",
+      }),
+    )
+    expect(JSON.parse(await readFile(handoffPath, "utf8"))).toEqual(
+      expect.objectContaining({
+        createdAt: Date.UTC(2026, 5, 22, 9, 10, 0),
+        expiresAt: Date.UTC(2026, 5, 22, 9, 20, 0),
+        status: "updated",
+        targetVersion: "0.1.21",
+      }),
+    )
+  })
+
   test("writes failed control command status without leaving a pending command behind", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-updater-"))
     const statusPath = join(dir, "bridge-status.json")

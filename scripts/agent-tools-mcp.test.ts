@@ -5,10 +5,12 @@ import {
   AGENT_TOOL_MCP_INPUT_SCHEMAS,
   AGENT_TOOL_GUIDE_RESOURCE,
   AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
+  ARTIFACTS_FEATURE_FLAG_KEY,
   buildAgentToolMcpEnv,
   buildAgentToolGuideText,
   buildAgentToolSessionContextText,
   createAgentToolsMcpServer,
+  getVisibleAgentToolMcpToolNames,
   invokeAgentToolOverHttp,
   toMcpToolResult,
 } from "./agent-tools-mcp"
@@ -18,6 +20,7 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toEqual([
       "userPrompts.requestChoice",
       "threads.list",
+      "threads.create",
       "messages.search",
       "settings.setDefaultApprovalLevel",
       "agents.list",
@@ -56,12 +59,20 @@ describe("agent tools MCP server helpers", () => {
       "databases.deleteRow",
       "secrets.put",
       "secrets.listAvailable",
+      "artifacts.create",
+      "artifacts.createUploadIntent",
+      "artifacts.completeUpload",
+      "artifacts.search",
+      "artifacts.read",
+      "artifacts.getContentUrl",
+      "artifacts.link",
       "scripts.createDraft",
       "scripts.updateDraft",
       "scripts.search",
       "scripts.read",
     ])
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.list")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.create")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.get")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.current")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.read")
@@ -76,6 +87,8 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("multiple-choice UI")
     expect(buildAgentToolGuideText()).toContain("spaces.archive")
     expect(buildAgentToolGuideText()).toContain("threads.list")
+    expect(buildAgentToolGuideText()).toContain("threads.create")
+    expect(buildAgentToolGuideText()).toContain("agentIdOrSlug")
     expect(buildAgentToolGuideText()).not.toContain("threads.current")
     expect(buildAgentToolGuideText()).not.toContain("threads.read")
     expect(buildAgentToolGuideText()).not.toContain("call threads.current first")
@@ -107,6 +120,14 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("secrets.listAvailable")
     expect(buildAgentToolGuideText()).toContain("scripts.createDraft")
     expect(buildAgentToolGuideText()).toContain("Never request raw Convex credentials")
+    expect(buildAgentToolGuideText()).not.toContain("artifacts.create")
+    expect(buildAgentToolGuideText()).not.toContain("artifacts.createUploadIntent")
+    expect(buildAgentToolGuideText({ enabledFeatureFlags: [ARTIFACTS_FEATURE_FLAG_KEY] })).toContain(
+      "artifacts.create",
+    )
+    expect(buildAgentToolGuideText({ enabledFeatureFlags: [ARTIFACTS_FEATURE_FLAG_KEY] })).toContain(
+      "instead of local files",
+    )
     expect(buildAgentToolGuideText()).toContain(
       "Do not call messages.search just to recover current-thread history",
     )
@@ -176,6 +197,23 @@ describe("agent tools MCP server helpers", () => {
     expect(JSON.stringify(parsed)).not.toContain("ghu_secret")
   })
 
+  test("validates thread creation schema including self assignment", () => {
+    const schema = AGENT_TOOL_MCP_INPUT_SCHEMAS["threads.create"]
+
+    expect(schema.safeParse({
+      agentIdOrSlug: "self",
+      approvalLevel: "full_permissions",
+      clientThreadId: "client-thread-123",
+      initialUserMessage: "Start here only if requested.",
+      requireAgentSession: true,
+      spaceIdOrSlug: "build",
+      summary: "Follow-up context",
+      title: "Follow-up thread",
+    }).success).toBe(true)
+    expect(schema.safeParse({ title: "Missing space" }).success).toBe(false)
+    expect(schema.safeParse({ approvalLevel: "always", spaceIdOrSlug: "build" }).success).toBe(false)
+  })
+
   test("keeps the public mailbox tool schema aligned with conversation replies", () => {
     const schema = AGENT_TOOL_MCP_INPUT_SCHEMAS["agents.sendMailboxMessage"]
 
@@ -207,6 +245,7 @@ describe("agent tools MCP server helpers", () => {
         ZERO_CHAT_AGENT_TOOLS_URL: "https://bridge.example.test",
         ZERO_CHAT_BRIDGE_DEVICE_ID: "device_123",
         ZERO_CHAT_BRIDGE_TOKEN: "secret-token",
+        ZERO_CHAT_ENABLED_FEATURE_FLAGS: "artifacts",
         ZERO_CHAT_THREAD_ID: "thread_abc",
       }),
     ).toEqual({
@@ -214,10 +253,26 @@ describe("agent tools MCP server helpers", () => {
       appUrl: "https://chat.example.test/app",
       bridgeToken: "secret-token",
       deviceId: "device_123",
+      enabledFeatureFlags: ["artifacts"],
       threadId: "thread_abc",
       toolBaseUrl: "https://bridge.example.test",
     })
     expect(() => buildAgentToolMcpEnv({})).toThrow(/ZERO_CHAT_APP_URL/)
+  })
+
+  test("registers artifact MCP tools only when Artifacts is enabled", () => {
+    expect(getVisibleAgentToolMcpToolNames()).not.toContain("artifacts.create")
+    expect(getVisibleAgentToolMcpToolNames([ARTIFACTS_FEATURE_FLAG_KEY])).toEqual(
+      expect.arrayContaining([
+        "artifacts.create",
+        "artifacts.createUploadIntent",
+        "artifacts.completeUpload",
+        "artifacts.search",
+        "artifacts.read",
+        "artifacts.getContentUrl",
+        "artifacts.link",
+      ]),
+    )
   })
 
   test("forwards MCP tool calls to the bridge-authenticated app endpoint", async () => {

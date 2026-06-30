@@ -60,6 +60,27 @@ export type HermesAcpPromptResult = {
   capabilities?: HermesAcpRuntimeCapabilities
   finalText?: HermesAcpFinalTextDiagnostics
   attachmentDeliveryMode?: HermesAcpAttachmentDeliveryMode
+  continuityMode?: HermesAcpContinuityMode
+  threadHistoryInjected?: boolean
+  externalContinuity?: HermesAcpExternalContinuityState
+  usage?: HermesAcpTokenUsage
+}
+
+export type HermesAcpContinuityMode = "fresh" | "hot" | "native" | "checkpoint"
+
+export type HermesAcpExternalContinuityState = {
+  attempted: boolean
+  fallback: boolean
+  loaded: boolean
+}
+
+export type HermesAcpTokenUsage = {
+  providerId?: string
+  modelId?: string
+  inputTokens?: number
+  cachedInputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
 }
 
 export type HermesAcpFinalTextDiagnostics = {
@@ -363,6 +384,7 @@ export class HermesAcpSession {
     if (text.length === 0) {
       throw new Error("Cannot send an empty ACP runtime user message")
     }
+    const wasStarted = this.started && Boolean(this.sessionId)
     const sessionId = await this.start()
     if (this.externalContinuityFallback && !this.externalContinuityFallbackNotified) {
       this.externalContinuityFallbackNotified = true
@@ -394,6 +416,9 @@ export class HermesAcpSession {
       attachmentBlocks.length > 0 || !options.attachmentReferenceText
         ? text
         : `${text}\n\n${options.attachmentReferenceText}`
+    const continuity = this.resolvePromptContinuity(options.threadHistory, {
+      wasStarted,
+    })
     let rawResult: unknown
     try {
       const promptResult = await this.withRequestTimeout("session/prompt", () =>
@@ -403,7 +428,7 @@ export class HermesAcpSession {
             attachmentBlocks,
             attributionContext: options.attributionContext,
             includeContinuityFallbackNote: this.externalContinuityFallback,
-            threadHistory: options.threadHistory,
+            threadHistory: continuity.threadHistory,
           }) as BridgePromptContentBlock[],
         }),
       )
@@ -420,6 +445,7 @@ export class HermesAcpSession {
     }
     const events = this.promptEvents.slice(eventStart)
     const stopReason = extractStopReason(rawResult)
+    const usage = extractTokenUsage(rawResult)
     const finalText = extractFinalText({
       command: this.command,
       events,
@@ -437,6 +463,10 @@ export class HermesAcpSession {
       capabilities: this.capabilities,
       finalText: finalText.diagnostics,
       attachmentDeliveryMode,
+      continuityMode: continuity.mode,
+      threadHistoryInjected: continuity.threadHistoryInjected,
+      externalContinuity: this.getExternalContinuityState(),
+      usage,
     }
   }
 
@@ -484,12 +514,36 @@ export class HermesAcpSession {
     }
   }
 
-  getExternalContinuityState(): { attempted: boolean; fallback: boolean; loaded: boolean } {
+  getExternalContinuityState(): HermesAcpExternalContinuityState {
     return {
       attempted: this.externalContinuityAttempted,
       fallback: this.externalContinuityFallback,
       loaded: this.externalContinuityLoaded,
     }
+  }
+
+  private resolvePromptContinuity(
+    threadHistory: string | undefined,
+    state: { wasStarted: boolean },
+  ): {
+    mode: HermesAcpContinuityMode
+    threadHistory?: string
+    threadHistoryInjected: boolean
+  } {
+    if (state.wasStarted) {
+      return { mode: "hot", threadHistoryInjected: false }
+    }
+    if (this.externalContinuityLoaded) {
+      return { mode: "native", threadHistoryInjected: false }
+    }
+    if (threadHistory?.trim()) {
+      return {
+        mode: "checkpoint",
+        threadHistory,
+        threadHistoryInjected: true,
+      }
+    }
+    return { mode: "fresh", threadHistoryInjected: false }
   }
 
   async close(): Promise<void> {
@@ -1473,6 +1527,125 @@ function extractStopReason(result: unknown): string | undefined {
   }
   const record = result as Record<string, unknown>
   return readString(record.stopReason)
+}
+
+function extractTokenUsage(result: unknown): HermesAcpTokenUsage | undefined {
+  const root = readRecord(result)
+  if (!root) {
+    return undefined
+  }
+  const usage = readRecord(root.usage) ?? root
+  const sources = [usage, root]
+  const inputTokens = firstNumberAt(sources, [
+    ["inputTokens"],
+    ["input_tokens"],
+    ["promptTokens"],
+    ["prompt_tokens"],
+  ])
+  const cachedInputTokens = firstNumberAt(sources, [
+    ["cachedInputTokens"],
+    ["cached_input_tokens"],
+    ["cacheReadInputTokens"],
+    ["cache_read_input_tokens"],
+    ["inputTokenDetails", "cacheReadTokens"],
+    ["input_token_details", "cache_read_tokens"],
+    ["inputTokensDetails", "cachedTokens"],
+    ["input_tokens_details", "cached_tokens"],
+    ["promptTokensDetails", "cachedTokens"],
+    ["prompt_tokens_details", "cached_tokens"],
+  ])
+  const outputTokens = firstNumberAt(sources, [
+    ["outputTokens"],
+    ["output_tokens"],
+    ["completionTokens"],
+    ["completion_tokens"],
+  ])
+  const explicitTotalTokens = firstNumberAt(sources, [
+    ["totalTokens"],
+    ["total_tokens"],
+  ])
+  const totalTokens =
+    explicitTotalTokens ??
+    (inputTokens !== undefined || outputTokens !== undefined
+      ? (inputTokens ?? 0) + (outputTokens ?? 0)
+      : undefined)
+  const modelId = firstStringAt(sources, [["modelId"], ["model_id"], ["model"]])
+  const providerId = firstStringAt(sources, [
+    ["providerId"],
+    ["provider_id"],
+    ["provider"],
+  ])
+  if (
+    inputTokens === undefined &&
+    cachedInputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined
+  }
+  return withoutUndefined({
+    providerId,
+    modelId,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    totalTokens,
+  })
+}
+
+function firstNumberAt(
+  sources: Array<Record<string, unknown>>,
+  paths: string[][],
+): number | undefined {
+  for (const source of sources) {
+    for (const path of paths) {
+      const value = valueAtPath(source, path)
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value
+      }
+    }
+  }
+  return undefined
+}
+
+function firstStringAt(
+  sources: Array<Record<string, unknown>>,
+  paths: string[][],
+): string | undefined {
+  for (const source of sources) {
+    for (const path of paths) {
+      const value = valueAtPath(source, path)
+      const text = readString(value)
+      if (text) {
+        return text
+      }
+    }
+  }
+  return undefined
+}
+
+function valueAtPath(source: Record<string, unknown>, path: string[]): unknown {
+  let current: unknown = source
+  for (const segment of path) {
+    const record = readRecord(current)
+    if (!record) {
+      return undefined
+    }
+    current = record[segment]
+  }
+  return current
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function withoutUndefined<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as T
 }
 
 function extractFinalText(input: {

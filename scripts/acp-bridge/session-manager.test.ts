@@ -756,6 +756,69 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("preserves structured metadata when terminalizing an active prompt externally", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => await new Promise(() => {}),
+      }),
+    });
+
+    void manager.handleQueueItem(promptQueueItem());
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe(
+        "queue-prompt",
+      ),
+    );
+
+    const metadata = {
+      ageMs: 31_000,
+      failureClass: "tool_result_timeout",
+      reasonCode: "tool_result_timeout",
+      timeoutMs: 30_000,
+      toolCallId: "tool-1",
+      toolClass: "standard",
+      toolName: "messages.search",
+      toolPolicyId: "standard-tool-result-timeout",
+    };
+    await expect(
+      manager.failActiveQueueItem(
+        "queue-prompt",
+        "tool_result_timeout",
+        metadata,
+      ),
+    ).resolves.toBe(true);
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        claimId: "claim-prompt",
+        id: "queue-prompt",
+        result: expect.objectContaining({
+          ok: false,
+          terminal: true,
+          ...metadata,
+        }),
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "bridge_error",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining(metadata),
+          status: "error",
+          type: "error",
+        }),
+        rawPayload: expect.objectContaining({
+          queueId: "queue-prompt",
+          ...metadata,
+        }),
+      }),
+    );
+  });
+
   test("terminalizes active prompt when a tool call never resolves", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
@@ -779,15 +842,25 @@ describe("bridge session cwd safety", () => {
     });
 
     const handled = manager.handleQueueItem(promptQueueItem());
+    const expectedTimeoutMetadata = {
+      failureClass: "tool_result_propagation_lost",
+      reasonCode: "tool_result_timeout",
+      timeoutMs: 5,
+      toolCallId: "tool-1",
+      toolClass: "standard",
+      toolName: "shell",
+      toolPolicyId: "explicit-tool-result-timeout",
+    };
     await eventually(() =>
       expect(cloud.results).toContainEqual(
         expect.objectContaining({
           claimId: "claim-prompt",
           id: "queue-prompt",
           result: expect.objectContaining({
+            ageMs: expect.any(Number),
             ok: false,
-            reasonCode: "tool_result_timeout",
             terminal: true,
+            ...expectedTimeoutMetadata,
           }),
         }),
       ),
@@ -800,11 +873,16 @@ describe("bridge session cwd safety", () => {
         eventType: "bridge_error",
         normalizedPayload: expect.objectContaining({
           json: expect.objectContaining({
-            reasonCode: "tool_result_timeout",
-            toolCallId: "tool-1",
+            ageMs: expect.any(Number),
+            ...expectedTimeoutMetadata,
           }),
           status: "error",
           type: "error",
+        }),
+        rawPayload: expect.objectContaining({
+          ageMs: expect.any(Number),
+          queueId: "queue-prompt",
+          ...expectedTimeoutMetadata,
         }),
       }),
     );
@@ -1586,6 +1664,802 @@ describe("bridge session cwd safety", () => {
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-1",
       result: { agentSessionId: "provider-session", ok: true },
+    });
+  });
+
+  test("does not warm runtime sessions when no warm profiles are configured", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return fakeSession();
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({ runtimeProfileIds: [] }),
+    ).resolves.toBe(0);
+
+    expect(contexts).toHaveLength(1);
+    expect(manager.getStatus().sessions).toEqual([]);
+  });
+
+  test("warms explicitly configured recently used runtime profiles", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    const logs: Array<Record<string, unknown>> = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(1);
+
+    expect(contexts).toHaveLength(2);
+    expect(contexts.at(-1)).toMatchObject({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      organizationId: "org-1",
+      threadId: "thread-1",
+    });
+    expect(startCount).toBe(1);
+    expect(manager.getStatus().sessions).toEqual([
+      expect.objectContaining({
+        runtimeProfileId: "codex:default",
+        threadId: "thread-1",
+      }),
+    ]);
+    const warmLog = logs.find((entry) => entry.event === "bridge.session.warmed");
+    expect(warmLog).toEqual(
+      expect.objectContaining({
+        agentSessionId: "provider-session",
+        event: "bridge.session.warmed",
+        threadId: "thread-1",
+      }),
+    );
+    expect(warmLog).not.toHaveProperty("bridgeProfileId");
+    expect(warmLog).not.toHaveProperty("hermesProfileName");
+    expect(warmLog).not.toHaveProperty("launchSpecKey");
+  });
+
+  test("does not resurrect candidates after terminalized sessions close", async () => {
+    const releasePrompt = deferred<void>();
+    const contexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          sendUserMessage: async () => {
+            await releasePrompt.promise;
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: "late ok",
+            };
+          },
+          start: async () => "warm-session",
+        };
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    const handling = manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(
+      manager.failActiveQueueItem("queue-1", "provider_silent_timeout"),
+    ).resolves.toBe(true);
+    releasePrompt.resolve();
+    await handling;
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(0);
+
+    expect(contexts).toHaveLength(1);
+    expect(manager.getStatus().sessions).toEqual([]);
+  });
+
+  test("explicit close removes an idle-pressure warm candidate", async () => {
+    const cloud = fakeCloudClient();
+    const contexts: BridgeSessionContext[] = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-close",
+      id: "queue-close",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "close-session",
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(0);
+
+    expect(startCount).toBe(0);
+    expect(contexts).toHaveLength(1);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-close",
+      result: { closed: true, ok: true },
+    });
+    expect(manager.getStatus().sessions).toEqual([]);
+  });
+
+  test("seeds restart handoff hints as reusable warm candidates", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      requireScopedIdentity: true,
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    expect(
+      manager.seedWarmRuntimeSessions({
+        candidates: [
+          {
+            agentSessionId: "provider-session",
+            bridgeProfileId: "codex:default",
+            lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 0),
+            organizationId: "org-1",
+            runtimeProfileId: "codex:default",
+            threadId: "thread-1",
+          },
+          {
+            bridgeProfileId: "codex:default",
+            runtimeProfileId: "codex:default",
+            threadId: "missing-scoped-identity",
+          },
+        ],
+      }),
+    ).toBe(1);
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(1);
+
+    expect(startCount).toBe(1);
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toMatchObject({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      organizationId: "org-1",
+      threadId: "thread-1",
+    });
+    expect(manager.getStatus().sessions).toEqual([
+      expect.objectContaining({
+        agentSessionId: "provider-session",
+        organizationId: "org-1",
+        runtimeProfileId: "codex:default",
+        threadId: "thread-1",
+      }),
+    ]);
+  });
+
+  test("bounds retained warm candidates to the newest sessions", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    for (let index = 0; index < 65; index += 1) {
+      await manager.handleQueueItem({
+        agentSessionId: `provider-session-${index}`,
+        bridgeProfileId: "codex:default",
+        claimId: `claim-${index}`,
+        id: `queue-${index}`,
+        organizationId: "org-1",
+        prompt: "hello",
+        threadId: `thread-${index}`,
+        type: "prompt",
+      });
+    }
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 65,
+      targetFreeProcessSlots: 65,
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 100,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(64);
+
+    expect(startCount).toBe(64);
+    expect(contexts).toHaveLength(129);
+    expect(manager.getStatus().sessions).toHaveLength(64);
+    expect(manager.getStatus().sessions).not.toContainEqual(
+      expect.objectContaining({
+        threadId: "thread-0",
+      }),
+    );
+  });
+
+  test("warms newest matching profile first without crossing org or profile scope", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["claude", "acp"],
+          id: "claude-code:default",
+          kind: "claude-code",
+          label: "Claude Code",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-old",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-old",
+      id: "queue-old",
+      organizationId: "org-old",
+      prompt: "hello",
+      threadId: "thread-old",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      agentSessionId: "provider-new",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-new",
+      id: "queue-new",
+      organizationId: "org-new",
+      prompt: "hello",
+      threadId: "thread-new",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      agentSessionId: "provider-old",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-old-again",
+      id: "queue-old-again",
+      organizationId: "org-old",
+      prompt: "still here",
+      threadId: "thread-old",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      agentSessionId: "provider-other",
+      bridgeProfileId: "claude-code:default",
+      claimId: "claim-other",
+      id: "queue-other",
+      organizationId: "org-other",
+      prompt: "hello",
+      threadId: "thread-other",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 3,
+      targetFreeProcessSlots: 3,
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(1);
+
+    expect(contexts.at(-1)).toMatchObject({
+      agentSessionId: "provider-old",
+      bridgeProfileId: "codex:default",
+      organizationId: "org-old",
+      threadId: "thread-old",
+    });
+    expect(startCount).toBe(1);
+    expect(manager.getStatus().sessions).toEqual([
+      expect.objectContaining({
+        runtimeProfileId: "codex:default",
+        sessionKey: expect.stringContaining("org-old"),
+      }),
+    ]);
+  });
+
+  test("skips warming candidates when another live runtime owns the same scope", async () => {
+    const closedProfiles: string[] = [];
+    const contexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          close: async () => {
+            closedProfiles.push(context.bridgeProfileId ?? "default");
+          },
+          start: async () => "warm-session",
+        };
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["claude", "acp"],
+          id: "claude-code:default",
+          kind: "claude-code",
+          label: "Claude Code",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "claude-code:default",
+      claimId: "claim-claude",
+      id: "queue-claude",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+    closedProfiles.length = 0;
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-codex",
+      id: "queue-codex",
+      organizationId: "org-1",
+      prompt: "hello again",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["claude-code:default"],
+      }),
+    ).resolves.toBe(0);
+
+    expect(contexts).toHaveLength(2);
+    expect(closedProfiles).toEqual([]);
+    expect(manager.getStatus().sessions).toEqual([
+      expect.objectContaining({
+        runtimeProfileId: "codex:default",
+        threadId: "thread-1",
+      }),
+    ]);
+  });
+
+  test("closes and removes a warmed session when ACP start fails", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    let closeCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: () => ({
+        ...fakeSession(),
+        close: async () => {
+          closeCount += 1;
+        },
+        start: async () => {
+          throw new Error("warm start failed");
+        },
+      }),
+      deviceId: "device-1",
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+    closeCount = 0;
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(0);
+
+    expect(closeCount).toBe(1);
+    const warmLog = logs.find(
+      (entry) => entry.event === "bridge.session.warm_failed",
+    );
+    expect(warmLog).toEqual(
+      expect.objectContaining({
+        agentSessionId: "provider-session",
+        event: "bridge.session.warm_failed",
+        reason: "warm start failed",
+        threadId: "thread-1",
+      }),
+    );
+    expect(warmLog).not.toHaveProperty("bridgeProfileId");
+    expect(warmLog).not.toHaveProperty("hermesProfileName");
+    expect(warmLog).not.toHaveProperty("launchSpecKey");
+    expect(manager.getStatus().sessions).toEqual([]);
+  });
+
+  test("stops warming when capacity is unavailable", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return fakeSession();
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        canStartSession: () => false,
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(0);
+
+    expect(contexts).toHaveLength(1);
+    expect(manager.getStatus().sessions).toEqual([]);
+  });
+
+  test("persists ACP continuity metadata in prompt results", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          continuityMode: "native" as const,
+          events: [],
+          externalContinuity: {
+            attempted: true,
+            fallback: false,
+            loaded: true,
+          },
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ok",
+          threadHistoryInjected: false,
+        }),
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadHistory: "Recent thread history:\nUser: cached context",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: {
+        acpContinuityMode: "native",
+        acpExternalContinuity: {
+          attempted: true,
+          fallback: false,
+          loaded: true,
+        },
+        acpThreadHistoryInjected: false,
+        ok: true,
+      },
+    });
+  });
+
+  test("persists ACP usage metadata and usage update events in prompt results", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => ({
+          events: [],
+          rawResult: {},
+          sessionId: "session-1",
+          text: "ok",
+          usage: {
+            cachedInputTokens: 96,
+            inputTokens: 120,
+            modelId: "gpt-5",
+            outputTokens: 30,
+            totalTokens: 150,
+          },
+        }),
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-1",
+      result: {
+        acpUsage: {
+          cachedInputTokens: 96,
+          inputTokens: 120,
+          modelId: "gpt-5",
+          outputTokens: 30,
+          totalTokens: 150,
+        },
+        ok: true,
+      },
+    });
+    const usageEvent = flattenPersistedEvents(cloud.events).find(
+      (event) => event.eventType === "usage_update",
+    );
+    expect(usageEvent?.eventType).toBe("usage_update");
+    expect(usageEvent?.normalizedPayload).toMatchObject({
+      json: {
+        cachedInputTokens: 96,
+        inputTokens: 120,
+        modelId: "gpt-5",
+        outputTokens: 30,
+        totalTokens: 150,
+      },
+      type: "event",
     });
   });
 
@@ -4405,6 +5279,92 @@ describe("bridge session cwd safety", () => {
       id: "queue-prompt",
       result: { ok: true, text: "visible answer" },
     });
+  });
+
+  test("logs first runtime activity and first assistant text once per organization queue item", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const runtimeProfiles = [
+      {
+        capabilities: {},
+        command: ["hermes", "acp"],
+        id: "profile-1",
+        kind: "hermes" as const,
+        label: "Hermes",
+        status: "available" as const,
+      },
+    ];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          context.onEvent(streamChunkEvent("agent_message_chunk", "hello", 2));
+          context.onEvent(streamChunkEvent("agent_message_chunk", "again", 3));
+          return {
+            events: [],
+            rawResult: { stopReason: "end_turn" },
+            sessionId: "session-1",
+            stopReason: "end_turn",
+            text: "visible answer",
+          };
+        },
+      }),
+      log: (entry) => logs.push(entry as Record<string, unknown>),
+      runtimeProfiles,
+    });
+    const createdAtMs = Date.now() - 1_000;
+    const claimedAtMs = Date.now() - 500;
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "profile-1",
+      claimedAtMs,
+      createdAtMs,
+      organizationId: "org-1",
+    });
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "profile-1",
+      claimedAtMs,
+      createdAtMs,
+      organizationId: "org-2",
+    });
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "profile-1",
+      claimedAtMs,
+      createdAtMs,
+      organizationId: "org-1",
+    });
+
+    const firstActivityLogs = logs.filter(
+      (entry) => entry.event === "bridge.queue_item.first_runtime_activity",
+    );
+    const firstTextLogs = logs.filter(
+      (entry) => entry.event === "bridge.queue_item.first_assistant_text",
+    );
+    expect(firstActivityLogs).toHaveLength(3);
+    expect(firstTextLogs).toHaveLength(3);
+    expect(firstActivityLogs).toContainEqual(
+      expect.objectContaining({
+        bridgeProfileId: "profile-1",
+        event: "bridge.queue_item.first_runtime_activity",
+        organizationId: "org-1",
+        queueCreatedToFirstOutputMs: expect.any(Number),
+        queueId: "queue-prompt",
+        runtimeEventType: "tool_call",
+      }),
+    );
+    expect(firstTextLogs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.first_assistant_text",
+        organizationId: "org-1",
+        queueId: "queue-prompt",
+        runtimeEventType: "agent_message_chunk",
+      }),
+    );
   });
 
   test("keeps attachment-only assistant output successful", async () => {

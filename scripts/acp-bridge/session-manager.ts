@@ -63,6 +63,10 @@ import type {
 export type BridgeSessionQueueItem = {
   id: string;
   claimId?: string;
+  claimedAt?: string;
+  claimedAtMs?: number;
+  createdAt?: string;
+  createdAtMs?: number;
   type?: string;
   kind?: string;
   attachments?: BridgeQueueAttachment[];
@@ -203,11 +207,30 @@ type BridgeSessionRecord = {
   hermesProfileName?: string;
   generation: number;
   providerSessionKey: string;
+  organizationId?: string;
   scopeConversationId: string;
   scopeKeyWithoutAgent: string;
   terminalScope?: TerminalHandleScope;
   idleTimer?: ReturnType<typeof setTimeout>;
   lastUsedAt: number;
+};
+
+type BridgeWarmSessionCandidate = Pick<
+  BridgeSessionQueueItem,
+  | "agentName"
+  | "agentSessionId"
+  | "bridgeProfileId"
+  | "cwd"
+  | "hermesProfileName"
+  | "mailboxConversationId"
+  | "organizationId"
+  | "sessionId"
+  | "threadId"
+> & {
+  lastUsedAt: number;
+  launchSpecKey?: string;
+  runtimeProfileId?: string;
+  sessionKey: string;
 };
 
 type BridgeSessionCloudClient = {
@@ -249,8 +272,27 @@ type ActiveToolCall = {
 
 type ToolResultTimeoutDetails = {
   ageMs: number;
+  failureClass: "tool_result_propagation_lost";
+  timeoutMs: number;
   toolCallId: string;
+  toolClass: string;
   toolName: string;
+  toolPolicyId: string;
+};
+
+export type BridgeTerminalizationMetadata = {
+  ageMs?: number;
+  failureClass?: string;
+  reasonCode?: string;
+  timeoutMs?: number;
+  toolCallId?: string;
+  toolClass?: string;
+  toolName?: string;
+  toolPolicyId?: string;
+};
+
+type BoundedBridgeTerminalizationMetadata = BridgeTerminalizationMetadata & {
+  reasonCode: string;
 };
 
 const EVENT_BATCH_MAX_SIZE = 25;
@@ -262,7 +304,9 @@ const APPROVAL_RESPONSE_SESSION_POLL_MS = 10;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000;
 export const DEFAULT_TOOL_RESULT_TIMEOUT_MS = 5 * 60_000;
+const MAX_WARM_SESSION_CANDIDATES = 64;
 const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300;
+const MAX_TERMINALIZATION_METADATA_TEXT_LENGTH = 200;
 
 export type BridgeSessionManagerOptions = {
   cloudClient: BridgeSessionCloudClient;
@@ -312,6 +356,9 @@ export type BridgeSessionManagerStatus = {
 export type BridgeSessionManagerSessionStatus = {
   sessionKey: string;
   threadId: string;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  organizationId?: string;
   launchSpecKey?: string;
   launchSpecSummary?: BridgeLaunchSpecSummary;
   runtimeProfileId?: string;
@@ -326,6 +373,31 @@ export type BridgeSessionManagerSessionStatus = {
 export type BridgeProcessPressureCleanupRequest = {
   targetFreeProcessSlots: number;
   maxSessionsToClose?: number;
+};
+
+export type BridgeWarmRuntimeSessionRequest = {
+  runtimeProfileIds: string[];
+  maxSessions?: number;
+  canStartSession?: () => boolean;
+};
+
+export type BridgeWarmRuntimeSessionSeed = {
+  agentName?: string;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  cwd?: string;
+  hermesProfileName?: string;
+  lastUsedAt?: number;
+  launchSpecKey?: string;
+  mailboxConversationId?: string;
+  organizationId?: string;
+  runtimeProfileId?: string;
+  sessionId?: string;
+  threadId: string;
+};
+
+export type BridgeWarmRuntimeSessionSeedRequest = {
+  candidates: BridgeWarmRuntimeSessionSeed[];
 };
 
 export type BridgeSessionLogEntry = BridgeLogEntry;
@@ -511,15 +583,22 @@ export class BridgeSessionManager {
     string,
     ToolResultTimeoutDetails
   >();
+  private readonly warmSessionCandidates = new Map<
+    string,
+    BridgeWarmSessionCandidate
+  >();
   private readonly lastSessionEventQueueItems = new Map<
     string,
     BridgeSessionQueueItem
   >();
+  private readonly firstAssistantTextLoggedQueueItems = new Set<string>();
+  private readonly firstRuntimeActivityLoggedQueueItems = new Set<string>();
   private readonly eventBatch: BridgeEventInput[] = [];
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = [];
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined;
   private eventBatchTimer: ReturnType<typeof setTimeout> | undefined;
   private nextSequence = 1;
+  private lastSessionUsageAt = 0;
   private readonly activePromptSequenceBases = new Map<string, number>();
   private nextGeneration = 1;
 
@@ -577,6 +656,9 @@ export class BridgeSessionManager {
       return {
         sessionKey: session.sessionKey,
         threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+        bridgeProfileId: session.runtimeProfile?.id,
+        organizationId: session.organizationId,
         launchSpecKey: session.launchSpecKey,
         launchSpecSummary: session.launchSpecSummary,
         runtimeProfileId: session.runtimeProfile?.id,
@@ -639,10 +721,128 @@ export class BridgeSessionManager {
         acpSessionId: session.acp.sessionId,
         targetFreeProcessSlots: request.targetFreeProcessSlots,
       });
-      await this.closeSession(session.sessionKey);
+      await this.closeSession(session.sessionKey, {
+        removeWarmCandidate: false,
+      });
       closedSessionCount += 1;
     }
     return closedSessionCount;
+  }
+
+  async warmRuntimeSessions(
+    request: BridgeWarmRuntimeSessionRequest,
+  ): Promise<number> {
+    const warmProfileIds = new Set(
+      request.runtimeProfileIds
+        .map((profileId) => profileId.trim())
+        .filter((profileId) => profileId.length > 0),
+    );
+    if (warmProfileIds.size === 0) {
+      return 0;
+    }
+    const maxSessions = Math.max(
+      0,
+      Math.floor(request.maxSessions ?? warmProfileIds.size),
+    );
+    if (maxSessions <= 0) {
+      return 0;
+    }
+    const candidates = Array.from(this.warmSessionCandidates.values())
+      .filter((candidate) =>
+        warmSessionCandidateMatchesProfiles(candidate, warmProfileIds),
+      )
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt);
+    let warmedCount = 0;
+    for (const candidate of candidates) {
+      if (warmedCount >= maxSessions) {
+        break;
+      }
+      if (request.canStartSession && !request.canStartSession()) {
+        break;
+      }
+      if (this.sessions.has(candidate.sessionKey)) {
+        continue;
+      }
+      const item = warmSessionQueueItem(candidate);
+      if (this.hasLiveSessionForWarmCandidateScope(item, candidate)) {
+        continue;
+      }
+      const session = await this.ensureSession(item, {
+        closeReplacedSessions: false,
+      });
+      try {
+        await session.acp.start?.();
+      } catch (error) {
+        await this.closeSession(session.sessionKey);
+        this.warmSessionCandidates.delete(candidate.sessionKey);
+        this.writeLog({
+          level: "warn",
+          event: "bridge.session.warm_failed",
+          threadId: session.threadId,
+          agentSessionId: session.providerSessionKey,
+          reason:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        });
+        continue;
+      }
+      this.markSessionUsed(session);
+      this.scheduleIdleClose(session);
+      this.writeLog({
+        level: "info",
+        event: "bridge.session.warmed",
+        threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+      });
+      warmedCount += 1;
+    }
+    return warmedCount;
+  }
+
+  seedWarmRuntimeSessions(
+    request: BridgeWarmRuntimeSessionSeedRequest,
+  ): number {
+    let seededCount = 0;
+    for (const candidate of request.candidates) {
+      const threadId = candidate.threadId.trim();
+      if (!threadId) {
+        continue;
+      }
+      const item = warmSessionQueueItemFromSeed(candidate, threadId);
+      if (
+        this.requireScopedIdentity &&
+        (!item.organizationId || !item.agentSessionId)
+      ) {
+        continue;
+      }
+      const sessionKey = this.sessionKeyForItem(item);
+      if (!sessionKey) {
+        continue;
+      }
+      this.warmSessionCandidates.set(sessionKey, {
+        agentName: candidate.agentName,
+        agentSessionId: item.agentSessionId,
+        bridgeProfileId: item.bridgeProfileId,
+        cwd: item.cwd,
+        hermesProfileName: item.hermesProfileName,
+        lastUsedAt:
+          typeof candidate.lastUsedAt === "number" &&
+          Number.isFinite(candidate.lastUsedAt)
+            ? candidate.lastUsedAt
+            : this.nextSessionUsageTimestamp(),
+        launchSpecKey: candidate.launchSpecKey,
+        mailboxConversationId: item.mailboxConversationId,
+        organizationId: item.organizationId,
+        runtimeProfileId: candidate.runtimeProfileId ?? item.bridgeProfileId,
+        sessionId: item.sessionId,
+        sessionKey,
+        threadId,
+      });
+      seededCount += 1;
+    }
+    this.pruneWarmSessionCandidates();
+    return seededCount;
   }
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
@@ -797,6 +997,7 @@ export class BridgeSessionManager {
       );
     } finally {
       this.activeQueueItems.delete(item.id);
+      this.clearFirstOutputLogState(item);
       if (!this.sessionQueueStateHasQueueItem(item.id)) {
         this.externallyTerminalizedQueueItemIds.delete(item.id);
       }
@@ -806,11 +1007,13 @@ export class BridgeSessionManager {
   async failActiveQueueItem(
     queueItemId: string,
     reasonCode: string,
+    metadata?: BridgeTerminalizationMetadata,
   ): Promise<boolean> {
     const item = this.activeQueueItems.get(queueItemId);
     if (!item) {
       return false;
     }
+    const failureMetadata = boundTerminalizationMetadata(reasonCode, metadata);
     const type = normalizeType(item);
     const sessionKey =
       this.findSessionKeyForActiveQueueItem(queueItemId) ??
@@ -836,12 +1039,12 @@ export class BridgeSessionManager {
         eventType: "bridge_error",
         payload: {
           queueId: queueItemId,
-          reasonCode,
+          ...failureMetadata,
         },
         part: {
           type: "error",
           text: message,
-          json: { reasonCode },
+          json: failureMetadata,
           status: "error",
         },
       });
@@ -854,7 +1057,7 @@ export class BridgeSessionManager {
     await this.markQueueResult(item, {
       ok: false,
       error: message,
-      reasonCode,
+      ...failureMetadata,
       terminal: true,
     });
     this.writeLog({
@@ -871,6 +1074,7 @@ export class BridgeSessionManager {
       await this.closeSession(sessionKey, { terminalInteraction: true });
     }
     this.activeQueueItems.delete(queueItemId);
+    this.clearFirstOutputLogState(item);
     return true;
   }
 
@@ -880,7 +1084,10 @@ export class BridgeSessionManager {
       this.clearToolCallsForQueueItem(queueItemId);
     }
     this.activeToolTimeoutFailures.clear();
+    this.warmSessionCandidates.clear();
     this.lastSessionEventQueueItems.clear();
+    this.firstAssistantTextLoggedQueueItems.clear();
+    this.firstRuntimeActivityLoggedQueueItems.clear();
     const sessions = Array.from(this.sessions.values());
     this.sessions.clear();
     await Promise.all(
@@ -977,7 +1184,7 @@ export class BridgeSessionManager {
       ...acpPromptOptions
     } = options;
     this.lastSessionEventQueueItems.set(session.sessionKey, item);
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.clearIdleTimer(session);
     this.supervisor?.recordPromptPersisted(
       this.supervisorWorkItem(item, session),
@@ -1161,6 +1368,24 @@ export class BridgeSessionManager {
         status: "complete",
       },
     });
+    if (result.usage) {
+      this.enqueueEventWrite(session, {
+        externalEventId: `${item.id}:usage_update`,
+        source: "bridge",
+        eventType: "usage_update",
+        payload: {
+          ...result.usage,
+          queueId: item.id,
+          queueType: normalizeType(item),
+        },
+        part: {
+          type: "event",
+          text: "ACP usage updated.",
+          json: result.usage,
+          status: "complete",
+        },
+      });
+    }
     if (result.finalText?.withheld) {
       this.writeLog({
         level: "warn",
@@ -1186,13 +1411,22 @@ export class BridgeSessionManager {
       result.events,
     );
     await this.drainEventWrites();
-    const finalResultMetadata =
-      result.attachmentDeliveryMode && resultMetadata
-        ? {
-            ...resultMetadata,
-            attachmentDeliveryMode: result.attachmentDeliveryMode,
-          }
-        : resultMetadata;
+    const finalResultMetadata = {
+      ...resultMetadata,
+      ...(result.attachmentDeliveryMode
+        ? { attachmentDeliveryMode: result.attachmentDeliveryMode }
+        : {}),
+      ...(result.continuityMode
+        ? { acpContinuityMode: result.continuityMode }
+        : {}),
+      ...(typeof result.threadHistoryInjected === "boolean"
+        ? { acpThreadHistoryInjected: result.threadHistoryInjected }
+        : {}),
+      ...(result.externalContinuity
+        ? { acpExternalContinuity: result.externalContinuity }
+        : {}),
+      ...(result.usage ? { acpUsage: result.usage } : {}),
+    };
     if (result.attachmentDeliveryMode && baseResultMetadata?.attachmentCount) {
       this.writeLog({
         level: "info",
@@ -1282,7 +1516,7 @@ export class BridgeSessionManager {
       ...finalResultMetadata,
     });
     this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session));
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     this.writeLog({
       level: "info",
@@ -1530,8 +1764,12 @@ export class BridgeSessionManager {
       const ageMs = Date.now() - activeTool.startedAt;
       const details = {
         ageMs,
+        failureClass: "tool_result_propagation_lost" as const,
+        timeoutMs: policy.timeoutMs,
         toolCallId: activeTool.toolCallId,
+        toolClass: policy.toolClass,
         toolName: activeTool.toolName,
+        toolPolicyId: policy.policyId,
       };
       this.activeToolTimeoutFailures.set(queueItemId, details);
       this.writeLog({
@@ -1542,9 +1780,6 @@ export class BridgeSessionManager {
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
         reasonCode: "tool_result_timeout",
-        timeoutMs: policy.timeoutMs,
-        toolClass: policy.toolClass,
-        toolPolicyId: policy.policyId,
         ...details,
       });
       this.activeLivenessFailures.get(queueItemId)?.(
@@ -1825,7 +2060,7 @@ export class BridgeSessionManager {
       await this.markStaleInteractionResponse(item, type);
       return;
     }
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     await this.markQueueResult(item, { ok: true, approved });
   }
@@ -1921,7 +2156,7 @@ export class BridgeSessionManager {
     item: BridgeSessionQueueItem,
   ): Promise<void> {
     const session = await this.ensureSession(item);
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     await this.markQueueResult(item, {
       ok: true,
@@ -1988,7 +2223,9 @@ export class BridgeSessionManager {
     item: BridgeSessionQueueItem,
   ): Promise<void> {
     const key = this.findSessionKeyForItem(item);
-    const closed = Boolean(key && this.sessions.has(key));
+    const removedWarmCandidateCount = this.removeWarmSessionCandidatesForItem(item);
+    const closed = Boolean(key && this.sessions.has(key)) ||
+      removedWarmCandidateCount > 0;
     if (key) {
       await this.closeSession(key, { terminalInteraction: true });
     }
@@ -2103,7 +2340,7 @@ export class BridgeSessionManager {
       this.resumeEnabled &&
       Boolean(item.externalSessionId) &&
       session.acp.getExternalContinuityState?.().loaded === true;
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     await this.markQueueResult(item, {
       ok: true,
@@ -2126,7 +2363,10 @@ export class BridgeSessionManager {
 
   private async closeSession(
     sessionKey: string,
-    options: { terminalInteraction?: boolean } = {},
+    options: {
+      removeWarmCandidate?: boolean;
+      terminalInteraction?: boolean;
+    } = {},
   ): Promise<void> {
     const session = this.sessions.get(sessionKey);
     if (!session) {
@@ -2136,6 +2376,9 @@ export class BridgeSessionManager {
       this.rememberTerminalInteractionSession(session);
     }
     this.sessions.delete(sessionKey);
+    if (options.removeWarmCandidate !== false) {
+      this.warmSessionCandidates.delete(sessionKey);
+    }
     this.lastSessionEventQueueItems.delete(sessionKey);
     this.clearIdleTimer(session);
     await this.releaseTerminalHandles(session);
@@ -2247,6 +2490,7 @@ export class BridgeSessionManager {
 
   private async ensureSession(
     item: BridgeSessionQueueItem,
+    options: { closeReplacedSessions?: boolean } = {},
   ): Promise<BridgeSessionRecord> {
     const threadId = item.threadId ?? item.sessionId;
     if (!threadId) {
@@ -2339,10 +2583,11 @@ export class BridgeSessionManager {
       agentName: normalizeAgentName(item.agentName),
       generation,
       providerSessionKey,
+      organizationId: item.organizationId,
       scopeConversationId: item.mailboxConversationId ?? threadId,
       scopeKeyWithoutAgent,
       terminalScope,
-      lastUsedAt: Date.now(),
+      lastUsedAt: this.nextSessionUsageTimestamp(),
       launchSpecKey: launchSpec.key,
       launchSpecSummary: launchSpec.summary,
       acp: this.createSession({
@@ -2388,6 +2633,8 @@ export class BridgeSessionManager {
               record,
               item,
             );
+            this.writeFirstRuntimeActivityLog(eventItem, record, event);
+            this.writeFirstAssistantTextLog(eventItem, record, event);
             this.recordLivenessEvent(
               eventItem.id,
               event.eventType.includes("tool")
@@ -2456,9 +2703,145 @@ export class BridgeSessionManager {
       runtimeProfile,
       hermesProfileName: item.hermesProfileName,
     };
-    await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey);
+    if (options.closeReplacedSessions !== false) {
+      await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey);
+    }
     this.sessions.set(sessionKey, record);
+    this.rememberWarmSessionCandidate(item, record);
     return record;
+  }
+
+  private rememberWarmSessionCandidate(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+  ): void {
+    this.warmSessionCandidates.set(record.sessionKey, {
+      agentName: item.agentName,
+      agentSessionId: item.agentSessionId,
+      bridgeProfileId: record.runtimeProfile?.id ?? item.bridgeProfileId,
+      cwd: record.cwd,
+      hermesProfileName: record.hermesProfileName,
+      lastUsedAt: record.lastUsedAt,
+      launchSpecKey: record.launchSpecKey,
+      mailboxConversationId: item.mailboxConversationId,
+      organizationId: item.organizationId,
+      runtimeProfileId: record.runtimeProfile?.id,
+      sessionId: item.sessionId,
+      sessionKey: record.sessionKey,
+      threadId: record.threadId,
+    });
+    this.pruneWarmSessionCandidates();
+  }
+
+  private pruneWarmSessionCandidates(): void {
+    const excessCount =
+      this.warmSessionCandidates.size - MAX_WARM_SESSION_CANDIDATES;
+    if (excessCount <= 0) {
+      return;
+    }
+    const oldestCandidates = Array.from(this.warmSessionCandidates.values())
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt)
+      .slice(0, excessCount);
+    for (const candidate of oldestCandidates) {
+      this.warmSessionCandidates.delete(candidate.sessionKey);
+    }
+  }
+
+  private markSessionUsed(record: BridgeSessionRecord): void {
+    record.lastUsedAt = this.nextSessionUsageTimestamp();
+    const candidate = this.warmSessionCandidates.get(record.sessionKey);
+    if (candidate) {
+      candidate.lastUsedAt = record.lastUsedAt;
+    }
+  }
+
+  private nextSessionUsageTimestamp(): number {
+    const timestamp = Math.max(Date.now(), this.lastSessionUsageAt + 1);
+    this.lastSessionUsageAt = timestamp;
+    return timestamp;
+  }
+
+  private hasLiveSessionForWarmCandidateScope(
+    item: BridgeSessionQueueItem,
+    candidate: BridgeWarmSessionCandidate,
+  ): boolean {
+    const threadId = item.threadId ?? item.sessionId;
+    const providerSessionKey = providerSessionKeyForItem(item);
+    if (!threadId || !providerSessionKey) {
+      return true;
+    }
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(
+      item,
+      providerSessionKey,
+      threadId,
+    );
+    return Array.from(this.sessions.values()).some(
+      (session) =>
+        session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
+        session.sessionKey !== candidate.sessionKey,
+    );
+  }
+
+  private removeWarmSessionCandidatesForItem(
+    item: BridgeSessionQueueItem,
+  ): number {
+    let removedCount = 0;
+    const exact = this.sessionKeyForItem(item);
+    if (exact && this.warmSessionCandidates.delete(exact)) {
+      removedCount += 1;
+    }
+    for (const candidate of Array.from(this.warmSessionCandidates.values())) {
+      if (this.queueItemMatchesWarmSessionCandidate(item, candidate)) {
+        this.warmSessionCandidates.delete(candidate.sessionKey);
+        removedCount += 1;
+      }
+    }
+    return removedCount;
+  }
+
+  private queueItemMatchesWarmSessionCandidate(
+    item: BridgeSessionQueueItem,
+    candidate: BridgeWarmSessionCandidate,
+  ): boolean {
+    if (this.sessionKeyForItem(item) === candidate.sessionKey) {
+      return true;
+    }
+    const providerSessionKey = providerSessionKeyForItem(item);
+    const threadId = item.threadId ?? item.sessionId;
+    const candidateProviderSessionKey =
+      candidate.agentSessionId ?? candidate.sessionId ?? candidate.threadId;
+    if (
+      !providerSessionKey ||
+      !threadId ||
+      providerSessionKey !== candidateProviderSessionKey ||
+      threadId !== candidate.threadId
+    ) {
+      return false;
+    }
+    if (
+      item.organizationId &&
+      candidate.organizationId &&
+      item.organizationId !== candidate.organizationId
+    ) {
+      return false;
+    }
+    if (
+      item.mailboxConversationId &&
+      candidate.mailboxConversationId &&
+      item.mailboxConversationId !== candidate.mailboxConversationId
+    ) {
+      return false;
+    }
+    if (
+      hasExplicitRuntimeScope(item) &&
+      !bridgeQueueItemMatchesSessionRuntimeScope(item, {
+        hermesProfileName: candidate.hermesProfileName,
+        runtimeProfileId: candidate.runtimeProfileId ?? candidate.bridgeProfileId,
+      })
+    ) {
+      return false;
+    }
+    return true;
   }
 
   private currentSessionHashes(): {
@@ -2615,6 +2998,76 @@ export class BridgeSessionManager {
       return this.lastSessionEventQueueItems.get(record.sessionKey) ?? fallback;
     }
     return this.activeQueueItems.get(runningQueueItemId) ?? fallback;
+  }
+
+  private writeFirstRuntimeActivityLog(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    const key = queueItemOnceKey(item);
+    if (this.firstRuntimeActivityLoggedQueueItems.has(key)) {
+      return;
+    }
+    this.firstRuntimeActivityLoggedQueueItems.add(key);
+    this.writeLog({
+      ...this.firstOutputLogFields(item, record),
+      level: "info",
+      event: "bridge.queue_item.first_runtime_activity",
+      runtimeEventType: event.eventType,
+      runtimePartType: event.part?.type,
+    });
+  }
+
+  private writeFirstAssistantTextLog(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    if (event.part?.type !== "text" || !event.part.text) {
+      return;
+    }
+    const key = queueItemOnceKey(item);
+    if (this.firstAssistantTextLoggedQueueItems.has(key)) {
+      return;
+    }
+    this.firstAssistantTextLoggedQueueItems.add(key);
+    this.writeLog({
+      ...this.firstOutputLogFields(item, record),
+      level: "info",
+      event: "bridge.queue_item.first_assistant_text",
+      runtimeEventType: event.eventType,
+      runtimePartType: event.part.type,
+    });
+  }
+
+  private clearFirstOutputLogState(item: BridgeSessionQueueItem): void {
+    const key = queueItemOnceKey(item);
+    this.firstAssistantTextLoggedQueueItems.delete(key);
+    this.firstRuntimeActivityLoggedQueueItems.delete(key);
+  }
+
+  private firstOutputLogFields(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+  ): Record<string, unknown> {
+    const now = Date.now();
+    return removeUndefinedValues({
+      queueId: item.id,
+      queueType: normalizeType(item),
+      threadId: item.threadId ?? record.threadId,
+      sessionId: item.sessionId,
+      agentSessionId: record.providerSessionKey,
+      acpSessionId: record.acp.sessionId,
+      organizationId: item.organizationId,
+      bridgeProfileId: item.bridgeProfileId,
+      runtimeProfileId: record.runtimeProfile?.id ?? item.bridgeProfileId,
+      runtimeKind:
+        record.launchSpecSummary?.runtimeKind ?? record.runtimeProfile?.kind,
+      hermesProfileName: item.hermesProfileName ? "<hermes-profile>" : undefined,
+      queueCreatedToFirstOutputMs: elapsedSince(item.createdAtMs, now),
+      claimedToFirstOutputMs: elapsedSince(item.claimedAtMs, now),
+    });
   }
 
   private clearIdleTimer(record: BridgeSessionRecord): void {
@@ -3304,6 +3757,54 @@ export class BridgeSessionManager {
   }
 }
 
+function warmSessionCandidateMatchesProfiles(
+  candidate: BridgeWarmSessionCandidate,
+  warmProfileIds: Set<string>,
+): boolean {
+  return [
+    candidate.bridgeProfileId,
+    candidate.runtimeProfileId,
+    candidate.launchSpecKey,
+  ].some((profileId) => profileId !== undefined && warmProfileIds.has(profileId));
+}
+
+function warmSessionQueueItem(
+  candidate: BridgeWarmSessionCandidate,
+): BridgeSessionQueueItem {
+  return removeUndefinedValues({
+    agentName: candidate.agentName,
+    agentSessionId: candidate.agentSessionId,
+    bridgeProfileId: candidate.bridgeProfileId,
+    cwd: candidate.cwd,
+    hermesProfileName: candidate.hermesProfileName,
+    id: `warm:${candidate.sessionKey}`,
+    mailboxConversationId: candidate.mailboxConversationId,
+    organizationId: candidate.organizationId,
+    sessionId: candidate.sessionId,
+    threadId: candidate.threadId,
+    type: "start-session",
+  }) as BridgeSessionQueueItem;
+}
+
+function warmSessionQueueItemFromSeed(
+  candidate: BridgeWarmRuntimeSessionSeed,
+  threadId: string,
+): BridgeSessionQueueItem {
+  return removeUndefinedValues({
+    agentName: candidate.agentName,
+    agentSessionId: candidate.agentSessionId,
+    bridgeProfileId: candidate.bridgeProfileId ?? candidate.runtimeProfileId,
+    cwd: candidate.cwd,
+    hermesProfileName: candidate.hermesProfileName,
+    id: `warm-seed:${threadId}`,
+    mailboxConversationId: candidate.mailboxConversationId,
+    organizationId: candidate.organizationId,
+    sessionId: candidate.sessionId,
+    threadId,
+    type: "start-session",
+  }) as BridgeSessionQueueItem;
+}
+
 function isBridgeEventUploadOverload(error: unknown): boolean {
   const status =
     error && typeof error === "object" && "status" in error
@@ -3927,6 +4428,57 @@ function removeUndefinedValues(
   return output;
 }
 
+function boundTerminalizationMetadata(
+  reasonCode: string,
+  metadata: BridgeTerminalizationMetadata | undefined,
+): BoundedBridgeTerminalizationMetadata {
+  const output: BoundedBridgeTerminalizationMetadata = { reasonCode };
+  const addString = (
+    key:
+      | "failureClass"
+      | "toolCallId"
+      | "toolClass"
+      | "toolName"
+      | "toolPolicyId",
+    value: string | undefined,
+  ) => {
+    const normalized = boundTerminalizationMetadataText(value);
+    if (normalized) {
+      output[key] = normalized;
+    }
+  };
+  const addNumber = (
+    key: "ageMs" | "timeoutMs",
+    value: number | undefined,
+  ) => {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      output[key] = value;
+    }
+  };
+
+  addString("failureClass", metadata?.failureClass);
+  addString("toolCallId", metadata?.toolCallId);
+  addString("toolName", metadata?.toolName);
+  addString("toolClass", metadata?.toolClass);
+  addString("toolPolicyId", metadata?.toolPolicyId);
+  addNumber("timeoutMs", metadata?.timeoutMs);
+  addNumber("ageMs", metadata?.ageMs);
+  return output;
+}
+
+function boundTerminalizationMetadataText(
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.length <= MAX_TERMINALIZATION_METADATA_TEXT_LENGTH) {
+    return normalized;
+  }
+  return normalized.slice(0, MAX_TERMINALIZATION_METADATA_TEXT_LENGTH);
+}
+
 function displayNameForSessionStart(session: BridgeSessionRecord): string {
   const agentName = normalizeAgentName(session.agentName);
   if (agentName) {
@@ -4202,4 +4754,12 @@ function createHashReader(
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function elapsedSince(startMs: number | undefined, nowMs: number): number | undefined {
+  return startMs === undefined ? undefined : Math.max(0, nowMs - startMs);
+}
+
+function queueItemOnceKey(item: BridgeSessionQueueItem): string {
+  return `${item.organizationId ?? "unknown-org"}\u0000${item.id}`;
 }
