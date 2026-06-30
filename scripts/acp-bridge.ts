@@ -147,7 +147,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.30";
+export const BRIDGE_VERSION = "0.1.31";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -743,6 +743,9 @@ export type BridgeLoopIterationInput = {
   getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   isProcessIdleForRestart?: () => boolean;
+  applyFeatureFlagsControl?: (
+    enabledFeatureFlags: string[],
+  ) => Promise<void> | void;
   pollReason?: BridgeLoopPollReason;
   reserveClaimSlots?: () => BridgeClaimSlotReservation;
   warmRuntimeProfileIds?: string[];
@@ -2047,6 +2050,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         bridgeDeviceId: registration.deviceId,
       });
       await supervisor.replayOutboxBeforeClaiming();
+      let runtimeContext: RuntimeContext | undefined;
       const manager = new BridgeSessionManager({
         cloudClient,
         deviceId: registration.deviceId,
@@ -2062,6 +2066,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         idleSessionTtlMs,
         requireScopedIdentity: true,
         createMcpServers: ({ agentSessionId, threadId }) => {
+          const currentRegistration = runtimeContext?.config ?? registration;
           if (!agentSessionId) {
             throw new Error(
               "agent tool MCP context is missing agentSessionId; reconnect the agent",
@@ -2069,11 +2074,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
           }
           return buildAgentToolsMcpServers({
             agentSessionId,
-            appUrl: registration.appUrl,
-            agentToolsUrl: registration.appUrl,
-            bridgeToken: registration.bridgeToken,
-            deviceId: registration.deviceId,
-            enabledFeatureFlags: registration.enabledFeatureFlags,
+            appUrl: currentRegistration.appUrl,
+            agentToolsUrl: currentRegistration.appUrl,
+            bridgeToken: currentRegistration.bridgeToken,
+            deviceId: currentRegistration.deviceId,
+            enabledFeatureFlags: currentRegistration.enabledFeatureFlags,
             threadId,
           });
         },
@@ -2169,6 +2174,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         wakeSignal,
         orgMaxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
       };
+      runtimeContext = context;
       const restartHandoffSeededSessionCount =
         handoffEntry && manager.seedWarmRuntimeSessions
           ? manager.seedWarmRuntimeSessions({
@@ -2552,6 +2558,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       cloudRequestTimeoutMs,
       applySettingsControl: (settings) => {
         applyBridgeSettingsControl(context, settings);
+      },
+      applyFeatureFlagsControl: async () => {
+        await appendBridgeRegistration(configPath, context.config);
       },
       log: context.log,
       recordLoopError: recordLoopError(context),
@@ -3817,6 +3826,22 @@ export async function runBridgeLoopIteration(
       }
       if (
         heartbeatResult.ok &&
+        heartbeatResult.enabledFeatureFlags !== undefined &&
+        !stringArraysEqual(
+          input.config.enabledFeatureFlags ?? [],
+          heartbeatResult.enabledFeatureFlags,
+        )
+      ) {
+        input.config.enabledFeatureFlags =
+          heartbeatResult.enabledFeatureFlags.length > 0
+            ? [...heartbeatResult.enabledFeatureFlags]
+            : undefined;
+        await input.applyFeatureFlagsControl?.([
+          ...heartbeatResult.enabledFeatureFlags,
+        ]);
+      }
+      if (
+        heartbeatResult.ok &&
         (heartbeatResult.control?.settings ||
           heartbeatResult.control?.refreshHermesProfiles ||
           heartbeatResult.control?.refreshRuntimeProfiles ||
@@ -5056,7 +5081,12 @@ async function cleanupStaleClaims(
 }
 
 type BridgeHeartbeatSendResult =
-  | { ok: true; control?: BridgeControlResponse; wake?: BridgeWakeToken }
+  | {
+      ok: true;
+      control?: BridgeControlResponse;
+      enabledFeatureFlags?: string[];
+      wake?: BridgeWakeToken;
+    }
   | {
       ok: false;
       error:
@@ -5355,6 +5385,7 @@ export async function sendHeartbeatWithClient(
   try {
     const response = await client.heartbeat<{
       control?: BridgeControlResponse;
+      enabledFeatureFlags?: unknown;
       wake?: BridgeWakeToken;
     }>({
       bridgeInstanceId: status.runtimeIdentity?.instanceId,
@@ -5362,7 +5393,14 @@ export async function sendHeartbeatWithClient(
       status: buildHeartbeatStatusPayload(status),
       version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
     });
-    return { ok: true, control: response.control, wake: response.wake };
+    return {
+      ok: true,
+      control: response.control,
+      enabledFeatureFlags: stringArrayFromUnknownAllowEmpty(
+        response.enabledFeatureFlags,
+      ),
+      wake: response.wake,
+    };
   } catch (error) {
     if (isTransientHeartbeatError(error)) {
       return { ok: false, error };
@@ -6057,6 +6095,22 @@ function stringArrayFromUnknown(value: unknown): string[] | undefined {
     .map((item) => (typeof item === "string" ? item.trim() : ""))
     .filter(Boolean);
   return result.length > 0 ? result : undefined;
+}
+
+function stringArrayFromUnknownAllowEmpty(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean),
+    ),
+  );
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]) {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
 }
 
 function numberFromUnknown(value: unknown): number | undefined {

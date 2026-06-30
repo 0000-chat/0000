@@ -11,6 +11,7 @@ import {
   buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
   buildHeartbeatStatusPayload,
+  type BridgeRegistration,
   type BridgeStatus,
   type BridgeLoopIterationInput,
   bridgeHeartbeatSignature,
@@ -1030,6 +1031,65 @@ describe("bridge MCP helper configuration", () => {
         name: "0000",
       },
     ]);
+  });
+
+  test("refreshes feature flags from heartbeat before creating MCP helper config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-flags-"));
+    const config = bridgeRegistration();
+    const appliedFeatureFlags: string[][] = [];
+
+    await runBridgeLoopIteration({
+      applyFeatureFlagsControl: async (enabledFeatureFlags: string[]) => {
+        appliedFeatureFlags.push([...enabledFeatureFlags]);
+        config.enabledFeatureFlags = [...enabledFeatureFlags];
+      },
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 22, 9, 0, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        enabledFeatureFlags: ["artifacts"],
+        ok: true,
+      }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(appliedFeatureFlags).toEqual([["artifacts"]]);
+    expect(config.enabledFeatureFlags).toEqual(["artifacts"]);
+    expect(
+      buildAgentToolsMcpServers({
+        ...config,
+        agentSessionId: "agent_session_1",
+        agentToolsUrl: config.appUrl,
+        threadId: "thread_1",
+      })[0]?.env,
+    ).toContainEqual({
+      name: "ZERO_CHAT_ENABLED_FEATURE_FLAGS",
+      value: "artifacts",
+    });
   });
 
   test("rejects bridge-scoped session keys for agent tool invocation", () => {
@@ -3758,7 +3818,7 @@ describe("bridge supervisor claim gating", () => {
   });
 });
 
-function bridgeRegistration() {
+function bridgeRegistration(): BridgeRegistration {
   return {
     appUrl: "https://app.example.com",
     bridgeApiUrl: "https://app.example.com/api/agent-bridge",
