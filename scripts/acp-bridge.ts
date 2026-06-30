@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   chmod,
   mkdir,
+  readdir,
   readFile,
   rename,
   unlink,
@@ -1090,13 +1091,22 @@ export function getToolResultTimeoutMs(
   flags: FlagMap,
   env: NodeJS.ProcessEnv = process.env,
 ): number {
+  return (
+    getExplicitToolResultTimeoutMs(flags, env) ?? DEFAULT_TOOL_RESULT_TIMEOUT_MS
+  );
+}
+
+export function getExplicitToolResultTimeoutMs(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
   const rawValue = getFlag(
     flags,
     "tool-result-timeout-ms",
     env.ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS,
   );
   if (rawValue === undefined) {
-    return DEFAULT_TOOL_RESULT_TIMEOUT_MS;
+    return undefined;
   }
 
   const timeoutMs = Number(rawValue);
@@ -1784,7 +1794,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   ).map((command) => splitCommand(command));
   const requestTimeoutMs = getRequestTimeoutMs(parsed.flags);
   const cloudRequestTimeoutMs = getCloudRequestTimeoutMs(parsed.flags);
-  const toolResultTimeoutMs = getToolResultTimeoutMs(parsed.flags);
+  const toolResultTimeoutMs = getExplicitToolResultTimeoutMs(parsed.flags);
   const resumeEnabled = getAcpResumeEnabled(parsed.flags);
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags);
   const allowRemoteCwd = getAllowRemoteCwd(parsed.flags);
@@ -2728,6 +2738,12 @@ async function refreshRuntimeConformanceProfiles(input: {
     input.priorityProfileIds ?? [],
   );
   for (const profile of profiles) {
+    if (
+      isLaunchSpecRuntimeProfile(profile) &&
+      !priorityProfileIds.has(profile.id)
+    ) {
+      continue;
+    }
     const lastProbeAt =
       input.lastProbeAtByProfile.get(profile.id) ??
       nextRecords[profile.id]?.checkedAt ??
@@ -2774,6 +2790,10 @@ function prioritizeRuntimeConformanceProfiles(
     }
   }
   return prioritized;
+}
+
+function isLaunchSpecRuntimeProfile(profile: BridgeRuntimeProfile): boolean {
+  return Boolean(profile.hermesProfileName) || profile.id.includes("|hermes-profile:");
 }
 
 function bridgeInFlightRuntimeProfileIds(
@@ -4965,17 +4985,23 @@ function runtimeConformanceBlockForCommand(
     return undefined;
   }
   const runtimeProfileId = runtimeProfileIdForCommand(command);
+  const profile = runtimeConformance.profiles[runtimeProfileId];
+  if (profile && !profile.canClaim && !isSoftRuntimeConformanceBlock(profile)) {
+    return {
+      reasonCode: profile.reasonCode ?? "runtime_conformance_missing",
+      status: runtimeConformance.status,
+    };
+  }
   const launchSpecKey = launchSpecKeyForCommand(command);
   if (launchSpecKey) {
     const launchSpec = runtimeConformance.launchSpecs?.[launchSpecKey];
     if (!launchSpec) {
-      return {
-        launchSpecKey,
-        reasonCode: "runtime_launch_spec_missing",
-        status: runtimeConformance.status,
-      };
+      return undefined;
     }
     if (!launchSpec.canClaim) {
+      if (isSoftRuntimeConformanceBlock(launchSpec)) {
+        return undefined;
+      }
       return {
         launchSpecKey,
         reasonCode: launchSpecReasonCode(launchSpec.reasonCode),
@@ -4983,20 +5009,7 @@ function runtimeConformanceBlockForCommand(
       };
     }
   }
-  const profile = runtimeConformance.profiles[runtimeProfileId];
-  if (!profile) {
-    return undefined;
-  }
-  if (profile.canClaim) {
-    return undefined;
-  }
-  if (isSoftRuntimeConformanceBlock(profile)) {
-    return undefined;
-  }
-  return {
-    reasonCode: profile.reasonCode ?? "runtime_conformance_missing",
-    status: runtimeConformance.status,
-  };
+  return undefined;
 }
 
 export function runtimeConformanceRecordsForSuccessfulCommand(
@@ -5472,11 +5485,41 @@ function normalizeHermesPlaceholder(value: string | undefined): string | undefin
   return trimmed;
 }
 
-async function discoverHermesProfiles(): Promise<HermesProfileSummary[]> {
-  const { stdout } = await runProcess("hermes", ["profile", "list"], {
-    timeoutMs: DEFAULT_HERMES_PROFILE_DISCOVERY_TIMEOUT_MS,
+export async function discoverHermesProfilesFromDisk(
+  hermesHome = process.env.HERMES_HOME || join(homedir(), ".hermes"),
+): Promise<HermesProfileSummary[]> {
+  const profilesDir = join(hermesHome, "profiles");
+  const entries = await readdir(profilesDir, { withFileTypes: true }).catch(
+    () => [],
+  );
+  return entries.flatMap((entry) => {
+    if (!entry.isDirectory()) {
+      return [];
+    }
+    const name = safeProfileText(entry.name, 80);
+    if (!name) {
+      return [];
+    }
+    const profileDir = join(profilesDir, entry.name);
+    if (
+      !existsSync(join(profileDir, "config.yaml")) &&
+      !existsSync(join(profileDir, "profile.yaml"))
+    ) {
+      return [];
+    }
+    return [{ name }];
   });
-  return parseHermesProfileListOutput(stdout);
+}
+
+async function discoverHermesProfiles(): Promise<HermesProfileSummary[]> {
+  try {
+    const { stdout } = await runProcess("hermes", ["profile", "list"], {
+      timeoutMs: DEFAULT_HERMES_PROFILE_DISCOVERY_TIMEOUT_MS,
+    });
+    return parseHermesProfileListOutput(stdout);
+  } catch {
+    return discoverHermesProfilesFromDisk();
+  }
 }
 
 export function runProcess(

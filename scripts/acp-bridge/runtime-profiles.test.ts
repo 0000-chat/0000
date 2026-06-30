@@ -55,6 +55,29 @@ describe("runtime profile compatibility", () => {
     })
   })
 
+  test("classifies terminal quality commands as long-running", () => {
+    const profile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      id: "hermes:test",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    }
+
+    expect(
+      resolveToolCallTimeoutPolicy({
+        defaultTimeoutMs: 300_000,
+        profile,
+        toolName: "terminal: bun run quality:changed",
+      }),
+    ).toEqual({
+      policyId: "generic-long-running-tool",
+      timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
+      toolClass: "long_running",
+    })
+  })
+
   test("keeps explicit bridge tool timeout overrides authoritative", () => {
     const profile: BridgeRuntimeProfile = {
       capabilities: {},

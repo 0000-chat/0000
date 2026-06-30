@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -25,12 +25,15 @@ import {
   createBridgeWakeSignal,
   getAllowRemoteCwd,
   getAcpIdleTtlMs,
+  getExplicitToolResultTimeoutMs,
   getInitialOrgMaxInFlight,
   getLocalHardMaxInFlight,
+  getToolResultTimeoutMs,
   getConvexUrl,
   getWarmRuntimeProfileIds,
   normalizeBridgeConfigFile,
   normalizeQueueCommand,
+  discoverHermesProfilesFromDisk,
   parseHermesProfileListOutput,
   parseBridgeArgs,
   preparePendingAgentConnectionRequest,
@@ -60,6 +63,21 @@ import {
 } from "./acp-bridge/runtime-defaults";
 
 describe("bridge command parsing", () => {
+  test("keeps default tool result timeout implicit unless configured", () => {
+    const parsed = parseBridgeArgs(["start"]);
+
+    expect(getExplicitToolResultTimeoutMs(parsed.flags, {})).toBeUndefined();
+    expect(getToolResultTimeoutMs(parsed.flags, {})).toBe(5 * 60_000);
+
+    const explicit = parseBridgeArgs([
+      "start",
+      "--tool-result-timeout-ms",
+      "900000",
+    ]);
+    expect(getExplicitToolResultTimeoutMs(explicit.flags, {})).toBe(900_000);
+    expect(getToolResultTimeoutMs(explicit.flags, {})).toBe(900_000);
+  });
+
   test("accepts connect-org as a legacy alias for connect", () => {
     expect(
       parseBridgeArgs([
@@ -153,6 +171,24 @@ describe("bridge command parsing", () => {
 });
 
 describe("Hermes profile discovery", () => {
+  test("falls back to profile directories when profile listing is unavailable", async () => {
+    const hermesHome = await mkdtemp(join(tmpdir(), "hermes-profiles-"));
+    await mkdir(join(hermesHome, "profiles", "0000-builder"), {
+      recursive: true,
+    });
+    await mkdir(join(hermesHome, "profiles", "scratch-without-config"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(hermesHome, "profiles", "0000-builder", "config.yaml"),
+      "model: gpt-5\n",
+    );
+
+    await expect(discoverHermesProfilesFromDisk(hermesHome)).resolves.toEqual([
+      { name: "0000-builder" },
+    ]);
+  });
+
   test("parses long profile names without absorbing placeholder columns", () => {
     const profiles = parseHermesProfileListOutput(`
 Profile                     Model                        Gateway      Alias
@@ -927,6 +963,52 @@ describe("bridge restart handoff startup priority", () => {
     expect(refreshedProfiles).toEqual(["codex:default", "claude:default"]);
     expect(records["codex:default"]?.checkedAt).toBe(1_001);
     expect(records["claude:default"]?.checkedAt).toBe(1_002);
+  });
+
+  test("skips broad Hermes launch-spec probes unless explicitly prioritized", async () => {
+    const refreshedProfiles: string[] = [];
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(),
+      getRunningSessionProfileIds: () => new Set(),
+      now: () => 10_000,
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 10_000 + refreshedProfiles.length,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      profiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["hermes", "-p", "0000-builder", "acp"],
+          hermesProfileName: "0000-builder",
+          id: "hermes:default|hermes-profile:0000-builder",
+          kind: "hermes",
+          label: "Hermes: 0000-builder",
+          status: "available",
+        },
+      ],
+      records: {},
+      ttlMs: 1_000,
+    });
+
+    expect(refreshedProfiles).toEqual(["hermes:default"]);
+    expect(records["hermes:default"]?.checkedAt).toBe(10_001);
+    expect(
+      records["hermes:default|hermes-profile:0000-builder"],
+    ).toBeUndefined();
   });
 });
 
@@ -3072,13 +3154,13 @@ describe("bridge supervisor claim gating", () => {
     expect(results).toEqual([]);
   });
 
-  test("rejects claimed Hermes profile work without exact launch-spec conformance", async () => {
+  test("allows Hermes profile work to seed missing launch-spec conformance", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const results: Array<{
       command: Record<string, unknown>;
       result: Record<string, unknown>;
     }> = [];
-    let handled = false;
+    const handled: Array<Record<string, unknown>> = [];
 
     await runBridgeLoopIteration({
       canClaimWork: () => true,
@@ -3109,6 +3191,102 @@ describe("bridge supervisor claim gating", () => {
           },
         },
         status: "healthy",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
+        },
+      },
+      markCommandResult: async (_config, command, result) => {
+        results.push({
+          command: command as unknown as Record<string, unknown>,
+          result: result as Record<string, unknown>,
+        });
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(handled).toEqual([
+      expect.objectContaining({
+        bridgeProfileId: "hermes:default",
+        hermesProfileName: "nextpay-chief-of-staff",
+        id: "queue-hermes-profile",
+      }),
+    ]);
+    expect(results).toEqual([]);
+  });
+
+  test("rejects claimed Hermes profile work with hard-failed launch-spec conformance", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const results: Array<{
+      command: Record<string, unknown>;
+      result: Record<string, unknown>;
+    }> = [];
+    let handled = false;
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => true,
+      claimCommands: async () => [
+        {
+          agentSessionId: "agent-session-1",
+          bridgeProfileId: "hermes:default",
+          claimId: "claim-hermes-profile",
+          hermesProfileName: "nextpay-chief-of-staff",
+          id: "queue-hermes-profile",
+          prompt: "do not run",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getRuntimeConformance: () => ({
+        canClaim: true,
+        launchSpecs: {
+          "hermes:default|hermes-profile:nextpay-chief-of-staff": {
+            canClaim: false,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+            diagnostics: [],
+            reasonCode: "runtime_conformance_failed",
+            runtimeId:
+              "hermes:default|hermes-profile:nextpay-chief-of-staff",
+            state: "failing",
+            strength: "none",
+          },
+        },
+        profiles: {
+          "hermes:default": {
+            canClaim: true,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+            diagnostics: [],
+            runtimeId: "hermes:default",
+            state: "passing",
+            strength: "init_only",
+          },
+        },
+        status: "degraded",
       }),
       inFlightCommandMetadata: new Map(),
       inFlightCommands: new Map(),
@@ -3158,7 +3336,7 @@ describe("bridge supervisor claim gating", () => {
           launchSpecKey:
             "hermes:default|hermes-profile:nextpay-chief-of-staff",
           ok: false,
-          reasonCode: "runtime_launch_spec_missing",
+          reasonCode: "runtime_launch_spec_failed",
           retryable: true,
         }),
       },

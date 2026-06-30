@@ -112,6 +112,17 @@ const GENERIC_SUBAGENT_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
   ],
 }
 
+const GENERIC_LONG_RUNNING_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
+  id: "generic-long-running-tool",
+  timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
+  toolClass: "long_running",
+  toolNamePatterns: [
+    "^terminal:.*\\b(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:quality:(?:affected|changed|fast|gate|timings)|typecheck|build|test|work:(?:finish|land))\\b",
+    "^terminal:.*\\b(?:cargo|gradle|mvn)\\b",
+    "^terminal:.*\\bgh\\s+run\\s+watch\\b",
+  ],
+}
+
 export function normalizeCommand(
   command: string | string[] | undefined,
   fallback: string,
@@ -215,11 +226,11 @@ export function resolveToolCallTimeoutPolicy(input: {
   const runtimePolicy = input.profile?.compatibility?.toolCallPolicies?.find((policy) =>
     toolCallPolicyMatches(policy, input.toolName),
   )
-  const policy = runtimePolicy ?? (
-    toolCallPolicyMatches(GENERIC_SUBAGENT_TOOL_POLICY, input.toolName)
-      ? GENERIC_SUBAGENT_TOOL_POLICY
-      : undefined
-  )
+  const genericPolicy = [
+    GENERIC_SUBAGENT_TOOL_POLICY,
+    GENERIC_LONG_RUNNING_TOOL_POLICY,
+  ].find((policy) => toolCallPolicyMatches(policy, input.toolName))
+  const policy = runtimePolicy ?? genericPolicy
 
   if (!policy) {
     return {
