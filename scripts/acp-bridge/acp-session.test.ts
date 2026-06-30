@@ -1,5 +1,8 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { EventEmitter } from "node:events"
+import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { PassThrough, Readable, Writable } from "node:stream"
 import { describe, expect, test } from "bun:test"
 import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientprotocol/sdk"
@@ -496,6 +499,28 @@ describe("ACP runtime adapter boundary", () => {
       { outcome: { optionId: "allow_once", outcome: "selected" } },
     ])
     expect(result.stopReason).toBe("end_turn")
+  })
+
+  test("auto-approves SDK filesystem writes during full-permissions prompts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "0000-acp-session-write-"))
+    const target = join(workspace, "existing.txt")
+    await writeFile(target, "before", "utf8")
+
+    const session = new HermesAcpSession({
+      agentCommand: "codex acp",
+      cwd: workspace,
+      spawnProcess: createFakeAcpProcess({
+        writeFileOnPrompt: { content: "after", path: target },
+      }),
+    })
+
+    await session.start()
+    const result = await session.sendUserMessage("edit existing file", {
+      autoApprovePermissionRequests: true,
+    })
+
+    expect(result.stopReason).toBe("end_turn")
+    await expect(readFile(target, "utf8")).resolves.toBe("after")
   })
 
   test("lets the node proxy run its process-group kill fallback before bridge escalation", () => {
@@ -1113,6 +1138,7 @@ function createFakeAcpProcess(options: {
   processes?: ChildProcessWithoutNullStreams[]
   requestPermissionOnPrompt?: boolean
   useTerminalOnPrompt?: boolean
+  writeFileOnPrompt?: { content: string; path: string }
 }): () => ChildProcessWithoutNullStreams {
   return () => {
     const stdout = new PassThrough()
@@ -1135,6 +1161,13 @@ function createFakeAcpProcess(options: {
           })
           await terminal.currentOutput()
           await terminal.waitForExit()
+        }
+        if (options.writeFileOnPrompt) {
+          await agentConnection.writeTextFile({
+            content: options.writeFileOnPrompt.content,
+            path: options.writeFileOnPrompt.path,
+            sessionId: params.sessionId,
+          })
         }
         if (options.requestPermissionOnPrompt) {
           const response = await agentConnection.requestPermission({

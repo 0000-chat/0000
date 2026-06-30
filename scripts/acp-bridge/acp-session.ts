@@ -780,7 +780,12 @@ export class HermesAcpSession {
     this.attachProcessHandlers(this.child)
     const runtimeClient = SdkAcpRuntimeClient.fromChildProcess(this.child, {
       ...(this.cwd && isAbsolute(this.cwd)
-        ? { filesystemPolicy: { workspaceRoots: [this.cwd] } }
+        ? {
+            filesystemPolicy: {
+              onWriteApprovalRequired: async () => this.autoApprovePermissionRequests,
+              workspaceRoots: [this.cwd],
+            },
+          }
         : {}),
       onActivity: (activity) => this.handleRuntimeActivity(activity),
       onPermissionRequest: (params) => this.handlePermissionRequest(params),
