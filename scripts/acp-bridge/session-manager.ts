@@ -743,9 +743,6 @@ export class BridgeSessionManager {
           event: "bridge.session.warm_failed",
           threadId: session.threadId,
           agentSessionId: session.providerSessionKey,
-          bridgeProfileId: session.runtimeProfile?.id,
-          hermesProfileName: session.hermesProfileName,
-          launchSpecKey: redactLaunchSpecKey(session.launchSpecKey),
           reason:
             error instanceof Error
               ? error.message
@@ -760,9 +757,6 @@ export class BridgeSessionManager {
         event: "bridge.session.warmed",
         threadId: session.threadId,
         agentSessionId: session.providerSessionKey,
-        bridgeProfileId: session.runtimeProfile?.id,
-        hermesProfileName: session.hermesProfileName,
-        launchSpecKey: redactLaunchSpecKey(session.launchSpecKey),
       });
       warmedCount += 1;
     }
@@ -2140,7 +2134,9 @@ export class BridgeSessionManager {
     item: BridgeSessionQueueItem,
   ): Promise<void> {
     const key = this.findSessionKeyForItem(item);
-    const closed = Boolean(key && this.sessions.has(key));
+    const removedWarmCandidateCount = this.removeWarmSessionCandidatesForItem(item);
+    const closed = Boolean(key && this.sessions.has(key)) ||
+      removedWarmCandidateCount > 0;
     if (key) {
       await this.closeSession(key, { terminalInteraction: true });
     }
@@ -2691,6 +2687,68 @@ export class BridgeSessionManager {
         session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
         session.sessionKey !== candidate.sessionKey,
     );
+  }
+
+  private removeWarmSessionCandidatesForItem(
+    item: BridgeSessionQueueItem,
+  ): number {
+    let removedCount = 0;
+    const exact = this.sessionKeyForItem(item);
+    if (exact && this.warmSessionCandidates.delete(exact)) {
+      removedCount += 1;
+    }
+    for (const candidate of Array.from(this.warmSessionCandidates.values())) {
+      if (this.queueItemMatchesWarmSessionCandidate(item, candidate)) {
+        this.warmSessionCandidates.delete(candidate.sessionKey);
+        removedCount += 1;
+      }
+    }
+    return removedCount;
+  }
+
+  private queueItemMatchesWarmSessionCandidate(
+    item: BridgeSessionQueueItem,
+    candidate: BridgeWarmSessionCandidate,
+  ): boolean {
+    if (this.sessionKeyForItem(item) === candidate.sessionKey) {
+      return true;
+    }
+    const providerSessionKey = providerSessionKeyForItem(item);
+    const threadId = item.threadId ?? item.sessionId;
+    const candidateProviderSessionKey =
+      candidate.agentSessionId ?? candidate.sessionId ?? candidate.threadId;
+    if (
+      !providerSessionKey ||
+      !threadId ||
+      providerSessionKey !== candidateProviderSessionKey ||
+      threadId !== candidate.threadId
+    ) {
+      return false;
+    }
+    if (
+      item.organizationId &&
+      candidate.organizationId &&
+      item.organizationId !== candidate.organizationId
+    ) {
+      return false;
+    }
+    if (
+      item.mailboxConversationId &&
+      candidate.mailboxConversationId &&
+      item.mailboxConversationId !== candidate.mailboxConversationId
+    ) {
+      return false;
+    }
+    if (
+      hasExplicitRuntimeScope(item) &&
+      !bridgeQueueItemMatchesSessionRuntimeScope(item, {
+        hermesProfileName: candidate.hermesProfileName,
+        runtimeProfileId: candidate.runtimeProfileId ?? candidate.bridgeProfileId,
+      })
+    ) {
+      return false;
+    }
+    return true;
   }
 
   private currentSessionHashes(): {

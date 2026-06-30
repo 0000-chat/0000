@@ -1594,6 +1594,7 @@ describe("bridge session cwd safety", () => {
 
   test("warms explicitly configured recently used runtime profiles", async () => {
     const contexts: BridgeSessionContext[] = [];
+    const logs: Array<Record<string, unknown>> = [];
     let startCount = 0;
     const manager = new BridgeSessionManager({
       cloudClient: fakeCloudClient(),
@@ -1608,6 +1609,7 @@ describe("bridge session cwd safety", () => {
         };
       },
       deviceId: "device-1",
+      log: (entry) => logs.push(entry),
       runtimeProfiles: [
         {
           capabilities: {},
@@ -1656,6 +1658,17 @@ describe("bridge session cwd safety", () => {
         threadId: "thread-1",
       }),
     ]);
+    const warmLog = logs.find((entry) => entry.event === "bridge.session.warmed");
+    expect(warmLog).toEqual(
+      expect.objectContaining({
+        agentSessionId: "provider-session",
+        event: "bridge.session.warmed",
+        threadId: "thread-1",
+      }),
+    );
+    expect(warmLog).not.toHaveProperty("bridgeProfileId");
+    expect(warmLog).not.toHaveProperty("hermesProfileName");
+    expect(warmLog).not.toHaveProperty("launchSpecKey");
   });
 
   test("does not resurrect candidates after terminalized sessions close", async () => {
@@ -1717,6 +1730,75 @@ describe("bridge session cwd safety", () => {
     ).resolves.toBe(0);
 
     expect(contexts).toHaveLength(1);
+    expect(manager.getStatus().sessions).toEqual([]);
+  });
+
+  test("explicit close removes an idle-pressure warm candidate", async () => {
+    const cloud = fakeCloudClient();
+    const contexts: BridgeSessionContext[] = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-1",
+      id: "queue-1",
+      organizationId: "org-1",
+      prompt: "hello",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.closeIdleSessionsForProcessPressure({
+      maxSessionsToClose: 1,
+      targetFreeProcessSlots: 1,
+    });
+    await manager.handleQueueItem({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      claimId: "claim-close",
+      id: "queue-close",
+      organizationId: "org-1",
+      threadId: "thread-1",
+      type: "close-session",
+    });
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(0);
+
+    expect(startCount).toBe(0);
+    expect(contexts).toHaveLength(1);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-close",
+      result: { closed: true, ok: true },
+    });
     expect(manager.getStatus().sessions).toEqual([]);
   });
 
@@ -1965,6 +2047,7 @@ describe("bridge session cwd safety", () => {
   });
 
   test("closes and removes a warmed session when ACP start fails", async () => {
+    const logs: Array<Record<string, unknown>> = [];
     let closeCount = 0;
     const manager = new BridgeSessionManager({
       cloudClient: fakeCloudClient(),
@@ -1978,6 +2061,7 @@ describe("bridge session cwd safety", () => {
         },
       }),
       deviceId: "device-1",
+      log: (entry) => logs.push(entry),
       runtimeProfiles: [
         {
           capabilities: {},
@@ -2014,6 +2098,20 @@ describe("bridge session cwd safety", () => {
     ).resolves.toBe(0);
 
     expect(closeCount).toBe(1);
+    const warmLog = logs.find(
+      (entry) => entry.event === "bridge.session.warm_failed",
+    );
+    expect(warmLog).toEqual(
+      expect.objectContaining({
+        agentSessionId: "provider-session",
+        event: "bridge.session.warm_failed",
+        reason: "warm start failed",
+        threadId: "thread-1",
+      }),
+    );
+    expect(warmLog).not.toHaveProperty("bridgeProfileId");
+    expect(warmLog).not.toHaveProperty("hermesProfileName");
+    expect(warmLog).not.toHaveProperty("launchSpecKey");
     expect(manager.getStatus().sessions).toEqual([]);
   });
 
