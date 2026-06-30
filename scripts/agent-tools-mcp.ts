@@ -58,7 +58,10 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "artifacts.completeUpload",
   "artifacts.search",
   "artifacts.read",
+  "artifacts.readContent",
   "artifacts.getContentUrl",
+  "artifacts.update",
+  "artifacts.patchText",
   "artifacts.link",
   "scripts.createDraft",
   "scripts.updateDraft",
@@ -112,7 +115,10 @@ const ARTIFACT_TOOL_NAMES = new Set<AgentToolMcpToolName>([
   "artifacts.completeUpload",
   "artifacts.search",
   "artifacts.read",
+  "artifacts.readContent",
   "artifacts.getContentUrl",
+  "artifacts.update",
+  "artifacts.patchText",
   "artifacts.link",
 ])
 const DEFINED_FEATURE_FLAGS = new Set([ARTIFACTS_FEATURE_FLAG_KEY])
@@ -371,11 +377,42 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     artifactId: z.string().optional(),
     slug: z.string().optional(),
   },
+  "artifacts.readContent": {
+    artifactId: z.string().optional(),
+    slug: z.string().optional(),
+    versionId: z.string().optional(),
+  },
   "artifacts.getContentUrl": {
     artifactId: z.string().optional(),
     expiresIn: z.number().optional(),
     slug: z.string().optional(),
     versionId: z.string().optional(),
+  },
+  "artifacts.update": {
+    artifactId: z.string().optional(),
+    content: z.string(),
+    contentHash: z.string().optional(),
+    expectedContentHash: z.string().optional(),
+    expectedVersionId: z.string(),
+    slug: z.string().optional(),
+    summary: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    title: z.string().optional(),
+    versionMetadata: z.record(z.string(), z.unknown()).optional(),
+  },
+  "artifacts.patchText": {
+    artifactId: z.string().optional(),
+    contentHash: z.string().optional(),
+    expectedContentHash: z.string().optional(),
+    expectedVersionId: z.string(),
+    newText: z.string(),
+    oldText: z.string(),
+    replaceAll: z.boolean().optional(),
+    slug: z.string().optional(),
+    summary: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    title: z.string().optional(),
+    versionMetadata: z.record(z.string(), z.unknown()).optional(),
   },
   "artifacts.link": {
     artifactId: z.string(),
@@ -486,9 +523,15 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "artifacts.search":
     "Search durable artifacts in the current organization. Use this before creating local files when looking for existing plans, reports, exported files, or generated content.",
   "artifacts.read":
-    "Read artifact metadata and current version metadata by id or slug. Use artifacts.getContentUrl for R2-backed content bytes.",
+    "Read artifact metadata and current version metadata by id or slug. Use artifacts.readContent for inline markdown/text content and artifacts.getContentUrl for R2-backed bytes.",
+  "artifacts.readContent":
+    "Read inline markdown/text artifact content directly by id or slug. Use this before editing artifacts like local markdown files; returns content, versionId, contentHash, format, and artifact metadata. R2-backed or binary content is rejected.",
   "artifacts.getContentUrl":
     "Get a short-lived read URL for an R2-backed artifact version. Use artifacts.read first when you need metadata or the current version id.",
+  "artifacts.update":
+    "Replace an inline markdown/text artifact with a new version. Read with artifacts.readContent first, pass the returned expectedVersionId, and optionally expectedContentHash to avoid overwriting concurrent edits. Use this like a whole-file markdown save.",
+  "artifacts.patchText":
+    "Patch an inline markdown/text artifact by replacing exact oldText with newText in a new version. Read with artifacts.readContent first and pass expectedVersionId; if oldText appears more than once, provide more context or set replaceAll true.",
   "artifacts.link":
     "Use when an artifact should be attached to a first-class 0000 object such as a thread, message, space, database row, script, or app.",
   "scripts.createDraft": "Create a reusable generated script draft and first version.",
