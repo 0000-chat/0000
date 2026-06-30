@@ -18,6 +18,7 @@ import { makeFunctionReference } from "convex/server";
 
 import {
   BridgeCloudHttpError,
+  BridgeCloudRequestTimeoutError,
   ConvexBridgeCloudClient,
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
@@ -113,6 +114,8 @@ const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_IDLE_HEARTBEAT_MS = 5 * 60_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
+const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_STALE_CLEANUP_TIMEOUT_MS = 2_000;
 const DEFAULT_RESTART_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
@@ -133,7 +136,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.26";
+export const BRIDGE_VERSION = "0.1.27";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -644,6 +647,8 @@ export type BridgeLoopIterationInput = {
   watchdogFailures?: BridgeLoopWatchdogResult[];
   lastStaleCleanupAt: number;
   setLastStaleCleanupAt: (value: number) => void;
+  staleCleanupTimeoutMs?: number;
+  cloudRequestTimeoutMs?: number;
   log: FlushableBridgeLogger;
   recordLoopError: (error: unknown) => Promise<void>;
   statusPath: string;
@@ -902,6 +907,28 @@ export function getRequestTimeoutMs(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error(
       "request-timeout-ms must be a positive number of milliseconds",
+    );
+  }
+  return timeoutMs;
+}
+
+export function getCloudRequestTimeoutMs(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const rawValue = getFlag(
+    flags,
+    "cloud-request-timeout-ms",
+    env.ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS,
+  );
+  if (rawValue === undefined) {
+    return DEFAULT_CLOUD_REQUEST_TIMEOUT_MS;
+  }
+
+  const timeoutMs = Number(rawValue);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(
+      "cloud-request-timeout-ms must be a positive number of milliseconds",
     );
   }
   return timeoutMs;
@@ -1543,6 +1570,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     "runtime-command",
   ).map((command) => splitCommand(command));
   const requestTimeoutMs = getRequestTimeoutMs(parsed.flags);
+  const cloudRequestTimeoutMs = getCloudRequestTimeoutMs(parsed.flags);
   const toolResultTimeoutMs = getToolResultTimeoutMs(parsed.flags);
   const resumeEnabled = getAcpResumeEnabled(parsed.flags);
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags);
@@ -1680,7 +1708,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         workerLog,
         createLocalAuditBridgeLogger(),
       ]);
-      const cloudClient = createCloudClient(registration);
+      const cloudClient = createCloudClient(registration, {
+        requestTimeoutMs: cloudRequestTimeoutMs,
+      });
       const hostAdapter = new ConvexBridgeHostAdapter(cloudClient);
       const processRegistryPath = getBridgeProcessRegistryPath(
         parsed.flags,
@@ -2162,6 +2192,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         setLastStaleCleanupAt: (value) => {
           context.lastStaleCleanupAt = value;
         },
+        staleCleanupTimeoutMs: Math.min(
+          cloudRequestTimeoutMs,
+          DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+        ),
+        cloudRequestTimeoutMs,
         applySettingsControl: (settings) => {
           applyBridgeSettingsControl(context, settings);
         },
@@ -3057,31 +3092,42 @@ export async function runBridgeLoopIteration(
       const now = currentTime();
       if (now - input.lastStaleCleanupAt >= 60_000) {
         input.setLastStaleCleanupAt(now);
-        const cleanupResult = await cleanup(input.config, {
+        const cleanupResult = await cleanupStaleClaimsWithTimeout({
+          cleanup,
+          config: input.config,
           limit: availableSlots,
+          log: input.log,
+          requestTimeoutMs: Math.min(
+            input.cloudRequestTimeoutMs ?? DEFAULT_CLOUD_REQUEST_TIMEOUT_MS,
+            input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+          ),
+          timeoutMs:
+            input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
         });
         input.status.lastStaleCleanupAt = new Date(now).toISOString();
-        input.status.lastStaleCleanup = {
-          inspected:
-            typeof cleanupResult.inspected === "number"
-              ? cleanupResult.inspected
-              : undefined,
-          released:
-            typeof cleanupResult.released === "number"
-              ? cleanupResult.released
-              : undefined,
-        };
-        if (
-          typeof cleanupResult.released === "number" &&
-          cleanupResult.released > 0
-        ) {
-          input.log({
-            level: "info",
-            event: "bridge.queue.cleanup_stale",
-            deviceId: input.config.deviceId,
-            released: cleanupResult.released,
-            inspected: cleanupResult.inspected,
-          });
+        if (cleanupResult) {
+          input.status.lastStaleCleanup = {
+            inspected:
+              typeof cleanupResult.inspected === "number"
+                ? cleanupResult.inspected
+                : undefined,
+            released:
+              typeof cleanupResult.released === "number"
+                ? cleanupResult.released
+                : undefined,
+          };
+          if (
+            typeof cleanupResult.released === "number" &&
+            cleanupResult.released > 0
+          ) {
+            input.log({
+              level: "info",
+              event: "bridge.queue.cleanup_stale",
+              deviceId: input.config.deviceId,
+              released: cleanupResult.released,
+              inspected: cleanupResult.inspected,
+            });
+          }
         }
       }
       const pressureCleanupRequest =
@@ -3610,7 +3656,7 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS Bridge cloud API timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
 }
 
 function getStatusPath(
@@ -3872,20 +3918,78 @@ function runtimeConformanceBlockResult(
   };
 }
 
+async function cleanupStaleClaimsWithTimeout(input: {
+  cleanup: typeof cleanupStaleClaims;
+  config: BridgeConfig;
+  limit: number;
+  log: FlushableBridgeLogger;
+  requestTimeoutMs: number;
+  timeoutMs: number;
+}): Promise<QueueCleanupResponse | undefined> {
+  const timeoutMs = Math.max(1, input.timeoutMs);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let timeoutLogged = false;
+  const logTimeout = () => {
+    if (timeoutLogged) {
+      return;
+    }
+    timeoutLogged = true;
+    input.log({
+      level: "warn",
+      event: "bridge.queue.cleanup_stale_timeout",
+      deviceId: input.config.deviceId,
+      timeoutMs,
+    });
+  };
+
+  const cleanupTask = input
+    .cleanup(input.config, {
+      limit: input.limit,
+      requestTimeoutMs: input.requestTimeoutMs,
+    })
+    .catch((error) => {
+      if (timedOut || error instanceof BridgeCloudRequestTimeoutError) {
+        logTimeout();
+        return undefined;
+      }
+      throw error;
+    });
+  const timeoutTask = new Promise<undefined>((resolve) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      logTimeout();
+      resolve(undefined);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([cleanupTask, timeoutTask]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 async function cleanupStaleClaims(
   config: BridgeConfig,
-  input: { limit?: number } = {},
+  input: { limit?: number; requestTimeoutMs?: number } = {},
 ): Promise<QueueCleanupResponse> {
+  const { requestTimeoutMs, ...body } = input;
   return await createCloudClient(
     config,
-  ).cleanupStaleClaims<QueueCleanupResponse>(input);
+    { requestTimeoutMs },
+  ).cleanupStaleClaims<QueueCleanupResponse>(body);
 }
 
 type BridgeHeartbeatSendResult =
   | { ok: true; control?: BridgeControlResponse; wake?: BridgeWakeToken }
   | {
       ok: false;
-      error: BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 };
+      error:
+        | (BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 })
+        | BridgeCloudRequestTimeoutError;
     };
 
 type BridgeControlResponse = {
@@ -4219,7 +4323,12 @@ function looksSensitiveProfileText(value: string): boolean {
 
 export function isTransientHeartbeatError(
   error: unknown,
-): error is BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 } {
+): error is
+  | (BridgeCloudHttpError & { status: 500 | 502 | 503 | 504 })
+  | BridgeCloudRequestTimeoutError {
+  if (error instanceof BridgeCloudRequestTimeoutError) {
+    return true;
+  }
   return (
     error instanceof BridgeCloudHttpError &&
     (error.status === 500 ||
@@ -4229,13 +4338,18 @@ export function isTransientHeartbeatError(
   );
 }
 
-function createCloudClient(config: BridgeConfig): ConvexBridgeCloudClient {
+function createCloudClient(
+  config: BridgeConfig,
+  options: { requestTimeoutMs?: number } = {},
+): ConvexBridgeCloudClient {
   return new ConvexBridgeCloudClient({
     appUrl: config.appUrl,
     bridgeApiUrl: config.bridgeApiUrl,
     logIngestUrl: config.logIngestUrl,
     deviceId: config.deviceId,
     bridgeToken: config.bridgeToken,
+    requestTimeoutMs:
+      options.requestTimeoutMs ?? getCloudRequestTimeoutMs({}, process.env),
     paths: {
       heartbeat: DEFAULT_HEARTBEAT_PATH,
       queueClaim: DEFAULT_CLAIM_PATH,

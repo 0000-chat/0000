@@ -1482,6 +1482,73 @@ describe("bridge supervisor claim gating", () => {
     ).not.toHaveProperty("terminatedOrphanedProcessCount");
   });
 
+  test("continues queue claims when stale cleanup stalls", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+    let cleanupStarted = false;
+    let releaseCleanup: (() => void) | undefined;
+    const cleanupResult = new Promise<Record<string, unknown>>((resolve) => {
+      releaseCleanup = () => resolve({ inspected: 0, released: 0 });
+    });
+    let claimed = false;
+
+    const run = runBridgeLoopIteration({
+      claimCommands: async () => {
+        claimed = true;
+        return [];
+      },
+      cleanupStaleClaims: async () => {
+        cleanupStarted = true;
+        return await cleanupResult;
+      },
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 30, 2, 47, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      staleCleanupTimeoutMs: 5,
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(cleanupStarted).toBe(true);
+      expect(claimed).toBe(true);
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          event: "bridge.queue.cleanup_stale_timeout",
+        }),
+      );
+    } finally {
+      releaseCleanup?.();
+      await run;
+    }
+  });
+
   test("reports unavailable runtime conformance without globally skipping claims", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
