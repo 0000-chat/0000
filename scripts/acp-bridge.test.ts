@@ -22,6 +22,7 @@ import {
   getAcpIdleTtlMs,
   getLocalHardMaxInFlight,
   getConvexUrl,
+  getWarmRuntimeProfileIds,
   normalizeBridgeConfigFile,
   normalizeQueueCommand,
   parseHermesProfileListOutput,
@@ -151,6 +152,34 @@ describe("bridge capacity configuration", () => {
         { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
       ),
     ).toBe(9);
+  });
+
+  test("parses explicit warm runtime profiles from flags and env", () => {
+    expect(getWarmRuntimeProfileIds({}, {})).toEqual([]);
+    expect(
+      getWarmRuntimeProfileIds(
+        {
+          "warm-runtime-profile": [
+            "codex:default",
+            "hermes:default|hermes-profile:ops",
+          ],
+        },
+        { ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES: "claude-code:default" },
+      ),
+    ).toEqual([
+      "claude-code:default",
+      "codex:default",
+      "hermes:default|hermes-profile:ops",
+    ]);
+    expect(
+      getWarmRuntimeProfileIds(
+        {},
+        {
+          ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES:
+            "codex:default, codex:default, hermes:default",
+        },
+      ),
+    ).toEqual(["codex:default", "hermes:default"]);
   });
 });
 
@@ -1036,6 +1065,149 @@ describe("bridge supervisor claim gating", () => {
         reason: "bridge_device_not_paired",
       }),
     );
+  });
+
+  test("warms configured runtime profiles only when loop capacity is available", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const warmRequests: Array<{ maxSessions?: number; runtimeProfileIds: string[] }> =
+      [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () =>
+        ({
+          canClaim: true,
+          childCount: 1,
+          processCap: 2,
+          status: "healthy",
+        }) as NonNullable<BridgeStatus["processHealth"]>,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+        warmRuntimeSessions: async (request) => {
+          warmRequests.push({
+            maxSessions: request.maxSessions,
+            runtimeProfileIds: request.runtimeProfileIds,
+          });
+          return 1;
+        },
+      },
+      maxInFlight: 2,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      warmRuntimeProfileIds: ["codex:default"],
+      writeStatus: async () => {},
+    });
+
+    expect(warmRequests).toEqual([
+      {
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      },
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.warm_runtime_profiles",
+        runtimeProfileCount: 1,
+        warmedCount: 1,
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        runtimeProfileIds: ["codex:default"],
+      }),
+    );
+  });
+
+  test("does not warm when newly claimed prompt work reserves process capacity", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const warmRequests: Array<{ maxSessions?: number; runtimeProfileIds: string[] }> =
+      [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          agentSessionId: "provider-session",
+          bridgeProfileId: "codex:default",
+          claimId: "claim-1",
+          id: "queue-1",
+          organizationId: "org-1",
+          prompt: "hello",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () =>
+        ({
+          canClaim: true,
+          childCount: 1,
+          processCap: 2,
+          status: "healthy",
+        }) as NonNullable<BridgeStatus["processHealth"]>,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+        warmRuntimeSessions: async (request) => {
+          warmRequests.push({
+            maxSessions: request.maxSessions,
+            runtimeProfileIds: request.runtimeProfileIds,
+          });
+          return 1;
+        },
+      },
+      maxInFlight: 2,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      warmRuntimeProfileIds: ["codex:default"],
+      writeStatus: async () => {},
+    });
+
+    expect(warmRequests).toEqual([]);
   });
 
   test("does not spam claim skipped logs after a registration is disabled", async () => {

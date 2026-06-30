@@ -634,6 +634,7 @@ type BridgeLoopManager = Pick<
   "getStatus" | "handleQueueItem"
 > & {
   closeIdleSessionsForProcessPressure?: BridgeSessionManager["closeIdleSessionsForProcessPressure"];
+  warmRuntimeSessions?: BridgeSessionManager["warmRuntimeSessions"];
   failActiveQueueItem?: (
     queueItemId: string,
     reasonCode: string,
@@ -679,6 +680,7 @@ export type BridgeLoopIterationInput = {
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   pollReason?: BridgeLoopPollReason;
   reserveClaimSlots?: () => BridgeClaimSlotReservation;
+  warmRuntimeProfileIds?: string[];
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
   wakeSignal?: BridgeWakeSignal;
@@ -1091,6 +1093,19 @@ export function getAllowRemoteCwd(
   return rawValue === "1" || rawValue === "true" || rawValue === "yes";
 }
 
+export function getWarmRuntimeProfileIds(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const profileIds = [
+    ...splitCommaSeparatedList(env.ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES),
+    ...getRepeatedFlags(flags, "warm-runtime-profile").flatMap(
+      splitCommaSeparatedList,
+    ),
+  ];
+  return Array.from(new Set(profileIds));
+}
+
 export function deriveConvexCloudUrl(appUrl: string): string | undefined {
   const url = new URL(appUrl);
   if (url.hostname.endsWith(".convex.cloud")) {
@@ -1319,6 +1334,16 @@ export function buildEndpoint(baseUrl: string, path: string): string {
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+function splitCommaSeparatedList(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 export function splitCommand(command: string): string[] {
@@ -1623,6 +1648,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const resumeEnabled = getAcpResumeEnabled(parsed.flags);
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags);
   const allowRemoteCwd = getAllowRemoteCwd(parsed.flags);
+  const warmRuntimeProfileIds = getWarmRuntimeProfileIds(
+    parsed.flags,
+    process.env,
+  );
   const logUrl = getBridgeLogUrl(parsed.flags, process.env);
   const runtimeCatalogCachePath = getRuntimeCatalogCachePath(parsed.flags);
   const runtimeCommandKeys = runtimeCatalogCommandKeys({
@@ -2360,6 +2389,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       getRuntimeConformance: runtimeConformanceSummary,
       writeStatus: persistAggregateStatus,
       wakeSignal: context.wakeSignal,
+      warmRuntimeProfileIds,
       heartbeatIntervalMs:
         pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
       pollReason,
@@ -3420,6 +3450,7 @@ export async function runBridgeLoopIteration(
             commandCount: commands.length,
           });
         }
+        let dispatchedCommandCount = 0;
         for (const command of commands) {
           const conformanceBlock = runtimeConformanceBlockForCommand(
             command,
@@ -3444,6 +3475,53 @@ export async function runBridgeLoopIteration(
             continue;
           }
           runCommand(command);
+          dispatchedCommandCount += 1;
+        }
+        const warmRuntimeProfileIds = input.warmRuntimeProfileIds ?? [];
+        const processWarmCapacity =
+          processHealth && typeof processHealth.processCap === "number"
+            ? Math.max(0, processHealth.processCap - processHealth.childCount)
+            : Number.POSITIVE_INFINITY;
+        const warmCapacity = Math.min(
+          Math.max(0, maxInFlight - input.inFlightCommands.size),
+          processWarmCapacity,
+        );
+        if (
+          warmRuntimeProfileIds.length > 0 &&
+          dispatchedCommandCount === 0 &&
+          warmCapacity > 0 &&
+          input.manager.warmRuntimeSessions
+        ) {
+          const warmedCount = await input.manager.warmRuntimeSessions({
+            canStartSession: () => {
+              const latestProcessHealth =
+                input.getProcessHealth?.() ?? processHealth;
+              if (!latestProcessHealth) {
+                return true;
+              }
+              if (!latestProcessHealth.canClaim) {
+                return false;
+              }
+              if (
+                typeof latestProcessHealth.processCap === "number" &&
+                latestProcessHealth.childCount >= latestProcessHealth.processCap
+              ) {
+                return false;
+              }
+              return true;
+            },
+            maxSessions: warmCapacity,
+            runtimeProfileIds: warmRuntimeProfileIds,
+          });
+          if (warmedCount > 0) {
+            input.log({
+              level: "info",
+              event: "bridge.session.warm_runtime_profiles",
+              deviceId: input.config.deviceId,
+              warmedCount,
+              runtimeProfileCount: warmRuntimeProfileIds.length,
+            });
+          }
         }
       }
     } finally {
@@ -3892,7 +3970,7 @@ export function buildStartupSecuritySummary(input: {
 }
 
 function helpText(): string {
-  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS Bridge cloud API timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
+  return `0000 Chat ACP bridge\n\nUsage:\n  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]\n  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]\n  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]\n  bun scripts/acp-bridge.ts status\n  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]\n\nEnvironment:\n  ZERO_CHAT_APP_URL                         Default app URL for connect or pair\n  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect\n  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})\n  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})\n  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations\n  ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES   Comma-separated runtime profile ids to warm from recent scoped sessions (default: disabled)\n  ZERO_CHAT_BRIDGE_REQUEST_TIMEOUT_MS      ACP request timeout in milliseconds\n  ZERO_CHAT_BRIDGE_CLOUD_REQUEST_TIMEOUT_MS Bridge cloud API timeout in milliseconds\n  ZERO_CHAT_BRIDGE_TOOL_RESULT_TIMEOUT_MS  Unresolved ACP tool-call timeout in milliseconds\n  ZERO_CHAT_BRIDGE_ALLOW_REMOTE_CWD        Honor cwd values from 0000 Chat queue items (default: true; set 0/false to disable)\n  ZERO_CHAT_BRIDGE_JOURNAL                 Override local SQLite journal path (default: ${DEFAULT_JOURNAL_DIR}/<device>.sqlite)\n  ZERO_CHAT_BRIDGE_PROCESS_REGISTRY        Override local ACP child registry path (default: ${DEFAULT_PROCESS_REGISTRY_DIR}/<device>.json)\n  ZERO_CHAT_BRIDGE_LOG_URL                 Worker log ingest URL (default: disabled)\n\n`;
 }
 
 function getStatusPath(

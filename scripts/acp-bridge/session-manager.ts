@@ -204,6 +204,24 @@ type BridgeSessionRecord = {
   lastUsedAt: number;
 };
 
+type BridgeWarmSessionCandidate = Pick<
+  BridgeSessionQueueItem,
+  | "agentName"
+  | "agentSessionId"
+  | "bridgeProfileId"
+  | "cwd"
+  | "hermesProfileName"
+  | "mailboxConversationId"
+  | "organizationId"
+  | "sessionId"
+  | "threadId"
+> & {
+  lastUsedAt: number;
+  launchSpecKey?: string;
+  runtimeProfileId?: string;
+  sessionKey: string;
+};
+
 type BridgeSessionCloudClient = {
   appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>;
   uploadAttachment(
@@ -275,6 +293,7 @@ const APPROVAL_RESPONSE_SESSION_POLL_MS = 10;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000;
 export const DEFAULT_TOOL_RESULT_TIMEOUT_MS = 5 * 60_000;
+const MAX_WARM_SESSION_CANDIDATES = 64;
 const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300;
 const MAX_TERMINALIZATION_METADATA_TEXT_LENGTH = 200;
 
@@ -340,6 +359,12 @@ export type BridgeSessionManagerSessionStatus = {
 export type BridgeProcessPressureCleanupRequest = {
   targetFreeProcessSlots: number;
   maxSessionsToClose?: number;
+};
+
+export type BridgeWarmRuntimeSessionRequest = {
+  runtimeProfileIds: string[];
+  maxSessions?: number;
+  canStartSession?: () => boolean;
 };
 
 export type BridgeSessionLogEntry = BridgeLogEntry;
@@ -525,6 +550,10 @@ export class BridgeSessionManager {
     string,
     ToolResultTimeoutDetails
   >();
+  private readonly warmSessionCandidates = new Map<
+    string,
+    BridgeWarmSessionCandidate
+  >();
   private readonly lastSessionEventQueueItems = new Map<
     string,
     BridgeSessionQueueItem
@@ -536,6 +565,7 @@ export class BridgeSessionManager {
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined;
   private eventBatchTimer: ReturnType<typeof setTimeout> | undefined;
   private nextSequence = 1;
+  private lastSessionUsageAt = 0;
   private readonly activePromptSequenceBases = new Map<string, number>();
   private nextGeneration = 1;
 
@@ -654,10 +684,89 @@ export class BridgeSessionManager {
         acpSessionId: session.acp.sessionId,
         targetFreeProcessSlots: request.targetFreeProcessSlots,
       });
-      await this.closeSession(session.sessionKey);
+      await this.closeSession(session.sessionKey, {
+        removeWarmCandidate: false,
+      });
       closedSessionCount += 1;
     }
     return closedSessionCount;
+  }
+
+  async warmRuntimeSessions(
+    request: BridgeWarmRuntimeSessionRequest,
+  ): Promise<number> {
+    const warmProfileIds = new Set(
+      request.runtimeProfileIds
+        .map((profileId) => profileId.trim())
+        .filter((profileId) => profileId.length > 0),
+    );
+    if (warmProfileIds.size === 0) {
+      return 0;
+    }
+    const maxSessions = Math.max(
+      0,
+      Math.floor(request.maxSessions ?? warmProfileIds.size),
+    );
+    if (maxSessions <= 0) {
+      return 0;
+    }
+    const candidates = Array.from(this.warmSessionCandidates.values())
+      .filter((candidate) =>
+        warmSessionCandidateMatchesProfiles(candidate, warmProfileIds),
+      )
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt);
+    let warmedCount = 0;
+    for (const candidate of candidates) {
+      if (warmedCount >= maxSessions) {
+        break;
+      }
+      if (request.canStartSession && !request.canStartSession()) {
+        break;
+      }
+      if (this.sessions.has(candidate.sessionKey)) {
+        continue;
+      }
+      const item = warmSessionQueueItem(candidate);
+      if (this.hasLiveSessionForWarmCandidateScope(item, candidate)) {
+        continue;
+      }
+      const session = await this.ensureSession(item, {
+        closeReplacedSessions: false,
+      });
+      try {
+        await session.acp.start?.();
+      } catch (error) {
+        await this.closeSession(session.sessionKey);
+        this.warmSessionCandidates.delete(candidate.sessionKey);
+        this.writeLog({
+          level: "warn",
+          event: "bridge.session.warm_failed",
+          threadId: session.threadId,
+          agentSessionId: session.providerSessionKey,
+          bridgeProfileId: session.runtimeProfile?.id,
+          hermesProfileName: session.hermesProfileName,
+          launchSpecKey: redactLaunchSpecKey(session.launchSpecKey),
+          reason:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        });
+        continue;
+      }
+      this.markSessionUsed(session);
+      this.scheduleIdleClose(session);
+      this.writeLog({
+        level: "info",
+        event: "bridge.session.warmed",
+        threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+        bridgeProfileId: session.runtimeProfile?.id,
+        hermesProfileName: session.hermesProfileName,
+        launchSpecKey: redactLaunchSpecKey(session.launchSpecKey),
+      });
+      warmedCount += 1;
+    }
+    return warmedCount;
   }
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
@@ -899,6 +1008,7 @@ export class BridgeSessionManager {
       this.clearToolCallsForQueueItem(queueItemId);
     }
     this.activeToolTimeoutFailures.clear();
+    this.warmSessionCandidates.clear();
     this.lastSessionEventQueueItems.clear();
     this.firstAssistantTextLoggedQueueItems.clear();
     this.firstRuntimeActivityLoggedQueueItems.clear();
@@ -995,7 +1105,7 @@ export class BridgeSessionManager {
       ...acpPromptOptions
     } = options;
     this.lastSessionEventQueueItems.set(session.sessionKey, item);
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.clearIdleTimer(session);
     this.supervisor?.recordPromptPersisted(
       this.supervisorWorkItem(item, session),
@@ -1323,7 +1433,7 @@ export class BridgeSessionManager {
       ...finalResultMetadata,
     });
     this.supervisor?.recordCompleted(this.supervisorWorkItem(item, session));
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     this.writeLog({
       level: "info",
@@ -1867,7 +1977,7 @@ export class BridgeSessionManager {
       await this.markStaleInteractionResponse(item, type);
       return;
     }
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     await this.markQueueResult(item, { ok: true, approved });
   }
@@ -1963,7 +2073,7 @@ export class BridgeSessionManager {
     item: BridgeSessionQueueItem,
   ): Promise<void> {
     const session = await this.ensureSession(item);
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     await this.markQueueResult(item, {
       ok: true,
@@ -2145,7 +2255,7 @@ export class BridgeSessionManager {
       this.resumeEnabled &&
       Boolean(item.externalSessionId) &&
       session.acp.getExternalContinuityState?.().loaded === true;
-    session.lastUsedAt = Date.now();
+    this.markSessionUsed(session);
     this.scheduleIdleClose(session);
     await this.markQueueResult(item, {
       ok: true,
@@ -2168,7 +2278,10 @@ export class BridgeSessionManager {
 
   private async closeSession(
     sessionKey: string,
-    options: { terminalInteraction?: boolean } = {},
+    options: {
+      removeWarmCandidate?: boolean;
+      terminalInteraction?: boolean;
+    } = {},
   ): Promise<void> {
     const session = this.sessions.get(sessionKey);
     if (!session) {
@@ -2178,6 +2291,9 @@ export class BridgeSessionManager {
       this.rememberTerminalInteractionSession(session);
     }
     this.sessions.delete(sessionKey);
+    if (options.removeWarmCandidate !== false) {
+      this.warmSessionCandidates.delete(sessionKey);
+    }
     this.lastSessionEventQueueItems.delete(sessionKey);
     this.clearIdleTimer(session);
     await this.releaseTerminalHandles(session);
@@ -2289,6 +2405,7 @@ export class BridgeSessionManager {
 
   private async ensureSession(
     item: BridgeSessionQueueItem,
+    options: { closeReplacedSessions?: boolean } = {},
   ): Promise<BridgeSessionRecord> {
     const threadId = item.threadId ?? item.sessionId;
     if (!threadId) {
@@ -2382,7 +2499,7 @@ export class BridgeSessionManager {
       scopeConversationId: item.mailboxConversationId ?? threadId,
       scopeKeyWithoutAgent,
       terminalScope,
-      lastUsedAt: Date.now(),
+      lastUsedAt: this.nextSessionUsageTimestamp(),
       launchSpecKey: launchSpec.key,
       launchSpecSummary: launchSpec.summary,
       acp: this.createSession({
@@ -2497,9 +2614,83 @@ export class BridgeSessionManager {
       runtimeProfile,
       hermesProfileName: item.hermesProfileName,
     };
-    await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey);
+    if (options.closeReplacedSessions !== false) {
+      await this.closeReplacedRuntimeSessions(scopeKeyWithoutAgent, sessionKey);
+    }
     this.sessions.set(sessionKey, record);
+    this.rememberWarmSessionCandidate(item, record);
     return record;
+  }
+
+  private rememberWarmSessionCandidate(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+  ): void {
+    this.warmSessionCandidates.set(record.sessionKey, {
+      agentName: item.agentName,
+      agentSessionId: item.agentSessionId,
+      bridgeProfileId: record.runtimeProfile?.id ?? item.bridgeProfileId,
+      cwd: record.cwd,
+      hermesProfileName: record.hermesProfileName,
+      lastUsedAt: record.lastUsedAt,
+      launchSpecKey: record.launchSpecKey,
+      mailboxConversationId: item.mailboxConversationId,
+      organizationId: item.organizationId,
+      runtimeProfileId: record.runtimeProfile?.id,
+      sessionId: item.sessionId,
+      sessionKey: record.sessionKey,
+      threadId: record.threadId,
+    });
+    this.pruneWarmSessionCandidates();
+  }
+
+  private pruneWarmSessionCandidates(): void {
+    const excessCount =
+      this.warmSessionCandidates.size - MAX_WARM_SESSION_CANDIDATES;
+    if (excessCount <= 0) {
+      return;
+    }
+    const oldestCandidates = Array.from(this.warmSessionCandidates.values())
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt)
+      .slice(0, excessCount);
+    for (const candidate of oldestCandidates) {
+      this.warmSessionCandidates.delete(candidate.sessionKey);
+    }
+  }
+
+  private markSessionUsed(record: BridgeSessionRecord): void {
+    record.lastUsedAt = this.nextSessionUsageTimestamp();
+    const candidate = this.warmSessionCandidates.get(record.sessionKey);
+    if (candidate) {
+      candidate.lastUsedAt = record.lastUsedAt;
+    }
+  }
+
+  private nextSessionUsageTimestamp(): number {
+    const timestamp = Math.max(Date.now(), this.lastSessionUsageAt + 1);
+    this.lastSessionUsageAt = timestamp;
+    return timestamp;
+  }
+
+  private hasLiveSessionForWarmCandidateScope(
+    item: BridgeSessionQueueItem,
+    candidate: BridgeWarmSessionCandidate,
+  ): boolean {
+    const threadId = item.threadId ?? item.sessionId;
+    const providerSessionKey = providerSessionKeyForItem(item);
+    if (!threadId || !providerSessionKey) {
+      return true;
+    }
+    const scopeKeyWithoutAgent = this.scopeKeyWithoutAgentForItem(
+      item,
+      providerSessionKey,
+      threadId,
+    );
+    return Array.from(this.sessions.values()).some(
+      (session) =>
+        session.scopeKeyWithoutAgent === scopeKeyWithoutAgent &&
+        session.sessionKey !== candidate.sessionKey,
+    );
   }
 
   private currentSessionHashes(): {
@@ -3411,6 +3602,35 @@ export class BridgeSessionManager {
       redactLogValue({ deviceId: this.deviceId, ...entry }) as BridgeLogEntry,
     );
   }
+}
+
+function warmSessionCandidateMatchesProfiles(
+  candidate: BridgeWarmSessionCandidate,
+  warmProfileIds: Set<string>,
+): boolean {
+  return [
+    candidate.bridgeProfileId,
+    candidate.runtimeProfileId,
+    candidate.launchSpecKey,
+  ].some((profileId) => profileId !== undefined && warmProfileIds.has(profileId));
+}
+
+function warmSessionQueueItem(
+  candidate: BridgeWarmSessionCandidate,
+): BridgeSessionQueueItem {
+  return removeUndefinedValues({
+    agentName: candidate.agentName,
+    agentSessionId: candidate.agentSessionId,
+    bridgeProfileId: candidate.bridgeProfileId,
+    cwd: candidate.cwd,
+    hermesProfileName: candidate.hermesProfileName,
+    id: `warm:${candidate.sessionKey}`,
+    mailboxConversationId: candidate.mailboxConversationId,
+    organizationId: candidate.organizationId,
+    sessionId: candidate.sessionId,
+    threadId: candidate.threadId,
+    type: "start-session",
+  }) as BridgeSessionQueueItem;
 }
 
 function isBridgeEventUploadOverload(error: unknown): boolean {
