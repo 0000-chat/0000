@@ -483,6 +483,7 @@ describe("bridge MCP helper configuration", () => {
         appUrl: "https://0000.chat",
         bridgeToken: "token-a",
         deviceId: "bridge_a",
+        enabledFeatureFlags: ["artifacts"],
         threadId: "thread_1",
       }),
     ).toEqual([
@@ -495,6 +496,7 @@ describe("bridge MCP helper configuration", () => {
           { name: "ZERO_CHAT_AGENT_TOOLS_URL", value: "https://0000.chat" },
           { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: "bridge_a" },
           { name: "ZERO_CHAT_THREAD_ID", value: "thread_1" },
+          { name: "ZERO_CHAT_ENABLED_FEATURE_FLAGS", value: "artifacts" },
           { name: "ZERO_CHAT_BRIDGE_TOKEN", value: "token-a" },
         ],
         name: "0000",
