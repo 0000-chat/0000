@@ -14,13 +14,13 @@ function isArtifactsEnabled(options: ZeroChatPolicyOptions = {}) {
 }
 
 const ARTIFACT_TOOL_LIST =
-  "- artifacts.create, artifacts.createUploadIntent, artifacts.completeUpload, artifacts.search, artifacts.read, artifacts.getContentUrl, artifacts.link"
+  "- artifacts.create, artifacts.createUploadIntent, artifacts.completeUpload, artifacts.search, artifacts.read, artifacts.readContent, artifacts.getContentUrl, artifacts.update, artifacts.patchText, artifacts.link"
 
 const ARTIFACT_TOOL_GUIDANCE =
-  "Use artifact tools when durable markdown, JSON, reports, exports, notes, plans, or generated files should be available in 0000 Chat instead of local files. Use artifacts.create for small inline content, artifacts.createUploadIntent followed by artifacts.completeUpload for larger R2-backed content, artifacts.search/read to retrieve existing artifacts, and artifacts.link to connect artifacts to threads, messages, spaces, database rows, scripts, or apps. Scripts remain first-class runnable objects; use script tools for runnable code rather than storing scripts as generic artifacts."
+  "Use artifact tools when durable markdown, JSON, reports, exports, notes, plans, or generated files should be available in 0000 Chat instead of local files. Use artifacts.create for small inline content, artifacts.createUploadIntent followed by artifacts.completeUpload for larger R2-backed content, artifacts.search/read to retrieve existing artifacts, artifacts.readContent then artifacts.patchText for surgical markdown/text edits, artifacts.update for whole-document text replacement, and artifacts.link to connect artifacts to threads, messages, spaces, database rows, scripts, or apps. Scripts remain first-class runnable objects; use script tools for runnable code rather than storing scripts as generic artifacts."
 
 const ARTIFACT_TOOL_USE_POLICY =
-  " Use artifacts.create for small durable markdown, JSON, reports, notes, plans, or generated files that should live in 0000 Chat instead of local files; use artifacts.createUploadIntent and artifacts.completeUpload for large content. Scripts remain first-class runnable objects, so use script tools for runnable code rather than treating scripts as generic artifacts."
+  " Use artifacts.create for small durable markdown, JSON, reports, notes, plans, or generated files that should live in 0000 Chat instead of local files; use artifacts.readContent then artifacts.patchText or artifacts.update to edit inline markdown/text artifacts with expectedVersionId; use artifacts.createUploadIntent and artifacts.completeUpload for large content. Scripts remain first-class runnable objects, so use script tools for runnable code rather than treating scripts as generic artifacts."
 
 export function buildZeroChatToolUsePolicy(options: ZeroChatPolicyOptions = {}): string {
   const artifactReference = isArtifactsEnabled(options) ? ", artifacts" : ""
