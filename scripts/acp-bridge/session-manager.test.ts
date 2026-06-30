@@ -1802,6 +1802,80 @@ describe("bridge session cwd safety", () => {
     expect(manager.getStatus().sessions).toEqual([]);
   });
 
+  test("seeds restart handoff hints as reusable warm candidates", async () => {
+    const contexts: BridgeSessionContext[] = [];
+    let startCount = 0;
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => {
+        contexts.push(context);
+        return {
+          ...fakeSession(),
+          start: async () => {
+            startCount += 1;
+            return "warm-session";
+          },
+        };
+      },
+      deviceId: "device-1",
+      requireScopedIdentity: true,
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    });
+
+    expect(
+      manager.seedWarmRuntimeSessions({
+        candidates: [
+          {
+            agentSessionId: "provider-session",
+            bridgeProfileId: "codex:default",
+            lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 0),
+            organizationId: "org-1",
+            runtimeProfileId: "codex:default",
+            threadId: "thread-1",
+          },
+          {
+            bridgeProfileId: "codex:default",
+            runtimeProfileId: "codex:default",
+            threadId: "missing-scoped-identity",
+          },
+        ],
+      }),
+    ).toBe(1);
+
+    await expect(
+      manager.warmRuntimeSessions({
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      }),
+    ).resolves.toBe(1);
+
+    expect(startCount).toBe(1);
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toMatchObject({
+      agentSessionId: "provider-session",
+      bridgeProfileId: "codex:default",
+      organizationId: "org-1",
+      threadId: "thread-1",
+    });
+    expect(manager.getStatus().sessions).toEqual([
+      expect.objectContaining({
+        agentSessionId: "provider-session",
+        organizationId: "org-1",
+        runtimeProfileId: "codex:default",
+        threadId: "thread-1",
+      }),
+    ]);
+  });
+
   test("bounds retained warm candidates to the newest sessions", async () => {
     const contexts: BridgeSessionContext[] = [];
     let startCount = 0;

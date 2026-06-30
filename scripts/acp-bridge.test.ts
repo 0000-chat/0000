@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   BRIDGE_VERSION,
   buildBridgeRestartHandoff,
+  buildBridgeCapacitySnapshot,
   buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
   buildHeartbeatStatusPayload,
@@ -156,6 +157,63 @@ describe("bridge capacity configuration", () => {
         { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
       ),
     ).toBe(9);
+  });
+
+  test("counts retained warm sessions against the shared bridge capacity", () => {
+    const activeWork = new Map<string, Promise<void>>([
+      ["queue-active", Promise.resolve()],
+    ]);
+    const snapshot = buildBridgeCapacitySnapshot(
+      [
+        {
+          inFlightCommands: new Map(),
+          manager: {
+            getStatus: () => ({
+              activeSessions: [],
+              retainedSessions: [],
+              terminalInteractionSessionKeyCount: 0,
+              sessions: [
+                {
+                  lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 0),
+                  queueDepth: 0,
+                  sessionKey: "warm-session",
+                  threadId: "thread-warm",
+                },
+              ],
+            }),
+          },
+          orgMaxInFlight: 2,
+        },
+        {
+          inFlightCommands: activeWork,
+          manager: {
+            getStatus: () => ({
+              activeSessions: ["active-session"],
+              retainedSessions: [],
+              terminalInteractionSessionKeyCount: 0,
+              sessions: [
+                {
+                  lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 1),
+                  queueDepth: 1,
+                  runningQueueItemId: "queue-active",
+                  sessionKey: "active-session",
+                  threadId: "thread-active",
+                },
+              ],
+            }),
+          },
+          orgMaxInFlight: 2,
+        },
+      ],
+      3,
+    );
+
+    expect(snapshot).toMatchObject({
+      bridgeMaxInFlight: 3,
+      processSlotUsage: 2,
+      retainedSessionCount: 1,
+      totalInFlight: 1,
+    });
   });
 
   test("parses explicit warm runtime profiles from flags and env", () => {
@@ -442,7 +500,10 @@ describe("bridge restart handoff", () => {
       ],
       sessionQueues: [
         {
+          agentSessionId: "provider-session",
+          bridgeProfileId: "codex:default",
           lastUsedAt: Date.UTC(2026, 5, 22, 8, 55, 0),
+          organizationId: "org-1",
           queueDepth: 1,
           runningQueueItemId: "queue-1",
           runtimeProfileId: "codex:default",
@@ -493,6 +554,9 @@ describe("bridge restart handoff", () => {
         runtimeProfileIds: ["codex:default"],
         sessionWarmupHints: [
           expect.objectContaining({
+            agentSessionId: "provider-session",
+            bridgeProfileId: "codex:default",
+            organizationId: "org-1",
             runtimeProfileId: "codex:default",
             threadId: "thread-1",
           }),

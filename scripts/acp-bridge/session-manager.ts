@@ -197,6 +197,7 @@ type BridgeSessionRecord = {
   hermesProfileName?: string;
   generation: number;
   providerSessionKey: string;
+  organizationId?: string;
   scopeConversationId: string;
   scopeKeyWithoutAgent: string;
   terminalScope?: TerminalHandleScope;
@@ -345,6 +346,9 @@ export type BridgeSessionManagerStatus = {
 export type BridgeSessionManagerSessionStatus = {
   sessionKey: string;
   threadId: string;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  organizationId?: string;
   launchSpecKey?: string;
   launchSpecSummary?: BridgeLaunchSpecSummary;
   runtimeProfileId?: string;
@@ -365,6 +369,25 @@ export type BridgeWarmRuntimeSessionRequest = {
   runtimeProfileIds: string[];
   maxSessions?: number;
   canStartSession?: () => boolean;
+};
+
+export type BridgeWarmRuntimeSessionSeed = {
+  agentName?: string;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  cwd?: string;
+  hermesProfileName?: string;
+  lastUsedAt?: number;
+  launchSpecKey?: string;
+  mailboxConversationId?: string;
+  organizationId?: string;
+  runtimeProfileId?: string;
+  sessionId?: string;
+  threadId: string;
+};
+
+export type BridgeWarmRuntimeSessionSeedRequest = {
+  candidates: BridgeWarmRuntimeSessionSeed[];
 };
 
 export type BridgeSessionLogEntry = BridgeLogEntry;
@@ -622,6 +645,9 @@ export class BridgeSessionManager {
       return {
         sessionKey: session.sessionKey,
         threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+        bridgeProfileId: session.runtimeProfile?.id,
+        organizationId: session.organizationId,
         launchSpecKey: session.launchSpecKey,
         launchSpecSummary: session.launchSpecSummary,
         runtimeProfileId: session.runtimeProfile?.id,
@@ -761,6 +787,51 @@ export class BridgeSessionManager {
       warmedCount += 1;
     }
     return warmedCount;
+  }
+
+  seedWarmRuntimeSessions(
+    request: BridgeWarmRuntimeSessionSeedRequest,
+  ): number {
+    let seededCount = 0;
+    for (const candidate of request.candidates) {
+      const threadId = candidate.threadId.trim();
+      if (!threadId) {
+        continue;
+      }
+      const item = warmSessionQueueItemFromSeed(candidate, threadId);
+      if (
+        this.requireScopedIdentity &&
+        (!item.organizationId || !item.agentSessionId)
+      ) {
+        continue;
+      }
+      const sessionKey = this.sessionKeyForItem(item);
+      if (!sessionKey) {
+        continue;
+      }
+      this.warmSessionCandidates.set(sessionKey, {
+        agentName: candidate.agentName,
+        agentSessionId: item.agentSessionId,
+        bridgeProfileId: item.bridgeProfileId,
+        cwd: item.cwd,
+        hermesProfileName: item.hermesProfileName,
+        lastUsedAt:
+          typeof candidate.lastUsedAt === "number" &&
+          Number.isFinite(candidate.lastUsedAt)
+            ? candidate.lastUsedAt
+            : this.nextSessionUsageTimestamp(),
+        launchSpecKey: candidate.launchSpecKey,
+        mailboxConversationId: item.mailboxConversationId,
+        organizationId: item.organizationId,
+        runtimeProfileId: candidate.runtimeProfileId ?? item.bridgeProfileId,
+        sessionId: item.sessionId,
+        sessionKey,
+        threadId,
+      });
+      seededCount += 1;
+    }
+    this.pruneWarmSessionCandidates();
+    return seededCount;
   }
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
@@ -2492,6 +2563,7 @@ export class BridgeSessionManager {
       agentName: normalizeAgentName(item.agentName),
       generation,
       providerSessionKey,
+      organizationId: item.organizationId,
       scopeConversationId: item.mailboxConversationId ?? threadId,
       scopeKeyWithoutAgent,
       terminalScope,
@@ -3687,6 +3759,25 @@ function warmSessionQueueItem(
     organizationId: candidate.organizationId,
     sessionId: candidate.sessionId,
     threadId: candidate.threadId,
+    type: "start-session",
+  }) as BridgeSessionQueueItem;
+}
+
+function warmSessionQueueItemFromSeed(
+  candidate: BridgeWarmRuntimeSessionSeed,
+  threadId: string,
+): BridgeSessionQueueItem {
+  return removeUndefinedValues({
+    agentName: candidate.agentName,
+    agentSessionId: candidate.agentSessionId,
+    bridgeProfileId: candidate.bridgeProfileId ?? candidate.runtimeProfileId,
+    cwd: candidate.cwd,
+    hermesProfileName: candidate.hermesProfileName,
+    id: `warm-seed:${threadId}`,
+    mailboxConversationId: candidate.mailboxConversationId,
+    organizationId: candidate.organizationId,
+    sessionId: candidate.sessionId,
+    threadId,
     type: "start-session",
   }) as BridgeSessionQueueItem;
 }

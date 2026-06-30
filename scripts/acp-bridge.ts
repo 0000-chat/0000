@@ -295,6 +295,8 @@ export type BridgeStatus = {
     orgMaxInFlight?: number;
     bridgeConfiguredMaxInFlight?: number;
     bridgeMaxInFlight?: number;
+    processSlotUsage?: number;
+    retainedSessionCount?: number;
     totalInFlight?: number;
     localHardMaxInFlight?: number;
   };
@@ -371,6 +373,9 @@ export type BridgeRestartHandoffStatus = {
 type BridgeSessionSummary = {
   sessionKey: string;
   threadId: string;
+  agentSessionId?: string;
+  bridgeProfileId?: string;
+  organizationId?: string;
   runtimeProfileId?: string;
   runtimeLabel?: string;
   runtimeKind?: string;
@@ -461,8 +466,13 @@ export type BridgeRestartHandoffEntry = {
   deviceId: string;
   runtimeProfileIds: string[];
   sessionWarmupHints: Array<{
+    agentSessionId?: string;
+    bridgeProfileId?: string;
+    hermesProfileName?: string;
     lastUsedAt?: number;
+    organizationId?: string;
     runtimeProfileId?: string;
+    sessionId?: string;
     threadId: string;
   }>;
 };
@@ -686,6 +696,7 @@ type BridgeLoopManager = Pick<
   "getStatus" | "handleQueueItem"
 > & {
   closeIdleSessionsForProcessPressure?: BridgeSessionManager["closeIdleSessionsForProcessPressure"];
+  seedWarmRuntimeSessions?: BridgeSessionManager["seedWarmRuntimeSessions"];
   warmRuntimeSessions?: BridgeSessionManager["warmRuntimeSessions"];
   failActiveQueueItem?: (
     queueItemId: string,
@@ -1107,9 +1118,10 @@ function normalizeControlUpdatedAt(value: unknown): number | undefined {
     : undefined;
 }
 
-function buildBridgeCapacitySnapshot(
+export function buildBridgeCapacitySnapshot(
   contexts: Iterable<{
     inFlightCommands: Map<string, Promise<void>>;
+    manager?: Pick<BridgeLoopManager, "getStatus">;
     orgMaxInFlight: number;
   }>,
   localHardMaxInFlight: number | undefined,
@@ -1127,14 +1139,34 @@ function buildBridgeCapacitySnapshot(
     (sum, context) => sum + context.inFlightCommands.size,
     0,
   );
+  const retainedSessionCount = list.reduce(
+    (sum, context) => sum + retainedBridgeSessionCount(context.manager),
+    0,
+  );
+  const processSlotUsage = totalInFlight + retainedSessionCount;
   return {
     bridgeConfiguredMaxInFlight,
     bridgeMaxInFlight,
+    processSlotUsage,
+    retainedSessionCount,
     totalInFlight,
     ...(localHardMaxInFlight === undefined
       ? {}
       : { localHardMaxInFlight }),
   };
+}
+
+function retainedBridgeSessionCount(
+  manager: Pick<BridgeLoopManager, "getStatus"> | undefined,
+): number {
+  if (!manager) {
+    return 0;
+  }
+  const status = manager.getStatus();
+  const activeSessionKeys = new Set(status.activeSessions);
+  return status.sessions.filter(
+    (session) => !activeSessionKeys.has(session.sessionKey),
+  ).length;
 }
 
 export function getAllowRemoteCwd(
@@ -2112,6 +2144,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         wakeSignal,
         orgMaxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
       };
+      const restartHandoffSeededSessionCount =
+        handoffEntry && manager.seedWarmRuntimeSessions
+          ? manager.seedWarmRuntimeSessions({
+              candidates: handoffEntry.sessionWarmupHints.map((hint) => ({
+                ...hint,
+                bridgeProfileId: hint.bridgeProfileId ?? hint.runtimeProfileId,
+              })),
+            })
+          : 0;
       contexts.set(registration.deviceId, context);
       log({
         level: "info",
@@ -2124,6 +2165,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         processStartToken: BRIDGE_PROCESS_START_TOKEN,
         runtimeConformance: runtimeConformanceSummary(),
         restartHandoffConsumed: Boolean(handoffEntry),
+        restartHandoffSeededSessionCount,
         restartHandoffSessionHintCount:
           handoffEntry?.sessionWarmupHints.length,
       });
@@ -2354,12 +2396,14 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     const availableProcessSlots = Math.max(
       0,
       (bridgeCapacity.bridgeMaxInFlight ?? 0) -
-        totalInFlight() -
+        (bridgeCapacity.processSlotUsage ?? totalInFlight()) -
         reservedClaimSlots,
     );
     const availableOrgSlots = Math.max(
       0,
-      context.orgMaxInFlight - context.inFlightCommands.size,
+      context.orgMaxInFlight -
+        context.inFlightCommands.size -
+        retainedBridgeSessionCount(context.manager),
     );
     const reservedSlots = Math.min(availableOrgSlots, availableProcessSlots);
     reservedClaimSlots += reservedSlots;
@@ -2493,7 +2537,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       getRuntimeConformance: runtimeConformanceSummary,
       writeStatus: persistAggregateStatus,
       wakeSignal: context.wakeSignal,
-      warmRuntimeProfileIds,
+      warmRuntimeProfileIds: bridgeWarmRuntimeProfileIdsForStatus(
+        warmRuntimeProfileIds,
+        context.status,
+      ),
       heartbeatIntervalMs:
         pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
       pollReason,
@@ -2959,11 +3006,15 @@ function buildBridgeRestartHandoffEntry(
     .filter((session) => session.threadId.trim())
     .map((session) =>
       compact({
+        agentSessionId: session.agentSessionId,
+        bridgeProfileId: session.bridgeProfileId ?? session.runtimeProfileId,
+        hermesProfileName: session.hermesProfileName,
         lastUsedAt:
           typeof session.lastUsedAt === "number" &&
           Number.isFinite(session.lastUsedAt)
             ? session.lastUsedAt
             : undefined,
+        organizationId: session.organizationId,
         runtimeProfileId: session.runtimeProfileId,
         threadId: session.threadId,
       }),
@@ -3132,11 +3183,21 @@ function normalizeBridgeRestartHandoffEntry(
     if (!threadId) {
       continue;
     }
+    const agentSessionId = stringFromUnknown(hint.agentSessionId)?.trim();
+    const bridgeProfileId = stringFromUnknown(hint.bridgeProfileId)?.trim();
+    const hermesProfileName = stringFromUnknown(hint.hermesProfileName)?.trim();
     const lastUsedAt = numberFromUnknown(hint.lastUsedAt);
     const runtimeProfileId = stringFromUnknown(hint.runtimeProfileId);
+    const organizationId = stringFromUnknown(hint.organizationId)?.trim();
+    const sessionId = stringFromUnknown(hint.sessionId)?.trim();
     sessionWarmupHints.push({
+      ...(agentSessionId ? { agentSessionId } : {}),
+      ...(bridgeProfileId ? { bridgeProfileId } : {}),
+      ...(hermesProfileName ? { hermesProfileName } : {}),
       ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
+      ...(organizationId ? { organizationId } : {}),
       ...(runtimeProfileId ? { runtimeProfileId } : {}),
+      ...(sessionId ? { sessionId } : {}),
       threadId,
     });
     if (sessionWarmupHints.length >= BRIDGE_RESTART_HANDOFF_MAX_SESSIONS) {
@@ -3193,13 +3254,27 @@ function restartHandoffEntryPriorityProfileIds(
       [
         ...entry.runtimeProfileIds,
         ...entry.sessionWarmupHints
-          .map((hint) => hint.runtimeProfileId)
+          .flatMap((hint) => [hint.runtimeProfileId, hint.bridgeProfileId])
           .filter((id): id is string => Boolean(id)),
       ]
         .map((id) => id.trim())
         .filter(Boolean),
     ),
   ).slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
+}
+
+function bridgeWarmRuntimeProfileIdsForStatus(
+  configuredProfileIds: string[],
+  status: BridgeStatus,
+): string[] {
+  return Array.from(
+    new Set([
+      ...configuredProfileIds,
+      ...(status.restartHandoff?.startupPriorityRuntimeProfileIds ?? []),
+    ]),
+  )
+    .map((id) => id.trim())
+    .filter(Boolean);
 }
 
 async function unlinkIfExists(path: string): Promise<void> {
