@@ -341,6 +341,10 @@ export type BridgeSessionManagerOptions = {
     context: BridgeTerminalContext,
     params: CreateTerminalRequest,
   ) => Promise<SdkAcpRuntimeTerminalHandle>;
+  onQueueResultMarked?: (
+    item: BridgeSessionQueueItem,
+    result: Record<string, unknown>,
+  ) => void;
 };
 
 export type BridgeSessionManagerStatus = {
@@ -559,6 +563,10 @@ export class BridgeSessionManager {
         params: CreateTerminalRequest,
       ) => Promise<SdkAcpRuntimeTerminalHandle>)
     | undefined;
+  private readonly onQueueResultMarked?: (
+    item: BridgeSessionQueueItem,
+    result: Record<string, unknown>,
+  ) => void;
   private readonly createSession: (
     context: BridgeSessionContext,
   ) => ManagedAcpSession;
@@ -629,6 +637,7 @@ export class BridgeSessionManager {
     this.closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
     this.terminalRegistry = options.terminalRegistry;
     this.createTerminal = options.createTerminal;
+    this.onQueueResultMarked = options.onQueueResultMarked;
     this.createMcpServers = options.createMcpServers ?? (() => []);
     this.createSession =
       options.createSession ??
@@ -2359,6 +2368,7 @@ export class BridgeSessionManager {
       item.claimId ? { ...result, claimId: item.claimId } : result,
       item.claimId,
     );
+    this.onQueueResultMarked?.(item, result);
   }
 
   private async closeSession(
