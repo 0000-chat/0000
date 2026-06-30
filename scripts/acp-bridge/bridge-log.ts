@@ -61,6 +61,8 @@ export const bridgeLogEventNames = [
   "bridge.queue_item.complete",
   "bridge.queue_item.error",
   "bridge.queue_item.externally_terminalized",
+  "bridge.queue_item.first_assistant_text",
+  "bridge.queue_item.first_runtime_activity",
   "bridge.queue_item.in_flight",
   "bridge.queue_item.settled",
   "bridge.queue_item.start",

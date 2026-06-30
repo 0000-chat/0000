@@ -88,6 +88,11 @@ import {
   type RuntimeConformanceRecord,
   type RuntimeConformanceSummary,
 } from "./acp-bridge/runtime-conformance";
+import {
+  DEFAULT_RUNTIME_CATALOG_CACHE_PATH,
+  loadRuntimeCatalogCache,
+  writeRuntimeCatalogCache,
+} from "./acp-bridge/runtime-catalog-cache";
 export {
   defaultAgentCommandForEnvironment,
   defaultProposedAgentName,
@@ -607,6 +612,10 @@ type InFlightCommandMetadata = BridgeTerminalizationMetadata & {
   sessionId?: string;
   agentSessionId?: string;
   bridgeProfileId?: string;
+  createdAt?: string;
+  createdAtMs?: number;
+  claimedAt?: string;
+  claimedAtMs?: number;
   startedAt: string;
 };
 
@@ -1615,18 +1624,37 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const idleSessionTtlMs = getAcpIdleTtlMs(parsed.flags);
   const allowRemoteCwd = getAllowRemoteCwd(parsed.flags);
   const logUrl = getBridgeLogUrl(parsed.flags, process.env);
+  const runtimeCatalogCachePath = getRuntimeCatalogCachePath(parsed.flags);
+  const runtimeCommandKeys = runtimeCatalogCommandKeys({
+    agentCommand,
+    customRuntimeCommands,
+  });
+  const cachedRuntimeCatalog = await loadRuntimeCatalogCache({
+    bridgeVersion: BRIDGE_VERSION,
+    cachePath: runtimeCatalogCachePath,
+    now: Date.now(),
+    runtimeCommandKeys,
+    ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+  }).catch(() => null);
   const hermesProfiles = await discoverHermesProfiles().catch(() => []);
-  const runtimeProfiles = await discoverBridgeRuntimeProfiles({
-    baseAgentCommand: agentCommand,
-    customCommands: customRuntimeCommands,
-  }).catch(() => []);
-  const launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
+  let runtimeProfiles =
+    cachedRuntimeCatalog?.profiles ??
+    (await discoverBridgeRuntimeProfiles({
+      baseAgentCommand: agentCommand,
+      customCommands: customRuntimeCommands,
+    }).catch(() => []));
+  let launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
     hermesProfiles,
     runtimeProfiles,
   });
-  const conformanceProfiles = [...runtimeProfiles, ...launchSpecRuntimeProfiles];
-  let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> = {};
-  const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>();
+  let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> =
+    cachedRuntimeCatalog?.conformanceRecords ?? {};
+  const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>(
+    Object.entries(runtimeConformanceRecords).map(([profileId, record]) => [
+      profileId,
+      record.checkedAt,
+    ]),
+  );
   const runtimeConformanceSummary = () => {
     const summary = summarizeRuntimeConformance({
       activeProfileIds: bridgeActiveRuntimeProfileIds(contexts.values()),
@@ -1670,6 +1698,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   const contexts = new Map<string, RuntimeContext>();
   let stopping = false;
   let reservedClaimSlots = 0;
+  let startupRuntimeCatalogRefreshScheduled = false;
 
   const aggregateStatus = () =>
     buildAggregateBridgeStatus(
@@ -1689,6 +1718,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       (count, context) => count + context.inFlightCommands.size,
       0,
     );
+  const persistRuntimeCatalogCache = async () => {
+    await writeRuntimeCatalogCache({
+      bridgeVersion: BRIDGE_VERSION,
+      cachePath: runtimeCatalogCachePath,
+      conformanceRecords: runtimeConformanceRecords,
+      now: Date.now(),
+      profiles: runtimeProfiles,
+      runtimeCommandKeys,
+      ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
+    }).catch(() => undefined);
+  };
   const refreshRuntimeConformanceIfStale = async (
     options: { force?: boolean } = {},
   ) => {
@@ -1721,14 +1761,56 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             }),
           profile,
         }),
-      profiles: conformanceProfiles,
+      profiles: [...runtimeProfiles, ...launchSpecRuntimeProfiles],
       records: runtimeConformanceRecords,
       ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
     });
     runtimeConformanceRecords = refreshed.records;
+    await persistRuntimeCatalogCache();
     for (const context of contexts.values()) {
       context.status.runtimeConformance = runtimeConformanceSummary();
     }
+  };
+  const refreshRuntimeCatalogInBackground = () => {
+    void (async () => {
+      const nextHermesProfiles = await discoverHermesProfiles().catch(
+        () => hermesProfiles,
+      );
+      const discoveredRuntimeProfiles = await discoverBridgeRuntimeProfiles({
+        baseAgentCommand: agentCommand,
+        customCommands: customRuntimeCommands,
+      }).catch(() => runtimeProfiles);
+      const runtimeCatalogChanged = runtimeProfilesChanged(
+        runtimeProfiles,
+        discoveredRuntimeProfiles,
+      );
+      runtimeProfiles = discoveredRuntimeProfiles;
+      launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
+        hermesProfiles: nextHermesProfiles,
+        runtimeProfiles,
+      });
+      for (const context of contexts.values()) {
+        context.status.hermesProfiles = nextHermesProfiles;
+        context.status.runtimeProfiles = runtimeProfiles;
+        context.status.lastHermesProfileRefreshAt = new Date().toISOString();
+        context.status.lastRuntimeProfileRefreshAt = new Date().toISOString();
+        if (runtimeCatalogChanged) {
+          context.status.lifecycle = "restartPending";
+          context.status.pendingControlCommand = {
+            command: "restartWhenIdle",
+            requestedAt: Date.now(),
+          };
+          context.status.updateState = buildBridgeUpdateState(
+            "waitingForIdle",
+            Date.now(),
+            { requestedAt: context.status.pendingControlCommand.requestedAt },
+          );
+        }
+      }
+      if (!runtimeCatalogChanged) {
+        await refreshRuntimeConformanceIfStale({ force: true });
+      }
+    })().catch(() => undefined);
   };
   const ensureContexts = async () => {
     const latestConfig = await readBridgeConfigFile(configPath);
@@ -2327,6 +2409,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     await ensureContexts();
     await refreshRuntimeConformanceIfStale();
     startContextLoops();
+    if (cachedRuntimeCatalog && !startupRuntimeCatalogRefreshScheduled) {
+      startupRuntimeCatalogRefreshScheduled = true;
+      refreshRuntimeCatalogInBackground();
+    }
     await sleep(pollMs);
   }
 }
@@ -2929,6 +3015,30 @@ export async function runBridgeLoopIteration(
     );
   };
   const runCommand = (command: BridgeQueueCommand) => {
+    const localDispatchAtMs = currentTime();
+    const claimedAtMs =
+      command.claimedAtMs ??
+      timestampMsFromUnknown(command.claimedAt) ??
+      localDispatchAtMs;
+    const claimedAt =
+      command.claimedAt ??
+      (claimedAtMs === undefined
+        ? undefined
+        : new Date(claimedAtMs).toISOString());
+    const createdAtMs =
+      command.createdAtMs ?? timestampMsFromUnknown(command.createdAt);
+    const createdAt =
+      command.createdAt ??
+      (createdAtMs === undefined
+        ? undefined
+        : new Date(createdAtMs).toISOString());
+    const commandWithTiming: BridgeQueueCommand = {
+      ...command,
+      createdAt,
+      createdAtMs,
+      claimedAt,
+      claimedAtMs,
+    };
     input.inFlightCommandMetadata.set(command.id, {
       id: command.id,
       type: command.type ?? command.kind,
@@ -2936,7 +3046,11 @@ export async function runBridgeLoopIteration(
       sessionId: command.sessionId,
       agentSessionId: command.agentSessionId,
       bridgeProfileId: command.bridgeProfileId,
-      startedAt: new Date(currentTime()).toISOString(),
+      createdAt,
+      createdAtMs,
+      claimedAt,
+      claimedAtMs,
+      startedAt: new Date(localDispatchAtMs).toISOString(),
     });
     input.log({
       level: "info",
@@ -2949,7 +3063,7 @@ export async function runBridgeLoopIteration(
       agentSessionId: command.agentSessionId,
     });
     const task = input.manager
-      .handleQueueItem(command)
+      .handleQueueItem(commandWithTiming)
       .catch(input.recordLoopError)
       .finally(() => {
         const wasInFlight = input.inFlightCommands.delete(command.id);
@@ -3068,7 +3182,7 @@ export async function runBridgeLoopIteration(
             const refreshedAt = new Date(currentTime()).toISOString();
             input.status.lastHermesProfileRefreshAt = refreshedAt;
             input.status.lastRuntimeProfileRefreshAt = refreshedAt;
-            const runtimeCommandChanged = runtimeProfileCommandsChanged(
+            const runtimeCatalogChanged = runtimeProfilesChanged(
               previousRuntimeProfiles,
               refreshedRuntimeProfiles,
             );
@@ -3078,9 +3192,9 @@ export async function runBridgeLoopIteration(
               deviceId: input.config.deviceId,
               profileCount: input.status.hermesProfiles.length,
               runtimeProfileCount: refreshedRuntimeProfiles.length,
-              runtimeCommandChanged,
+              runtimeCommandChanged: runtimeCatalogChanged,
             });
-            if (runtimeCommandChanged) {
+            if (runtimeCatalogChanged) {
               input.status.lifecycle = "restarting";
               input.status.updateState = buildBridgeUpdateState(
                 "restarting",
@@ -3128,6 +3242,11 @@ export async function runBridgeLoopIteration(
         await input.log.flush();
       } catch {}
       return restartResult;
+    }
+    if (normalizeControlCommand(input.status.pendingControlCommand)) {
+      syncBridgeStatus();
+      await persistStatus(input.statusPath, input.status);
+      return { restartRequested: false };
     }
     for (const watchdog of input.watchdogFailures ?? []) {
       if (watchdog.checkpoint === "quiet") {
@@ -3477,14 +3596,14 @@ export function bridgeHeartbeatSignature(
   });
 }
 
-function runtimeProfileCommandsChanged(
+function runtimeProfilesChanged(
   previousProfiles: BridgeRuntimeProfile[],
   refreshedProfiles: BridgeRuntimeProfile[],
 ): boolean {
   const previousById = new Map(
     previousProfiles.map((profile) => [
       profile.id,
-      profile.command.join("\u0000"),
+      runtimeProfileCatalogSignature(profile),
     ]),
   );
   const refreshedIds = new Set(refreshedProfiles.map((profile) => profile.id));
@@ -3492,15 +3611,22 @@ function runtimeProfileCommandsChanged(
     return true;
   }
   for (const profile of refreshedProfiles) {
-    const previousCommand = previousById.get(profile.id);
+    const previousSignature = previousById.get(profile.id);
     if (
-      previousCommand === undefined ||
-      previousCommand !== profile.command.join("\u0000")
+      previousSignature === undefined ||
+      previousSignature !== runtimeProfileCatalogSignature(profile)
     ) {
       return true;
     }
   }
   return false;
+}
+
+function runtimeProfileCatalogSignature(profile: BridgeRuntimeProfile): string {
+  return JSON.stringify({
+    capabilities: profile.capabilities,
+    command: profile.command,
+  });
 }
 
 function syncBridgeRuntimeStatus(
@@ -3777,6 +3903,29 @@ function getStatusPath(
     getFlag(flags, "status-file", env.ZERO_CHAT_BRIDGE_STATUS) ??
     DEFAULT_STATUS_PATH
   );
+}
+
+function getRuntimeCatalogCachePath(
+  flags: FlagMap,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return (
+    getFlag(
+      flags,
+      "runtime-catalog-cache",
+      env.ZERO_CHAT_RUNTIME_CATALOG_CACHE,
+    ) ?? DEFAULT_RUNTIME_CATALOG_CACHE_PATH
+  );
+}
+
+function runtimeCatalogCommandKeys(input: {
+  agentCommand: string;
+  customRuntimeCommands: string[][];
+}): string[][] {
+  return [
+    splitCommand(input.agentCommand),
+    ...input.customRuntimeCommands,
+  ].filter((command) => command.length > 0);
 }
 
 function getBridgeJournalPath(
@@ -4975,9 +5124,23 @@ export function normalizeQueueCommand(
   const approvalOutcome =
     stringFromUnknown(record.approvalOutcome) ??
     (type === "choice-response" ? payloadText : undefined);
+  const createdAtMs = timestampMsFromUnknown(record.createdAt);
+  const claimedAtMs = timestampMsFromUnknown(record.claimedAt);
   return {
     id,
     claimId: stringFromUnknown(record.claimId),
+    claimedAt:
+      stringFromUnknown(record.claimedAt) ??
+      (claimedAtMs === undefined
+        ? undefined
+        : new Date(claimedAtMs).toISOString()),
+    claimedAtMs,
+    createdAt:
+      stringFromUnknown(record.createdAt) ??
+      (createdAtMs === undefined
+        ? undefined
+        : new Date(createdAtMs).toISOString()),
+    createdAtMs,
     type,
     attachments: attachmentsFromUnknown(record.attachments),
     threadId: stringFromUnknown(record.threadId),
@@ -5075,6 +5238,17 @@ function numberFromUnknown(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+function timestampMsFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function stringRecordFromUnknown(

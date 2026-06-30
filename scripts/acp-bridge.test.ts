@@ -1266,6 +1266,81 @@ describe("bridge supervisor claim gating", () => {
     expect(status.lifecycle).toBe("restarting");
   });
 
+  test("requests restart when refreshed runtime profile capabilities change", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let claimCalled = false;
+    let heartbeatCount = 0;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    };
+
+    const result = await runBridgeLoopIteration({
+      claimCommands: async () => {
+        claimCalled = true;
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      discoverHermesProfiles: async () => [],
+      discoverRuntimeProfiles: async () => [
+        {
+          capabilities: { sessionMcpServers: true, supportsPlans: true },
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 5, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1;
+        return heartbeatCount === 1
+          ? {
+              ok: true,
+              control: { refreshRuntimeProfiles: { requestedAt: "now" } },
+            }
+          : { ok: true };
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(result.restartRequested).toBe(true);
+    expect(claimCalled).toBe(false);
+    expect(status.lifecycle).toBe("restarting");
+  });
+
   test("applies bridge capacity settings returned by heartbeat control", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     let appliedSettings: unknown;
@@ -2225,12 +2300,17 @@ describe("bridge supervisor claim gating", () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
     const handled: Array<Record<string, unknown>> = [];
+    const inFlightCommandMetadata = new Map();
+    const backendClaimedAtMs = Date.parse("2026-06-30T12:00:00.250Z");
+    const localDispatchAtMs = Date.parse("2026-06-30T12:00:01.000Z");
 
     await runBridgeLoopIteration({
       claimCommands: async () => [
         {
           agentSessionId: "agent-session-1",
           claimId: "claim-1",
+          claimedAt: "2026-06-30T12:00:00.250Z",
+          createdAt: "2026-06-30T12:00:00.000Z",
           id: "queue-cancel-1",
           kind: "cancel-session",
           threadId: "thread-1",
@@ -2239,7 +2319,7 @@ describe("bridge supervisor claim gating", () => {
       ],
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
       config: bridgeRegistration(),
-      inFlightCommandMetadata: new Map(),
+      inFlightCommandMetadata,
       inFlightCommands: new Map(),
       lastStaleCleanupAt: Date.now(),
       log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
@@ -2253,9 +2333,17 @@ describe("bridge supervisor claim gating", () => {
         }),
         handleQueueItem: async (item) => {
           handled.push(item as unknown as Record<string, unknown>);
+          expect(inFlightCommandMetadata.get("queue-cancel-1")).toMatchObject({
+            claimedAt: "2026-06-30T12:00:00.250Z",
+            claimedAtMs: backendClaimedAtMs,
+            createdAt: "2026-06-30T12:00:00.000Z",
+            createdAtMs: Date.parse("2026-06-30T12:00:00.000Z"),
+            id: "queue-cancel-1",
+          });
         },
       },
       maxInFlight: 1,
+      now: () => localDispatchAtMs,
       recordLoopError: async (error) => {
         throw error;
       },
@@ -2274,8 +2362,13 @@ describe("bridge supervisor claim gating", () => {
       expect.objectContaining({
         id: "queue-cancel-1",
         type: "cancel-session",
+        claimedAt: "2026-06-30T12:00:00.250Z",
+        claimedAtMs: backendClaimedAtMs,
+        createdAt: "2026-06-30T12:00:00.000Z",
+        createdAtMs: Date.parse("2026-06-30T12:00:00.000Z"),
       }),
     ]);
+    expect(inFlightCommandMetadata.size).toBe(0);
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "bridge.queue_item.in_flight",

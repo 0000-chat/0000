@@ -4473,6 +4473,92 @@ describe("bridge session cwd safety", () => {
     });
   });
 
+  test("logs first runtime activity and first assistant text once per organization queue item", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const runtimeProfiles = [
+      {
+        capabilities: {},
+        command: ["hermes", "acp"],
+        id: "profile-1",
+        kind: "hermes" as const,
+        label: "Hermes",
+        status: "available" as const,
+      },
+    ];
+    const manager = new BridgeSessionManager({
+      cloudClient: fakeCloudClient(),
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          context.onEvent(streamChunkEvent("agent_message_chunk", "hello", 2));
+          context.onEvent(streamChunkEvent("agent_message_chunk", "again", 3));
+          return {
+            events: [],
+            rawResult: { stopReason: "end_turn" },
+            sessionId: "session-1",
+            stopReason: "end_turn",
+            text: "visible answer",
+          };
+        },
+      }),
+      log: (entry) => logs.push(entry as Record<string, unknown>),
+      runtimeProfiles,
+    });
+    const createdAtMs = Date.now() - 1_000;
+    const claimedAtMs = Date.now() - 500;
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "profile-1",
+      claimedAtMs,
+      createdAtMs,
+      organizationId: "org-1",
+    });
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "profile-1",
+      claimedAtMs,
+      createdAtMs,
+      organizationId: "org-2",
+    });
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "profile-1",
+      claimedAtMs,
+      createdAtMs,
+      organizationId: "org-1",
+    });
+
+    const firstActivityLogs = logs.filter(
+      (entry) => entry.event === "bridge.queue_item.first_runtime_activity",
+    );
+    const firstTextLogs = logs.filter(
+      (entry) => entry.event === "bridge.queue_item.first_assistant_text",
+    );
+    expect(firstActivityLogs).toHaveLength(3);
+    expect(firstTextLogs).toHaveLength(3);
+    expect(firstActivityLogs).toContainEqual(
+      expect.objectContaining({
+        bridgeProfileId: "profile-1",
+        event: "bridge.queue_item.first_runtime_activity",
+        organizationId: "org-1",
+        queueCreatedToFirstOutputMs: expect.any(Number),
+        queueId: "queue-prompt",
+        runtimeEventType: "tool_call",
+      }),
+    );
+    expect(firstTextLogs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.first_assistant_text",
+        organizationId: "org-1",
+        queueId: "queue-prompt",
+        runtimeEventType: "agent_message_chunk",
+      }),
+    );
+  });
+
   test("keeps attachment-only assistant output successful", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({

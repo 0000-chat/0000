@@ -56,6 +56,10 @@ import type {
 export type BridgeSessionQueueItem = {
   id: string;
   claimId?: string;
+  claimedAt?: string;
+  claimedAtMs?: number;
+  createdAt?: string;
+  createdAtMs?: number;
   type?: string;
   kind?: string;
   attachments?: BridgeQueueAttachment[];
@@ -525,6 +529,8 @@ export class BridgeSessionManager {
     string,
     BridgeSessionQueueItem
   >();
+  private readonly firstAssistantTextLoggedQueueItems = new Set<string>();
+  private readonly firstRuntimeActivityLoggedQueueItems = new Set<string>();
   private readonly eventBatch: BridgeEventInput[] = [];
   private readonly pendingEventWrites: Promise<EventWriteOutcome>[] = [];
   private pendingStreamChunkEvent: CoalescedBridgeStreamChunkEvent | undefined;
@@ -806,6 +812,7 @@ export class BridgeSessionManager {
       );
     } finally {
       this.activeQueueItems.delete(item.id);
+      this.clearFirstOutputLogState(item);
       if (!this.sessionQueueStateHasQueueItem(item.id)) {
         this.externallyTerminalizedQueueItemIds.delete(item.id);
       }
@@ -882,6 +889,7 @@ export class BridgeSessionManager {
       await this.closeSession(sessionKey, { terminalInteraction: true });
     }
     this.activeQueueItems.delete(queueItemId);
+    this.clearFirstOutputLogState(item);
     return true;
   }
 
@@ -892,6 +900,8 @@ export class BridgeSessionManager {
     }
     this.activeToolTimeoutFailures.clear();
     this.lastSessionEventQueueItems.clear();
+    this.firstAssistantTextLoggedQueueItems.clear();
+    this.firstRuntimeActivityLoggedQueueItems.clear();
     const sessions = Array.from(this.sessions.values());
     this.sessions.clear();
     await Promise.all(
@@ -2417,6 +2427,8 @@ export class BridgeSessionManager {
               record,
               item,
             );
+            this.writeFirstRuntimeActivityLog(eventItem, record, event);
+            this.writeFirstAssistantTextLog(eventItem, record, event);
             this.recordLivenessEvent(
               eventItem.id,
               event.eventType.includes("tool")
@@ -2644,6 +2656,76 @@ export class BridgeSessionManager {
       return this.lastSessionEventQueueItems.get(record.sessionKey) ?? fallback;
     }
     return this.activeQueueItems.get(runningQueueItemId) ?? fallback;
+  }
+
+  private writeFirstRuntimeActivityLog(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    const key = queueItemOnceKey(item);
+    if (this.firstRuntimeActivityLoggedQueueItems.has(key)) {
+      return;
+    }
+    this.firstRuntimeActivityLoggedQueueItems.add(key);
+    this.writeLog({
+      ...this.firstOutputLogFields(item, record),
+      level: "info",
+      event: "bridge.queue_item.first_runtime_activity",
+      runtimeEventType: event.eventType,
+      runtimePartType: event.part?.type,
+    });
+  }
+
+  private writeFirstAssistantTextLog(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): void {
+    if (event.part?.type !== "text" || !event.part.text) {
+      return;
+    }
+    const key = queueItemOnceKey(item);
+    if (this.firstAssistantTextLoggedQueueItems.has(key)) {
+      return;
+    }
+    this.firstAssistantTextLoggedQueueItems.add(key);
+    this.writeLog({
+      ...this.firstOutputLogFields(item, record),
+      level: "info",
+      event: "bridge.queue_item.first_assistant_text",
+      runtimeEventType: event.eventType,
+      runtimePartType: event.part.type,
+    });
+  }
+
+  private clearFirstOutputLogState(item: BridgeSessionQueueItem): void {
+    const key = queueItemOnceKey(item);
+    this.firstAssistantTextLoggedQueueItems.delete(key);
+    this.firstRuntimeActivityLoggedQueueItems.delete(key);
+  }
+
+  private firstOutputLogFields(
+    item: BridgeSessionQueueItem,
+    record: BridgeSessionRecord,
+  ): Record<string, unknown> {
+    const now = Date.now();
+    return removeUndefinedValues({
+      queueId: item.id,
+      queueType: normalizeType(item),
+      threadId: item.threadId ?? record.threadId,
+      sessionId: item.sessionId,
+      agentSessionId: record.providerSessionKey,
+      acpSessionId: record.acp.sessionId,
+      organizationId: item.organizationId,
+      bridgeProfileId: item.bridgeProfileId,
+      runtimeProfileId: record.runtimeProfile?.id ?? item.bridgeProfileId,
+      runtimeKind:
+        record.launchSpecSummary?.runtimeKind ?? record.runtimeProfile?.kind,
+      hermesProfileName: item.hermesProfileName ? "<hermes-profile>" : undefined,
+      queueCreatedToFirstOutputMs: elapsedSince(item.createdAtMs, now),
+      claimedToFirstOutputMs: elapsedSince(item.claimedAtMs, now),
+    });
   }
 
   private clearIdleTimer(record: BridgeSessionRecord): void {
@@ -4280,4 +4362,12 @@ function createHashReader(
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function elapsedSince(startMs: number | undefined, nowMs: number): number | undefined {
+  return startMs === undefined ? undefined : Math.max(0, nowMs - startMs);
+}
+
+function queueItemOnceKey(item: BridgeSessionQueueItem): string {
+  return `${item.organizationId ?? "unknown-org"}\u0000${item.id}`;
 }
