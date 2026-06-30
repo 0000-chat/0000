@@ -2831,6 +2831,100 @@ describe("bridge supervisor claim gating", () => {
     ]);
   });
 
+  test("claims control-lane work when prompt capacity is saturated", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const claimInputs: unknown[] = [];
+    const handled: Array<Record<string, unknown>> = [];
+    const inFlightCommands = new Map<string, Promise<void>>();
+    inFlightCommands.set("queue-active", new Promise(() => {}));
+
+    await runBridgeLoopIteration({
+      canClaimWork: () => true,
+      claimCommands: async (_config, input) => {
+        claimInputs.push(input ?? {});
+        return [
+          {
+            agentSessionId: "agent-session-1",
+            approvalId: "permission-1",
+            approvalOutcome: "approved",
+            bridgeProfileId: "codex:default",
+            claimId: "claim-permission",
+            externalRequestId: "permission-1",
+            id: "queue-permission",
+            threadId: "thread-1",
+            type: "permission-response",
+          },
+        ];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getRuntimeConformance: () => ({
+        canClaim: true,
+        profiles: {
+          "codex:default": {
+            canClaim: true,
+            checkedAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+            diagnostics: [],
+            runtimeId: "codex:default",
+            state: "passing",
+            strength: "init_only",
+          },
+        },
+        status: "healthy",
+      }),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands,
+      lastStaleCleanupAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: ["session-1"],
+          liveness: {
+            activeSessions: [
+              {
+                bridgeProfileId: "codex:default",
+                lastActivityAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+                lastMeaningfulEventAt: Date.UTC(2026, 5, 14, 0, 1, 0),
+                providerActivitySeen: true,
+                queueItemId: "queue-active",
+                sessionKey: "session-1",
+                startedAt: Date.UTC(2026, 5, 14, 0, 0, 0),
+                state: "active",
+              },
+            ],
+          },
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
+        },
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 14, 0, 1, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: ["session-1"],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimInputs).toEqual([{ lane: "control", limit: 1 }]);
+    expect(handled).toEqual([
+      expect.objectContaining({
+        id: "queue-permission",
+        type: "permission-response",
+      }),
+    ]);
+  });
+
   test("rejects claimed prompt work for a stale runtime profile before execution", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const results: Array<{
@@ -3577,7 +3671,7 @@ describe("bridge supervisor claim gating", () => {
 
     await runBridgeLoopIteration({
       claimCommands: async (_config, limit) => {
-        claimLimit = limit;
+        claimLimit = typeof limit === "number" ? limit : limit?.limit;
         return [];
       },
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),

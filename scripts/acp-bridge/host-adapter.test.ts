@@ -151,6 +151,28 @@ describe("bridge host adapter boundary", () => {
     })
   })
 
+  test("real Convex transport forwards control lane queue claims", async () => {
+    let body: Record<string, unknown> | undefined
+    const client = new ConvexBridgeCloudClient({
+      appUrl: "https://app.example.test",
+      bridgeApiUrl: "https://bridge.example.test",
+      bridgeToken: "secret",
+      deviceId: "device-1",
+      fetch: async (_input, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return Response.json({ commands: [] })
+      },
+    })
+
+    await client.claimWork({ lane: "control", limit: 1 })
+
+    expect(body).toMatchObject({
+      deviceId: "device-1",
+      lane: "control",
+      limit: 1,
+    })
+  })
+
   test("real Convex transport rejects queue results without claimId", async () => {
     const client = new ConvexBridgeCloudClient({
       appUrl: "https://app.example.test",
