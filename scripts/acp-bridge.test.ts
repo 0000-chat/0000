@@ -29,6 +29,7 @@ import {
   preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
   reconcileBridgeStartupControlCommandStatus,
+  runBridgeRegistrationScheduler,
   runBridgeLoopIteration,
   sendHeartbeatWithClient,
   upsertBridgeRegistration,
@@ -810,6 +811,79 @@ describe("bridge doctor", () => {
 });
 
 describe("bridge supervisor claim gating", () => {
+  test("runs registration schedulers independently when one pass stalls", async () => {
+    let registrationAActive = true;
+    let registrationBActive = true;
+    let releaseRegistrationA: (() => void) | undefined;
+    const registrationABlocked = new Promise<void>((resolve) => {
+      releaseRegistrationA = resolve;
+    });
+    let registrationBPasses = 0;
+
+    const schedulerA = runBridgeRegistrationScheduler({
+      context: { deviceId: "bridge-a" },
+      isActive: () => registrationAActive,
+      onRestartRequested: async () => {},
+      runContextPass: async () => {
+        await registrationABlocked;
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 0,
+      waitForWakeSignal: async () => "timer",
+    });
+    const schedulerB = runBridgeRegistrationScheduler({
+      context: { deviceId: "bridge-b" },
+      isActive: () => registrationBActive,
+      onRestartRequested: async () => {},
+      runContextPass: async () => {
+        registrationBPasses += 1;
+        registrationBActive = false;
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 0,
+      waitForWakeSignal: async () => "timer",
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(registrationBPasses).toBe(1);
+    } finally {
+      registrationAActive = false;
+      releaseRegistrationA?.();
+      await Promise.all([schedulerA, schedulerB]);
+    }
+  });
+
+  test("exits a registration scheduler without waiting after the context deactivates", async () => {
+    let active = true;
+    let wakeWaits = 0;
+    const scheduler = runBridgeRegistrationScheduler({
+      context: { deviceId: "bridge-a" },
+      isActive: () => active,
+      onRestartRequested: async () => {},
+      runContextPass: async () => {
+        active = false;
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 0,
+      waitForWakeSignal: async () => {
+        wakeWaits += 1;
+        await new Promise(() => {});
+        return "timer";
+      },
+    });
+
+    const result = await Promise.race([
+      scheduler.then(() => "completed" as const),
+      new Promise<"blocked">((resolve) =>
+        setTimeout(() => resolve("blocked"), 20),
+      ),
+    ]);
+
+    expect(result).toBe("completed");
+    expect(wakeWaits).toBe(0);
+  });
+
   test("runtime conformance refresh can run for idle profiles while another profile is active", async () => {
     const refreshedProfiles: string[] = [];
 

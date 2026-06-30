@@ -246,7 +246,7 @@ type ProposedAgentProfile = {
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
 type BridgeWakeWaitResult = "signal" | "timeout";
-type BridgeLoopPollReason = "active" | "startup" | "timer" | "wake";
+export type BridgeLoopPollReason = "active" | "startup" | "timer" | "wake";
 
 type BridgeWakeSignal = {
   wait(timeoutMs: number): Promise<BridgeWakeWaitResult>;
@@ -632,6 +632,11 @@ type BridgeLoopManager = Pick<
   ) => Promise<boolean>;
 };
 
+type BridgeClaimSlotReservation = {
+  maxInFlight: number;
+  release: () => void;
+};
+
 export type BridgeLoopIterationInput = {
   config: BridgeConfig;
   agentCommand?: string;
@@ -664,6 +669,7 @@ export type BridgeLoopIterationInput = {
   getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   pollReason?: BridgeLoopPollReason;
+  reserveClaimSlots?: () => BridgeClaimSlotReservation;
   writeStatus?: typeof writeStatus;
   launchUpdater?: typeof launchBridgeUpdater;
   wakeSignal?: BridgeWakeSignal;
@@ -672,6 +678,39 @@ export type BridgeLoopIterationInput = {
 export type BridgeLoopIterationResult = {
   restartRequested: boolean;
 };
+
+export type BridgeRegistrationSchedulerInput<TContext> = {
+  context: TContext;
+  isActive: (context: TContext) => boolean;
+  onRestartRequested: (context: TContext) => Promise<void>;
+  runContextPass: (
+    context: TContext,
+    pollReason: BridgeLoopPollReason,
+  ) => Promise<BridgeLoopIterationResult>;
+  totalInFlight: () => number;
+  waitForWakeSignal: (
+    context: TContext,
+  ) => Promise<BridgeLoopPollReason>;
+};
+
+export async function runBridgeRegistrationScheduler<TContext>(
+  input: BridgeRegistrationSchedulerInput<TContext>,
+): Promise<void> {
+  let nextPollReason: BridgeLoopPollReason = "startup";
+  while (input.isActive(input.context)) {
+    const pollReason =
+      input.totalInFlight() > 0 ? "active" : nextPollReason;
+    const result = await input.runContextPass(input.context, pollReason);
+    if (result.restartRequested) {
+      await input.onRestartRequested(input.context);
+      return;
+    }
+    if (!input.isActive(input.context)) {
+      return;
+    }
+    nextPollReason = await input.waitForWakeSignal(input.context);
+  }
+}
 
 function processPressureCleanupRequest(
   processHealth: BridgeStatus["processHealth"],
@@ -1608,6 +1647,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
 
   type RuntimeContext = {
+    closing: boolean;
     config: BridgeRegistration;
     inFlightCommands: Map<string, Promise<void>>;
     inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
@@ -1622,20 +1662,27 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     status: BridgeStatus;
     supervisor: BridgeSupervisor;
     wakeSignal: BridgeWakeSignal;
+    loopTask?: Promise<void>;
     orgMaxInFlight: number;
     orgMaxInFlightUpdatedAt?: number;
   };
 
   const contexts = new Map<string, RuntimeContext>();
   let stopping = false;
+  let reservedClaimSlots = 0;
 
   const aggregateStatus = () =>
     buildAggregateBridgeStatus(
       Array.from(contexts.values()),
       buildBridgeCapacitySnapshot(contexts.values(), localHardMaxInFlight),
     );
+  let aggregateStatusWrite: Promise<void> = Promise.resolve();
   const persistAggregateStatus = async () => {
-    await writeStatus(statusPath, aggregateStatus());
+    const write = aggregateStatusWrite
+      .catch(() => undefined)
+      .then(() => writeStatus(statusPath, aggregateStatus()));
+    aggregateStatusWrite = write;
+    await write;
   };
   const totalInFlight = () =>
     Array.from(contexts.values()).reduce(
@@ -1836,6 +1883,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         localJournal: bridgeSupervisorHealthStatus(supervisor),
       };
       const context: RuntimeContext = {
+        closing: false,
         config: registration,
         inFlightCommands: new Map(),
         inFlightCommandMetadata: new Map(),
@@ -1869,8 +1917,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       if (activeIds.has(deviceId) || context.inFlightCommands.size > 0) {
         continue;
       }
+      context.closing = true;
       context.status.connected = false;
       await context.wakeSignal.close();
+      await context.loopTask?.catch(() => undefined);
       await context.manager.close();
       context.supervisor.close();
       await context.singletonGuard.release();
@@ -1879,39 +1929,26 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     await persistAggregateStatus();
   };
-  const idleWakeSignalTimeoutMs = () => {
+  const idleWakeSignalTimeoutMs = (context: RuntimeContext) => {
     const fallbackMs = Math.max(pollMs, 30_000);
-    let nextRefreshAt = Number.POSITIVE_INFINITY;
-    for (const context of contexts.values()) {
-      if (!context.wakeSignal.isWakeSubscriptionActive?.()) {
-        return fallbackMs;
-      }
-      const refreshAt = context.wakeSignal.nextWakeTokenRefreshAt?.();
-      if (typeof refreshAt !== "number" || !Number.isFinite(refreshAt)) {
-        return fallbackMs;
-      }
-      nextRefreshAt = Math.min(nextRefreshAt, refreshAt);
-    }
-    if (!Number.isFinite(nextRefreshAt)) {
+    if (!context.wakeSignal.isWakeSubscriptionActive?.()) {
       return fallbackMs;
     }
-    const refreshDelayMs = nextRefreshAt - Date.now();
+    const refreshAt = context.wakeSignal.nextWakeTokenRefreshAt?.();
+    if (typeof refreshAt !== "number" || !Number.isFinite(refreshAt)) {
+      return fallbackMs;
+    }
+    const refreshDelayMs = refreshAt - Date.now();
     return refreshDelayMs > 0
       ? Math.max(Math.min(refreshDelayMs, DEFAULT_IDLE_HEARTBEAT_MS), pollMs)
       : fallbackMs;
   };
-  const waitForAnyWakeSignal = async (): Promise<BridgeLoopPollReason> => {
-    const signals = Array.from(contexts.values()).map(
-      (context) => context.wakeSignal,
-    );
-    const timeoutMs = totalInFlight() > 0 ? pollMs : idleWakeSignalTimeoutMs();
-    if (signals.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-      return "timer";
-    }
-    const result = await Promise.race(
-      signals.map((signal) => signal.wait(timeoutMs)),
-    );
+  const waitForContextWakeSignal = async (
+    context: RuntimeContext,
+  ): Promise<BridgeLoopPollReason> => {
+    const timeoutMs =
+      totalInFlight() > 0 ? pollMs : idleWakeSignalTimeoutMs(context);
+    const result = await context.wakeSignal.wait(timeoutMs);
     return result === "signal" ? "wake" : "timer";
   };
 
@@ -1952,12 +1989,16 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       reason?: string;
       shutdownTimeoutMs?: number;
       signal?: NodeJS.Signals;
+      skipLoopTask?: Promise<void>;
     } = {},
   ) => {
     if (stopping) {
       return;
     }
     stopping = true;
+    for (const context of contexts.values()) {
+      context.closing = true;
+    }
     for (const context of contexts.values()) {
       if (options.signal) {
         context.log({
@@ -1988,6 +2029,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       });
       const shutdownTask = (async () => {
         await context.wakeSignal.close();
+        if (
+          context.loopTask &&
+          context.loopTask !== options.skipLoopTask
+        ) {
+          await context.loopTask.catch(() => undefined);
+        }
         if (options.forceRuntimeProcesses) {
           context.supervisor.close();
         }
@@ -2082,151 +2129,205 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     void stop({ reason: "process signal", signal: "SIGTERM" }),
   );
 
-  let nextPollReason: BridgeLoopPollReason = "startup";
-  while (!stopping) {
-    await ensureContexts();
-    await refreshRuntimeConformanceIfStale();
-    const loopPollReason =
-      totalInFlight() > 0 ? "active" : nextPollReason;
-    for (const context of contexts.values()) {
-      const pollReason =
-        loopPollReason === "timer" &&
-        !context.wakeSignal.isWakeSubscriptionActive?.()
-          ? "wake"
-          : loopPollReason;
-      const bridgeCapacity = buildBridgeCapacitySnapshot(
-        contexts.values(),
-        localHardMaxInFlight,
-      );
-      const availableProcessSlots = Math.max(
-        0,
-        (bridgeCapacity.bridgeMaxInFlight ?? 0) - totalInFlight(),
-      );
-      const availableOrgSlots = Math.max(
-        0,
-        context.orgMaxInFlight - context.inFlightCommands.size,
-      );
-      const effectiveMaxInFlight =
-        context.inFlightCommands.size +
-        Math.min(availableOrgSlots, availableProcessSlots);
-      context.status.capacity = {
-        ...bridgeCapacity,
-        orgMaxInFlight: context.orgMaxInFlight,
-      };
-      context.status.localJournal = bridgeSupervisorHealthStatus(
-        context.supervisor,
-      );
-      const singletonStatus = await context.singletonGuard.reconcile();
-      context.status.processHealth = mergeBridgeProcessHealth(
-        context.supervisor.getProcessHealth(),
-        singletonStatus,
-        context.processRegistryPath,
-      );
-      const processOrphanCleanupNow = Date.now();
-      if (
-        singletonStatus.canClaim &&
-        processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
-        DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
-      ) {
-        context.lastProcessOrphanCleanupAt = processOrphanCleanupNow;
-        try {
-          const orphanCleanup =
-            await context.supervisor.cleanupOrphanedProcesses();
-          if (
-            orphanCleanup &&
-            (orphanCleanup.orphanedProcessCount > 0 ||
-              orphanCleanup.terminatedOrphanedProcessCount > 0)
-          ) {
-            context.log({
-              level: "warn",
-              event: "bridge.process.orphan_cleanup",
-              deviceId: context.config.deviceId,
-              orphanedProcessCount: orphanCleanup.orphanedProcessCount,
-              terminatedOrphanedProcessCount:
-                orphanCleanup.terminatedOrphanedProcessCount,
-            });
-          }
-        } catch (error) {
-          const message = redactForOutput(
-            error instanceof Error ? error.message : String(error),
-          );
+  const reserveClaimSlotsForContext = (
+    context: RuntimeContext,
+  ): BridgeClaimSlotReservation => {
+    const bridgeCapacity = buildBridgeCapacitySnapshot(
+      contexts.values(),
+      localHardMaxInFlight,
+    );
+    const availableProcessSlots = Math.max(
+      0,
+      (bridgeCapacity.bridgeMaxInFlight ?? 0) -
+        totalInFlight() -
+        reservedClaimSlots,
+    );
+    const availableOrgSlots = Math.max(
+      0,
+      context.orgMaxInFlight - context.inFlightCommands.size,
+    );
+    const reservedSlots = Math.min(availableOrgSlots, availableProcessSlots);
+    reservedClaimSlots += reservedSlots;
+    let released = false;
+    return {
+      maxInFlight: context.inFlightCommands.size + reservedSlots,
+      release: () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        reservedClaimSlots = Math.max(0, reservedClaimSlots - reservedSlots);
+      },
+    };
+  };
+
+  const runContextLoopPass = async (
+    context: RuntimeContext,
+    loopPollReason: BridgeLoopPollReason,
+  ): Promise<BridgeLoopIterationResult> => {
+    const pollReason =
+      loopPollReason === "timer" &&
+      !context.wakeSignal.isWakeSubscriptionActive?.()
+        ? "wake"
+        : loopPollReason;
+    const bridgeCapacity = buildBridgeCapacitySnapshot(
+      contexts.values(),
+      localHardMaxInFlight,
+    );
+    context.status.capacity = {
+      ...bridgeCapacity,
+      orgMaxInFlight: context.orgMaxInFlight,
+    };
+    context.status.localJournal = bridgeSupervisorHealthStatus(
+      context.supervisor,
+    );
+    const singletonStatus = await context.singletonGuard.reconcile();
+    context.status.processHealth = mergeBridgeProcessHealth(
+      context.supervisor.getProcessHealth(),
+      singletonStatus,
+      context.processRegistryPath,
+    );
+    const processOrphanCleanupNow = Date.now();
+    if (
+      singletonStatus.canClaim &&
+      processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
+      DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
+    ) {
+      context.lastProcessOrphanCleanupAt = processOrphanCleanupNow;
+      try {
+        const orphanCleanup =
+          await context.supervisor.cleanupOrphanedProcesses();
+        if (
+          orphanCleanup &&
+          (orphanCleanup.orphanedProcessCount > 0 ||
+            orphanCleanup.terminatedOrphanedProcessCount > 0)
+        ) {
           context.log({
             level: "warn",
-            event: "bridge.process.orphan_cleanup_failed",
+            event: "bridge.process.orphan_cleanup",
             deviceId: context.config.deviceId,
-            error: message,
+            orphanedProcessCount: orphanCleanup.orphanedProcessCount,
+            terminatedOrphanedProcessCount:
+              orphanCleanup.terminatedOrphanedProcessCount,
           });
         }
-        context.status.processHealth = mergeBridgeProcessHealth(
+      } catch (error) {
+        const message = redactForOutput(
+          error instanceof Error ? error.message : String(error),
+        );
+        context.log({
+          level: "warn",
+          event: "bridge.process.orphan_cleanup_failed",
+          deviceId: context.config.deviceId,
+          error: message,
+        });
+      }
+      context.status.processHealth = mergeBridgeProcessHealth(
+        context.supervisor.getProcessHealth(),
+        context.singletonGuard.getStatus(),
+        context.processRegistryPath,
+      );
+    }
+    await publishBridgeSupervisorHealthIfChanged(context);
+    const watchdogFailures = context.supervisor.checkWatchdogs();
+    for (const watchdog of watchdogFailures) {
+      if (watchdog.checkpoint === "quiet") {
+        continue;
+      }
+      context.log({
+        level: "warn",
+        event: "bridge.watchdog.timeout",
+        deviceId: context.config.deviceId,
+        queueId: watchdog.queueItemId,
+        reason: watchdog.reasonCode,
+      });
+    }
+    return await runBridgeLoopIteration({
+      config: context.config,
+      agentCommand,
+      runtimeCommands: customRuntimeCommands,
+      status: context.status,
+      maxInFlight: context.inFlightCommands.size,
+      getStatusMaxInFlight: () => context.orgMaxInFlight,
+      manager: context.manager,
+      inFlightCommands: context.inFlightCommands,
+      inFlightCommandMetadata: context.inFlightCommandMetadata,
+      watchdogFailures,
+      lastStaleCleanupAt: context.lastStaleCleanupAt,
+      setLastStaleCleanupAt: (value) => {
+        context.lastStaleCleanupAt = value;
+      },
+      staleCleanupTimeoutMs: Math.min(
+        cloudRequestTimeoutMs,
+        DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+      ),
+      cloudRequestTimeoutMs,
+      applySettingsControl: (settings) => {
+        applyBridgeSettingsControl(context, settings);
+      },
+      log: context.log,
+      recordLoopError: recordLoopError(context),
+      statusPath,
+      canClaimWork: () => context.supervisor.canClaimWork(),
+      getProcessHealth: () =>
+        mergeBridgeProcessHealth(
           context.supervisor.getProcessHealth(),
           context.singletonGuard.getStatus(),
           context.processRegistryPath,
-        );
-      }
-      await publishBridgeSupervisorHealthIfChanged(context);
-      const watchdogFailures = context.supervisor.checkWatchdogs();
-      for (const watchdog of watchdogFailures) {
-        if (watchdog.checkpoint === "quiet") {
-          continue;
-        }
-        context.log({
-          level: "warn",
-          event: "bridge.watchdog.timeout",
-          deviceId: context.config.deviceId,
-          queueId: watchdog.queueItemId,
-          reason: watchdog.reasonCode,
-        });
-      }
-      const result = await runBridgeLoopIteration({
-        config: context.config,
-        agentCommand,
-        runtimeCommands: customRuntimeCommands,
-        status: context.status,
-        maxInFlight: effectiveMaxInFlight,
-        getStatusMaxInFlight: () => context.orgMaxInFlight,
-        manager: context.manager,
-        inFlightCommands: context.inFlightCommands,
-        inFlightCommandMetadata: context.inFlightCommandMetadata,
-        watchdogFailures,
-        lastStaleCleanupAt: context.lastStaleCleanupAt,
-        setLastStaleCleanupAt: (value) => {
-          context.lastStaleCleanupAt = value;
-        },
-        staleCleanupTimeoutMs: Math.min(
-          cloudRequestTimeoutMs,
-          DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
         ),
-        cloudRequestTimeoutMs,
-        applySettingsControl: (settings) => {
-          applyBridgeSettingsControl(context, settings);
-        },
-        log: context.log,
-        recordLoopError: recordLoopError(context),
-        statusPath,
-        canClaimWork: () => context.supervisor.canClaimWork(),
-        getProcessHealth: () =>
-          mergeBridgeProcessHealth(
-            context.supervisor.getProcessHealth(),
-            context.singletonGuard.getStatus(),
-            context.processRegistryPath,
-          ),
-        getRuntimeConformance: runtimeConformanceSummary,
-        writeStatus: persistAggregateStatus,
-        wakeSignal: context.wakeSignal,
-        heartbeatIntervalMs:
-          pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
-        pollReason,
-      });
-      if (result.restartRequested) {
+      getRuntimeConformance: runtimeConformanceSummary,
+      writeStatus: persistAggregateStatus,
+      wakeSignal: context.wakeSignal,
+      heartbeatIntervalMs:
+        pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
+      pollReason,
+      reserveClaimSlots: () => reserveClaimSlotsForContext(context),
+    });
+  };
+
+  const startContextLoop = (context: RuntimeContext) => {
+    if (context.loopTask || context.closing) {
+      return;
+    }
+    const task = runBridgeRegistrationScheduler({
+      context,
+      isActive: (candidate) =>
+        !stopping &&
+        !candidate.closing &&
+        contexts.get(candidate.config.deviceId) === candidate,
+      onRestartRequested: async (candidate) => {
         await stop({
           forceRuntimeProcesses: true,
           reason: "runtime restart requested",
           shutdownTimeoutMs: DEFAULT_RESTART_STOP_TIMEOUT_MS,
+          skipLoopTask: candidate.loopTask,
         });
         process.exit(0);
-      }
+      },
+      runContextPass: runContextLoopPass,
+      totalInFlight,
+      waitForWakeSignal: waitForContextWakeSignal,
+    })
+      .catch(recordLoopError(context))
+      .finally(() => {
+        if (context.loopTask === task) {
+          context.loopTask = undefined;
+        }
+      });
+    context.loopTask = task;
+  };
+
+  const startContextLoops = () => {
+    for (const context of contexts.values()) {
+      startContextLoop(context);
     }
-    nextPollReason = await waitForAnyWakeSignal();
+  };
+
+  while (!stopping) {
+    await ensureContexts();
+    await refreshRuntimeConformanceIfStale();
+    startContextLoops();
+    await sleep(pollMs);
   }
 }
 
@@ -3076,149 +3177,158 @@ export async function runBridgeLoopIteration(
       });
       await persistStatus(input.statusPath, input.status);
     }
-    const availableSlots = input.maxInFlight - input.inFlightCommands.size;
-    const shouldPollQueue =
-      pollReason !== "timer" || input.inFlightCommands.size > 0;
-    if (availableSlots > 0 && shouldPollQueue) {
-      let processHealth = input.getProcessHealth?.();
-      if (processHealth) {
-        input.status.processHealth = processHealth;
-      }
-      const runtimeConformance =
-        input.getRuntimeConformance?.() ?? input.status.runtimeConformance;
-      if (runtimeConformance) {
-        input.status.runtimeConformance = runtimeConformance;
-      }
-      const now = currentTime();
-      if (now - input.lastStaleCleanupAt >= 60_000) {
-        input.setLastStaleCleanupAt(now);
-        const cleanupResult = await cleanupStaleClaimsWithTimeout({
-          cleanup,
-          config: input.config,
-          limit: availableSlots,
-          log: input.log,
-          requestTimeoutMs: Math.min(
-            input.cloudRequestTimeoutMs ?? DEFAULT_CLOUD_REQUEST_TIMEOUT_MS,
-            input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
-          ),
-          timeoutMs:
-            input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
-        });
-        input.status.lastStaleCleanupAt = new Date(now).toISOString();
-        if (cleanupResult) {
-          input.status.lastStaleCleanup = {
-            inspected:
-              typeof cleanupResult.inspected === "number"
-                ? cleanupResult.inspected
-                : undefined,
-            released:
-              typeof cleanupResult.released === "number"
-                ? cleanupResult.released
-                : undefined,
-          };
-          if (
-            typeof cleanupResult.released === "number" &&
-            cleanupResult.released > 0
-          ) {
+    const claimReservation = input.reserveClaimSlots?.();
+    try {
+      const maxInFlight = claimReservation?.maxInFlight ?? input.maxInFlight;
+      const availableSlots = maxInFlight - input.inFlightCommands.size;
+      const shouldPollQueue =
+        pollReason !== "timer" || input.inFlightCommands.size > 0;
+      if (availableSlots > 0 && shouldPollQueue) {
+        let processHealth = input.getProcessHealth?.();
+        if (processHealth) {
+          input.status.processHealth = processHealth;
+        }
+        const runtimeConformance =
+          input.getRuntimeConformance?.() ?? input.status.runtimeConformance;
+        if (runtimeConformance) {
+          input.status.runtimeConformance = runtimeConformance;
+        }
+        const now = currentTime();
+        if (now - input.lastStaleCleanupAt >= 60_000) {
+          input.setLastStaleCleanupAt(now);
+          const cleanupResult = await cleanupStaleClaimsWithTimeout({
+            cleanup,
+            config: input.config,
+            limit: availableSlots,
+            log: input.log,
+            requestTimeoutMs: Math.min(
+              input.cloudRequestTimeoutMs ?? DEFAULT_CLOUD_REQUEST_TIMEOUT_MS,
+              input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+            ),
+            timeoutMs:
+              input.staleCleanupTimeoutMs ?? DEFAULT_STALE_CLEANUP_TIMEOUT_MS,
+          });
+          input.status.lastStaleCleanupAt = new Date(now).toISOString();
+          if (cleanupResult) {
+            input.status.lastStaleCleanup = {
+              inspected:
+                typeof cleanupResult.inspected === "number"
+                  ? cleanupResult.inspected
+                  : undefined,
+              released:
+                typeof cleanupResult.released === "number"
+                  ? cleanupResult.released
+                  : undefined,
+            };
+            if (
+              typeof cleanupResult.released === "number" &&
+              cleanupResult.released > 0
+            ) {
+              input.log({
+                level: "info",
+                event: "bridge.queue.cleanup_stale",
+                deviceId: input.config.deviceId,
+                released: cleanupResult.released,
+                inspected: cleanupResult.inspected,
+              });
+            }
+          }
+        }
+        const pressureCleanupRequest =
+          processPressureCleanupRequest(processHealth);
+        if (
+          pressureCleanupRequest &&
+          input.manager.closeIdleSessionsForProcessPressure
+        ) {
+          const childCountBefore = processHealth?.childCount;
+          const processCapBefore = processHealth?.processCap;
+          const closedSessionCount =
+            await input.manager.closeIdleSessionsForProcessPressure(
+              pressureCleanupRequest,
+            );
+          if (closedSessionCount > 0) {
+            processHealth = input.getProcessHealth?.() ?? processHealth;
+            if (processHealth) {
+              input.status.processHealth = processHealth;
+            }
             input.log({
               level: "info",
-              event: "bridge.queue.cleanup_stale",
+              event: "bridge.lifecycle.idle_pressure_close",
               deviceId: input.config.deviceId,
-              released: cleanupResult.released,
-              inspected: cleanupResult.inspected,
+              closedSessionCount,
+              targetFreeProcessSlots:
+                pressureCleanupRequest.targetFreeProcessSlots,
+              maxSessionsToClose: pressureCleanupRequest.maxSessionsToClose,
+              childCountBefore,
+              childCountAfter: processHealth?.childCount,
+              processCap: processHealth?.processCap ?? processCapBefore,
             });
           }
         }
-      }
-      const pressureCleanupRequest =
-        processPressureCleanupRequest(processHealth);
-      if (
-        pressureCleanupRequest &&
-        input.manager.closeIdleSessionsForProcessPressure
-      ) {
-        const childCountBefore = processHealth?.childCount;
-        const processCapBefore = processHealth?.processCap;
-        const closedSessionCount =
-          await input.manager.closeIdleSessionsForProcessPressure(
-            pressureCleanupRequest,
-          );
-        if (closedSessionCount > 0) {
-          processHealth = input.getProcessHealth?.() ?? processHealth;
-          if (processHealth) {
-            input.status.processHealth = processHealth;
-          }
-          input.log({
-            level: "info",
-            event: "bridge.lifecycle.idle_pressure_close",
-            deviceId: input.config.deviceId,
-            closedSessionCount,
-            targetFreeProcessSlots:
-              pressureCleanupRequest.targetFreeProcessSlots,
-            maxSessionsToClose: pressureCleanupRequest.maxSessionsToClose,
-            childCountBefore,
-            childCountAfter: processHealth?.childCount,
-            processCap: processHealth?.processCap ?? processCapBefore,
-          });
-        }
-      }
-      if (processHealth && !processHealth.canClaim) {
-        input.log({
-          level: "warn",
-          event: "bridge.queue.claim_skipped",
-          deviceId: input.config.deviceId,
-          reason: "process_health_unsafe",
-          processHealthStatus: processHealth.status,
-          childCount: processHealth.childCount,
-          ambiguousProcessCount: processHealth.ambiguousProcessCount,
-          processCapExceeded: processHealth.processCapExceeded,
-        });
-        syncBridgeStatus();
-        await persistStatus(input.statusPath, input.status);
-        return { restartRequested: false };
-      }
-      if (input.canClaimWork && !input.canClaimWork()) {
-        input.log({
-          level: "warn",
-          event: "bridge.queue.claim_skipped",
-          deviceId: input.config.deviceId,
-          reason: "local_journal_hard_failed",
-        });
-        syncBridgeStatus();
-        await persistStatus(input.statusPath, input.status);
-        return { restartRequested: false };
-      }
-      input.status.lastPollAt = new Date(now).toISOString();
-      const commands = await claim(input.config, availableSlots);
-      if (commands.length > 0) {
-        input.log({
-          level: "info",
-          event: "bridge.queue.claimed",
-          deviceId: input.config.deviceId,
-          commandCount: commands.length,
-        });
-      }
-      for (const command of commands) {
-        const conformanceBlock = runtimeConformanceBlockForCommand(
-          command,
-          runtimeConformance,
-        );
-        if (conformanceBlock) {
-          const result = runtimeConformanceBlockResult(command, conformanceBlock);
-          await markResult(input.config, command, result);
+        if (processHealth && !processHealth.canClaim) {
           input.log({
             level: "warn",
             event: "bridge.queue.claim_skipped",
             deviceId: input.config.deviceId,
-            queueId: command.id,
-            queueType: command.type ?? command.kind,
-            bridgeProfileId: command.bridgeProfileId,
-            reason: conformanceBlock.reasonCode,
-            runtimeConformanceStatus: conformanceBlock.status,
+            reason: "process_health_unsafe",
+            processHealthStatus: processHealth.status,
+            childCount: processHealth.childCount,
+            ambiguousProcessCount: processHealth.ambiguousProcessCount,
+            processCapExceeded: processHealth.processCapExceeded,
           });
-          continue;
+          syncBridgeStatus();
+          await persistStatus(input.statusPath, input.status);
+          return { restartRequested: false };
         }
-        runCommand(command);
+        if (input.canClaimWork && !input.canClaimWork()) {
+          input.log({
+            level: "warn",
+            event: "bridge.queue.claim_skipped",
+            deviceId: input.config.deviceId,
+            reason: "local_journal_hard_failed",
+          });
+          syncBridgeStatus();
+          await persistStatus(input.statusPath, input.status);
+          return { restartRequested: false };
+        }
+        input.status.lastPollAt = new Date(now).toISOString();
+        const commands = await claim(input.config, availableSlots);
+        if (commands.length > 0) {
+          input.log({
+            level: "info",
+            event: "bridge.queue.claimed",
+            deviceId: input.config.deviceId,
+            commandCount: commands.length,
+          });
+        }
+        for (const command of commands) {
+          const conformanceBlock = runtimeConformanceBlockForCommand(
+            command,
+            runtimeConformance,
+          );
+          if (conformanceBlock) {
+            const result = runtimeConformanceBlockResult(
+              command,
+              conformanceBlock,
+            );
+            await markResult(input.config, command, result);
+            input.log({
+              level: "warn",
+              event: "bridge.queue.claim_skipped",
+              deviceId: input.config.deviceId,
+              queueId: command.id,
+              queueType: command.type ?? command.kind,
+              bridgeProfileId: command.bridgeProfileId,
+              reason: conformanceBlock.reasonCode,
+              runtimeConformanceStatus: conformanceBlock.status,
+            });
+            continue;
+          }
+          runCommand(command);
+        }
       }
+    } finally {
+      claimReservation?.release();
     }
     syncBridgeStatus();
     await persistStatus(input.statusPath, input.status);
@@ -4513,15 +4623,34 @@ export function createBridgeWakeSignal(input: {
 
 function createTimeoutWakeSignal(): BridgeWakeSignal {
   let closed = false;
+  const waiters = new Set<() => void>();
+  const wake = () => {
+    for (const resolve of Array.from(waiters)) {
+      waiters.delete(resolve);
+      resolve();
+    }
+  };
   return {
     wait: async (timeoutMs: number) => {
-      if (!closed) {
-        await sleep(timeoutMs);
+      if (closed) {
+        return "timeout";
       }
+      await new Promise<void>((resolve) => {
+        const onWake = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+        const timeout = setTimeout(() => {
+          waiters.delete(onWake);
+          resolve();
+        }, timeoutMs);
+        waiters.add(onWake);
+      });
       return "timeout";
     },
     close: async () => {
       closed = true;
+      wake();
     },
   };
 }
