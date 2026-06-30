@@ -6,11 +6,15 @@ import { fileURLToPath } from "node:url";
 
 import {
   BRIDGE_VERSION,
+  buildBridgeRestartHandoff,
+  buildBridgeCapacitySnapshot,
   buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
   buildHeartbeatStatusPayload,
   type BridgeStatus,
+  type BridgeLoopIterationInput,
   bridgeHeartbeatSignature,
+  consumeBridgeRestartHandoffFile,
   describeStatus,
   deriveConvexCloudUrl,
   appendBridgeRegistration,
@@ -22,6 +26,7 @@ import {
   getAcpIdleTtlMs,
   getLocalHardMaxInFlight,
   getConvexUrl,
+  getWarmRuntimeProfileIds,
   normalizeBridgeConfigFile,
   normalizeQueueCommand,
   parseHermesProfileListOutput,
@@ -36,6 +41,7 @@ import {
   upsertBridgeRegistration,
   waitForRestartShutdownTask,
   writeBridgeConfigFile,
+  writeBridgeRestartHandoffFile,
   writeBridgeStatusFile,
 } from "./acp-bridge";
 import {
@@ -152,6 +158,91 @@ describe("bridge capacity configuration", () => {
         { ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT: "9" },
       ),
     ).toBe(9);
+  });
+
+  test("counts retained warm sessions against the shared bridge capacity", () => {
+    const activeWork = new Map<string, Promise<void>>([
+      ["queue-active", Promise.resolve()],
+    ]);
+    const snapshot = buildBridgeCapacitySnapshot(
+      [
+        {
+          inFlightCommands: new Map(),
+          manager: {
+            getStatus: () => ({
+              activeSessions: [],
+              retainedSessions: [],
+              terminalInteractionSessionKeyCount: 0,
+              sessions: [
+                {
+                  lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 0),
+                  queueDepth: 0,
+                  sessionKey: "warm-session",
+                  threadId: "thread-warm",
+                },
+              ],
+            }),
+          },
+          orgMaxInFlight: 2,
+        },
+        {
+          inFlightCommands: activeWork,
+          manager: {
+            getStatus: () => ({
+              activeSessions: ["active-session"],
+              retainedSessions: [],
+              terminalInteractionSessionKeyCount: 0,
+              sessions: [
+                {
+                  lastUsedAt: Date.UTC(2026, 5, 5, 10, 0, 1),
+                  queueDepth: 1,
+                  runningQueueItemId: "queue-active",
+                  sessionKey: "active-session",
+                  threadId: "thread-active",
+                },
+              ],
+            }),
+          },
+          orgMaxInFlight: 2,
+        },
+      ],
+      3,
+    );
+
+    expect(snapshot).toMatchObject({
+      bridgeMaxInFlight: 3,
+      processSlotUsage: 2,
+      retainedSessionCount: 1,
+      totalInFlight: 1,
+    });
+  });
+
+  test("parses explicit warm runtime profiles from flags and env", () => {
+    expect(getWarmRuntimeProfileIds({}, {})).toEqual([]);
+    expect(
+      getWarmRuntimeProfileIds(
+        {
+          "warm-runtime-profile": [
+            "codex:default",
+            "hermes:default|hermes-profile:ops",
+          ],
+        },
+        { ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES: "claude-code:default" },
+      ),
+    ).toEqual([
+      "claude-code:default",
+      "codex:default",
+      "hermes:default|hermes-profile:ops",
+    ]);
+    expect(
+      getWarmRuntimeProfileIds(
+        {},
+        {
+          ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES:
+            "codex:default, codex:default, hermes:default",
+        },
+      ),
+    ).toEqual(["codex:default", "hermes:default"]);
   });
 });
 
@@ -434,6 +525,387 @@ describe("bridge control command lifecycle", () => {
       startedAt: Date.UTC(2026, 5, 22, 8, 59, 0),
       status: "succeeded",
     });
+  });
+});
+
+describe("bridge restart handoff", () => {
+  test("writes and consumes privacy-safe scoped restart hints", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-handoff-"));
+    const handoffPath = join(dir, "restart-handoff.json");
+    const status: BridgeStatus = {
+      activeSessions: [],
+      appUrl: "https://0000.chat",
+      connected: true,
+      controlCommandStatus: {
+        command: "updateWhenIdle",
+        status: "executing",
+        targetVersion: "0.1.29",
+      },
+      deviceId: "bridge-org-a",
+      recentErrors: [],
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      sessionQueues: [
+        {
+          agentSessionId: "provider-session",
+          bridgeProfileId: "codex:default",
+          lastUsedAt: Date.UTC(2026, 5, 22, 8, 55, 0),
+          organizationId: "org-1",
+          queueDepth: 1,
+          runningQueueItemId: "queue-1",
+          runtimeProfileId: "codex:default",
+          sessionKey: "org-secret-session-key",
+          threadId: "thread-1",
+        },
+      ],
+    };
+
+    const handoff = {
+      ...buildBridgeRestartHandoff({
+        createdAt: Date.UTC(2026, 5, 22, 9, 0, 0),
+        reason: "updateWhenIdle",
+        statuses: [status],
+        targetVersion: "0.1.29",
+      }),
+      bridgeVersion: "0.1.27",
+      status: "updated",
+    };
+    await writeBridgeRestartHandoffFile(handoffPath, handoff);
+
+    const raw = await Bun.file(handoffPath).text();
+    expect(raw).toContain("bridge-org-a");
+    expect(raw).toContain("codex:default");
+    expect(raw).not.toContain("org-secret-session-key");
+    expect(raw).not.toContain("Bearer");
+    expect(raw).not.toContain("token");
+    expect((await stat(handoffPath)).mode & 0o777).toBe(0o600);
+
+    const consumed = await consumeBridgeRestartHandoffFile({
+      now: () => Date.UTC(2026, 5, 22, 9, 1, 0),
+      path: handoffPath,
+      registrations: [
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "secret-token",
+          deviceId: "bridge-org-a",
+          deviceName: "Org A",
+          pairedAt: "2026-06-22T08:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(consumed?.status).toBe("updated");
+    expect(consumed?.entries).toEqual([
+      expect.objectContaining({
+        deviceId: "bridge-org-a",
+        runtimeProfileIds: ["codex:default"],
+        sessionWarmupHints: [
+          expect.objectContaining({
+            agentSessionId: "provider-session",
+            bridgeProfileId: "codex:default",
+            organizationId: "org-1",
+            runtimeProfileId: "codex:default",
+            threadId: "thread-1",
+          }),
+        ],
+      }),
+    ]);
+    expect(Bun.file(handoffPath).exists()).resolves.toBe(false);
+  });
+
+  test("ignores stale or schema-mismatched restart handoff files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-handoff-"));
+    const handoffPath = join(dir, "restart-handoff.json");
+    await writeBridgeRestartHandoffFile(
+      handoffPath,
+      buildBridgeRestartHandoff({
+        createdAt: Date.UTC(2026, 5, 22, 8, 0, 0),
+        reason: "restartWhenIdle",
+        statuses: [
+          {
+            activeSessions: [],
+            appUrl: "https://0000.chat",
+            connected: true,
+            deviceId: "bridge-org-a",
+            recentErrors: [],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      consumeBridgeRestartHandoffFile({
+        now: () => Date.UTC(2026, 5, 22, 9, 0, 1),
+        path: handoffPath,
+        registrations: [
+          {
+            appUrl: "https://0000.chat",
+            bridgeToken: "secret-token",
+            deviceId: "bridge-org-a",
+            deviceName: "Org A",
+            pairedAt: "2026-06-22T08:00:00.000Z",
+          },
+        ],
+      }),
+    ).resolves.toBeUndefined();
+
+    await writeBridgeRestartHandoffFile(handoffPath, { schemaVersion: 999 });
+    await expect(
+      consumeBridgeRestartHandoffFile({
+        now: () => Date.UTC(2026, 5, 22, 9, 0, 1),
+        path: handoffPath,
+        registrations: [
+          {
+            appUrl: "https://0000.chat",
+            bridgeToken: "secret-token",
+            deviceId: "bridge-org-a",
+            deviceName: "Org A",
+            pairedAt: "2026-06-22T08:00:00.000Z",
+          },
+        ],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("leaves another process registration handoff intact when nothing matches", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-handoff-"));
+    const handoffPath = join(dir, "restart-handoff.json");
+    const handoff = buildBridgeRestartHandoff({
+      createdAt: Date.UTC(2026, 5, 22, 9, 0, 0),
+      reason: "restartWhenIdle",
+      statuses: [
+        {
+          activeSessions: [],
+          appUrl: "https://0000.chat",
+          connected: true,
+          deviceId: "bridge-org-a",
+          recentErrors: [],
+          runtimeProfiles: [
+            {
+              capabilities: {},
+              command: ["codex", "acp"],
+              id: "codex:default",
+              kind: "codex",
+              label: "Codex",
+              status: "available",
+            },
+          ],
+        },
+      ],
+    });
+    await writeBridgeRestartHandoffFile(handoffPath, handoff);
+    const before = await Bun.file(handoffPath).text();
+
+    await expect(
+      consumeBridgeRestartHandoffFile({
+        now: () => Date.UTC(2026, 5, 22, 9, 1, 0),
+        path: handoffPath,
+        registrations: [
+          {
+            appUrl: "https://0000.chat",
+            bridgeToken: "secret-token",
+            deviceId: "bridge-org-b",
+            deviceName: "Org B",
+            pairedAt: "2026-06-22T08:00:00.000Z",
+          },
+        ],
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(await Bun.file(handoffPath).text()).toBe(before);
+  });
+
+  test("partial restart handoff consumption preserves unmatched valid entries", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-handoff-"));
+    const handoffPath = join(dir, "restart-handoff.json");
+    await writeBridgeRestartHandoffFile(
+      handoffPath,
+      buildBridgeRestartHandoff({
+        createdAt: Date.UTC(2026, 5, 22, 9, 0, 0),
+        reason: "updateWhenIdle",
+        statuses: [
+          {
+            activeSessions: [],
+            appUrl: "https://0000.chat",
+            connected: true,
+            deviceId: "bridge-org-a",
+            recentErrors: [],
+            runtimeProfiles: [
+              {
+                capabilities: {},
+                command: ["codex", "acp"],
+                id: "codex:default",
+                kind: "codex",
+                label: "Codex",
+                status: "available",
+              },
+            ],
+          },
+          {
+            activeSessions: [],
+            appUrl: "https://staging.0000.chat",
+            connected: true,
+            deviceId: "bridge-org-b",
+            recentErrors: [],
+            runtimeProfiles: [
+              {
+                capabilities: {},
+                command: ["claude", "acp"],
+                id: "claude:default",
+                kind: "claude-code",
+                label: "Claude",
+                status: "available",
+              },
+            ],
+          },
+        ],
+        targetVersion: "0.1.29",
+      }),
+    );
+
+    const consumed = await consumeBridgeRestartHandoffFile({
+      now: () => Date.UTC(2026, 5, 22, 9, 1, 0),
+      path: handoffPath,
+      registrations: [
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "secret-token",
+          deviceId: "bridge-org-a",
+          deviceName: "Org A",
+          pairedAt: "2026-06-22T08:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(consumed?.entries.map((entry) => entry.deviceId)).toEqual([
+      "bridge-org-a",
+    ]);
+    const remaining = await consumeBridgeRestartHandoffFile({
+      now: () => Date.UTC(2026, 5, 22, 9, 2, 0),
+      path: handoffPath,
+      registrations: [
+        {
+          appUrl: "https://staging.0000.chat",
+          bridgeToken: "secret-token",
+          deviceId: "bridge-org-b",
+          deviceName: "Org B",
+          pairedAt: "2026-06-22T08:00:00.000Z",
+        },
+      ],
+    });
+    expect(remaining?.targetVersion).toBe("0.1.29");
+    expect(remaining?.entries).toEqual([
+      expect.objectContaining({
+        deviceId: "bridge-org-b",
+        runtimeProfileIds: ["claude:default"],
+      }),
+    ]);
+    expect(Bun.file(handoffPath).exists()).resolves.toBe(false);
+  });
+});
+
+describe("bridge restart handoff startup priority", () => {
+  test("prioritized handoff profiles refresh before normal stale profiles", async () => {
+    const refreshedProfiles: string[] = [];
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(),
+      getRunningSessionProfileIds: () => new Set(),
+      now: () => 1_000,
+      priorityProfileIds: ["codex:default"],
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 1_000 + refreshedProfiles.length,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      profiles: [
+        {
+          capabilities: {},
+          command: ["claude", "acp"],
+          id: "claude:default",
+          kind: "claude-code",
+          label: "Claude",
+          status: "available",
+        },
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:default",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      records: {
+        "claude:default": {
+          checkedAt: 0,
+          diagnostics: [],
+          runtimeId: "claude:default",
+          state: "passing",
+          strength: "init_only",
+        },
+        "codex:default": {
+          checkedAt: 900,
+          diagnostics: [],
+          runtimeId: "codex:default",
+          state: "passing",
+          strength: "init_only",
+        },
+      },
+      ttlMs: 1_000,
+    });
+
+    expect(refreshedProfiles).toEqual(["codex:default", "claude:default"]);
+    expect(records["codex:default"]?.checkedAt).toBe(1_001);
+    expect(records["claude:default"]?.checkedAt).toBe(1_002);
+  });
+});
+
+describe("bridge startup control command reconciliation", () => {
+  test("does not mark an executing target-version command succeeded on version mismatch", () => {
+    const reconciled = reconcileBridgeStartupControlCommandStatus(
+      {
+        controlCommandStatus: {
+          command: "updateWhenIdle",
+          requestedAt: 10,
+          startedAt: 20,
+          status: "executing",
+          targetVersion: "0.1.29",
+        },
+      },
+      {
+        bridgeVersion: "0.1.28",
+        instanceId: "new-instance",
+        mcpManifestHash: "mcp",
+        pid: 1234,
+        processStartedAt: "2026-06-22T09:00:00.000Z",
+        toolPolicyHash: "tool",
+      },
+      () => 40,
+    );
+
+    expect(reconciled).toEqual(
+      expect.objectContaining({
+        command: "updateWhenIdle",
+        failedAt: 40,
+        instanceId: "new-instance",
+        status: "failed",
+        targetVersion: "0.1.29",
+      }),
+    );
+    expect(reconciled?.error).toContain("target version");
   });
 });
 
@@ -939,6 +1411,40 @@ describe("bridge supervisor claim gating", () => {
     expect(wakeWaits).toBe(0);
   });
 
+  test("defers process restart until all registrations are idle", async () => {
+    let active = true;
+    let totalInFlight = 1;
+    let restartRequests = 0;
+    let passes = 0;
+    let wakeWaits = 0;
+
+    await runBridgeRegistrationScheduler({
+      context: { deviceId: "bridge-a" },
+      isActive: () => active,
+      onRestartRequested: async () => {
+        restartRequests += 1;
+        active = false;
+      },
+      runContextPass: async () => {
+        passes += 1;
+        if (passes === 1) {
+          return { restartRequested: true };
+        }
+        return { restartRequested: false };
+      },
+      totalInFlight: () => totalInFlight,
+      waitForWakeSignal: async () => {
+        wakeWaits += 1;
+        totalInFlight = 0;
+        return "timer";
+      },
+    });
+
+    expect(passes).toBe(2);
+    expect(wakeWaits).toBe(1);
+    expect(restartRequests).toBe(1);
+  });
+
   test("runtime conformance refresh can run for idle profiles while another profile is active", async () => {
     const refreshedProfiles: string[] = [];
 
@@ -1093,6 +1599,149 @@ describe("bridge supervisor claim gating", () => {
     );
   });
 
+  test("warms configured runtime profiles only when loop capacity is available", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const warmRequests: Array<{ maxSessions?: number; runtimeProfileIds: string[] }> =
+      [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () =>
+        ({
+          canClaim: true,
+          childCount: 1,
+          processCap: 2,
+          status: "healthy",
+        }) as NonNullable<BridgeStatus["processHealth"]>,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+        warmRuntimeSessions: async (request) => {
+          warmRequests.push({
+            maxSessions: request.maxSessions,
+            runtimeProfileIds: request.runtimeProfileIds,
+          });
+          return 1;
+        },
+      },
+      maxInFlight: 2,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      warmRuntimeProfileIds: ["codex:default"],
+      writeStatus: async () => {},
+    });
+
+    expect(warmRequests).toEqual([
+      {
+        maxSessions: 1,
+        runtimeProfileIds: ["codex:default"],
+      },
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.warm_runtime_profiles",
+        runtimeProfileCount: 1,
+        warmedCount: 1,
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        runtimeProfileIds: ["codex:default"],
+      }),
+    );
+  });
+
+  test("does not warm when newly claimed prompt work reserves process capacity", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const warmRequests: Array<{ maxSessions?: number; runtimeProfileIds: string[] }> =
+      [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [
+        {
+          agentSessionId: "provider-session",
+          bridgeProfileId: "codex:default",
+          claimId: "claim-1",
+          id: "queue-1",
+          organizationId: "org-1",
+          prompt: "hello",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+      ],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () =>
+        ({
+          canClaim: true,
+          childCount: 1,
+          processCap: 2,
+          status: "healthy",
+        }) as NonNullable<BridgeStatus["processHealth"]>,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+        warmRuntimeSessions: async (request) => {
+          warmRequests.push({
+            maxSessions: request.maxSessions,
+            runtimeProfileIds: request.runtimeProfileIds,
+          });
+          return 1;
+        },
+      },
+      maxInFlight: 2,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      warmRuntimeProfileIds: ["codex:default"],
+      writeStatus: async () => {},
+    });
+
+    expect(warmRequests).toEqual([]);
+  });
+
   test("does not spam claim skipped logs after a registration is disabled", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
@@ -1185,9 +1834,9 @@ describe("bridge supervisor claim gating", () => {
           capabilities: {},
           command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
           id: "codex:codex-acp",
-          kind: "codex",
+          kind: "codex" as const,
           label: "Codex",
-          status: "available",
+          status: "available" as const,
         },
       ],
       inFlightCommandMetadata: new Map(),
@@ -1337,6 +1986,101 @@ describe("bridge supervisor claim gating", () => {
     );
   });
 
+  test("defers runtime profile restart while another registration has active work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let claimCalled = false;
+    let heartbeatCount = 0;
+    let processIdle = false;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: [
+        {
+          capabilities: {},
+          command: ["npx", "--yes", "@agentclientprotocol/codex-acp@0.0.45"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    };
+    const baseInput: BridgeLoopIterationInput = {
+      claimCommands: async () => {
+        claimCalled = true;
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      discoverHermesProfiles: async () => [],
+      discoverRuntimeProfiles: async () => [
+        {
+          capabilities: {},
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      isProcessIdleForRestart: () => processIdle,
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 3, 0),
+      recordLoopError: async (error: unknown) => {
+        throw error;
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1;
+        return heartbeatCount === 1
+          ? {
+              ok: true as const,
+              control: { refreshRuntimeProfiles: { requestedAt: "now" } },
+            }
+          : { ok: true as const };
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    };
+
+    const busyResult = await runBridgeLoopIteration(baseInput);
+    expect(busyResult.restartRequested).toBe(false);
+    expect(claimCalled).toBe(false);
+    expect(status.lifecycle).toBe("draining");
+    expect(status.updateState?.status).toBe("waitingForIdle");
+    expect(status.pendingControlCommand).toMatchObject({
+      command: "restartWhenIdle",
+    });
+    expect(status.controlCommandStatus).toMatchObject({
+      command: "restartWhenIdle",
+      status: "waiting_for_idle",
+    });
+
+    processIdle = true;
+    const idleResult = await runBridgeLoopIteration(baseInput);
+    expect(idleResult.restartRequested).toBe(true);
+    expect(status.lifecycle).toBe("restarting");
+    expect(status.pendingControlCommand).toBeUndefined();
+    expect(status.controlCommandStatus).toMatchObject({
+      command: "restartWhenIdle",
+      status: "executing",
+    });
+  });
+
   test("requests restart when refreshed runtime profile ids change", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     let claimCalled = false;
@@ -1397,6 +2141,81 @@ describe("bridge supervisor claim gating", () => {
       },
       maxInFlight: 1,
       now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1;
+        return heartbeatCount === 1
+          ? {
+              ok: true,
+              control: { refreshRuntimeProfiles: { requestedAt: "now" } },
+            }
+          : { ok: true };
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(result.restartRequested).toBe(true);
+    expect(claimCalled).toBe(false);
+    expect(status.lifecycle).toBe("restarting");
+  });
+
+  test("requests restart when refreshed runtime profile capabilities change", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let claimCalled = false;
+    let heartbeatCount = 0;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: [
+        {
+          capabilities: { sessionMcpServers: true },
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+    };
+
+    const result = await runBridgeLoopIteration({
+      claimCommands: async () => {
+        claimCalled = true;
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      discoverHermesProfiles: async () => [],
+      discoverRuntimeProfiles: async () => [
+        {
+          capabilities: { sessionMcpServers: true, supportsPlans: true },
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 5, 0),
       recordLoopError: async (error) => {
         throw error;
       },
@@ -2379,12 +3198,17 @@ describe("bridge supervisor claim gating", () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
     const handled: Array<Record<string, unknown>> = [];
+    const inFlightCommandMetadata = new Map();
+    const backendClaimedAtMs = Date.parse("2026-06-30T12:00:00.250Z");
+    const localDispatchAtMs = Date.parse("2026-06-30T12:00:01.000Z");
 
     await runBridgeLoopIteration({
       claimCommands: async () => [
         {
           agentSessionId: "agent-session-1",
           claimId: "claim-1",
+          claimedAt: "2026-06-30T12:00:00.250Z",
+          createdAt: "2026-06-30T12:00:00.000Z",
           id: "queue-cancel-1",
           kind: "cancel-session",
           threadId: "thread-1",
@@ -2393,7 +3217,7 @@ describe("bridge supervisor claim gating", () => {
       ],
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
       config: bridgeRegistration(),
-      inFlightCommandMetadata: new Map(),
+      inFlightCommandMetadata,
       inFlightCommands: new Map(),
       lastStaleCleanupAt: Date.now(),
       log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
@@ -2407,9 +3231,17 @@ describe("bridge supervisor claim gating", () => {
         }),
         handleQueueItem: async (item) => {
           handled.push(item as unknown as Record<string, unknown>);
+          expect(inFlightCommandMetadata.get("queue-cancel-1")).toMatchObject({
+            claimedAt: "2026-06-30T12:00:00.250Z",
+            claimedAtMs: backendClaimedAtMs,
+            createdAt: "2026-06-30T12:00:00.000Z",
+            createdAtMs: Date.parse("2026-06-30T12:00:00.000Z"),
+            id: "queue-cancel-1",
+          });
         },
       },
       maxInFlight: 1,
+      now: () => localDispatchAtMs,
       recordLoopError: async (error) => {
         throw error;
       },
@@ -2428,8 +3260,13 @@ describe("bridge supervisor claim gating", () => {
       expect.objectContaining({
         id: "queue-cancel-1",
         type: "cancel-session",
+        claimedAt: "2026-06-30T12:00:00.250Z",
+        claimedAtMs: backendClaimedAtMs,
+        createdAt: "2026-06-30T12:00:00.000Z",
+        createdAtMs: Date.parse("2026-06-30T12:00:00.000Z"),
       }),
     ]);
+    expect(inFlightCommandMetadata.size).toBe(0);
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "bridge.queue_item.in_flight",
