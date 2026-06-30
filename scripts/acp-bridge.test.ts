@@ -25,6 +25,7 @@ import {
   createBridgeWakeSignal,
   getAllowRemoteCwd,
   getAcpIdleTtlMs,
+  getInitialOrgMaxInFlight,
   getLocalHardMaxInFlight,
   getConvexUrl,
   getWarmRuntimeProfileIds,
@@ -293,6 +294,11 @@ describe("bridge capacity configuration", () => {
         },
       ),
     ).toEqual(["codex:default", "hermes:default"]);
+  });
+
+  test("local hard max seeds initial registration capacity", () => {
+    expect(getInitialOrgMaxInFlight(undefined)).toBe(2);
+    expect(getInitialOrgMaxInFlight(12)).toBe(12);
   });
 });
 
