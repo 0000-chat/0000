@@ -637,6 +637,69 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("preserves structured metadata when terminalizing an active prompt externally", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => await new Promise(() => {}),
+      }),
+    });
+
+    void manager.handleQueueItem(promptQueueItem());
+    await eventually(() =>
+      expect(manager.getStatus().sessions[0]?.runningQueueItemId).toBe(
+        "queue-prompt",
+      ),
+    );
+
+    const metadata = {
+      ageMs: 31_000,
+      failureClass: "tool_result_timeout",
+      reasonCode: "tool_result_timeout",
+      timeoutMs: 30_000,
+      toolCallId: "tool-1",
+      toolClass: "standard",
+      toolName: "messages.search",
+      toolPolicyId: "standard-tool-result-timeout",
+    };
+    await expect(
+      manager.failActiveQueueItem(
+        "queue-prompt",
+        "tool_result_timeout",
+        metadata,
+      ),
+    ).resolves.toBe(true);
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        claimId: "claim-prompt",
+        id: "queue-prompt",
+        result: expect.objectContaining({
+          ok: false,
+          terminal: true,
+          ...metadata,
+        }),
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "bridge_error",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining(metadata),
+          status: "error",
+          type: "error",
+        }),
+        rawPayload: expect.objectContaining({
+          queueId: "queue-prompt",
+          ...metadata,
+        }),
+      }),
+    );
+  });
+
   test("terminalizes active prompt when a tool call never resolves", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
@@ -660,15 +723,25 @@ describe("bridge session cwd safety", () => {
     });
 
     const handled = manager.handleQueueItem(promptQueueItem());
+    const expectedTimeoutMetadata = {
+      failureClass: "tool_result_propagation_lost",
+      reasonCode: "tool_result_timeout",
+      timeoutMs: 5,
+      toolCallId: "tool-1",
+      toolClass: "standard",
+      toolName: "shell",
+      toolPolicyId: "explicit-tool-result-timeout",
+    };
     await eventually(() =>
       expect(cloud.results).toContainEqual(
         expect.objectContaining({
           claimId: "claim-prompt",
           id: "queue-prompt",
           result: expect.objectContaining({
+            ageMs: expect.any(Number),
             ok: false,
-            reasonCode: "tool_result_timeout",
             terminal: true,
+            ...expectedTimeoutMetadata,
           }),
         }),
       ),
@@ -681,11 +754,16 @@ describe("bridge session cwd safety", () => {
         eventType: "bridge_error",
         normalizedPayload: expect.objectContaining({
           json: expect.objectContaining({
-            reasonCode: "tool_result_timeout",
-            toolCallId: "tool-1",
+            ageMs: expect.any(Number),
+            ...expectedTimeoutMetadata,
           }),
           status: "error",
           type: "error",
+        }),
+        rawPayload: expect.objectContaining({
+          ageMs: expect.any(Number),
+          queueId: "queue-prompt",
+          ...expectedTimeoutMetadata,
         }),
       }),
     );

@@ -2446,6 +2446,108 @@ describe("bridge supervisor claim gating", () => {
     );
   });
 
+  test("preserves structured tool timeout metadata when terminalizing watchdog-failed commands", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const inFlightCommands = new Map<string, Promise<void>>([
+      ["queue-tool-timeout", new Promise<void>(() => {})],
+    ]);
+    const inFlightCommandMetadata = new Map([
+      [
+        "queue-tool-timeout",
+        {
+          id: "queue-tool-timeout",
+          ageMs: 31_000,
+          failureClass: "tool_result_timeout",
+          startedAt: "2026-06-05T10:00:00.000Z",
+          threadId: "thread-1",
+          timeoutMs: 30_000,
+          toolCallId: "tool-1",
+          toolClass: "standard",
+          toolName: "databases.get",
+          toolPolicyId: "standard-tool-result-timeout",
+          type: "prompt",
+        },
+      ],
+    ]);
+    const terminalized: Array<{
+      metadata?: Record<string, unknown>;
+      queueItemId: string;
+      reasonCode: string;
+    }> = [];
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata,
+      inFlightCommands,
+      lastStaleCleanupAt: Date.now(),
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        failActiveQueueItem: async (queueItemId, reasonCode, metadata) => {
+          terminalized.push({ queueItemId, reasonCode, metadata });
+          return true;
+        },
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 0, 31),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: {
+        activeSessions: [],
+        connected: true,
+        recentErrors: [],
+      },
+      statusPath: join(dir, "status.json"),
+      watchdogFailures: [
+        {
+          checkpoint: "failed",
+          queueItemId: "queue-tool-timeout",
+          reasonCode: "tool_result_timeout",
+        },
+      ],
+      writeStatus: async () => {},
+    });
+
+    const metadata = {
+      ageMs: 31_000,
+      failureClass: "tool_result_timeout",
+      reasonCode: "tool_result_timeout",
+      timeoutMs: 30_000,
+      toolCallId: "tool-1",
+      toolClass: "standard",
+      toolName: "databases.get",
+      toolPolicyId: "standard-tool-result-timeout",
+    };
+    expect(terminalized).toEqual([
+      {
+        metadata,
+        queueItemId: "queue-tool-timeout",
+        reasonCode: "tool_result_timeout",
+      },
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.queue_item.settled",
+        queueId: "queue-tool-timeout",
+        reason: "tool_result_timeout",
+        ...metadata,
+      }),
+    );
+  });
+
   test("keeps quiet watchdog in-flight instead of terminalizing", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
