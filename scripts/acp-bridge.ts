@@ -59,6 +59,7 @@ import {
   buildBridgeLaunchSpec,
   type BridgeQueueAttachment,
   BridgeSessionManager,
+  type BridgeSessionManagerStatus,
   type BridgeTerminalizationMetadata,
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
   type BridgeSessionQueueItem,
@@ -136,7 +137,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.28";
+export const BRIDGE_VERSION = "0.1.29";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -710,6 +711,30 @@ export async function runBridgeRegistrationScheduler<TContext>(
     }
     nextPollReason = await input.waitForWakeSignal(input.context);
   }
+}
+
+export function shouldCleanupBridgeOrphanedProcesses(input: {
+  inFlightCommandCount: number;
+  managerStatus: Pick<
+    BridgeSessionManagerStatus,
+    "activeSessions" | "sessions"
+  >;
+  singletonCanClaim: boolean;
+}): boolean {
+  if (!input.singletonCanClaim) {
+    return false;
+  }
+  if (input.inFlightCommandCount > 0) {
+    return false;
+  }
+  if (input.managerStatus.activeSessions.length > 0) {
+    return false;
+  }
+  return !input.managerStatus.sessions.some(
+    (session) =>
+      Boolean(session.runningQueueItemId) ||
+      (typeof session.queueDepth === "number" && session.queueDepth > 0),
+  );
 }
 
 function processPressureCleanupRequest(
@@ -2189,7 +2214,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     );
     const processOrphanCleanupNow = Date.now();
     if (
-      singletonStatus.canClaim &&
+      shouldCleanupBridgeOrphanedProcesses({
+        inFlightCommandCount: context.inFlightCommands.size,
+        managerStatus: context.manager.getStatus(),
+        singletonCanClaim: singletonStatus.canClaim,
+      }) &&
       processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
       DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
     ) {
@@ -3081,16 +3110,36 @@ export async function runBridgeLoopIteration(
               runtimeCommandChanged,
             });
             if (runtimeCommandChanged) {
-              input.status.lifecycle = "restarting";
-              input.status.updateState = buildBridgeUpdateState(
-                "restarting",
-                currentTime(),
+              const requestedAt =
+                typeof heartbeatResult.control.refreshRuntimeProfiles
+                  ?.requestedAt === "number"
+                  ? heartbeatResult.control.refreshRuntimeProfiles.requestedAt
+                  : currentTime();
+              const acceptedAt = currentTime();
+              input.status.pendingControlCommand = {
+                command: "restartWhenIdle",
+                requestedAt,
+              };
+              input.status.controlCommandStatus = buildControlCommandStatus(
+                "restartWhenIdle",
+                "accepted",
+                {
+                  acceptedAt,
+                  instanceId: input.status.runtimeIdentity?.instanceId,
+                  requestedAt,
+                },
               );
-              restartResult = { restartRequested: true };
+              await persistStatus(input.statusPath, input.status);
+              restartResult = await applyPendingBridgeControlCommand(
+                input.status,
+                currentTime,
+                input,
+              );
               input.log({
                 level: "info",
                 event: "bridge.runtime_profiles.restart_requested",
                 deviceId: input.config.deviceId,
+                restartRequested: restartResult.restartRequested,
               });
             }
             await persistStatus(input.statusPath, input.status);
@@ -3176,6 +3225,11 @@ export async function runBridgeLoopIteration(
         ...terminalizationMetadata,
       });
       await persistStatus(input.statusPath, input.status);
+    }
+    if (normalizeControlCommand(input.status.pendingControlCommand)) {
+      syncBridgeStatus();
+      await persistStatus(input.statusPath, input.status);
+      return { restartRequested: false };
     }
     const claimReservation = input.reserveClaimSlots?.();
     try {
