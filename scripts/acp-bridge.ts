@@ -58,6 +58,7 @@ import {
   buildBridgeLaunchSpec,
   type BridgeQueueAttachment,
   BridgeSessionManager,
+  type BridgeTerminalizationMetadata,
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
   type BridgeSessionQueueItem,
 } from "./acp-bridge/session-manager";
@@ -596,7 +597,7 @@ type AgentToolsMcpServerInput = {
   threadId?: string;
 };
 
-type InFlightCommandMetadata = {
+type InFlightCommandMetadata = BridgeTerminalizationMetadata & {
   id: string;
   type?: string;
   threadId?: string;
@@ -606,12 +607,26 @@ type InFlightCommandMetadata = {
   startedAt: string;
 };
 
+type BridgeLoopWatchdogResult =
+  | (Extract<BridgeWatchdogResult, { checkpoint: "quiet" }> &
+      BridgeTerminalizationMetadata)
+  | (Omit<
+      Extract<BridgeWatchdogResult, { checkpoint: "failed" }>,
+      "reasonCode"
+    > & {
+      reasonCode: string;
+    } & BridgeTerminalizationMetadata);
+
 type BridgeLoopManager = Pick<
   BridgeSessionManager,
   "getStatus" | "handleQueueItem"
 > & {
   closeIdleSessionsForProcessPressure?: BridgeSessionManager["closeIdleSessionsForProcessPressure"];
-  failActiveQueueItem?: BridgeSessionManager["failActiveQueueItem"];
+  failActiveQueueItem?: (
+    queueItemId: string,
+    reasonCode: string,
+    metadata?: BridgeTerminalizationMetadata,
+  ) => Promise<boolean>;
 };
 
 export type BridgeLoopIterationInput = {
@@ -626,7 +641,7 @@ export type BridgeLoopIterationInput = {
   manager: BridgeLoopManager;
   inFlightCommands: Map<string, Promise<void>>;
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
-  watchdogFailures?: BridgeWatchdogResult[];
+  watchdogFailures?: BridgeLoopWatchdogResult[];
   lastStaleCleanupAt: number;
   setLastStaleCleanupAt: (value: number) => void;
   log: FlushableBridgeLogger;
@@ -2678,6 +2693,77 @@ async function applyPendingBridgeControlCommand(
   return { restartRequested: true };
 }
 
+function buildWatchdogTerminalizationMetadata(
+  watchdog: BridgeLoopWatchdogResult,
+  inFlight: InFlightCommandMetadata | undefined,
+  now: number,
+): BridgeTerminalizationMetadata | undefined {
+  if (
+    watchdog.checkpoint === "quiet" ||
+    watchdog.reasonCode !== "tool_result_timeout"
+  ) {
+    return undefined;
+  }
+  const metadata: BridgeTerminalizationMetadata = {
+    reasonCode: watchdog.reasonCode,
+  };
+  let hasStructuredMetadata = false;
+
+  const addString = (
+    key:
+      | "failureClass"
+      | "toolCallId"
+      | "toolClass"
+      | "toolName"
+      | "toolPolicyId",
+    value: string | undefined,
+  ) => {
+    const normalized = value?.trim();
+    if (!normalized) {
+      return;
+    }
+    metadata[key] = normalized;
+    hasStructuredMetadata = true;
+  };
+  const addNumber = (
+    key: "ageMs" | "timeoutMs",
+    value: number | undefined,
+  ) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return;
+    }
+    metadata[key] = value;
+    hasStructuredMetadata = true;
+  };
+
+  addString("failureClass", watchdog.failureClass ?? inFlight?.failureClass);
+  addString("toolCallId", watchdog.toolCallId ?? inFlight?.toolCallId);
+  addString("toolName", watchdog.toolName ?? inFlight?.toolName);
+  addString("toolClass", watchdog.toolClass ?? inFlight?.toolClass);
+  addString("toolPolicyId", watchdog.toolPolicyId ?? inFlight?.toolPolicyId);
+  addNumber("timeoutMs", watchdog.timeoutMs ?? inFlight?.timeoutMs);
+  addNumber(
+    "ageMs",
+    watchdog.ageMs ?? inFlight?.ageMs ?? ageMsFromStartedAt(inFlight, now),
+  );
+
+  return hasStructuredMetadata ? metadata : undefined;
+}
+
+function ageMsFromStartedAt(
+  inFlight: InFlightCommandMetadata | undefined,
+  now: number,
+): number | undefined {
+  if (!inFlight?.startedAt) {
+    return undefined;
+  }
+  const startedAtMs = Date.parse(inFlight.startedAt);
+  if (!Number.isFinite(startedAtMs)) {
+    return undefined;
+  }
+  return Math.max(0, now - startedAtMs);
+}
+
 export async function runBridgeLoopIteration(
   input: BridgeLoopIterationInput,
 ): Promise<BridgeLoopIterationResult> {
@@ -2921,10 +3007,16 @@ export async function runBridgeLoopIteration(
         await persistStatus(input.statusPath, input.status);
         continue;
       }
+      const terminalizationMetadata = buildWatchdogTerminalizationMetadata(
+        watchdog,
+        input.inFlightCommandMetadata.get(watchdog.queueItemId),
+        currentTime(),
+      );
       const terminalized =
         (await input.manager.failActiveQueueItem?.(
           watchdog.queueItemId,
           watchdog.reasonCode,
+          terminalizationMetadata,
         )) ?? false;
       if (!terminalized) {
         input.log({
@@ -2945,6 +3037,7 @@ export async function runBridgeLoopIteration(
         deviceId: input.config.deviceId,
         queueId: watchdog.queueItemId,
         reason: watchdog.reasonCode,
+        ...terminalizationMetadata,
       });
       await persistStatus(input.statusPath, input.status);
     }

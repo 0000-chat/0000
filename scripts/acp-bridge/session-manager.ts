@@ -239,8 +239,27 @@ type ActiveToolCall = {
 
 type ToolResultTimeoutDetails = {
   ageMs: number;
+  failureClass: "tool_result_propagation_lost";
+  timeoutMs: number;
   toolCallId: string;
+  toolClass: string;
   toolName: string;
+  toolPolicyId: string;
+};
+
+export type BridgeTerminalizationMetadata = {
+  ageMs?: number;
+  failureClass?: string;
+  reasonCode?: string;
+  timeoutMs?: number;
+  toolCallId?: string;
+  toolClass?: string;
+  toolName?: string;
+  toolPolicyId?: string;
+};
+
+type BoundedBridgeTerminalizationMetadata = BridgeTerminalizationMetadata & {
+  reasonCode: string;
 };
 
 const EVENT_BATCH_MAX_SIZE = 25;
@@ -253,6 +272,7 @@ const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_SESSION_LIVENESS_TIMEOUT_MS = 120_000;
 export const DEFAULT_TOOL_RESULT_TIMEOUT_MS = 5 * 60_000;
 const MAX_TERMINAL_INTERACTION_SESSION_KEYS = 300;
+const MAX_TERMINALIZATION_METADATA_TEXT_LENGTH = 200;
 
 export type BridgeSessionManagerOptions = {
   cloudClient: BridgeSessionCloudClient;
@@ -795,11 +815,13 @@ export class BridgeSessionManager {
   async failActiveQueueItem(
     queueItemId: string,
     reasonCode: string,
+    metadata?: BridgeTerminalizationMetadata,
   ): Promise<boolean> {
     const item = this.activeQueueItems.get(queueItemId);
     if (!item) {
       return false;
     }
+    const failureMetadata = boundTerminalizationMetadata(reasonCode, metadata);
     const type = normalizeType(item);
     const sessionKey =
       this.findSessionKeyForActiveQueueItem(queueItemId) ??
@@ -825,12 +847,12 @@ export class BridgeSessionManager {
         eventType: "bridge_error",
         payload: {
           queueId: queueItemId,
-          reasonCode,
+          ...failureMetadata,
         },
         part: {
           type: "error",
           text: message,
-          json: { reasonCode },
+          json: failureMetadata,
           status: "error",
         },
       });
@@ -843,7 +865,7 @@ export class BridgeSessionManager {
     await this.markQueueResult(item, {
       ok: false,
       error: message,
-      reasonCode,
+      ...failureMetadata,
       terminal: true,
     });
     this.writeLog({
@@ -1539,8 +1561,12 @@ export class BridgeSessionManager {
       const ageMs = Date.now() - activeTool.startedAt;
       const details = {
         ageMs,
+        failureClass: "tool_result_propagation_lost" as const,
+        timeoutMs: policy.timeoutMs,
         toolCallId: activeTool.toolCallId,
+        toolClass: policy.toolClass,
         toolName: activeTool.toolName,
+        toolPolicyId: policy.policyId,
       };
       this.activeToolTimeoutFailures.set(queueItemId, details);
       this.writeLog({
@@ -1551,9 +1577,6 @@ export class BridgeSessionManager {
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
         reasonCode: "tool_result_timeout",
-        timeoutMs: policy.timeoutMs,
-        toolClass: policy.toolClass,
-        toolPolicyId: policy.policyId,
         ...details,
       });
       this.activeLivenessFailures.get(queueItemId)?.(
@@ -3929,6 +3952,57 @@ function removeUndefinedValues(
     }
   }
   return output;
+}
+
+function boundTerminalizationMetadata(
+  reasonCode: string,
+  metadata: BridgeTerminalizationMetadata | undefined,
+): BoundedBridgeTerminalizationMetadata {
+  const output: BoundedBridgeTerminalizationMetadata = { reasonCode };
+  const addString = (
+    key:
+      | "failureClass"
+      | "toolCallId"
+      | "toolClass"
+      | "toolName"
+      | "toolPolicyId",
+    value: string | undefined,
+  ) => {
+    const normalized = boundTerminalizationMetadataText(value);
+    if (normalized) {
+      output[key] = normalized;
+    }
+  };
+  const addNumber = (
+    key: "ageMs" | "timeoutMs",
+    value: number | undefined,
+  ) => {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      output[key] = value;
+    }
+  };
+
+  addString("failureClass", metadata?.failureClass);
+  addString("toolCallId", metadata?.toolCallId);
+  addString("toolName", metadata?.toolName);
+  addString("toolClass", metadata?.toolClass);
+  addString("toolPolicyId", metadata?.toolPolicyId);
+  addNumber("timeoutMs", metadata?.timeoutMs);
+  addNumber("ageMs", metadata?.ageMs);
+  return output;
+}
+
+function boundTerminalizationMetadataText(
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.length <= MAX_TERMINALIZATION_METADATA_TEXT_LENGTH) {
+    return normalized;
+  }
+  return normalized.slice(0, MAX_TERMINALIZATION_METADATA_TEXT_LENGTH);
 }
 
 function displayNameForSessionStart(session: BridgeSessionRecord): string {
