@@ -39,6 +39,7 @@ import {
   reconcileBridgeStartupControlCommandStatus,
   runBridgeRegistrationScheduler,
   runBridgeLoopIteration,
+  runProcess,
   sendHeartbeatWithClient,
   shouldCleanupBridgeOrphanedProcesses,
   upsertBridgeRegistration,
@@ -3458,6 +3459,140 @@ describe("bridge supervisor claim gating", () => {
     expect(heartbeatInput).toMatchObject({
       bridgeInstanceId: "instance-bridge-1",
       version: BRIDGE_VERSION,
+    });
+  });
+
+  test("runProcess rejects instead of hanging past its timeout", async () => {
+    const startedAt = Date.now();
+
+    await expect(
+      runProcess("bash", ["-lc", "sleep 10"], { timeoutMs: 50 }),
+    ).rejects.toThrow(/timed out/i);
+
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  test("retries heartbeat without update state when an older server rejects update target fields", async () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeIdentity: {
+        bridgeVersion: BRIDGE_VERSION,
+        instanceId: "instance-bridge-1",
+        mcpManifestHash: "manifest-a",
+        pid: 4242,
+        processStartedAt: "2026-06-22T00:00:00.000Z",
+        toolPolicyHash: "policy-a",
+      },
+      updateState: {
+        available: false,
+        channel: "stable",
+        currentVersion: BRIDGE_VERSION,
+        lastCheckedAt: 1_782_820_543_998,
+        latestVersion: BRIDGE_VERSION,
+        requestedAt: 1_782_820_532_649,
+        required: false,
+        status: "restarting",
+        targetVersion: BRIDGE_VERSION,
+      },
+    };
+    const heartbeatInputs: BridgeHeartbeatInput[] = [];
+
+    const result = await sendHeartbeatWithClient(bridgeRegistration(), status, {
+      heartbeat: async <TResponse = Record<string, unknown>>(
+        input: BridgeHeartbeatInput,
+      ) => {
+        heartbeatInputs.push(input);
+        if (heartbeatInputs.length === 1) {
+          throw new BridgeCloudHttpError(
+            "POST",
+            "https://example.test/api/agent-bridge/heartbeat",
+            401,
+            '{"error":"ArgumentValidationError: Object contains extra field `targetVersion` that is not in the validator.\\nPath: .status.updateState"}',
+          );
+        }
+        return {} as TResponse;
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(heartbeatInputs).toHaveLength(2);
+    expect(
+      (heartbeatInputs[0]?.status as Record<string, unknown>).updateState,
+    ).toMatchObject({ targetVersion: BRIDGE_VERSION });
+    expect(
+      (heartbeatInputs[1]?.status as Record<string, unknown>).updateState,
+    ).toBeUndefined();
+  });
+
+  test("retries heartbeat with compatible status when an older server rejects new status fields", async () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      restartHandoff: {
+        consumedAt: "2026-06-30T12:27:34.741Z",
+        createdAt: "2026-06-30T12:27:31.161Z",
+        reason: "restartWhenIdle",
+        runtimeProfileIds: ["codex:codex-acp"],
+        sessionWarmupHints: [],
+        startupPriorityRuntimeProfileIds: [],
+        status: "restarting",
+        targetVersion: BRIDGE_VERSION,
+      },
+      runtimeIdentity: {
+        bridgeVersion: BRIDGE_VERSION,
+        instanceId: "instance-bridge-1",
+        mcpManifestHash: "manifest-a",
+        pid: 4242,
+        processStartedAt: "2026-06-22T00:00:00.000Z",
+        toolPolicyHash: "policy-a",
+      },
+      updateState: {
+        available: false,
+        channel: "stable",
+        currentVersion: BRIDGE_VERSION,
+        lastCheckedAt: 1_782_820_543_998,
+        latestVersion: BRIDGE_VERSION,
+        required: false,
+        status: "upToDate",
+      },
+    };
+    const heartbeatInputs: BridgeHeartbeatInput[] = [];
+
+    const result = await sendHeartbeatWithClient(bridgeRegistration(), status, {
+      heartbeat: async <TResponse = Record<string, unknown>>(
+        input: BridgeHeartbeatInput,
+      ) => {
+        heartbeatInputs.push(input);
+        if (heartbeatInputs.length === 1) {
+          throw new BridgeCloudHttpError(
+            "POST",
+            "https://example.test/api/agent-bridge/heartbeat",
+            401,
+            '{"error":"ArgumentValidationError: Object contains extra field `restartHandoff` that is not in the validator.\\nPath: .status"}',
+          );
+        }
+        return {} as TResponse;
+      },
+    });
+
+    const fallbackStatus = heartbeatInputs[1]?.status as Record<
+      string,
+      unknown
+    >;
+
+    expect(result.ok).toBe(true);
+    expect(heartbeatInputs).toHaveLength(2);
+    expect(
+      (heartbeatInputs[0]?.status as Record<string, unknown>).restartHandoff,
+    ).toBeDefined();
+    expect(fallbackStatus.restartHandoff).toBeUndefined();
+    expect(fallbackStatus.updateState).toBeUndefined();
+    expect(fallbackStatus.connected).toBe(true);
+    expect(fallbackStatus.runtimeIdentity).toMatchObject({
+      instanceId: "instance-bridge-1",
     });
   });
 

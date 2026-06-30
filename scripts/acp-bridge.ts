@@ -20,6 +20,7 @@ import {
   BridgeCloudHttpError,
   BridgeCloudRequestTimeoutError,
   ConvexBridgeCloudClient,
+  type BridgeHeartbeatInput,
   type BridgeQueueClaimInput,
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
@@ -130,6 +131,7 @@ const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_STALE_CLEANUP_TIMEOUT_MS = 2_000;
 const DEFAULT_RESTART_STOP_TIMEOUT_MS = 5_000;
+const DEFAULT_HERMES_PROFILE_DISCOVERY_TIMEOUT_MS = 3_000;
 const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
 const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
@@ -5250,6 +5252,39 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
   };
 }
 
+function buildCompatibleHeartbeatStatusPayload(status: BridgeStatus) {
+  return {
+    activeSessions: status.activeSessions,
+    availability: status.availability,
+    capacity: status.capacity,
+    connected: status.connected,
+    inFlightCommands: status.inFlightCommands ?? [],
+    lastPollAt: status.lastPollAt,
+    lastStaleCleanup: status.lastStaleCleanup,
+    lastStaleCleanupAt: status.lastStaleCleanupAt,
+    lifecycle: status.lifecycle ?? "running",
+    liveness: status.liveness,
+    maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+    recentErrors: status.recentErrors.slice(-5),
+    retainedSessions: (status.retainedSessions ?? status.sessionQueues ?? []).map(
+      (session) => ({
+        queueDepth: session.queueDepth,
+        runningQueueItemId: session.runningQueueItemId,
+        sessionKey: session.sessionKey,
+        threadId: session.threadId,
+      }),
+    ),
+    runtimeConformance: status.runtimeConformance,
+    runtimeIdentity: status.runtimeIdentity,
+    sessionQueues: (status.sessionQueues ?? []).map((session) => ({
+      queueDepth: session.queueDepth,
+      runningQueueItemId: session.runningQueueItemId,
+      sessionKey: session.sessionKey,
+      threadId: session.threadId,
+    })),
+  };
+}
+
 function buildHeartbeatUpdateStatePayload(updateState: BridgeStatus["updateState"]) {
   const payload = {
     ...(updateState ?? {
@@ -5438,26 +5473,72 @@ function normalizeHermesPlaceholder(value: string | undefined): string | undefin
 }
 
 async function discoverHermesProfiles(): Promise<HermesProfileSummary[]> {
-  const { stdout } = await runProcess("hermes", ["profile", "list"]);
+  const { stdout } = await runProcess("hermes", ["profile", "list"], {
+    timeoutMs: DEFAULT_HERMES_PROFILE_DISCOVERY_TIMEOUT_MS,
+  });
   return parseHermesProfileListOutput(stdout);
 }
 
-function runProcess(
+export function runProcess(
   command: string,
   args: string[],
+  options: { timeoutMs?: number } = {},
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeoutMs =
+      typeof options.timeoutMs === "number" && options.timeoutMs > 0
+        ? options.timeoutMs
+        : undefined;
+    const timeout =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!child.killed) {
+                child.kill("SIGKILL");
+              }
+            }, 1_000).unref();
+            reject(
+              new Error(
+                `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
+              ),
+            );
+          }, timeoutMs);
+    timeout?.unref();
+    const settle = () => {
+      if (settled) {
+        return false;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      return true;
+    };
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
     });
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (settle()) {
+        reject(error);
+      }
+    });
     child.on("close", (code) => {
+      if (!settle()) {
+        return;
+      }
       if (code === 0) {
         resolve({ stderr, stdout });
         return;
@@ -5483,31 +5564,63 @@ export async function sendHeartbeatWithClient(
   status: BridgeStatus,
   client: Pick<ConvexBridgeCloudClient, "heartbeat">,
 ): Promise<BridgeHeartbeatSendResult> {
+  const input: BridgeHeartbeatInput = {
+    bridgeInstanceId: status.runtimeIdentity?.instanceId,
+    capabilities: buildHeartbeatCapabilities(status),
+    status: buildHeartbeatStatusPayload(status),
+    version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
+  };
   try {
-    const response = await client.heartbeat<{
-      control?: BridgeControlResponse;
-      enabledFeatureFlags?: unknown;
-      wake?: BridgeWakeToken;
-    }>({
-      bridgeInstanceId: status.runtimeIdentity?.instanceId,
-      capabilities: buildHeartbeatCapabilities(status),
-      status: buildHeartbeatStatusPayload(status),
-      version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
-    });
-    return {
-      ok: true,
-      control: response.control,
-      enabledFeatureFlags: stringArrayFromUnknownAllowEmpty(
-        response.enabledFeatureFlags,
-      ),
-      wake: response.wake,
-    };
+    return await sendHeartbeatInput(client, input);
   } catch (error) {
+    if (isHeartbeatStatusCompatibilityError(error)) {
+      try {
+        return await sendHeartbeatInput(client, {
+          ...input,
+          status: buildCompatibleHeartbeatStatusPayload(status),
+        });
+      } catch (fallbackError) {
+        if (isTransientHeartbeatError(fallbackError)) {
+          return { ok: false, error: fallbackError };
+        }
+        throw fallbackError;
+      }
+    }
     if (isTransientHeartbeatError(error)) {
       return { ok: false, error };
     }
     throw error;
   }
+}
+
+async function sendHeartbeatInput(
+  client: Pick<ConvexBridgeCloudClient, "heartbeat">,
+  input: BridgeHeartbeatInput,
+): Promise<Extract<BridgeHeartbeatSendResult, { ok: true }>> {
+  const response = await client.heartbeat<{
+    control?: BridgeControlResponse;
+    enabledFeatureFlags?: unknown;
+    wake?: BridgeWakeToken;
+  }>(input);
+  return {
+    ok: true,
+    control: response.control,
+    enabledFeatureFlags: stringArrayFromUnknownAllowEmpty(
+      response.enabledFeatureFlags,
+    ),
+    wake: response.wake,
+  };
+}
+
+function isHeartbeatStatusCompatibilityError(
+  error: unknown,
+): error is BridgeCloudHttpError {
+  return (
+    error instanceof BridgeCloudHttpError &&
+    (error.status === 400 || error.status === 401) &&
+    /ArgumentValidationError/i.test(error.responseBody) &&
+    /Path:\s*\.status(?:\.|\b)|\.status(?:\.|\b)/i.test(error.responseBody)
+  );
 }
 
 export function buildHeartbeatCapabilities(
