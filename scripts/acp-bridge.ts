@@ -149,7 +149,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.33";
+export const BRIDGE_VERSION = "0.1.34";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -1135,6 +1135,12 @@ export function getMaxInFlight(
   );
 }
 
+export function getInitialOrgMaxInFlight(
+  localHardMaxInFlight: number | undefined,
+): number {
+  return localHardMaxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS;
+}
+
 function normalizeControlMaxInFlight(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
     return undefined;
@@ -2053,8 +2059,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         parsed.flags,
         registration.deviceId,
       );
+      const initialOrgMaxInFlight =
+        getInitialOrgMaxInFlight(localHardMaxInFlight);
       const processRegistry = new AcpBridgeProcessRegistry({
-        maxProcesses: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+        maxProcesses: initialOrgMaxInFlight,
         path: processRegistryPath,
       });
       const singletonGuard = new BridgeSingletonGuard({
@@ -2116,13 +2124,13 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       const wakeSignal = createBridgeWakeSignal({
         config: registration,
         convexUrl: getConvexUrl(parsed.flags, registration),
-        limit: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+        limit: initialOrgMaxInFlight,
         log,
       });
       const initialCapacity = buildBridgeCapacitySnapshot(
         contexts.values(),
         localHardMaxInFlight,
-        DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+        initialOrgMaxInFlight,
       );
       const previousStatus =
         previousAggregateStatus?.registrations?.find(
@@ -2151,7 +2159,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
               pendingRestart: false,
             },
         lastStartedAt: new Date().toISOString(),
-        maxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+        maxInFlight: initialOrgMaxInFlight,
         capacity: initialCapacity,
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
@@ -2198,7 +2206,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         status,
         supervisor,
         wakeSignal,
-        orgMaxInFlight: DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
+        orgMaxInFlight: initialOrgMaxInFlight,
       };
       runtimeContext = context;
       const restartHandoffSeededSessionCount =
