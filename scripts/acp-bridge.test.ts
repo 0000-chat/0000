@@ -34,6 +34,7 @@ import {
   parseBridgeArgs,
   preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
+  runtimeConformanceRecordsForSuccessfulCommand,
   reconcileBridgeStartupControlCommandStatus,
   runBridgeRegistrationScheduler,
   runBridgeLoopIteration,
@@ -161,7 +162,7 @@ describe("bridge capacity configuration", () => {
     ).toBe(9);
   });
 
-  test("counts retained warm sessions against the shared bridge capacity", () => {
+  test("does not count retained warm sessions against fresh work capacity", () => {
     const activeWork = new Map<string, Promise<void>>([
       ["queue-active", Promise.resolve()],
     ]);
@@ -212,7 +213,7 @@ describe("bridge capacity configuration", () => {
 
     expect(snapshot).toMatchObject({
       bridgeMaxInFlight: 3,
-      processSlotUsage: 2,
+      processSlotUsage: 1,
       retainedSessionCount: 1,
       totalInFlight: 1,
     });
@@ -2925,13 +2926,13 @@ describe("bridge supervisor claim gating", () => {
     ]);
   });
 
-  test("rejects claimed prompt work for a stale runtime profile before execution", async () => {
+  test("runs claimed prompt work for a stale passing runtime profile", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const results: Array<{
       command: Record<string, unknown>;
       result: Record<string, unknown>;
     }> = [];
-    let handled = false;
+    const handled: Array<Record<string, unknown>> = [];
 
     await runBridgeLoopIteration({
       canClaimWork: () => true,
@@ -2981,8 +2982,8 @@ describe("bridge supervisor claim gating", () => {
           terminalInteractionSessionKeyCount: 0,
           sessions: [],
         }),
-        handleQueueItem: async () => {
-          handled = true;
+        handleQueueItem: async (item) => {
+          handled.push(item as unknown as Record<string, unknown>);
         },
       },
       markCommandResult: async (_config, command, result) => {
@@ -3007,20 +3008,13 @@ describe("bridge supervisor claim gating", () => {
       writeStatus: async () => {},
     });
 
-    expect(handled).toBe(false);
-    expect(results).toEqual([
-      {
-        command: expect.objectContaining({
-          bridgeProfileId: "codex:stale",
-          id: "queue-stale-prompt",
-        }),
-        result: expect.objectContaining({
-          error: "runtime_conformance_stale",
-          ok: false,
-          retryable: true,
-        }),
-      },
+    expect(handled).toEqual([
+      expect.objectContaining({
+        bridgeProfileId: "codex:stale",
+        id: "queue-stale-prompt",
+      }),
     ]);
+    expect(results).toEqual([]);
   });
 
   test("rejects claimed Hermes profile work without exact launch-spec conformance", async () => {
@@ -3227,6 +3221,71 @@ describe("bridge supervisor claim gating", () => {
         },
       }),
     ).not.toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("heartbeat payload omits bridge-local update start timestamps", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      updateState: {
+        available: false,
+        channel: "stable",
+        currentVersion: "0.1.32",
+        lastCheckedAt: Date.UTC(2026, 5, 30, 10, 0, 0),
+        latestVersion: "0.1.32",
+        requestedAt: Date.UTC(2026, 5, 30, 9, 59, 0),
+        required: false,
+        startedAt: Date.UTC(2026, 5, 30, 10, 0, 1),
+        status: "restarting",
+        targetVersion: "0.1.32",
+      },
+    };
+
+    expect(buildHeartbeatStatusPayload(status).updateState).toEqual({
+      available: false,
+      channel: "stable",
+      currentVersion: "0.1.32",
+      lastCheckedAt: Date.UTC(2026, 5, 30, 10, 0, 0),
+      latestVersion: "0.1.32",
+      requestedAt: Date.UTC(2026, 5, 30, 9, 59, 0),
+      required: false,
+      status: "restarting",
+      targetVersion: "0.1.32",
+    });
+  });
+
+  test("successful runtime work refreshes profile and launch-spec conformance records", () => {
+    expect(
+      runtimeConformanceRecordsForSuccessfulCommand(
+        {
+          agentSessionId: "agent-session-1",
+          bridgeProfileId: "hermes:default",
+          claimId: "claim-hermes",
+          hermesProfileName: "ops",
+          id: "queue-hermes-prompt",
+          prompt: "hello",
+          threadId: "thread-1",
+          type: "prompt",
+        },
+        Date.UTC(2026, 5, 30, 10, 0, 0),
+      ),
+    ).toEqual({
+      "hermes:default": {
+        checkedAt: Date.UTC(2026, 5, 30, 10, 0, 0),
+        diagnostics: [],
+        runtimeId: "hermes:default",
+        state: "passing",
+        strength: "init_only",
+      },
+      "hermes:default|hermes-profile:ops": {
+        checkedAt: Date.UTC(2026, 5, 30, 10, 0, 0),
+        diagnostics: [],
+        runtimeId: "hermes:default|hermes-profile:ops",
+        state: "passing",
+        strength: "init_only",
+      },
+    });
   });
 
   test("heartbeat payload separates retained idle sessions from active work", () => {
