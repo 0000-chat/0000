@@ -132,7 +132,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.24";
+export const BRIDGE_VERSION = "0.1.25";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -186,6 +186,7 @@ export type BridgeRegistration = {
   deviceName: string;
   pairedAt: string;
   bridgeApiUrl?: string;
+  enabledFeatureFlags?: string[];
   logIngestUrl?: string;
 };
 
@@ -203,6 +204,7 @@ type PairResponse = {
   bridgeToken?: unknown;
   token?: unknown;
   bridgeApiUrl?: unknown;
+  enabledFeatureFlags?: unknown;
   endpoint?: unknown;
   logIngestUrl?: unknown;
   logUrl?: unknown;
@@ -590,6 +592,7 @@ type AgentToolsMcpServerInput = {
   agentToolsUrl?: string;
   bridgeToken: string;
   deviceId: string;
+  enabledFeatureFlags?: string[];
   threadId?: string;
 };
 
@@ -734,6 +737,7 @@ function normalizeBridgeRegistration(raw: unknown): BridgeRegistration {
     bridgeToken,
     deviceId,
     deviceName,
+    enabledFeatureFlags: stringArrayFromUnknown(record.enabledFeatureFlags),
     logIngestUrl: stringFromUnknown(record.logIngestUrl),
     pairedAt,
   });
@@ -1046,6 +1050,14 @@ export function buildAgentToolsMcpServers(
         { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: input.deviceId },
         ...(input.threadId
           ? [{ name: "ZERO_CHAT_THREAD_ID", value: input.threadId }]
+          : []),
+        ...(input.enabledFeatureFlags?.length
+          ? [
+              {
+                name: "ZERO_CHAT_ENABLED_FEATURE_FLAGS",
+                value: input.enabledFeatureFlags.join(","),
+              },
+            ]
           : []),
         { name: "ZERO_CHAT_BRIDGE_TOKEN", value: input.bridgeToken },
       ],
@@ -1378,6 +1390,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
     bridgeToken,
     deviceId,
     deviceName: proposedProfile.proposedAgentName,
+    enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
     pairedAt: new Date().toISOString(),
   };
 
@@ -1464,6 +1477,7 @@ async function pairBridge(parsed: ParsedBridgeArgs) {
     bridgeToken,
     appUrl,
     deviceName,
+    enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
     pairedAt: new Date().toISOString(),
   };
 
@@ -1709,6 +1723,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             agentToolsUrl: registration.appUrl,
             bridgeToken: registration.bridgeToken,
             deviceId: registration.deviceId,
+            enabledFeatureFlags: registration.enabledFeatureFlags,
             threadId,
           });
         },
@@ -4710,6 +4725,14 @@ function redactForOutput(value: string): string {
 
 function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringArrayFromUnknown(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+  return result.length > 0 ? result : undefined;
 }
 
 function numberFromUnknown(value: unknown): number | undefined {
