@@ -15,6 +15,7 @@ export type BridgeRuntimeProfile = {
   kind: BridgeRuntimeKind
   label: string
   command: string[]
+  probeTimeoutMs?: number
   status: BridgeRuntimeProfileStatus
   availableCommands?: BridgeRuntimeAvailableCommand[]
   compatibility?: BridgeRuntimeCompatibility
@@ -159,6 +160,7 @@ export function synthesizeLegacyHermesProfile(
     kind: "hermes",
     label: "Hermes",
     command: normalizedCommand,
+    probeTimeoutMs: 30_000,
     status: "available",
     compatibility: hermesRuntimeCompatibility(),
     identityRules: {
