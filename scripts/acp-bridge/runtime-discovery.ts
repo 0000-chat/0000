@@ -81,7 +81,13 @@ const BUILT_INS: Array<{
   binary: string
   probeTimeoutMs?: number
 }> = [
-  { kind: "hermes", label: "Hermes", command: ["hermes", "acp"], binary: "hermes" },
+  {
+    kind: "hermes",
+    label: "Hermes",
+    command: ["hermes", "acp"],
+    binary: "hermes",
+    probeTimeoutMs: 30_000,
+  },
   {
     kind: "codex",
     label: "Codex",
@@ -283,7 +289,10 @@ async function withAcpDetails(
   discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
   options: AcpProbeOptions = {},
 ): Promise<BridgeRuntimeProfile> {
-  const probe = await probeAcpCommand(profile.command, options)
+  const probe = await probeAcpCommand(profile.command, {
+    ...options,
+    timeoutMs: options.timeoutMs ?? profile.probeTimeoutMs,
+  })
   if (probe.ok) {
     const availableCommands = await discoverAcpCommands(profile.command).catch(() => [])
     const probedProfile = applyProbeCapabilities(profile, probe.capabilities)
