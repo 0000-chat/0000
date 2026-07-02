@@ -280,6 +280,11 @@ type ToolResultTimeoutDetails = {
   toolPolicyId: string;
 };
 
+type ToolCallReconciliationTrigger =
+  | "assistant_output_resumed"
+  | "later_tool_started"
+  | "turn_completed";
+
 export type BridgeTerminalizationMetadata = {
   ageMs?: number;
   failureClass?: string;
@@ -1652,10 +1657,16 @@ export class BridgeSessionManager {
       schedule();
     });
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         session.acp.sendUserMessage(prompt, options),
         livenessFailure,
       ]);
+      if (!isEmptyVisiblePromptResult(result)) {
+        this.reconcilePendingToolCalls(queueItemId, session, {
+          trigger: "turn_completed",
+        });
+      }
+      return result;
     } finally {
       if (timer) {
         clearTimeout(timer);
@@ -1703,6 +1714,10 @@ export class BridgeSessionManager {
       event.externalEventId ??
       `${queueItemId}:${tool.toolName}`;
     if (part.type === "tool_call") {
+      this.reconcilePendingToolCalls(queueItemId, session, {
+        exceptToolCallId: toolCallId,
+        trigger: "later_tool_started",
+      });
       this.trackPendingToolCall(queueItemId, session, {
         toolCallId,
         toolName: tool.toolName,
@@ -1711,6 +1726,10 @@ export class BridgeSessionManager {
     }
     const state = readToolState(part.json);
     if (state === "input-streaming" || state === "input-available") {
+      this.reconcilePendingToolCalls(queueItemId, session, {
+        exceptToolCallId: toolCallId,
+        trigger: "later_tool_started",
+      });
       this.trackPendingToolCall(queueItemId, session, {
         toolCallId,
         toolName: tool.toolName,
@@ -1720,7 +1739,7 @@ export class BridgeSessionManager {
     this.clearToolCall(queueItemId, toolCallId);
   }
 
-  private clearPendingToolCallsIfAssistantOutputResumed(
+  private reconcilePendingToolCallsIfAssistantOutputResumed(
     queueItemId: string,
     session: BridgeSessionRecord,
     event: NormalizedBridgeEvent,
@@ -1729,20 +1748,86 @@ export class BridgeSessionManager {
     if (partType !== "text" && partType !== "thinking") {
       return;
     }
+    this.reconcilePendingToolCalls(queueItemId, session, {
+      trigger: "assistant_output_resumed",
+    });
+  }
+
+  private reconcilePendingToolCalls(
+    queueItemId: string,
+    session: BridgeSessionRecord,
+    options: {
+      exceptToolCallId?: string;
+      trigger: ToolCallReconciliationTrigger;
+    },
+  ): void {
     const queueTools = this.activeToolCalls.get(queueItemId);
     if (!queueTools || queueTools.size === 0) {
       return;
     }
-    const clearedToolCallCount = queueTools.size;
-    this.clearToolCallsForQueueItem(queueItemId);
+    const tools = Array.from(queueTools.values()).filter(
+      (tool) => tool.toolCallId !== options.exceptToolCallId,
+    );
+    if (tools.length === 0) {
+      return;
+    }
+    for (const tool of tools) {
+      const ageMs = Date.now() - tool.startedAt;
+      this.clearToolCall(queueItemId, tool.toolCallId);
+      this.writeLog({
+        level: "warn",
+        event: "bridge.session.tool_call_reconciled",
+        queueId: queueItemId,
+        threadId: session.threadId,
+        agentSessionId: session.providerSessionKey,
+        bridgeProfileId: session.runtimeProfile?.id,
+        ageMs,
+        reasonCode: "tool_completion_lost",
+        settlementState: "completion_lost",
+        toolCallId: tool.toolCallId,
+        toolName: tool.toolName,
+        trigger: options.trigger,
+      });
+      this.enqueueEventWrite(session, {
+        externalEventId: `${queueItemId}:${tool.toolCallId}:completion_lost`,
+        source: "bridge",
+        eventType: "tool_call_update",
+        payload: {
+          ageMs,
+          queueId: queueItemId,
+          reasonCode: "tool_completion_lost",
+          settlementState: "completion_lost",
+          sessionUpdate: "tool_call_update",
+          state: "completion_lost",
+          toolCallId: tool.toolCallId,
+          toolName: tool.toolName,
+          trigger: options.trigger,
+        },
+        part: {
+          type: "tool_result",
+          text: `${tool.toolName} completion could not be confirmed.`,
+          json: {
+            ageMs,
+            reasonCode: "tool_completion_lost",
+            settlementState: "completion_lost",
+            state: "completion_lost",
+            toolCallId: tool.toolCallId,
+            toolName: tool.toolName,
+            trigger: options.trigger,
+          },
+          status: "error",
+        },
+      });
+    }
     this.writeLog({
       level: "debug",
-      event: "bridge.session.tool_calls_cleared_on_assistant_output",
+      event: "bridge.session.tool_calls_reconciled",
       queueId: queueItemId,
       threadId: session.threadId,
       agentSessionId: session.providerSessionKey,
       bridgeProfileId: session.runtimeProfile?.id,
-      clearedToolCallCount,
+      clearedToolCallCount: tools.length,
+      trigger: options.trigger,
     });
   }
 
@@ -2652,7 +2737,7 @@ export class BridgeSessionManager {
                 : "assistant_output",
             );
             this.recordToolEvent(eventItem.id, record, event);
-            this.clearPendingToolCallsIfAssistantOutputResumed(
+            this.reconcilePendingToolCallsIfAssistantOutputResumed(
               eventItem.id,
               record,
               event,
