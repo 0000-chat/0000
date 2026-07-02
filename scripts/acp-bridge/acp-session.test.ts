@@ -942,6 +942,12 @@ describe("ACP runtime adapter boundary", () => {
 
   test("sends image attachments as ACP image blocks and other files as resource links", async () => {
     const requests: RuntimeRequest[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { "content-type": "image/png" },
+        status: 200,
+      })) as unknown as typeof fetch
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
       runtimeClient: createFakeRuntimeClient({
@@ -950,23 +956,27 @@ describe("ACP runtime adapter boundary", () => {
       }),
     })
 
-    await session.sendUserMessage("review these", {
-      attachments: [
-        {
-          filename: "diagram.png",
-          mediaType: "image/png",
-          sizeBytes: 1234,
-          url: "https://app.example.test/api/attachments/image",
-        },
-        {
-          filename: "notes.txt",
-          mediaType: "text/plain",
-          sizeBytes: 42,
-          url: "https://app.example.test/api/attachments/file",
-        },
-      ],
-      systemPrompt: "Prefer concise answers.",
-    })
+    try {
+      await session.sendUserMessage("review these", {
+        attachments: [
+          {
+            filename: "diagram.png",
+            mediaType: "image/png",
+            sizeBytes: 1234,
+            url: "https://app.example.test/api/attachments/image",
+          },
+          {
+            filename: "notes.txt",
+            mediaType: "text/plain",
+            sizeBytes: 42,
+            url: "https://app.example.test/api/attachments/file",
+          },
+        ],
+        systemPrompt: "Prefer concise answers.",
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
 
     const promptRequest = requests.find((request) => request.method === "session/prompt")
     expect(promptRequest?.params).toMatchObject({ sessionId: "session-1" })
@@ -980,9 +990,9 @@ describe("ACP runtime adapter boundary", () => {
         }),
         { text: "review these", type: "text" },
         {
+          data: "iVBORw==",
           mimeType: "image/png",
           type: "image",
-          uri: "https://app.example.test/api/attachments/image",
         },
         {
           mimeType: "text/plain",
@@ -997,6 +1007,12 @@ describe("ACP runtime adapter boundary", () => {
 
   test("infers image block MIME type from attachment filenames", async () => {
     const requests: RuntimeRequest[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([255, 216, 255]), {
+        headers: { "content-type": "image/jpeg" },
+        status: 200,
+      })) as unknown as typeof fetch
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
       runtimeClient: createFakeRuntimeClient({
@@ -1005,21 +1021,25 @@ describe("ACP runtime adapter boundary", () => {
       }),
     })
 
-    await session.sendUserMessage("review this", {
-      attachments: [
-        {
-          filename: "diagram.png",
-          url: "https://app.example.test/api/attachments/image",
-        },
-      ],
-    })
+    try {
+      await session.sendUserMessage("review this", {
+        attachments: [
+          {
+            filename: "diagram.png",
+            url: "https://app.example.test/api/attachments/image",
+          },
+        ],
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
 
     const promptRequest = requests.find((request) => request.method === "session/prompt")
     const params = promptRequest?.params as { prompt?: unknown[] } | undefined
     expect(params?.prompt).toContainEqual({
-      mimeType: "image/png",
+      data: "/9j/",
+      mimeType: "image/jpeg",
       type: "image",
-      uri: "https://app.example.test/api/attachments/image",
     })
   })
 

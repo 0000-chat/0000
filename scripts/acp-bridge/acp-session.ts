@@ -106,6 +106,8 @@ export type HermesAcpPromptOptions = {
 
 export type HermesAcpAttachmentDeliveryMode = "resource_links" | "text_references"
 
+const MAX_INLINE_PROMPT_IMAGE_BYTES = 10 * 1024 * 1024
+
 export type HermesAcpPromptAttachment = {
   access?: {
     mode?: string
@@ -405,7 +407,7 @@ export class HermesAcpSession {
     const attachmentBlocks =
       this.capabilities?.supportsPromptResourceLinks === false
         ? []
-        : buildAttachmentContentBlocks(options.attachments)
+        : await buildAttachmentContentBlocks(options.attachments)
     const attachmentDeliveryMode =
       attachmentBlocks.length > 0
         ? "resource_links"
@@ -1353,28 +1355,38 @@ export function buildPromptContentBlocks(
   ]
 }
 
-function buildAttachmentContentBlocks(
+async function buildAttachmentContentBlocks(
   attachments: HermesAcpPromptAttachment[] | undefined,
-): Array<Record<string, unknown>> {
+): Promise<Array<Record<string, unknown>>> {
   if (!Array.isArray(attachments)) {
     return []
   }
   const blocks: Array<Record<string, unknown>> = []
-  attachments.forEach((attachment, index) => {
+  for (const [index, attachment] of attachments.entries()) {
     const uri = (attachment.access?.url ?? attachment.url)?.trim()
     if (!uri) {
-      return
+      continue
     }
     const name = attachment.filename?.trim() || `Attachment ${index + 1}`
     const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
     const imageMediaType = imageMediaTypeForAttachment(attachment, mediaType, uri)
     if (imageMediaType) {
-      blocks.push({
-        type: "image",
-        uri,
-        mimeType: imageMediaType,
-      })
-      return
+      const imageData = await fetchPromptImageData(uri, imageMediaType, attachment.sizeBytes)
+      if (imageData) {
+        blocks.push({
+          type: "image",
+          data: imageData.dataBase64,
+          mimeType: imageData.mediaType,
+        })
+      } else {
+        blocks.push({
+          type: "resource_link",
+          uri,
+          name,
+          mimeType: mediaType,
+        })
+      }
+      continue
     }
     const block: Record<string, unknown> = {
       type: "resource_link",
@@ -1386,8 +1398,53 @@ function buildAttachmentContentBlocks(
       block.size = attachment.sizeBytes
     }
     blocks.push(block)
-  })
+  }
   return blocks
+}
+
+async function fetchPromptImageData(
+  uri: string,
+  fallbackMediaType: string,
+  declaredSizeBytes?: number,
+): Promise<{ dataBase64: string; mediaType: string } | undefined> {
+  if (declaredSizeBytes && declaredSizeBytes > MAX_INLINE_PROMPT_IMAGE_BYTES) {
+    return undefined
+  }
+  const parsed = safeUrl(uri)
+  if (!parsed || !["http:", "https:"].includes(parsed.protocol)) {
+    return undefined
+  }
+  try {
+    const response = await fetch(parsed)
+    if (!response.ok) {
+      return undefined
+    }
+    const contentLength = response.headers.get("content-length")
+    if (contentLength && Number(contentLength) > MAX_INLINE_PROMPT_IMAGE_BYTES) {
+      return undefined
+    }
+    const mediaType =
+      response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ||
+      fallbackMediaType
+    if (!mediaType.startsWith("image/")) {
+      return undefined
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_INLINE_PROMPT_IMAGE_BYTES) {
+      return undefined
+    }
+    return { dataBase64: Buffer.from(bytes).toString("base64"), mediaType }
+  } catch {
+    return undefined
+  }
+}
+
+function safeUrl(uri: string): URL | undefined {
+  try {
+    return new URL(uri)
+  } catch {
+    return undefined
+  }
 }
 
 function imageMediaTypeForAttachment(

@@ -485,6 +485,26 @@ function normalizeAttachmentUploadCandidate(
   kind: string,
   update: JsonRecord,
 ): BridgeAttachmentUploadCandidate | undefined {
+  const content = maybeRecord(update.content)
+  if (kind === "agent_message_chunk" && content && readString(content.type) === "image") {
+    const dataBase64 = readString(content.data)
+    const mediaType = readString(content.mimeType) ?? readString(content.mime_type)
+    const filename =
+      readString(content.filename) ??
+      readString(content.name) ??
+      readString(content.title) ??
+      filenameFromUri(readString(content.uri)) ??
+      defaultFilenameForMediaType(mediaType)
+    if (dataBase64 && filename) {
+      return removeUndefinedValues({
+        kind: "base64",
+        dataBase64,
+        filename,
+        mediaType,
+      }) as BridgeAttachmentUploadCandidate
+    }
+  }
+
   const resource =
     maybeRecord(update.attachment) ??
     maybeRecord(update.file) ??
@@ -845,6 +865,33 @@ function arrayFromUnknown(value: unknown): unknown[] | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function filenameFromUri(uri: string | undefined): string | undefined {
+  if (!uri) return undefined
+  try {
+    const parsed = new URL(uri)
+    const name = parsed.pathname.split("/").filter(Boolean).at(-1)
+    return name ? decodeURIComponent(name) : undefined
+  } catch {
+    const name = uri.split(/[\\/]/).filter(Boolean).at(-1)
+    return name || undefined
+  }
+}
+
+function defaultFilenameForMediaType(mediaType: string | undefined): string {
+  const normalized = (mediaType ?? "image/png").split(";", 1)[0]?.trim().toLowerCase()
+  const extension =
+    normalized === "image/jpeg"
+      ? "jpg"
+      : normalized === "image/webp"
+        ? "webp"
+        : normalized === "image/gif"
+          ? "gif"
+          : normalized === "image/svg+xml"
+            ? "svg"
+            : "png"
+  return `agent-image.${extension}`
 }
 
 function readNumberString(value: unknown): string | undefined {

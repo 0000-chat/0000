@@ -3146,15 +3146,26 @@ describe("bridge session cwd safety", () => {
       const cloud = fakeCloudClient();
       const manager = new BridgeSessionManager({
         cloudClient: cloud,
-        createSession: () => ({
+        createSession: (context) => ({
           close: async () => {},
           cancel: async () => {},
-          sendUserMessage: async () => ({
-            events: [],
-            rawResult: {},
-            sessionId: "session-1",
-            text: `Here is the image.\nMEDIA:${imagePath}`,
-          }),
+          sendUserMessage: async () => {
+            context.onEvent(
+              streamChunkEvent(
+                "agent_message_chunk",
+                `Here is the image.
+MEDIA:${imagePath}`,
+                1,
+              ),
+            );
+            return {
+              events: [],
+              rawResult: {},
+              sessionId: "session-1",
+              text: `Here is the image.
+MEDIA:${imagePath}`,
+            };
+          },
         }),
       });
 
@@ -3193,9 +3204,68 @@ describe("bridge session cwd safety", () => {
         ],
         text: "Here is the image.",
       });
+      const persistedText = JSON.stringify(flattenPersistedEvents(cloud.events));
+      expect(persistedText).toContain("Here is the image.");
+      expect(persistedText).not.toContain("MEDIA:");
     } finally {
       await rm(cwd, { force: true, recursive: true });
     }
+  });
+
+  test("uploads streamed ACP image content blocks even when result events omit them", async () => {
+    const cloud = fakeCloudClient();
+    const imageBytes = new Uint8Array([137, 80, 78, 71]);
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(acpImageChunkEvent(imageBytes, 1));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "Here is the image.",
+          };
+        },
+      }),
+    });
+
+    await manager.handleQueueItem({
+      agentSessionId: "agent-session-1",
+      claimId: "claim-1",
+      id: "queue-1",
+      prompt: "Create an image.",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+
+    expect(cloud.uploads).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        byteLength: 4,
+        filename: "reply.png",
+        mediaType: "image/png",
+        threadId: "thread-1",
+      },
+    ]);
+    expect(cloud.results.at(-1)?.result).toMatchObject({
+      ok: true,
+      parts: [
+        {
+          payload: {
+            filename: "reply.png",
+            mediaType: "image/png",
+            sizeBytes: 4,
+            storageBackend: "r2",
+            type: "file",
+          },
+          type: "attachment",
+        },
+      ],
+      text: "Here is the image.",
+    });
   });
 
   test("waits for a starting ACP session before handling an approval response", async () => {
@@ -6034,6 +6104,46 @@ function streamChunkEvent(
     payload: {
       content: { text, type: "text" },
       sessionUpdate: eventType,
+    },
+    providerSequence: sequence,
+    source: "acp_bridge",
+  };
+}
+
+function acpImageChunkEvent(
+  bytes: Uint8Array,
+  sequence: number,
+): NormalizedBridgeEvent {
+  const dataBase64 = Buffer.from(bytes).toString("base64");
+  return {
+    attachmentUpload: {
+      dataBase64,
+      filename: "reply.png",
+      kind: "base64",
+      mediaType: "image/png",
+    },
+    eventType: "agent_message_chunk",
+    externalEventId: `session-1:${sequence}:agent_message_chunk`,
+    part: {
+      json: {
+        candidateKind: "base64",
+        eventKind: "agent_message_chunk",
+        filename: "reply.png",
+        mediaType: "image/png",
+        status: "pending_upload",
+        type: "agent_attachment_upload",
+      },
+      status: "streaming",
+      text: "Agent emitted an attachment.",
+      type: "event",
+    },
+    payload: {
+      candidateKind: "base64",
+      eventKind: "agent_message_chunk",
+      filename: "reply.png",
+      mediaType: "image/png",
+      status: "pending_upload",
+      type: "agent_attachment_upload",
     },
     providerSequence: sequence,
     source: "acp_bridge",
