@@ -77,7 +77,10 @@ import {
   inferRuntimeId,
   inferRuntimeLabel,
 } from "./acp-bridge/runtime-defaults";
-import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles";
+import {
+  synthesizeLegacyHermesProfile,
+  type BridgeRuntimeProfile,
+} from "./acp-bridge/runtime-profiles";
 import { shouldRestartBridgeForDevHotReload } from "./acp-bridge/dev-hot-reload";
 import { openBridgeJournal } from "./acp-bridge/sqlite-journal";
 import { buildRestartCommandArgs } from "./bridge-updater";
@@ -152,7 +155,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.37";
+export const BRIDGE_VERSION = "0.1.38";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -381,6 +384,7 @@ type BridgeSessionSummary = {
   threadId: string;
   agentSessionId?: string;
   bridgeProfileId?: string;
+  claimId?: string;
   organizationId?: string;
   runtimeProfileId?: string;
   runtimeLabel?: string;
@@ -388,6 +392,7 @@ type BridgeSessionSummary = {
   hermesProfileName?: string;
   queueDepth: number;
   runningQueueItemId?: string;
+  lastActivityAt?: number;
   lastUsedAt?: number;
 };
 
@@ -474,11 +479,15 @@ export type BridgeRestartHandoffEntry = {
   sessionWarmupHints: Array<{
     agentSessionId?: string;
     bridgeProfileId?: string;
+    claimId?: string;
     hermesProfileName?: string;
+    lastActivityAt?: number;
     lastUsedAt?: number;
     organizationId?: string;
+    queueItemId?: string;
     runtimeProfileId?: string;
     sessionId?: string;
+    sessionKey?: string;
     threadId: string;
   }>;
 };
@@ -1822,6 +1831,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       baseAgentCommand: agentCommand,
       customCommands: customRuntimeCommands,
     }).catch(() => []));
+  runtimeProfiles = seedConfiguredHermesRuntimeProfile(
+    runtimeProfiles,
+    agentCommand,
+  );
   let launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
     hermesProfiles,
     runtimeProfiles,
@@ -1990,11 +2003,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         baseAgentCommand: agentCommand,
         customCommands: customRuntimeCommands,
       }).catch(() => runtimeProfiles);
+      const nextRuntimeProfiles = seedConfiguredHermesRuntimeProfile(
+        discoveredRuntimeProfiles,
+        agentCommand,
+      );
       const runtimeCatalogChanged = runtimeProfilesChanged(
         runtimeProfiles,
-        discoveredRuntimeProfiles,
+        nextRuntimeProfiles,
       );
-      runtimeProfiles = discoveredRuntimeProfiles;
+      runtimeProfiles = nextRuntimeProfiles;
       launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
         hermesProfiles: nextHermesProfiles,
         runtimeProfiles,
@@ -2332,6 +2349,24 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     stopping = true;
     for (const context of contexts.values()) {
       context.closing = true;
+    }
+    if (options.signal) {
+      for (const context of contexts.values()) {
+        syncBridgeRuntimeStatus(
+          context.status,
+          context.manager,
+          context.orgMaxInFlight,
+          context.inFlightCommandMetadata,
+        );
+      }
+      await persistRestartHandoffForStatuses(restartHandoffPath, {
+        reason: "restartWhenIdle",
+        status: "processSignal",
+        statuses: Array.from(contexts.values()).map(
+          (context) => context.status,
+        ),
+        targetVersion: BRIDGE_VERSION,
+      });
     }
     for (const context of contexts.values()) {
       if (options.signal) {
@@ -2734,7 +2769,11 @@ async function refreshRuntimeConformanceProfiles(input: {
   const nextRecords = { ...input.records };
   const priorityProfileIds = new Set(input.priorityProfileIds ?? []);
   const profiles = prioritizeRuntimeConformanceProfiles(
-    input.profiles.filter((candidate) => candidate.status === "available"),
+    input.profiles.filter(
+      (candidate) =>
+        candidate.status === "available" ||
+        !isLaunchSpecRuntimeProfile(candidate),
+    ),
     input.priorityProfileIds ?? [],
   );
   for (const profile of profiles) {
@@ -3100,14 +3139,18 @@ function buildBridgeRestartHandoffEntry(
       compact({
         agentSessionId: session.agentSessionId,
         bridgeProfileId: session.bridgeProfileId ?? session.runtimeProfileId,
+        claimId: session.claimId,
         hermesProfileName: session.hermesProfileName,
+        lastActivityAt: session.lastActivityAt,
         lastUsedAt:
           typeof session.lastUsedAt === "number" &&
           Number.isFinite(session.lastUsedAt)
             ? session.lastUsedAt
             : undefined,
         organizationId: session.organizationId,
+        queueItemId: session.runningQueueItemId,
         runtimeProfileId: session.runtimeProfileId,
+        sessionKey: session.sessionKey,
         threadId: session.threadId,
       }),
     )
@@ -3277,19 +3320,27 @@ function normalizeBridgeRestartHandoffEntry(
     }
     const agentSessionId = stringFromUnknown(hint.agentSessionId)?.trim();
     const bridgeProfileId = stringFromUnknown(hint.bridgeProfileId)?.trim();
+    const claimId = stringFromUnknown(hint.claimId)?.trim();
     const hermesProfileName = stringFromUnknown(hint.hermesProfileName)?.trim();
+    const lastActivityAt = numberFromUnknown(hint.lastActivityAt);
     const lastUsedAt = numberFromUnknown(hint.lastUsedAt);
+    const queueItemId = stringFromUnknown(hint.queueItemId)?.trim();
     const runtimeProfileId = stringFromUnknown(hint.runtimeProfileId);
     const organizationId = stringFromUnknown(hint.organizationId)?.trim();
     const sessionId = stringFromUnknown(hint.sessionId)?.trim();
+    const sessionKey = stringFromUnknown(hint.sessionKey)?.trim();
     sessionWarmupHints.push({
       ...(agentSessionId ? { agentSessionId } : {}),
       ...(bridgeProfileId ? { bridgeProfileId } : {}),
+      ...(claimId ? { claimId } : {}),
       ...(hermesProfileName ? { hermesProfileName } : {}),
+      ...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
       ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
       ...(organizationId ? { organizationId } : {}),
+      ...(queueItemId ? { queueItemId } : {}),
       ...(runtimeProfileId ? { runtimeProfileId } : {}),
       ...(sessionId ? { sessionId } : {}),
+      ...(sessionKey ? { sessionKey } : {}),
       threadId,
     });
     if (sessionWarmupHints.length >= BRIDGE_RESTART_HANDOFF_MAX_SESSIONS) {
@@ -3320,6 +3371,9 @@ function buildRestartHandoffStatus(
       restartHandoffEntryPriorityProfileIds(entry),
     sessionWarmupHints: entry.sessionWarmupHints.map((hint) =>
       compact({
+        bridgeProfileId: hint.bridgeProfileId,
+        hermesProfileName: hint.hermesProfileName,
+        queueItemId: hint.queueItemId,
         runtimeProfileId: hint.runtimeProfileId,
         threadId: hint.threadId,
       }),
@@ -4432,7 +4486,10 @@ export function bridgeHeartbeatSignature(
     lastStaleCleanup: status.lastStaleCleanup,
     sessionQueues: (status.sessionQueues ?? [])
       .map((session) => ({
+        agentSessionId: session.agentSessionId,
+        bridgeProfileId: session.bridgeProfileId,
         hermesProfileName: session.hermesProfileName,
+        lastUsedAt: session.lastUsedAt,
         queueDepth: session.queueDepth,
         runningQueueItemId: session.runningQueueItemId,
         runtimeKind: session.runtimeKind,
@@ -4483,6 +4540,20 @@ function runtimeProfilesChanged(
     }
   }
   return false;
+}
+
+function seedConfiguredHermesRuntimeProfile(
+  profiles: BridgeRuntimeProfile[],
+  agentCommand: string | string[] | undefined,
+): BridgeRuntimeProfile[] {
+  const configuredHermesProfile = synthesizeLegacyHermesProfile(agentCommand);
+  if (!configuredHermesProfile) {
+    return profiles;
+  }
+  if (profiles.some((profile) => profile.id === configuredHermesProfile.id)) {
+    return profiles;
+  }
+  return [configuredHermesProfile, ...profiles];
 }
 
 function runtimeProfileCatalogSignature(profile: BridgeRuntimeProfile): string {
@@ -5246,15 +5317,25 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     availability: status.availability,
     retainedSessions: (status.retainedSessions ?? status.sessionQueues ?? []).map(
       (session) => ({
+        agentSessionId: session.agentSessionId,
+        bridgeProfileId: session.bridgeProfileId,
+        hermesProfileName: session.hermesProfileName,
+        lastUsedAt: session.lastUsedAt,
         queueDepth: session.queueDepth,
         runningQueueItemId: session.runningQueueItemId,
+        runtimeProfileId: session.runtimeProfileId,
         sessionKey: session.sessionKey,
         threadId: session.threadId,
       }),
     ),
     sessionQueues: (status.sessionQueues ?? []).map((session) => ({
+      agentSessionId: session.agentSessionId,
+      bridgeProfileId: session.bridgeProfileId,
+      hermesProfileName: session.hermesProfileName,
+      lastUsedAt: session.lastUsedAt,
       queueDepth: session.queueDepth,
       runningQueueItemId: session.runningQueueItemId,
+      runtimeProfileId: session.runtimeProfileId,
       sessionKey: session.sessionKey,
       threadId: session.threadId,
     })),
@@ -5281,8 +5362,13 @@ function buildCompatibleHeartbeatStatusPayload(status: BridgeStatus) {
     recentErrors: status.recentErrors.slice(-5),
     retainedSessions: (status.retainedSessions ?? status.sessionQueues ?? []).map(
       (session) => ({
+        agentSessionId: session.agentSessionId,
+        bridgeProfileId: session.bridgeProfileId,
+        hermesProfileName: session.hermesProfileName,
+        lastUsedAt: session.lastUsedAt,
         queueDepth: session.queueDepth,
         runningQueueItemId: session.runningQueueItemId,
+        runtimeProfileId: session.runtimeProfileId,
         sessionKey: session.sessionKey,
         threadId: session.threadId,
       }),
@@ -5290,8 +5376,13 @@ function buildCompatibleHeartbeatStatusPayload(status: BridgeStatus) {
     runtimeConformance: status.runtimeConformance,
     runtimeIdentity: status.runtimeIdentity,
     sessionQueues: (status.sessionQueues ?? []).map((session) => ({
+      agentSessionId: session.agentSessionId,
+      bridgeProfileId: session.bridgeProfileId,
+      hermesProfileName: session.hermesProfileName,
+      lastUsedAt: session.lastUsedAt,
       queueDepth: session.queueDepth,
       runningQueueItemId: session.runningQueueItemId,
+      runtimeProfileId: session.runtimeProfileId,
       sessionKey: session.sessionKey,
       threadId: session.threadId,
     })),

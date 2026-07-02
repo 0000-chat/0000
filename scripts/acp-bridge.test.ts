@@ -650,6 +650,8 @@ describe("bridge restart handoff", () => {
         {
           agentSessionId: "provider-session",
           bridgeProfileId: "codex:default",
+          claimId: "claim-queue-1",
+          lastActivityAt: Date.UTC(2026, 5, 22, 8, 56, 0),
           lastUsedAt: Date.UTC(2026, 5, 22, 8, 55, 0),
           organizationId: "org-1",
           queueDepth: 1,
@@ -676,7 +678,6 @@ describe("bridge restart handoff", () => {
     const raw = await Bun.file(handoffPath).text();
     expect(raw).toContain("bridge-org-a");
     expect(raw).toContain("codex:default");
-    expect(raw).not.toContain("org-secret-session-key");
     expect(raw).not.toContain("Bearer");
     expect(raw).not.toContain("token");
     expect((await stat(handoffPath)).mode & 0o777).toBe(0o600);
@@ -704,8 +705,12 @@ describe("bridge restart handoff", () => {
           expect.objectContaining({
             agentSessionId: "provider-session",
             bridgeProfileId: "codex:default",
+            claimId: "claim-queue-1",
+            lastActivityAt: Date.UTC(2026, 5, 22, 8, 56, 0),
             organizationId: "org-1",
+            queueItemId: "queue-1",
             runtimeProfileId: "codex:default",
+            sessionKey: "org-secret-session-key",
             threadId: "thread-1",
           }),
         ],
@@ -1009,6 +1014,48 @@ describe("bridge restart handoff startup priority", () => {
     expect(
       records["hermes:default|hermes-profile:0000-builder"],
     ).toBeUndefined();
+  });
+
+  test("retries unavailable base runtime profiles while idle", async () => {
+    const refreshedProfiles: string[] = [];
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(),
+      getRunningSessionProfileIds: () => new Set(),
+      now: () => 20_000,
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 20_000,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      profiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "acp"],
+          id: "hermes:default",
+          kind: "hermes",
+          label: "Hermes",
+          status: "unavailable",
+        },
+        {
+          capabilities: {},
+          command: ["codex", "acp"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      ],
+      records: {},
+      ttlMs: 1_000,
+    });
+
+    expect(refreshedProfiles).toEqual(["hermes:default", "codex:codex-acp"]);
+    expect(records["hermes:default"]?.state).toBe("passing");
   });
 });
 

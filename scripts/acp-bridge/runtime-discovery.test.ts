@@ -268,6 +268,10 @@ describe("runtime discovery", () => {
           call.timeoutMs === 30_000,
       ),
     ).toBe(true)
+    expect(probeCalls.find((call) => call.command.join(" ") === "hermes acp")).toEqual({
+      command: ["hermes", "acp"],
+      timeoutMs: 30_000,
+    })
     expect(probeCalls.find((call) => call.command.join(" ") === "openclaw acp")).toEqual({
       command: ["openclaw", "acp"],
       timeoutMs: 20_000,
@@ -276,6 +280,7 @@ describe("runtime discovery", () => {
       probeCalls
         .filter(
           (call) =>
+            call.command.join(" ") !== "hermes acp" &&
             call.command.join(" ") !== "bunx @zed-industries/codex-acp@0.16.0" &&
             call.command.join(" ") !== "openclaw acp",
         )
