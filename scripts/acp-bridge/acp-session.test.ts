@@ -940,7 +940,7 @@ describe("ACP runtime adapter boundary", () => {
     })
   })
 
-  test("sends attachment references as ACP resource link content blocks", async () => {
+  test("sends image attachments as ACP image blocks and other files as resource links", async () => {
     const requests: RuntimeRequest[] = []
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",
@@ -981,9 +981,7 @@ describe("ACP runtime adapter boundary", () => {
         { text: "review these", type: "text" },
         {
           mimeType: "image/png",
-          name: "diagram.png",
-          size: 1234,
-          type: "resource_link",
+          type: "image",
           uri: "https://app.example.test/api/attachments/image",
         },
         {
@@ -995,6 +993,34 @@ describe("ACP runtime adapter boundary", () => {
         },
       ]),
     )
+  })
+
+  test("infers image block MIME type from attachment filenames", async () => {
+    const requests: RuntimeRequest[] = []
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({
+        requests,
+        updates: [],
+      }),
+    })
+
+    await session.sendUserMessage("review this", {
+      attachments: [
+        {
+          filename: "diagram.png",
+          url: "https://app.example.test/api/attachments/image",
+        },
+      ],
+    })
+
+    const promptRequest = requests.find((request) => request.method === "session/prompt")
+    const params = promptRequest?.params as { prompt?: unknown[] } | undefined
+    expect(params?.prompt).toContainEqual({
+      mimeType: "image/png",
+      type: "image",
+      uri: "https://app.example.test/api/attachments/image",
+    })
   })
 
   test("falls back to text attachment references when resource links are disabled", async () => {
