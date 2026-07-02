@@ -1347,6 +1347,36 @@ export class BridgeSessionManager {
         `ACP session ${session.sessionKey} was replaced before prompt completed`,
       );
     }
+    const mediaExtraction = extractMediaAttachmentReferences(
+      result.text,
+      session.cwd,
+    );
+    if (mediaExtraction.attachments.length > 0) {
+      result.text = mediaExtraction.text;
+      result.events.push(
+        ...mediaExtraction.attachments.map((attachment, index) => ({
+          externalEventId: `${item.id}:media_attachment:${index + 1}`,
+          source: "bridge" as const,
+          eventType: "file",
+          payload: {
+            filename: attachment.filename,
+            mediaType: attachment.mediaType,
+            type: "media_reference",
+          },
+          part: {
+            type: "event" as const,
+            text: "Agent emitted an attachment.",
+            json: {
+              filename: attachment.filename,
+              mediaType: attachment.mediaType,
+              type: "media_reference",
+            },
+            status: "streaming" as const,
+          },
+          attachmentUpload: attachment,
+        })),
+      );
+    }
     const emptyVisibleOutput = isEmptyVisiblePromptResult(result);
     if (normalizeType(item) === "steer-session" && emptyVisibleOutput) {
       await this.markQueueResult(item, {
@@ -4393,6 +4423,61 @@ function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
       },
     ];
   });
+}
+
+const MEDIA_ATTACHMENT_LINE_PATTERN = /^\s*MEDIA:\s*(\S.*?)\s*$/;
+
+function extractMediaAttachmentReferences(
+  text: string,
+  cwd: string | undefined,
+): { attachments: BridgeAttachmentUploadCandidate[]; text: string } {
+  const attachments: BridgeAttachmentUploadCandidate[] = [];
+  const lines = text.split(/\r?\n/);
+  const keptLines: string[] = [];
+
+  for (const line of lines) {
+    const match = MEDIA_ATTACHMENT_LINE_PATTERN.exec(line);
+    if (!match?.[1]) {
+      keptLines.push(line);
+      continue;
+    }
+    const rawPath = match[1].trim();
+    const mediaType = mediaTypeFromImagePath(rawPath);
+    if (!mediaType || !isScopedLocalAttachmentPath(rawPath, cwd)) {
+      keptLines.push(line);
+      continue;
+    }
+    attachments.push({
+      filename: basename(rawPath.startsWith("file://") ? fileURLToPath(rawPath) : rawPath),
+      kind: "local_file",
+      mediaType,
+      path: rawPath,
+    });
+  }
+
+  return { attachments, text: keptLines.join("\n").trim() };
+}
+
+function mediaTypeFromImagePath(path: string): string | undefined {
+  const cleanPath = path.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
+  if (cleanPath.endsWith(".png")) return "image/png";
+  if (cleanPath.endsWith(".jpg") || cleanPath.endsWith(".jpeg")) return "image/jpeg";
+  if (cleanPath.endsWith(".gif")) return "image/gif";
+  if (cleanPath.endsWith(".webp")) return "image/webp";
+  if (cleanPath.endsWith(".avif")) return "image/avif";
+  return undefined;
+}
+
+function isScopedLocalAttachmentPath(
+  path: string,
+  cwd: string | undefined,
+): boolean {
+  try {
+    resolveLocalAttachmentPath(path, cwd);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function buildAgentAttachmentUploadInput(

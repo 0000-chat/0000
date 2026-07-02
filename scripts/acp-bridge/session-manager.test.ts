@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { BridgeSupervisor } from "./bridge-supervisor";
 import {
@@ -3139,6 +3142,67 @@ describe("bridge session cwd safety", () => {
       .flat()
       .map((event) => event.normalizedPayload);
     expect(JSON.stringify(appendedPayloads)).not.toContain("YWdlbnQgb3V0cHV0");
+  });
+
+  test("uploads scoped MEDIA image references as attachment parts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "zero-media-attachment-"));
+    try {
+      const imagePath = join(cwd, "reply.png");
+      await writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+
+      const cloud = fakeCloudClient();
+      const manager = new BridgeSessionManager({
+        cloudClient: cloud,
+        createSession: () => ({
+          close: async () => {},
+          cancel: async () => {},
+          sendUserMessage: async () => ({
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: `Here is the image.\nMEDIA:${imagePath}`,
+          }),
+        }),
+      });
+
+      await manager.handleQueueItem({
+        agentSessionId: "agent-session-1",
+        claimId: "claim-1",
+        cwd,
+        id: "queue-1",
+        prompt: "Create an image.",
+        threadId: "thread-1",
+        type: "prompt",
+      });
+
+      expect(cloud.uploads).toEqual([
+        {
+          agentSessionId: "agent-session-1",
+          byteLength: 4,
+          filename: "reply.png",
+          mediaType: "image/png",
+          threadId: "thread-1",
+        },
+      ]);
+      expect(cloud.results.at(-1)?.result).toMatchObject({
+        ok: true,
+        parts: [
+          {
+            payload: {
+              filename: "reply.png",
+              mediaType: "image/png",
+              sizeBytes: 4,
+              storageBackend: "r2",
+              type: "file",
+            },
+            type: "attachment",
+          },
+        ],
+        text: "Here is the image.",
+      });
+    } finally {
+      await rm(cwd, { force: true, recursive: true });
+    }
   });
 
   test("waits for a starting ACP session before handling an approval response", async () => {
