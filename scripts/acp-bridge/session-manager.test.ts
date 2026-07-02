@@ -1139,36 +1139,27 @@ describe("bridge session cwd safety", () => {
       expect.objectContaining({
         event: "bridge.session.tool_call_reconciled",
         queueId: "queue-prompt",
-        reasonCode: "tool_completion_lost",
-        settlementState: "completion_lost",
+        level: "debug",
+        reasonCode: "provider_progressed_without_tool_result",
+        settlementState: "provider_progressed",
         toolCallId: "tool-1",
         toolName: "shell",
       }),
     );
-    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+    expect(flattenPersistedEvents(cloud.events)).not.toContainEqual(
       expect.objectContaining({
         eventType: "tool_call_update",
         normalizedPayload: expect.objectContaining({
           json: expect.objectContaining({
-            reasonCode: "tool_completion_lost",
-            settlementState: "completion_lost",
-            state: "completion_lost",
             toolCallId: "tool-1",
           }),
-          status: "error",
           type: "tool_result",
-        }),
-        rawPayload: expect.objectContaining({
-          reasonCode: "tool_completion_lost",
-          settlementState: "completion_lost",
-          state: "completion_lost",
-          toolCallId: "tool-1",
         }),
       }),
     );
   });
 
-  test("reconciles an older pending tool when a later tool starts", async () => {
+  test("clears an older pending tool when a later tool starts", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
     const manager = new BridgeSessionManager({
@@ -1206,8 +1197,9 @@ describe("bridge session cwd safety", () => {
       expect.objectContaining({
         event: "bridge.session.tool_call_reconciled",
         queueId: "queue-prompt",
-        reasonCode: "tool_completion_lost",
-        settlementState: "completion_lost",
+        level: "debug",
+        reasonCode: "provider_progressed_without_tool_result",
+        settlementState: "provider_progressed",
         toolCallId: "tool-1",
         toolName: "search",
         trigger: "later_tool_started",
@@ -1257,8 +1249,9 @@ describe("bridge session cwd safety", () => {
       expect.objectContaining({
         event: "bridge.session.tool_call_reconciled",
         queueId: "queue-prompt",
-        reasonCode: "tool_completion_lost",
-        settlementState: "completion_lost",
+        level: "debug",
+        reasonCode: "provider_progressed_without_tool_result",
+        settlementState: "provider_progressed",
         toolCallId: "tool-1",
         toolName: "shell",
         trigger: "turn_completed",
