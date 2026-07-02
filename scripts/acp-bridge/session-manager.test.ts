@@ -1132,6 +1132,141 @@ describe("bridge session cwd safety", () => {
         event: "agent.turn.failed",
       }),
     );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        queueId: "queue-prompt",
+        reasonCode: "tool_completion_lost",
+        settlementState: "completion_lost",
+        toolCallId: "tool-1",
+        toolName: "shell",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_call_update",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            reasonCode: "tool_completion_lost",
+            settlementState: "completion_lost",
+            state: "completion_lost",
+            toolCallId: "tool-1",
+          }),
+          status: "error",
+          type: "tool_result",
+        }),
+        rawPayload: expect.objectContaining({
+          reasonCode: "tool_completion_lost",
+          settlementState: "completion_lost",
+          state: "completion_lost",
+          toolCallId: "tool-1",
+        }),
+      }),
+    );
+  });
+
+  test("reconciles an older pending tool when a later tool starts", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "search", "tool-1"));
+          context.onEvent(toolCallEvent(2, "shell", "tool-2"));
+          context.onEvent(toolResultEvent(3, "tool-2"));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        queueId: "queue-prompt",
+        reasonCode: "tool_completion_lost",
+        settlementState: "completion_lost",
+        toolCallId: "tool-1",
+        toolName: "search",
+        trigger: "later_tool_started",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+        toolCallId: "tool-1",
+      }),
+    );
+  });
+
+  test("reconciles pending tools when a turn completes with final text", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        queueId: "queue-prompt",
+        reasonCode: "tool_completion_lost",
+        settlementState: "completion_lost",
+        toolCallId: "tool-1",
+        toolName: "shell",
+        trigger: "turn_completed",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        error: "tool_result_timeout",
+        event: "agent.turn.failed",
+      }),
+    );
   });
 
   test("clears pending tool timeout from a nested tool result", async () => {
@@ -5848,41 +5983,45 @@ function streamChunkEvent(
   };
 }
 
-function toolCallEvent(sequence: number, toolName = "shell"): NormalizedBridgeEvent {
+function toolCallEvent(
+  sequence: number,
+  toolName = "shell",
+  toolCallId = "tool-1",
+): NormalizedBridgeEvent {
   return {
     eventType: "tool_call",
     externalEventId: `session-1:${sequence}:tool_call`,
     part: {
       json: {
         state: "input-available",
-        toolCallId: "tool-1",
+        toolCallId,
         toolName,
       },
       status: "streaming",
       text: "tool started",
       type: "tool_call",
     },
-    payload: { sessionUpdate: "tool_call", toolCallId: "tool-1" },
+    payload: { sessionUpdate: "tool_call", toolCallId },
     providerSequence: sequence,
     source: "acp_bridge",
   };
 }
 
-function toolResultEvent(sequence: number): NormalizedBridgeEvent {
+function toolResultEvent(sequence: number, toolCallId = "tool-1"): NormalizedBridgeEvent {
   return {
     eventType: "tool_result",
     externalEventId: `session-1:${sequence}:tool_result`,
     part: {
       json: {
         state: "output-available",
-        toolCallId: "tool-1",
+        toolCallId,
         toolName: "shell",
       },
       status: "streaming",
       text: "tool finished",
       type: "tool_result",
     },
-    payload: { sessionUpdate: "tool_result", toolCallId: "tool-1" },
+    payload: { sessionUpdate: "tool_result", toolCallId },
     providerSequence: sequence,
     source: "acp_bridge",
   };
