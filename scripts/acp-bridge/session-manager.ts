@@ -197,6 +197,7 @@ type BridgeSessionRecord = {
   sessionKey: string;
   threadId: string;
   cwd?: string;
+  pendingAttachmentUploadEvents: NormalizedBridgeEvent[];
   mcpManifestHash?: string;
   toolPolicyHash?: string;
   acp: ManagedAcpSession;
@@ -1198,6 +1199,7 @@ export class BridgeSessionManager {
       ...acpPromptOptions
     } = options;
     this.lastSessionEventQueueItems.set(session.sessionKey, item);
+    session.pendingAttachmentUploadEvents = [];
     this.markSessionUsed(session);
     this.clearIdleTimer(session);
     this.supervisor?.recordPromptPersisted(
@@ -1347,6 +1349,11 @@ export class BridgeSessionManager {
         `ACP session ${session.sessionKey} was replaced before prompt completed`,
       );
     }
+    result.events = mergePendingAttachmentUploadEvents(
+      session.pendingAttachmentUploadEvents,
+      result.events,
+    );
+    session.pendingAttachmentUploadEvents = [];
     const mediaExtraction = extractMediaAttachmentReferences(
       result.text,
       session.cwd,
@@ -2673,6 +2680,7 @@ export class BridgeSessionManager {
       sessionKey,
       threadId,
       cwd,
+      pendingAttachmentUploadEvents: [],
       mcpManifestHash: currentHashes.mcpManifestHash,
       toolPolicyHash: currentHashes.toolPolicyHash,
       agentName: normalizeAgentName(item.agentName),
@@ -2762,6 +2770,7 @@ export class BridgeSessionManager {
               );
             }
             if (event.attachmentUpload) {
+              record.pendingAttachmentUploadEvents.push(event);
               this.writeLog({
                 level: "debug",
                 event: "agent.attachments.upload_deferred",
@@ -3269,9 +3278,16 @@ export class BridgeSessionManager {
     record: BridgeSessionRecord,
     event: NormalizedBridgeEvent,
   ): number {
+    const preparedEvent = stripMediaAttachmentReferencesFromStreamEvent(
+      event,
+      record.cwd,
+    );
     const sequence = this.allocateEventSequence(record, event);
-    this.writeBridgeActivityLog(record, event, sequence);
-    this.enqueueBridgeEvent(toBridgeEvent(record, event, sequence));
+    if (!preparedEvent) {
+      return sequence;
+    }
+    this.writeBridgeActivityLog(record, preparedEvent, sequence);
+    this.enqueueBridgeEvent(toBridgeEvent(record, preparedEvent, sequence));
     return sequence;
   }
 
@@ -4395,7 +4411,57 @@ function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
   });
 }
 
+function mergePendingAttachmentUploadEvents(
+  pendingEvents: NormalizedBridgeEvent[],
+  resultEvents: NormalizedBridgeEvent[],
+): NormalizedBridgeEvent[] {
+  if (pendingEvents.length === 0) {
+    return resultEvents;
+  }
+  const seen = new Set<string>();
+  const merged: NormalizedBridgeEvent[] = [];
+  for (const event of [...pendingEvents, ...resultEvents]) {
+    const key =
+      event.externalEventId ||
+      `${event.sessionId ?? "session"}:${event.providerSequence ?? merged.length}:${event.eventType}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged;
+}
+
 const MEDIA_ATTACHMENT_LINE_PATTERN = /^\s*MEDIA:\s*(\S.*?)\s*$/;
+
+function stripMediaAttachmentReferencesFromStreamEvent(
+  event: NormalizedBridgeEvent,
+  cwd: string | undefined,
+): NormalizedBridgeEvent | undefined {
+  if (event.eventType !== "agent_message_chunk" || event.part?.type !== "text") {
+    return event;
+  }
+  const text = event.part.text;
+  if (!text?.includes("MEDIA:")) {
+    return event;
+  }
+  const mediaExtraction = extractMediaAttachmentReferences(text, cwd);
+  if (mediaExtraction.attachments.length === 0) {
+    return event;
+  }
+  if (!mediaExtraction.text) {
+    return undefined;
+  }
+  return {
+    ...event,
+    part: {
+      ...event.part,
+      text: mediaExtraction.text,
+    },
+    payload: mergeBridgeEventTextPayload(event.payload, mediaExtraction.text, {}),
+  };
+}
 
 function extractMediaAttachmentReferences(
   text: string,
