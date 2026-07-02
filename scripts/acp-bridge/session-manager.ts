@@ -1805,48 +1805,18 @@ export class BridgeSessionManager {
       const ageMs = Date.now() - tool.startedAt;
       this.clearToolCall(queueItemId, tool.toolCallId);
       this.writeLog({
-        level: "warn",
+        level: "debug",
         event: "bridge.session.tool_call_reconciled",
         queueId: queueItemId,
         threadId: session.threadId,
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
         ageMs,
-        reasonCode: "tool_completion_lost",
-        settlementState: "completion_lost",
+        reasonCode: "provider_progressed_without_tool_result",
+        settlementState: "provider_progressed",
         toolCallId: tool.toolCallId,
         toolName: tool.toolName,
         trigger: options.trigger,
-      });
-      this.enqueueEventWrite(session, {
-        externalEventId: `${queueItemId}:${tool.toolCallId}:completion_lost`,
-        source: "bridge",
-        eventType: "tool_call_update",
-        payload: {
-          ageMs,
-          queueId: queueItemId,
-          reasonCode: "tool_completion_lost",
-          settlementState: "completion_lost",
-          sessionUpdate: "tool_call_update",
-          state: "completion_lost",
-          toolCallId: tool.toolCallId,
-          toolName: tool.toolName,
-          trigger: options.trigger,
-        },
-        part: {
-          type: "tool_result",
-          text: `${tool.toolName} completion could not be confirmed.`,
-          json: {
-            ageMs,
-            reasonCode: "tool_completion_lost",
-            settlementState: "completion_lost",
-            state: "completion_lost",
-            toolCallId: tool.toolCallId,
-            toolName: tool.toolName,
-            trigger: options.trigger,
-          },
-          status: "error",
-        },
       });
     }
     this.writeLog({
