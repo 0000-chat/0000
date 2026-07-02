@@ -405,7 +405,7 @@ export class HermesAcpSession {
     const attachmentBlocks =
       this.capabilities?.supportsPromptResourceLinks === false
         ? []
-        : buildAttachmentResourceLinkBlocks(options.attachments)
+        : buildAttachmentContentBlocks(options.attachments)
     const attachmentDeliveryMode =
       attachmentBlocks.length > 0
         ? "resource_links"
@@ -1353,7 +1353,7 @@ export function buildPromptContentBlocks(
   ]
 }
 
-function buildAttachmentResourceLinkBlocks(
+function buildAttachmentContentBlocks(
   attachments: HermesAcpPromptAttachment[] | undefined,
 ): Array<Record<string, unknown>> {
   if (!Array.isArray(attachments)) {
@@ -1367,6 +1367,15 @@ function buildAttachmentResourceLinkBlocks(
     }
     const name = attachment.filename?.trim() || `Attachment ${index + 1}`
     const mediaType = attachment.mediaType?.trim() || "application/octet-stream"
+    const imageMediaType = imageMediaTypeForAttachment(attachment, mediaType, uri)
+    if (imageMediaType) {
+      blocks.push({
+        type: "image",
+        uri,
+        mimeType: imageMediaType,
+      })
+      return
+    }
     const block: Record<string, unknown> = {
       type: "resource_link",
       uri,
@@ -1379,6 +1388,43 @@ function buildAttachmentResourceLinkBlocks(
     blocks.push(block)
   })
   return blocks
+}
+
+function imageMediaTypeForAttachment(
+  attachment: HermesAcpPromptAttachment,
+  mediaType: string,
+  uri: string,
+): string | undefined {
+  const normalizedMediaType = mediaType.split(";", 1)[0]?.trim().toLowerCase()
+  if (normalizedMediaType?.startsWith("image/")) {
+    return normalizedMediaType
+  }
+  const imagePath = `${attachment.filename ?? ""} ${uri}`.toLowerCase()
+  const extension = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|avif)(?:[?#\s]|$)/.exec(
+    imagePath,
+  )?.[1]
+  switch (extension) {
+    case "png":
+      return "image/png"
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg"
+    case "gif":
+      return "image/gif"
+    case "webp":
+      return "image/webp"
+    case "bmp":
+      return "image/bmp"
+    case "tif":
+    case "tiff":
+      return "image/tiff"
+    case "heic":
+      return "image/heic"
+    case "avif":
+      return "image/avif"
+    default:
+      return undefined
+  }
 }
 
 export function splitCommand(command: string): string[] {
