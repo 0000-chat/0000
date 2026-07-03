@@ -17,6 +17,7 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "userPrompts.requestChoice",
   "threads.list",
   "threads.create",
+  "threads.continue",
   "messages.search",
   "settings.setDefaultApprovalLevel",
   "agents.list",
@@ -163,6 +164,14 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     requireAgentSession: z.boolean().optional(),
     spaceIdOrSlug: z.string(),
     summary: z.string().optional(),
+    title: z.string().optional(),
+  },
+  "threads.continue": {
+    agentIdOrSlug: z.string().optional(),
+    approvalLevel: z.enum(["ask", "full_permissions"]).optional(),
+    instruction: z.string(),
+    requireAgentSession: z.boolean().optional(),
+    threadId: z.string().optional(),
     title: z.string().optional(),
   },
   "messages.search": {
@@ -535,6 +544,8 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "threads.list": "List recent 0000 Chat threads visible to this agent session.",
   "threads.create":
     "Create a new 0000 Chat thread in a space. By default this creates a thread and agent session without messages; pass agentIdOrSlug to assign the thread to another usable agent, or pass agentIdOrSlug: \"self\" to assign it to the calling agent. Pass initialUserMessage only when the user explicitly wants that text carried into the new thread as the first user message.",
+  "threads.continue":
+    "Continue the current 0000 Chat thread with an agent-authored turn. Pass instruction, optionally agentIdOrSlug: \"self\" or another usable agent id/slug. This records agent provenance and must not be used to simulate a user-authored message.",
   "messages.search": "Search cached 0000 Chat messages.",
   "settings.setDefaultApprovalLevel":
     "Set the user's default approval mode. Use full_permissions only when the user explicitly asks to enable trusted local automation; this tool requires in-thread approval unless the current thread already has full permissions.",
