@@ -38,6 +38,20 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["context.get"].safeParse({}).success).toBe(true)
     expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["objects.get"].safeParse({ object: { id: "thread_1", type: "thread" } }).success).toBe(true)
     expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["threads.fork"].safeParse({ sourceThreadId: "thread_1", title: "Fork" }).success).toBe(true)
+    expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["databases.createField"].safeParse({
+      displayName: "Status",
+      fieldKey: "status",
+      fieldPreset: "single_select",
+      options: [{ color: "green", key: "active", label: "Active" }],
+      tableId: "table_1",
+    }).success).toBe(true)
+    expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["databases.createField"].safeParse({
+      displayName: "Status",
+      fieldKey: "status",
+      fieldPreset: "single_select",
+      options: [{ key: "active" }],
+      tableId: "table_1",
+    }).success).toBe(false)
     expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["actions.updateDraft"].safeParse({
       actionId: "action_1",
       code: "export default {}",
