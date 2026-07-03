@@ -4,12 +4,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod/v4"
 
 import {
+  ACTIONS_RUNTIME_FEATURE_FLAG_KEY,
   ARTIFACTS_FEATURE_FLAG_KEY,
   buildZeroChatMcpGuideText,
   type ZeroChatPolicyOptions,
 } from "./acp-bridge/zero-chat-policy"
 
-export { ARTIFACTS_FEATURE_FLAG_KEY }
+export { ACTIONS_RUNTIME_FEATURE_FLAG_KEY, ARTIFACTS_FEATURE_FLAG_KEY }
 
 export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "capabilities.advise",
@@ -73,6 +74,11 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "scripts.updateDraft",
   "scripts.search",
   "scripts.read",
+  "actions.createDraft",
+  "actions.search",
+  "actions.read",
+  "actions.archive",
+  "actions.run",
 ] as const
 
 type AgentToolMcpToolName = (typeof AGENT_TOOL_MCP_TOOL_NAMES)[number]
@@ -127,7 +133,8 @@ const ARTIFACT_TOOL_NAMES = new Set<AgentToolMcpToolName>([
   "artifacts.patchText",
   "artifacts.link",
 ])
-const DEFINED_FEATURE_FLAGS = new Set([ARTIFACTS_FEATURE_FLAG_KEY])
+const ACTIONS_RUNTIME_TOOL_NAMES = new Set<AgentToolMcpToolName>(["actions.run"])
+const DEFINED_FEATURE_FLAGS = new Set([ARTIFACTS_FEATURE_FLAG_KEY, ACTIONS_RUNTIME_FEATURE_FLAG_KEY])
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "capabilities.advise": {
@@ -499,6 +506,21 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
   "scripts.read": {
     scriptId: z.string(),
   },
+  "actions.createDraft": {
+    code: z.string(),
+    description: z.string(),
+    kind: z.enum(["agent_action", "app_action", "automation"]),
+    manifest: z.record(z.string(), z.unknown()),
+    name: z.string(),
+    slug: z.string().optional(),
+  },
+  "actions.search": { query: z.string().optional() },
+  "actions.read": { actionId: z.string() },
+  "actions.archive": { actionId: z.string() },
+  "actions.run": {
+    actionId: z.string(),
+    input: z.record(z.string(), z.unknown()),
+  },
 }
 
 export const AGENT_TOOL_MCP_INPUT_SCHEMAS = Object.fromEntries(
@@ -602,6 +624,11 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "scripts.updateDraft": "Update a reusable generated script draft by creating a new draft version.",
   "scripts.search": "Search reusable generated script artifacts in the current organization.",
   "scripts.read": "Read one reusable generated script artifact and its current version.",
+  "actions.createDraft": "Create a reusable generated action draft and first version.",
+  "actions.search": "Search reusable generated actions in the current organization.",
+  "actions.read": "Read one reusable generated action and its current version.",
+  "actions.archive": "Archive a reusable generated action so it no longer appears in default search and cannot be run.",
+  "actions.run": "Run one reusable generated action with JSON input through the 0000 Actions runtime.",
 }
 
 export function buildAgentToolMcpEnv(env: NodeJS.ProcessEnv): AgentToolMcpEnv {
@@ -733,7 +760,12 @@ export function getVisibleAgentToolMcpToolNames(
   enabledFeatureFlags: readonly string[] = [],
 ): AgentToolMcpToolName[] {
   const artifactsEnabled = enabledFeatureFlags.includes(ARTIFACTS_FEATURE_FLAG_KEY)
-  return AGENT_TOOL_MCP_TOOL_NAMES.filter((toolName) => artifactsEnabled || !ARTIFACT_TOOL_NAMES.has(toolName))
+  const actionsRuntimeEnabled = enabledFeatureFlags.includes(ACTIONS_RUNTIME_FEATURE_FLAG_KEY)
+  return AGENT_TOOL_MCP_TOOL_NAMES.filter((toolName) => {
+    if (ARTIFACT_TOOL_NAMES.has(toolName) && !artifactsEnabled) return false
+    if (ACTIONS_RUNTIME_TOOL_NAMES.has(toolName) && !actionsRuntimeEnabled) return false
+    return true
+  })
 }
 
 export function buildAgentToolGuideText(options: ZeroChatPolicyOptions = {}): string {
