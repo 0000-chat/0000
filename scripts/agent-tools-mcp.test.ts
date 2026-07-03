@@ -58,6 +58,11 @@ describe("agent tools MCP server helpers", () => {
       "databases.createRow",
       "databases.updateRow",
       "databases.deleteRow",
+      "databases.listRelationshipDefinitions",
+      "databases.listRowRelationships",
+      "databases.createRelationshipDefinition",
+      "databases.createRelationship",
+      "databases.deleteRelationship",
       "secrets.put",
       "secrets.listAvailable",
       "artifacts.create",
@@ -79,6 +84,7 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("capabilities.advise")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.create")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.get")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.createRelationship")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.current")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.read")
   })
