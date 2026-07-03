@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   AGENT_TOOL_MCP_TOOL_NAMES,
   AGENT_TOOL_MCP_INPUT_SCHEMAS,
+  ACTIONS_RUNTIME_FEATURE_FLAG_KEY,
   AGENT_TOOL_GUIDE_RESOURCE,
   AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
   ARTIFACTS_FEATURE_FLAG_KEY,
@@ -79,6 +80,11 @@ describe("agent tools MCP server helpers", () => {
       "scripts.updateDraft",
       "scripts.search",
       "scripts.read",
+      "actions.createDraft",
+      "actions.search",
+      "actions.read",
+      "actions.archive",
+      "actions.run",
     ])
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.list")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("capabilities.advise")
@@ -132,6 +138,12 @@ describe("agent tools MCP server helpers", () => {
     expect(buildAgentToolGuideText()).toContain("Secret values are encrypted by 0000 Chat")
     expect(buildAgentToolGuideText()).toContain("secrets.listAvailable")
     expect(buildAgentToolGuideText()).toContain("scripts.createDraft")
+    expect(buildAgentToolGuideText()).toContain("actions.createDraft")
+    expect(buildAgentToolGuideText()).toContain("actions.search")
+    expect(buildAgentToolGuideText()).not.toContain("actions.run")
+    expect(buildAgentToolGuideText({ enabledFeatureFlags: [ACTIONS_RUNTIME_FEATURE_FLAG_KEY] })).toContain(
+      "actions.run",
+    )
     expect(buildAgentToolGuideText()).toContain("Never request raw Convex credentials")
     expect(buildAgentToolGuideText()).not.toContain("artifacts.create")
     expect(buildAgentToolGuideText()).not.toContain("artifacts.createUploadIntent")
@@ -289,6 +301,15 @@ describe("agent tools MCP server helpers", () => {
         "artifacts.link",
       ]),
     )
+  })
+
+  test("registers Actions runtime tool only when Actions runtime is enabled", () => {
+    expect(getVisibleAgentToolMcpToolNames()).toContain("actions.createDraft")
+    expect(getVisibleAgentToolMcpToolNames()).toContain("actions.search")
+    expect(getVisibleAgentToolMcpToolNames()).toContain("actions.read")
+    expect(getVisibleAgentToolMcpToolNames()).toContain("actions.archive")
+    expect(getVisibleAgentToolMcpToolNames()).not.toContain("actions.run")
+    expect(getVisibleAgentToolMcpToolNames([ACTIONS_RUNTIME_FEATURE_FLAG_KEY])).toContain("actions.run")
   })
 
   test("forwards MCP tool calls to the bridge-authenticated app endpoint", async () => {

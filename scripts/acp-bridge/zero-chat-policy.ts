@@ -4,6 +4,7 @@ import path from "node:path"
 export const ZERO_CHAT_APP_CONTEXT_POLICY = `The user's messages are sent from the 0000 Chat app. When the user says "this app", "this thread", "this space", "my app", "my database", "my table", "records", "search messages", "create an app", or "create a database", interpret those as references to 0000 Chat unless they clearly say otherwise.`
 
 export const ARTIFACTS_FEATURE_FLAG_KEY = "artifacts"
+export const ACTIONS_RUNTIME_FEATURE_FLAG_KEY = "actions-runtime"
 
 export type ZeroChatPolicyOptions = {
   enabledFeatureFlags?: readonly string[]
@@ -13,8 +14,18 @@ function isArtifactsEnabled(options: ZeroChatPolicyOptions = {}) {
   return options.enabledFeatureFlags?.includes(ARTIFACTS_FEATURE_FLAG_KEY) ?? false
 }
 
+function isActionsRuntimeEnabled(options: ZeroChatPolicyOptions = {}) {
+  return options.enabledFeatureFlags?.includes(ACTIONS_RUNTIME_FEATURE_FLAG_KEY) ?? false
+}
+
 const ARTIFACT_TOOL_LIST =
   "- artifacts.create, artifacts.createUploadIntent, artifacts.completeUpload, artifacts.search, artifacts.read, artifacts.readContent, artifacts.getContentUrl, artifacts.update, artifacts.patchText, artifacts.link"
+
+const ACTION_TOOL_LIST =
+  "- actions.createDraft, actions.search, actions.read, actions.archive"
+
+const ACTION_RUNTIME_TOOL_LIST =
+  "- actions.run (requires the actions-runtime feature flag)"
 
 const ARTIFACT_TOOL_GUIDANCE =
   "Use artifact tools when durable markdown, JSON, reports, exports, notes, plans, or generated files should be available in 0000 Chat instead of local files. Use artifacts.create for small inline content, artifacts.createUploadIntent followed by artifacts.completeUpload for larger R2-backed content, artifacts.search/read to retrieve existing artifacts, artifacts.readContent then artifacts.patchText for surgical markdown/text edits, artifacts.update for whole-document text replacement, and artifacts.link to connect artifacts to threads, messages, spaces, database rows, scripts, or apps. Scripts remain first-class runnable objects; use script tools for runnable code rather than storing scripts as generic artifacts."
@@ -48,6 +59,7 @@ ${ZERO_CHAT_APPROVAL_POLICY}`
 
 export function buildZeroChatMcpGuideText(options: ZeroChatPolicyOptions = {}): string {
   const artifactTools = isArtifactsEnabled(options) ? `${ARTIFACT_TOOL_LIST}\n` : ""
+  const actionTools = `${ACTION_TOOL_LIST}\n${isActionsRuntimeEnabled(options) ? `${ACTION_RUNTIME_TOOL_LIST}\n` : ""}`
   const artifactGuidance = isArtifactsEnabled(options) ? `\n${ARTIFACT_TOOL_GUIDANCE}\n` : ""
   return `You are operating inside 0000 Chat.
 
@@ -73,6 +85,7 @@ Use the 0000-chat MCP tools for 0000 Chat data and actions:
 - secrets.put (stores user or organization secrets; Secret values are encrypted by 0000 Chat and redacted from approvals and tool logs)
 - secrets.listAvailable
 - scripts.createDraft, scripts.updateDraft, scripts.search, scripts.read
+${actionTools}
 ${artifactTools}
 
 Use dynamic database tools when the user needs structured app memory, reusable datasets, tables, records, or app inputs. Inspect existing databases before creating a new table, and prefer extending a relevant table over making duplicates. Store or update structured data that will be reused, searched, compared, or fed into apps; keep one-off ephemeral facts in the thread instead. For app work, include any database tables and fields the app depends on in the saved prompt so future refreshes can re-read those records on refresh.
