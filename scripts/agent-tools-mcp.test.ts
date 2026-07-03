@@ -18,6 +18,7 @@ import {
 describe("agent tools MCP server helpers", () => {
   test("lists the portable agent tool names", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toEqual([
+      "capabilities.advise",
       "userPrompts.requestChoice",
       "threads.list",
       "threads.create",
@@ -75,6 +76,7 @@ describe("agent tools MCP server helpers", () => {
       "scripts.read",
     ])
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.list")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("capabilities.advise")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("threads.create")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databases.get")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("threads.current")
@@ -87,6 +89,8 @@ describe("agent tools MCP server helpers", () => {
 
     expect(buildAgentToolGuideText()).toContain("You are operating inside 0000 Chat")
     expect(buildAgentToolGuideText()).toContain("userPrompts.requestChoice")
+    expect(buildAgentToolGuideText()).toContain("capabilities.advise")
+    expect(buildAgentToolGuideText()).toContain("0000 advisor")
     expect(buildAgentToolGuideText()).toContain("multiple-choice UI")
     expect(buildAgentToolGuideText()).toContain("spaces.archive")
     expect(buildAgentToolGuideText()).toContain("threads.list")
