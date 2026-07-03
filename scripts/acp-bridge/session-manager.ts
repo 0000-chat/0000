@@ -62,6 +62,7 @@ import type {
 
 export type BridgeSessionQueueItem = {
   id: string;
+  activeToolSurfaces?: string[];
   claimId?: string;
   claimedAt?: string;
   claimedAtMs?: number;
@@ -194,6 +195,7 @@ export type BridgeTerminalContext = {
 >;
 
 type BridgeSessionRecord = {
+  activeToolSurfaces?: string[];
   sessionKey: string;
   threadId: string;
   cwd?: string;
@@ -326,7 +328,7 @@ export type BridgeSessionManagerOptions = {
     context: Pick<
       BridgeSessionContext,
       "agentSessionId" | "cwd" | "organizationId" | "sessionKey" | "threadId"
-    >,
+    > & { activeToolSurfaces?: string[] },
   ) => HermesAcpMcpServer[];
   createSession?: (context: BridgeSessionContext) => ManagedAcpSession;
   idleSessionTtlMs?: number;
@@ -411,6 +413,14 @@ export type BridgeWarmRuntimeSessionSeedRequest = {
 };
 
 export type BridgeSessionLogEntry = BridgeLogEntry;
+
+
+function sameStringArray(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
 
 export function bridgeQueueItemMatchesSessionRuntimeScope(
   item: Pick<BridgeSessionQueueItem, "bridgeProfileId" | "hermesProfileName">,
@@ -546,7 +556,7 @@ export class BridgeSessionManager {
     context: Pick<
       BridgeSessionContext,
       "agentSessionId" | "cwd" | "organizationId" | "sessionKey" | "threadId"
-    >,
+    > & { activeToolSurfaces?: string[] },
   ) => HermesAcpMcpServer[];
   private readonly log?: BridgeLogger;
   private readonly supervisor?: BridgeSupervisor;
@@ -2611,7 +2621,16 @@ export class BridgeSessionManager {
     if (existing) {
       existing.agentName =
         normalizeAgentName(item.agentName) ?? existing.agentName;
-      if (!this.sessionMatchesExplicitRuntimeRequest(existing, item)) {
+      if (!sameStringArray(existing.activeToolSurfaces, item.activeToolSurfaces)) {
+        this.writeLog({
+          level: "info",
+          event: "bridge.session.tool_surface_changed",
+          queueId: item.id,
+          threadId,
+          agentSessionId: sessionKey,
+        });
+        await this.closeSession(sessionKey);
+      } else if (!this.sessionMatchesExplicitRuntimeRequest(existing, item)) {
         this.writeLog({
           level: "warn",
           event: "bridge.session.runtime_profile_changed",
@@ -2677,6 +2696,7 @@ export class BridgeSessionManager {
         })
       : undefined;
     const record: BridgeSessionRecord = {
+      activeToolSurfaces: item.activeToolSurfaces ? [...item.activeToolSurfaces] : undefined,
       sessionKey,
       threadId,
       cwd,
@@ -2722,6 +2742,7 @@ export class BridgeSessionManager {
           : undefined,
         mcpServers: applyRuntimeMcpServerCompatibility(
           this.createMcpServers({
+            activeToolSurfaces: item.activeToolSurfaces,
             agentSessionId: item.agentSessionId,
             cwd,
             organizationId: item.organizationId,
