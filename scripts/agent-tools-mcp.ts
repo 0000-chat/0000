@@ -52,6 +52,11 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "databases.createRow",
   "databases.updateRow",
   "databases.deleteRow",
+  "databases.listRelationshipDefinitions",
+  "databases.listRowRelationships",
+  "databases.createRelationshipDefinition",
+  "databases.createRelationship",
+  "databases.deleteRelationship",
   "secrets.put",
   "secrets.listAvailable",
   "artifacts.create",
@@ -332,6 +337,45 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     permanent: z.boolean().optional(),
     rowId: z.string(),
   },
+  "databases.listRelationshipDefinitions": {
+    direction: z.enum(["source", "target", "both"]).optional(),
+    tableIdOrSlug: z.string(),
+  },
+  "databases.listRowRelationships": {
+    direction: z.enum(["forward", "reverse", "both"]).optional(),
+    limit: z.number().optional(),
+    rowId: z.string(),
+  },
+  "databases.createRelationshipDefinition": {
+    cardinality: z.enum(["one_to_one", "one_to_many", "many_to_one", "many_to_many"]),
+    description: z.string().optional(),
+    displayName: z.string(),
+    metadataFields: z
+      .array(
+        z.object({
+          displayName: z.string(),
+          fieldKey: z.string(),
+          fieldType: z.enum(["text_single", "checkbox", "select_single", "number", "date"]),
+          options: z.array(z.string()).optional(),
+          required: z.boolean().optional(),
+        }),
+      )
+      .optional(),
+    relationshipKey: z.string(),
+    reverseDisplayName: z.string(),
+    sourceTableIdOrSlug: z.string(),
+    targetTableIdOrSlug: z.string(),
+  },
+  "databases.createRelationship": {
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    relationshipDefinitionId: z.string(),
+    sourceRowId: z.string(),
+    targetRowId: z.string(),
+  },
+  "databases.deleteRelationship": {
+    relationshipId: z.string(),
+    rowId: z.string(),
+  },
   "secrets.put": {
     name: z.string(),
     scope: z.enum(["user", "organization"]),
@@ -520,6 +564,16 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "databases.updateRow": "Update a record in a 0000 Chat dynamic database table.",
   "databases.deleteRow":
     "Archive a record in a 0000 Chat dynamic database table, or permanently delete it when permanent is true.",
+  "databases.listRelationshipDefinitions":
+    "List true relationship definitions for a 0000 Chat dynamic database table.",
+  "databases.listRowRelationships":
+    "List true relationship instances for a 0000 Chat dynamic database row, including related row data when access-safe.",
+  "databases.createRelationshipDefinition":
+    "Create a true relationship definition between two 0000 Chat dynamic database tables.",
+  "databases.createRelationship":
+    "Create a true relationship instance linking two 0000 Chat dynamic database rows through a relationship definition.",
+  "databases.deleteRelationship":
+    "Delete a true relationship instance attached to an owned 0000 Chat dynamic database row.",
   "secrets.put":
     "Encrypt and store a 0000 Chat user or organization secret. The value is sent to 0000 Chat for encrypted storage and is redacted from approvals and tool logs.",
   "secrets.listAvailable":
