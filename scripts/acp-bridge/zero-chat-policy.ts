@@ -54,6 +54,7 @@ export function buildZeroChatMcpGuideText(options: ZeroChatPolicyOptions = {}): 
 ${ZERO_CHAT_APP_CONTEXT_POLICY}
 
 Use the 0000-chat MCP tools for 0000 Chat data and actions:
+- capabilities.advise (planning only; use this when the user asks for the "0000 advisor" or "0000 Architect", or before unfamiliar 0000-native product/system-building work. It returns a machine-readable plan and does not execute writes. Do not look for a mailbox agent named advisor.)
 - userPrompts.requestChoice (ask the user a structured multiple-choice question; use this instead of printing a lettered list when you need the multiple-choice UI or decision-needed thread icon)
 - threads.list
 - threads.create (create a new thread in a space; pass agentIdOrSlug to assign another usable agent, or agentIdOrSlug:"self" for the calling agent)

@@ -12,6 +12,7 @@ import {
 export { ARTIFACTS_FEATURE_FLAG_KEY }
 
 export const AGENT_TOOL_MCP_TOOL_NAMES = [
+  "capabilities.advise",
   "userPrompts.requestChoice",
   "threads.list",
   "threads.create",
@@ -124,6 +125,13 @@ const ARTIFACT_TOOL_NAMES = new Set<AgentToolMcpToolName>([
 const DEFINED_FEATURE_FLAGS = new Set([ARTIFACTS_FEATURE_FLAG_KEY])
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
+  "capabilities.advise": {
+    availablePacks: z.array(z.string()).optional(),
+    availableTools: z.array(z.string()).optional(),
+    constraints: z.string().optional(),
+    currentContext: z.string().optional(),
+    desiredOutcome: z.string(),
+  },
   "userPrompts.requestChoice": {
     choices: z.array(
       z.object({
@@ -454,6 +462,8 @@ export const AGENT_TOOL_MCP_INPUT_SCHEMAS = Object.fromEntries(
 ) as Record<AgentToolMcpToolName, z.ZodObject<z.ZodRawShape>>
 
 const toolDescriptions: Record<AgentToolMcpToolName, string> = {
+  "capabilities.advise":
+    "Ask the 0000 advisor / 0000 Architect for a read-only machine-readable plan over 0000 primitives and capability packs. This tool does not execute writes.",
   "userPrompts.requestChoice":
     "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
   "threads.list": "List recent 0000 Chat threads visible to this agent session.",
