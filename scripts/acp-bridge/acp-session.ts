@@ -23,6 +23,7 @@ import type {
 import {
   SdkAcpRuntimeClient,
   type SdkAcpRuntimeActivity,
+  type SdkAcpRuntimeRequestContext,
   type SdkAcpRuntimeTerminalAdapter,
 } from "./sdk-acp-runtime-client"
 import type {
@@ -790,7 +791,7 @@ export class HermesAcpSession {
           }
         : {}),
       onActivity: (activity) => this.handleRuntimeActivity(activity),
-      onPermissionRequest: (params) => this.handlePermissionRequest(params),
+      onPermissionRequest: (params, context) => this.handlePermissionRequest(params, context),
       ...(this.terminalAdapter ? { terminalAdapter: this.terminalAdapter } : {}),
     })
     this.unsubscribeRuntimeUpdates = runtimeClient.onUpdate((event) => {
@@ -906,6 +907,7 @@ export class HermesAcpSession {
 
   private async handlePermissionRequest(
     request: BridgePermissionRequest,
+    context?: SdkAcpRuntimeRequestContext,
   ): Promise<BridgePermissionResponse> {
     this.markRequestActivity()
     let event = normalizeAcpNotification(
@@ -916,6 +918,13 @@ export class HermesAcpSession {
     event = {
       ...event,
       externalRequestId: event.externalRequestId ?? event.externalEventId,
+      part: event.part
+        ? {
+            ...event.part,
+            json: withAcpRequestContext(event.part.json, context),
+          }
+        : event.part,
+      payload: withAcpRequestContext(event.payload, context),
     }
     if (this.shouldSuppressAcpNotification()) {
       return { outcome: { outcome: "cancelled" } }
@@ -1229,6 +1238,19 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {}
+}
+
+function withAcpRequestContext(
+  value: unknown,
+  context: SdkAcpRuntimeRequestContext | undefined,
+): unknown {
+  if (context?.requestId === undefined) {
+    return value
+  }
+  return {
+    ...recordFromUnknown(value),
+    jsonRpcRequestId: context.requestId,
+  }
 }
 
 function extractPermissionOptions(request: unknown): PermissionRequestOption[] {

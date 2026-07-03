@@ -464,12 +464,14 @@ describe("ACP runtime adapter boundary", () => {
     const permissionEventSeen = deferred<void>()
     const permissionResponses: RequestPermissionResponse[] = []
     let permissionExternalRequestId: string | undefined
+    let permissionPayload: Record<string, unknown> | undefined
 
     const session = new HermesAcpSession({
       agentCommand: "codex acp",
       onEvent: (event) => {
         if (event.eventType === "permission_request") {
           permissionExternalRequestId = event.externalRequestId
+          permissionPayload = isRecord(event.payload) ? event.payload : undefined
           permissionEventSeen.resolve()
         }
       },
@@ -487,6 +489,7 @@ describe("ACP runtime adapter boundary", () => {
 
     expect(typeof permissionExternalRequestId).toBe("string")
     expect(permissionExternalRequestId).not.toHaveLength(0)
+    expect(permissionPayload?.jsonRpcRequestId).toBeDefined()
 
     const delivered = await session.respondToPermissionRequest(permissionExternalRequestId ?? "", {
       approved: true,
@@ -1277,6 +1280,10 @@ function deferred<T>() {
     reject = promiseReject
   })
   return { promise, reject, resolve }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
 }
 
 function normalizeFakeSessionUpdate(update: Record<string, unknown>): Record<string, unknown> {

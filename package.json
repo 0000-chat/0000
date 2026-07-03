@@ -1,6 +1,6 @@
 {
   "name": "@0000-chat/0000",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "description": "Local ACP bridge for connecting external coding agents to 0000 Chat.",
   "type": "module",
   "packageManager": "bun@1.3.9",
@@ -19,7 +19,7 @@
     "quality": "bun test && bun run typecheck && bun run observability:check"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.25.0",
+    "@agentclientprotocol/sdk": "^1.1.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "convex": "^1.39.1",
     "zod": "^4.4.3"
