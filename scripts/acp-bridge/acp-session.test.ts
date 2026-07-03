@@ -118,6 +118,7 @@ describe("ACP final text extraction", () => {
     const result = await session.sendUserMessage("Can you repeat that but in a more simple way?", {
       threadHistory:
         "Current 0000 Chat context:\n- threadId: thread_123\n\nRecent thread history:\nUser: You were working on reviving thread context\nAssistant: The bridge should replay history",
+      threadContextHint: "0000 Thread Memory available: use threads.contextList when older context matters.",
     })
 
     const promptRequest = requests.find((request) => request.method === "session/prompt")
@@ -130,6 +131,7 @@ describe("ACP final text extraction", () => {
     expect(systemBlockText).toContain("Recent thread history:")
     expect(systemBlockText).toContain("User: You were working on reviving thread context")
     expect(systemBlockText).toContain("Assistant: The bridge should replay history")
+    expect(systemBlockText).not.toContain("0000 Thread Memory available")
     expect(result.continuityMode).toBe("checkpoint")
     expect(result.threadHistoryInjected).toBe(true)
   })
@@ -148,6 +150,7 @@ describe("ACP final text extraction", () => {
     const result = await session.sendUserMessage("Follow-up turn", {
       threadHistory:
         "Recent thread history:\nUser: prior context\nAssistant: prior answer",
+      threadContextHint: "0000 Thread Memory available: use threads.contextList when older context matters.",
     })
 
     const promptRequests = requests.filter(
@@ -163,6 +166,8 @@ describe("ACP final text extraction", () => {
 
     expect(systemBlockText).not.toContain("Recent thread history:")
     expect(systemBlockText).not.toContain("User: prior context")
+    expect(systemBlockText).toContain("0000 Thread Memory available")
+    expect(systemBlockText).toContain("threads.contextList")
     expect(result.continuityMode).toBe("hot")
     expect(result.threadHistoryInjected).toBe(false)
   })
@@ -186,6 +191,7 @@ describe("ACP final text extraction", () => {
     const result = await session.sendUserMessage("Continue the work", {
       threadHistory:
         "Recent thread history:\nUser: checkpoint context\nAssistant: checkpoint answer",
+      threadContextHint: "0000 Thread Memory available: use threads.contextList when older context matters.",
     })
 
     expect(requests.some((request) => request.method === "session/load")).toBe(
@@ -204,6 +210,8 @@ describe("ACP final text extraction", () => {
 
     expect(systemBlockText).not.toContain("Recent thread history:")
     expect(systemBlockText).not.toContain("User: checkpoint context")
+    expect(systemBlockText).toContain("0000 Thread Memory available")
+    expect(systemBlockText).toContain("threads.contextList")
     expect(result.continuityMode).toBe("native")
     expect(result.threadHistoryInjected).toBe(false)
     expect(result.externalContinuity).toEqual({
