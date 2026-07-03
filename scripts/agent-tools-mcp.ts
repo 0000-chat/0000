@@ -760,7 +760,7 @@ export function parseAgentToolMcpFeatureFlags(value: string | undefined): string
     const featureFlag = rawFeatureFlag.trim().toLowerCase()
     if (!featureFlag) continue
     if (!DEFINED_FEATURE_FLAGS.has(featureFlag)) {
-      throw new Error(`ZERO_CHAT_ENABLED_FEATURE_FLAGS contains unknown feature flag "${rawFeatureFlag.trim()}"`)
+      continue
     }
     if (!featureFlags.includes(featureFlag)) featureFlags.push(featureFlag)
   }

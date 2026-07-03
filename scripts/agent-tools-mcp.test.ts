@@ -288,7 +288,7 @@ describe("agent tools MCP server helpers", () => {
         ZERO_CHAT_AGENT_TOOLS_URL: "https://bridge.example.test",
         ZERO_CHAT_BRIDGE_DEVICE_ID: "device_123",
         ZERO_CHAT_BRIDGE_TOKEN: "secret-token",
-        ZERO_CHAT_ENABLED_FEATURE_FLAGS: "artifacts",
+        ZERO_CHAT_ENABLED_FEATURE_FLAGS: "artifacts,future-flag,actions-runtime",
         ZERO_CHAT_THREAD_ID: "thread_abc",
       }),
     ).toEqual({
@@ -296,7 +296,7 @@ describe("agent tools MCP server helpers", () => {
       appUrl: "https://chat.example.test/app",
       bridgeToken: "secret-token",
       deviceId: "device_123",
-      enabledFeatureFlags: ["artifacts"],
+      enabledFeatureFlags: ["artifacts", "actions-runtime"],
       threadId: "thread_abc",
       toolBaseUrl: "https://bridge.example.test",
     })
