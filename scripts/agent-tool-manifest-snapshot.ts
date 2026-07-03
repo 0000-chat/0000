@@ -2016,7 +2016,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "databases",
-      "description": "Create a field on a dynamic database table. Prefer fieldPreset when possible: short_text for titles/names, boolean for is/has flags, number for counts/prices/scores, date for dates, tags for tag lists, url/email/phone for contact fields, single_select or multi_select for bounded choices, long_text for notes, and article_markdown/markdown only for article or body content.",
+      "description": "Create a field on a dynamic database table. Prefer fieldPreset when possible: short_text for titles/names, boolean for is/has flags, number for counts/prices/scores, date for dates, tags for tag lists, url/email/phone for contact fields, single_select or multi_select for bounded choices, long_text for notes, and article_markdown/markdown only for article or body content. For single_select and multi_select fields, pass options:[{key,label,color?}] in the same call; option keys are the row values. Supported attributeType values include text_single, text_multi, number, currency, datetime, checkbox, select_single, select_multi, email, url, phone, text_array, attachments, entity_reference, relationship, and ai_agent. Use referenceEntityTypeId for entity_reference fields.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -2031,6 +2031,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
           },
           "optional": true
         },
+        "defaultValue": {
+          "kind": "string",
+          "optional": true
+        },
         "description": {
           "kind": "string",
           "optional": true
@@ -2043,6 +2047,45 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
           "optional": true
         },
         "fieldPreset": {
+          "kind": "string",
+          "optional": true
+        },
+        "isEditable": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "isHidden": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "isRequired": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "isUnique": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "options": {
+          "items": {
+            "fields": {
+              "color": {
+                "kind": "string",
+                "optional": true
+              },
+              "key": {
+                "kind": "string"
+              },
+              "label": {
+                "kind": "string"
+              }
+            },
+            "kind": "object"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "referenceEntityTypeId": {
           "kind": "string",
           "optional": true
         },
