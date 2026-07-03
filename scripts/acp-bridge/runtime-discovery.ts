@@ -34,6 +34,9 @@ export type AcpProbeCapabilities = {
   supportsElicitation?: boolean
   supportsExtensions?: boolean
   supportsLogout?: boolean
+  supportsNativeSubagentControl?: boolean
+  supportsNativeSubagentStatus?: boolean
+  supportsNativeSubagentTools?: boolean
   supportsPlans?: boolean
   supportsResume?: boolean
   supportsSessionDelete?: boolean
@@ -254,6 +257,7 @@ async function profileForBuiltIn(
           nativeHooks: true,
           nativeMcp: true,
           sessionMcpServers: true,
+          ...nativeSubagentCapabilitiesForRuntime("codex"),
         },
       },
       probeAcpCommand,
@@ -275,7 +279,10 @@ async function profileForBuiltIn(
       command: builtIn.command,
       status: "available",
       ...(builtIn.kind === "hermes" ? { compatibility: hermesRuntimeCompatibility() } : {}),
-      capabilities: { sessionMcpServers: true },
+      capabilities: {
+        sessionMcpServers: true,
+        ...nativeSubagentCapabilitiesForRuntime(builtIn.kind),
+      },
     },
     probeAcpCommand,
     discoverAcpCommands,
@@ -412,6 +419,9 @@ function applyProbeCapabilities(
     "supportsElicitation",
     "supportsExtensions",
     "supportsLogout",
+    "supportsNativeSubagentControl",
+    "supportsNativeSubagentStatus",
+    "supportsNativeSubagentTools",
     "supportsPlans",
     "supportsSessionDelete",
     "supportsSessionFork",
@@ -654,6 +664,16 @@ export function capabilitiesFromInitializeResult(
   if (supportsExtensions !== undefined) {
     capabilities.supportsExtensions = supportsExtensions
   }
+  for (const key of [
+    "supportsNativeSubagentControl",
+    "supportsNativeSubagentStatus",
+    "supportsNativeSubagentTools",
+  ] as const) {
+    const supported = supportExtensionBoolean(key)
+    if (supported !== undefined) {
+      capabilities[key] = supported
+    }
+  }
 
   const cwdBoundSessions = booleanFromUnknown(
     runtimeCapabilities.cwdBoundSessions ?? agentCapabilities.cwdBoundSessions,
@@ -668,6 +688,24 @@ export function capabilitiesFromInitializeResult(
   }
 
   return Object.keys(capabilities).length > 0 ? capabilities : undefined
+}
+
+function nativeSubagentCapabilitiesForRuntime(
+  kind: BridgeRuntimeKind,
+): Pick<
+  AcpProbeCapabilities,
+  | "supportsNativeSubagentControl"
+  | "supportsNativeSubagentStatus"
+  | "supportsNativeSubagentTools"
+> {
+  if (kind !== "hermes" && kind !== "codex" && kind !== "claude-code") {
+    return {}
+  }
+  return {
+    supportsNativeSubagentControl: false,
+    supportsNativeSubagentStatus: false,
+    supportsNativeSubagentTools: true,
+  }
 }
 
 export function discoverLocalAcpCommands(

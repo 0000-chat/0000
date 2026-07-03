@@ -66,6 +66,9 @@ export type BridgeRuntimeProfile = {
     supportsElicitation?: boolean
     supportsExtensions?: boolean
     supportsLogout?: boolean
+    supportsNativeSubagentControl?: boolean
+    supportsNativeSubagentStatus?: boolean
+    supportsNativeSubagentTools?: boolean
     supportsPlans?: boolean
     supportsSessionDelete?: boolean
     supportsSessionFork?: boolean
@@ -173,6 +176,9 @@ export function synthesizeLegacyHermesProfile(
     },
     capabilities: {
       sessionMcpServers: true,
+      supportsNativeSubagentControl: false,
+      supportsNativeSubagentStatus: false,
+      supportsNativeSubagentTools: true,
     },
   }
 }
