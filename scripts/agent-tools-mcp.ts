@@ -12,6 +12,7 @@ import {
 export { ARTIFACTS_FEATURE_FLAG_KEY }
 
 export const AGENT_TOOL_MCP_TOOL_NAMES = [
+  "capabilities.advise",
   "userPrompts.requestChoice",
   "threads.list",
   "threads.create",
@@ -51,6 +52,11 @@ export const AGENT_TOOL_MCP_TOOL_NAMES = [
   "databases.createRow",
   "databases.updateRow",
   "databases.deleteRow",
+  "databases.listRelationshipDefinitions",
+  "databases.listRowRelationships",
+  "databases.createRelationshipDefinition",
+  "databases.createRelationship",
+  "databases.deleteRelationship",
   "secrets.put",
   "secrets.listAvailable",
   "artifacts.create",
@@ -124,6 +130,13 @@ const ARTIFACT_TOOL_NAMES = new Set<AgentToolMcpToolName>([
 const DEFINED_FEATURE_FLAGS = new Set([ARTIFACTS_FEATURE_FLAG_KEY])
 
 const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
+  "capabilities.advise": {
+    availablePacks: z.array(z.string()).optional(),
+    availableTools: z.array(z.string()).optional(),
+    constraints: z.string().optional(),
+    currentContext: z.string().optional(),
+    desiredOutcome: z.string(),
+  },
   "userPrompts.requestChoice": {
     choices: z.array(
       z.object({
@@ -324,6 +337,45 @@ const toolSchemas: Record<AgentToolMcpToolName, z.ZodRawShape> = {
     permanent: z.boolean().optional(),
     rowId: z.string(),
   },
+  "databases.listRelationshipDefinitions": {
+    direction: z.enum(["source", "target", "both"]).optional(),
+    tableIdOrSlug: z.string(),
+  },
+  "databases.listRowRelationships": {
+    direction: z.enum(["forward", "reverse", "both"]).optional(),
+    limit: z.number().optional(),
+    rowId: z.string(),
+  },
+  "databases.createRelationshipDefinition": {
+    cardinality: z.enum(["one_to_one", "one_to_many", "many_to_one", "many_to_many"]),
+    description: z.string().optional(),
+    displayName: z.string(),
+    metadataFields: z
+      .array(
+        z.object({
+          displayName: z.string(),
+          fieldKey: z.string(),
+          fieldType: z.enum(["text_single", "checkbox", "select_single", "number", "date"]),
+          options: z.array(z.string()).optional(),
+          required: z.boolean().optional(),
+        }),
+      )
+      .optional(),
+    relationshipKey: z.string(),
+    reverseDisplayName: z.string(),
+    sourceTableIdOrSlug: z.string(),
+    targetTableIdOrSlug: z.string(),
+  },
+  "databases.createRelationship": {
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    relationshipDefinitionId: z.string(),
+    sourceRowId: z.string(),
+    targetRowId: z.string(),
+  },
+  "databases.deleteRelationship": {
+    relationshipId: z.string(),
+    rowId: z.string(),
+  },
   "secrets.put": {
     name: z.string(),
     scope: z.enum(["user", "organization"]),
@@ -454,6 +506,8 @@ export const AGENT_TOOL_MCP_INPUT_SCHEMAS = Object.fromEntries(
 ) as Record<AgentToolMcpToolName, z.ZodObject<z.ZodRawShape>>
 
 const toolDescriptions: Record<AgentToolMcpToolName, string> = {
+  "capabilities.advise":
+    "Ask the 0000 advisor / 0000 Architect for a read-only machine-readable plan over 0000 primitives and capability packs. This tool does not execute writes.",
   "userPrompts.requestChoice":
     "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
   "threads.list": "List recent 0000 Chat threads visible to this agent session.",
@@ -510,6 +564,16 @@ const toolDescriptions: Record<AgentToolMcpToolName, string> = {
   "databases.updateRow": "Update a record in a 0000 Chat dynamic database table.",
   "databases.deleteRow":
     "Archive a record in a 0000 Chat dynamic database table, or permanently delete it when permanent is true.",
+  "databases.listRelationshipDefinitions":
+    "List true relationship definitions for a 0000 Chat dynamic database table.",
+  "databases.listRowRelationships":
+    "List true relationship instances for a 0000 Chat dynamic database row, including related row data when access-safe.",
+  "databases.createRelationshipDefinition":
+    "Create a true relationship definition between two 0000 Chat dynamic database tables.",
+  "databases.createRelationship":
+    "Create a true relationship instance linking two 0000 Chat dynamic database rows through a relationship definition.",
+  "databases.deleteRelationship":
+    "Delete a true relationship instance attached to an owned 0000 Chat dynamic database row.",
   "secrets.put":
     "Encrypt and store a 0000 Chat user or organization secret. The value is sent to 0000 Chat for encrypted storage and is redacted from approvals and tool logs.",
   "secrets.listAvailable":

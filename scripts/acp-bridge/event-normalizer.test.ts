@@ -40,6 +40,37 @@ test("normalizes ACP available command updates for UI consumption", () => {
   })
 })
 
+test("normalizes ACP agent image chunks as uploadable attachments", () => {
+  const event = normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          content: {
+            data: "iVBORw0KGgo=",
+            mimeType: "image/png",
+            type: "image",
+            uri: "file:///workspace/reply.png",
+          },
+          sessionUpdate: "agent_message_chunk",
+        },
+      },
+    },
+    13,
+  )
+
+  assert.equal(event.eventType, "agent_message_chunk")
+  assert.deepEqual(event.attachmentUpload, {
+    dataBase64: "iVBORw0KGgo=",
+    filename: "reply.png",
+    kind: "base64",
+    mediaType: "image/png",
+  })
+  assert.equal(event.part?.type, "event")
+  assert.equal(event.part?.status, "streaming")
+})
+
 test("classifies routine Hermes lifecycle logs as suppressible info diagnostics", () => {
   for (const line of [
     "acp_adapter.server: ACP client connected",

@@ -199,6 +199,7 @@ type BridgeSessionRecord = {
   sessionKey: string;
   threadId: string;
   cwd?: string;
+  pendingAttachmentUploadEvents: NormalizedBridgeEvent[];
   mcpManifestHash?: string;
   toolPolicyHash?: string;
   acp: ManagedAcpSession;
@@ -1204,6 +1205,7 @@ export class BridgeSessionManager {
       ...acpPromptOptions
     } = options;
     this.lastSessionEventQueueItems.set(session.sessionKey, item);
+    session.pendingAttachmentUploadEvents = [];
     this.markSessionUsed(session);
     this.clearIdleTimer(session);
     this.supervisor?.recordPromptPersisted(
@@ -1353,6 +1355,11 @@ export class BridgeSessionManager {
         `ACP session ${session.sessionKey} was replaced before prompt completed`,
       );
     }
+    result.events = mergePendingAttachmentUploadEvents(
+      session.pendingAttachmentUploadEvents,
+      result.events,
+    );
+    session.pendingAttachmentUploadEvents = [];
     const mediaExtraction = extractMediaAttachmentReferences(
       result.text,
       session.cwd,
@@ -1912,55 +1919,21 @@ export class BridgeSessionManager {
       this.clearToolCall(queueItemId, tool.toolCallId);
       clearedToolCallCount += 1;
       this.writeLog({
-        level: "warn",
+        level: "debug",
         event: "bridge.session.tool_call_reconciled",
         queueId: queueItemId,
         threadId: session.threadId,
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
         ageMs,
-        reasonCode: "tool_completion_lost",
-        settlementState: "completion_lost",
+        reasonCode: "provider_progressed_without_tool_result",
+        settlementState: "provider_progressed",
         toolCallId: tool.toolCallId,
         toolClass: tool.toolClass,
         toolName: tool.toolName,
         toolPolicyId: tool.toolPolicyId,
         toolTimeoutMs: tool.toolTimeoutMs,
         trigger: options.trigger,
-      });
-      const metadata =
-        tool.toolClass === "standard" ? {} : activeToolPolicyMetadata(tool);
-      this.enqueueEventWrite(session, {
-        externalEventId: `${queueItemId}:${tool.toolCallId}:completion_lost`,
-        source: "bridge",
-        eventType: "tool_call_update",
-        payload: {
-          ageMs,
-          queueId: queueItemId,
-          reasonCode: "tool_completion_lost",
-          settlementState: "completion_lost",
-          sessionUpdate: "tool_call_update",
-          state: "completion_lost",
-          toolCallId: tool.toolCallId,
-          toolName: tool.toolName,
-          trigger: options.trigger,
-          ...metadata,
-        },
-        part: {
-          type: "tool_result",
-          text: `${tool.toolName} completion could not be confirmed.`,
-          json: {
-            ageMs,
-            reasonCode: "tool_completion_lost",
-            settlementState: "completion_lost",
-            state: "completion_lost",
-            toolCallId: tool.toolCallId,
-            toolName: tool.toolName,
-            trigger: options.trigger,
-            ...metadata,
-          },
-          status: "error",
-        },
       });
     }
     if (clearedToolCallCount === 0) {
@@ -2831,6 +2804,7 @@ export class BridgeSessionManager {
       sessionKey,
       threadId,
       cwd,
+      pendingAttachmentUploadEvents: [],
       mcpManifestHash: currentHashes.mcpManifestHash,
       toolPolicyHash: currentHashes.toolPolicyHash,
       agentName: normalizeAgentName(item.agentName),
@@ -2929,6 +2903,7 @@ export class BridgeSessionManager {
               );
             }
             if (annotatedEvent.attachmentUpload) {
+              record.pendingAttachmentUploadEvents.push(annotatedEvent);
               this.writeLog({
                 level: "debug",
                 event: "agent.attachments.upload_deferred",
@@ -3436,9 +3411,16 @@ export class BridgeSessionManager {
     record: BridgeSessionRecord,
     event: NormalizedBridgeEvent,
   ): number {
+    const preparedEvent = stripMediaAttachmentReferencesFromStreamEvent(
+      event,
+      record.cwd,
+    );
     const sequence = this.allocateEventSequence(record, event);
-    this.writeBridgeActivityLog(record, event, sequence);
-    this.enqueueBridgeEvent(toBridgeEvent(record, event, sequence));
+    if (!preparedEvent) {
+      return sequence;
+    }
+    this.writeBridgeActivityLog(record, preparedEvent, sequence);
+    this.enqueueBridgeEvent(toBridgeEvent(record, preparedEvent, sequence));
     return sequence;
   }
 
@@ -4611,7 +4593,57 @@ function attachmentPartsFromPromptEvents(events: NormalizedBridgeEvent[]) {
   });
 }
 
+function mergePendingAttachmentUploadEvents(
+  pendingEvents: NormalizedBridgeEvent[],
+  resultEvents: NormalizedBridgeEvent[],
+): NormalizedBridgeEvent[] {
+  if (pendingEvents.length === 0) {
+    return resultEvents;
+  }
+  const seen = new Set<string>();
+  const merged: NormalizedBridgeEvent[] = [];
+  for (const event of [...pendingEvents, ...resultEvents]) {
+    const key =
+      event.externalEventId ||
+      `${event.sessionId ?? "session"}:${event.providerSequence ?? merged.length}:${event.eventType}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged;
+}
+
 const MEDIA_ATTACHMENT_LINE_PATTERN = /^\s*MEDIA:\s*(\S.*?)\s*$/;
+
+function stripMediaAttachmentReferencesFromStreamEvent(
+  event: NormalizedBridgeEvent,
+  cwd: string | undefined,
+): NormalizedBridgeEvent | undefined {
+  if (event.eventType !== "agent_message_chunk" || event.part?.type !== "text") {
+    return event;
+  }
+  const text = event.part.text;
+  if (!text?.includes("MEDIA:")) {
+    return event;
+  }
+  const mediaExtraction = extractMediaAttachmentReferences(text, cwd);
+  if (mediaExtraction.attachments.length === 0) {
+    return event;
+  }
+  if (!mediaExtraction.text) {
+    return undefined;
+  }
+  return {
+    ...event,
+    part: {
+      ...event.part,
+      text: mediaExtraction.text,
+    },
+    payload: mergeBridgeEventTextPayload(event.payload, mediaExtraction.text, {}),
+  };
+}
 
 function extractMediaAttachmentReferences(
   text: string,
