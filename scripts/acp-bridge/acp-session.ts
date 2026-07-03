@@ -98,6 +98,7 @@ export type HermesAcpFinalTextDiagnostics = {
 export type HermesAcpPromptOptions = {
   systemPrompt?: string
   threadHistory?: string
+  threadContextHint?: string
   attributionContext?: string
   attachmentReferenceText?: string
   attachments?: HermesAcpPromptAttachment[]
@@ -431,6 +432,10 @@ export class HermesAcpSession {
             attachmentBlocks,
             attributionContext: options.attributionContext,
             includeContinuityFallbackNote: this.externalContinuityFallback,
+            threadContextHint:
+              continuity.mode === "hot" || continuity.mode === "native"
+                ? options.threadContextHint
+                : undefined,
             threadHistory: continuity.threadHistory,
           }) as BridgePromptContentBlock[],
         }),
@@ -1342,11 +1347,13 @@ export function buildPromptContentBlocks(
     attachmentBlocks?: Array<Record<string, unknown>>
     attributionContext?: string
     includeContinuityFallbackNote?: boolean
+    threadContextHint?: string
     threadHistory?: string
   },
 ) {
   const normalizedSystemPrompt = systemPrompt?.trim()
   const normalizedThreadHistory = continuity?.threadHistory?.trim()
+  const normalizedThreadContextHint = continuity?.threadContextHint?.trim()
   const normalizedAttributionContext = continuity?.attributionContext?.trim()
   const userBlock = { type: "text", text }
   const appSystemPromptBase = normalizedSystemPrompt
@@ -1360,6 +1367,7 @@ export function buildPromptContentBlocks(
   const appSystemPrompt = [
     appSystemPromptBase,
     normalizedAttributionContext || undefined,
+    normalizedThreadContextHint || undefined,
     threadHistoryPrompt,
   ]
     .filter((part) => part !== undefined)
