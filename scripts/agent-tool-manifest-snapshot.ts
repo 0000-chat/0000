@@ -508,6 +508,58 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "risk": "read",
       "visibility": "core"
     },
+    "threads.update": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Update lifecycle metadata for a 0000 Chat thread. Defaults to the current thread. Use for bounded thread title, summary, destination space, approval level, pin, or archive/unarchive changes; use tags.* for tag assignment and threads.continue for agent-authored work. Contradictory pinned+archived requests are rejected.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "archived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "pinned": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "threadId": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
     "threads.create": {
       "annotations": {
         "destructiveHint": false,
@@ -4078,6 +4130,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "threads.contextExpand",
     "threads.list",
     "threads.read",
+    "threads.update",
     "threads.create",
     "threads.continue",
     "threads.fork",
@@ -4224,6 +4277,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "threads.contextDescribe",
         "threads.contextExpand",
         "threads.list",
+        "threads.update",
         "threads.create",
         "threads.continue",
         "threads.fork",
