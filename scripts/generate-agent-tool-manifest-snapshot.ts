@@ -18,4 +18,4 @@ await writeFile(
   outputPath,
   `// Generated from /home/ubuntu/0000-chat/apps/convex/convex/agentToolManifest.ts.\n// Regenerate with: bun scripts/generate-agent-tool-manifest-snapshot.ts /home/ubuntu/0000-chat\n\nexport const AGENT_TOOL_MANIFEST_SNAPSHOT = (${JSON.stringify(snapshot, null, 2)}) as const\n`,
 )
-console.log(`Wrote ${outputPath}`)
+process.stdout.write(`Wrote ${outputPath}\n`)

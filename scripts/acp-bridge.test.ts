@@ -1863,7 +1863,7 @@ describe("bridge supervisor claim gating", () => {
         ({
           canClaim: true,
           childCount: 1,
-          processCap: 2,
+          processCap: 4,
           status: "healthy",
         }) as NonNullable<BridgeStatus["processHealth"]>,
       inFlightCommandMetadata: new Map(),
@@ -1918,6 +1918,69 @@ describe("bridge supervisor claim gating", () => {
         runtimeProfileIds: ["codex:default"],
       }),
     );
+  });
+
+  test("does not warm into reserved process headroom after pressure cleanup", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const warmRequests: Array<{ maxSessions?: number; runtimeProfileIds: string[] }> =
+      [];
+    let processChildCount = 12;
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () =>
+        ({
+          canClaim: processChildCount < 12,
+          childCount: processChildCount,
+          processCap: 12,
+          processCapExceeded: processChildCount >= 12,
+          status: processChildCount >= 12 ? "cap_exceeded" : "healthy",
+        }) as NonNullable<BridgeStatus["processHealth"]>,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: Date.UTC(2026, 5, 5, 10, 2, 0),
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        closeIdleSessionsForProcessPressure: async () => {
+          processChildCount = 10;
+          return 2;
+        },
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+        warmRuntimeSessions: async (request) => {
+          warmRequests.push({
+            maxSessions: request.maxSessions,
+            runtimeProfileIds: request.runtimeProfileIds,
+          });
+          return 1;
+        },
+      },
+      maxInFlight: 12,
+      now: () => Date.UTC(2026, 5, 5, 10, 2, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      warmRuntimeProfileIds: ["hermes:default"],
+      writeStatus: async () => {},
+    });
+
+    expect(warmRequests).toEqual([]);
+    expect(processChildCount).toBe(10);
   });
 
   test("does not warm when newly claimed prompt work reserves process capacity", async () => {
