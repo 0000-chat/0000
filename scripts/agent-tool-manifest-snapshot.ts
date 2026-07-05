@@ -4083,6 +4083,40 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "tools.executeCode": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "actions",
+      "description": "Execute ephemeral per-turn agent-written JavaScript through the 0000 Code Mode runtime. Use for loops, conditions, pagination, transforms, retries, and branching that are too dynamic for tools.executePlan. Code may call scoped 0000 tools through the provided tools helper; server-side auth, approval, audit, tool policy, limits, and scoped credentials remain enforced by the broker.",
+      "effect": "row_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "actions-runtime",
+      "inputSchema": {
+        "code": {
+          "kind": "string",
+          "sensitive": true
+        },
+        "input": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          },
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "sensitiveInput": true,
+      "surfaces": [
+        "action",
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
     "actions.run": {
       "annotations": {
         "destructiveHint": false,
@@ -4225,6 +4259,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "actions.archive",
     "actions.search",
     "actions.read",
+    "tools.executeCode",
     "actions.run"
   ],
   "AGENT_TOOL_CAPABILITY_PACKS": {
@@ -4449,6 +4484,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "actions.archive",
         "actions.search",
         "actions.read",
+        "tools.executeCode",
         "actions.run"
       ]
     },

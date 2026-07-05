@@ -67,7 +67,13 @@ describe("agent tools MCP server helpers", () => {
   })
 
   test("hard-switches MCP exposure to broker tools only", () => {
-    expect(AGENT_TOOL_BROKER_MCP_TOOL_NAMES).toEqual(["tools.search", "tools.describe", "tools.call", "tools.executePlan"])
+    expect(AGENT_TOOL_BROKER_MCP_TOOL_NAMES).toEqual([
+      "tools.search",
+      "tools.describe",
+      "tools.call",
+      "tools.executePlan",
+      "tools.executeCode",
+    ])
     expect(getVisibleAgentToolMcpToolNames()).toEqual([...AGENT_TOOL_BROKER_MCP_TOOL_NAMES])
     expect(getVisibleAgentToolMcpToolNames(["thread", "database"], [ARTIFACTS_FEATURE_FLAG_KEY, ACTIONS_RUNTIME_FEATURE_FLAG_KEY])).toEqual([
       ...AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
@@ -256,7 +262,13 @@ describe("agent tools MCP server helpers", () => {
 
     expect(registeredResourceNames).toContain("0000 Chat capability packs")
     expect(registeredResourceNames).toContain("0000 Chat core capability pack")
-    expect(registeredToolNames).toEqual(["tools.search", "tools.describe", "tools.call", "tools.executePlan"])
+    expect(registeredToolNames).toEqual([
+      "tools.search",
+      "tools.describe",
+      "tools.call",
+      "tools.executePlan",
+      "tools.executeCode",
+    ])
     expect(registeredToolNames).not.toContain("context.get")
     expect(registeredToolNames).not.toContain("threads.list")
     expect(registeredToolNames).not.toContain("databases.get")

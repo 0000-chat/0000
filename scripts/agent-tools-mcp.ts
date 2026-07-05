@@ -108,6 +108,7 @@ export const AGENT_TOOL_BROKER_MCP_TOOL_NAMES = [
   "tools.describe",
   "tools.call",
   "tools.executePlan",
+  "tools.executeCode",
 ] as const
 export type AgentToolBrokerMcpToolName = (typeof AGENT_TOOL_BROKER_MCP_TOOL_NAMES)[number]
 const TOOL_SEARCH_INPUT_SCHEMA = {
@@ -134,6 +135,10 @@ const TOOL_EXECUTE_PLAN_INPUT_SCHEMA = {
       tool: z.string().trim().min(1),
     }),
   ).min(1).max(20),
+}
+const TOOL_EXECUTE_CODE_INPUT_SCHEMA = {
+  code: z.string().min(1),
+  input: z.record(z.string(), z.unknown()).optional(),
 }
 
 function toZodField(field: AgentToolInputSchemaField): z.ZodType {
@@ -696,7 +701,7 @@ export function buildAgentToolGuideText(options: ZeroChatPolicyOptions = {}): st
   const featureFlags = parseFeatureFlagArray(options.enabledFeatureFlags)
   return `You are operating inside 0000 Chat.
 
-Use the 0000 MCP server for 0000 Chat data and actions. The public bridge MCP surface is hard-switched to a small broker: tools.search finds catalog tools, tools.describe returns schema/risk/approval details, tools.call invokes one catalog tool, and tools.executePlan runs bounded multi-step plans. Individual 0000 tool names are catalog entries passed through the broker, not directly visible MCP tools.
+Use the 0000 MCP server for 0000 Chat data and actions. The public bridge MCP surface is hard-switched to a small broker: tools.search finds catalog tools, tools.describe returns schema/risk/approval details, tools.call invokes one catalog tool, tools.executePlan runs bounded multi-step plans, and tools.executeCode runs ephemeral per-turn Code Mode. Individual 0000 tool names are catalog entries passed through the broker, not directly visible MCP tools.
 
 Broker tools: ${AGENT_TOOL_BROKER_MCP_TOOL_NAMES.join(", ")}.
 
@@ -729,7 +734,7 @@ mcpServer: 0000
 activeToolSurfaces: ${activeToolSurfaces} (legacy hint only; direct surface tools are hidden by the broker hard-switch)
 enabledFeatureFlags: ${enabledFeatureFlags}
 visibleTools: ${visibleTools.join(",")}
-toolBroker: use tools.search to find 0000 tools, tools.describe for schema/risk, tools.call for one call, and tools.executePlan for bounded multi-step calls. Do not rely on direct surface tools being visible.
+toolBroker: use tools.search to find 0000 tools, tools.describe for schema/risk, tools.call for one call, tools.executePlan for bounded multi-step calls, and tools.executeCode for ephemeral Code Mode. Do not rely on direct surface tools being visible.
 toolGuide: ${AGENT_TOOL_GUIDE_RESOURCE}`
 }
 
@@ -777,6 +782,17 @@ export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
       inputSchema: TOOL_EXECUTE_PLAN_INPUT_SCHEMA,
     },
     async (input) => toMcpToolResult(await executeCatalogPlan(env, input)),
+  )
+
+  server.registerTool(
+    "tools.executeCode",
+    {
+      annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false, readOnlyHint: false },
+      description:
+        "Execute ephemeral per-turn JavaScript Code Mode through 0000 Chat. Use when loops, conditions, pagination, transforms, retries, or branching are needed. The code runs server-side in the Actions runtime substrate and nested 0000 tool calls still use normal auth, approval, audit, policy, and limits.",
+      inputSchema: TOOL_EXECUTE_CODE_INPUT_SCHEMA,
+    },
+    async (input) => toMcpToolResult(await callCatalogTool(env, "tools.executeCode", input)),
   )
 
   server.registerResource(
