@@ -10,7 +10,10 @@ import {
   type BridgeSessionContext,
   type BridgeSessionQueueItem,
 } from "./session-manager";
-import type { NormalizedBridgeEvent } from "./event-normalizer";
+import {
+  normalizeAcpNotification,
+  type NormalizedBridgeEvent,
+} from "./event-normalizer";
 import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client";
 import { TerminalHandleRegistry } from "./terminal-handles";
 
@@ -1344,6 +1347,107 @@ describe("bridge session cwd safety", () => {
       expect.objectContaining({
         event: "bridge.session.tool_result_timeout",
         toolCallId: "delegate-1",
+      }),
+    );
+  });
+
+  test("settles Hermes delegate background receipts as detached work", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(
+            acpSessionUpdateEvent(1, {
+              content: [
+                {
+                  content: {
+                    text: "Review the current implementation and report risks.",
+                    type: "text",
+                  },
+                  type: "content",
+                },
+              ],
+              kind: "execute",
+              locations: [],
+              sessionUpdate: "tool_call",
+              title: "delegate: Review the current 0000 Chat MCP broker hard-switch imple...",
+              toolCallId: "delegate-1",
+            }),
+          );
+          context.onEvent(
+            acpSessionUpdateEvent(2, {
+              content: [
+                {
+                  content: {
+                    text: "Background subagent is running. The delegated result will be available later.",
+                    type: "text",
+                  },
+                  type: "content",
+                },
+              ],
+              kind: "execute",
+              sessionUpdate: "tool_call_update",
+              status: "completed",
+              toolCallId: "delegate-1",
+            }),
+          );
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.native_subagent_unjoined",
+        reasonCode: "native_subagent_unjoined",
+        settlementState: "detached_unjoined",
+        toolCallId: "delegate-1",
+        toolClass: "subagent",
+        toolPolicyId: "hermes-delegate-subagent",
+        trigger: "tool_result_background_receipt",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_call_update",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            reasonCode: "native_subagent_unjoined",
+            runtimeProfileId: "hermes:default",
+            settlementState: "detached_unjoined",
+            state: "detached_unjoined",
+            toolCallId: "delegate-1",
+            toolClass: "subagent",
+            toolPolicyId: "hermes-delegate-subagent",
+          }),
+          status: "complete",
+          type: "tool_result",
+        }),
+        rawPayload: expect.objectContaining({
+          reasonCode: "native_subagent_unjoined",
+          settlementState: "detached_unjoined",
+          state: "detached_unjoined",
+          toolCallId: "delegate-1",
+          toolClass: "subagent",
+          toolPolicyId: "hermes-delegate-subagent",
+        }),
       }),
     );
   });
@@ -6377,6 +6481,22 @@ function toolCallEvent(
     providerSequence: sequence,
     source: "acp_bridge",
   };
+}
+
+function acpSessionUpdateEvent(
+  sequence: number,
+  update: Record<string, unknown>,
+): NormalizedBridgeEvent {
+  return normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update,
+      },
+    },
+    sequence,
+  );
 }
 
 function toolResultEvent(
