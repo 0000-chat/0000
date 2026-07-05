@@ -79,6 +79,7 @@ export type BridgeSessionQueueItem = {
   cwd?: string;
   prompt?: string;
   threadHistory?: string;
+  threadContextHint?: string;
   systemPrompt?: string;
   runtimeOptions?: {
     modelId?: string;
@@ -131,6 +132,7 @@ export type ManagedAcpSession = {
     options?: {
       systemPrompt?: string;
       threadHistory?: string;
+      threadContextHint?: string;
       attachmentReferenceText?: string;
       attachments?: HermesAcpPromptAttachment[];
       attributionContext?: string;
@@ -1138,6 +1140,7 @@ export class BridgeSessionManager {
     const attachmentReferenceText =
       attachmentReferenceTextForPrompt(attachments);
     const threadHistory = normalizeThreadHistory(item.threadHistory);
+    const threadContextHint = normalizeThreadHistory(item.threadContextHint);
     const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
     const attributionContext = attributionPromptContext(item);
     const autoApprovePermissionRequests =
@@ -1178,6 +1181,7 @@ export class BridgeSessionManager {
             : undefined,
         systemPrompt,
         threadHistory,
+        threadContextHint,
       }),
     );
   }
@@ -1188,6 +1192,7 @@ export class BridgeSessionManager {
     options: {
       systemPrompt?: string;
       threadHistory?: string;
+      threadContextHint?: string;
       attachmentReferenceText?: string;
       attachments?: HermesAcpPromptAttachment[];
       attributionContext?: string;

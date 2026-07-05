@@ -3,14 +3,17 @@ import { readFile, writeFile } from "node:fs/promises"
 import { Readable, Writable } from "node:stream"
 import {
   ClientSideConnection,
+  client as createClientApp,
+  methods,
   ndJsonStream,
   PROTOCOL_VERSION,
-  type Client,
   type ClientCapabilities,
+  type ClientConnection,
   type CreateTerminalRequest,
   type CreateTerminalResponse,
   type KillTerminalRequest,
   type KillTerminalResponse,
+  type JsonRpcId,
   type ReadTextFileRequest,
   type ReadTextFileResponse,
   type ReleaseTerminalRequest,
@@ -128,11 +131,33 @@ export type SdkAcpRuntimeActivity =
   | SdkAcpRuntimeFilesystemActivity
   | SdkAcpRuntimeTerminalActivity
 
+export type SdkAcpRuntimeRequestContext = {
+  requestId?: JsonRpcId
+}
+
+type SdkAcpRuntimeAgentConnection = Pick<
+  ClientSideConnection,
+  | "authenticate"
+  | "cancel"
+  | "closeSession"
+  | "deleteSession"
+  | "initialize"
+  | "listSessions"
+  | "loadSession"
+  | "logout"
+  | "newSession"
+  | "prompt"
+  | "resumeSession"
+  | "setSessionConfigOption"
+  | "setSessionMode"
+>
+
 export type SdkAcpRuntimeClientOptions = {
   connection?: ClientSideConnection
   onActivity?: (activity: SdkAcpRuntimeActivity) => Promise<void> | void
   onPermissionRequest?: (
     params: RequestPermissionRequest,
+    context?: SdkAcpRuntimeRequestContext,
   ) => Promise<RequestPermissionResponse>
   readTextFile?: (params: ReadTextFileRequest) => Promise<ReadTextFileResponse>
   filesystemPolicy?: SdkAcpRuntimeFilesystemPolicy
@@ -142,12 +167,15 @@ export type SdkAcpRuntimeClientOptions = {
 }
 
 export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
-  private readonly connection: ClientSideConnection
+  private readonly connection: SdkAcpRuntimeAgentConnection
   private readonly onActivity:
     | ((activity: SdkAcpRuntimeActivity) => Promise<void> | void)
     | undefined
   private readonly onPermissionRequest:
-    | ((params: RequestPermissionRequest) => Promise<RequestPermissionResponse>)
+    | ((
+        params: RequestPermissionRequest,
+        context?: SdkAcpRuntimeRequestContext,
+      ) => Promise<RequestPermissionResponse>)
     | undefined
   private readonly terminalAdapter: SdkAcpRuntimeTerminalAdapter | undefined
   private readonly terminalRecords = new Map<
@@ -186,7 +214,7 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
       throw new Error("ACP SDK runtime client requires a connection or stream")
     }
 
-    this.connection = new ClientSideConnection(() => this.clientCallbacks(), options.stream)
+    this.connection = this.createAppConnection(options.stream)
   }
 
   static fromChildProcess(
@@ -287,27 +315,59 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
     return
   }
 
-  private clientCallbacks(): Client {
-    return {
-      createTerminal: (params) => this.createTerminal(params),
-      killTerminal: (params) => this.killTerminal(params),
-      readTextFile: this.readTextFile,
-      releaseTerminal: (params) => this.releaseTerminal(params),
-      requestPermission: async (params) => {
-        if (this.onPermissionRequest) {
-          return await this.onPermissionRequest(params)
-        }
-        return { outcome: { outcome: "cancelled" } }
-      },
-      sessionUpdate: async (params) => {
+  private createAppConnection(stream: Stream): SdkAcpRuntimeAgentConnection {
+    const app = createClientApp({ name: "0000-bridge" })
+      .onRequest(methods.client.session.requestPermission, (context) =>
+        this.requestPermission(context.params, { requestId: context.requestId }),
+      )
+      .onNotification(methods.client.session.update, async (context) => {
         for (const callback of this.updates) {
-          callback(params)
+          callback(context.params)
         }
-      },
-      terminalOutput: (params) => this.terminalOutput(params),
-      waitForTerminalExit: (params) => this.waitForTerminalExit(params),
-      writeTextFile: this.writeTextFile,
+      })
+
+    const readTextFile = this.readTextFile
+    if (readTextFile) {
+      app.onRequest(methods.client.fs.readTextFile, (context) =>
+        readTextFile(context.params),
+      )
     }
+    const writeTextFile = this.writeTextFile
+    if (writeTextFile) {
+      app.onRequest(methods.client.fs.writeTextFile, async (context) =>
+        (await writeTextFile(context.params)) ?? {},
+      )
+    }
+    if (this.terminalAdapter) {
+      app
+        .onRequest(methods.client.terminal.create, (context) =>
+          this.createTerminal(context.params),
+        )
+        .onRequest(methods.client.terminal.output, (context) =>
+          this.terminalOutput(context.params),
+        )
+        .onRequest(methods.client.terminal.waitForExit, (context) =>
+          this.waitForTerminalExit(context.params),
+        )
+        .onRequest(methods.client.terminal.kill, async (context) =>
+          (await this.killTerminal(context.params)) ?? {},
+        )
+        .onRequest(methods.client.terminal.release, async (context) =>
+          (await this.releaseTerminal(context.params)) ?? {},
+        )
+    }
+
+    return agentConnectionFromClientApp(app.connect(stream))
+  }
+
+  private async requestPermission(
+    params: RequestPermissionRequest,
+    context?: SdkAcpRuntimeRequestContext,
+  ): Promise<RequestPermissionResponse> {
+    if (this.onPermissionRequest) {
+      return await this.onPermissionRequest(params, context)
+    }
+    return { outcome: { outcome: "cancelled" } }
   }
 
   private clientCapabilities(): ClientCapabilities {
@@ -457,6 +517,37 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
   private async emitActivity(activity: SdkAcpRuntimeActivity): Promise<void> {
     await this.onActivity?.(activity)
   }
+}
+
+function agentConnectionFromClientApp(
+  connection: ClientConnection,
+): SdkAcpRuntimeAgentConnection {
+  const { agent } = connection
+  return {
+    authenticate: (params) =>
+      withEmptyObjectFallback(agent.request(methods.agent.authenticate, params)),
+    cancel: (params) => agent.notify(methods.agent.session.cancel, params),
+    closeSession: (params) =>
+      withEmptyObjectFallback(agent.request(methods.agent.session.close, params)),
+    deleteSession: (params) =>
+      withEmptyObjectFallback(agent.request(methods.agent.session.delete, params)),
+    initialize: (params) => agent.request(methods.agent.initialize, params),
+    listSessions: (params) => agent.request(methods.agent.session.list, params),
+    loadSession: (params) =>
+      withEmptyObjectFallback(agent.request(methods.agent.session.load, params)),
+    logout: (params) => withEmptyObjectFallback(agent.request(methods.agent.logout, params)),
+    newSession: (params) => agent.request(methods.agent.session.new, params),
+    prompt: (params) => agent.request(methods.agent.session.prompt, params),
+    resumeSession: (params) => agent.request(methods.agent.session.resume, params),
+    setSessionConfigOption: (params) =>
+      agent.request(methods.agent.session.setConfigOption, params),
+    setSessionMode: (params) =>
+      withEmptyObjectFallback(agent.request(methods.agent.session.setMode, params)),
+  }
+}
+
+async function withEmptyObjectFallback<T>(request: Promise<T | void>): Promise<T> {
+  return ((await request) ?? {}) as T
 }
 
 function buildPolicyBackedReadTextFileCallback(

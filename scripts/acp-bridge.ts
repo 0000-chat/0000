@@ -155,7 +155,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.43";
+export const BRIDGE_VERSION = "0.1.52";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
@@ -857,6 +857,20 @@ function processPressureCleanupRequest(
     maxSessionsToClose,
     targetFreeProcessSlots: PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS,
   };
+}
+
+export function processWarmCapacityForHealth(
+  processHealth: BridgeStatus["processHealth"],
+): number {
+  if (!processHealth || typeof processHealth.processCap !== "number") {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(
+    0,
+    processHealth.processCap -
+      processHealth.childCount -
+      PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS,
+  );
 }
 
 export type BridgeUpdaterLaunchInput = {
@@ -4306,10 +4320,7 @@ export async function runBridgeLoopIteration(
           dispatchedCommandCount += 1;
         }
         const warmRuntimeProfileIds = input.warmRuntimeProfileIds ?? [];
-        const processWarmCapacity =
-          processHealth && typeof processHealth.processCap === "number"
-            ? Math.max(0, processHealth.processCap - processHealth.childCount)
-            : Number.POSITIVE_INFINITY;
+        const processWarmCapacity = processWarmCapacityForHealth(processHealth);
         const warmCapacity = Math.min(
           Math.max(0, maxInFlight - input.inFlightCommands.size),
           processWarmCapacity,

@@ -189,19 +189,14 @@ test("preserves clear SDK diagnostics when optional lifecycle methods are unsupp
   const client = new SdkAcpRuntimeClient({ stream: streams.client })
   await client.initialize()
 
-  await withCapturedSdkMethodNotFoundLogs(
-    ["session/list", "session/delete", "session/resume", "session/close", "logout"],
-    async () => {
-      await expectUnsupportedMethod(client.listSessions({}), "session/list")
-      await expectUnsupportedMethod(client.deleteSession({ sessionId: "session-1" }), "session/delete")
-      await expectUnsupportedMethod(
-        client.resumeSession({ cwd: "/tmp/project", mcpServers: [], sessionId: "session-1" }),
-        "session/resume",
-      )
-      await expectUnsupportedMethod(client.closeSession({ sessionId: "session-1" }), "session/close")
-      await expectUnsupportedMethod(client.logout(), "logout")
-    },
+  await expectUnsupportedMethod(client.listSessions({}), "session/list")
+  await expectUnsupportedMethod(client.deleteSession({ sessionId: "session-1" }), "session/delete")
+  await expectUnsupportedMethod(
+    client.resumeSession({ cwd: "/tmp/project", mcpServers: [], sessionId: "session-1" }),
+    "session/resume",
   )
+  await expectUnsupportedMethod(client.closeSession({ sessionId: "session-1" }), "session/close")
+  await expectUnsupportedMethod(client.logout(), "logout")
 })
 
 test("preserves clear SDK diagnostics when authenticate is rejected by the SDK connection", async () => {
@@ -214,6 +209,58 @@ test("preserves clear SDK diagnostics when authenticate is rejected by the SDK c
   })
 
   await expectUnsupportedMethod(client.authenticate({ methodId: "oauth" }), "authenticate")
+})
+
+test("passes SDK request ids with permission callbacks", async () => {
+  const streams = createPairedStreams()
+  const requestContexts: Array<{ requestId?: unknown } | undefined> = []
+  let agentConnection: AgentSideConnection
+  const agent: Agent = {
+    authenticate: async () => undefined,
+    cancel: async () => undefined,
+    initialize: async (params) => ({
+      agentCapabilities: {},
+      protocolVersion: params.protocolVersion,
+    }),
+    newSession: async () => ({ sessionId: "session-1" }),
+    prompt: async (params) => {
+      await agentConnection.requestPermission({
+        options: [
+          {
+            kind: "allow_once",
+            name: "Allow once",
+            optionId: "allow_once",
+          },
+        ],
+        sessionId: params.sessionId,
+        toolCall: {
+          kind: "edit",
+          status: "pending",
+          title: "Edit file",
+          toolCallId: "tool-1",
+        },
+      })
+      return { stopReason: "end_turn" }
+    },
+  }
+  agentConnection = new AgentSideConnection(() => agent, streams.agent)
+  const client = new SdkAcpRuntimeClient({
+    onPermissionRequest: async (_params, context) => {
+      requestContexts.push(context)
+      return { outcome: { outcome: "cancelled" } }
+    },
+    stream: streams.client,
+  })
+
+  await client.initialize()
+  await client.createSession({ cwd: "/tmp", mcpServers: [] })
+  await client.prompt({
+    prompt: [{ text: "hello", type: "text" }],
+    sessionId: "session-1",
+  })
+
+  expect(requestContexts).toHaveLength(1)
+  expect(requestContexts[0]?.requestId).toBeDefined()
 })
 
 test("serves SDK filesystem callbacks through the 0000 workspace policy", async () => {
@@ -289,17 +336,12 @@ test("serves SDK filesystem callbacks through the 0000 workspace policy", async 
 
   await client.initialize()
   const session = await client.createSession({ cwd: workspaceRoot, mcpServers: [] })
-  await withCapturedSdkInternalErrorLogs(
-    ["fs/read_text_file", "fs/write_text_file"],
-    async () => {
-      await expect(
-        client.prompt({
-          prompt: [{ text: "use files", type: "text" }],
-          sessionId: session.sessionId,
-        }),
-      ).resolves.toMatchObject({ stopReason: "end_turn" })
-    },
-  )
+  await expect(
+    client.prompt({
+      prompt: [{ text: "use files", type: "text" }],
+      sessionId: session.sessionId,
+    }),
+  ).resolves.toMatchObject({ stopReason: "end_turn" })
   await expect(readFile(targetPath, "utf8")).resolves.toBe("allowed content updated")
   const filesystemActivities = activities.filter((activity) => activity.type === "filesystem_activity")
   expect(filesystemActivities).toEqual([
@@ -502,80 +544,4 @@ async function expectUnsupportedMethod(promise: Promise<unknown>, method: string
     })
     expect(error).toHaveProperty("message", `"Method not found": ${method}`)
   }
-}
-
-async function withCapturedSdkMethodNotFoundLogs<T>(
-  expectedMethods: Array<string>,
-  callback: () => Promise<T>,
-): Promise<T> {
-  const originalConsoleError = console.error
-  const captured: Array<{ code: unknown; method: unknown }> = []
-  const expected = new Set(expectedMethods)
-
-  console.error = (...args: Parameters<typeof console.error>) => {
-    const [message, request, error] = args
-    if (
-      message === "Error handling request" &&
-      isRecord(request) &&
-      isRecord(error) &&
-      error.code === -32601 &&
-      typeof request.method === "string" &&
-      expected.has(request.method)
-    ) {
-      const data = error.data
-      captured.push({
-        code: error.code,
-        method: isRecord(data) ? data.method : undefined,
-      })
-      return
-    }
-
-    originalConsoleError(...args)
-  }
-
-  try {
-    const result = await callback()
-    expect(captured).toEqual(expectedMethods.map((method) => ({ code: -32601, method })))
-    return result
-  } finally {
-    console.error = originalConsoleError
-  }
-}
-
-async function withCapturedSdkInternalErrorLogs<T>(
-  expectedMethods: Array<string>,
-  callback: () => Promise<T>,
-): Promise<T> {
-  const originalConsoleError = console.error
-  const captured: Array<{ code: unknown; method: unknown }> = []
-  const expected = new Set(expectedMethods)
-
-  console.error = (...args: Parameters<typeof console.error>) => {
-    const [message, request, error] = args
-    if (
-      message === "Error handling request" &&
-      isRecord(request) &&
-      isRecord(error) &&
-      error.code === -32603 &&
-      typeof request.method === "string" &&
-      expected.has(request.method)
-    ) {
-      captured.push({ code: error.code, method: request.method })
-      return
-    }
-
-    originalConsoleError(...args)
-  }
-
-  try {
-    const result = await callback()
-    expect(captured).toEqual(expectedMethods.map((method) => ({ code: -32603, method })))
-    return result
-  } finally {
-    console.error = originalConsoleError
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
 }
