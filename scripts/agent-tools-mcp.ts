@@ -58,7 +58,7 @@ const AGENT_TOOL_MCP_SURFACES = [
   "action",
 ] as const satisfies readonly AgentToolSurface[]
 
-type AgentToolMcpEnv = {
+export type AgentToolMcpEnv = {
   activeToolSurfaces?: readonly AgentToolSurface[]
   agentSessionId: string
   appUrl: string
@@ -82,6 +82,7 @@ type AgentToolInvokeFailure = {
   ok: false
   error: string
   reasonCode: AgentToolInvokeFailureReasonCode
+  failedSteps?: Array<{ error?: string; id: string; reasonCode?: string; tool: string }>
   retryable?: boolean
   timeoutMs?: number
   httpStatus?: number
@@ -476,6 +477,12 @@ function isAgentToolMcpToolName(value: string): value is AgentToolMcpToolName {
   return (AGENT_TOOL_MCP_TOOL_NAMES as readonly string[]).includes(value)
 }
 
+function canCatalogToolRunInParallel(toolName: string, enabledFeatureFlags: readonly FeatureFlagKey[] = []): boolean {
+  if (!isAgentToolMcpToolName(toolName) || !visibleCatalogToolNames(enabledFeatureFlags).includes(toolName)) return false
+  const tool = AGENT_TOOL_MCP_MANIFEST[toolName] as AgentToolManifestEntry
+  return tool.effect === "read" || tool.annotations.readOnlyHint === true
+}
+
 async function callCatalogTool(env: AgentToolMcpEnv, toolName: string, input: unknown): Promise<unknown> {
   if (!isAgentToolMcpToolName(toolName) || !visibleCatalogToolNames(env.enabledFeatureFlags).includes(toolName)) {
     return { ok: false, error: `Unknown or unavailable 0000 tool: ${toolName}` }
@@ -516,38 +523,76 @@ function resolveCatalogPlanInputReferences(value: unknown, completedSteps: reado
   return value
 }
 
-async function executeCatalogPlan(
+export async function executeCatalogPlan(
   env: AgentToolMcpEnv,
   plan: { mode?: "sequential" | "parallel"; steps: { id?: string; input?: unknown; tool: string }[] },
 ): Promise<unknown> {
+  const requestedMode = plan.mode === "parallel" ? "parallel" : "sequential"
+  const steps = plan.steps.map((step, index) => ({ ...step, id: step.id ?? `step_${index + 1}` }))
+  const mode = requestedMode === "parallel" && steps.every((step) => canCatalogToolRunInParallel(step.tool, env.enabledFeatureFlags))
+    ? "parallel"
+    : "sequential"
   const runStep = async (
     step: { id?: string; input?: unknown; tool: string },
     index: number,
     completedSteps: readonly CatalogPlanStepResult[] = [],
   ): Promise<CatalogPlanStepResult> => {
     const id = step.id ?? `step_${index + 1}`
-    const input = plan.mode === "parallel" ? (step.input ?? {}) : resolveCatalogPlanInputReferences(step.input ?? {}, completedSteps)
-    return {
-      id,
-      result: await callCatalogTool(env, step.tool, input),
-      tool: step.tool,
+    const input = mode === "parallel" ? (step.input ?? {}) : resolveCatalogPlanInputReferences(step.input ?? {}, completedSteps)
+    try {
+      return {
+        id,
+        result: await callCatalogTool(env, step.tool, input),
+        tool: step.tool,
+      }
+    } catch (error) {
+      return {
+        id,
+        result: buildAgentToolInvokeFailure({
+          error: error instanceof Error ? error.message : String(error),
+          reasonCode: "APP_ERROR",
+          tool: step.tool,
+        }),
+        tool: step.tool,
+      }
     }
   }
-  const steps = plan.steps.map((step, index) => ({ ...step, id: step.id ?? `step_${index + 1}` }))
-  const results = plan.mode === "parallel"
+  const results = mode === "parallel"
     ? await Promise.all(steps.map((step, index) => runStep(step, index)))
     : []
-  if (plan.mode !== "parallel") {
+  if (mode !== "parallel") {
     for (let index = 0; index < steps.length; index += 1) {
       results.push(await runStep(steps[index]!, index, results))
       const result = results[results.length - 1]?.result
       if (result && typeof result === "object" && (result as { ok?: unknown }).ok === false) break
     }
   }
+  const failedSteps = results
+    .filter((step) => step.result && typeof step.result === "object" && (step.result as { ok?: unknown }).ok === false)
+    .map((step) => {
+      const failure = step.result as { error?: unknown; reasonCode?: unknown }
+      return {
+        error: typeof failure.error === "string" ? sanitizeErrorText(failure.error) : undefined,
+        id: step.id,
+        reasonCode: typeof failure.reasonCode === "string" ? failure.reasonCode : undefined,
+        tool: step.tool,
+      }
+    })
   return {
-    ok: results.every((step) => !(step.result && typeof step.result === "object" && (step.result as { ok?: unknown }).ok === false)),
+    ok: failedSteps.length === 0,
+    ...(failedSteps.length > 0
+      ? {
+          error: `Plan failed at ${failedSteps.length} step${failedSteps.length === 1 ? "" : "s"}: ${failedSteps
+            .slice(0, 5)
+            .map((step) => `${step.id} (${step.tool})${step.error ? `: ${step.error}` : ""}`)
+            .join("; ")}${failedSteps.length > 5 ? `; ${failedSteps.length - 5} more` : ""}`,
+          failedSteps,
+          reasonCode: "APP_ERROR",
+        }
+      : {}),
     result: {
-      mode: plan.mode ?? "sequential",
+      mode,
+      ...(requestedMode !== mode ? { requestedMode } : {}),
       steps: results,
     },
   }
@@ -688,12 +733,13 @@ export async function invokeAgentToolOverHttp(
   }
 }
 
-export function toMcpToolResult(result: unknown) {
+export function toMcpToolResult(result: unknown, options: { markOkFalseAsError?: boolean } = {}) {
   const record = result && typeof result === "object" ? (result as { ok?: unknown }) : undefined
-  const text = record?.ok === false ? JSON.stringify(boundToolFailureForMcp(result), null, 2) : JSON.stringify(result, null, 2)
+  const markAsError = record?.ok === false && options.markOkFalseAsError !== false
+  const text = markAsError ? JSON.stringify(boundToolFailureForMcp(result), null, 2) : JSON.stringify(result, null, 2)
   return {
     content: [{ type: "text" as const, text }],
-    ...(record?.ok === false ? { isError: true } : {}),
+    ...(markAsError ? { isError: true } : {}),
   }
 }
 
@@ -781,7 +827,7 @@ export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
         "Execute a bounded multi-step 0000 Chat tool plan through the broker. Use mode='parallel' only when steps are independent; otherwise omit mode for sequential execution. Sequential step inputs may reference previous step results with strings like '$steps.current.result.thread.id'. Loops and conditionals are not supported; create/run an Action for reusable workflow logic. Existing approval and audit behavior applies per step.",
       inputSchema: TOOL_EXECUTE_PLAN_INPUT_SCHEMA,
     },
-    async (input) => toMcpToolResult(await executeCatalogPlan(env, input)),
+    async (input) => toMcpToolResult(await executeCatalogPlan(env, input), { markOkFalseAsError: false }),
   )
 
   server.registerTool(
@@ -923,6 +969,7 @@ function boundToolFailureForMcp(result: unknown): AgentToolInvokeFailure {
     ...(typeof failure.timeoutMs === "number" ? { timeoutMs: failure.timeoutMs } : {}),
     ...(typeof failure.httpStatus === "number" ? { httpStatus: failure.httpStatus } : {}),
     ...(typeof failure.tool === "string" ? { tool: failure.tool } : {}),
+    ...(Array.isArray(failure.failedSteps) ? { failedSteps: failure.failedSteps.slice(0, 10) } : {}),
   }
   let text = JSON.stringify(bounded, null, 2)
   if (text.length <= MAX_MCP_ERROR_JSON_LENGTH) return bounded
