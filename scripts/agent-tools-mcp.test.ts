@@ -13,6 +13,7 @@ import {
   buildAgentToolSessionContextText,
   createAgentToolsMcpServer,
   describeAgentToolCatalogEntry,
+  executeCatalogPlan,
   getVisibleAgentToolMcpToolNames,
   invokeAgentToolOverHttp,
   searchAgentToolCatalog,
@@ -223,6 +224,46 @@ describe("agent tools MCP server helpers", () => {
     expect(result.isError).toBe(true)
     expect(result.content[0]?.text.length).toBeLessThan(2_000)
     expect(result.content[0]?.text).toContain('"tool": "apps.create"')
+  })
+
+  test("returns executePlan partial failures as readable plan results instead of generic MCP errors", async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    try {
+      globalThis.fetch = Object.assign(async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tool?: string }
+        calls.push(String(body.tool))
+        if (body.tool === "databases.createRow") {
+          return new Response(JSON.stringify({ error: "Row write failed", ok: false }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { id: "ok" } }), { status: 200 })
+      }, { preconnect: originalFetch.preconnect }) as typeof fetch
+
+      const planResult = await executeCatalogPlan(
+        { agentSessionId: "agent_session_1", appUrl: "https://chat.example.test", bridgeToken: "secret-token", deviceId: "device_1" },
+        {
+          mode: "parallel",
+          steps: [
+            { id: "read", input: { threadId: "thread_1" }, tool: "threads.read" },
+            { id: "write", input: { attributes: { title: "Task" }, tableId: "dev-tasks" }, tool: "databases.createRow" },
+          ],
+        },
+      ) as { error?: string; failedSteps?: Array<{ error?: string; id: string; reasonCode?: string; tool: string }>; ok: boolean; result: { steps: unknown[] } }
+
+      expect(calls).toEqual(["threads.read", "databases.createRow"])
+      expect(planResult.ok).toBe(false)
+      expect(planResult.error).toContain("write (databases.createRow): Row write failed")
+      expect(planResult.failedSteps).toEqual([{ error: "Row write failed", id: "write", reasonCode: "APP_ERROR", tool: "databases.createRow" }])
+      expect(planResult.result).toMatchObject({ mode: "sequential", requestedMode: "parallel" })
+      expect(planResult.result.steps).toHaveLength(2)
+
+      const mcpResult = toMcpToolResult(planResult, { markOkFalseAsError: false })
+      expect(mcpResult.isError).toBeUndefined()
+      expect(mcpResult.content[0]?.text).toContain('"failedSteps"')
+      expect(mcpResult.content[0]?.text).toContain('"result"')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   test("registers visible tools and capability resources", async () => {
