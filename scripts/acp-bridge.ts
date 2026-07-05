@@ -27,7 +27,7 @@ import {
 } from "./acp-bridge/convex-http";
 import {
   AGENT_TOOL_GUIDE_RESOURCE,
-  AGENT_TOOL_MCP_INPUT_SCHEMAS,
+  AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
   AGENT_TOOL_MCP_TOOL_NAMES,
   AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
   buildAgentToolGuideText,
@@ -155,10 +155,10 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.52";
+export const BRIDGE_VERSION = "0.1.53";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
-const BRIDGE_MCP_SERVER_VERSION = "0.1.0";
+const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
 const BRIDGE_RESTART_HANDOFF_SCHEMA_VERSION = 1;
 const BRIDGE_RESTART_HANDOFF_TTL_MS = 10 * 60_000;
 const BRIDGE_RESTART_HANDOFF_MAX_SESSIONS = 12;
@@ -593,8 +593,14 @@ function buildBridgeMcpManifestSummary() {
     ],
     serverName: BRIDGE_MCP_SERVER_NAME,
     serverVersion: BRIDGE_MCP_SERVER_VERSION,
-    tools: AGENT_TOOL_MCP_TOOL_NAMES.map((toolName) => ({
-      inputFields: Object.keys(AGENT_TOOL_MCP_INPUT_SCHEMAS[toolName].shape).sort(),
+    tools: AGENT_TOOL_BROKER_MCP_TOOL_NAMES.map((toolName) => ({
+      inputFields: toolName === "tools.search"
+        ? ["capabilityPack", "effect", "limit", "offset", "query", "risk"]
+        : toolName === "tools.describe"
+          ? ["tool"]
+          : toolName === "tools.call"
+            ? ["input", "tool"]
+            : ["mode", "steps"],
       name: toolName,
     })),
   };
@@ -603,7 +609,8 @@ function buildBridgeMcpManifestSummary() {
 function buildBridgeToolPolicySummary() {
   return {
     guideText: buildAgentToolGuideText(),
-    toolNames: [...AGENT_TOOL_MCP_TOOL_NAMES],
+    catalogToolNames: [...AGENT_TOOL_MCP_TOOL_NAMES],
+    toolNames: [...AGENT_TOOL_BROKER_MCP_TOOL_NAMES],
   };
 }
 
