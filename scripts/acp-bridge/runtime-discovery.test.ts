@@ -39,6 +39,9 @@ describe("runtime discovery", () => {
           },
           sharedGatewayKey: true,
           sessionIsolation: "unverified",
+          supportsNativeSubagentControl: false,
+          supportsNativeSubagentStatus: true,
+          supportsNativeSubagentTools: true,
           structuredInteractions: true,
         },
       }),
@@ -56,6 +59,9 @@ describe("runtime discovery", () => {
       supportsCancel: true,
       supportsClose: true,
       supportsLogout: true,
+      supportsNativeSubagentControl: false,
+      supportsNativeSubagentStatus: true,
+      supportsNativeSubagentTools: true,
       supportsResume: true,
       supportsSessionDelete: true,
       supportsSessionFork: true,
@@ -119,7 +125,14 @@ describe("runtime discovery", () => {
       id: "codex:codex-acp",
       command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
       diagnostics: { acp: "supported", contextMode: "available", mcpServers: 2 },
-      capabilities: { nativeSkills: true, nativeHooks: true, nativeMcp: true },
+      capabilities: {
+        nativeSkills: true,
+        nativeHooks: true,
+        nativeMcp: true,
+        supportsNativeSubagentControl: false,
+        supportsNativeSubagentStatus: false,
+        supportsNativeSubagentTools: true,
+      },
     })
     expect(codex?.availableCommands).toEqual([
       { name: "status", description: "Show session status" },
@@ -162,7 +175,12 @@ describe("runtime discovery", () => {
       label: "Claude Code",
       command: ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
       diagnostics: { acp: "supported" },
-      capabilities: { sessionMcpServers: true },
+      capabilities: {
+        sessionMcpServers: true,
+        supportsNativeSubagentControl: false,
+        supportsNativeSubagentStatus: false,
+        supportsNativeSubagentTools: true,
+      },
       capabilityProvenance: {
         closeSession: {
           diagnosticReasonCode: "session_close_unsupported",
@@ -341,7 +359,13 @@ describe("runtime discovery", () => {
       },
     })
 
-    expect(profiles.some((profile) => profile.id === "hermes:default")).toBe(true)
+    expect(profiles.find((profile) => profile.id === "hermes:default")).toMatchObject({
+      capabilities: {
+        supportsNativeSubagentControl: false,
+        supportsNativeSubagentStatus: false,
+        supportsNativeSubagentTools: true,
+      },
+    })
     expect(profiles.some((profile) => profile.kind === "codex")).toBe(false)
   })
 

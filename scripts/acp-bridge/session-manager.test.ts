@@ -10,7 +10,10 @@ import {
   type BridgeSessionContext,
   type BridgeSessionQueueItem,
 } from "./session-manager";
-import type { NormalizedBridgeEvent } from "./event-normalizer";
+import {
+  normalizeAcpNotification,
+  type NormalizedBridgeEvent,
+} from "./event-normalizer";
 import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client";
 import { TerminalHandleRegistry } from "./terminal-handles";
 
@@ -1209,6 +1212,312 @@ describe("bridge session cwd safety", () => {
       expect.objectContaining({
         event: "bridge.session.tool_result_timeout",
         toolCallId: "tool-1",
+      }),
+    );
+  });
+
+  test("keeps Hermes delegate tools active when later tool work and assistant output overlap", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "delegate_task", "delegate-1"));
+          context.onEvent(toolCallEvent(2, "shell", "tool-2"));
+          context.onEvent(
+            streamChunkEvent("agent_thought_chunk", "still working", 3),
+          );
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        reasonCode: "tool_completion_lost",
+        toolCallId: "delegate-1",
+      }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        reasonCode: "provider_progressed_without_tool_result",
+        toolCallId: "tool-2",
+        trigger: "assistant_output_resumed",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_call",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            runtimeProfileId: "hermes:default",
+            toolCallId: "delegate-1",
+            toolClass: "subagent",
+            toolName: "delegate_task",
+            toolPolicyId: "hermes-delegate-subagent",
+            toolTimeoutMs: expect.any(Number),
+          }),
+        }),
+      }),
+    );
+  });
+
+  test("clears Hermes delegate tool tracking when the matching result arrives", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "delegate_task", "delegate-1"));
+          context.onEvent(
+            toolResultEvent(2, "delegate-1", "delegate_task", {
+              omitToolName: true,
+            }),
+          );
+          context.onEvent(toolCallEvent(3, "shell", "tool-2"));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        toolCallId: "delegate-1",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).not.toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_call_update",
+        rawPayload: expect.objectContaining({
+          settlementState: "detached_unjoined",
+          toolCallId: "delegate-1",
+        }),
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_result",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            runtimeProfileId: "hermes:default",
+            toolCallId: "delegate-1",
+            toolClass: "subagent",
+            toolPolicyId: "hermes-delegate-subagent",
+          }),
+        }),
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+        toolCallId: "delegate-1",
+      }),
+    );
+  });
+
+  test("settles Hermes delegate background receipts as detached work", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(
+            acpSessionUpdateEvent(1, {
+              content: [
+                {
+                  content: {
+                    text: "Review the current implementation and report risks.",
+                    type: "text",
+                  },
+                  type: "content",
+                },
+              ],
+              kind: "execute",
+              locations: [],
+              sessionUpdate: "tool_call",
+              title: "delegate: Review the current 0000 Chat MCP broker hard-switch imple...",
+              toolCallId: "delegate-1",
+            }),
+          );
+          context.onEvent(
+            acpSessionUpdateEvent(2, {
+              content: [
+                {
+                  content: {
+                    text: "Background subagent is running. The delegated result will be available later.",
+                    type: "text",
+                  },
+                  type: "content",
+                },
+              ],
+              kind: "execute",
+              sessionUpdate: "tool_call_update",
+              status: "completed",
+              toolCallId: "delegate-1",
+            }),
+          );
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.native_subagent_unjoined",
+        reasonCode: "native_subagent_unjoined",
+        settlementState: "detached_unjoined",
+        toolCallId: "delegate-1",
+        toolClass: "subagent",
+        toolPolicyId: "hermes-delegate-subagent",
+        trigger: "tool_result_background_receipt",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_call_update",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            reasonCode: "native_subagent_unjoined",
+            runtimeProfileId: "hermes:default",
+            settlementState: "detached_unjoined",
+            state: "detached_unjoined",
+            toolCallId: "delegate-1",
+            toolClass: "subagent",
+            toolPolicyId: "hermes-delegate-subagent",
+          }),
+          status: "complete",
+          type: "tool_result",
+        }),
+        rawPayload: expect.objectContaining({
+          reasonCode: "native_subagent_unjoined",
+          settlementState: "detached_unjoined",
+          state: "detached_unjoined",
+          toolCallId: "delegate-1",
+          toolClass: "subagent",
+          toolPolicyId: "hermes-delegate-subagent",
+        }),
+      }),
+    );
+  });
+
+  test("settles unjoined Hermes delegate tools without bridge failure when a turn completes", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "delegate_task", "delegate-1"));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({ ok: true }),
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        error: "tool_result_timeout",
+        event: "agent.turn.failed",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_call_update",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({
+            reasonCode: "native_subagent_unjoined",
+            runtimeProfileId: "hermes:default",
+            settlementState: "detached_unjoined",
+            state: "detached_unjoined",
+            toolCallId: "delegate-1",
+            toolClass: "subagent",
+            toolName: "delegate_task",
+            toolPolicyId: "hermes-delegate-subagent",
+          }),
+          status: "complete",
+          type: "tool_result",
+        }),
+        rawPayload: expect.objectContaining({
+          reasonCode: "native_subagent_unjoined",
+          settlementState: "detached_unjoined",
+          state: "detached_unjoined",
+          toolCallId: "delegate-1",
+          toolClass: "subagent",
+          toolPolicyId: "hermes-delegate-subagent",
+        }),
       }),
     );
   });
@@ -6174,7 +6483,28 @@ function toolCallEvent(
   };
 }
 
-function toolResultEvent(sequence: number, toolCallId = "tool-1"): NormalizedBridgeEvent {
+function acpSessionUpdateEvent(
+  sequence: number,
+  update: Record<string, unknown>,
+): NormalizedBridgeEvent {
+  return normalizeAcpNotification(
+    {
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update,
+      },
+    },
+    sequence,
+  );
+}
+
+function toolResultEvent(
+  sequence: number,
+  toolCallId = "tool-1",
+  toolName = "shell",
+  options?: { omitToolName?: boolean },
+): NormalizedBridgeEvent {
   return {
     eventType: "tool_result",
     externalEventId: `session-1:${sequence}:tool_result`,
@@ -6182,7 +6512,7 @@ function toolResultEvent(sequence: number, toolCallId = "tool-1"): NormalizedBri
       json: {
         state: "output-available",
         toolCallId,
-        toolName: "shell",
+        ...(options?.omitToolName ? {} : { toolName }),
       },
       status: "streaming",
       text: "tool finished",
@@ -6250,6 +6580,30 @@ function fakeSession() {
       sessionId: "session-1",
       text: "ok",
     }),
+  };
+}
+
+function hermesRuntimeProfile() {
+  return {
+    capabilities: { sessionMcpServers: true },
+    command: ["hermes", "acp"],
+    compatibility: {
+      mcpServerNameAliases: {
+        "0000": "zero-chat",
+      },
+      toolCallPolicies: [
+        {
+          id: "hermes-delegate-subagent",
+          timeoutMs: 30 * 60 * 1000,
+          toolClass: "subagent" as const,
+          toolNamePatterns: ["^delegate(?::|_|-|\\b)", "^delegate_task$"],
+        },
+      ],
+    },
+    id: "hermes:default",
+    kind: "hermes" as const,
+    label: "Hermes",
+    status: "available" as const,
   };
 }
 

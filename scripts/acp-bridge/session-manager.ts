@@ -35,6 +35,8 @@ import type {
 } from "./event-normalizer";
 import {
   type BridgeRuntimeProfile,
+  type BridgeRuntimeToolCallClass,
+  type BridgeToolCallTimeoutResolution,
   applyRuntimeMcpServerCompatibility,
   commandKey,
   findRuntimeProfile,
@@ -267,10 +269,14 @@ type EventWriteOutcome =
   | { ok: false; count: number; error: Error };
 
 type ActiveToolCall = {
+  runtimeProfileId?: string;
   startedAt: number;
   timeout: ReturnType<typeof setTimeout>;
   toolCallId: string;
+  toolClass: BridgeRuntimeToolCallClass;
   toolName: string;
+  toolPolicyId: string;
+  toolTimeoutMs: number;
 };
 
 type ToolResultTimeoutDetails = {
@@ -287,6 +293,9 @@ type ToolCallReconciliationTrigger =
   | "assistant_output_resumed"
   | "later_tool_started"
   | "turn_completed";
+
+const NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER =
+  "tool_result_background_receipt";
 
 export type BridgeTerminalizationMetadata = {
   ageMs?: number;
@@ -1741,6 +1750,69 @@ export class BridgeSessionManager {
     }
   }
 
+  private annotateToolEvent(
+    queueItemId: string,
+    session: BridgeSessionRecord,
+    event: NormalizedBridgeEvent,
+  ): NormalizedBridgeEvent {
+    const part = event.part;
+    if (!part || (part.type !== "tool_call" && part.type !== "tool_result")) {
+      return event;
+    }
+    const tool = readToolLogFields(part.json);
+    const toolCallId =
+      tool.toolCallId ??
+      event.externalEventId ??
+      `${queueItemId}:${tool.toolName}`;
+    const activeTool = this.activeToolCalls.get(queueItemId)?.get(toolCallId);
+    if (activeTool && activeTool.toolClass !== "standard") {
+      const metadata = activeToolPolicyMetadata(activeTool);
+      const annotatedEvent = {
+        ...event,
+        payload: mergeRecordMetadata(event.payload, metadata),
+        part: {
+          ...part,
+          json: mergeRecordMetadata(part.json, metadata),
+        },
+      };
+      if (isNativeSubagentBackgroundReceipt(activeTool, annotatedEvent)) {
+        const ageMs = Date.now() - activeTool.startedAt;
+        this.writeLog({
+          level: "info",
+          event: "bridge.session.native_subagent_unjoined",
+          queueId: queueItemId,
+          threadId: session.threadId,
+          agentSessionId: session.providerSessionKey,
+          bridgeProfileId: session.runtimeProfile?.id,
+          ageMs,
+          reasonCode: "native_subagent_unjoined",
+          settlementState: "detached_unjoined",
+          toolCallId: activeTool.toolCallId,
+          toolClass: activeTool.toolClass,
+          toolName: activeTool.toolName,
+          toolPolicyId: activeTool.toolPolicyId,
+          toolTimeoutMs: activeTool.toolTimeoutMs,
+          trigger: NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER,
+        });
+        return markNativeSubagentResultDetached(annotatedEvent, activeTool, ageMs);
+      }
+      return annotatedEvent;
+    }
+    const policy = this.resolveToolCallPolicy(session, tool.toolName);
+    if (policy.toolClass === "standard") {
+      return event;
+    }
+    const metadata = toolEventPolicyMetadata(session, policy);
+    return {
+      ...event,
+      payload: mergeRecordMetadata(event.payload, metadata),
+      part: {
+        ...part,
+        json: mergeRecordMetadata(part.json, metadata),
+      },
+    };
+  }
+
   private recordToolEvent(
     queueItemId: string,
     session: BridgeSessionRecord,
@@ -1813,9 +1885,69 @@ export class BridgeSessionManager {
     if (tools.length === 0) {
       return;
     }
+    let clearedToolCallCount = 0;
     for (const tool of tools) {
+      if (shouldKeepNativeToolPending(tool, options.trigger)) {
+        continue;
+      }
       const ageMs = Date.now() - tool.startedAt;
+      if (shouldSettleNativeSubagentAsUnjoined(tool, options.trigger)) {
+        this.clearToolCall(queueItemId, tool.toolCallId);
+        clearedToolCallCount += 1;
+        this.writeLog({
+          level: "info",
+          event: "bridge.session.native_subagent_unjoined",
+          queueId: queueItemId,
+          threadId: session.threadId,
+          agentSessionId: session.providerSessionKey,
+          bridgeProfileId: session.runtimeProfile?.id,
+          ageMs,
+          reasonCode: "native_subagent_unjoined",
+          settlementState: "detached_unjoined",
+          toolCallId: tool.toolCallId,
+          toolClass: tool.toolClass,
+          toolName: tool.toolName,
+          toolPolicyId: tool.toolPolicyId,
+          toolTimeoutMs: tool.toolTimeoutMs,
+          trigger: options.trigger,
+        });
+        const metadata = activeToolPolicyMetadata(tool);
+        this.enqueueEventWrite(session, {
+          externalEventId: `${queueItemId}:${tool.toolCallId}:native_subagent_unjoined`,
+          source: "bridge",
+          eventType: "tool_call_update",
+          payload: {
+            ageMs,
+            queueId: queueItemId,
+            reasonCode: "native_subagent_unjoined",
+            settlementState: "detached_unjoined",
+            sessionUpdate: "tool_call_update",
+            state: "detached_unjoined",
+            toolCallId: tool.toolCallId,
+            toolName: tool.toolName,
+            trigger: options.trigger,
+            ...metadata,
+          },
+          part: {
+            type: "tool_result",
+            text: `${tool.toolName} delegated work was not joined before the turn completed.`,
+            json: {
+              ageMs,
+              reasonCode: "native_subagent_unjoined",
+              settlementState: "detached_unjoined",
+              state: "detached_unjoined",
+              toolCallId: tool.toolCallId,
+              toolName: tool.toolName,
+              trigger: options.trigger,
+              ...metadata,
+            },
+            status: "complete",
+          },
+        });
+        continue;
+      }
       this.clearToolCall(queueItemId, tool.toolCallId);
+      clearedToolCallCount += 1;
       this.writeLog({
         level: "debug",
         event: "bridge.session.tool_call_reconciled",
@@ -1827,9 +1959,15 @@ export class BridgeSessionManager {
         reasonCode: "provider_progressed_without_tool_result",
         settlementState: "provider_progressed",
         toolCallId: tool.toolCallId,
+        toolClass: tool.toolClass,
         toolName: tool.toolName,
+        toolPolicyId: tool.toolPolicyId,
+        toolTimeoutMs: tool.toolTimeoutMs,
         trigger: options.trigger,
       });
+    }
+    if (clearedToolCallCount === 0) {
+      return;
     }
     this.writeLog({
       level: "debug",
@@ -1838,8 +1976,21 @@ export class BridgeSessionManager {
       threadId: session.threadId,
       agentSessionId: session.providerSessionKey,
       bridgeProfileId: session.runtimeProfile?.id,
-      clearedToolCallCount: tools.length,
+      clearedToolCallCount,
       trigger: options.trigger,
+    });
+  }
+
+  private resolveToolCallPolicy(
+    session: BridgeSessionRecord,
+    toolName: string,
+  ): BridgeToolCallTimeoutResolution {
+    return resolveToolCallTimeoutPolicy({
+      defaultTimeoutMs: this.toolResultTimeoutMs,
+      explicitTimeoutMs: this.explicitToolResultTimeoutMs,
+      profile: session.runtimeProfile,
+      requestTimeoutMs: this.requestTimeoutMs,
+      toolName,
     });
   }
 
@@ -1855,13 +2006,7 @@ export class BridgeSessionManager {
       this.activeToolCalls.set(queueItemId, queueTools);
     }
     const startedAt = Date.now();
-    const policy = resolveToolCallTimeoutPolicy({
-      defaultTimeoutMs: this.toolResultTimeoutMs,
-      explicitTimeoutMs: this.explicitToolResultTimeoutMs,
-      profile: session.runtimeProfile,
-      requestTimeoutMs: this.requestTimeoutMs,
-      toolName: tool.toolName,
-    });
+    const policy = this.resolveToolCallPolicy(session, tool.toolName);
     const timeout = setTimeout(() => {
       const activeTool = this.activeToolCalls.get(queueItemId)?.get(tool.toolCallId);
       if (!activeTool) {
@@ -1871,11 +2016,11 @@ export class BridgeSessionManager {
       const details = {
         ageMs,
         failureClass: "tool_result_propagation_lost" as const,
-        timeoutMs: policy.timeoutMs,
+        timeoutMs: activeTool.toolTimeoutMs,
         toolCallId: activeTool.toolCallId,
-        toolClass: policy.toolClass,
+        toolClass: activeTool.toolClass,
         toolName: activeTool.toolName,
-        toolPolicyId: policy.policyId,
+        toolPolicyId: activeTool.toolPolicyId,
       };
       this.activeToolTimeoutFailures.set(queueItemId, details);
       this.writeLog({
@@ -1894,10 +2039,14 @@ export class BridgeSessionManager {
     }, policy.timeoutMs);
     timeout.unref?.();
     queueTools.set(tool.toolCallId, {
+      runtimeProfileId: session.runtimeProfile?.id,
       startedAt,
       timeout,
       toolCallId: tool.toolCallId,
+      toolClass: policy.toolClass,
       toolName: tool.toolName,
+      toolPolicyId: policy.policyId,
+      toolTimeoutMs: policy.timeoutMs,
     });
   }
 
@@ -2741,41 +2890,50 @@ export class BridgeSessionManager {
               record,
               item,
             );
-            this.writeFirstRuntimeActivityLog(eventItem, record, event);
-            this.writeFirstAssistantTextLog(eventItem, record, event);
-            this.recordLivenessEvent(
-              eventItem.id,
-              event.eventType.includes("tool")
-                ? "tool_progress"
-                : "assistant_output",
-            );
-            this.recordToolEvent(eventItem.id, record, event);
-            this.reconcilePendingToolCallsIfAssistantOutputResumed(
+            const annotatedEvent = this.annotateToolEvent(
               eventItem.id,
               record,
               event,
             );
+            this.writeFirstRuntimeActivityLog(
+              eventItem,
+              record,
+              annotatedEvent,
+            );
+            this.writeFirstAssistantTextLog(eventItem, record, annotatedEvent);
+            this.recordLivenessEvent(
+              eventItem.id,
+              annotatedEvent.eventType.includes("tool")
+                ? "tool_progress"
+                : "assistant_output",
+            );
+            this.recordToolEvent(eventItem.id, record, annotatedEvent);
+            this.reconcilePendingToolCallsIfAssistantOutputResumed(
+              eventItem.id,
+              record,
+              annotatedEvent,
+            );
             this.supervisor?.recordProviderEvent(
               this.supervisorWorkItem(eventItem, record),
               {
-                eventType: event.eventType,
+                eventType: annotatedEvent.eventType,
               },
             );
             if (
-              event.part?.type === "approval_request" ||
-              event.part?.type === "choice"
+              annotatedEvent.part?.type === "approval_request" ||
+              annotatedEvent.part?.type === "choice"
             ) {
               this.recordLivenessEvent(eventItem.id, "permission_request");
               this.supervisor?.recordWaitingForInteraction(
                 this.supervisorWorkItem(eventItem, record),
-                event.externalEventId ??
+                annotatedEvent.externalEventId ??
                   eventItem.externalRequestId ??
                   eventItem.approvalId ??
                   eventItem.id,
               );
             }
-            if (event.attachmentUpload) {
-              record.pendingAttachmentUploadEvents.push(event);
+            if (annotatedEvent.attachmentUpload) {
+              record.pendingAttachmentUploadEvents.push(annotatedEvent);
               this.writeLog({
                 level: "debug",
                 event: "agent.attachments.upload_deferred",
@@ -2784,13 +2942,13 @@ export class BridgeSessionManager {
                 agentSessionId: record.providerSessionKey,
                 queueId: eventItem.id,
                 queueType: normalizeType(eventItem),
-                candidateKind: event.attachmentUpload.kind,
-                mediaType: event.attachmentUpload.mediaType,
-                sizeBytes: event.attachmentUpload.sizeBytes,
+                candidateKind: annotatedEvent.attachmentUpload.kind,
+                mediaType: annotatedEvent.attachmentUpload.mediaType,
+                sizeBytes: annotatedEvent.attachmentUpload.sizeBytes,
               });
               return;
             }
-            this.enqueueEventWrite(record, event);
+            this.enqueueEventWrite(record, annotatedEvent);
           }
         },
         onEventBoundary: () => {
@@ -4377,6 +4535,147 @@ function withRuntimeEventMetadata(
     runtimeLabel: runtimeProfile.label,
     runtimeCommand: summarizeRuntimeCommand(runtimeProfile.command),
   });
+}
+
+function mergeRecordMetadata(
+  value: unknown,
+  metadata: Record<string, unknown>,
+): unknown {
+  return isRecord(value)
+    ? removeUndefinedValues({ ...value, ...metadata })
+    : value;
+}
+
+function toolEventPolicyMetadata(
+  session: BridgeSessionRecord,
+  policy: BridgeToolCallTimeoutResolution,
+): Record<string, unknown> {
+  return removeUndefinedValues({
+    runtimeProfileId: session.runtimeProfile?.id,
+    toolClass: policy.toolClass,
+    toolPolicyId: policy.policyId,
+    toolTimeoutMs: policy.timeoutMs,
+  });
+}
+
+function activeToolPolicyMetadata(
+  tool: ActiveToolCall,
+): Record<string, unknown> {
+  return removeUndefinedValues({
+    runtimeProfileId: tool.runtimeProfileId,
+    toolClass: tool.toolClass,
+    toolPolicyId: tool.toolPolicyId,
+    toolTimeoutMs: tool.toolTimeoutMs,
+  });
+}
+
+function isNativeSubagentBackgroundReceipt(
+  tool: ActiveToolCall,
+  event: NormalizedBridgeEvent,
+): boolean {
+  if (tool.toolClass !== "subagent" || event.part?.type !== "tool_result") {
+    return false;
+  }
+  const state = readToolState(event.part.json)?.toLowerCase();
+  if (
+    state &&
+    !["output-available", "complete", "completed", "success", "succeeded", "ok"].includes(
+      state,
+    )
+  ) {
+    return false;
+  }
+  const text = collectBridgeEventTextForClassification(event).toLowerCase();
+  return (
+    /\bbackground\b/.test(text) &&
+    /\b(?:running|started|launched|spawned|queued)\b/.test(text) &&
+    /\b(?:sub-?agent|delegat(?:e|ed|ion))\b/.test(text)
+  );
+}
+
+function markNativeSubagentResultDetached(
+  event: NormalizedBridgeEvent,
+  tool: ActiveToolCall,
+  ageMs: number,
+): NormalizedBridgeEvent {
+  const metadata = removeUndefinedValues({
+    ageMs,
+    reasonCode: "native_subagent_unjoined",
+    settlementState: "detached_unjoined",
+    state: "detached_unjoined",
+    toolCallId: tool.toolCallId,
+    toolName: tool.toolName,
+    trigger: NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER,
+    ...activeToolPolicyMetadata(tool),
+  });
+  const part = event.part ?? { type: "tool_result" as const };
+  return {
+    ...event,
+    payload: mergeRecordMetadata(event.payload, metadata),
+    part: {
+      ...part,
+      json: mergeRecordMetadata(part.json, metadata),
+      status: "complete",
+      text: `${tool.toolName} delegated work is running in the native runtime and was not joined before the turn completed.`,
+      type: "tool_result",
+    },
+  };
+}
+
+function collectBridgeEventTextForClassification(
+  event: NormalizedBridgeEvent,
+): string {
+  const values: string[] = [];
+  const budget = { chars: 0 };
+  collectStringValues(event.part?.text, values, budget);
+  collectStringValues(event.part?.json, values, budget);
+  collectStringValues(event.payload, values, budget);
+  return values.join("\n").slice(0, 20_000);
+}
+
+function collectStringValues(
+  value: unknown,
+  output: string[],
+  budget: { chars: number },
+  depth = 0,
+): void {
+  if (budget.chars > 20_000 || depth > 6 || value == null) {
+    return;
+  }
+  if (typeof value === "string") {
+    output.push(value);
+    budget.chars += value.length;
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringValues(item, output, budget, depth + 1);
+    }
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const child of Object.values(value)) {
+    collectStringValues(child, output, budget, depth + 1);
+  }
+}
+
+function shouldKeepNativeToolPending(
+  tool: ActiveToolCall,
+  trigger: ToolCallReconciliationTrigger,
+): boolean {
+  return (
+    trigger !== "turn_completed" &&
+    (tool.toolClass === "subagent" || tool.toolClass === "long_running")
+  );
+}
+
+function shouldSettleNativeSubagentAsUnjoined(
+  tool: ActiveToolCall,
+  trigger: ToolCallReconciliationTrigger,
+): boolean {
+  return trigger === "turn_completed" && tool.toolClass === "subagent";
 }
 
 function summarizeRuntimeCommand(command: string[] | undefined):
