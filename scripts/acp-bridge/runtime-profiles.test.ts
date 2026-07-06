@@ -78,6 +78,35 @@ describe("runtime profile compatibility", () => {
     })
   })
 
+  test("classifies terminal work push commands as long-running", () => {
+    const profile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      id: "hermes:test",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    }
+
+    for (const toolName of [
+      "terminal: bun run work:push",
+      "terminal: export TSC_GUARD_LOCK_DIR=/tmp/locks && bun run work:push",
+      "terminal: git rev-list --left-right --count origin/main...main && bun run work:push",
+    ]) {
+      expect(
+        resolveToolCallTimeoutPolicy({
+          defaultTimeoutMs: 300_000,
+          profile,
+          toolName,
+        }),
+      ).toEqual({
+        policyId: "generic-long-running-tool",
+        timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
+        toolClass: "long_running",
+      })
+    }
+  })
+
   test("keeps explicit bridge tool timeout overrides authoritative", () => {
     const profile: BridgeRuntimeProfile = {
       capabilities: {},
