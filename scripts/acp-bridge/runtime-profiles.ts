@@ -121,7 +121,7 @@ const GENERIC_LONG_RUNNING_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
   timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
   toolClass: "long_running",
   toolNamePatterns: [
-    "^terminal:.*\\b(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:quality:(?:affected|changed|fast|gate|timings)|typecheck|build|test|work:(?:finish|land))\\b",
+    "^terminal:.*\\b(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:quality:(?:affected|changed|fast|gate|timings)|typecheck|build|test|work:(?:finish|land|push))\\b",
     "^terminal:.*\\b(?:cargo|gradle|mvn)\\b",
     "^terminal:.*\\bgh\\s+run\\s+watch\\b",
   ],
