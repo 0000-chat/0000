@@ -624,7 +624,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Continue an existing 0000 Chat thread by starting an agent-authored turn. Defaults to the current thread; pass agentIdOrSlug: \"self\" to continue as the calling agent, or another usable agent id/slug to hand off inside the same thread. This records agent provenance and must not be used to simulate a user-authored message.",
+      "description": "Continue an existing authorized 0000 Chat thread by starting an agent-authored turn. Defaults to the current thread; pass threadId to continue another non-archived thread in the caller organization. Pass agentIdOrSlug: \"self\" to continue as the calling agent, or another usable agent id/slug to hand off. This records agent provenance and must not be used to simulate a user-authored message.",
       "effect": "interaction_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -1638,7 +1638,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "automations",
-      "description": "Create a space-scoped scheduled agent automation or loop. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation.",
+      "description": "Create a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation. For thread-event triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any').",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -1763,6 +1763,41 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "reuse-thread"
           ]
         },
+        "automationType": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "scheduled",
+            "loop",
+            "trigger"
+          ]
+        },
+        "triggerConfig": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          },
+          "optional": true
+        },
+        "triggerKind": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "thread_created",
+            "assistant_turn_completed",
+            "thread_failed",
+            "automation_completed",
+            "webhook",
+            "database_mutation"
+          ]
+        },
+        "triggerRiskAcknowledgements": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
         "triggerMode": {
           "kind": "enum",
           "optional": true,
@@ -1788,7 +1823,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "automations",
-      "description": "Update a space-scoped scheduled agent automation. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals.",
+      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For space-based triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any').",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -1909,6 +1944,41 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "new-thread",
             "reuse-thread"
           ]
+        },
+        "automationType": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "scheduled",
+            "loop",
+            "trigger"
+          ]
+        },
+        "triggerConfig": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          },
+          "optional": true
+        },
+        "triggerKind": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "thread_created",
+            "assistant_turn_completed",
+            "thread_failed",
+            "automation_completed",
+            "webhook",
+            "database_mutation"
+          ]
+        },
+        "triggerRiskAcknowledgements": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
         },
         "triggerMode": {
           "kind": "enum",
@@ -4083,6 +4153,40 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "tools.executeCode": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "actions",
+      "description": "Execute ephemeral per-turn agent-written JavaScript through the 0000 Code Mode runtime. Use for loops, conditions, pagination, transforms, retries, and branching that are too dynamic for tools.executePlan. Code may call scoped 0000 tools through the provided tools helper; server-side auth, approval, audit, tool policy, limits, and scoped credentials remain enforced by the broker.",
+      "effect": "row_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "actions-runtime",
+      "inputSchema": {
+        "code": {
+          "kind": "string",
+          "sensitive": true
+        },
+        "input": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          },
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "sensitiveInput": true,
+      "surfaces": [
+        "action",
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
     "actions.run": {
       "annotations": {
         "destructiveHint": false,
@@ -4225,6 +4329,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "actions.archive",
     "actions.search",
     "actions.read",
+    "tools.executeCode",
     "actions.run"
   ],
   "AGENT_TOOL_CAPABILITY_PACKS": {
@@ -4449,6 +4554,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "actions.archive",
         "actions.search",
         "actions.read",
+        "tools.executeCode",
         "actions.run"
       ]
     },

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   ACTIONS_RUNTIME_FEATURE_FLAG_KEY,
   AGENT_TOOL_CAPABILITY_PACKS_RESOURCE,
+  AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
   AGENT_TOOL_MCP_INPUT_SCHEMAS,
   AGENT_TOOL_MCP_TOOL_NAMES,
   AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
@@ -11,8 +12,11 @@ import {
   buildAgentToolMcpEnv,
   buildAgentToolSessionContextText,
   createAgentToolsMcpServer,
+  describeAgentToolCatalogEntry,
+  executeCatalogPlan,
   getVisibleAgentToolMcpToolNames,
   invokeAgentToolOverHttp,
+  searchAgentToolCatalog,
   toMcpToolResult,
 } from "./agent-tools-mcp"
 
@@ -63,25 +67,32 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["actions.updateDraft"].safeParse({ actionId: "action_1" }).success).toBe(false)
   })
 
-  test("progressively discloses tools by active surface and feature flags", () => {
-    expect(getVisibleAgentToolMcpToolNames()).toEqual([
-      "capabilities.advise",
-      "context.get",
-      "userPrompts.requestChoice",
-      "objects.get",
-      "objects.search",
-      "objects.listLinked",
-      "threads.current",
-      "threads.read",
+  test("hard-switches MCP exposure to broker tools only", () => {
+    expect(AGENT_TOOL_BROKER_MCP_TOOL_NAMES).toEqual([
+      "tools.search",
+      "tools.describe",
+      "tools.call",
+      "tools.executePlan",
+      "tools.executeCode",
     ])
-    expect(getVisibleAgentToolMcpToolNames(["thread"])).toEqual(expect.arrayContaining(["threads.list", "threads.fork", "tags.assign", "messages.search"]))
-    expect(getVisibleAgentToolMcpToolNames(["database"])).toEqual(expect.arrayContaining(["databases.get", "databaseViews.list"]))
-    expect(getVisibleAgentToolMcpToolNames(["settings"])).toEqual(expect.arrayContaining(["bridgeDevices.list", "notifications.getBrowserConfig", "settings.setDefaultApprovalLevel"]))
-    expect(getVisibleAgentToolMcpToolNames(["action"])).toEqual(expect.arrayContaining(["actions.createDraft", "actions.updateDraft", "actions.search"]))
-    expect(getVisibleAgentToolMcpToolNames(["thread"])).not.toContain("artifacts.create")
-    expect(getVisibleAgentToolMcpToolNames(["thread"], [ARTIFACTS_FEATURE_FLAG_KEY])).toContain("artifacts.create")
-    expect(getVisibleAgentToolMcpToolNames(["action"])).not.toContain("actions.run")
-    expect(getVisibleAgentToolMcpToolNames(["action"], [ACTIONS_RUNTIME_FEATURE_FLAG_KEY])).toContain("actions.run")
+    expect(getVisibleAgentToolMcpToolNames()).toEqual([...AGENT_TOOL_BROKER_MCP_TOOL_NAMES])
+    expect(getVisibleAgentToolMcpToolNames(["thread", "database"], [ARTIFACTS_FEATURE_FLAG_KEY, ACTIONS_RUNTIME_FEATURE_FLAG_KEY])).toEqual([
+      ...AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
+    ])
+  })
+
+  test("searches and describes the hidden 0000 tool catalog", () => {
+    const search = searchAgentToolCatalog({ query: "create thread", limit: 5 })
+    expect(search.items.map((item) => item.tool)).toContain("threads.create")
+    expect(search.items.every((item) => typeof item.score === "number" && item.score > 0)).toBe(true)
+
+    const automation = searchAgentToolCatalog({ query: "edit this automation", limit: 5 })
+    expect(automation.items.map((item) => item.tool)).toContain("automations.update")
+
+    const withoutActionsRun = describeAgentToolCatalogEntry("actions.run")
+    expect("error" in withoutActionsRun).toBe(true)
+    const withActionsRun = describeAgentToolCatalogEntry("actions.run", [ACTIONS_RUNTIME_FEATURE_FLAG_KEY])
+    expect(withActionsRun).toMatchObject({ capabilityPack: "actions", tool: "actions.run" })
   })
 
   test("loads bridge env including active surfaces and feature flags", () => {
@@ -109,8 +120,8 @@ describe("agent tools MCP server helpers", () => {
 
   test("describes progressive disclosure and capability pack resources", () => {
     expect(AGENT_TOOL_CAPABILITY_PACKS_RESOURCE).toBe("https://0000.chat/mcp/resources/capabilities/packs")
-    expect(buildAgentToolGuideText()).toContain("ZERO_CHAT_ACTIVE_TOOL_SURFACES")
-    expect(buildAgentToolGuideText()).toContain("context.get")
+    expect(buildAgentToolGuideText()).toContain("hard-switched to a small broker")
+    expect(buildAgentToolGuideText()).toContain("tools.search")
     expect(buildAgentToolGuideText()).toContain("threads.current")
     expect(buildAgentToolGuideText()).toContain("capability packs")
     expect(buildAgentToolGuideText()).not.toContain("github.createPullRequest")
@@ -126,7 +137,7 @@ describe("agent tools MCP server helpers", () => {
       deviceId: "device_123",
       enabledFeatureFlags: ["artifacts"],
       threadId: "thread_abc",
-    })).toContain("activeToolSurfaces: thread,app")
+    })).toContain("activeToolSurfaces: thread,app (legacy hint only")
     expect(buildAgentToolSessionContextText({
       agentSessionId: "agent_session_1",
       appUrl: "https://chat.example.test/app",
@@ -215,6 +226,46 @@ describe("agent tools MCP server helpers", () => {
     expect(result.content[0]?.text).toContain('"tool": "apps.create"')
   })
 
+  test("returns executePlan partial failures as readable plan results instead of generic MCP errors", async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    try {
+      globalThis.fetch = Object.assign(async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tool?: string }
+        calls.push(String(body.tool))
+        if (body.tool === "databases.createRow") {
+          return new Response(JSON.stringify({ error: "Row write failed", ok: false }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { id: "ok" } }), { status: 200 })
+      }, { preconnect: originalFetch.preconnect }) as typeof fetch
+
+      const planResult = await executeCatalogPlan(
+        { agentSessionId: "agent_session_1", appUrl: "https://chat.example.test", bridgeToken: "secret-token", deviceId: "device_1" },
+        {
+          mode: "parallel",
+          steps: [
+            { id: "read", input: { threadId: "thread_1" }, tool: "threads.read" },
+            { id: "write", input: { attributes: { title: "Task" }, tableId: "dev-tasks" }, tool: "databases.createRow" },
+          ],
+        },
+      ) as { error?: string; failedSteps?: Array<{ error?: string; id: string; reasonCode?: string; tool: string }>; ok: boolean; result: { steps: unknown[] } }
+
+      expect(calls).toEqual(["threads.read", "databases.createRow"])
+      expect(planResult.ok).toBe(false)
+      expect(planResult.error).toContain("write (databases.createRow): Row write failed")
+      expect(planResult.failedSteps).toEqual([{ error: "Row write failed", id: "write", reasonCode: "APP_ERROR", tool: "databases.createRow" }])
+      expect(planResult.result).toMatchObject({ mode: "sequential", requestedMode: "parallel" })
+      expect(planResult.result.steps).toHaveLength(2)
+
+      const mcpResult = toMcpToolResult(planResult, { markOkFalseAsError: false })
+      expect(mcpResult.isError).toBeUndefined()
+      expect(mcpResult.content[0]?.text).toContain('"failedSteps"')
+      expect(mcpResult.content[0]?.text).toContain('"result"')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test("registers visible tools and capability resources", async () => {
     const registeredToolNames: string[] = []
     const registeredResourceNames: string[] = []
@@ -252,20 +303,20 @@ describe("agent tools MCP server helpers", () => {
 
     expect(registeredResourceNames).toContain("0000 Chat capability packs")
     expect(registeredResourceNames).toContain("0000 Chat core capability pack")
-    expect(registeredToolNames).toContain("context.get")
-    expect(registeredToolNames).toContain("threads.list")
+    expect(registeredToolNames).toEqual([
+      "tools.search",
+      "tools.describe",
+      "tools.call",
+      "tools.executePlan",
+      "tools.executeCode",
+    ])
+    expect(registeredToolNames).not.toContain("context.get")
+    expect(registeredToolNames).not.toContain("threads.list")
     expect(registeredToolNames).not.toContain("databases.get")
     expect(registeredToolNames).not.toContain("github.createPullRequest")
     expect(registeredToolNames.some((name) => name.startsWith("scripts."))).toBe(false)
 
-    try {
-      const result = await contextGetHandler?.({})
-      expect(result).toEqual({
-        content: [{ text: '{\n  "error": "socket hang up",\n  "ok": false,\n  "reasonCode": "FETCH_ERROR",\n  "retryable": true,\n  "tool": "context.get"\n}', type: "text" }],
-        isError: true,
-      })
-    } finally {
-      globalThis.fetch = originalFetch
-    }
+    expect(contextGetHandler).toBeUndefined()
+    globalThis.fetch = originalFetch
   })
 })
