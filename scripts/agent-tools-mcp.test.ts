@@ -19,8 +19,46 @@ import {
   searchAgentToolCatalog,
   toMcpToolResult,
 } from "./agent-tools-mcp"
+import {
+  buildAgentToolManifestSnapshotSource,
+  renderAgentToolManifestSnapshotModule,
+  verifyAgentToolManifestSnapshotModule,
+} from "./generate-agent-tool-manifest-snapshot"
 
 describe("agent tools MCP server helpers", () => {
+  test("generates and checks the bridge manifest snapshot from the app portable snapshot", async () => {
+    const portableSnapshot = {
+      capabilityPackOrder: ["core"],
+      capabilityPacks: { core: { contexts: [], defaultVisibility: "core", name: "core", title: "Core", tools: [] } },
+      generatedBy: "bun scripts/export-agent-tool-mcp-manifest.ts --write",
+      note: "fixture",
+      schemaVersion: 1,
+      source: "apps/convex/convex/agentToolManifest.ts",
+      toolNames: ["context.get"],
+      tools: {
+        "context.get": {
+          annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false, readOnlyHint: true },
+          approvalBehavior: "read_only",
+          capabilityPack: "core",
+          description: "Read context.",
+          effect: "read",
+          executionMode: "read",
+          inputSchema: {},
+          risk: "read",
+          visibility: "core",
+        },
+      },
+    }
+
+    const source = await buildAgentToolManifestSnapshotSource({ portableSnapshot })
+    expect(source).toContain("Portable bridge MCP snapshot generated from 0000 Chat")
+    expect(source).toContain("AGENT_TOOL_MANIFEST_SNAPSHOT")
+    expect(source).toContain('"context.get"')
+    expect(renderAgentToolManifestSnapshotModule(portableSnapshot)).toBe(source)
+    expect(verifyAgentToolManifestSnapshotModule({ actual: source, portableSnapshot }).ok).toBe(true)
+    expect(verifyAgentToolManifestSnapshotModule({ actual: source.replace("Read context", "Drifted context"), portableSnapshot }).ok).toBe(false)
+  })
+
   test("uses the generated app-manifest tool surface", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("capabilities.describe")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("context.get")
