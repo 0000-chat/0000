@@ -34,6 +34,22 @@ Common scripts:
 - `bun test`: run bridge tests.
 - `bun run typecheck`: run TypeScript checking.
 
+MCP tool-surface updates:
+
+- The bridge vendors the app's portable MCP manifest snapshot in
+  `scripts/agent-tool-manifest-snapshot.ts`.
+- After changing `/home/ubuntu/0000-chat/apps/convex/convex/agentToolManifest.ts`,
+  first update/check the app snapshot in `/home/ubuntu/0000-chat`, then refresh the
+  bridge snapshot with:
+
+```bash
+bun scripts/generate-agent-tool-manifest-snapshot.ts /home/ubuntu/0000-chat --write
+bun scripts/generate-agent-tool-manifest-snapshot.ts /home/ubuntu/0000-chat --check
+```
+
+- `--check` fails when the vendored bridge snapshot drifts from the app's
+  `scripts/agent-tool-mcp-manifest.snapshot.json`.
+
 ## Change Workflow
 
 For coding-agent work, create a normal feature branch from `main`:

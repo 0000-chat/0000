@@ -1,876 +1,402 @@
-// Generated from /home/ubuntu/0000-chat/apps/convex/convex/agentToolManifest.ts.
-// Regenerate with: bun scripts/generate-agent-tool-manifest-snapshot.ts /home/ubuntu/0000-chat
+// Portable bridge MCP snapshot generated from 0000 Chat scripts/agent-tool-mcp-manifest.snapshot.json.
+// Regenerate with: bun scripts/generate-agent-tool-manifest-snapshot.ts /home/ubuntu/0000-chat --write
+// Do not edit by hand; run --check before bridge releases.
 
 export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
+  "AGENT_TOOL_CAPABILITY_PACK_ORDER": [
+    "core",
+    "threads",
+    "runtime",
+    "databases",
+    "apps",
+    "automations",
+    "actions",
+    "artifacts",
+    "admin",
+    "spaces"
+  ],
+  "AGENT_TOOL_CAPABILITY_PACKS": {
+    "actions": {
+      "approvalBehavior": "Draft writes and action runs may require approval; code inputs are sensitive.",
+      "contexts": [
+        "action",
+        "settings"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Reusable generated Actions drafts, reads/searches, updates, and gated runtime execution.",
+      "effectTypes": [
+        "read",
+        "schema_write",
+        "row_write"
+      ],
+      "name": "actions",
+      "title": "Actions",
+      "toolNames": [
+        "secrets.listAvailable",
+        "actions.createDraft",
+        "actions.updateDraft",
+        "actions.archive",
+        "actions.search",
+        "actions.read",
+        "tools.executeCode",
+        "actions.run"
+      ],
+      "whenNotToUse": "Do not use generic artifacts for runnable code when a first-class Action is intended.",
+      "whenToUse": "Use for reusable generated code/actions, action metadata, and gated action execution."
+    },
+    "admin": {
+      "approvalBehavior": "Admin/security writes are approval-gated; secret writes redact values and default approval changes are an explicit trust boundary.",
+      "contexts": [
+        "settings"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Settings, secrets, mailbox-capable agents, trust-boundary approval defaults, and security-adjacent operations.",
+      "effectTypes": [
+        "admin_write",
+        "read",
+        "secret_write"
+      ],
+      "name": "admin",
+      "title": "Admin and security",
+      "toolNames": [
+        "settings.setDefaultApprovalLevel",
+        "agents.list",
+        "secrets.put"
+      ],
+      "whenNotToUse": "Do not expose by default and do not change trust/security settings unless the user explicitly asks.",
+      "whenToUse": "Use for explicit settings, secrets, agent directory, or approval-mode administration."
+    },
+    "apps": {
+      "approvalBehavior": "App/revision/generation writes may require approval; validation/list/read are direct.",
+      "contexts": [
+        "app",
+        "space"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Prompt-backed 0000 OpenUI apps, revisions, validated generations, and app archives.",
+      "effectTypes": [
+        "read",
+        "schema_write"
+      ],
+      "name": "apps",
+      "title": "OpenUI apps",
+      "toolNames": [
+        "apps.list",
+        "apps.get",
+        "apps.create",
+        "apps.createRevision",
+        "apps.generateFromRevision",
+        "apps.listGenerations",
+        "apps.update",
+        "apps.archive",
+        "apps.validateOpenUi"
+      ],
+      "whenNotToUse": "Do not create standalone HTML/local files; do not use apps.update for prompt-backed creation or revision work.",
+      "whenToUse": "Use when the user asks to create, improve, refresh, inspect, or archive a 0000 app/dashboard."
+    },
+    "artifacts": {
+      "approvalBehavior": "Artifact create/update/link/upload completion writes may require approval; reads are direct.",
+      "contexts": [
+        "thread",
+        "space"
+      ],
+      "defaultVisibility": "deferred",
+      "description": "Durable documents/files/reports, R2 upload versions, text edits, reads, and links.",
+      "effectTypes": [
+        "schema_write",
+        "read"
+      ],
+      "name": "artifacts",
+      "title": "Artifacts",
+      "toolNames": [
+        "artifacts.create",
+        "artifacts.createUploadIntent",
+        "artifacts.completeUpload",
+        "artifacts.search",
+        "artifacts.read",
+        "artifacts.readContent",
+        "artifacts.getContentUrl",
+        "artifacts.update",
+        "artifacts.patchText",
+        "artifacts.link"
+      ],
+      "whenNotToUse": "Do not confuse low-level upload/version tools with normal app-building; use apps.* for 0000 apps and actions.* for runnable Actions.",
+      "whenToUse": "Use when durable markdown, JSON, reports, exports, or generated files should live in 0000 Chat instead of local files."
+    },
+    "automations": {
+      "approvalBehavior": "Automation writes/runs may require approval, especially outside full-permissions threads.",
+      "contexts": [
+        "automation",
+        "space"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Scheduled, loop, and trigger-like agent automation management and run inspection.",
+      "effectTypes": [
+        "read",
+        "schema_write"
+      ],
+      "name": "automations",
+      "title": "Automations",
+      "toolNames": [
+        "automations.list",
+        "automations.get",
+        "automations.create",
+        "automations.update",
+        "automations.disable",
+        "automations.runNow"
+      ],
+      "whenNotToUse": "Do not create recurring/loop automations without explicit cadence, target space, and approval expectations.",
+      "whenToUse": "Use when the user asks to schedule, remind, run later, repeat work, create a loop, or inspect automation history."
+    },
+    "core": {
+      "approvalBehavior": "Read-only except userPrompts.requestChoice, which writes an in-thread decision request.",
+      "contexts": [
+        "thread"
+      ],
+      "defaultVisibility": "default",
+      "description": "Small always-visible orientation and safe current-thread continuity surface.",
+      "effectTypes": [
+        "read",
+        "interaction_write"
+      ],
+      "name": "core",
+      "title": "Core context and continuity",
+      "toolNames": [
+        "capabilities.advise",
+        "context.get",
+        "userPrompts.requestChoice",
+        "objects.get",
+        "objects.search",
+        "objects.listLinked",
+        "threads.current",
+        "threads.read"
+      ],
+      "whenNotToUse": "Do not add broad CRUD tools here; load contextual packs for app, database, automation, runtime, artifact, or admin work.",
+      "whenToUse": "Use at the start of an in-app run, for elliptical follow-ups, typed references, and structured user choices."
+    },
+    "databases": {
+      "approvalBehavior": "Table/field/view writes and row writes may require approval; reads are direct.",
+      "contexts": [
+        "database",
+        "space"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Dynamic database schema, views, row reads/searches, and row writes.",
+      "effectTypes": [
+        "read",
+        "schema_write",
+        "row_write"
+      ],
+      "name": "databases",
+      "title": "Dynamic databases",
+      "toolNames": [
+        "databases.list",
+        "databases.get",
+        "databases.create",
+        "databases.createField",
+        "databases.listRows",
+        "databases.getRow",
+        "databases.searchRows",
+        "databases.createRow",
+        "databases.updateRow",
+        "databases.deleteRow",
+        "databases.listRelationshipDefinitions",
+        "databases.listRowRelationships",
+        "databases.createRelationshipDefinition",
+        "databases.createRelationship",
+        "databases.deleteRelationship",
+        "databaseViews.list",
+        "databaseViews.get",
+        "databaseViews.getDefault",
+        "databaseViews.create",
+        "databaseViews.updateConfig",
+        "databaseViews.rename",
+        "databaseViews.duplicate",
+        "databaseViews.setDefault",
+        "databaseViews.delete"
+      ],
+      "whenNotToUse": "Do not create duplicate tables before inspecting existing tables; do not store one-off ephemeral facts as rows.",
+      "whenToUse": "Use for structured reusable records, app inputs, searchable datasets, or database-backed workflows."
+    },
+    "runtime": {
+      "approvalBehavior": "Reads are direct; bridge/device controls and notification registrations may require approval.",
+      "contexts": [
+        "settings"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Bridge/device runtime, pairing, lifecycle control, and notification runtime state.",
+      "effectTypes": [
+        "read",
+        "admin_write"
+      ],
+      "name": "runtime",
+      "title": "Runtime and bridge operations",
+      "toolNames": [
+        "bridgeDevices.list",
+        "bridgeDevices.listPairingCodes",
+        "bridgeDevices.createPairingCode",
+        "bridgeDevices.revokePairingCode",
+        "bridgeDevices.revoke",
+        "bridgeDevices.delete",
+        "bridgeDevices.renameLocation",
+        "bridgeDevices.refreshHermesProfiles",
+        "bridgeDevices.requestUpdateWhenIdle",
+        "bridgeDevices.requestRestartWhenIdle",
+        "bridgeDevices.cancelPendingControl",
+        "notifications.getBrowserConfig",
+        "notifications.getBrowserSubscriptionStatus",
+        "notifications.getNativeDeviceStatus",
+        "notifications.subscribeBrowser",
+        "notifications.registerNativeDevice",
+        "notifications.unregisterNativeDevice",
+        "notifications.unsubscribeBrowser"
+      ],
+      "whenNotToUse": "Do not expose by default for normal app-building; do not restart/update devices without explicit user intent.",
+      "whenToUse": "Use for local bridge health, pairing, Hermes profile refresh, device control, or notification runtime setup."
+    },
+    "spaces": {
+      "approvalBehavior": "Space writes may require approval; reads are direct.",
+      "contexts": [
+        "space"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Space listing, inspection, creation, settings updates, archival, and restoration.",
+      "effectTypes": [
+        "read",
+        "schema_write"
+      ],
+      "name": "spaces",
+      "title": "Spaces",
+      "toolNames": [
+        "spaces.list",
+        "spaces.get",
+        "spaces.create",
+        "spaces.update",
+        "spaces.archive",
+        "spaces.unarchive"
+      ],
+      "whenNotToUse": "Do not archive or mutate spaces unless the user clearly asks for that app-level change.",
+      "whenToUse": "Use when the user asks about this space, another space, space settings, or space lifecycle."
+    },
+    "threads": {
+      "approvalBehavior": "Reads are direct; thread creation/forking/tag writes may require approval.",
+      "contexts": [
+        "thread"
+      ],
+      "defaultVisibility": "contextual",
+      "description": "Thread discovery, durable activity, cached-message search, forking, tags, and agent handoffs.",
+      "effectTypes": [
+        "read",
+        "interaction_write",
+        "schema_write"
+      ],
+      "name": "threads",
+      "title": "Threads and conversation work",
+      "toolNames": [
+        "capabilities.describe",
+        "threads.readActivity",
+        "threads.contextList",
+        "threads.contextDescribe",
+        "threads.contextExpand",
+        "threads.list",
+        "threads.update",
+        "threads.create",
+        "threads.continue",
+        "threads.fork",
+        "messages.search",
+        "tags.list",
+        "tags.create",
+        "tags.update",
+        "tags.archive",
+        "tags.listForTarget",
+        "tags.assign",
+        "tags.unassign",
+        "agents.sendMailboxMessage"
+      ],
+      "whenNotToUse": "Do not use messages.search for current-thread continuity; use context.get, threads.current, and threads.read first.",
+      "whenToUse": "Use when the user asks to inspect, create, fork, search, tag, or coordinate work across threads."
+    }
+  },
   "AGENT_TOOL_MANIFEST": {
-    "capabilities.describe": {
+    "actions.archive": {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "Describe 0000 Chat MCP tool capabilities, core tools, surface-scoped tools, and workflow guides. Use this before choosing from deferred or surface-scoped tool packs.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "guideId": {
-          "kind": "string",
-          "optional": true
-        },
-        "query": {
-          "kind": "string",
-          "optional": true
-        },
-        "surface": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "thread",
-            "space",
-            "database",
-            "app",
-            "automation",
-            "settings",
-            "action"
-          ]
-        }
-      },
-      "risk": "read",
-      "visibility": "deferred"
-    },
-    "capabilities.advise": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "Consult 0000 Architect for a machine-readable 0000-native plan for a desired outcome. Use this for planning/advice before composing spaces, threads, tags, databases, OpenUI apps, automations, actions, artifacts, typed references, or user prompts; it does not execute writes.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "availablePacks": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "availableTools": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "constraints": {
-          "kind": "string",
-          "optional": true
-        },
-        "currentContext": {
-          "kind": "string",
-          "optional": true
-        },
-        "desiredOutcome": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "visibility": "core"
-    },
-    "context.get": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "Read the current 0000 Chat operating context as typed object references for the active thread, space, and agent session. Prefer this before resolving objects from ambiguous user phrasing.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {},
-      "risk": "read",
-      "visibility": "core"
-    },
-    "userPrompts.requestChoice": {
-      "annotations": {
-        "destructiveHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
       "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
-      "effect": "interaction_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "choices": {
-          "items": {
-            "fields": {
-              "description": {
-                "kind": "string",
-                "optional": true
-              },
-              "id": {
-                "kind": "string"
-              },
-              "label": {
-                "kind": "string"
-              }
-            },
-            "kind": "object"
-          },
-          "kind": "array"
-        },
-        "prompt": {
-          "kind": "string"
-        }
-      },
-      "risk": "user_interaction",
-      "visibility": "core"
-    },
-    "objects.get": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "Read one first-class 0000 Chat object through a typed reference. Use after context.get, objects.search, or another tool returns an object ref.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "include": {
-          "items": {
-            "kind": "enum",
-            "optional": true,
-            "values": [
-              "metadata",
-              "content",
-              "links"
-            ]
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "object": {
-          "fields": {
-            "id": {
-              "kind": "string"
-            },
-            "type": {
-              "kind": "enum",
-              "values": [
-                "thread",
-                "message",
-                "space",
-                "app",
-                "automation",
-                "database",
-                "record",
-                "artifact",
-                "action"
-              ]
-            }
-          },
-          "kind": "object"
-        }
-      },
-      "risk": "read",
-      "visibility": "core"
-    },
-    "objects.search": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "Search first-class 0000 Chat objects by type and query, returning typed object references agents can pass to objects.get or objects.listLinked.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "query": {
-          "kind": "string"
-        },
-        "types": {
-          "items": {
-            "kind": "enum",
-            "values": [
-              "thread",
-              "message",
-              "space",
-              "app",
-              "automation",
-              "database",
-              "record",
-              "artifact",
-              "action"
-            ]
-          },
-          "kind": "array",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "visibility": "core"
-    },
-    "objects.listLinked": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "List first-class 0000 Chat objects linked to a typed object reference. Use this to discover related artifacts and context without guessing ids.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "object": {
-          "fields": {
-            "id": {
-              "kind": "string"
-            },
-            "type": {
-              "kind": "enum",
-              "values": [
-                "thread",
-                "message",
-                "space",
-                "app",
-                "automation",
-                "database",
-                "record",
-                "artifact",
-                "action"
-              ]
-            }
-          },
-          "kind": "object"
-        },
-        "relationship": {
-          "kind": "enum",
-          "values": [
-            "source",
-            "reference",
-            "result",
-            "embedded",
-            "mentioned"
-          ],
-          "optional": true
-        },
-        "types": {
-          "items": {
-            "kind": "enum",
-            "values": [
-              "thread",
-              "message",
-              "space",
-              "app",
-              "automation",
-              "database",
-              "record",
-              "artifact",
-              "action"
-            ]
-          },
-          "kind": "array",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "visibility": "core"
-    },
-    "threads.current": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "Read the exact current 0000 Chat thread/session context for this agent run. Prefer this for continue, resume, or remember prompts.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {},
-      "risk": "read",
-      "visibility": "core"
-    },
-    "threads.readActivity": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "Read exact bounded durable 0000 Chat thread activity events. Defaults to the current thread and returns message_events oldest-to-newest for the selected sequence window. Use when recent cached messages from threads.read are not enough; do not use for broad message search.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "threadId": {
-          "kind": "string",
-          "optional": true
-        },
-        "afterSequence": {
-          "kind": "number",
-          "optional": true
-        },
-        "beforeSequence": {
-          "kind": "number",
-          "optional": true
-        },
-        "limit": {
-          "kind": "number",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.contextList": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "List ready lossless thread context memory nodes for a 0000 Chat thread, plus active/recent summarization work status. Defaults to the current thread. Use query to search summaries, then threads.contextDescribe or threads.contextExpand to inspect exact source links.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "query": {
-          "kind": "string",
-          "optional": true
-        },
-        "threadId": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.contextDescribe": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "Describe one lossless thread context memory node, including summary metadata, parent/child node ids, and exact source message ids without expanding raw message content.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "nodeId": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.contextExpand": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "Expand one lossless thread context memory node into child context nodes and, when includeMessages=true, bounded exact source messages linked to that node.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "includeMessages": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "nodeId": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.list": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "List recent 0000 Chat threads visible to this bridge session. Optionally filter by tag slugs/names, unreadOnly, and updatedSince; tagMatch defaults to all. Example: unread threads from the last 24 hours tagged project.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "tagMatch": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "all",
-            "any"
-          ]
-        },
-        "tags": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "unreadOnly": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "updatedSince": {
-          "kind": "number",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.read": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "core",
-      "description": "Read one 0000 Chat thread and its recent cached messages. Use this for current-thread continuity when context.get or threads.current identifies the thread; do not use messages.search for current-thread recovery.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "threadId": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "visibility": "core"
-    },
-    "threads.update": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Update lifecycle metadata for a 0000 Chat thread. Defaults to the current thread. Use for bounded thread title, summary, destination space, approval level, pin, or archive/unarchive changes; use tags.* for tag assignment and threads.continue for agent-authored work. Contradictory pinned+archived requests are rejected.",
-      "effect": "interaction_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "approvalLevel": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "ask",
-            "full_permissions"
-          ]
-        },
-        "archived": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "pinned": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "spaceIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "threadId": {
-          "kind": "string",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.create": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Create a new 0000 Chat thread in a space. By default this creates a thread and agent session without messages; pass agentIdOrSlug to assign the thread to another usable agent, or pass agentIdOrSlug: \"self\" to assign it to the calling agent. Pass initialUserMessage only when the user explicitly wants that text carried into the new thread as the first user message.",
-      "effect": "interaction_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "agentIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        },
-        "approvalLevel": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "ask",
-            "full_permissions"
-          ]
-        },
-        "clientThreadId": {
-          "kind": "string",
-          "optional": true
-        },
-        "initialUserMessage": {
-          "kind": "string",
-          "optional": true
-        },
-        "requireAgentSession": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "spaceIdOrSlug": {
-          "kind": "string"
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "user_interaction",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.continue": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Continue an existing authorized 0000 Chat thread by starting an agent-authored turn. Defaults to the current thread; pass threadId to continue another non-archived thread in the caller organization. Pass agentIdOrSlug: \"self\" to continue as the calling agent, or another usable agent id/slug to hand off. This records agent provenance and must not be used to simulate a user-authored message.",
-      "effect": "interaction_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "agentIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        },
-        "approvalLevel": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "ask",
-            "full_permissions"
-          ]
-        },
-        "instruction": {
-          "kind": "string"
-        },
-        "requireAgentSession": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "threadId": {
-          "kind": "string",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "user_interaction",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "threads.fork": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Fork a 0000 Chat thread into a new independent thread with safe visible context and lineage. Defaults to the current thread, source space, and source thread agent when sourceThreadId, spaceIdOrSlug, or agentIdOrSlug are omitted; pass initialUserMessage only when the user explicitly wants that text to start the fork.",
-      "effect": "interaction_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "agentIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        },
-        "approvalLevel": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "ask",
-            "full_permissions"
-          ]
-        },
-        "forkReason": {
-          "kind": "string",
-          "optional": true
-        },
-        "initialUserMessage": {
-          "kind": "string",
-          "optional": true
-        },
-        "requireAgentSession": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "sourceThreadId": {
-          "kind": "string",
-          "optional": true
-        },
-        "spaceIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        },
-        "upToMessageId": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "user_interaction",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "messages.search": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "Search cached 0000 Chat messages across accessible threads in the current organization. Use for explicit cross-thread or historical search. Do not use for current-thread continuity after revive/resume/compaction; use context.get, threads.current, or threads.read instead.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "query": {
-          "kind": "string"
-        },
-        "threadId": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "tags.list": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "List organization tags available for organizing threads, artifacts, and databases.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "includeArchived": {
-          "kind": "boolean",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "tags.create": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Create an organization tag for threads, artifacts, and databases.",
+      "capabilityPack": "actions",
+      "description": "Archive a reusable generated action so it no longer appears in the default Actions page/search and cannot be run.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "color": {
+        "actionId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "action",
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "actions.createDraft": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "actions",
+      "description": "Create a reusable generated action draft and first version.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "code": {
           "kind": "string",
-          "optional": true
+          "sensitive": true
         },
         "description": {
-          "kind": "string",
-          "optional": true
+          "kind": "string"
+        },
+        "kind": {
+          "kind": "enum",
+          "values": [
+            "agent_action",
+            "app_action",
+            "automation"
+          ]
+        },
+        "manifest": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          }
         },
         "name": {
           "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "tags.update": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Update an organization tag's name, color, or description.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "color": {
+        },
+        "slug": {
           "kind": "string",
           "optional": true
         },
-        "description": {
+        "spaceId": {
           "kind": "string",
           "optional": true
-        },
-        "name": {
-          "kind": "string",
-          "optional": true
-        },
-        "tagIdOrSlug": {
-          "kind": "string"
         }
       },
       "risk": "mutating_write",
+      "sensitiveInput": true,
       "surfaces": [
-        "thread"
+        "action",
+        "settings"
       ],
       "visibility": "surface-scoped"
     },
-    "tags.archive": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Archive an organization tag so it is no longer suggested for new assignments.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "tagIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "tags.listForTarget": {
+    "actions.read": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -878,30 +404,23 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": true
       },
       "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
-      "description": "List tags assigned to a thread, artifact, or database table.",
+      "capabilityPack": "actions",
+      "description": "Read one reusable generated action and its current version.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
-        "targetId": {
+        "actionId": {
           "kind": "string"
-        },
-        "targetType": {
-          "kind": "enum",
-          "values": [
-            "thread",
-            "artifact",
-            "database_table"
-          ]
         }
       },
       "risk": "read",
       "surfaces": [
-        "thread"
+        "action",
+        "settings"
       ],
       "visibility": "surface-scoped"
     },
-    "tags.assign": {
+    "actions.run": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -909,33 +428,55 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": false
       },
       "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Assign an organization tag to a thread, artifact, or database table.",
-      "effect": "schema_write",
+      "capabilityPack": "actions",
+      "description": "Run one reusable generated action with JSON input through the 0000 Actions runtime.",
+      "effect": "row_write",
       "executionMode": "mutation",
+      "featureFlagKey": "actions-runtime",
       "inputSchema": {
-        "tagIdOrSlug": {
+        "actionId": {
           "kind": "string"
         },
-        "targetId": {
-          "kind": "string"
-        },
-        "targetType": {
-          "kind": "enum",
-          "values": [
-            "thread",
-            "artifact",
-            "database_table"
-          ]
+        "input": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          }
         }
       },
       "risk": "mutating_write",
       "surfaces": [
-        "thread"
+        "action",
+        "settings"
       ],
       "visibility": "surface-scoped"
     },
-    "tags.unassign": {
+    "actions.search": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "actions",
+      "description": "Search reusable generated actions in the current organization.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "query": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "action",
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "actions.updateDraft": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -943,56 +484,47 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": false
       },
       "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "threads",
-      "description": "Remove an organization tag assignment from a thread, artifact, or database table.",
+      "capabilityPack": "actions",
+      "description": "Update a reusable generated action draft by creating a new draft version.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "tagIdOrSlug": {
+        "actionId": {
           "kind": "string"
         },
-        "targetId": {
+        "code": {
+          "kind": "string",
+          "sensitive": true
+        },
+        "description": {
           "kind": "string"
         },
-        "targetType": {
+        "kind": {
           "kind": "enum",
           "values": [
-            "thread",
-            "artifact",
-            "database_table"
+            "agent_action",
+            "app_action",
+            "automation"
           ]
+        },
+        "manifest": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "name": {
+          "kind": "string"
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
         }
       },
       "risk": "mutating_write",
+      "sensitiveInput": true,
       "surfaces": [
-        "thread"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "settings.setDefaultApprovalLevel": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "explicit_trust_boundary",
-      "capabilityPack": "admin",
-      "description": "Set the user's default approval mode for future 0000 Chat threads. Use approvalLevel='full_permissions' only when the user explicitly asks to enable trusted local automation. This tool always requires an in-thread approval unless the current thread is already full-permissions.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "approvalLevel": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "ask",
-            "full_permissions"
-          ]
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
+        "action",
         "settings"
       ],
       "visibility": "surface-scoped"
@@ -1071,62 +603,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "spaces.list": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "spaces",
-      "description": "List 0000 Chat spaces in the current organization.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "includeArchived": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "limit": {
-          "kind": "number",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "spaces.get": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "spaces",
-      "description": "Read one 0000 Chat space by id or slug.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "includeArchived": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "spaceIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "spaces.create": {
+    "apps.archive": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -1134,202 +611,20 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": false
       },
       "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "spaces",
-      "description": "Create a 0000 Chat space, including title, description, icon/color, favorite status, auto-archive timing, and the space systemPrompt.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "autoArchiveInactiveThreadsAfterHours": {
-          "kind": "number",
-          "nullable": true,
-          "optional": true
-        },
-        "color": {
-          "kind": "string",
-          "optional": true
-        },
-        "description": {
-          "kind": "string",
-          "optional": true
-        },
-        "favorite": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "icon": {
-          "kind": "string",
-          "optional": true
-        },
-        "systemPrompt": {
-          "kind": "string",
-          "optional": true
-        },
-        "title": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "spaces.update": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "spaces",
-      "description": "Update a 0000 Chat space, including title, URL slug, description, icon/color, favorite status, auto-archive timing, and the space systemPrompt.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "autoArchiveInactiveThreadsAfterHours": {
-          "kind": "number",
-          "nullable": true,
-          "optional": true
-        },
-        "color": {
-          "kind": "string",
-          "optional": true
-        },
-        "description": {
-          "kind": "string",
-          "optional": true
-        },
-        "favorite": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "icon": {
-          "kind": "string",
-          "optional": true
-        },
-        "spaceIdOrSlug": {
-          "kind": "string"
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "systemPrompt": {
-          "kind": "string",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "spaces.archive": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "spaces",
-      "description": "Archive a 0000 Chat space.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "spaceIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "spaces.unarchive": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "spaces",
-      "description": "Restore an archived 0000 Chat space.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "spaceIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "apps.list": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
       "capabilityPack": "apps",
-      "description": "List saved 0000 apps for a 0000 Chat space.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {
-        "includeArchived": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "spaceIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "app",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "apps.get": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "apps",
-      "description": "Read one saved 0000 app by id or slug.",
-      "effect": "read",
-      "executionMode": "read",
+      "description": "Archive a saved 0000 app.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
       "inputSchema": {
         "appIdOrSlug": {
           "kind": "string"
         },
-        "includeArchived": {
-          "kind": "boolean",
-          "optional": true
-        },
         "spaceIdOrSlug": {
           "kind": "string",
           "optional": true
         }
       },
-      "risk": "read",
+      "risk": "mutating_write",
       "surfaces": [
         "app",
         "space"
@@ -1457,6 +752,66 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "apps.get": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "Read one saved 0000 app by id or slug.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "appIdOrSlug": {
+          "kind": "string"
+        },
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "List saved 0000 apps for a 0000 Chat space.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
     "apps.listGenerations": {
       "annotations": {
         "destructiveHint": false,
@@ -1525,34 +880,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "apps.archive": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "apps",
-      "description": "Archive a saved 0000 app.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "appIdOrSlug": {
-          "kind": "string"
-        },
-        "spaceIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "app",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
     "apps.validateOpenUi": {
       "annotations": {
         "destructiveHint": false,
@@ -1577,35 +904,224 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "automations.list": {
+    "artifacts.completeUpload": {
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": false
       },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "automations",
-      "description": "List space-scoped scheduled agent automations.",
-      "effect": "read",
-      "executionMode": "read",
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "artifacts",
+      "description": "Use after artifacts.createUploadIntent and a successful R2 upload to mark the pending artifact version as available.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "artifacts",
       "inputSchema": {
-        "includeDisabled": {
-          "kind": "boolean",
-          "optional": true
+        "artifactId": {
+          "kind": "string"
         },
-        "spaceIdOrSlug": {
+        "byteLength": {
+          "kind": "number"
+        },
+        "contentHash": {
+          "kind": "string"
+        },
+        "versionId": {
           "kind": "string"
         }
       },
-      "risk": "read",
+      "risk": "mutating_write",
       "surfaces": [
-        "automation",
+        "thread",
         "space"
       ],
       "visibility": "surface-scoped"
     },
-    "automations.get": {
+    "artifacts.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "artifacts",
+      "description": "Create a small durable org-visible artifact inline. Use this for markdown notes, plans, JSON, and other durable content that should live in 0000 Chat instead of local files. Actions/actions remain first-class; use action tools for runnable code.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "content": {
+          "kind": "string"
+        },
+        "contentHash": {
+          "kind": "string",
+          "optional": true
+        },
+        "format": {
+          "kind": "enum",
+          "values": [
+            "text/markdown",
+            "text/typescript",
+            "application/json",
+            "binary"
+          ]
+        },
+        "kind": {
+          "kind": "enum",
+          "values": [
+            "document",
+            "action",
+            "app",
+            "file",
+            "report"
+          ]
+        },
+        "metadata": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "spaceId": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "tags": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "title": {
+          "kind": "string"
+        },
+        "versionMetadata": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "visibility": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "organization",
+            "space",
+            "restricted"
+          ]
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.createUploadIntent": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "artifacts",
+      "description": "Create an R2 upload intent for a large durable artifact. Upload the content to the returned uploadUrl, then call artifacts.completeUpload with the byte length and content hash.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "extension": {
+          "kind": "string",
+          "optional": true
+        },
+        "format": {
+          "kind": "enum",
+          "values": [
+            "text/markdown",
+            "text/typescript",
+            "application/json",
+            "binary"
+          ]
+        },
+        "kind": {
+          "kind": "enum",
+          "values": [
+            "document",
+            "action",
+            "app",
+            "file",
+            "report"
+          ]
+        },
+        "metadata": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "spaceId": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "tags": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "title": {
+          "kind": "string"
+        },
+        "versionMetadata": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "visibility": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "organization",
+            "space",
+            "restricted"
+          ]
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.getContentUrl": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -1613,18 +1129,356 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": true
       },
       "approvalBehavior": "read_only",
-      "capabilityPack": "automations",
-      "description": "Read one scheduled agent automation and recent run history.",
+      "capabilityPack": "artifacts",
+      "description": "Get a short-lived read URL for an R2-backed artifact version. Use artifacts.read first when you need metadata or the current version id.",
       "effect": "read",
       "executionMode": "read",
+      "featureFlagKey": "artifacts",
       "inputSchema": {
-        "automationId": {
-          "kind": "string"
+        "artifactId": {
+          "kind": "string",
+          "optional": true
+        },
+        "expiresIn": {
+          "kind": "number",
+          "optional": true
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "versionId": {
+          "kind": "string",
+          "optional": true
         }
       },
       "risk": "read",
       "surfaces": [
-        "automation",
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.link": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "artifacts",
+      "description": "Use when an artifact should be attached to a first-class 0000 object such as a thread, message, space, database row, action, or app.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "artifactId": {
+          "kind": "string"
+        },
+        "fieldKey": {
+          "kind": "string",
+          "optional": true
+        },
+        "relationship": {
+          "kind": "enum",
+          "values": [
+            "source",
+            "reference",
+            "result",
+            "embedded",
+            "mentioned"
+          ]
+        },
+        "rowId": {
+          "kind": "string",
+          "optional": true
+        },
+        "tableId": {
+          "kind": "string",
+          "optional": true
+        },
+        "targetId": {
+          "kind": "string"
+        },
+        "targetType": {
+          "kind": "enum",
+          "values": [
+            "thread",
+            "message",
+            "space",
+            "database_row",
+            "database_table",
+            "action",
+            "app"
+          ]
+        },
+        "targetVersionId": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.patchText": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "artifacts",
+      "description": "Patch an inline markdown/text artifact by replacing exact oldText with newText in a new version. Read with artifacts.readContent first and pass expectedVersionId; if oldText appears more than once, provide more context or set replaceAll true.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "artifactId": {
+          "kind": "string",
+          "optional": true
+        },
+        "contentHash": {
+          "kind": "string",
+          "optional": true
+        },
+        "expectedContentHash": {
+          "kind": "string",
+          "optional": true
+        },
+        "expectedVersionId": {
+          "kind": "string"
+        },
+        "newText": {
+          "kind": "string"
+        },
+        "oldText": {
+          "kind": "string"
+        },
+        "replaceAll": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "tags": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        },
+        "versionMetadata": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.read": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "artifacts",
+      "description": "Read artifact metadata and current version metadata by id or slug. Use artifacts.readContent for inline markdown/text content and artifacts.getContentUrl for R2-backed bytes.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "artifactId": {
+          "kind": "string",
+          "optional": true
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.readContent": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "artifacts",
+      "description": "Read inline markdown/text artifact content directly by id or slug. Use this before editing artifacts like local markdown files; returns content, versionId, contentHash, format, and artifact metadata. R2-backed or binary content is rejected.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "artifactId": {
+          "kind": "string",
+          "optional": true
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "versionId": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.search": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "artifacts",
+      "description": "Search durable artifacts in the current organization. Use this before creating local files when looking for existing plans, reports, exported files, or generated content.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "kind": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "document",
+            "action",
+            "app",
+            "file",
+            "report"
+          ]
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "query": {
+          "kind": "string",
+          "optional": true
+        },
+        "spaceId": {
+          "kind": "string",
+          "optional": true
+        },
+        "status": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "draft",
+            "active",
+            "archived",
+            "pendingDeletion"
+          ]
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "artifacts.update": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "artifacts",
+      "description": "Replace an inline markdown/text artifact with a new version. Read with artifacts.readContent first, pass the returned expectedVersionId, and optionally expectedContentHash to avoid overwriting concurrent edits. Use this like a whole-file markdown save.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "artifacts",
+      "inputSchema": {
+        "artifactId": {
+          "kind": "string",
+          "optional": true
+        },
+        "content": {
+          "kind": "string"
+        },
+        "contentHash": {
+          "kind": "string",
+          "optional": true
+        },
+        "expectedContentHash": {
+          "kind": "string",
+          "optional": true
+        },
+        "expectedVersionId": {
+          "kind": "string"
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "tags": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        },
+        "versionMetadata": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread",
         "space"
       ],
       "visibility": "surface-scoped"
@@ -1658,15 +1512,24 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "full_permissions"
           ]
         },
+        "automationType": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "scheduled",
+            "loop",
+            "trigger"
+          ]
+        },
         "continuationPrompt": {
           "kind": "string",
           "optional": true
         },
-        "goalPrompt": {
+        "goalEvaluationPrompt": {
           "kind": "string",
           "optional": true
         },
-        "goalEvaluationPrompt": {
+        "goalPrompt": {
           "kind": "string",
           "optional": true
         },
@@ -1691,6 +1554,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         },
         "schedule": {
           "kind": "union",
+          "optional": true,
           "options": [
             {
               "fields": {
@@ -1740,8 +1604,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
               },
               "kind": "object"
             }
-          ],
-          "optional": true
+          ]
         },
         "spaceId": {
           "kind": "string",
@@ -1763,21 +1626,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "reuse-thread"
           ]
         },
-        "automationType": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "scheduled",
-            "loop",
-            "trigger"
-          ]
-        },
         "triggerConfig": {
           "kind": "record",
+          "optional": true,
           "value": {
             "kind": "unknown"
-          },
-          "optional": true
+          }
         },
         "triggerKind": {
           "kind": "enum",
@@ -1791,186 +1645,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "database_mutation"
           ]
         },
-        "triggerRiskAcknowledgements": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
         "triggerMode": {
           "kind": "enum",
           "optional": true,
           "values": [
             "scheduled",
             "loop"
-          ]
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "automation",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "automations.update": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "automations",
-      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For space-based triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any').",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "agentId": {
-          "kind": "string",
-          "optional": true
-        },
-        "agentIdOrSlug": {
-          "kind": "string",
-          "optional": true
-        },
-        "automationId": {
-          "kind": "string"
-        },
-        "continuationPrompt": {
-          "kind": "string",
-          "optional": true
-        },
-        "enabled": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "goalPrompt": {
-          "kind": "string",
-          "optional": true
-        },
-        "goalEvaluationPrompt": {
-          "kind": "string",
-          "optional": true
-        },
-        "loopKind": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "finite",
-            "infinite",
-            "goal"
-          ]
-        },
-        "maxIterations": {
-          "kind": "number",
-          "optional": true
-        },
-        "name": {
-          "kind": "string",
-          "optional": true
-        },
-        "prompt": {
-          "kind": "string",
-          "optional": true
-        },
-        "approvalLevel": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "ask",
-            "full_permissions"
-          ]
-        },
-        "schedule": {
-          "kind": "union",
-          "options": [
-            {
-              "fields": {
-                "runAt": {
-                  "kind": "number"
-                },
-                "type": {
-                  "kind": "literal",
-                  "value": "once"
-                }
-              },
-              "kind": "object"
-            },
-            {
-              "fields": {
-                "intervalMs": {
-                  "kind": "number"
-                },
-                "startAt": {
-                  "kind": "number",
-                  "optional": true
-                },
-                "type": {
-                  "kind": "literal",
-                  "value": "interval"
-                }
-              },
-              "kind": "object"
-            },
-            {
-              "fields": {
-                "cron": {
-                  "kind": "string"
-                },
-                "startAt": {
-                  "kind": "number",
-                  "optional": true
-                },
-                "timezone": {
-                  "kind": "string",
-                  "optional": true
-                },
-                "type": {
-                  "kind": "literal",
-                  "value": "cron"
-                }
-              },
-              "kind": "object"
-            }
-          ],
-          "optional": true
-        },
-        "threadMode": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "new-thread",
-            "reuse-thread"
-          ]
-        },
-        "automationType": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "scheduled",
-            "loop",
-            "trigger"
-          ]
-        },
-        "triggerConfig": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        },
-        "triggerKind": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "thread_created",
-            "assistant_turn_completed",
-            "thread_failed",
-            "automation_completed",
-            "webhook",
-            "database_mutation"
           ]
         },
         "triggerRiskAcknowledgements": {
@@ -1979,14 +1659,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
           },
           "kind": "array",
           "optional": true
-        },
-        "triggerMode": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "scheduled",
-            "loop"
-          ]
         }
       },
       "risk": "mutating_write",
@@ -2020,6 +1692,58 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "automations.get": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "automations",
+      "description": "Read one scheduled agent automation and recent run history.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "automationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "automation",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "automations.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "automations",
+      "description": "List space-scoped scheduled agent automations.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "includeDisabled": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "automation",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
     "automations.runNow": {
       "annotations": {
         "destructiveHint": false,
@@ -2044,32 +1768,263 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "databases.list": {
+    "automations.update": {
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": false
       },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "List user-created dynamic database tables.",
-      "effect": "read",
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "automations",
+      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For space-based triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any').",
+      "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "includeArchived": {
+        "agentId": {
+          "kind": "string",
+          "optional": true
+        },
+        "agentIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "automationId": {
+          "kind": "string"
+        },
+        "automationType": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "scheduled",
+            "loop",
+            "trigger"
+          ]
+        },
+        "continuationPrompt": {
+          "kind": "string",
+          "optional": true
+        },
+        "enabled": {
           "kind": "boolean",
+          "optional": true
+        },
+        "goalEvaluationPrompt": {
+          "kind": "string",
+          "optional": true
+        },
+        "goalPrompt": {
+          "kind": "string",
+          "optional": true
+        },
+        "loopKind": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "finite",
+            "infinite",
+            "goal"
+          ]
+        },
+        "maxIterations": {
+          "kind": "number",
+          "optional": true
+        },
+        "name": {
+          "kind": "string",
+          "optional": true
+        },
+        "prompt": {
+          "kind": "string",
+          "optional": true
+        },
+        "schedule": {
+          "kind": "union",
+          "optional": true,
+          "options": [
+            {
+              "fields": {
+                "runAt": {
+                  "kind": "number"
+                },
+                "type": {
+                  "kind": "literal",
+                  "value": "once"
+                }
+              },
+              "kind": "object"
+            },
+            {
+              "fields": {
+                "intervalMs": {
+                  "kind": "number"
+                },
+                "startAt": {
+                  "kind": "number",
+                  "optional": true
+                },
+                "type": {
+                  "kind": "literal",
+                  "value": "interval"
+                }
+              },
+              "kind": "object"
+            },
+            {
+              "fields": {
+                "cron": {
+                  "kind": "string"
+                },
+                "startAt": {
+                  "kind": "number",
+                  "optional": true
+                },
+                "timezone": {
+                  "kind": "string",
+                  "optional": true
+                },
+                "type": {
+                  "kind": "literal",
+                  "value": "cron"
+                }
+              },
+              "kind": "object"
+            }
+          ]
+        },
+        "threadMode": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "new-thread",
+            "reuse-thread"
+          ]
+        },
+        "triggerConfig": {
+          "kind": "record",
+          "optional": true,
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "triggerKind": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "thread_created",
+            "assistant_turn_completed",
+            "thread_failed",
+            "automation_completed",
+            "webhook",
+            "database_mutation"
+          ]
+        },
+        "triggerMode": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "scheduled",
+            "loop"
+          ]
+        },
+        "triggerRiskAcknowledgements": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
           "optional": true
         }
       },
-      "risk": "read",
+      "risk": "mutating_write",
       "surfaces": [
-        "database",
+        "automation",
         "space"
       ],
       "visibility": "surface-scoped"
     },
-    "databases.get": {
+    "bridgeDevices.cancelPendingControl": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to cancel a pending bridge update, restart, or control action before the device runs it.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.createPairingCode": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to create a short-lived pairing code for connecting a new local bridge device.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "label": {
+          "kind": "string",
+          "optional": true
+        },
+        "ttlMs": {
+          "kind": "number",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.delete": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to permanently remove a revoked bridge device record from settings.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.list": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -2077,21 +2032,272 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": true
       },
       "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "Read one dynamic database table definition.",
+      "capabilityPack": "admin",
+      "description": "Use this to list connected bridge devices, their status, capabilities, active sessions, and queued work.",
       "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {},
+      "risk": "read",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.listPairingCodes": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "admin",
+      "description": "Use this to list active and recently used bridge pairing codes for the current user.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {},
+      "risk": "read",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.refreshHermesProfiles": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to ask a bridge device to refresh Hermes agent profile discovery.",
+      "effect": "admin_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "tableIdOrSlug": {
+        "deviceId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.renameLocation": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to rename the human-readable location label for a bridge device.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceId": {
+          "kind": "string"
+        },
+        "label": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.requestRestartWhenIdle": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to ask a bridge device to restart the next time it is idle.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.requestUpdateWhenIdle": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to ask a bridge device to update itself the next time it is idle.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.revoke": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to revoke a bridge device and terminalize its active bridge sessions and queued work.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "bridgeDevices.revokePairingCode": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to revoke an unused bridge pairing code before it expires.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "pairingCodeId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "capabilities.advise": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "Consult 0000 Architect for a machine-readable 0000-native plan for a desired outcome. Use this for planning/advice before composing spaces, threads, tags, databases, OpenUI apps, automations, actions, artifacts, typed references, or user prompts; it does not execute writes.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "availablePacks": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "availableTools": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "constraints": {
+          "kind": "string",
+          "optional": true
+        },
+        "currentContext": {
+          "kind": "string",
+          "optional": true
+        },
+        "desiredOutcome": {
           "kind": "string"
         }
       },
       "risk": "read",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
+      "visibility": "core"
+    },
+    "capabilities.describe": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "Describe 0000 Chat MCP tool capabilities, core tools, surface-scoped tools, and workflow guides. Use this before choosing from deferred or surface-scoped tool packs.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "guideId": {
+          "kind": "string",
+          "optional": true
+        },
+        "query": {
+          "kind": "string",
+          "optional": true
+        },
+        "surface": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "thread",
+            "space",
+            "database",
+            "app",
+            "automation",
+            "settings",
+            "action"
+          ]
+        }
+      },
+      "risk": "read",
+      "visibility": "deferred"
+    },
+    "context.get": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "Read the current 0000 Chat operating context as typed object references for the active thread, space, and agent session. Prefer this before resolving objects from ambiguous user phrasing.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {},
+      "risk": "read",
+      "visibility": "core"
     },
     "databases.create": {
       "annotations": {
@@ -2148,10 +2354,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         },
         "config": {
           "kind": "record",
+          "optional": true,
           "value": {
             "kind": "unknown"
-          },
-          "optional": true
+          }
         },
         "defaultValue": {
           "kind": "string",
@@ -2222,105 +2428,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "databases.listRows": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "List rows in a dynamic database table.",
-      "effect": "read",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "cursor": {
-          "kind": "string",
-          "optional": true
-        },
-        "includeArchived": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "tableIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.getRow": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "Read one row in a dynamic database table.",
-      "effect": "read",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "rowId": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.searchRows": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "Search rows in a dynamic database table.",
-      "effect": "read",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "limit": {
-          "kind": "number",
-          "optional": true
-        },
-        "query": {
-          "kind": "string"
-        },
-        "searchFields": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "tableIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.createRow": {
+    "databases.createRelationship": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -2329,150 +2437,28 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "databases",
-      "description": "Create a row in a dynamic database table.",
+      "description": "Create a first-class relationship instance between two existing rows using a relationship definition. Validates ownership and source/target table compatibility.",
       "effect": "row_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "attributes": {
+        "metadata": {
           "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        },
-        "tableId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.updateRow": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "databases",
-      "description": "Update a row in a dynamic database table.",
-      "effect": "row_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "attributes": {
-          "kind": "record",
+          "optional": true,
           "value": {
             "kind": "unknown"
           }
         },
-        "rowId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.deleteRow": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "databases",
-      "description": "Use this to delete a row in a dynamic database table. Archives by default; hard-deletes only with permanent=true.",
-      "effect": "row_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "permanent": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "rowId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.listRelationshipDefinitions": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "List true relationship definitions connected to a dynamic database table. Use this before creating relationship instances so agents do not fake links with raw row IDs.",
-      "effect": "read",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "direction": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "source",
-            "target",
-            "both"
-          ]
-        },
-        "tableIdOrSlug": {
-          "kind": "string"
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databases.listRowRelationships": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "databases",
-      "description": "List true related-record links for one dynamic database row, including source/target row ids, labels, metadata, and related row summaries.",
-      "effect": "read",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "direction": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "forward",
-            "reverse",
-            "both"
-          ]
-        },
         "relationshipDefinitionId": {
-          "kind": "string",
-          "optional": true
+          "kind": "string"
         },
-        "rowId": {
+        "sourceRowId": {
+          "kind": "string"
+        },
+        "targetRowId": {
           "kind": "string"
         }
       },
-      "risk": "read",
+      "risk": "mutating_write",
       "surfaces": [
         "database",
         "space"
@@ -2553,7 +2539,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "databases.createRelationship": {
+    "databases.createRow": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -2562,24 +2548,18 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "databases",
-      "description": "Create a first-class relationship instance between two existing rows using a relationship definition. Validates ownership and source/target table compatibility.",
+      "description": "Create a row in a dynamic database table.",
       "effect": "row_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "metadata": {
+        "attributes": {
           "kind": "record",
+          "optional": true,
           "value": {
             "kind": "unknown"
-          },
-          "optional": true
+          }
         },
-        "relationshipDefinitionId": {
-          "kind": "string"
-        },
-        "sourceRowId": {
-          "kind": "string"
-        },
-        "targetRowId": {
+        "tableId": {
           "kind": "string"
         }
       },
@@ -2617,7 +2597,35 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "databaseViews.list": {
+    "databases.deleteRow": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Use this to delete a row in a dynamic database table. Archives by default; hard-deletes only with permanent=true.",
+      "effect": "row_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "permanent": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "rowId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.get": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -2626,15 +2634,327 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "databases",
-      "description": "Use this to list saved views for a dynamic database table before changing table layout, filters, sorting, or pagination defaults.",
+      "description": "Read one dynamic database table definition.",
       "effect": "read",
-      "executionMode": "read",
+      "executionMode": "mutation",
       "inputSchema": {
         "tableIdOrSlug": {
           "kind": "string"
         }
       },
       "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.getRow": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "Read one row in a dynamic database table.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "rowId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "List user-created dynamic database tables.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.listRelationshipDefinitions": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "List true relationship definitions connected to a dynamic database table. Use this before creating relationship instances so agents do not fake links with raw row IDs.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "direction": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "source",
+            "target",
+            "both"
+          ]
+        },
+        "tableIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.listRowRelationships": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "List true related-record links for one dynamic database row, including source/target row ids, labels, metadata, and related row summaries.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "direction": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "forward",
+            "reverse",
+            "both"
+          ]
+        },
+        "relationshipDefinitionId": {
+          "kind": "string",
+          "optional": true
+        },
+        "rowId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.listRows": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "List rows in a dynamic database table.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "cursor": {
+          "kind": "string",
+          "optional": true
+        },
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "tableIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.searchRows": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "Search rows in a dynamic database table.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "query": {
+          "kind": "string"
+        },
+        "searchFields": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "tableIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.updateRow": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Update a row in a dynamic database table.",
+      "effect": "row_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "attributes": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "rowId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databaseViews.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Use this to create a saved database table view with filters, sorting, visible columns, search, and page-size preferences.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "config": {
+          "kind": "record",
+          "value": {
+            "kind": "unknown"
+          }
+        },
+        "isDefault": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "name": {
+          "kind": "string"
+        },
+        "tableIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databaseViews.delete": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Use this to delete a non-default saved database view that is no longer needed.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "viewId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databaseViews.duplicate": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Use this to duplicate an existing saved database view before experimenting with a new layout or filter set.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "name": {
+          "kind": "string",
+          "optional": true
+        },
+        "viewId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
       "surfaces": [
         "database",
         "space"
@@ -2689,7 +3009,31 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "databaseViews.create": {
+    "databaseViews.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "Use this to list saved views for a dynamic database table before changing table layout, filters, sorting, or pagination defaults.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "tableIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databaseViews.rename": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -2698,24 +3042,38 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "databases",
-      "description": "Use this to create a saved database table view with filters, sorting, visible columns, search, and page-size preferences.",
+      "description": "Use this to rename an existing saved database view without changing its configuration.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "config": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          }
-        },
-        "isDefault": {
-          "kind": "boolean",
-          "optional": true
-        },
         "name": {
           "kind": "string"
         },
-        "tableIdOrSlug": {
+        "viewId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databaseViews.setDefault": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Use this to make an existing saved database view the default view for its table.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "viewId": {
           "kind": "string"
         }
       },
@@ -2756,145 +3114,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "databaseViews.rename": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "databases",
-      "description": "Use this to rename an existing saved database view without changing its configuration.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "name": {
-          "kind": "string"
-        },
-        "viewId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databaseViews.duplicate": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "databases",
-      "description": "Use this to duplicate an existing saved database view before experimenting with a new layout or filter set.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "name": {
-          "kind": "string",
-          "optional": true
-        },
-        "viewId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databaseViews.setDefault": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "databases",
-      "description": "Use this to make an existing saved database view the default view for its table.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "viewId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "databaseViews.delete": {
-      "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "databases",
-      "description": "Use this to delete a non-default saved database view that is no longer needed.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "viewId": {
-          "kind": "string"
-        }
-      },
-      "risk": "destructive",
-      "surfaces": [
-        "database",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "secrets.put": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Encrypt and store a user or organization secret. Secret values are redacted from approvals and tool logs.",
-      "effect": "secret_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "name": {
-          "kind": "string"
-        },
-        "scope": {
-          "kind": "enum",
-          "values": [
-            "user",
-            "organization"
-          ]
-        },
-        "value": {
-          "kind": "string",
-          "sensitive": true
-        }
-      },
-      "risk": "secret",
-      "sensitiveInput": true,
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "secrets.listAvailable": {
+    "messages.search": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -2902,863 +3122,26 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": true
       },
       "approvalBehavior": "read_only",
-      "capabilityPack": "actions",
-      "description": "List metadata for secrets available to generated actions without revealing values.",
+      "capabilityPack": "threads",
+      "description": "Search cached 0000 Chat messages across accessible threads in the current organization. Use for explicit cross-thread or historical search. Do not use for current-thread continuity after revive/resume/compaction; use context.get, threads.current, or threads.read instead.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
-        "query": {
-          "kind": "string",
-          "optional": true
-        },
-        "scopes": {
-          "items": {
-            "kind": "enum",
-            "values": [
-              "user",
-              "organization"
-            ]
-          },
-          "kind": "array",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "action",
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.create": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "artifacts",
-      "description": "Create a small durable org-visible artifact inline. Use this for markdown notes, plans, JSON, and other durable content that should live in 0000 Chat instead of local files. Actions/actions remain first-class; use action tools for runnable code.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "content": {
-          "kind": "string"
-        },
-        "contentHash": {
-          "kind": "string",
-          "optional": true
-        },
-        "format": {
-          "kind": "enum",
-          "values": [
-            "text/markdown",
-            "text/typescript",
-            "application/json",
-            "binary"
-          ]
-        },
-        "kind": {
-          "kind": "enum",
-          "values": [
-            "document",
-            "action",
-            "app",
-            "file",
-            "report"
-          ]
-        },
-        "metadata": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "spaceId": {
-          "kind": "string",
-          "optional": true
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "tags": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "title": {
-          "kind": "string"
-        },
-        "versionMetadata": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        },
-        "visibility": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "organization",
-            "space",
-            "restricted"
-          ]
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.createUploadIntent": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "artifacts",
-      "description": "Create an R2 upload intent for a large durable artifact. Upload the content to the returned uploadUrl, then call artifacts.completeUpload with the byte length and content hash.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "extension": {
-          "kind": "string",
-          "optional": true
-        },
-        "format": {
-          "kind": "enum",
-          "values": [
-            "text/markdown",
-            "text/typescript",
-            "application/json",
-            "binary"
-          ]
-        },
-        "kind": {
-          "kind": "enum",
-          "values": [
-            "document",
-            "action",
-            "app",
-            "file",
-            "report"
-          ]
-        },
-        "metadata": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "spaceId": {
-          "kind": "string",
-          "optional": true
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "tags": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "title": {
-          "kind": "string"
-        },
-        "versionMetadata": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        },
-        "visibility": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "organization",
-            "space",
-            "restricted"
-          ]
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.completeUpload": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "artifacts",
-      "description": "Use after artifacts.createUploadIntent and a successful R2 upload to mark the pending artifact version as available.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string"
-        },
-        "byteLength": {
-          "kind": "number"
-        },
-        "contentHash": {
-          "kind": "string"
-        },
-        "versionId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.search": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "artifacts",
-      "description": "Search durable artifacts in the current organization. Use this before creating local files when looking for existing plans, reports, exported files, or generated content.",
-      "effect": "read",
-      "executionMode": "read",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "kind": {
-          "kind": "enum",
-          "values": [
-            "document",
-            "action",
-            "app",
-            "file",
-            "report"
-          ],
-          "optional": true
-        },
         "limit": {
           "kind": "number",
           "optional": true
         },
         "query": {
-          "kind": "string",
-          "optional": true
+          "kind": "string"
         },
-        "spaceId": {
-          "kind": "string",
-          "optional": true
-        },
-        "status": {
-          "kind": "enum",
-          "optional": true,
-          "values": [
-            "draft",
-            "active",
-            "archived",
-            "pendingDeletion"
-          ]
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.read": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "artifacts",
-      "description": "Read artifact metadata and current version metadata by id or slug. Use artifacts.readContent for inline markdown/text content and artifacts.getContentUrl for R2-backed bytes.",
-      "effect": "read",
-      "executionMode": "read",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string",
-          "optional": true
-        },
-        "slug": {
+        "threadId": {
           "kind": "string",
           "optional": true
         }
       },
       "risk": "read",
       "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.readContent": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "artifacts",
-      "description": "Read inline markdown/text artifact content directly by id or slug. Use this before editing artifacts like local markdown files; returns content, versionId, contentHash, format, and artifact metadata. R2-backed or binary content is rejected.",
-      "effect": "read",
-      "executionMode": "read",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string",
-          "optional": true
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "versionId": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.getContentUrl": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "artifacts",
-      "description": "Get a short-lived read URL for an R2-backed artifact version. Use artifacts.read first when you need metadata or the current version id.",
-      "effect": "read",
-      "executionMode": "read",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string",
-          "optional": true
-        },
-        "expiresIn": {
-          "kind": "number",
-          "optional": true
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "versionId": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "read",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.update": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "artifacts",
-      "description": "Replace an inline markdown/text artifact with a new version. Read with artifacts.readContent first, pass the returned expectedVersionId, and optionally expectedContentHash to avoid overwriting concurrent edits. Use this like a whole-file markdown save.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string",
-          "optional": true
-        },
-        "content": {
-          "kind": "string"
-        },
-        "contentHash": {
-          "kind": "string",
-          "optional": true
-        },
-        "expectedContentHash": {
-          "kind": "string",
-          "optional": true
-        },
-        "expectedVersionId": {
-          "kind": "string"
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "tags": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        },
-        "versionMetadata": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.patchText": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "artifacts",
-      "description": "Patch an inline markdown/text artifact by replacing exact oldText with newText in a new version. Read with artifacts.readContent first and pass expectedVersionId; if oldText appears more than once, provide more context or set replaceAll true.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string",
-          "optional": true
-        },
-        "contentHash": {
-          "kind": "string",
-          "optional": true
-        },
-        "expectedContentHash": {
-          "kind": "string",
-          "optional": true
-        },
-        "expectedVersionId": {
-          "kind": "string"
-        },
-        "newText": {
-          "kind": "string"
-        },
-        "oldText": {
-          "kind": "string"
-        },
-        "replaceAll": {
-          "kind": "boolean",
-          "optional": true
-        },
-        "slug": {
-          "kind": "string",
-          "optional": true
-        },
-        "summary": {
-          "kind": "string",
-          "optional": true
-        },
-        "tags": {
-          "items": {
-            "kind": "string"
-          },
-          "kind": "array",
-          "optional": true
-        },
-        "title": {
-          "kind": "string",
-          "optional": true
-        },
-        "versionMetadata": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          },
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "artifacts.link": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "artifacts",
-      "description": "Use when an artifact should be attached to a first-class 0000 object such as a thread, message, space, database row, action, or app.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
-      "featureFlagKey": "artifacts",
-      "inputSchema": {
-        "artifactId": {
-          "kind": "string"
-        },
-        "fieldKey": {
-          "kind": "string",
-          "optional": true
-        },
-        "relationship": {
-          "kind": "enum",
-          "values": [
-            "source",
-            "reference",
-            "result",
-            "embedded",
-            "mentioned"
-          ]
-        },
-        "rowId": {
-          "kind": "string",
-          "optional": true
-        },
-        "tableId": {
-          "kind": "string",
-          "optional": true
-        },
-        "targetId": {
-          "kind": "string"
-        },
-        "targetType": {
-          "kind": "enum",
-          "values": [
-            "thread",
-            "message",
-            "space",
-            "database_row",
-            "database_table",
-            "action",
-            "app"
-          ]
-        },
-        "targetVersionId": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "thread",
-        "space"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.list": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "admin",
-      "description": "Use this to list connected bridge devices, their status, capabilities, active sessions, and queued work.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {},
-      "risk": "read",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.listPairingCodes": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "admin",
-      "description": "Use this to list active and recently used bridge pairing codes for the current user.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {},
-      "risk": "read",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.createPairingCode": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to create a short-lived pairing code for connecting a new local bridge device.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "label": {
-          "kind": "string",
-          "optional": true
-        },
-        "ttlMs": {
-          "kind": "number",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.revokePairingCode": {
-      "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to revoke an unused bridge pairing code before it expires.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "pairingCodeId": {
-          "kind": "string"
-        }
-      },
-      "risk": "destructive",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.revoke": {
-      "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to revoke a bridge device and terminalize its active bridge sessions and queued work.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "destructive",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.delete": {
-      "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to permanently remove a revoked bridge device record from settings.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "destructive",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.renameLocation": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to rename the human-readable location label for a bridge device.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        },
-        "label": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.refreshHermesProfiles": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to ask a bridge device to refresh Hermes agent profile discovery.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.requestUpdateWhenIdle": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to ask a bridge device to update itself the next time it is idle.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.requestRestartWhenIdle": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to ask a bridge device to restart the next time it is idle.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.cancelPendingControl": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to cancel a pending bridge update, restart, or control action before the device runs it.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
+        "thread"
       ],
       "visibility": "surface-scoped"
     },
@@ -3829,53 +3212,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "notifications.subscribeBrowser": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to register or refresh a browser push notification subscription for the current user.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "deviceLabel": {
-          "kind": "string",
-          "optional": true
-        },
-        "subscription": {
-          "fields": {
-            "endpoint": {
-              "kind": "string"
-            },
-            "keys": {
-              "fields": {
-                "auth": {
-                  "kind": "string"
-                },
-                "p256dh": {
-                  "kind": "string"
-                }
-              },
-              "kind": "object"
-            }
-          },
-          "kind": "object"
-        },
-        "userAgent": {
-          "kind": "string",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
     "notifications.registerNativeDevice": {
       "annotations": {
         "destructiveHint": false,
@@ -3919,6 +3255,53 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "tauri-desktop",
             "tauri-mobile"
           ]
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "notifications.subscribeBrowser": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to register or refresh a browser push notification subscription for the current user.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "deviceLabel": {
+          "kind": "string",
+          "optional": true
+        },
+        "subscription": {
+          "fields": {
+            "endpoint": {
+              "kind": "string"
+            },
+            "keys": {
+              "fields": {
+                "auth": {
+                  "kind": "string"
+                },
+                "p256dh": {
+                  "kind": "string"
+                }
+              },
+              "kind": "object"
+            }
+          },
+          "kind": "object"
+        },
+        "userAgent": {
+          "kind": "string",
+          "optional": true
         }
       },
       "risk": "mutating_write",
@@ -3973,138 +3356,169 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "actions.createDraft": {
+    "objects.get": {
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": false,
+        "idempotentHint": true,
         "openWorldHint": false,
-        "readOnlyHint": false
+        "readOnlyHint": true
       },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "actions",
-      "description": "Create a reusable generated action draft and first version.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "Read one first-class 0000 Chat object through a typed reference. Use after context.get, objects.search, or another tool returns an object ref.",
+      "effect": "read",
+      "executionMode": "read",
       "inputSchema": {
-        "code": {
-          "kind": "string",
-          "sensitive": true
-        },
-        "description": {
-          "kind": "string"
-        },
-        "kind": {
-          "kind": "enum",
-          "values": [
-            "agent_action",
-            "app_action",
-            "automation"
-          ]
-        },
-        "manifest": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          }
-        },
-        "name": {
-          "kind": "string"
-        },
-        "slug": {
-          "kind": "string",
+        "include": {
+          "items": {
+            "kind": "enum",
+            "optional": true,
+            "values": [
+              "metadata",
+              "content",
+              "links"
+            ]
+          },
+          "kind": "array",
           "optional": true
         },
-        "spaceId": {
-          "kind": "string",
-          "optional": true
+        "object": {
+          "fields": {
+            "id": {
+              "kind": "string"
+            },
+            "type": {
+              "kind": "enum",
+              "values": [
+                "thread",
+                "message",
+                "space",
+                "app",
+                "automation",
+                "database",
+                "record",
+                "artifact",
+                "action"
+              ]
+            }
+          },
+          "kind": "object"
         }
       },
-      "risk": "mutating_write",
-      "sensitiveInput": true,
-      "surfaces": [
-        "action",
-        "settings"
-      ],
-      "visibility": "surface-scoped"
+      "risk": "read",
+      "visibility": "core"
     },
-    "actions.updateDraft": {
+    "objects.listLinked": {
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": false,
+        "idempotentHint": true,
         "openWorldHint": false,
-        "readOnlyHint": false
+        "readOnlyHint": true
       },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "actions",
-      "description": "Update a reusable generated action draft by creating a new draft version.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "List first-class 0000 Chat objects linked to a typed object reference. Use this to discover related artifacts and context without guessing ids.",
+      "effect": "read",
+      "executionMode": "read",
       "inputSchema": {
-        "actionId": {
-          "kind": "string"
+        "object": {
+          "fields": {
+            "id": {
+              "kind": "string"
+            },
+            "type": {
+              "kind": "enum",
+              "values": [
+                "thread",
+                "message",
+                "space",
+                "app",
+                "automation",
+                "database",
+                "record",
+                "artifact",
+                "action"
+              ]
+            }
+          },
+          "kind": "object"
         },
-        "code": {
-          "kind": "string",
-          "sensitive": true
-        },
-        "description": {
-          "kind": "string"
-        },
-        "kind": {
+        "relationship": {
           "kind": "enum",
+          "optional": true,
           "values": [
-            "agent_action",
-            "app_action",
-            "automation"
+            "source",
+            "reference",
+            "result",
+            "embedded",
+            "mentioned"
           ]
         },
-        "manifest": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          }
-        },
-        "name": {
-          "kind": "string"
-        },
-        "slug": {
-          "kind": "string",
+        "types": {
+          "items": {
+            "kind": "enum",
+            "values": [
+              "thread",
+              "message",
+              "space",
+              "app",
+              "automation",
+              "database",
+              "record",
+              "artifact",
+              "action"
+            ]
+          },
+          "kind": "array",
           "optional": true
         }
       },
-      "risk": "mutating_write",
-      "sensitiveInput": true,
-      "surfaces": [
-        "action",
-        "settings"
-      ],
-      "visibility": "surface-scoped"
+      "risk": "read",
+      "visibility": "core"
     },
-    "actions.archive": {
+    "objects.search": {
       "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
         "openWorldHint": false,
-        "readOnlyHint": false
+        "readOnlyHint": true
       },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "actions",
-      "description": "Archive a reusable generated action so it no longer appears in the default Actions page/search and cannot be run.",
-      "effect": "schema_write",
-      "executionMode": "mutation",
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "Search first-class 0000 Chat objects by type and query, returning typed object references agents can pass to objects.get or objects.listLinked.",
+      "effect": "read",
+      "executionMode": "read",
       "inputSchema": {
-        "actionId": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "query": {
           "kind": "string"
+        },
+        "types": {
+          "items": {
+            "kind": "enum",
+            "values": [
+              "thread",
+              "message",
+              "space",
+              "app",
+              "automation",
+              "database",
+              "record",
+              "artifact",
+              "action"
+            ]
+          },
+          "kind": "array",
+          "optional": true
         }
       },
-      "risk": "destructive",
-      "surfaces": [
-        "action",
-        "settings"
-      ],
-      "visibility": "surface-scoped"
+      "risk": "read",
+      "visibility": "core"
     },
-    "actions.search": {
+    "secrets.listAvailable": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -4113,13 +3527,24 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "actions",
-      "description": "Search reusable generated actions in the current organization.",
+      "description": "List metadata for secrets available to generated actions without revealing values.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
         "query": {
           "kind": "string",
           "optional": true
+        },
+        "scopes": {
+          "items": {
+            "kind": "enum",
+            "values": [
+              "user",
+              "organization"
+            ]
+          },
+          "kind": "array",
+          "optional": true
         }
       },
       "risk": "read",
@@ -4129,7 +3554,141 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "actions.read": {
+    "secrets.put": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Encrypt and store a user or organization secret. Secret values are redacted from approvals and tool logs.",
+      "effect": "secret_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "name": {
+          "kind": "string"
+        },
+        "scope": {
+          "kind": "enum",
+          "values": [
+            "user",
+            "organization"
+          ]
+        },
+        "value": {
+          "kind": "string",
+          "sensitive": true
+        }
+      },
+      "risk": "secret",
+      "sensitiveInput": true,
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "settings.setDefaultApprovalLevel": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "explicit_trust_boundary",
+      "capabilityPack": "admin",
+      "description": "Set the user's default approval mode for future 0000 Chat threads. Use approvalLevel='full_permissions' only when the user explicitly asks to enable trusted local automation. This tool always requires an in-thread approval unless the current thread is already full-permissions.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "spaces.archive": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "spaces",
+      "description": "Archive a 0000 Chat space.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "spaceIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "spaces.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "spaces",
+      "description": "Create a 0000 Chat space, including title, description, icon/color, favorite status, auto-archive timing, and the space systemPrompt.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "autoArchiveInactiveThreadsAfterHours": {
+          "kind": "number",
+          "nullable": true,
+          "optional": true
+        },
+        "color": {
+          "kind": "string",
+          "optional": true
+        },
+        "description": {
+          "kind": "string",
+          "optional": true
+        },
+        "favorite": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "icon": {
+          "kind": "string",
+          "optional": true
+        },
+        "systemPrompt": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "spaces.get": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -4137,19 +3696,768 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": true
       },
       "approvalBehavior": "read_only",
-      "capabilityPack": "actions",
-      "description": "Read one reusable generated action and its current version.",
+      "capabilityPack": "spaces",
+      "description": "Read one 0000 Chat space by id or slug.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
-        "actionId": {
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
           "kind": "string"
         }
       },
       "risk": "read",
       "surfaces": [
-        "action",
-        "settings"
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "spaces.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "spaces",
+      "description": "List 0000 Chat spaces in the current organization.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "spaces.unarchive": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "spaces",
+      "description": "Restore an archived 0000 Chat space.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "spaceIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "spaces.update": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "spaces",
+      "description": "Update a 0000 Chat space, including title, URL slug, description, icon/color, favorite status, auto-archive timing, and the space systemPrompt.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "autoArchiveInactiveThreadsAfterHours": {
+          "kind": "number",
+          "nullable": true,
+          "optional": true
+        },
+        "color": {
+          "kind": "string",
+          "optional": true
+        },
+        "description": {
+          "kind": "string",
+          "optional": true
+        },
+        "favorite": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "icon": {
+          "kind": "string",
+          "optional": true
+        },
+        "slug": {
+          "kind": "string",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string"
+        },
+        "systemPrompt": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.archive": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Archive an organization tag so it is no longer suggested for new assignments.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "tagIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.assign": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Assign an organization tag to a thread, artifact, or database table.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "tagIdOrSlug": {
+          "kind": "string"
+        },
+        "targetId": {
+          "kind": "string"
+        },
+        "targetType": {
+          "kind": "enum",
+          "values": [
+            "thread",
+            "artifact",
+            "database_table"
+          ]
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Create an organization tag for threads, artifacts, and databases.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "color": {
+          "kind": "string",
+          "optional": true
+        },
+        "description": {
+          "kind": "string",
+          "optional": true
+        },
+        "name": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List organization tags available for organizing threads, artifacts, and databases.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "includeArchived": {
+          "kind": "boolean",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.listForTarget": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List tags assigned to a thread, artifact, or database table.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "targetId": {
+          "kind": "string"
+        },
+        "targetType": {
+          "kind": "enum",
+          "values": [
+            "thread",
+            "artifact",
+            "database_table"
+          ]
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.unassign": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Remove an organization tag assignment from a thread, artifact, or database table.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "tagIdOrSlug": {
+          "kind": "string"
+        },
+        "targetId": {
+          "kind": "string"
+        },
+        "targetType": {
+          "kind": "enum",
+          "values": [
+            "thread",
+            "artifact",
+            "database_table"
+          ]
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "tags.update": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Update an organization tag's name, color, or description.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "color": {
+          "kind": "string",
+          "optional": true
+        },
+        "description": {
+          "kind": "string",
+          "optional": true
+        },
+        "name": {
+          "kind": "string",
+          "optional": true
+        },
+        "tagIdOrSlug": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.contextDescribe": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "Describe one lossless thread context memory node, including summary metadata, parent/child node ids, and exact source message ids without expanding raw message content.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "nodeId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.contextExpand": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "Expand one lossless thread context memory node into child context nodes and, when includeMessages=true, bounded exact source messages linked to that node.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "includeMessages": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "nodeId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.contextList": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List ready lossless thread context memory nodes for a 0000 Chat thread, plus active/recent summarization work status. Defaults to the current thread. Use query to search summaries, then threads.contextDescribe or threads.contextExpand to inspect exact source links.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "query": {
+          "kind": "string",
+          "optional": true
+        },
+        "threadId": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.continue": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Continue an existing authorized 0000 Chat thread by starting an agent-authored turn. Defaults to the current thread; pass threadId to continue another non-archived thread in the caller organization. Pass agentIdOrSlug: \"self\" to continue as the calling agent, or another usable agent id/slug to hand off. This records agent provenance and must not be used to simulate a user-authored message.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "agentIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "instruction": {
+          "kind": "string"
+        },
+        "requireAgentSession": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "threadId": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "user_interaction",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Create a new 0000 Chat thread in a space. By default this creates a thread and agent session without messages; pass agentIdOrSlug to assign the thread to another usable agent, or pass agentIdOrSlug: \"self\" to assign it to the calling agent. Pass initialUserMessage only when the user explicitly wants that text carried into the new thread as the first user message.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "agentIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "clientThreadId": {
+          "kind": "string",
+          "optional": true
+        },
+        "initialUserMessage": {
+          "kind": "string",
+          "optional": true
+        },
+        "requireAgentSession": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string"
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "user_interaction",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.current": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "Read the exact current 0000 Chat thread/session context for this agent run. Prefer this for continue, resume, or remember prompts.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {},
+      "risk": "read",
+      "visibility": "core"
+    },
+    "threads.fork": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Fork a 0000 Chat thread into a new independent thread with safe visible context and lineage. Defaults to the current thread, source space, and source thread agent when sourceThreadId, spaceIdOrSlug, or agentIdOrSlug are omitted; pass initialUserMessage only when the user explicitly wants that text to start the fork.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "agentIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "forkReason": {
+          "kind": "string",
+          "optional": true
+        },
+        "initialUserMessage": {
+          "kind": "string",
+          "optional": true
+        },
+        "requireAgentSession": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "sourceThreadId": {
+          "kind": "string",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        },
+        "upToMessageId": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "user_interaction",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.list": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List recent 0000 Chat threads visible to this bridge session. Optionally filter by tag slugs/names, unreadOnly, and updatedSince; tagMatch defaults to all. Example: unread threads from the last 24 hours tagged project.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "tagMatch": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "all",
+            "any"
+          ]
+        },
+        "tags": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "unreadOnly": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "updatedSince": {
+          "kind": "number",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.read": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "core",
+      "description": "Read one 0000 Chat thread and its recent cached messages. Use this for current-thread continuity when context.get or threads.current identifies the thread; do not use messages.search for current-thread recovery.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "threadId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "visibility": "core"
+    },
+    "threads.readActivity": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "Read exact bounded durable 0000 Chat thread activity events. Defaults to the current thread and returns message_events oldest-to-newest for the selected sequence window. Use when recent cached messages from threads.read are not enough; do not use for broad message search.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "afterSequence": {
+          "kind": "number",
+          "optional": true
+        },
+        "beforeSequence": {
+          "kind": "number",
+          "optional": true
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "threadId": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.update": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Update lifecycle metadata for a 0000 Chat thread. Defaults to the current thread. Use for bounded thread title, summary, destination space, approval level, pin, or archive/unarchive changes; use tags.* for tag assignment and threads.continue for agent-authored work. Contradictory pinned+archived requests are rejected.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "archived": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "pinned": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "threadId": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "thread"
       ],
       "visibility": "surface-scoped"
     },
@@ -4173,10 +4481,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         },
         "input": {
           "kind": "record",
+          "optional": true,
           "value": {
             "kind": "unknown"
-          },
-          "optional": true
+          }
         }
       },
       "risk": "mutating_write",
@@ -4187,7 +4495,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "actions.run": {
+    "userPrompts.requestChoice": {
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
@@ -4195,28 +4503,35 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": false
       },
       "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "actions",
-      "description": "Run one reusable generated action with JSON input through the 0000 Actions runtime.",
-      "effect": "row_write",
+      "capabilityPack": "threads",
+      "description": "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
+      "effect": "interaction_write",
       "executionMode": "mutation",
-      "featureFlagKey": "actions-runtime",
       "inputSchema": {
-        "actionId": {
-          "kind": "string"
+        "choices": {
+          "items": {
+            "fields": {
+              "description": {
+                "kind": "string",
+                "optional": true
+              },
+              "id": {
+                "kind": "string"
+              },
+              "label": {
+                "kind": "string"
+              }
+            },
+            "kind": "object"
+          },
+          "kind": "array"
         },
-        "input": {
-          "kind": "record",
-          "value": {
-            "kind": "unknown"
-          }
+        "prompt": {
+          "kind": "string"
         }
       },
-      "risk": "mutating_write",
-      "surfaces": [
-        "action",
-        "settings"
-      ],
-      "visibility": "surface-scoped"
+      "risk": "user_interaction",
+      "visibility": "core"
     }
   },
   "AGENT_TOOL_MANIFEST_NAMES": [
@@ -4331,319 +4646,5 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "actions.read",
     "tools.executeCode",
     "actions.run"
-  ],
-  "AGENT_TOOL_CAPABILITY_PACKS": {
-    "core": {
-      "approvalBehavior": "Read-only except userPrompts.requestChoice, which writes an in-thread decision request.",
-      "contexts": [
-        "thread"
-      ],
-      "defaultVisibility": "default",
-      "description": "Small always-visible orientation and safe current-thread continuity surface.",
-      "title": "Core context and continuity",
-      "whenNotToUse": "Do not add broad CRUD tools here; load contextual packs for app, database, automation, runtime, artifact, or admin work.",
-      "whenToUse": "Use at the start of an in-app run, for elliptical follow-ups, typed references, and structured user choices.",
-      "effectTypes": [
-        "read",
-        "interaction_write"
-      ],
-      "name": "core",
-      "toolNames": [
-        "capabilities.advise",
-        "context.get",
-        "userPrompts.requestChoice",
-        "objects.get",
-        "objects.search",
-        "objects.listLinked",
-        "threads.current",
-        "threads.read"
-      ]
-    },
-    "threads": {
-      "approvalBehavior": "Reads are direct; thread creation/forking/tag writes may require approval.",
-      "contexts": [
-        "thread"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Thread discovery, durable activity, cached-message search, forking, tags, and agent handoffs.",
-      "title": "Threads and conversation work",
-      "whenNotToUse": "Do not use messages.search for current-thread continuity; use context.get, threads.current, and threads.read first.",
-      "whenToUse": "Use when the user asks to inspect, create, fork, search, tag, or coordinate work across threads.",
-      "effectTypes": [
-        "read",
-        "interaction_write",
-        "schema_write"
-      ],
-      "name": "threads",
-      "toolNames": [
-        "capabilities.describe",
-        "threads.readActivity",
-        "threads.contextList",
-        "threads.contextDescribe",
-        "threads.contextExpand",
-        "threads.list",
-        "threads.update",
-        "threads.create",
-        "threads.continue",
-        "threads.fork",
-        "messages.search",
-        "tags.list",
-        "tags.create",
-        "tags.update",
-        "tags.archive",
-        "tags.listForTarget",
-        "tags.assign",
-        "tags.unassign",
-        "agents.sendMailboxMessage"
-      ]
-    },
-    "runtime": {
-      "approvalBehavior": "Reads are direct; bridge/device controls and notification registrations may require approval.",
-      "contexts": [
-        "settings"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Bridge/device runtime, pairing, lifecycle control, and notification runtime state.",
-      "title": "Runtime and bridge operations",
-      "whenNotToUse": "Do not expose by default for normal app-building; do not restart/update devices without explicit user intent.",
-      "whenToUse": "Use for local bridge health, pairing, Hermes profile refresh, device control, or notification runtime setup.",
-      "effectTypes": [
-        "read",
-        "admin_write"
-      ],
-      "name": "runtime",
-      "toolNames": [
-        "bridgeDevices.list",
-        "bridgeDevices.listPairingCodes",
-        "bridgeDevices.createPairingCode",
-        "bridgeDevices.revokePairingCode",
-        "bridgeDevices.revoke",
-        "bridgeDevices.delete",
-        "bridgeDevices.renameLocation",
-        "bridgeDevices.refreshHermesProfiles",
-        "bridgeDevices.requestUpdateWhenIdle",
-        "bridgeDevices.requestRestartWhenIdle",
-        "bridgeDevices.cancelPendingControl",
-        "notifications.getBrowserConfig",
-        "notifications.getBrowserSubscriptionStatus",
-        "notifications.getNativeDeviceStatus",
-        "notifications.subscribeBrowser",
-        "notifications.registerNativeDevice",
-        "notifications.unregisterNativeDevice",
-        "notifications.unsubscribeBrowser"
-      ]
-    },
-    "databases": {
-      "approvalBehavior": "Table/field/view writes and row writes may require approval; reads are direct.",
-      "contexts": [
-        "database",
-        "space"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Dynamic database schema, views, row reads/searches, and row writes.",
-      "title": "Dynamic databases",
-      "whenNotToUse": "Do not create duplicate tables before inspecting existing tables; do not store one-off ephemeral facts as rows.",
-      "whenToUse": "Use for structured reusable records, app inputs, searchable datasets, or database-backed workflows.",
-      "effectTypes": [
-        "read",
-        "schema_write",
-        "row_write"
-      ],
-      "name": "databases",
-      "toolNames": [
-        "databases.list",
-        "databases.get",
-        "databases.create",
-        "databases.createField",
-        "databases.listRows",
-        "databases.getRow",
-        "databases.searchRows",
-        "databases.createRow",
-        "databases.updateRow",
-        "databases.deleteRow",
-        "databases.listRelationshipDefinitions",
-        "databases.listRowRelationships",
-        "databases.createRelationshipDefinition",
-        "databases.createRelationship",
-        "databases.deleteRelationship",
-        "databaseViews.list",
-        "databaseViews.get",
-        "databaseViews.getDefault",
-        "databaseViews.create",
-        "databaseViews.updateConfig",
-        "databaseViews.rename",
-        "databaseViews.duplicate",
-        "databaseViews.setDefault",
-        "databaseViews.delete"
-      ]
-    },
-    "apps": {
-      "approvalBehavior": "App/revision/generation writes may require approval; validation/list/read are direct.",
-      "contexts": [
-        "app",
-        "space"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Prompt-backed 0000 OpenUI apps, revisions, validated generations, and app archives.",
-      "title": "OpenUI apps",
-      "whenNotToUse": "Do not create standalone HTML/local files; do not use apps.update for prompt-backed creation or revision work.",
-      "whenToUse": "Use when the user asks to create, improve, refresh, inspect, or archive a 0000 app/dashboard.",
-      "effectTypes": [
-        "read",
-        "schema_write"
-      ],
-      "name": "apps",
-      "toolNames": [
-        "apps.list",
-        "apps.get",
-        "apps.create",
-        "apps.createRevision",
-        "apps.generateFromRevision",
-        "apps.listGenerations",
-        "apps.update",
-        "apps.archive",
-        "apps.validateOpenUi"
-      ]
-    },
-    "automations": {
-      "approvalBehavior": "Automation writes/runs may require approval, especially outside full-permissions threads.",
-      "contexts": [
-        "automation",
-        "space"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Scheduled, loop, and trigger-like agent automation management and run inspection.",
-      "title": "Automations",
-      "whenNotToUse": "Do not create recurring/loop automations without explicit cadence, target space, and approval expectations.",
-      "whenToUse": "Use when the user asks to schedule, remind, run later, repeat work, create a loop, or inspect automation history.",
-      "effectTypes": [
-        "read",
-        "schema_write"
-      ],
-      "name": "automations",
-      "toolNames": [
-        "automations.list",
-        "automations.get",
-        "automations.create",
-        "automations.update",
-        "automations.disable",
-        "automations.runNow"
-      ]
-    },
-    "actions": {
-      "approvalBehavior": "Draft writes and action runs may require approval; code inputs are sensitive.",
-      "contexts": [
-        "action",
-        "settings"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Reusable generated Actions drafts, reads/searches, updates, and gated runtime execution.",
-      "title": "Actions",
-      "whenNotToUse": "Do not use generic artifacts for runnable code when a first-class Action is intended.",
-      "whenToUse": "Use for reusable generated code/actions, action metadata, and gated action execution.",
-      "effectTypes": [
-        "read",
-        "schema_write",
-        "row_write"
-      ],
-      "name": "actions",
-      "toolNames": [
-        "secrets.listAvailable",
-        "actions.createDraft",
-        "actions.updateDraft",
-        "actions.archive",
-        "actions.search",
-        "actions.read",
-        "tools.executeCode",
-        "actions.run"
-      ]
-    },
-    "artifacts": {
-      "approvalBehavior": "Artifact create/update/link/upload completion writes may require approval; reads are direct.",
-      "contexts": [
-        "thread",
-        "space"
-      ],
-      "defaultVisibility": "deferred",
-      "description": "Durable documents/files/reports, R2 upload versions, text edits, reads, and links.",
-      "title": "Artifacts",
-      "whenNotToUse": "Do not confuse low-level upload/version tools with normal app-building; use apps.* for 0000 apps and actions.* for runnable Actions.",
-      "whenToUse": "Use when durable markdown, JSON, reports, exports, or generated files should live in 0000 Chat instead of local files.",
-      "effectTypes": [
-        "schema_write",
-        "read"
-      ],
-      "name": "artifacts",
-      "toolNames": [
-        "artifacts.create",
-        "artifacts.createUploadIntent",
-        "artifacts.completeUpload",
-        "artifacts.search",
-        "artifacts.read",
-        "artifacts.readContent",
-        "artifacts.getContentUrl",
-        "artifacts.update",
-        "artifacts.patchText",
-        "artifacts.link"
-      ]
-    },
-    "admin": {
-      "approvalBehavior": "Admin/security writes are approval-gated; secret writes redact values and default approval changes are an explicit trust boundary.",
-      "contexts": [
-        "settings"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Settings, secrets, mailbox-capable agents, trust-boundary approval defaults, and security-adjacent operations.",
-      "title": "Admin and security",
-      "whenNotToUse": "Do not expose by default and do not change trust/security settings unless the user explicitly asks.",
-      "whenToUse": "Use for explicit settings, secrets, agent directory, or approval-mode administration.",
-      "effectTypes": [
-        "admin_write",
-        "read",
-        "secret_write"
-      ],
-      "name": "admin",
-      "toolNames": [
-        "settings.setDefaultApprovalLevel",
-        "agents.list",
-        "secrets.put"
-      ]
-    },
-    "spaces": {
-      "approvalBehavior": "Space writes may require approval; reads are direct.",
-      "contexts": [
-        "space"
-      ],
-      "defaultVisibility": "contextual",
-      "description": "Space listing, inspection, creation, settings updates, archival, and restoration.",
-      "title": "Spaces",
-      "whenNotToUse": "Do not archive or mutate spaces unless the user clearly asks for that app-level change.",
-      "whenToUse": "Use when the user asks about this space, another space, space settings, or space lifecycle.",
-      "effectTypes": [
-        "read",
-        "schema_write"
-      ],
-      "name": "spaces",
-      "toolNames": [
-        "spaces.list",
-        "spaces.get",
-        "spaces.create",
-        "spaces.update",
-        "spaces.archive",
-        "spaces.unarchive"
-      ]
-    }
-  },
-  "AGENT_TOOL_CAPABILITY_PACK_ORDER": [
-    "core",
-    "threads",
-    "runtime",
-    "databases",
-    "apps",
-    "automations",
-    "actions",
-    "artifacts",
-    "admin",
-    "spaces"
   ]
 }) as const
