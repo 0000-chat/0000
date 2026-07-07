@@ -2,7 +2,6 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { readFile, writeFile } from "node:fs/promises"
 import { Readable, Writable } from "node:stream"
 import {
-  ClientSideConnection,
   client as createClientApp,
   methods,
   ndJsonStream,
@@ -13,13 +12,19 @@ import {
   type CreateTerminalResponse,
   type KillTerminalRequest,
   type KillTerminalResponse,
+  type InitializeRequest,
+  type InitializeResponse,
   type JsonRpcId,
+  type ListSessionsResponse,
+  type LoadSessionResponse,
+  type NewSessionResponse,
   type ReadTextFileRequest,
   type ReadTextFileResponse,
   type ReleaseTerminalRequest,
   type ReleaseTerminalResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type ResumeSessionResponse,
   type Stream,
   type TerminalOutputRequest,
   type TerminalOutputResponse,
@@ -135,25 +140,26 @@ export type SdkAcpRuntimeRequestContext = {
   requestId?: JsonRpcId
 }
 
-type SdkAcpRuntimeAgentConnection = Pick<
-  ClientSideConnection,
-  | "authenticate"
-  | "cancel"
-  | "closeSession"
-  | "deleteSession"
-  | "initialize"
-  | "listSessions"
-  | "loadSession"
-  | "logout"
-  | "newSession"
-  | "prompt"
-  | "resumeSession"
-  | "setSessionConfigOption"
-  | "setSessionMode"
->
+type SdkAcpRuntimeAgentConnection = {
+  authenticate: (params: BridgeAuthenticateParams) => Promise<BridgeAuthenticateResult>
+  cancel: (params: BridgeCancelParams) => Promise<void>
+  closeSession: (params: BridgeCloseSessionParams) => Promise<unknown>
+  deleteSession: (params: BridgeDeleteSessionParams) => Promise<unknown>
+  initialize: (params: InitializeRequest) => Promise<InitializeResponse>
+  listSessions: (params: BridgeListSessionsParams) => Promise<ListSessionsResponse>
+  loadSession: (params: BridgeLoadSessionParams) => Promise<LoadSessionResponse>
+  logout: (params: Record<string, never>) => Promise<unknown>
+  newSession: (params: BridgeCreateSessionParams) => Promise<NewSessionResponse>
+  prompt: (params: BridgePromptParams) => Promise<BridgePromptResult["raw"]>
+  resumeSession: (params: BridgeResumeSessionParams) => Promise<ResumeSessionResponse>
+  setSessionConfigOption: (
+    params: BridgeSetConfigOptionParams,
+  ) => Promise<BridgeSetConfigOptionResult>
+  setSessionMode: (params: BridgeSetModeParams) => Promise<BridgeSetModeResult>
+}
 
 export type SdkAcpRuntimeClientOptions = {
-  connection?: ClientSideConnection
+  connection?: SdkAcpRuntimeAgentConnection
   onActivity?: (activity: SdkAcpRuntimeActivity) => Promise<void> | void
   onPermissionRequest?: (
     params: RequestPermissionRequest,
