@@ -263,6 +263,116 @@ test("passes SDK request ids with permission callbacks", async () => {
   expect(requestContexts[0]?.requestId).toBeDefined()
 })
 
+test("classifies SDK elicitation requests with extensible union guards", async () => {
+  const streams = createPairedStreams()
+  let agentConnection: AgentSideConnection
+  let clientCapabilities: unknown
+  const elicitationRequests: unknown[] = []
+  const agent: Agent = {
+    authenticate: async () => undefined,
+    cancel: async () => undefined,
+    initialize: async (params) => {
+      clientCapabilities = params.clientCapabilities
+      return {
+        agentCapabilities: {},
+        protocolVersion: params.protocolVersion,
+      }
+    },
+    newSession: async () => ({ sessionId: "session-1" }),
+    prompt: async (params) => {
+      const response = await agentConnection.unstable_createElicitation({
+        message: "Choose the next path",
+        mode: "vendor_picker",
+        sessionId: params.sessionId,
+        vendorPayload: { choices: ["fast", "safe"] },
+      })
+      expect(response).toEqual({
+        _meta: { handledMode: "custom" },
+        action: "decline",
+      })
+      return { stopReason: "end_turn" }
+    },
+  }
+  agentConnection = new AgentSideConnection(() => agent, streams.agent)
+  const client = new SdkAcpRuntimeClient({
+    onElicitationRequest: async (request) => {
+      elicitationRequests.push(request)
+      return { _meta: { handledMode: request.mode }, action: "decline" }
+    },
+    stream: streams.client,
+  })
+
+  await client.initialize()
+  await client.createSession({ cwd: "/tmp", mcpServers: [] })
+  await expect(
+    client.prompt({
+      prompt: [{ text: "ask", type: "text" }],
+      sessionId: "session-1",
+    }),
+  ).resolves.toMatchObject({ stopReason: "end_turn" })
+
+  expect(clientCapabilities).toMatchObject({
+    elicitation: { form: {}, url: {} },
+  })
+  expect(elicitationRequests).toEqual([
+    {
+      mode: "custom",
+      params: {
+        message: "Choose the next path",
+        mode: "vendor_picker",
+        sessionId: "session-1",
+        vendorPayload: { choices: ["fast", "safe"] },
+      },
+    },
+  ])
+})
+
+test("cancels SDK elicitation requests when no callback is configured", async () => {
+  const streams = createPairedStreams()
+  let agentConnection: AgentSideConnection
+  let clientCapabilities: unknown
+  let elicitationResponse: unknown
+  const agent: Agent = {
+    authenticate: async () => undefined,
+    cancel: async () => undefined,
+    initialize: async (params) => {
+      clientCapabilities = params.clientCapabilities
+      return {
+        agentCapabilities: {},
+        protocolVersion: params.protocolVersion,
+      }
+    },
+    newSession: async () => ({ sessionId: "session-1" }),
+    prompt: async (params) => {
+      elicitationResponse = await agentConnection.unstable_createElicitation({
+        elicitationId: "elicit-1",
+        message: "Open this page",
+        mode: "url",
+        sessionId: params.sessionId,
+        url: "https://example.com/auth",
+      })
+      return { stopReason: "end_turn" }
+    },
+  }
+  agentConnection = new AgentSideConnection(() => agent, streams.agent)
+  const client = new SdkAcpRuntimeClient({ stream: streams.client })
+
+  await client.initialize()
+  await client.createSession({ cwd: "/tmp", mcpServers: [] })
+  await expect(
+    client.prompt({
+      prompt: [{ text: "ask", type: "text" }],
+      sessionId: "session-1",
+    }),
+  ).resolves.toMatchObject({ stopReason: "end_turn" })
+
+  expect(clientCapabilities).not.toHaveProperty("elicitation")
+  expect(elicitationResponse).toEqual({
+    _meta: { reason: "unsupported_elicitation" },
+    action: "cancel",
+  })
+})
+
 test("serves SDK filesystem callbacks through the 0000 workspace policy", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "zero-acp-fs-"))
   const sourcePath = join(workspaceRoot, "source.txt")

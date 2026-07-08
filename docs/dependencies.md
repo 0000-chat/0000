@@ -3,8 +3,12 @@
 The bridge keeps direct dependencies intentionally small:
 
 - `@agentclientprotocol/sdk`: manages the ACP client/session protocol used to
-  talk to local coding-agent runtimes. Version 1.2.0 includes upstream schema
-  updates and transport hardening for large or malformed JSON-RPC/SSE traffic.
+  talk to local coding-agent runtimes. Version 1.2.1 includes upstream
+  deterministic HTTP/SSE close and response delivery fixes, generated
+  extensible-union guards, and schema handling that preserves custom ACP
+  variant payloads. The bridge uses the guard export for experimental
+  elicitation request classification while keeping unsupported elicitation
+  requests on a deterministic cancelled response path.
 - `@modelcontextprotocol/sdk`: implements the local MCP server exposed to ACP
   runtimes so agents can use 0000 Chat tools.
 - `zod`: validates MCP tool schemas and inputs.
