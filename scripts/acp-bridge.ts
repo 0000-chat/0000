@@ -2800,7 +2800,8 @@ async function refreshRuntimeConformanceProfiles(input: {
   for (const profile of profiles) {
     if (
       isLaunchSpecRuntimeProfile(profile) &&
-      !priorityProfileIds.has(profile.id)
+      !priorityProfileIds.has(profile.id) &&
+      nextRecords[profile.id] === undefined
     ) {
       continue;
     }
