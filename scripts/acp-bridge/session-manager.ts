@@ -1423,13 +1423,18 @@ export class BridgeSessionManager {
       payload: {
         finalText: result.finalText,
         queueId: item.id,
+        responseMeta: result.responseMeta,
         stopReason: result.stopReason,
         text: result.text,
       },
       part: {
         type: "event",
         text: result.text,
-        json: { finalText: result.finalText, stopReason: result.stopReason },
+        json: {
+          finalText: result.finalText,
+          responseMeta: result.responseMeta,
+          stopReason: result.stopReason,
+        },
         status: "complete",
       },
     });
@@ -1490,6 +1495,7 @@ export class BridgeSessionManager {
       ...(result.externalContinuity
         ? { acpExternalContinuity: result.externalContinuity }
         : {}),
+      ...(result.responseMeta ? { acpResponseMeta: result.responseMeta } : {}),
       ...(result.usage ? { acpUsage: result.usage } : {}),
     };
     if (result.attachmentDeliveryMode && baseResultMetadata?.attachmentCount) {

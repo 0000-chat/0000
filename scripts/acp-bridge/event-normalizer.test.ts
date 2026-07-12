@@ -87,6 +87,29 @@ test("classifies routine Hermes lifecycle logs as suppressible info diagnostics"
   }
 })
 
+test("classifies successful delegation completion diagnostics as suppressible info", () => {
+  for (const line of [
+    "async delegation completed successfully",
+    "delegation batch finished successfully",
+  ]) {
+    const diagnostic = classifyRuntimeLogLine(line)
+    assert.equal(diagnostic?.severity, "info")
+    assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), true)
+  }
+})
+
+test("does not suppress unsuccessful delegation completion diagnostics", () => {
+  for (const line of [
+    "async delegation completed unsuccessfully",
+    "async delegation completed with failure",
+    "delegation batch finished with error",
+  ]) {
+    const diagnostic = classifyRuntimeLogLine(line)
+    assert.equal(shouldSuppressRuntimeDiagnostic(diagnostic), false)
+    assert.notEqual(diagnostic?.severity, "info")
+  }
+})
+
 test("classifies routine CLI status logs as suppressible info diagnostics", () => {
   for (const line of [
     "The user's messages are sent from the 0000 Chat app. When the",
