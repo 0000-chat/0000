@@ -1016,6 +1016,53 @@ describe("bridge restart handoff startup priority", () => {
     ).toBeUndefined();
   });
 
+  test("refreshes an existing Hermes launch-spec record before it becomes stale", async () => {
+    const refreshedProfiles: string[] = [];
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(),
+      getRunningSessionProfileIds: () => new Set(),
+      now: () => 10_000,
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 10_000,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      profiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "-p", "0000-builder", "acp"],
+          hermesProfileName: "0000-builder",
+          id: "hermes:default|hermes-profile:0000-builder",
+          kind: "hermes",
+          label: "Hermes: 0000-builder",
+          status: "available",
+        },
+      ],
+      records: {
+        "hermes:default|hermes-profile:0000-builder": {
+          checkedAt: 9_000,
+          diagnostics: [],
+          runtimeId: "hermes:default|hermes-profile:0000-builder",
+          state: "passing",
+          strength: "init_only",
+        },
+      },
+      ttlMs: 1_000,
+    });
+
+    expect(refreshedProfiles).toEqual([
+      "hermes:default|hermes-profile:0000-builder",
+    ]);
+    expect(
+      records["hermes:default|hermes-profile:0000-builder"]?.checkedAt,
+    ).toBe(10_000);
+  });
+
   test("retries unavailable base runtime profiles while idle", async () => {
     const refreshedProfiles: string[] = [];
     const records = await refreshRuntimeConformanceProfilesForTest({
