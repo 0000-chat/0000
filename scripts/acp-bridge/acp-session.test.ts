@@ -52,6 +52,52 @@ describe("ACP final text extraction", () => {
     expect(env?.GIT_COMMITTER_NAME).toBeUndefined();
   });
 
+  test("preserves only the Hermes delegation lifecycle envelope from ACP PromptResponse _meta", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({
+        promptResult: {
+          _meta: {
+            arbitraryProviderData: { secret: "must not persist" },
+            hermes: {
+              delegation: {
+                joinRequired: true,
+                reason: "join_timeout",
+                secret: "must not persist",
+                settlementState: "timed_out",
+              },
+            },
+          },
+          stopReason: "end_turn",
+        },
+        updates: [],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.responseMeta).toEqual({
+      hermes: {
+        delegation: {
+          joinRequired: true,
+          reason: "join_timeout",
+          settlementState: "timed_out",
+        },
+      },
+    })
+  })
+
+  test("keeps legacy prompt results without ACP _meta free of response metadata", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({ updates: [] }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.responseMeta).toBeUndefined()
+  })
+
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({
       agentCommand: "bunx @zed-industries/codex-acp@0.16.0",

@@ -55,6 +55,7 @@ export type HermesAcpRuntimeCapabilities = {
 export type HermesAcpPromptResult = {
   sessionId: string
   rawResult: unknown
+  responseMeta?: unknown
   stopReason?: string
   text: string
   events: NormalizedBridgeEvent[]
@@ -465,6 +466,7 @@ export class HermesAcpSession {
     return {
       sessionId,
       rawResult,
+      responseMeta: extractResponseMeta(rawResult),
       stopReason,
       text: finalText.text,
       events: processedEvents,
@@ -1665,6 +1667,40 @@ function extractStopReason(result: unknown): string | undefined {
   }
   const record = result as Record<string, unknown>
   return readString(record.stopReason)
+}
+
+function extractResponseMeta(result: unknown): unknown {
+  const record = readRecord(result)
+  const meta = readRecord(record?.["_meta"])
+  const hermes = readRecord(meta?.hermes)
+  const delegation = readRecord(hermes?.delegation)
+  if (!delegation) {
+    return undefined
+  }
+  const sanitized: Record<string, boolean | string> = {}
+  if (delegation.joinRequired === true) {
+    sanitized.joinRequired = true
+  }
+  const settlementState = readString(delegation.settlementState)
+  if (
+    settlementState === "join_required" ||
+    settlementState === "joined" ||
+    settlementState === "output-available" ||
+    settlementState === "timed_out" ||
+    settlementState === "cancelled"
+  ) {
+    sanitized.settlementState = settlementState
+  }
+  const reason = readString(delegation.reason)
+  if (
+    reason === "join_timeout" ||
+    reason === "parent_cancelled" ||
+    reason === "prompt_cancelled" ||
+    reason === "prompt_exception"
+  ) {
+    sanitized.reason = reason
+  }
+  return Object.keys(sanitized).length > 0 ? { hermes: { delegation: sanitized } } : undefined
 }
 
 function extractTokenUsage(result: unknown): HermesAcpTokenUsage | undefined {
