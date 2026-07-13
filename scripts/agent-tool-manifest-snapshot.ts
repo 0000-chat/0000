@@ -162,6 +162,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "name": "core",
       "title": "Core context and continuity",
       "toolNames": [
+        "capabilities.describe",
         "capabilities.advise",
         "context.get",
         "userPrompts.requestChoice",
@@ -232,6 +233,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "name": "runtime",
       "title": "Runtime and bridge operations",
       "toolNames": [
+        "runtime.readEvidence",
         "bridgeDevices.list",
         "bridgeDevices.listPairingCodes",
         "bridgeDevices.createPairingCode",
@@ -293,7 +295,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "name": "threads",
       "title": "Threads and conversation work",
       "toolNames": [
-        "capabilities.describe",
         "threads.readActivity",
         "threads.contextList",
         "threads.contextDescribe",
@@ -301,6 +302,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "threads.list",
         "threads.update",
         "threads.create",
+        "threads.createChild",
+        "threads.listChildren",
+        "threads.listDescendants",
+        "threads.listChildrenByTags",
         "threads.continue",
         "threads.fork",
         "messages.search",
@@ -640,7 +645,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "apps",
-      "description": "Create a saved prompt-backed 0000 app for a space with an initial app revision. After creating a new app, generate, validate, and save the first OpenUI output with apps.generateFromRevision so it appears in the app. Raw OpenUI must begin with root = AppCanvas(...), not AppCanvas { ... } or JSX. Supported app components: AppCanvas, Section, MetricRow, Metric, Sparkline, WorkloadPanel, WorkloadBar, SignalPanel, Signal, Timeline, TimelineItem, FocusList, FocusItem, DataTable, Badge, Alert, Progress, Card, EmptyState, Disclosure, Tabs, Tab, AvatarLabel, ItemList, Item. Exact signatures: AppCanvas(title, summary, generatedAtDate, sections); Section(title, description, layout, children) where layout is \"single\" or \"split\"; MetricRow(metrics); Metric(label, value, delta, detail, tone, sparkline) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Sparkline(values, tone?); WorkloadPanel(title, description, bars); WorkloadBar(label, value, count, tone) where value is a 0-100 number; SignalPanel(title, signals); Signal(label, summary, tone); Timeline(title, items); TimelineItem(time, title, detail, tone); FocusList(title, items); FocusItem(title, owner, due, priority) where priority is \"high\", \"medium\", or \"low\"; DataTable(title, columns, rows, caption?) where columns is a string array up to 8 values and rows is a string[][] up to 25 rows and 8 cells per row; Badge(label, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Alert(title, detail, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Progress(label, value, detail?, tone?) where value is a 0-100 number and tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Card(title, description, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; EmptyState(title, description, actionLabel?) where actionLabel is decorative only and does not perform an action; Disclosure(title, summary, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; Tabs(tabs) where tabs is an array of Tab entries and is display-only; Tab(label, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; AvatarLabel(name, subtitle?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; ItemList(title, items); Item(title, description, meta?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\". Do not use LiveRecord or LiveView unless the active organization has the real-time-apps feature flag; when access is unknown, use static OpenUI components. Use this valid shape as the model for generated openuiRaw: root = AppCanvas(\"Agent work health\", \"A generated operating read for this space.\", \"2026-06-14\", [overview, operations, next])\n\noverview = Section(\"Current shape\", \"The most important static sample metrics.\", \"single\", [metrics])\nmetrics = MetricRow([m1, m2, m3, m4])\nm1 = Metric(\"Revenue\", \"$128.4K\", \"+12%\", \"Monthly recurring revenue is trending upward.\", \"good\", s1)\nm2 = Metric(\"Users\", \"24.1K\", \"+5.3%\", \"Active users increased across the sample period.\", \"good\", s2)\nm3 = Metric(\"Conversion\", \"3.2%\", \"-0.1%\", \"Conversion is nearly flat and worth watching.\", \"risk\", s3)\nm4 = Metric(\"Uptime\", \"99.99%\", \"stable\", \"Service reliability is inside target.\", \"calm\", s4)\ns1 = Sparkline([82, 84, 86, 90, 94, 99], \"good\")\ns2 = Sparkline([19, 20, 21, 22, 23, 24], \"good\")\ns3 = Sparkline([4, 3.8, 3.5, 3.4, 3.3, 3.2], \"risk\")\ns4 = Sparkline([99.9, 99.95, 99.98, 99.99], \"calm\")\n\noperations = Section(\"Operating signals\", \"Capacity and health signals for the sample app.\", \"split\", [workload, signals])\nworkload = WorkloadPanel(\"Team utilization\", \"Static sample allocation by team.\", [w1, w2, w3])\nw1 = WorkloadBar(\"Engineering\", 85, \"85%\", \"risk\")\nw2 = WorkloadBar(\"Design\", 62, \"62%\", \"calm\")\nw3 = WorkloadBar(\"Marketing\", 44, \"44%\", \"good\")\nsignals = SignalPanel(\"Service health\", [sig1, sig2, sig3])\nsig1 = Signal(\"API\", \"Operational\", \"good\")\nsig2 = Signal(\"CDN\", \"Degraded\", \"risk\")\nsig3 = Signal(\"Search\", \"Down\", \"urgent\")\n\nnext = Section(\"Next actions\", \"Static sample activity, priorities, and phase-one surfaces.\", \"split\", [timeline, focus, card, table])\ntimeline = Timeline(\"Recent activity\", [t1, t2])\nt1 = TimelineItem(\"2 hours ago\", \"Deployment shipped\", \"Version 2.14 reached production.\", \"good\")\nt2 = TimelineItem(\"5 hours ago\", \"Incident resolved\", \"Search timeout mitigation completed.\", \"risk\")\nfocus = FocusList(\"Priority items\", [f1, f2])\nf1 = FocusItem(\"Fix search indexing pipeline\", \"Alex\", \"Today\", \"high\")\nf2 = FocusItem(\"Finalize roadmap review\", \"Sam\", \"Tomorrow\", \"medium\")\ncard = Card(\"Launch readiness\", \"Static shadcn-inspired display primitives.\", [badge, progress, alert, people, empty])\nbadge = Badge(\"On track\", \"good\")\nprogress = Progress(\"Checklist\", 72, \"Five of seven checks are complete.\", \"good\")\nalert = Alert(\"Watch search\", \"Index latency needs one more verification pass.\", \"risk\")\npeople = ItemList(\"Owners\", [owner1, owner2])\nowner1 = Item(\"Engineering\", \"Pipeline mitigation and rollout checks.\", \"Alex\", \"good\")\nowner2 = Item(\"Product\", \"Customer note and launch criteria.\", \"Sam\", \"calm\")\nempty = EmptyState(\"No blockers\", \"No critical unresolved blockers are currently listed.\", \"Add blocker\")\ntable = DataTable(\"Readiness matrix\", [\"Area\", \"Status\"], [[\"API\", \"Ready\"], [\"Search\", \"Watching\"]], \"Static sample rows\"). Do not create HTML files, folders, standalone apps, or local artifacts for app requests.",
+      "description": "Create a saved prompt-backed 0000 app for a space with an initial app revision. For prompt-backed OpenUI apps, generate, validate, and save the first OpenUI output with apps.generateFromRevision so it appears in the app. Raw OpenUI must begin with root = AppCanvas(...), not AppCanvas { ... } or JSX. Supported OpenUI app components: AppCanvas, Section, MetricRow, Metric, Sparkline, WorkloadPanel, WorkloadBar, SignalPanel, Signal, Timeline, TimelineItem, FocusList, FocusItem, DataTable, Badge, Alert, Progress, Card, EmptyState, Disclosure, Tabs, Tab, AvatarLabel, ItemList, Item. Exact signatures: AppCanvas(title, summary, generatedAtDate, sections); Section(title, description, layout, children) where layout is \"single\" or \"split\"; MetricRow(metrics); Metric(label, value, delta, detail, tone, sparkline) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Sparkline(values, tone?); WorkloadPanel(title, description, bars); WorkloadBar(label, value, count, tone) where value is a 0-100 number; SignalPanel(title, signals); Signal(label, summary, tone); Timeline(title, items); TimelineItem(time, title, detail, tone); FocusList(title, items); FocusItem(title, owner, due, priority) where priority is \"high\", \"medium\", or \"low\"; DataTable(title, columns, rows, caption?) where columns is a string array up to 8 values and rows is a string[][] up to 25 rows and 8 cells per row; Badge(label, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Alert(title, detail, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Progress(label, value, detail?, tone?) where value is a 0-100 number and tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Card(title, description, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; EmptyState(title, description, actionLabel?) where actionLabel is decorative only and does not perform an action; Disclosure(title, summary, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; Tabs(tabs) where tabs is an array of Tab entries and is display-only; Tab(label, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; AvatarLabel(name, subtitle?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; ItemList(title, items); Item(title, description, meta?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\". Do not use LiveRecord or LiveView unless the active organization has the real-time-apps feature flag; when access is unknown, use static OpenUI components. Use this valid shape as the model for generated openuiRaw: root = AppCanvas(\"Agent work health\", \"A generated operating read for this space.\", \"2026-06-14\", [overview, operations, next])\n\noverview = Section(\"Current shape\", \"The most important static sample metrics.\", \"single\", [metrics])\nmetrics = MetricRow([m1, m2, m3, m4])\nm1 = Metric(\"Revenue\", \"$128.4K\", \"+12%\", \"Monthly recurring revenue is trending upward.\", \"good\", s1)\nm2 = Metric(\"Users\", \"24.1K\", \"+5.3%\", \"Active users increased across the sample period.\", \"good\", s2)\nm3 = Metric(\"Conversion\", \"3.2%\", \"-0.1%\", \"Conversion is nearly flat and worth watching.\", \"risk\", s3)\nm4 = Metric(\"Uptime\", \"99.99%\", \"stable\", \"Service reliability is inside target.\", \"calm\", s4)\ns1 = Sparkline([82, 84, 86, 90, 94, 99], \"good\")\ns2 = Sparkline([19, 20, 21, 22, 23, 24], \"good\")\ns3 = Sparkline([4, 3.8, 3.5, 3.4, 3.3, 3.2], \"risk\")\ns4 = Sparkline([99.9, 99.95, 99.98, 99.99], \"calm\")\n\noperations = Section(\"Operating signals\", \"Capacity and health signals for the sample app.\", \"split\", [workload, signals])\nworkload = WorkloadPanel(\"Team utilization\", \"Static sample allocation by team.\", [w1, w2, w3])\nw1 = WorkloadBar(\"Engineering\", 85, \"85%\", \"risk\")\nw2 = WorkloadBar(\"Design\", 62, \"62%\", \"calm\")\nw3 = WorkloadBar(\"Marketing\", 44, \"44%\", \"good\")\nsignals = SignalPanel(\"Service health\", [sig1, sig2, sig3])\nsig1 = Signal(\"API\", \"Operational\", \"good\")\nsig2 = Signal(\"CDN\", \"Degraded\", \"risk\")\nsig3 = Signal(\"Search\", \"Down\", \"urgent\")\n\nnext = Section(\"Next actions\", \"Static sample activity, priorities, and phase-one surfaces.\", \"split\", [timeline, focus, card, table])\ntimeline = Timeline(\"Recent activity\", [t1, t2])\nt1 = TimelineItem(\"2 hours ago\", \"Deployment shipped\", \"Version 2.14 reached production.\", \"good\")\nt2 = TimelineItem(\"5 hours ago\", \"Incident resolved\", \"Search timeout mitigation completed.\", \"risk\")\nfocus = FocusList(\"Priority items\", [f1, f2])\nf1 = FocusItem(\"Fix search indexing pipeline\", \"Alex\", \"Today\", \"high\")\nf2 = FocusItem(\"Finalize roadmap review\", \"Sam\", \"Tomorrow\", \"medium\")\ncard = Card(\"Launch readiness\", \"Static shadcn-inspired display primitives.\", [badge, progress, alert, people, empty])\nbadge = Badge(\"On track\", \"good\")\nprogress = Progress(\"Checklist\", 72, \"Five of seven checks are complete.\", \"good\")\nalert = Alert(\"Watch search\", \"Index latency needs one more verification pass.\", \"risk\")\npeople = ItemList(\"Owners\", [owner1, owner2])\nowner1 = Item(\"Engineering\", \"Pipeline mitigation and rollout checks.\", \"Alex\", \"good\")\nowner2 = Item(\"Product\", \"Customer note and launch criteria.\", \"Sam\", \"calm\")\nempty = EmptyState(\"No blockers\", \"No critical unresolved blockers are currently listed.\", \"Add blocker\")\ntable = DataTable(\"Readiness matrix\", [\"Area\", \"Status\"], [[\"API\", \"Ready\"], [\"Search\", \"Watching\"]], \"Static sample rows\"). Do not create HTML files, folders, standalone apps, or local artifacts for app requests; native app types such as markdown decks are still saved 0000 apps, not local files.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -718,7 +723,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "apps",
-      "description": "Save generated OpenUI output for an existing saved 0000 app revision, preserving generation history. Use only these exact OpenUI component signatures: AppCanvas(title, summary, generatedAtDate, sections); Section(title, description, layout, children) where layout is \"single\" or \"split\"; MetricRow(metrics); Metric(label, value, delta, detail, tone, sparkline) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Sparkline(values, tone?); WorkloadPanel(title, description, bars); WorkloadBar(label, value, count, tone) where value is a 0-100 number; SignalPanel(title, signals); Signal(label, summary, tone); Timeline(title, items); TimelineItem(time, title, detail, tone); FocusList(title, items); FocusItem(title, owner, due, priority) where priority is \"high\", \"medium\", or \"low\"; DataTable(title, columns, rows, caption?) where columns is a string array up to 8 values and rows is a string[][] up to 25 rows and 8 cells per row; Badge(label, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Alert(title, detail, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Progress(label, value, detail?, tone?) where value is a 0-100 number and tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Card(title, description, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; EmptyState(title, description, actionLabel?) where actionLabel is decorative only and does not perform an action; Disclosure(title, summary, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; Tabs(tabs) where tabs is an array of Tab entries and is display-only; Tab(label, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; AvatarLabel(name, subtitle?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; ItemList(title, items); Item(title, description, meta?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\". Do not use LiveRecord or LiveView unless the active organization has the real-time-apps feature flag; when access is unknown, use static OpenUI components. Do not create HTML files or folders for generated app output.",
+      "description": "Save generated output for an existing prompt-backed 0000 app revision, preserving generation history. This tool currently saves OpenUI output; use only these exact OpenUI component signatures: AppCanvas(title, summary, generatedAtDate, sections); Section(title, description, layout, children) where layout is \"single\" or \"split\"; MetricRow(metrics); Metric(label, value, delta, detail, tone, sparkline) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Sparkline(values, tone?); WorkloadPanel(title, description, bars); WorkloadBar(label, value, count, tone) where value is a 0-100 number; SignalPanel(title, signals); Signal(label, summary, tone); Timeline(title, items); TimelineItem(time, title, detail, tone); FocusList(title, items); FocusItem(title, owner, due, priority) where priority is \"high\", \"medium\", or \"low\"; DataTable(title, columns, rows, caption?) where columns is a string array up to 8 values and rows is a string[][] up to 25 rows and 8 cells per row; Badge(label, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Alert(title, detail, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Progress(label, value, detail?, tone?) where value is a 0-100 number and tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Card(title, description, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; EmptyState(title, description, actionLabel?) where actionLabel is decorative only and does not perform an action; Disclosure(title, summary, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; Tabs(tabs) where tabs is an array of Tab entries and is display-only; Tab(label, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; AvatarLabel(name, subtitle?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; ItemList(title, items); Item(title, description, meta?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\". Do not use LiveRecord or LiveView unless the active organization has the real-time-apps feature flag; when access is unknown, use static OpenUI components. Do not create HTML files or folders for generated app output.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -761,7 +766,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "apps",
-      "description": "Read one saved 0000 app by id or slug.",
+      "description": "Read one saved 0000 app by id or slug, including its type-specific metadata and generated output when available.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
@@ -793,7 +798,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "apps",
-      "description": "List saved 0000 apps for a 0000 Chat space.",
+      "description": "List saved 0000 apps for a space, including OpenUI apps, markdown decks, and future app types.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
@@ -821,7 +826,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "apps",
-      "description": "List generated outputs for a saved 0000 app.",
+      "description": "List generated outputs for a saved prompt-backed 0000 app.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
@@ -1492,7 +1497,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "automations",
-      "description": "Create a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation. For thread-event triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any').",
+      "description": "Create a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation. For thread-event triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any'). For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -1777,7 +1782,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "automations",
-      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For space-based triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any').",
+      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For space-based triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any'). For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -2253,7 +2258,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "readOnlyHint": true
       },
       "approvalBehavior": "read_only",
-      "capabilityPack": "threads",
+      "capabilityPack": "core",
       "description": "Describe 0000 Chat MCP tool capabilities, core tools, surface-scoped tools, and workflow guides. Use this before choosing from deferred or surface-scoped tool packs.",
       "effect": "read",
       "executionMode": "read",
@@ -2281,7 +2286,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         }
       },
       "risk": "read",
-      "visibility": "deferred"
+      "visibility": "core"
     },
     "context.get": {
       "annotations": {
@@ -3518,6 +3523,35 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "risk": "read",
       "visibility": "core"
     },
+    "runtime.readEvidence": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "runtime",
+      "description": "Read bounded, organization-scoped runtime lifecycle aggregates. Returns allowlisted counts by event, entity, and next state only; never returns raw logs, prompts, content, secrets, cookies, tokens, or client-supplied organization scope. This is telemetry evidence only and does not perform deployment or rollback mutations.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "windowMs": {
+          "kind": "number",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
     "secrets.listAvailable": {
       "annotations": {
         "destructiveHint": false,
@@ -4222,6 +4256,61 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "threads.createChild": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "threads",
+      "description": "Create a new child thread under an authorized non-archived parent thread, in the parent's space. Pass initialUserMessage only when the user explicitly wants that text carried into the child.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "agentIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
+        "approvalLevel": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "ask",
+            "full_permissions"
+          ]
+        },
+        "clientThreadId": {
+          "kind": "string",
+          "optional": true
+        },
+        "initialUserMessage": {
+          "kind": "string",
+          "optional": true
+        },
+        "parentThreadId": {
+          "kind": "string"
+        },
+        "requireAgentSession": {
+          "kind": "boolean",
+          "optional": true
+        },
+        "summary": {
+          "kind": "string",
+          "optional": true
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
+        }
+      },
+      "risk": "user_interaction",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
     "threads.current": {
       "annotations": {
         "destructiveHint": false,
@@ -4341,6 +4430,102 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "updatedSince": {
           "kind": "number",
           "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.listChildren": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List direct child threads for an authorized parent thread. Archived children are omitted.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "parentThreadId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.listChildrenByTags": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List direct child threads for an authorized parent thread whose active tags match all or any requested tags. Archived children are omitted.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "parentThreadId": {
+          "kind": "string"
+        },
+        "tagMatch": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "all",
+            "any"
+          ]
+        },
+        "tags": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "thread"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "threads.listDescendants": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "threads",
+      "description": "List descendants at any depth for an authorized parent thread. Archived descendants are omitted.",
+      "effect": "read",
+      "executionMode": "read",
+      "inputSchema": {
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "parentThreadId": {
+          "kind": "string"
         }
       },
       "risk": "read",
@@ -4504,10 +4689,14 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Ask the user a structured multiple-choice question in the current 0000 Chat thread. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
+      "description": "Ask the user one or more structured questions in the current 0000 Chat thread. Supports single-choice, checkbox multi-select, text answers, custom answers, and multi-question batched submission. Use this instead of printing a lettered list when you need the multiple-choice UI and decision-needed thread indicator.",
       "effect": "interaction_write",
       "executionMode": "mutation",
       "inputSchema": {
+        "allowCustomResponse": {
+          "kind": "boolean",
+          "optional": true
+        },
         "choices": {
           "items": {
             "fields": {
@@ -4524,10 +4713,94 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             },
             "kind": "object"
           },
-          "kind": "array"
+          "kind": "array",
+          "optional": true
+        },
+        "customResponseLabel": {
+          "kind": "string",
+          "optional": true
         },
         "prompt": {
-          "kind": "string"
+          "kind": "string",
+          "optional": true
+        },
+        "questions": {
+          "items": {
+            "fields": {
+              "allowCustomResponse": {
+                "kind": "boolean",
+                "optional": true
+              },
+              "choices": {
+                "items": {
+                  "fields": {
+                    "description": {
+                      "kind": "string",
+                      "optional": true
+                    },
+                    "id": {
+                      "kind": "string"
+                    },
+                    "label": {
+                      "kind": "string"
+                    }
+                  },
+                  "kind": "object"
+                },
+                "kind": "array",
+                "optional": true
+              },
+              "customResponseLabel": {
+                "kind": "string",
+                "optional": true
+              },
+              "description": {
+                "kind": "string",
+                "optional": true
+              },
+              "id": {
+                "kind": "string"
+              },
+              "prompt": {
+                "kind": "string"
+              },
+              "required": {
+                "kind": "boolean",
+                "optional": true
+              },
+              "responseKind": {
+                "kind": "enum",
+                "optional": true,
+                "values": [
+                  "choice",
+                  "text"
+                ]
+              },
+              "selectionMode": {
+                "kind": "enum",
+                "optional": true,
+                "values": [
+                  "single",
+                  "multiple"
+                ]
+              }
+            },
+            "kind": "object"
+          },
+          "kind": "array",
+          "optional": true
+        },
+        "selectionMode": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "single",
+            "multiple"
+          ]
+        },
+        "title": {
+          "kind": "string",
+          "optional": true
         }
       },
       "risk": "user_interaction",
@@ -4543,6 +4816,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "objects.search",
     "objects.listLinked",
     "threads.current",
+    "runtime.readEvidence",
     "threads.readActivity",
     "threads.contextList",
     "threads.contextDescribe",
@@ -4551,6 +4825,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "threads.read",
     "threads.update",
     "threads.create",
+    "threads.createChild",
+    "threads.listChildren",
+    "threads.listDescendants",
+    "threads.listChildrenByTags",
     "threads.continue",
     "threads.fork",
     "messages.search",

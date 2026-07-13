@@ -1,17 +1,170 @@
-import { chmod, mkdtemp, writeFile } from "node:fs/promises"
+import { spawn, type ChildProcess } from "node:child_process"
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { describe, expect, test } from "bun:test"
+import * as runtimeDiscovery from "./runtime-discovery"
 import {
   capabilitiesFromInitializeResult,
   discoverRuntimeProfiles,
   resolveExecutableForSpawn,
   runtimeDiscoveryEnv,
 } from "./runtime-discovery"
+import { resolveNodeProxyExecutable } from "./acp-node-proxy-launcher"
 
 const noDiscoveredCommands = async () => []
 
 describe("runtime discovery", () => {
+  test("resolves Volta's concrete Node image for proxy launches", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-volta-node-"))
+    const fakeNodePath = join(tempDir, "node-image")
+    const fakeVoltaPath = join(tempDir, "volta")
+    await writeFile(fakeNodePath, "#!/bin/sh\nexit 0\n")
+    await writeFile(
+      fakeVoltaPath,
+      "#!/bin/sh\nif [ \"$1\" = \"which\" ] && [ \"$2\" = \"node\" ]; then printf '%s\\n' \"$FAKE_NODE_IMAGE\"; exit 0; fi\nexit 1\n",
+    )
+    await chmod(fakeNodePath, 0o755)
+    await chmod(fakeVoltaPath, 0o755)
+    try {
+      expect(
+        resolveNodeProxyExecutable({
+          FAKE_NODE_IMAGE: fakeNodePath,
+          PATH: tempDir,
+        }),
+      ).toBe(fakeNodePath)
+    } finally {
+      await rm(tempDir, { force: true, recursive: true })
+    }
+  })
+
+  test("detaches the Bun ACP discovery proxy for process-group cleanup", () => {
+    const module = runtimeDiscovery as typeof runtimeDiscovery & {
+      buildAcpDiscoveryProxySpawnOptions?: (
+        options: Parameters<typeof Bun.spawn>[1],
+      ) => Parameters<typeof Bun.spawn>[1]
+    }
+
+    expect(module.buildAcpDiscoveryProxySpawnOptions).toBeFunction()
+    expect(
+      module.buildAcpDiscoveryProxySpawnOptions?.({
+        detached: false,
+        stdio: ["pipe", "pipe", "pipe"],
+      })?.detached,
+    ).toBe(process.platform !== "win32")
+  })
+
+  test("force-kills ACP discovery probes that ignore SIGTERM", async () => {
+    const module = runtimeDiscovery as typeof runtimeDiscovery & {
+      terminateAcpDiscoveryChild?: (
+        child: ChildProcess,
+        options?: { killDelayMs?: number; timeoutMs?: number },
+      ) => Promise<void>
+    }
+    expect(module.terminateAcpDiscoveryChild).toBeFunction()
+
+    const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-stubborn-"))
+    const scriptPath = join(tempDir, "stubborn-probe.js")
+    await writeFile(
+      scriptPath,
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\n",
+    )
+    const child = spawn(process.execPath, [scriptPath], { stdio: "ignore" })
+    try {
+      await delay(50)
+      expect(isProcessAlive(child.pid)).toBe(true)
+
+      await module.terminateAcpDiscoveryChild?.(child, {
+        killDelayMs: 10,
+        timeoutMs: 1_000,
+      })
+
+      expect(isProcessAlive(child.pid)).toBe(false)
+    } finally {
+      if (isProcessAlive(child.pid)) {
+        child.kill("SIGKILL")
+      }
+      await rm(tempDir, { force: true, recursive: true })
+    }
+  })
+
+  test("ACP node proxy exits when its expected bridge parent is gone", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-orphan-"))
+    const scriptPath = join(tempDir, "long-running-runtime.js")
+    await writeFile(
+      scriptPath,
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\n",
+    )
+    const proxy = spawn(
+      "node",
+      [join(import.meta.dir, "acp-node-proxy.cjs"), process.execPath, scriptPath],
+      {
+        env: {
+          ...process.env,
+          ZERO_CHAT_ACP_PROXY_PARENT_CHECK_MS: "10",
+          ZERO_CHAT_ACP_PROXY_PARENT_PID: "99999999",
+          ZERO_CHAT_ACP_PROXY_TERMINATE_GRACE_MS: "20",
+        },
+        stdio: "ignore",
+      },
+    )
+    try {
+      const result = await Promise.race([
+        waitForClose(proxy),
+        delay(1_000).then(() => "timeout" as const),
+      ])
+
+      expect(result).toBe("closed")
+      expect(isProcessAlive(proxy.pid)).toBe(false)
+    } finally {
+      if (isProcessAlive(proxy.pid)) {
+        proxy.kill("SIGKILL")
+      }
+      await rm(tempDir, { force: true, recursive: true })
+    }
+  })
+
+  test("ACP node proxy stays up when expected bridge parent is alive but indirect", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-indirect-parent-"))
+    const scriptPath = join(tempDir, "short-runtime.js")
+    await writeFile(scriptPath, "setTimeout(() => process.exit(0), 150)\n")
+    const expectedParent = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1000)"], {
+      stdio: "ignore",
+    })
+    const proxy = spawn(
+      "node",
+      [join(import.meta.dir, "acp-node-proxy.cjs"), process.execPath, scriptPath],
+      {
+        env: {
+          ...process.env,
+          ZERO_CHAT_ACP_PROXY_PARENT_CHECK_MS: "10",
+          ZERO_CHAT_ACP_PROXY_PARENT_PID: String(expectedParent.pid),
+          ZERO_CHAT_ACP_PROXY_TERMINATE_GRACE_MS: "20",
+        },
+        stdio: "ignore",
+      },
+    )
+    try {
+      const result = await Promise.race([
+        waitForClose(proxy),
+        delay(1_000).then(() => "timeout" as const),
+      ])
+
+      expect(result).toBe("closed")
+      expect(proxy.exitCode).toBe(0)
+      expect(isProcessAlive(proxy.pid)).toBe(false)
+    } finally {
+      if (isProcessAlive(proxy.pid)) {
+        proxy.kill("SIGKILL")
+      }
+      if (isProcessAlive(expectedParent.pid)) {
+        expectedParent.kill("SIGKILL")
+      }
+      await rm(tempDir, { force: true, recursive: true })
+    }
+  })
+
   test("resolves ACP executables before the Bun node proxy can lose shim PATH entries", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-bin-"))
     const executablePath = join(tempDir, "shim-runtime")
@@ -524,3 +677,22 @@ describe("runtime discovery", () => {
     })
   })
 })
+
+function isProcessAlive(pid: number | undefined): boolean {
+  if (!pid) {
+    return false
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function waitForClose(child: ChildProcess): Promise<"closed"> {
+  return new Promise((resolve) => {
+    child.once("close", () => resolve("closed"))
+    child.once("exit", () => resolve("closed"))
+  })
+}

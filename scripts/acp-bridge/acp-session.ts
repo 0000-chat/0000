@@ -1,4 +1,8 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
+import {
+  type ChildProcessWithoutNullStreams,
+  spawn,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -30,6 +34,7 @@ import type {
   AcpBridgeProcessRegistryEntry,
   AcpBridgeProcessRegistryLike,
 } from "./process-registry"
+import { resolveNodeProxyExecutable } from "./acp-node-proxy-launcher"
 
 export type HermesAcpRuntimeCapabilities = {
   loadSession: boolean
@@ -55,6 +60,7 @@ export type HermesAcpRuntimeCapabilities = {
 export type HermesAcpPromptResult = {
   sessionId: string
   rawResult: unknown
+  responseMeta?: unknown
   stopReason?: string
   text: string
   events: NormalizedBridgeEvent[]
@@ -465,6 +471,7 @@ export class HermesAcpSession {
     return {
       sessionId,
       rawResult,
+      responseMeta: extractResponseMeta(rawResult),
       stopReason,
       text: finalText.text,
       events: processedEvents,
@@ -1566,17 +1573,37 @@ function defaultSpawnProcess(
 ): ChildProcessWithoutNullStreams {
   const processEnv = buildAcpProcessEnv(env)
   if (process.versions.bun) {
+    const proxyOptions = buildAcpProxySpawnOptions(cwd, processEnv)
     return spawn(
-      "node",
+      resolveNodeProxyExecutable(proxyOptions.env),
       [join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"), command, ...args],
-      {
-        cwd,
-        env: processEnv,
-        stdio: ["pipe", "pipe", "pipe"],
-      },
+      proxyOptions,
     )
   }
   return spawn(command, args, { cwd, env: processEnv, stdio: ["pipe", "pipe", "pipe"] })
+}
+
+export function buildAcpProxySpawnOptions(
+  cwd: string | undefined,
+  processEnv: NodeJS.ProcessEnv | undefined,
+): SpawnOptionsWithoutStdio {
+  return {
+    cwd,
+    detached: process.platform !== "win32",
+    env: buildAcpProxyProcessEnv(processEnv),
+    stdio: ["pipe", "pipe", "pipe"],
+  }
+}
+
+export function buildAcpProxyProcessEnv(
+  env: NodeJS.ProcessEnv | undefined,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv,
+    ...env,
+    ZERO_CHAT_ACP_PROXY_PARENT_PID: String(process.pid),
+  }
 }
 
 export function buildAcpProcessEnv(
@@ -1665,6 +1692,40 @@ function extractStopReason(result: unknown): string | undefined {
   }
   const record = result as Record<string, unknown>
   return readString(record.stopReason)
+}
+
+function extractResponseMeta(result: unknown): unknown {
+  const record = readRecord(result)
+  const meta = readRecord(record?.["_meta"])
+  const hermes = readRecord(meta?.hermes)
+  const delegation = readRecord(hermes?.delegation)
+  if (!delegation) {
+    return undefined
+  }
+  const sanitized: Record<string, boolean | string> = {}
+  if (delegation.joinRequired === true) {
+    sanitized.joinRequired = true
+  }
+  const settlementState = readString(delegation.settlementState)
+  if (
+    settlementState === "join_required" ||
+    settlementState === "joined" ||
+    settlementState === "output-available" ||
+    settlementState === "timed_out" ||
+    settlementState === "cancelled"
+  ) {
+    sanitized.settlementState = settlementState
+  }
+  const reason = readString(delegation.reason)
+  if (
+    reason === "join_timeout" ||
+    reason === "parent_cancelled" ||
+    reason === "prompt_cancelled" ||
+    reason === "prompt_exception"
+  ) {
+    sanitized.reason = reason
+  }
+  return Object.keys(sanitized).length > 0 ? { hermes: { delegation: sanitized } } : undefined
 }
 
 function extractTokenUsage(result: unknown): HermesAcpTokenUsage | undefined {

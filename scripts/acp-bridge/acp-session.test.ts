@@ -9,6 +9,8 @@ import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientproto
 
 import {
   buildAcpProcessEnv,
+  buildAcpProxyProcessEnv,
+  buildAcpProxySpawnOptions,
   DEFAULT_ACP_PROCESS_EXIT_GRACE_MS,
   expandLocalCwd,
   HermesAcpRuntimeAdapter,
@@ -51,6 +53,74 @@ describe("ACP final text extraction", () => {
     expect(env?.GIT_COMMITTER_EMAIL).toBeUndefined();
     expect(env?.GIT_COMMITTER_NAME).toBeUndefined();
   });
+
+  test("keeps parent environment when building Bun proxy env without overrides", () => {
+    const env = buildAcpProxyProcessEnv(undefined, {
+      HOME: "/home/tester",
+      PATH: "/usr/local/bin:/usr/bin",
+    });
+
+    expect(env.HOME).toBe("/home/tester");
+    expect(env.PATH).toBe("/usr/local/bin:/usr/bin");
+    expect(env.ZERO_CHAT_ACP_PROXY_PARENT_PID).toBe(String(process.pid));
+  });
+
+  test("detaches Bun session proxy so process-group cleanup reaches runtime children", () => {
+    const options = buildAcpProxySpawnOptions("/tmp/work", {
+      PATH: "/usr/bin",
+    });
+
+    expect(options?.cwd).toBe("/tmp/work");
+    expect(options?.detached).toBe(process.platform !== "win32");
+    expect(options?.env?.PATH).toBe("/usr/bin");
+    expect(options?.env?.ZERO_CHAT_ACP_PROXY_PARENT_PID).toBe(String(process.pid));
+  });
+
+  test("preserves only the Hermes delegation lifecycle envelope from ACP PromptResponse _meta", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({
+        promptResult: {
+          _meta: {
+            arbitraryProviderData: { secret: "must not persist" },
+            hermes: {
+              delegation: {
+                joinRequired: true,
+                reason: "join_timeout",
+                secret: "must not persist",
+                settlementState: "timed_out",
+              },
+            },
+          },
+          stopReason: "end_turn",
+        },
+        updates: [],
+      }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.responseMeta).toEqual({
+      hermes: {
+        delegation: {
+          joinRequired: true,
+          reason: "join_timeout",
+          settlementState: "timed_out",
+        },
+      },
+    })
+  })
+
+  test("keeps legacy prompt results without ACP _meta free of response metadata", async () => {
+    const session = new HermesAcpSession({
+      agentCommand: "hermes acp",
+      runtimeClient: createFakeRuntimeClient({ updates: [] }),
+    })
+
+    const result = await session.sendUserMessage("hello")
+
+    expect(result.responseMeta).toBeUndefined()
+  })
 
   test("keeps simple Codex ACP answer chunks when the turn has no tool activity", async () => {
     const session = new HermesAcpSession({

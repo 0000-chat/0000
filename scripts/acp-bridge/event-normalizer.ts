@@ -341,6 +341,8 @@ function isRoutineCliStatusLine(text: string): boolean {
 
 function isRoutineHermesLifecycleLogLine(text: string): boolean {
   return (
+    /\basync delegation completed successfully\b/i.test(text) ||
+    /\bdelegation batch finished successfully\b/i.test(text) ||
     /acp_adapter\.server:\s*ACP client connected/i.test(text) ||
     /Initialize from unknown \(protocol v\d+\)/i.test(text) ||
     /run_agent:\s*Loaded environment variables/i.test(text) ||

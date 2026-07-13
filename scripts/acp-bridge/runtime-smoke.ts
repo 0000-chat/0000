@@ -335,8 +335,7 @@ async function main() {
 }
 
 async function shutdownSmokeProbeChildren() {
-  terminateActiveAcpDiscoveryChildren()
-  await new Promise((resolve) => setTimeout(resolve, 1200))
+  await terminateActiveAcpDiscoveryChildren()
 }
 
 if (import.meta.main) {

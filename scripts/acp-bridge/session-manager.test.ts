@@ -2844,7 +2844,7 @@ describe("bridge session cwd safety", () => {
   });
 
   test("persists ACP usage metadata and usage update events in prompt results", async () => {
-    const cloud = fakeCloudClient();
+    const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: () => ({
@@ -2853,6 +2853,11 @@ describe("bridge session cwd safety", () => {
         sendUserMessage: async () => ({
           events: [],
           rawResult: {},
+          responseMeta: {
+            hermes: {
+              delegation: { reason: "join_timeout", settlementState: "timed_out" },
+            },
+          },
           sessionId: "session-1",
           text: "ok",
           usage: {
@@ -2877,6 +2882,11 @@ describe("bridge session cwd safety", () => {
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-1",
       result: {
+        acpResponseMeta: {
+          hermes: {
+            delegation: { reason: "join_timeout", settlementState: "timed_out" },
+          },
+        },
         acpUsage: {
           cachedInputTokens: 96,
           inputTokens: 120,

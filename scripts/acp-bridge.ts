@@ -155,7 +155,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.58";
+export const BRIDGE_VERSION = "0.1.60";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -757,6 +757,10 @@ export type BridgeLoopIterationInput = {
   sendHeartbeat?: typeof sendHeartbeat;
   discoverHermesProfiles?: typeof discoverHermesProfiles;
   discoverRuntimeProfiles?: typeof discoverBridgeRuntimeProfiles;
+  onRuntimeCatalogRefreshed?: (catalog: {
+    hermesProfiles: HermesProfileSummary[];
+    runtimeProfiles: BridgeRuntimeProfile[];
+  }) => Promise<void> | void;
   cleanupStaleClaims?: typeof cleanupStaleClaims;
   claimCommands?: typeof claimCommands;
   markCommandResult?: typeof markCommandResult;
@@ -2028,39 +2032,21 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         discoveredRuntimeProfiles,
         agentCommand,
       );
-      const runtimeCatalogChanged = runtimeProfilesChanged(
-        runtimeProfiles,
-        nextRuntimeProfiles,
-      );
+      const previousRuntimeProfiles = runtimeProfiles;
       runtimeProfiles = nextRuntimeProfiles;
       launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
         hermesProfiles: nextHermesProfiles,
         runtimeProfiles,
       });
-      for (const context of contexts.values()) {
-        context.status.hermesProfiles = nextHermesProfiles;
-        context.status.runtimeProfiles = runtimeProfiles;
-        context.status.lastHermesProfileRefreshAt = new Date().toISOString();
-        context.status.lastRuntimeProfileRefreshAt = new Date().toISOString();
-        if (runtimeCatalogChanged) {
-          context.status.lifecycle = "restartPending";
-          context.status.pendingControlCommand = {
-            command: "restartWhenIdle",
-            requestedAt: Date.now(),
-          };
-          context.status.updateState = buildBridgeUpdateState(
-            "waitingForIdle",
-            Date.now(),
-            {
-              requestedAt: context.status.pendingControlCommand.requestedAt,
-              targetVersion: BRIDGE_VERSION,
-            },
-          );
-        }
-      }
-      if (!runtimeCatalogChanged) {
-        await refreshRuntimeConformanceIfStale({ force: true });
-      }
+      await applyRuntimeCatalogRefreshResult({
+        hermesProfiles: nextHermesProfiles,
+        persistRuntimeCatalogCache,
+        previousRuntimeProfiles,
+        refreshRuntimeConformanceIfStale: () =>
+          refreshRuntimeConformanceIfStale({ force: true }),
+        refreshedRuntimeProfiles: runtimeProfiles,
+        statuses: Array.from(contexts.values()).map((context) => context.status),
+      });
     })().catch(() => undefined);
   };
   const ensureContexts = async () => {
@@ -2683,6 +2669,24 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
       pollReason,
       reserveClaimSlots: () => reserveClaimSlotsForContext(context),
+      onRuntimeCatalogRefreshed: async (catalog) => {
+        const nextRuntimeProfiles = seedConfiguredHermesRuntimeProfile(
+          catalog.runtimeProfiles,
+          agentCommand,
+        );
+        const runtimeCatalogChanged = runtimeProfilesChanged(
+          runtimeProfiles,
+          nextRuntimeProfiles,
+        );
+        runtimeProfiles = nextRuntimeProfiles;
+        launchSpecRuntimeProfiles = buildHermesLaunchSpecRuntimeProfiles({
+          hermesProfiles: catalog.hermesProfiles,
+          runtimeProfiles,
+        });
+        if (runtimeCatalogChanged) {
+          await persistRuntimeCatalogCache();
+        }
+      },
       restartHandoffPath,
       isProcessIdleForRestart: () => totalInFlight() === 0,
     });
@@ -2800,7 +2804,8 @@ async function refreshRuntimeConformanceProfiles(input: {
   for (const profile of profiles) {
     if (
       isLaunchSpecRuntimeProfile(profile) &&
-      !priorityProfileIds.has(profile.id)
+      !priorityProfileIds.has(profile.id) &&
+      nextRecords[profile.id] === undefined
     ) {
       continue;
     }
@@ -3154,29 +3159,12 @@ function buildBridgeRestartHandoffEntry(
     .map((id) => id.trim())
     .filter(Boolean)
     .slice(0, BRIDGE_RESTART_HANDOFF_MAX_PROFILES);
-  const sessionWarmupHints = (status.sessionQueues ?? [])
-    .filter((session) => session.threadId.trim())
-    .map((session) =>
-      compact({
-        agentSessionId: session.agentSessionId,
-        bridgeProfileId: session.bridgeProfileId ?? session.runtimeProfileId,
-        claimId: session.claimId,
-        hermesProfileName: session.hermesProfileName,
-        lastActivityAt: session.lastActivityAt,
-        lastUsedAt:
-          typeof session.lastUsedAt === "number" &&
-          Number.isFinite(session.lastUsedAt)
-            ? session.lastUsedAt
-            : undefined,
-        organizationId: session.organizationId,
-        queueItemId: session.runningQueueItemId,
-        runtimeProfileId: session.runtimeProfileId,
-        sessionKey: session.sessionKey,
-        threadId: session.threadId,
-      }),
-    )
-    .sort((left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0))
-    .slice(0, BRIDGE_RESTART_HANDOFF_MAX_SESSIONS);
+  // Do not restore ACP sessions across a bridge restart. A retained queue record
+  // can represent stale claimed work, and even an apparently active record can
+  // relaunch an abandoned provider turn and consume the entire process cap.
+  // Runtime profiles are still handed off above; user work is reclaimed from
+  // the cloud queue by the normal claim path.
+  const sessionWarmupHints: BridgeRestartHandoffEntry["sessionWarmupHints"] = [];
   return {
     appUrlHash: bridgeRestartHandoffAppUrlHash(status.appUrl),
     deviceId: status.deviceId,
@@ -4021,6 +4009,10 @@ export async function runBridgeLoopIteration(
               baseAgentCommand: input.agentCommand ?? DEFAULT_AGENT_COMMAND,
               customCommands: input.runtimeCommands,
             });
+            await input.onRuntimeCatalogRefreshed?.({
+              hermesProfiles: input.status.hermesProfiles,
+              runtimeProfiles: refreshedRuntimeProfiles,
+            });
             input.status.runtimeProfiles = refreshedRuntimeProfiles;
             const refreshedAt = new Date(currentTime()).toISOString();
             input.status.lastHermesProfileRefreshAt = refreshedAt;
@@ -4532,6 +4524,64 @@ export function bridgeHeartbeatSignature(
       : undefined,
     updateState: status.updateState,
   });
+}
+
+type RuntimeCatalogRefreshStatusTarget = Pick<
+  BridgeStatus,
+  | "hermesProfiles"
+  | "lastHermesProfileRefreshAt"
+  | "lastRuntimeProfileRefreshAt"
+  | "lifecycle"
+  | "pendingControlCommand"
+  | "runtimeProfiles"
+  | "updateState"
+>;
+
+export async function applyRuntimeCatalogRefreshResult(input: {
+  hermesProfiles: HermesProfileSummary[];
+  now?: () => number;
+  persistRuntimeCatalogCache: () => Promise<void>;
+  previousRuntimeProfiles: BridgeRuntimeProfile[];
+  refreshRuntimeConformanceIfStale?: () => Promise<void>;
+  refreshedRuntimeProfiles: BridgeRuntimeProfile[];
+  statuses: Iterable<RuntimeCatalogRefreshStatusTarget>;
+}): Promise<{ runtimeCatalogChanged: boolean }> {
+  const refreshedAtMs = input.now?.() ?? Date.now();
+  const refreshedAt = new Date(refreshedAtMs).toISOString();
+  const statuses = Array.from(input.statuses);
+  const runtimeCatalogChanged = runtimeProfilesChanged(
+    input.previousRuntimeProfiles,
+    input.refreshedRuntimeProfiles,
+  );
+
+  for (const status of statuses) {
+    status.hermesProfiles = input.hermesProfiles;
+    status.runtimeProfiles = input.refreshedRuntimeProfiles;
+    status.lastHermesProfileRefreshAt = refreshedAt;
+    status.lastRuntimeProfileRefreshAt = refreshedAt;
+  }
+
+  if (!runtimeCatalogChanged) {
+    await input.refreshRuntimeConformanceIfStale?.();
+    return { runtimeCatalogChanged };
+  }
+
+  await input.persistRuntimeCatalogCache();
+
+  const requestedAt = input.now?.() ?? Date.now();
+  for (const status of statuses) {
+    status.lifecycle = "restartPending";
+    status.pendingControlCommand = {
+      command: "restartWhenIdle",
+      requestedAt,
+    };
+    status.updateState = buildBridgeUpdateState("waitingForIdle", requestedAt, {
+      requestedAt,
+      targetVersion: BRIDGE_VERSION,
+    });
+  }
+
+  return { runtimeCatalogChanged };
 }
 
 function runtimeProfilesChanged(
