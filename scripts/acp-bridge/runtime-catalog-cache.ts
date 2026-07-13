@@ -95,6 +95,18 @@ export async function loadRuntimeCatalogCache(input: {
     }
     conformanceRecords[profile.id] = record
   }
+  for (const [runtimeId, record] of Object.entries(file.conformanceRecords)) {
+    if (conformanceRecords[runtimeId]) {
+      continue
+    }
+    if (!isOwnedHermesLaunchSpecRuntimeId(runtimeId, profiles)) {
+      continue
+    }
+    if (!isSafeCachedConformanceRecord(record, runtimeId, input.now, input.ttlMs)) {
+      continue
+    }
+    conformanceRecords[runtimeId] = record
+  }
   if (profiles.length === 0) {
     return null
   }
@@ -130,6 +142,19 @@ export async function writeRuntimeCatalogCache(input: {
     }
     conformanceRecords[sanitizedProfile.id] = record
   }
+  for (const [runtimeId, rawRecord] of Object.entries(input.conformanceRecords)) {
+    if (conformanceRecords[runtimeId]) {
+      continue
+    }
+    if (!isOwnedHermesLaunchSpecRuntimeId(runtimeId, profiles)) {
+      continue
+    }
+    const record = sanitizeConformanceRecord(rawRecord)
+    if (!record || !isSafeCachedConformanceRecord(record, runtimeId, input.now, input.ttlMs)) {
+      continue
+    }
+    conformanceRecords[runtimeId] = record
+  }
   const payload: RuntimeCatalogCacheFile = {
     cacheKey: runtimeCatalogCacheKey(input),
     conformanceRecords,
@@ -147,6 +172,25 @@ export async function writeRuntimeCatalogCache(input: {
   await chmod(tmpPath, PRIVATE_FILE_MODE)
   await rename(tmpPath, cachePath)
   await chmod(cachePath, PRIVATE_FILE_MODE).catch(() => undefined)
+}
+
+function isOwnedHermesLaunchSpecRuntimeId(
+  runtimeId: string,
+  profiles: BridgeRuntimeProfile[],
+): boolean {
+  const marker = "|hermes-profile:"
+  const markerIndex = runtimeId.indexOf(marker)
+  if (
+    markerIndex <= 0 ||
+    markerIndex + marker.length >= runtimeId.length ||
+    runtimeId.indexOf(marker, markerIndex + marker.length) !== -1
+  ) {
+    return false
+  }
+  const baseRuntimeId = runtimeId.slice(0, markerIndex)
+  return profiles.some(
+    (profile) => profile.id === baseRuntimeId && profile.kind === "hermes",
+  )
 }
 
 function parseCacheFile(raw: unknown): RuntimeCatalogCacheFile | null {

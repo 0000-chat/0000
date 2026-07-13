@@ -65,6 +65,54 @@ describe("runtime catalog cache", () => {
     }))
   })
 
+  test("persists conformance for launch specs owned by a cached Hermes runtime", async () => {
+    const path = await tempCachePath()
+    const hermesProfile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      id: "hermes:default",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    }
+    const launchSpecRecord: RuntimeConformanceRecord = {
+      checkedAt,
+      diagnostics: [],
+      runtimeId: "hermes:default|hermes-profile:app-builder",
+      state: "passing",
+      strength: "init_only",
+    }
+    const unrelatedRecord: RuntimeConformanceRecord = {
+      ...launchSpecRecord,
+      runtimeId: "other:default|hermes-profile:app-builder",
+    }
+
+    await writeRuntimeCatalogCache({
+      bridgeVersion: "0.1.28",
+      cachePath: path,
+      conformanceRecords: {
+        [launchSpecRecord.runtimeId]: launchSpecRecord,
+        [unrelatedRecord.runtimeId]: unrelatedRecord,
+      },
+      now,
+      profiles: [hermesProfile],
+      runtimeCommandKeys: [["hermes", "acp"]],
+      ttlMs: 60_000,
+    })
+
+    const loaded = await loadRuntimeCatalogCache({
+      bridgeVersion: "0.1.28",
+      cachePath: path,
+      now,
+      runtimeCommandKeys: [["hermes", "acp"]],
+      ttlMs: 60_000,
+    })
+
+    expect(loaded?.conformanceRecords).toEqual({
+      [launchSpecRecord.runtimeId]: launchSpecRecord,
+    })
+  })
+
   test("drops stale conformance records and rejects stale cache files or key mismatches", async () => {
     const path = await tempCachePath()
     await writeRuntimeCatalogCache({

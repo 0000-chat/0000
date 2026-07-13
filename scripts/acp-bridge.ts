@@ -1966,7 +1966,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }).catch(() => undefined);
   };
   const refreshRuntimeConformanceIfStale = async (
-    options: { force?: boolean } = {},
+    options: { force?: boolean; maxMissingLaunchSpecProbes?: number } = {},
   ) => {
     const ownerContext = contexts.values().next().value as
       | RuntimeContext
@@ -1981,6 +1981,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       getRunningSessionProfileIds: () =>
         bridgeRunningSessionRuntimeProfileIds(contexts.values()),
       lastProbeAtByProfile: lastRuntimeConformanceProbeAtByProfile,
+      maxMissingLaunchSpecProbes: options.maxMissingLaunchSpecProbes,
       now: () => Date.now(),
       probeProfile: async (profile) =>
         runRuntimeConformance({
@@ -2007,6 +2008,24 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     for (const context of contexts.values()) {
       context.status.runtimeConformance = runtimeConformanceSummary();
     }
+  };
+  const canProbeMissingLaunchSpec = () => {
+    if (
+      processControlPending() ||
+      totalInFlight() > 0 ||
+      bridgeRunningSessionRuntimeProfileIds(contexts.values()).size > 0
+    ) {
+      return false;
+    }
+    const ownerContext = contexts.values().next().value as
+      | RuntimeContext
+      | undefined;
+    return Boolean(
+      ownerContext?.supervisor.canClaimWork() &&
+        processWarmCapacityForHealth(
+          ownerContext.supervisor.getProcessHealth(),
+        ) > 0,
+    );
   };
   const recordSuccessfulRuntimeConformance = (
     item: { bridgeProfileId?: string; hermesProfileName?: string; kind?: string; type?: string },
@@ -2759,10 +2778,25 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
   };
 
+  let contextLoopsStarted = false;
   while (!stopping) {
     await ensureContexts();
-    await refreshRuntimeConformanceIfStale();
+    const missingLaunchSpecProbeBudget =
+      contextLoopsStarted && canProbeMissingLaunchSpec() ? 1 : 0;
+    if (missingLaunchSpecProbeBudget > 0) {
+      reservedClaimSlots += 1;
+    }
+    try {
+      await refreshRuntimeConformanceIfStale({
+        maxMissingLaunchSpecProbes: missingLaunchSpecProbeBudget,
+      });
+    } finally {
+      if (missingLaunchSpecProbeBudget > 0) {
+        reservedClaimSlots = Math.max(0, reservedClaimSlots - 1);
+      }
+    }
     startContextLoops();
+    contextLoopsStarted = true;
     if (cachedRuntimeCatalog && !startupRuntimeCatalogRefreshScheduled) {
       startupRuntimeCatalogRefreshScheduled = true;
       refreshRuntimeCatalogInBackground();
@@ -2774,6 +2808,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
 export async function refreshRuntimeConformanceProfilesForTest(input: {
   getInFlightProfileIds: () => Set<string>;
   getRunningSessionProfileIds: () => Set<string>;
+  maxMissingLaunchSpecProbes?: number;
   now: () => number;
   probeProfile: (
     profile: BridgeRuntimeProfile,
@@ -2800,6 +2835,7 @@ async function refreshRuntimeConformanceProfiles(input: {
   getInFlightProfileIds: () => Set<string>;
   getRunningSessionProfileIds: () => Set<string>;
   lastProbeAtByProfile: Map<string, number>;
+  maxMissingLaunchSpecProbes?: number;
   now: () => number;
   probeProfile: (
     profile: BridgeRuntimeProfile,
@@ -2810,6 +2846,10 @@ async function refreshRuntimeConformanceProfiles(input: {
   ttlMs: number;
 }): Promise<{ records: Record<string, RuntimeConformanceRecord> }> {
   const nextRecords = { ...input.records };
+  let missingLaunchSpecProbeBudget = Math.max(
+    0,
+    Math.floor(input.maxMissingLaunchSpecProbes ?? 0),
+  );
   const priorityProfileIds = new Set(input.priorityProfileIds ?? []);
   const profiles = prioritizeRuntimeConformanceProfiles(
     input.profiles.filter(
@@ -2820,10 +2860,13 @@ async function refreshRuntimeConformanceProfiles(input: {
     input.priorityProfileIds ?? [],
   );
   for (const profile of profiles) {
-    if (
+    const isMissingLaunchSpec =
       isLaunchSpecRuntimeProfile(profile) &&
+      nextRecords[profile.id] === undefined;
+    if (
+      isMissingLaunchSpec &&
       !priorityProfileIds.has(profile.id) &&
-      nextRecords[profile.id] === undefined
+      missingLaunchSpecProbeBudget <= 0
     ) {
       continue;
     }
@@ -2845,6 +2888,9 @@ async function refreshRuntimeConformanceProfiles(input: {
       const record = await input.probeProfile(profile);
       nextRecords[profile.id] = record;
       input.lastProbeAtByProfile.set(profile.id, record.checkedAt);
+      if (isMissingLaunchSpec && !priorityProfileIds.has(profile.id)) {
+        missingLaunchSpecProbeBudget -= 1;
+      }
     }
   }
   return { records: nextRecords };
@@ -6565,6 +6611,7 @@ export function normalizeQueueCommand(
     : undefined;
   const prompt =
     stringFromUnknown(record.prompt) ??
+    (type === "prompt" ? payloadText : undefined) ??
     (type === "choice-response"
       ? (payloadContinuationPrompt ?? payloadText)
       : undefined) ??
