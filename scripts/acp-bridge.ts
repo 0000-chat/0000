@@ -765,6 +765,7 @@ export type BridgeLoopIterationInput = {
   claimCommands?: typeof claimCommands;
   markCommandResult?: typeof markCommandResult;
   canClaimWork?: () => boolean;
+  canClaimPromptWork?: () => boolean;
   getProcessHealth?: () => BridgeProcessHealth;
   getRuntimeConformance?: () => RuntimeConformanceSummary | undefined;
   isProcessIdleForRestart?: () => boolean;
@@ -1942,6 +1943,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       (count, context) => count + context.inFlightCommands.size,
       0,
     );
+  const processControlPending = () =>
+    hasPendingBridgeProcessControl(
+      Array.from(contexts.values()).map((context) => context.status),
+    );
+  const processIdleForRestart = () =>
+    isBridgeProcessIdleForRestart(
+      Array.from(contexts.values()).map((context) => ({
+        inFlightCommandCount: context.inFlightCommands.size,
+        sessionQueues: context.manager.getStatus().sessions,
+      })),
+    );
   const persistRuntimeCatalogCache = async () => {
     await writeRuntimeCatalogCache({
       bridgeVersion: BRIDGE_VERSION,
@@ -2178,6 +2190,11 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       const handoffEntry = consumedRestartHandoff?.entries.find(
         (entry) => entry.deviceId === registration.deviceId,
       );
+      const startupControlCommandState =
+        reconcileBridgeStartupControlCommandState(
+          previousStatus,
+          getBridgeRuntimeIdentity(),
+        );
       const status: BridgeStatus = {
         deviceId: registration.deviceId,
         appUrl: registration.appUrl,
@@ -2200,10 +2217,10 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
         runtimeIdentity: getBridgeRuntimeIdentity(),
-        controlCommandStatus: reconcileBridgeStartupControlCommandStatus(
-          previousStatus,
-          getBridgeRuntimeIdentity(),
-        ),
+        pendingControlCommand:
+          startupControlCommandState.pendingControlCommand,
+        controlCommandStatus:
+          startupControlCommandState.controlCommandStatus,
         restartHandoff:
           consumedRestartHandoff && handoffEntry
             ? buildRestartHandoffStatus(
@@ -2652,6 +2669,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       recordLoopError: recordLoopError(context),
       statusPath,
       canClaimWork: () => context.supervisor.canClaimWork(),
+      canClaimPromptWork: () => !processControlPending(),
       getProcessHealth: () =>
         mergeBridgeProcessHealth(
           context.supervisor.getProcessHealth(),
@@ -2688,7 +2706,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         }
       },
       restartHandoffPath,
-      isProcessIdleForRestart: () => totalInFlight() === 0,
+      isProcessIdleForRestart: processIdleForRestart,
     });
   };
 
@@ -2940,7 +2958,7 @@ function buildHermesLaunchSpecRuntimeProfiles(input: {
   });
 }
 
-function buildAggregateBridgeStatus(
+export function buildAggregateBridgeStatus(
   contexts: Array<{
     config: BridgeRegistration;
     status: BridgeStatus;
@@ -2956,6 +2974,7 @@ function buildAggregateBridgeStatus(
     lifecycle: status.lifecycle,
     updateState: status.updateState,
     devHotReload: status.devHotReload,
+    pendingControlCommand: status.pendingControlCommand,
     controlCommandStatus: status.controlCommandStatus,
     restartHandoff: status.restartHandoff,
     lastStartedAt: status.lastStartedAt,
@@ -2984,6 +3003,7 @@ function buildAggregateBridgeStatus(
     lifecycle: first?.status.lifecycle,
     updateState: first?.status.updateState,
     devHotReload: first?.status.devHotReload,
+    pendingControlCommand: first?.status.pendingControlCommand,
     controlCommandStatus: first?.status.controlCommandStatus,
     restartHandoff: first?.status.restartHandoff,
     lastStartedAt: first?.status.lastStartedAt,
@@ -3072,6 +3092,95 @@ function normalizeControlCommandStatus(
     status: value.status,
     targetVersion: boundControlCommandTargetVersion(value.targetVersion),
   });
+}
+
+function sameBridgeControlCommand(
+  left: BridgeControlCommandState | undefined,
+  right: BridgeControlCommandState | undefined,
+): boolean {
+  return (
+    left?.command === right?.command &&
+    left?.requestedAt === right?.requestedAt
+  );
+}
+
+function actionableBridgeControlCommand(
+  status: Pick<BridgeStatus, "controlCommandStatus" | "pendingControlCommand">,
+): BridgeControlCommandState | undefined {
+  const pending = normalizeControlCommand(status.pendingControlCommand);
+  if (pending) {
+    return pending;
+  }
+  const lifecycle = normalizeControlCommandStatus(status.controlCommandStatus);
+  if (
+    lifecycle?.status !== "accepted" &&
+    lifecycle?.status !== "waiting_for_idle"
+  ) {
+    return undefined;
+  }
+  return {
+    command: lifecycle.command,
+    requestedAt: lifecycle.requestedAt,
+  };
+}
+
+export function hasPendingBridgeProcessControl(
+  statuses: Iterable<
+    Pick<BridgeStatus, "controlCommandStatus" | "pendingControlCommand">
+  >,
+): boolean {
+  return Array.from(statuses).some((status) =>
+    Boolean(actionableBridgeControlCommand(status)),
+  );
+}
+
+export function isBridgeProcessIdleForRestart(
+  registrations: Iterable<{
+    inFlightCommandCount: number;
+    sessionQueues: Array<{
+      queueDepth?: number;
+      runningQueueItemId?: string;
+    }>;
+  }>,
+): boolean {
+  return Array.from(registrations).every(
+    (registration) =>
+      registration.inFlightCommandCount === 0 &&
+      registration.sessionQueues.every(
+        (session) =>
+          !session.runningQueueItemId && (session.queueDepth ?? 0) === 0,
+      ),
+  );
+}
+
+function acceptBridgeControlCommand(
+  status: Pick<
+    BridgeStatus,
+    "controlCommandStatus" | "pendingControlCommand" | "runtimeIdentity"
+  >,
+  command: BridgeControlCommandState,
+  now: number,
+): boolean {
+  const normalized = normalizeControlCommand(command);
+  if (!normalized) {
+    return false;
+  }
+  if (
+    sameBridgeControlCommand(actionableBridgeControlCommand(status), normalized)
+  ) {
+    return false;
+  }
+  status.pendingControlCommand = normalized;
+  status.controlCommandStatus = buildControlCommandStatus(
+    normalized.command,
+    "accepted",
+    {
+      acceptedAt: now,
+      instanceId: status.runtimeIdentity?.instanceId,
+      requestedAt: normalized.requestedAt,
+    },
+  );
+  return true;
 }
 
 function buildControlCommandStatus(
@@ -3484,6 +3593,89 @@ export function reconcileBridgeStartupControlCommandStatus(
   });
 }
 
+export function reconcileBridgeStartupControlCommandState(
+  previousStatus:
+    | Pick<
+        BridgeStatus,
+        | "controlCommandStatus"
+        | "lifecycle"
+        | "pendingControlCommand"
+        | "updateState"
+      >
+    | undefined,
+  runtimeIdentity: BridgeRuntimeIdentity = getBridgeRuntimeIdentity(),
+  now: () => number = Date.now,
+): Pick<BridgeStatus, "controlCommandStatus" | "pendingControlCommand"> {
+  const reconciledStatus = reconcileBridgeStartupControlCommandStatus(
+    previousStatus,
+    runtimeIdentity,
+    now,
+  );
+  const explicitPending =
+    reconciledStatus?.status === "executing" ||
+    reconciledStatus?.status === "succeeded" ||
+    reconciledStatus?.status === "failed"
+      ? undefined
+      : normalizeControlCommand(previousStatus?.pendingControlCommand);
+  const lifecyclePending =
+    reconciledStatus?.status === "accepted" ||
+    reconciledStatus?.status === "waiting_for_idle"
+      ? {
+          command: reconciledStatus.command,
+          requestedAt: reconciledStatus.requestedAt,
+        }
+      : undefined;
+  const pending = explicitPending ?? lifecyclePending;
+
+  if (pending?.command === "restartWhenIdle") {
+    return {
+      controlCommandStatus: buildControlCommandStatus(
+        "restartWhenIdle",
+        "succeeded",
+        {
+          acceptedAt: reconciledStatus?.acceptedAt,
+          completedAt: now(),
+          instanceId: runtimeIdentity.instanceId,
+          requestedAt: pending.requestedAt,
+          startedAt: reconciledStatus?.startedAt,
+          targetVersion: reconciledStatus?.targetVersion,
+        },
+      ),
+    };
+  }
+  if (pending?.command === "updateWhenIdle") {
+    return {
+      pendingControlCommand: pending,
+      controlCommandStatus:
+        reconciledStatus ??
+        buildControlCommandStatus("updateWhenIdle", "accepted", {
+          acceptedAt: now(),
+          instanceId: runtimeIdentity.instanceId,
+          requestedAt: pending.requestedAt,
+        }),
+    };
+  }
+  if (
+    !reconciledStatus &&
+    previousStatus?.lifecycle === "restartPending" &&
+    previousStatus.updateState?.status === "waitingForIdle"
+  ) {
+    return {
+      controlCommandStatus: buildControlCommandStatus(
+        "restartWhenIdle",
+        "succeeded",
+        {
+          completedAt: now(),
+          instanceId: runtimeIdentity.instanceId,
+          requestedAt: previousStatus.updateState.requestedAt,
+          targetVersion: previousStatus.updateState.targetVersion,
+        },
+      ),
+    };
+  }
+  return { controlCommandStatus: reconciledStatus };
+}
+
 async function launchBridgeUpdater(
   input: BridgeUpdaterLaunchInput,
 ): Promise<void> {
@@ -3554,7 +3746,7 @@ async function applyPendingBridgeControlCommand(
     | "writeStatus"
   >,
 ): Promise<BridgeLoopIterationResult> {
-  const command = normalizeControlCommand(status.pendingControlCommand);
+  const command = actionableBridgeControlCommand(status);
   if (!command) {
     return { restartRequested: false };
   }
@@ -3575,6 +3767,7 @@ async function applyPendingBridgeControlCommand(
       "waiting_for_idle",
       {
         acceptedAt,
+        instanceId: status.controlCommandStatus?.instanceId,
         requestedAt,
       },
     );
@@ -3906,14 +4099,6 @@ export async function runBridgeLoopIteration(
       });
       restartResult = { restartRequested: true };
     }
-    if (
-      !restartResult.restartRequested &&
-      input.status.controlCommandStatus?.status === "waiting_for_idle"
-    ) {
-      syncBridgeStatus();
-      await persistStatus(input.statusPath, input.status);
-      return restartResult;
-    }
     const heartbeatNow = currentTime();
     const heartbeatSignature = bridgeHeartbeatSignature(input.status);
     if (
@@ -3974,15 +4159,10 @@ export async function runBridgeLoopIteration(
         );
         if (controlCommand) {
           const acceptedAt = currentTime();
-          input.status.pendingControlCommand = controlCommand;
-          input.status.controlCommandStatus = buildControlCommandStatus(
-            controlCommand.command,
-            "accepted",
-            {
-              acceptedAt,
-              instanceId: input.status.runtimeIdentity?.instanceId,
-              requestedAt: controlCommand.requestedAt,
-            },
+          acceptBridgeControlCommand(
+            input.status,
+            controlCommand,
+            acceptedAt,
           );
           await persistStatus(input.statusPath, input.status);
           restartResult = await applyPendingBridgeControlCommand(
@@ -4036,18 +4216,10 @@ export async function runBridgeLoopIteration(
                   ? heartbeatResult.control.refreshRuntimeProfiles.requestedAt
                   : currentTime();
               const acceptedAt = currentTime();
-              input.status.pendingControlCommand = {
-                command: "restartWhenIdle",
-                requestedAt,
-              };
-              input.status.controlCommandStatus = buildControlCommandStatus(
-                "restartWhenIdle",
-                "accepted",
-                {
-                  acceptedAt,
-                  instanceId: input.status.runtimeIdentity?.instanceId,
-                  requestedAt,
-                },
+              acceptBridgeControlCommand(
+                input.status,
+                { command: "restartWhenIdle", requestedAt },
+                acceptedAt,
               );
               await persistStatus(input.statusPath, input.status);
               restartResult = await applyPendingBridgeControlCommand(
@@ -4098,11 +4270,6 @@ export async function runBridgeLoopIteration(
       } catch {}
       return restartResult;
     }
-    if (normalizeControlCommand(input.status.pendingControlCommand)) {
-      syncBridgeStatus();
-      await persistStatus(input.statusPath, input.status);
-      return { restartRequested: false };
-    }
     for (const watchdog of input.watchdogFailures ?? []) {
       if (watchdog.checkpoint === "quiet") {
         input.log({
@@ -4151,23 +4318,23 @@ export async function runBridgeLoopIteration(
       });
       await persistStatus(input.statusPath, input.status);
     }
-    if (normalizeControlCommand(input.status.pendingControlCommand)) {
-      syncBridgeStatus();
-      await persistStatus(input.statusPath, input.status);
-      return { restartRequested: false };
-    }
     const claimReservation = input.reserveClaimSlots?.();
     try {
       const maxInFlight = claimReservation?.maxInFlight ?? input.maxInFlight;
       const availableSlots = maxInFlight - input.inFlightCommands.size;
+      const canClaimPromptWork =
+        !actionableBridgeControlCommand(input.status) &&
+        (input.canClaimPromptWork?.() ?? true);
       const shouldPollQueue =
         pollReason !== "timer" || input.inFlightCommands.size > 0;
       const claimInput: BridgeQueueClaimInput | undefined =
-        availableSlots > 0
-          ? { limit: availableSlots }
-          : input.inFlightCommands.size > 0
-            ? { lane: "control", limit: 1 }
-            : undefined;
+        !canClaimPromptWork
+          ? { lane: "control", limit: 1 }
+          : availableSlots > 0
+            ? { limit: availableSlots }
+            : input.inFlightCommands.size > 0
+              ? { lane: "control", limit: 1 }
+              : undefined;
       if (claimInput && shouldPollQueue) {
         let processHealth = input.getProcessHealth?.();
         if (processHealth) {
@@ -4326,6 +4493,7 @@ export async function runBridgeLoopIteration(
         );
         if (
           warmRuntimeProfileIds.length > 0 &&
+          canClaimPromptWork &&
           dispatchedCommandCount === 0 &&
           warmCapacity > 0 &&
           input.manager.warmRuntimeSessions
@@ -4528,11 +4696,13 @@ export function bridgeHeartbeatSignature(
 
 type RuntimeCatalogRefreshStatusTarget = Pick<
   BridgeStatus,
+  | "controlCommandStatus"
   | "hermesProfiles"
   | "lastHermesProfileRefreshAt"
   | "lastRuntimeProfileRefreshAt"
   | "lifecycle"
   | "pendingControlCommand"
+  | "runtimeIdentity"
   | "runtimeProfiles"
   | "updateState"
 >;
@@ -4571,10 +4741,11 @@ export async function applyRuntimeCatalogRefreshResult(input: {
   const requestedAt = input.now?.() ?? Date.now();
   for (const status of statuses) {
     status.lifecycle = "restartPending";
-    status.pendingControlCommand = {
-      command: "restartWhenIdle",
+    acceptBridgeControlCommand(
+      status,
+      { command: "restartWhenIdle", requestedAt },
       requestedAt,
-    };
+    );
     status.updateState = buildBridgeUpdateState("waitingForIdle", requestedAt, {
       requestedAt,
       targetVersion: BRIDGE_VERSION,

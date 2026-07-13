@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   BRIDGE_VERSION,
+  buildAggregateBridgeStatus,
   buildBridgeRestartHandoff,
   buildBridgeCapacitySnapshot,
   buildBridgeDoctorReport,
@@ -32,6 +33,8 @@ import {
   getToolResultTimeoutMs,
   getConvexUrl,
   getWarmRuntimeProfileIds,
+  hasPendingBridgeProcessControl,
+  isBridgeProcessIdleForRestart,
   normalizeBridgeConfigFile,
   normalizeQueueCommand,
   discoverHermesProfilesFromDisk,
@@ -41,6 +44,7 @@ import {
   refreshRuntimeConformanceProfilesForTest,
   runtimeConformanceRecordsForSuccessfulCommand,
   reconcileBridgeStartupControlCommandStatus,
+  reconcileBridgeStartupControlCommandState,
   runBridgeRegistrationScheduler,
   runBridgeLoopIteration,
   runProcess,
@@ -421,7 +425,7 @@ describe("bridge control command lifecycle", () => {
   test("persists accepted and waiting_for_idle for restartWhenIdle while work is still active", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const writes: BridgeStatus[] = [];
-    let claimCalled = false;
+    let promptClaimCalled = false;
     const status: BridgeStatus = {
       activeSessions: [],
       connected: true,
@@ -437,8 +441,9 @@ describe("bridge control command lifecycle", () => {
     };
 
     const result = await runBridgeLoopIteration({
-      claimCommands: async () => {
-        claimCalled = true;
+      claimCommands: async (_config, claimInput) => {
+        promptClaimCalled =
+          typeof claimInput === "number" || claimInput?.lane !== "control";
         return [];
       },
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
@@ -486,7 +491,7 @@ describe("bridge control command lifecycle", () => {
     });
 
     expect(result.restartRequested).toBe(false);
-    expect(claimCalled).toBe(false);
+    expect(promptClaimCalled).toBe(false);
     expect(writes).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -515,6 +520,158 @@ describe("bridge control command lifecycle", () => {
         command: "restartWhenIdle",
         status: "waiting_for_idle",
       },
+    });
+  });
+
+  test("keeps heartbeats, watchdogs, and control-lane polling active while draining", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    let heartbeatCount = 0;
+    let terminalized = false;
+    let promptClaimCalled = false;
+    const inFlightCommands = new Map<string, Promise<void>>([
+      ["queue-timeout", Promise.resolve()],
+    ]);
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      controlCommandStatus: {
+        acceptedAt: 5,
+        command: "restartWhenIdle",
+        requestedAt: 4,
+        status: "waiting_for_idle",
+      },
+      pendingControlCommand: {
+        command: "restartWhenIdle",
+        requestedAt: 4,
+      },
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async (_config, claimInput) => {
+        promptClaimCalled =
+          typeof claimInput === "number" || claimInput?.lane !== "control";
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands,
+      isProcessIdleForRestart: () => false,
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        failActiveQueueItem: async () => {
+          terminalized = true;
+          return true;
+        },
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [
+            {
+              lastUsedAt: 0,
+              queueDepth: 1,
+              runningQueueItemId: "queue-timeout",
+              sessionKey: "session-1",
+              threadId: "thread-1",
+            },
+          ],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => 10,
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1;
+        return { ok: true };
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      watchdogFailures: [
+        {
+          checkpoint: "failed",
+          queueItemId: "queue-timeout",
+          reasonCode: "provider_silent_timeout",
+        },
+      ],
+      writeStatus: async () => {},
+    });
+
+    expect(heartbeatCount).toBe(1);
+    expect(terminalized).toBe(true);
+    expect(inFlightCommands.has("queue-timeout")).toBe(false);
+    expect(promptClaimCalled).toBe(false);
+  });
+
+  test("does not reset a waiting command when the host redelivers it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      controlCommandStatus: {
+        acceptedAt: 5,
+        command: "restartWhenIdle",
+        requestedAt: 4,
+        status: "waiting_for_idle",
+      },
+      pendingControlCommand: {
+        command: "restartWhenIdle",
+        requestedAt: 4,
+      },
+      recentErrors: [],
+    };
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      isProcessIdleForRestart: () => false,
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [
+            {
+              lastUsedAt: 0,
+              queueDepth: 1,
+              runningQueueItemId: "queue-active",
+              sessionKey: "session-1",
+              threadId: "thread-1",
+            },
+          ],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => 100,
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        control: {
+          command: { command: "restartWhenIdle", requestedAt: 4 },
+        },
+        ok: true,
+      }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(status.controlCommandStatus).toMatchObject({
+      acceptedAt: 5,
+      requestedAt: 4,
+      status: "waiting_for_idle",
     });
   });
 
@@ -1130,6 +1287,64 @@ describe("bridge restart handoff startup priority", () => {
 });
 
 describe("bridge startup control command reconciliation", () => {
+  const nextRuntimeIdentity = {
+    bridgeVersion: BRIDGE_VERSION,
+    instanceId: "new-instance",
+    mcpManifestHash: "mcp",
+    pid: 1234,
+    processStartedAt: "2026-06-22T09:00:00.000Z",
+    toolPolicyHash: "tool",
+  };
+
+  test("completes a legacy waiting restart instead of leaving the registration stuck", () => {
+    const reconciled = reconcileBridgeStartupControlCommandState(
+      {
+        controlCommandStatus: {
+          acceptedAt: 5,
+          command: "restartWhenIdle",
+          requestedAt: 10,
+          status: "waiting_for_idle",
+        },
+      },
+      nextRuntimeIdentity,
+      () => 40,
+    );
+
+    expect(reconciled.pendingControlCommand).toBeUndefined();
+    expect(reconciled.controlCommandStatus).toMatchObject({
+      command: "restartWhenIdle",
+      completedAt: 40,
+      instanceId: "new-instance",
+      requestedAt: 10,
+      status: "succeeded",
+    });
+  });
+
+  test("resumes a waiting update after startup", () => {
+    const reconciled = reconcileBridgeStartupControlCommandState(
+      {
+        controlCommandStatus: {
+          acceptedAt: 5,
+          command: "updateWhenIdle",
+          requestedAt: 10,
+          status: "waiting_for_idle",
+        },
+      },
+      nextRuntimeIdentity,
+      () => 40,
+    );
+
+    expect(reconciled.pendingControlCommand).toEqual({
+      command: "updateWhenIdle",
+      requestedAt: 10,
+    });
+    expect(reconciled.controlCommandStatus).toMatchObject({
+      command: "updateWhenIdle",
+      requestedAt: 10,
+      status: "waiting_for_idle",
+    });
+  });
+
   test("does not mark an executing target-version command succeeded on version mismatch", () => {
     const reconciled = reconcileBridgeStartupControlCommandStatus(
       {
@@ -1652,6 +1867,110 @@ describe("bridge doctor", () => {
   });
 });
 
+describe("bridge process control coordination", () => {
+  test("persists pending command intent per registration and at the legacy top level", () => {
+    const config = bridgeRegistration();
+    const pendingControlCommand = {
+      command: "updateWhenIdle" as const,
+      requestedAt: 10,
+    };
+    const aggregate = buildAggregateBridgeStatus(
+      [
+        {
+          config,
+          status: {
+            activeSessions: [],
+            connected: true,
+            pendingControlCommand,
+            recentErrors: [],
+          },
+        },
+      ],
+      {},
+    );
+
+    expect(aggregate.pendingControlCommand).toEqual(pendingControlCommand);
+    expect(aggregate.registrations?.[0]?.pendingControlCommand).toEqual(
+      pendingControlCommand,
+    );
+  });
+
+  test("treats one registration's pending command as a process-wide drain", () => {
+    expect(
+      hasPendingBridgeProcessControl([
+        {
+          controlCommandStatus: {
+            command: "restartWhenIdle",
+            requestedAt: 10,
+            status: "waiting_for_idle",
+          },
+        },
+        {},
+      ]),
+    ).toBe(true);
+  });
+
+  test("requires every registration's commands and session queues to drain", () => {
+    expect(
+      isBridgeProcessIdleForRestart([
+        { inFlightCommandCount: 0, sessionQueues: [] },
+        {
+          inFlightCommandCount: 0,
+          sessionQueues: [
+            { queueDepth: 1, runningQueueItemId: "queue-b" },
+          ],
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      isBridgeProcessIdleForRestart([
+        { inFlightCommandCount: 0, sessionQueues: [] },
+        { inFlightCommandCount: 0, sessionQueues: [{ queueDepth: 0 }] },
+      ]),
+    ).toBe(true);
+  });
+
+  test("uses the control lane when another registration is draining", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const claimInputs: unknown[] = [];
+
+    await runBridgeLoopIteration({
+      canClaimPromptWork: () => false,
+      claimCommands: async (_config, claimInput) => {
+        claimInputs.push(claimInput);
+        return [];
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => 10,
+      pollReason: "wake",
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status: { activeSessions: [], connected: true, recentErrors: [] },
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(claimInputs).toEqual([{ lane: "control", limit: 1 }]);
+  });
+});
+
 describe("bridge supervisor claim gating", () => {
   test("runs registration schedulers independently when one pass stalls", async () => {
     let registrationAActive = true;
@@ -1864,6 +2183,12 @@ describe("bridge supervisor claim gating", () => {
     expect(status.pendingControlCommand).toEqual({
       command: "restartWhenIdle",
       requestedAt: Date.UTC(2026, 6, 7, 18, 0, 0),
+    });
+    expect(status.controlCommandStatus).toMatchObject({
+      acceptedAt: Date.UTC(2026, 6, 7, 18, 0, 0),
+      command: "restartWhenIdle",
+      requestedAt: Date.UTC(2026, 6, 7, 18, 0, 0),
+      status: "accepted",
     });
     expect(status.updateState).toMatchObject({
       requestedAt: Date.UTC(2026, 6, 7, 18, 0, 0),
@@ -2234,7 +2559,7 @@ describe("bridge supervisor claim gating", () => {
   test("requests restart when refreshed runtime profile commands change", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
-    let claimCalled = false;
+    let promptClaimCalled = false;
     let heartbeatCount = 0;
     const status: BridgeStatus = {
       activeSessions: [],
@@ -2253,8 +2578,9 @@ describe("bridge supervisor claim gating", () => {
     };
 
     const result = await runBridgeLoopIteration({
-      claimCommands: async () => {
-        claimCalled = true;
+      claimCommands: async (_config, claimInput) => {
+        promptClaimCalled =
+          typeof claimInput === "number" || claimInput?.lane !== "control";
         return [];
       },
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
@@ -2305,7 +2631,7 @@ describe("bridge supervisor claim gating", () => {
     });
 
     expect(result.restartRequested).toBe(true);
-    expect(claimCalled).toBe(false);
+    expect(promptClaimCalled).toBe(false);
     expect(status.lifecycle).toBe("restarting");
     expect(status.runtimeProfiles?.[0]?.command).toEqual([
       "bunx",
@@ -2321,7 +2647,7 @@ describe("bridge supervisor claim gating", () => {
   test("waits for idle when refreshed runtime profile commands change during active work", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
-    let claimCalled = false;
+    let promptClaimCalled = false;
     let heartbeatCount = 0;
     const status: BridgeStatus = {
       activeSessions: [],
@@ -2340,8 +2666,9 @@ describe("bridge supervisor claim gating", () => {
     };
 
     const result = await runBridgeLoopIteration({
-      claimCommands: async () => {
-        claimCalled = true;
+      claimCommands: async (_config, claimInput) => {
+        promptClaimCalled =
+          typeof claimInput === "number" || claimInput?.lane !== "control";
         return [];
       },
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
@@ -2400,7 +2727,7 @@ describe("bridge supervisor claim gating", () => {
     });
 
     expect(result.restartRequested).toBe(false);
-    expect(claimCalled).toBe(false);
+    expect(promptClaimCalled).toBe(false);
     expect(status.lifecycle).toBe("draining");
     expect(status.pendingControlCommand).toMatchObject({
       command: "restartWhenIdle",
@@ -2419,7 +2746,7 @@ describe("bridge supervisor claim gating", () => {
 
   test("defers runtime profile restart while another registration has active work", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
-    let claimCalled = false;
+    let promptClaimCalled = false;
     let heartbeatCount = 0;
     let processIdle = false;
     const status: BridgeStatus = {
@@ -2438,8 +2765,9 @@ describe("bridge supervisor claim gating", () => {
       ],
     };
     const baseInput: BridgeLoopIterationInput = {
-      claimCommands: async () => {
-        claimCalled = true;
+      claimCommands: async (_config, claimInput) => {
+        promptClaimCalled =
+          typeof claimInput === "number" || claimInput?.lane !== "control";
         return [];
       },
       cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
@@ -2490,7 +2818,7 @@ describe("bridge supervisor claim gating", () => {
 
     const busyResult = await runBridgeLoopIteration(baseInput);
     expect(busyResult.restartRequested).toBe(false);
-    expect(claimCalled).toBe(false);
+    expect(promptClaimCalled).toBe(false);
     expect(status.lifecycle).toBe("draining");
     expect(status.updateState?.status).toBe("waitingForIdle");
     expect(status.pendingControlCommand).toMatchObject({
