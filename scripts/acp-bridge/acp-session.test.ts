@@ -76,6 +76,7 @@ describe("ACP final text extraction", () => {
     expect(options?.env?.ZERO_CHAT_ACP_PROXY_PARENT_PID).toBe(String(process.pid));
   });
 
+
   test("preserves only the Hermes delegation lifecycle envelope from ACP PromptResponse _meta", async () => {
     const session = new HermesAcpSession({
       agentCommand: "hermes acp",

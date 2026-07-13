@@ -1423,6 +1423,7 @@ export class BridgeSessionManager {
       payload: {
         finalText: result.finalText,
         queueId: item.id,
+        responseMeta: result.responseMeta,
         stopReason: result.stopReason,
         responseMeta: result.responseMeta,
         text: result.text,

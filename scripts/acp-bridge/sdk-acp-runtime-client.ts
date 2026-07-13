@@ -2,12 +2,16 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { readFile, writeFile } from "node:fs/promises"
 import { Readable, Writable } from "node:stream"
 import {
+  CreateElicitationRequest as ElicitationRequestGuards,
   client as createClientApp,
   methods,
   ndJsonStream,
   PROTOCOL_VERSION,
   type ClientCapabilities,
   type ClientConnection,
+  type CompleteElicitationNotification,
+  type CreateElicitationRequest,
+  type CreateElicitationResponse,
   type CreateTerminalRequest,
   type CreateTerminalResponse,
   type KillTerminalRequest,
@@ -140,6 +144,13 @@ export type SdkAcpRuntimeRequestContext = {
   requestId?: JsonRpcId
 }
 
+export type SdkAcpRuntimeElicitationMode = "custom" | "form" | "url"
+
+export type SdkAcpRuntimeElicitationRequest = {
+  mode: SdkAcpRuntimeElicitationMode
+  params: CreateElicitationRequest
+}
+
 type SdkAcpRuntimeAgentConnection = {
   authenticate: (params: BridgeAuthenticateParams) => Promise<BridgeAuthenticateResult>
   cancel: (params: BridgeCancelParams) => Promise<void>
@@ -160,6 +171,12 @@ type SdkAcpRuntimeAgentConnection = {
 
 export type SdkAcpRuntimeClientOptions = {
   connection?: SdkAcpRuntimeAgentConnection
+  onElicitationComplete?: (
+    params: CompleteElicitationNotification,
+  ) => Promise<void> | void
+  onElicitationRequest?: (
+    request: SdkAcpRuntimeElicitationRequest,
+  ) => Promise<CreateElicitationResponse>
   onActivity?: (activity: SdkAcpRuntimeActivity) => Promise<void> | void
   onPermissionRequest?: (
     params: RequestPermissionRequest,
@@ -176,6 +193,12 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
   private readonly connection: SdkAcpRuntimeAgentConnection
   private readonly onActivity:
     | ((activity: SdkAcpRuntimeActivity) => Promise<void> | void)
+    | undefined
+  private readonly onElicitationComplete:
+    | ((params: CompleteElicitationNotification) => Promise<void> | void)
+    | undefined
+  private readonly onElicitationRequest:
+    | ((request: SdkAcpRuntimeElicitationRequest) => Promise<CreateElicitationResponse>)
     | undefined
   private readonly onPermissionRequest:
     | ((
@@ -198,6 +221,8 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
 
   constructor(options: SdkAcpRuntimeClientOptions) {
     this.onActivity = options.onActivity
+    this.onElicitationComplete = options.onElicitationComplete
+    this.onElicitationRequest = options.onElicitationRequest
     this.onPermissionRequest = options.onPermissionRequest
     this.terminalAdapter = options.terminalAdapter
     this.readTextFile =
@@ -326,6 +351,12 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
       .onRequest(methods.client.session.requestPermission, (context) =>
         this.requestPermission(context.params, { requestId: context.requestId }),
       )
+      .onRequest(methods.client.elicitation.create, (context) =>
+        this.createElicitation(context.params),
+      )
+      .onNotification(methods.client.elicitation.complete, (context) =>
+        this.completeElicitation(context.params),
+      )
       .onNotification(methods.client.session.update, async (context) => {
         for (const callback of this.updates) {
           callback(context.params)
@@ -376,14 +407,32 @@ export class SdkAcpRuntimeClient implements BridgeAcpRuntimeClient {
     return { outcome: { outcome: "cancelled" } }
   }
 
+  private async createElicitation(
+    params: CreateElicitationRequest,
+  ): Promise<CreateElicitationResponse> {
+    const request = { mode: classifyElicitationMode(params), params }
+    if (this.onElicitationRequest) {
+      return await this.onElicitationRequest(request)
+    }
+    return { _meta: { reason: "unsupported_elicitation" }, action: "cancel" }
+  }
+
+  private async completeElicitation(params: CompleteElicitationNotification): Promise<void> {
+    await this.onElicitationComplete?.(params)
+  }
+
   private clientCapabilities(): ClientCapabilities {
-    return {
+    const capabilities: ClientCapabilities = {
       fs: {
         readTextFile: this.readTextFile !== undefined,
         writeTextFile: this.writeTextFile !== undefined,
       },
       terminal: this.terminalAdapter !== undefined,
     }
+    if (this.onElicitationRequest) {
+      capabilities.elicitation = { form: {}, url: {} }
+    }
+    return capabilities
   }
 
   private async createTerminal(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
@@ -669,6 +718,18 @@ function truncateText(text: string, limit: number): { text: string; truncated: b
     return { text, truncated: false }
   }
   return { text: text.slice(0, limit), truncated: true }
+}
+
+function classifyElicitationMode(
+  params: CreateElicitationRequest,
+): SdkAcpRuntimeElicitationMode {
+  if (ElicitationRequestGuards.isForm(params)) {
+    return "form"
+  }
+  if (ElicitationRequestGuards.isUrl(params)) {
+    return "url"
+  }
+  return "custom"
 }
 
 function filesystemPolicyError(
