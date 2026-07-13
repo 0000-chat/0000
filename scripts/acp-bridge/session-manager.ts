@@ -1425,7 +1425,6 @@ export class BridgeSessionManager {
         queueId: item.id,
         responseMeta: result.responseMeta,
         stopReason: result.stopReason,
-        responseMeta: result.responseMeta,
         text: result.text,
       },
       part: {
