@@ -65,7 +65,7 @@ describe("runtime catalog cache", () => {
     }))
   })
 
-  test("rejects stale entries and schema or runtime command mismatches", async () => {
+  test("drops stale conformance records and rejects stale cache files or key mismatches", async () => {
     const path = await tempCachePath()
     await writeRuntimeCatalogCache({
       bridgeVersion: "0.1.28",
@@ -77,11 +77,21 @@ describe("runtime catalog cache", () => {
       ttlMs: 60_000,
     })
 
+    const staleConformance = await loadRuntimeCatalogCache({
+      bridgeVersion: "0.1.28",
+      cachePath: path,
+      now: checkedAt + 60_001,
+      runtimeCommandKeys: [["codex", "acp"]],
+      ttlMs: 60_000,
+    })
+    expect(staleConformance?.profiles).toEqual([profile])
+    expect(staleConformance?.conformanceRecords).toEqual({})
+
     expect(
       await loadRuntimeCatalogCache({
         bridgeVersion: "0.1.28",
         cachePath: path,
-        now: checkedAt + 60_001,
+        now: now + 60_001,
         runtimeCommandKeys: [["codex", "acp"]],
         ttlMs: 60_000,
       }),
@@ -165,7 +175,7 @@ describe("runtime catalog cache", () => {
     expect(raw).toContain("[redacted]")
   })
 
-  test("ignores missing or unsafe conformance records", async () => {
+  test("loads profiles while ignoring missing or unsafe conformance records", async () => {
     const path = await tempCachePath()
     await writeRuntimeCatalogCache({
       bridgeVersion: "0.1.28",
@@ -179,15 +189,16 @@ describe("runtime catalog cache", () => {
       ttlMs: 60_000,
     })
 
-    expect(
-      await loadRuntimeCatalogCache({
-        bridgeVersion: "0.1.28",
-        cachePath: path,
-        now,
-        runtimeCommandKeys: [["codex", "acp"]],
-        ttlMs: 60_000,
-      }),
-    ).toBeNull()
+    const loaded = await loadRuntimeCatalogCache({
+      bridgeVersion: "0.1.28",
+      cachePath: path,
+      now,
+      runtimeCommandKeys: [["codex", "acp"]],
+      ttlMs: 60_000,
+    })
+
+    expect(loaded?.profiles).toEqual([profile])
+    expect(loaded?.conformanceRecords).toEqual({})
 
     await rm(path, { force: true })
     expect(

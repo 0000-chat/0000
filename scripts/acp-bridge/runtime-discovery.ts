@@ -15,6 +15,7 @@ import {
 } from "./runtime-profiles"
 import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
 import { SdkAcpRuntimeClient } from "./sdk-acp-runtime-client"
+import { resolveNodeProxyExecutable } from "./acp-node-proxy-launcher"
 
 export type CommandResult = { ok: boolean; stdout: string; stderr?: string }
 export type AcpProbeCapabilities = {
@@ -51,6 +52,10 @@ export type AcpProbeResult =
   | { ok: true; capabilities?: AcpProbeCapabilities }
   | { ok: false; reason: string }
 export type AcpProbeOptions = { timeoutMs?: number }
+export type AcpDiscoveryChildTerminationOptions = {
+  killDelayMs?: number
+  timeoutMs?: number
+}
 
 export type RuntimeDiscoveryInput = {
   baseAgentCommand: string | string[] | undefined
@@ -513,8 +518,7 @@ export function probeLocalAcpCommand(
       }
       settled = true
       clearTimeout(timeout)
-      terminateSpawnedAcpCommand(child)
-      resolve(result)
+      void terminateAcpDiscoveryChild(child).finally(() => resolve(result))
     }
     const timeout = setTimeout(() => {
       settle({ ok: false, reason: "ACP initialize probe timed out" })
@@ -723,8 +727,7 @@ export function discoverLocalAcpCommands(
       }
       settled = true
       clearTimeout(timeout)
-      terminateSpawnedAcpCommand(child)
-      resolve(commands)
+      void terminateAcpDiscoveryChild(child).finally(() => resolve(commands))
     }
     const timeout = setTimeout(() => settle([]), 5000)
     child.on("error", () => settle([]))
@@ -849,7 +852,7 @@ export function runLocalCommand(command: string[]): Promise<CommandResult> {
       resolve(result)
     }
     const timeout = setTimeout(() => {
-      terminateSpawnedAcpCommand(child)
+      void terminateAcpDiscoveryChild(child)
       settle({ ok: false, stdout, stderr: "Command timed out" })
     }, 3000)
     child.stdout?.on("data", (chunk) => {
@@ -876,20 +879,41 @@ function spawnAcpCommand(
   const executable = command[0] ?? ""
   const resolvedExecutable = resolveExecutableForSpawn(executable, options?.env)
   const args = command.slice(1)
+  const proxyOptions = buildAcpDiscoveryProxySpawnOptions(options)
   const child = process.versions.bun
     ? spawn(
-        "node",
+        resolveNodeProxyExecutable(proxyOptions?.env),
         [
           join(dirname(fileURLToPath(import.meta.url)), "acp-node-proxy.cjs"),
           resolvedExecutable,
           ...args,
         ],
-        { ...options, detached: process.platform !== "win32" },
+        {
+          ...proxyOptions,
+          env: buildAcpDiscoveryProxyEnv(proxyOptions?.env),
+        },
       )
     : spawn(resolvedExecutable, args, options)
   activeAcpDiscoveryChildren.add(child)
   child.once("close", () => activeAcpDiscoveryChildren.delete(child))
   return child
+}
+
+export function buildAcpDiscoveryProxySpawnOptions(
+  options: Parameters<typeof spawn>[2],
+): Parameters<typeof spawn>[2] {
+  // Bun wraps spawned commands; detaching the proxy makes the returned PID a
+  // process-group leader so cleanup can signal the entire ACP runtime tree.
+  return { ...options, detached: process.platform !== "win32" }
+}
+
+function buildAcpDiscoveryProxyEnv(
+  env: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    ZERO_CHAT_ACP_PROXY_PARENT_PID: String(process.pid),
+  }
 }
 
 export function resolveExecutableForSpawn(
@@ -916,52 +940,86 @@ export function resolveExecutableForSpawn(
   return executable
 }
 
-export function terminateActiveAcpDiscoveryChildren(): void {
-  for (const child of activeAcpDiscoveryChildren) {
-    terminateSpawnedAcpCommand(child)
-  }
+export async function terminateActiveAcpDiscoveryChildren(): Promise<void> {
+  await Promise.all(
+    Array.from(activeAcpDiscoveryChildren).map((child) =>
+      terminateAcpDiscoveryChild(child),
+    ),
+  )
 }
 
 export function getActiveAcpDiscoveryChildCount(): number {
   return activeAcpDiscoveryChildren.size
 }
 
-function terminateSpawnedAcpCommand(child: ReturnType<typeof spawn>): void {
-  if (child.exitCode !== null || child.signalCode !== null) {
+export async function terminateAcpDiscoveryChild(
+  child: ReturnType<typeof spawn>,
+  options: AcpDiscoveryChildTerminationOptions = {},
+): Promise<void> {
+  const pid = child.pid
+  if (child.exitCode !== null || child.signalCode !== null || !pid) {
     return
   }
-  if (child.pid) {
-    if (process.platform !== "win32") {
-      try {
-        process.kill(-child.pid, "SIGTERM")
-      } catch {
-        // Fall through to direct process signals below.
-      }
-    }
+  const closed = waitForChildClose(child)
+  signalAcpDiscoveryChild(pid, "SIGTERM")
+  child.kill("SIGTERM")
+  const killDelayMs = Math.max(0, options.killDelayMs ?? 1000)
+  const timeoutMs = Math.max(killDelayMs + 1, options.timeoutMs ?? 5000)
+  const forceKillTimer = setTimeout(() => {
+    signalAcpDiscoveryChild(pid, "SIGKILL")
+    child.kill("SIGKILL")
+  }, killDelayMs)
+  forceKillTimer.unref()
+  try {
+    await Promise.race([closed, delay(timeoutMs)])
+  } finally {
+    clearTimeout(forceKillTimer)
+  }
+  if (isProcessStillAlive(pid)) {
+    signalAcpDiscoveryChild(pid, "SIGKILL")
+    child.kill("SIGKILL")
+    await Promise.race([closed, delay(250)])
+  }
+}
+
+function signalAcpDiscoveryChild(pid: number, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32") {
     try {
-      process.kill(child.pid, "SIGTERM")
+      process.kill(-pid, signal)
     } catch {
-      // Fall through to ChildProcess.kill; Node may still have a live handle.
+      // The child may not be the process-group leader.
     }
   }
-  child.kill("SIGTERM")
+  try {
+    process.kill(pid, signal)
+  } catch {
+    // The process may have exited between checks.
+  }
+}
 
-  setTimeout(() => {
-    if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+function waitForChildClose(child: ReturnType<typeof spawn>): Promise<"closed"> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve("closed")
       return
     }
-    if (process.platform !== "win32") {
-      try {
-        process.kill(-child.pid, "SIGKILL")
-      } catch {
-        // The process group exited between the graceful signal and fallback.
-      }
-    }
-    try {
-      process.kill(child.pid, "SIGKILL")
-    } catch {
-      // The process exited between the graceful signal and fallback.
-    }
-    child.kill("SIGKILL")
-  }, 1000).unref()
+    child.once("close", () => resolve("closed"))
+    child.once("exit", () => resolve("closed"))
+  })
+}
+
+function isProcessStillAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function delay(ms: number): Promise<"timeout"> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), ms)
+    timer.unref()
+  })
 }

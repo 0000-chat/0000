@@ -2844,7 +2844,7 @@ describe("bridge session cwd safety", () => {
   });
 
   test("persists ACP usage metadata and usage update events in prompt results", async () => {
-    const cloud = fakeCloudClient();
+    const cloud = fakeCloudClient()
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: () => ({

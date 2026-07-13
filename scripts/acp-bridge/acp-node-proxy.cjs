@@ -4,6 +4,11 @@ const { accessSync, constants } = require("node:fs")
 const { delimiter, join } = require("node:path")
 
 const [, , command, ...args] = process.argv
+const expectedParentPid = numberFromEnv("ZERO_CHAT_ACP_PROXY_PARENT_PID")
+const parentCheckMs = numberFromEnv("ZERO_CHAT_ACP_PROXY_PARENT_CHECK_MS") ?? 1000
+const terminateGraceMs = numberFromEnv("ZERO_CHAT_ACP_PROXY_TERMINATE_GRACE_MS") ?? 1000
+let terminating = false
+let parentWatchdog
 
 if (!command) {
   process.stderr.write("acp-node-proxy requires a command\n")
@@ -26,12 +31,29 @@ child.on("error", (error) => {
   process.exit(1)
 })
 
-child.on("exit", (code, signal) => process.exit(exitCodeForSignal(code, signal)))
+child.on("exit", (code, signal) => {
+  stopParentWatchdog()
+  process.exit(exitCodeForSignal(code, signal))
+})
+
+if (expectedParentPid && expectedParentPid > 0) {
+  parentWatchdog = setInterval(() => {
+    if (!isProcessAlive(expectedParentPid)) {
+      terminateChild("SIGTERM")
+    }
+  }, Math.max(10, parentCheckMs))
+  parentWatchdog.unref()
+}
 
 process.on("SIGINT", () => terminateChild("SIGINT"))
 process.on("SIGTERM", () => terminateChild("SIGTERM"))
 
 function terminateChild(signal) {
+  if (terminating) {
+    return
+  }
+  terminating = true
+  stopParentWatchdog()
   if (!child.pid) {
     process.exit(exitCodeForSignal(null, signal))
     return
@@ -58,7 +80,14 @@ function terminateChild(signal) {
       // The child may have exited after the graceful signal.
     }
     process.exit(exitCodeForSignal(null, signal))
-  }, 1000).unref()
+  }, terminateGraceMs).unref()
+}
+
+function stopParentWatchdog() {
+  if (parentWatchdog) {
+    clearInterval(parentWatchdog)
+    parentWatchdog = undefined
+  }
 }
 
 function resolveExecutable(command) {
@@ -80,6 +109,20 @@ function resolveExecutable(command) {
   }
 
   return command
+}
+
+function numberFromEnv(name) {
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function exitCodeForSignal(code, signal) {

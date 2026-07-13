@@ -82,14 +82,17 @@ export async function loadRuntimeCatalogCache(input: {
   if (file.cacheKey !== expectedKey) {
     return null
   }
+  if (input.now - file.generatedAt > input.ttlMs) {
+    return null
+  }
   const profiles: BridgeRuntimeProfile[] = []
   const conformanceRecords: Record<string, RuntimeConformanceRecord> = {}
   for (const profile of file.profiles) {
+    profiles.push(profile)
     const record = file.conformanceRecords[profile.id]
     if (!isSafeCachedConformanceRecord(record, profile.id, input.now, input.ttlMs)) {
       continue
     }
-    profiles.push(profile)
     conformanceRecords[profile.id] = record
   }
   if (profiles.length === 0) {
@@ -120,11 +123,11 @@ export async function writeRuntimeCatalogCache(input: {
       continue
     }
     const sanitizedProfile = sanitizeRuntimeProfile(profile)
+    profiles.push(sanitizedProfile)
     const record = sanitizeConformanceRecord(input.conformanceRecords[sanitizedProfile.id])
     if (!record || !isSafeCachedConformanceRecord(record, sanitizedProfile.id, input.now, input.ttlMs)) {
       continue
     }
-    profiles.push(sanitizedProfile)
     conformanceRecords[sanitizedProfile.id] = record
   }
   const payload: RuntimeCatalogCacheFile = {

@@ -70,6 +70,7 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("tags.assign")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("databaseViews.list")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("bridgeDevices.list")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("runtime.readEvidence")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("notifications.getBrowserConfig")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("actions.updateDraft")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("github.createPullRequest")

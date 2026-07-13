@@ -23,6 +23,7 @@ import {
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   createBridgeWakeSignal,
+  applyRuntimeCatalogRefreshResult,
   getAllowRemoteCwd,
   getAcpIdleTtlMs,
   getExplicitToolResultTimeoutMs,
@@ -61,6 +62,7 @@ import {
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
 } from "./acp-bridge/runtime-defaults";
+import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles";
 
 describe("bridge command parsing", () => {
   test("keeps default tool result timeout implicit unless configured", () => {
@@ -622,11 +624,44 @@ describe("bridge control command lifecycle", () => {
 });
 
 describe("bridge restart handoff", () => {
+  test("does not restore retained sessions with no queued work", () => {
+    const handoff = buildBridgeRestartHandoff({
+      reason: "restartWhenIdle",
+      statuses: [
+        {
+          activeSessions: ["live-session-key"],
+          appUrl: "https://0000.chat",
+          connected: true,
+          deviceId: "bridge-org-a",
+          recentErrors: [],
+          sessionQueues: [
+            {
+              agentSessionId: "stale-provider-session",
+              lastUsedAt: Date.UTC(2026, 5, 22, 8, 55, 0),
+              queueDepth: 0,
+              sessionKey: "stale-session-key",
+              threadId: "completed-thread",
+            },
+            {
+              agentSessionId: "live-provider-session",
+              queueDepth: 1,
+              runningQueueItemId: "queue-1",
+              sessionKey: "live-session-key",
+              threadId: "active-thread",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(handoff.entries[0]?.sessionWarmupHints).toEqual([]);
+  });
+
   test("writes and consumes privacy-safe scoped restart hints", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-handoff-"));
     const handoffPath = join(dir, "restart-handoff.json");
     const status: BridgeStatus = {
-      activeSessions: [],
+      activeSessions: ["org-secret-session-key"],
       appUrl: "https://0000.chat",
       connected: true,
       controlCommandStatus: {
@@ -701,19 +736,7 @@ describe("bridge restart handoff", () => {
       expect.objectContaining({
         deviceId: "bridge-org-a",
         runtimeProfileIds: ["codex:default"],
-        sessionWarmupHints: [
-          expect.objectContaining({
-            agentSessionId: "provider-session",
-            bridgeProfileId: "codex:default",
-            claimId: "claim-queue-1",
-            lastActivityAt: Date.UTC(2026, 5, 22, 8, 56, 0),
-            organizationId: "org-1",
-            queueItemId: "queue-1",
-            runtimeProfileId: "codex:default",
-            sessionKey: "org-secret-session-key",
-            threadId: "thread-1",
-          }),
-        ],
+        sessionWarmupHints: [],
       }),
     ]);
     expect(Bun.file(handoffPath).exists()).resolves.toBe(false);
@@ -1796,6 +1819,59 @@ describe("bridge supervisor claim gating", () => {
     expect(records["codex:codex-acp"]?.checkedAt).toBe(1_781_400_160_000);
   });
 
+  test("persists changed startup runtime catalog before requesting restart", async () => {
+    const hermesProfile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      id: "hermes:default",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    };
+    const codexProfile: BridgeRuntimeProfile = {
+      capabilities: { sessionMcpServers: true },
+      command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+      id: "codex:codex-acp",
+      kind: "codex",
+      label: "Codex",
+      status: "available",
+    };
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+    const events: string[] = [];
+
+    const result = await applyRuntimeCatalogRefreshResult({
+      hermesProfiles: [],
+      now: () => Date.UTC(2026, 6, 7, 18, 0, 0),
+      persistRuntimeCatalogCache: async () => {
+        events.push(status.pendingControlCommand?.command ?? "persist-before-restart");
+      },
+      previousRuntimeProfiles: [hermesProfile],
+      refreshRuntimeConformanceIfStale: async () => {
+        events.push("conformance-refresh");
+      },
+      refreshedRuntimeProfiles: [hermesProfile, codexProfile],
+      statuses: [status],
+    });
+
+    expect(result.runtimeCatalogChanged).toBe(true);
+    expect(events).toEqual(["persist-before-restart"]);
+    expect(status.runtimeProfiles).toEqual([hermesProfile, codexProfile]);
+    expect(status.lifecycle).toBe("restartPending");
+    expect(status.pendingControlCommand).toEqual({
+      command: "restartWhenIdle",
+      requestedAt: Date.UTC(2026, 6, 7, 18, 0, 0),
+    });
+    expect(status.updateState).toMatchObject({
+      requestedAt: Date.UTC(2026, 6, 7, 18, 0, 0),
+      status: "waitingForIdle",
+      targetVersion: BRIDGE_VERSION,
+    });
+  });
+
   test("classifies stale bridge registrations as hard auth failures", () => {
     const notPaired = buildBridgeRegistrationFailure(
       new BridgeCloudHttpError(
@@ -2440,6 +2516,8 @@ describe("bridge supervisor claim gating", () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     let claimCalled = false;
     let heartbeatCount = 0;
+    let pendingCommandAtCatalogRefresh: string | undefined;
+    let refreshedRuntimeProfileIds: string[] = [];
     const status: BridgeStatus = {
       activeSessions: [],
       connected: true,
@@ -2496,6 +2574,10 @@ describe("bridge supervisor claim gating", () => {
       },
       maxInFlight: 1,
       now: () => Date.UTC(2026, 5, 5, 10, 4, 0),
+      onRuntimeCatalogRefreshed: async (catalog) => {
+        pendingCommandAtCatalogRefresh = status.pendingControlCommand?.command;
+        refreshedRuntimeProfileIds = catalog.runtimeProfiles.map((profile) => profile.id);
+      },
       recordLoopError: async (error) => {
         throw error;
       },
@@ -2516,6 +2598,11 @@ describe("bridge supervisor claim gating", () => {
 
     expect(result.restartRequested).toBe(true);
     expect(claimCalled).toBe(false);
+    expect(pendingCommandAtCatalogRefresh).toBeUndefined();
+    expect(refreshedRuntimeProfileIds).toEqual([
+      "hermes:default",
+      "codex:codex-acp",
+    ]);
     expect(status.lifecycle).toBe("restarting");
   });
 
