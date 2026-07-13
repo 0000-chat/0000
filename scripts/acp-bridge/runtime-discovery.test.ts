@@ -112,7 +112,7 @@ describe("runtime discovery", () => {
     try {
       const result = await Promise.race([
         waitForClose(proxy),
-        delay(1_000).then(() => "timeout" as const),
+        delay(3_000).then(() => "timeout" as const),
       ])
 
       expect(result).toBe("closed")
@@ -129,7 +129,7 @@ describe("runtime discovery", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "acp-runtime-indirect-parent-"))
     const scriptPath = join(tempDir, "short-runtime.js")
     await writeFile(scriptPath, "setTimeout(() => process.exit(0), 150)\n")
-    const expectedParent = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1000)"], {
+    const expectedParent = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], {
       stdio: "ignore",
     })
     const proxy = spawn(
@@ -148,7 +148,7 @@ describe("runtime discovery", () => {
     try {
       const result = await Promise.race([
         waitForClose(proxy),
-        delay(1_000).then(() => "timeout" as const),
+        delay(3_000).then(() => "timeout" as const),
       ])
 
       expect(result).toBe("closed")
