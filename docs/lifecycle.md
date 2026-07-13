@@ -19,6 +19,21 @@ runtime control.
 
 Unknown lifecycle commands must fail clearly instead of becoming no-ops.
 
+## Process Control Drain
+
+`updateWhenIdle` and `restartWhenIdle` control the whole bridge process. When a
+single process hosts multiple registrations, an accepted command fences new
+prompt claims for every registration until all in-flight commands and session
+queues have drained. Control-lane polling, heartbeats, and watchdog
+terminalization continue during the drain so the process can make progress and
+remain observable.
+
+Accepted command intent and lifecycle status are persisted for each
+registration. After an unexpected process restart, an interrupted
+`restartWhenIdle` is complete because the requested restart occurred, while an
+interrupted `updateWhenIdle` resumes from its persisted intent. Repeated delivery
+of the same command and `requestedAt` value must not reset its lifecycle timing.
+
 ## Stop
 
 Stop is represented as `cancel-session`. The bridge records a local cancelling
