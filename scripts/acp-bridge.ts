@@ -136,6 +136,7 @@ const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_STALE_CLEANUP_TIMEOUT_MS = 2_000;
 const DEFAULT_RESTART_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_HERMES_PROFILE_DISCOVERY_TIMEOUT_MS = 3_000;
+const DEFAULT_RUNTIME_CONFORMANCE_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS = 2;
 const DEFAULT_AGENT_COMMAND = "hermes acp";
 const AGENT_TOOLS_MCP_SCRIPT_PATH = join(
@@ -1100,6 +1101,15 @@ export function getRequestTimeoutMs(
   return timeoutMs;
 }
 
+export function runtimeConformanceRequestTimeoutMs(
+  requestTimeoutMs: number,
+): number {
+  return Math.min(
+    requestTimeoutMs,
+    DEFAULT_RUNTIME_CONFORMANCE_REQUEST_TIMEOUT_MS,
+  );
+}
+
 export function getCloudRequestTimeoutMs(
   flags: FlagMap,
   env: NodeJS.ProcessEnv = process.env,
@@ -1867,6 +1877,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   });
   let runtimeConformanceRecords: Record<string, RuntimeConformanceRecord> =
     cachedRuntimeCatalog?.conformanceRecords ?? {};
+  let runtimeConformanceRefreshQueue: Promise<void> = Promise.resolve();
   const lastRuntimeConformanceProbeAtByProfile = new Map<string, number>(
     Object.entries(runtimeConformanceRecords).map(([profileId, record]) => [
       profileId,
@@ -1965,7 +1976,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       ttlMs: DEFAULT_RUNTIME_CONFORMANCE_TTL_MS,
     }).catch(() => undefined);
   };
-  const refreshRuntimeConformanceIfStale = async (
+  const runRuntimeConformanceRefresh = async (
     options: { force?: boolean; maxMissingLaunchSpecProbes?: number } = {},
   ) => {
     const ownerContext = contexts.values().next().value as
@@ -1994,7 +2005,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
                 runtimeProfileId: profile.id,
                 sessionKey: `runtime-conformance:${profile.id}`,
               },
-              requestTimeoutMs,
+              requestTimeoutMs: runtimeConformanceRequestTimeoutMs(requestTimeoutMs),
             }),
           profile,
         }),
@@ -2008,6 +2019,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     for (const context of contexts.values()) {
       context.status.runtimeConformance = runtimeConformanceSummary();
     }
+  };
+  const refreshRuntimeConformanceIfStale = (
+    options: { force?: boolean; maxMissingLaunchSpecProbes?: number } = {},
+  ) => {
+    const refresh = runtimeConformanceRefreshQueue.then(() =>
+      runRuntimeConformanceRefresh(options),
+    );
+    runtimeConformanceRefreshQueue = refresh.catch(() => undefined);
+    return refresh;
   };
   const canProbeMissingLaunchSpec = () => {
     if (

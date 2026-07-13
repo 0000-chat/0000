@@ -48,6 +48,7 @@ import {
   runBridgeRegistrationScheduler,
   runBridgeLoopIteration,
   runProcess,
+  runtimeConformanceRequestTimeoutMs,
   sendHeartbeatWithClient,
   shouldCleanupBridgeOrphanedProcesses,
   upsertBridgeRegistration,
@@ -69,6 +70,11 @@ import {
 import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles";
 
 describe("bridge command parsing", () => {
+  test("bounds conformance requests independently of prompt timeouts", () => {
+    expect(runtimeConformanceRequestTimeoutMs(30 * 60_000)).toBe(30_000);
+    expect(runtimeConformanceRequestTimeoutMs(5_000)).toBe(5_000);
+  });
+
   test("keeps default tool result timeout implicit unless configured", () => {
     const parsed = parseBridgeArgs(["start"]);
 
