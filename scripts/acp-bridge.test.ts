@@ -127,6 +127,20 @@ describe("bridge command parsing", () => {
     });
   });
 
+  test("normalizes legacy prompt payload text", () => {
+    expect(
+      normalizeQueueCommand({
+        id: "queue-prompt",
+        kind: "prompt",
+        payload: { text: "Start the app builder" },
+        threadId: "thread-1",
+      }),
+    ).toMatchObject({
+      prompt: "Start the app builder",
+      type: "prompt",
+    });
+  });
+
   test("normalizes safe code attribution metadata from queue commands", () => {
     expect(
       normalizeQueueCommand({
@@ -1150,11 +1164,12 @@ describe("bridge restart handoff startup priority", () => {
     expect(records["claude:default"]?.checkedAt).toBe(1_002);
   });
 
-  test("skips broad Hermes launch-spec probes unless explicitly prioritized", async () => {
+  test("bounds background Hermes launch-spec probes", async () => {
     const refreshedProfiles: string[] = [];
     const records = await refreshRuntimeConformanceProfilesForTest({
       getInFlightProfileIds: () => new Set(),
       getRunningSessionProfileIds: () => new Set(),
+      maxMissingLaunchSpecProbes: 1,
       now: () => 10_000,
       probeProfile: async (profile) => {
         refreshedProfiles.push(profile.id);
@@ -1184,16 +1199,66 @@ describe("bridge restart handoff startup priority", () => {
           label: "Hermes: 0000-builder",
           status: "available",
         },
+        {
+          capabilities: {},
+          command: ["hermes", "-p", "0000-reviewer", "acp"],
+          hermesProfileName: "0000-reviewer",
+          id: "hermes:default|hermes-profile:0000-reviewer",
+          kind: "hermes",
+          label: "Hermes: 0000-reviewer",
+          status: "available",
+        },
       ],
       records: {},
       ttlMs: 1_000,
     });
 
-    expect(refreshedProfiles).toEqual(["hermes:default"]);
+    expect(refreshedProfiles).toEqual([
+      "hermes:default",
+      "hermes:default|hermes-profile:0000-builder",
+    ]);
     expect(records["hermes:default"]?.checkedAt).toBe(10_001);
     expect(
       records["hermes:default|hermes-profile:0000-builder"],
+    ).toMatchObject({ state: "passing" });
+    expect(
+      records["hermes:default|hermes-profile:0000-reviewer"],
     ).toBeUndefined();
+  });
+
+  test("does not probe missing launch specs before background capacity is reserved", async () => {
+    const refreshedProfiles: string[] = [];
+    const records = await refreshRuntimeConformanceProfilesForTest({
+      getInFlightProfileIds: () => new Set(),
+      getRunningSessionProfileIds: () => new Set(),
+      now: () => 10_000,
+      probeProfile: async (profile) => {
+        refreshedProfiles.push(profile.id);
+        return {
+          checkedAt: 10_000,
+          diagnostics: [],
+          runtimeId: profile.id,
+          state: "passing",
+          strength: "init_only",
+        };
+      },
+      profiles: [
+        {
+          capabilities: {},
+          command: ["hermes", "-p", "0000-builder", "acp"],
+          hermesProfileName: "0000-builder",
+          id: "hermes:default|hermes-profile:0000-builder",
+          kind: "hermes",
+          label: "Hermes: 0000-builder",
+          status: "available",
+        },
+      ],
+      records: {},
+      ttlMs: 1_000,
+    });
+
+    expect(refreshedProfiles).toEqual([]);
+    expect(records).toEqual({});
   });
 
   test("refreshes an existing Hermes launch-spec record before it becomes stale", async () => {
