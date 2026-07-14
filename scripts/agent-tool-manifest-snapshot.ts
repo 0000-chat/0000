@@ -1497,7 +1497,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "automations",
-      "description": "Create a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation. For thread-event triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any'). For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
+      "description": "Create a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation. For thread-event triggers, prefer triggerConfig with spaceScope, spaceId, threadTagIds, and threadTagMatch ('all' or 'any'); threadTagSlugs is accepted only for legacy compatibility. For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -1782,7 +1782,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "automations",
-      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For space-based triggers, triggerConfig may include spaceScope, spaceId, threadTagSlugs, and threadTagMatch ('all' or 'any'). For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
+      "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For thread-event triggers, prefer triggerConfig with spaceScope, spaceId, threadTagIds, and threadTagMatch ('all' or 'any'); threadTagSlugs is accepted only for legacy compatibility. For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -3865,10 +3865,14 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Archive an organization tag so it is no longer suggested for new assignments.",
+      "description": "Archive an organization tag by default, or a space-owned tag when its spaceIdOrSlug is provided.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
         "tagIdOrSlug": {
           "kind": "string"
         }
@@ -3888,10 +3892,14 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Assign an organization tag to a thread, artifact, or database table.",
+      "description": "Assign an organization tag by default, or a space-owned tag when its spaceIdOrSlug is provided. The target must belong to that space.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
         "tagIdOrSlug": {
           "kind": "string"
         },
@@ -3922,7 +3930,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Create an organization tag for threads, artifacts, and databases.",
+      "description": "Create an organization tag by default, or a tag owned by one space when spaceIdOrSlug is provided.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -3936,6 +3944,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         },
         "name": {
           "kind": "string"
+        },
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
         }
       },
       "risk": "mutating_write",
@@ -3953,12 +3965,16 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "threads",
-      "description": "List organization tags available for organizing threads, artifacts, and databases.",
+      "description": "List organization tags by default, or tags owned by one space when spaceIdOrSlug is provided. Space-scoped results require the space-scoped-tags feature.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
         "includeArchived": {
           "kind": "boolean",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
+          "kind": "string",
           "optional": true
         }
       },
@@ -3977,10 +3993,14 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "threads",
-      "description": "List tags assigned to a thread, artifact, or database table.",
+      "description": "List valid tags assigned to a thread, artifact, or database table. Optionally pass spaceIdOrSlug to assert the target space.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
         "targetId": {
           "kind": "string"
         },
@@ -4008,10 +4028,14 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Remove an organization tag assignment from a thread, artifact, or database table.",
+      "description": "Remove an organization tag assignment by default, or a space-owned tag assignment when its spaceIdOrSlug is provided. The target must belong to that space.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
+        "spaceIdOrSlug": {
+          "kind": "string",
+          "optional": true
+        },
         "tagIdOrSlug": {
           "kind": "string"
         },
@@ -4042,7 +4066,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "threads",
-      "description": "Update an organization tag's name, color, or description.",
+      "description": "Update an organization tag by default, or a space-owned tag when its spaceIdOrSlug is provided.",
       "effect": "schema_write",
       "executionMode": "mutation",
       "inputSchema": {
@@ -4055,6 +4079,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
           "optional": true
         },
         "name": {
+          "kind": "string",
+          "optional": true
+        },
+        "spaceIdOrSlug": {
           "kind": "string",
           "optional": true
         },
