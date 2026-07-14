@@ -86,6 +86,13 @@ export type BridgeRuntimeCompatibility = {
 
 export type BridgeRuntimeToolCallClass = "standard" | "subagent" | "long_running"
 
+export type BridgeToolCallClassificationSource =
+  | "default_policy"
+  | "explicit_timeout"
+  | "generic_policy"
+  | "runtime_policy"
+  | "structured_kind"
+
 export type BridgeRuntimeToolCallPolicy = {
   id: string
   timeoutMs?: number
@@ -94,6 +101,7 @@ export type BridgeRuntimeToolCallPolicy = {
 }
 
 export type BridgeToolCallTimeoutResolution = {
+  classificationSource: BridgeToolCallClassificationSource
   policyId: string
   timeoutMs: number
   toolClass: BridgeRuntimeToolCallClass
@@ -101,17 +109,26 @@ export type BridgeToolCallTimeoutResolution = {
 
 export const DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS = 30 * 60 * 1000
 
+const STRUCTURED_NON_SUBAGENT_TOOL_KINDS = new Set([
+  "delete",
+  "edit",
+  "execute",
+  "fetch",
+  "move",
+  "read",
+  "search",
+  "switch_mode",
+  "think",
+])
+
 const GENERIC_SUBAGENT_TOOL_POLICY: BridgeRuntimeToolCallPolicy = {
   id: "generic-subagent-tool",
   toolClass: "subagent",
   toolNamePatterns: [
     "^delegate(?::|_|-|\\b)",
-    "subagent",
-    "sub-agent",
-    "agent\\.run",
+    "^sub-?agent(?::|_|-|\\b)",
+    "^agent\\.run(?::|_|-|\\b)",
     "^task(?::|_|-|\\b)",
-    "workflow",
-    "background",
     "^worker(?::|_|-|\\b)",
   ],
 }
@@ -223,12 +240,47 @@ export function resolveToolCallTimeoutPolicy(input: {
   explicitTimeoutMs?: number
   profile?: BridgeRuntimeProfile
   requestTimeoutMs?: number
+  toolKind?: string
   toolName: string
 }): BridgeToolCallTimeoutResolution {
   if (input.explicitTimeoutMs !== undefined) {
     return {
+      classificationSource: "explicit_timeout",
       policyId: "explicit-tool-result-timeout",
       timeoutMs: input.explicitTimeoutMs,
+      toolClass: "standard",
+    }
+  }
+
+  const toolKind = input.toolKind?.trim().toLowerCase()
+  if (toolKind && STRUCTURED_NON_SUBAGENT_TOOL_KINDS.has(toolKind)) {
+    const runtimeExecutePolicy =
+      toolKind === "execute"
+        ? input.profile?.compatibility?.toolCallPolicies?.find(
+            (policy) => toolCallPolicyMatches(policy, input.toolName),
+          )
+        : undefined
+    const genericExecutePolicy =
+      toolKind === "execute"
+        ? [GENERIC_SUBAGENT_TOOL_POLICY, GENERIC_LONG_RUNNING_TOOL_POLICY].find(
+            (policy) => toolCallPolicyMatches(policy, input.toolName),
+          )
+        : undefined
+    const executePolicy = runtimeExecutePolicy ?? genericExecutePolicy
+    if (executePolicy) {
+      return {
+        classificationSource: runtimeExecutePolicy
+          ? "runtime_policy"
+          : "generic_policy",
+        policyId: executePolicy.id,
+        timeoutMs: resolvePolicyTimeoutMs(executePolicy, input),
+        toolClass: executePolicy.toolClass,
+      }
+    }
+    return {
+      classificationSource: "structured_kind",
+      policyId: "structured-standard-tool",
+      timeoutMs: input.defaultTimeoutMs,
       toolClass: "standard",
     }
   }
@@ -244,6 +296,7 @@ export function resolveToolCallTimeoutPolicy(input: {
 
   if (!policy) {
     return {
+      classificationSource: "default_policy",
       policyId: "default-tool-result-timeout",
       timeoutMs: input.defaultTimeoutMs,
       toolClass: "standard",
@@ -251,6 +304,7 @@ export function resolveToolCallTimeoutPolicy(input: {
   }
 
   return {
+    classificationSource: runtimePolicy ? "runtime_policy" : "generic_policy",
     policyId: policy.id,
     timeoutMs: resolvePolicyTimeoutMs(policy, input),
     toolClass: policy.toolClass,

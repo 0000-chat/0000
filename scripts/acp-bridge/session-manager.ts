@@ -36,6 +36,7 @@ import type {
 import {
   type BridgeRuntimeProfile,
   type BridgeRuntimeToolCallClass,
+  type BridgeToolCallClassificationSource,
   type BridgeToolCallTimeoutResolution,
   applyRuntimeMcpServerCompatibility,
   commandKey,
@@ -269,23 +270,28 @@ type EventWriteOutcome =
   | { ok: false; count: number; error: Error };
 
 type ActiveToolCall = {
+  classificationSource: BridgeToolCallClassificationSource;
   runtimeProfileId?: string;
   startedAt: number;
   timeout: ReturnType<typeof setTimeout>;
   toolCallId: string;
   toolClass: BridgeRuntimeToolCallClass;
+  toolKind?: string;
   toolName: string;
   toolPolicyId: string;
   toolTimeoutMs: number;
 };
 
-type ToolResultTimeoutDetails = {
+type ToolResultTimeoutObservation = {
   ageMs: number;
-  failureClass: "tool_result_propagation_lost";
+  classificationSource: BridgeToolCallClassificationSource;
+  failureClass: "tool_result_unresolved";
+  providerSilenceMs?: number;
+  providerState?: SessionLivenessRecord["state"];
   timeoutMs: number;
   toolCallId: string;
   toolClass: string;
-  toolName: string;
+  toolKind?: string;
   toolPolicyId: string;
 };
 
@@ -605,9 +611,9 @@ export class BridgeSessionManager {
     (error: Error) => void
   >();
   private readonly activeToolCalls = new Map<string, Map<string, ActiveToolCall>>();
-  private readonly activeToolTimeoutFailures = new Map<
+  private readonly activeToolTimeoutObservations = new Map<
     string,
-    ToolResultTimeoutDetails
+    ToolResultTimeoutObservation
   >();
   private readonly warmSessionCandidates = new Map<
     string,
@@ -1048,7 +1054,7 @@ export class BridgeSessionManager {
     const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
     this.externallyTerminalizedQueueItemIds.add(queueItemId);
     this.clearToolCallsForQueueItem(queueItemId);
-    this.activeToolTimeoutFailures.delete(queueItemId);
+    this.activeToolTimeoutObservations.delete(queueItemId);
     if (sessionKey) {
       this.clearQueueItemFromSessionQueue(sessionKey, queueItemId);
     }
@@ -1110,7 +1116,7 @@ export class BridgeSessionManager {
     for (const queueItemId of this.activeToolCalls.keys()) {
       this.clearToolCallsForQueueItem(queueItemId);
     }
-    this.activeToolTimeoutFailures.clear();
+    this.activeToolTimeoutObservations.clear();
     this.warmSessionCandidates.clear();
     this.lastSessionEventQueueItems.clear();
     this.firstAssistantTextLoggedQueueItems.clear();
@@ -1263,9 +1269,9 @@ export class BridgeSessionManager {
       }
       const promptFailure = classifyPromptError(
         error,
-        this.activeToolTimeoutFailures.get(item.id),
+        this.activeToolTimeoutObservations.get(item.id),
       );
-      this.activeToolTimeoutFailures.delete(item.id);
+      this.activeToolTimeoutObservations.delete(item.id);
       if (promptFailure.terminal) {
         const diagnostics = session.acp.getPromptTimeoutDiagnostics?.();
         const failureDetails = promptFailure.details ?? {};
@@ -1321,7 +1327,7 @@ export class BridgeSessionManager {
       throw error;
     }
     this.activePromptSequenceBases.delete(session.sessionKey);
-    this.activeToolTimeoutFailures.delete(item.id);
+    this.activeToolTimeoutObservations.delete(item.id);
     if (this.externallyTerminalizedQueueItemIds.has(item.id)) {
       this.writeLog({
         level: "info",
@@ -1805,7 +1811,7 @@ export class BridgeSessionManager {
       }
       return annotatedEvent;
     }
-    const policy = this.resolveToolCallPolicy(session, tool.toolName);
+    const policy = this.resolveToolCallPolicy(session, tool);
     if (policy.toolClass === "standard") {
       return event;
     }
@@ -1841,6 +1847,7 @@ export class BridgeSessionManager {
       });
       this.trackPendingToolCall(queueItemId, session, {
         toolCallId,
+        toolKind: tool.toolKind,
         toolName: tool.toolName,
       });
       return;
@@ -1853,6 +1860,7 @@ export class BridgeSessionManager {
       });
       this.trackPendingToolCall(queueItemId, session, {
         toolCallId,
+        toolKind: tool.toolKind,
         toolName: tool.toolName,
       });
       return;
@@ -2022,21 +2030,22 @@ export class BridgeSessionManager {
 
   private resolveToolCallPolicy(
     session: BridgeSessionRecord,
-    toolName: string,
+    tool: { toolKind?: string; toolName: string },
   ): BridgeToolCallTimeoutResolution {
     return resolveToolCallTimeoutPolicy({
       defaultTimeoutMs: this.toolResultTimeoutMs,
       explicitTimeoutMs: this.explicitToolResultTimeoutMs,
       profile: session.runtimeProfile,
       requestTimeoutMs: this.requestTimeoutMs,
-      toolName,
+      toolKind: tool.toolKind,
+      toolName: tool.toolName,
     });
   }
 
   private trackPendingToolCall(
     queueItemId: string,
     session: BridgeSessionRecord,
-    tool: { toolCallId: string; toolName: string },
+    tool: { toolCallId: string; toolKind?: string; toolName: string },
   ): void {
     this.clearToolCall(queueItemId, tool.toolCallId);
     let queueTools = this.activeToolCalls.get(queueItemId);
@@ -2045,23 +2054,29 @@ export class BridgeSessionManager {
       this.activeToolCalls.set(queueItemId, queueTools);
     }
     const startedAt = Date.now();
-    const policy = this.resolveToolCallPolicy(session, tool.toolName);
+    const policy = this.resolveToolCallPolicy(session, tool);
     const timeout = setTimeout(() => {
       const activeTool = this.activeToolCalls.get(queueItemId)?.get(tool.toolCallId);
       if (!activeTool) {
         return;
       }
       const ageMs = Date.now() - activeTool.startedAt;
+      const liveness = this.activeLiveness.get(queueItemId);
       const details = {
         ageMs,
-        failureClass: "tool_result_propagation_lost" as const,
+        classificationSource: activeTool.classificationSource,
+        failureClass: "tool_result_unresolved" as const,
+        providerSilenceMs: liveness
+          ? Date.now() - liveness.lastMeaningfulEventAt
+          : undefined,
+        providerState: liveness?.state,
         timeoutMs: activeTool.toolTimeoutMs,
         toolCallId: activeTool.toolCallId,
         toolClass: activeTool.toolClass,
-        toolName: activeTool.toolName,
+        toolKind: activeTool.toolKind,
         toolPolicyId: activeTool.toolPolicyId,
       };
-      this.activeToolTimeoutFailures.set(queueItemId, details);
+      this.activeToolTimeoutObservations.set(queueItemId, details);
       this.writeLog({
         level: "warn",
         event: "bridge.session.tool_result_timeout",
@@ -2069,21 +2084,35 @@ export class BridgeSessionManager {
         threadId: session.threadId,
         agentSessionId: session.providerSessionKey,
         bridgeProfileId: session.runtimeProfile?.id,
-        reasonCode: "tool_result_timeout",
+        reasonCode: "tool_result_unresolved",
+        terminal: false,
         ...details,
       });
-      this.activeLivenessFailures.get(queueItemId)?.(
-        new Error("ACP live session lost: tool_result_timeout"),
-      );
     }, policy.timeoutMs);
     timeout.unref?.();
     queueTools.set(tool.toolCallId, {
+      classificationSource: policy.classificationSource,
       runtimeProfileId: session.runtimeProfile?.id,
       startedAt,
       timeout,
       toolCallId: tool.toolCallId,
       toolClass: policy.toolClass,
+      toolKind: tool.toolKind,
       toolName: tool.toolName,
+      toolPolicyId: policy.policyId,
+      toolTimeoutMs: policy.timeoutMs,
+    });
+    this.writeLog({
+      level: "debug",
+      event: "bridge.session.tool_call_tracked",
+      queueId: queueItemId,
+      threadId: session.threadId,
+      agentSessionId: session.providerSessionKey,
+      bridgeProfileId: session.runtimeProfile?.id,
+      classificationSource: policy.classificationSource,
+      toolCallId: tool.toolCallId,
+      toolClass: policy.toolClass,
+      toolKind: tool.toolKind,
       toolPolicyId: policy.policyId,
       toolTimeoutMs: policy.timeoutMs,
     });
@@ -2096,6 +2125,10 @@ export class BridgeSessionManager {
       return;
     }
     clearTimeout(activeTool.timeout);
+    const observation = this.activeToolTimeoutObservations.get(queueItemId);
+    if (observation?.toolCallId === toolCallId) {
+      this.activeToolTimeoutObservations.delete(queueItemId);
+    }
     queueTools.delete(toolCallId);
     if (queueTools.size === 0) {
       this.activeToolCalls.delete(queueItemId);
@@ -4144,7 +4177,7 @@ function isEmptyVisiblePromptResult(result: { text: string }): boolean {
 
 function classifyPromptError(
   error: unknown,
-  toolTimeoutDetails?: ToolResultTimeoutDetails,
+  toolTimeoutObservation?: ToolResultTimeoutObservation,
 ):
   | {
       terminal: true;
@@ -4153,19 +4186,10 @@ function classifyPromptError(
       reasonCode:
         | "acp_method_timeout"
         | "provider_silent_timeout"
-        | "runtime_process_exited"
-        | "tool_result_timeout";
+        | "runtime_process_exited";
     }
   | { terminal: false } {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("ACP live session lost: tool_result_timeout")) {
-    return {
-      terminal: true,
-      details: toolTimeoutDetails,
-      message: "ACP tool call did not return a result before the timeout.",
-      reasonCode: "tool_result_timeout",
-    };
-  }
   if (message.includes("ACP live session lost: provider_silent_timeout")) {
     return {
       terminal: true,
@@ -4183,6 +4207,12 @@ function classifyPromptError(
   if (message.includes("ACP request timed out: session/prompt")) {
     return {
       terminal: true,
+      details: toolTimeoutObservation
+        ? {
+            ...toolTimeoutObservation,
+            failureClass: "provider_silent_after_tool",
+          }
+        : undefined,
       message: "ACP prompt request timed out.",
       reasonCode: "acp_method_timeout",
     };
@@ -4591,6 +4621,7 @@ function toolEventPolicyMetadata(
 ): Record<string, unknown> {
   return removeUndefinedValues({
     runtimeProfileId: session.runtimeProfile?.id,
+    classificationSource: policy.classificationSource,
     toolClass: policy.toolClass,
     toolPolicyId: policy.policyId,
     toolTimeoutMs: policy.timeoutMs,
@@ -4602,7 +4633,9 @@ function activeToolPolicyMetadata(
 ): Record<string, unknown> {
   return removeUndefinedValues({
     runtimeProfileId: tool.runtimeProfileId,
+    classificationSource: tool.classificationSource,
     toolClass: tool.toolClass,
+    toolKind: tool.toolKind,
     toolPolicyId: tool.toolPolicyId,
     toolTimeoutMs: tool.toolTimeoutMs,
   });
@@ -5078,7 +5111,6 @@ function isTerminalPromptError(message: string): boolean {
     message.includes("ACP request timed out: session/prompt") ||
     message.includes("ACP live session lost: provider_silent_timeout") ||
     message.includes("ACP live session lost: runtime_process_exited") ||
-    message.includes("ACP live session lost: tool_result_timeout") ||
     /\bprovider_login_failed(?:\s+\(code\s+-?\d+\))?\b/i.test(message)
   );
 }
@@ -5231,6 +5263,7 @@ function encodeSessionKeyPart(value: string): string {
 
 function readToolLogFields(value: unknown): {
   toolCallId?: string;
+  toolKind?: string;
   toolName: string;
 } {
   const records = toolFieldRecords(value);
@@ -5240,6 +5273,7 @@ function readToolLogFields(value: unknown): {
       "tool_call_id",
       "id",
     ]),
+    toolKind: readFirstToolString(records, ["kind"]),
     toolName:
       readFirstToolString(records, ["toolName", "name", "tool", "title"]) ??
       "unknown",

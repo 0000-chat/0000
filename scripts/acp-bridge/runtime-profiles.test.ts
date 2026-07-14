@@ -25,6 +25,7 @@ describe("runtime profile compatibility", () => {
         toolName: "agent.run",
       }),
     ).toEqual({
+      classificationSource: "generic_policy",
       policyId: "generic-subagent-tool",
       timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
       toolClass: "subagent",
@@ -46,9 +47,11 @@ describe("runtime profile compatibility", () => {
       resolveToolCallTimeoutPolicy({
         defaultTimeoutMs: 300_000,
         profile,
+        toolKind: "other",
         toolName: "delegate: inspect OpenUI primitives",
       }),
     ).toMatchObject({
+      classificationSource: "runtime_policy",
       policyId: "hermes-delegate-subagent",
       timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
       toolClass: "subagent",
@@ -72,6 +75,7 @@ describe("runtime profile compatibility", () => {
         toolName: "terminal: bun run quality:changed",
       }),
     ).toEqual({
+      classificationSource: "generic_policy",
       policyId: "generic-long-running-tool",
       timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
       toolClass: "long_running",
@@ -101,6 +105,7 @@ describe("runtime profile compatibility", () => {
           toolName,
         }),
       ).toEqual({
+        classificationSource: "generic_policy",
         policyId: "generic-long-running-tool",
         timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
         toolClass: "long_running",
@@ -130,6 +135,7 @@ describe("runtime profile compatibility", () => {
           toolName,
         }),
       ).toEqual({
+        classificationSource: "generic_policy",
         policyId: "generic-long-running-tool",
         timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
         toolClass: "long_running",
@@ -156,9 +162,67 @@ describe("runtime profile compatibility", () => {
         toolName: "delegate_task",
       }),
     ).toEqual({
+      classificationSource: "explicit_timeout",
       policyId: "explicit-tool-result-timeout",
       timeoutMs: 5,
       toolClass: "standard",
+    })
+  })
+
+  test("keeps structured ordinary tools standard regardless of title prose", () => {
+    const profile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      compatibility: hermesRuntimeCompatibility(),
+      id: "hermes:test",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    }
+
+    for (const input of [
+      { toolKind: "read", toolName: "read: docs/workflow.md" },
+      { toolKind: "read", toolName: "read: notes/background-workers.md" },
+      { toolKind: "search", toolName: "search: subagent workflow" },
+      { toolKind: "execute", toolName: "background worker task" },
+    ]) {
+      expect(
+        resolveToolCallTimeoutPolicy({
+          defaultTimeoutMs: 300_000,
+          profile,
+          ...input,
+        }),
+      ).toEqual({
+        classificationSource: "structured_kind",
+        policyId: "structured-standard-tool",
+        timeoutMs: 300_000,
+        toolClass: "standard",
+      })
+    }
+  })
+
+  test("keeps structured execute tools eligible for long-running terminal policy", () => {
+    const profile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["hermes", "acp"],
+      id: "hermes:test",
+      kind: "hermes",
+      label: "Hermes",
+      status: "available",
+    }
+
+    expect(
+      resolveToolCallTimeoutPolicy({
+        defaultTimeoutMs: 300_000,
+        profile,
+        toolKind: "execute",
+        toolName: "terminal: bun run quality:changed",
+      }),
+    ).toEqual({
+      classificationSource: "generic_policy",
+      policyId: "generic-long-running-tool",
+      timeoutMs: DEFAULT_LONG_RUNNING_TOOL_RESULT_TIMEOUT_MS,
+      toolClass: "long_running",
     })
   })
 })

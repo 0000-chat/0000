@@ -825,10 +825,11 @@ describe("bridge session cwd safety", () => {
     );
   });
 
-  test("terminalizes active prompt when a tool call never resolves", async () => {
+  test("records an unresolved tool and attributes a later ACP timeout", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
     let closeCount = 0;
+    let rejectPrompt: ((error: Error) => void) | undefined;
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: (context) => ({
@@ -838,7 +839,9 @@ describe("bridge session cwd safety", () => {
         cancel: async () => {},
         sendUserMessage: async () => {
           context.onEvent(toolCallEvent(1));
-          await new Promise(() => {});
+          await new Promise<never>((_resolve, reject) => {
+            rejectPrompt = reject;
+          });
           throw new Error("unreachable");
         },
       }),
@@ -848,28 +851,44 @@ describe("bridge session cwd safety", () => {
     });
 
     const handled = manager.handleQueueItem(promptQueueItem());
-    const expectedTimeoutMetadata = {
-      failureClass: "tool_result_propagation_lost",
-      reasonCode: "tool_result_timeout",
+    const expectedObservation = {
+      classificationSource: "explicit_timeout",
+      failureClass: "tool_result_unresolved",
       timeoutMs: 5,
       toolCallId: "tool-1",
       toolClass: "standard",
-      toolName: "shell",
       toolPolicyId: "explicit-tool-result-timeout",
     };
     await eventually(() =>
-      expect(cloud.results).toContainEqual(
+      expect(logs).toContainEqual(
         expect.objectContaining({
-          claimId: "claim-prompt",
-          id: "queue-prompt",
-          result: expect.objectContaining({
+          event: "bridge.session.tool_result_timeout",
+          queueId: "queue-prompt",
+          terminal: false,
+          ...expectedObservation,
+        }),
+      ),
+    );
+    expect(cloud.results).toEqual([]);
+    rejectPrompt?.(new Error("ACP request timed out: session/prompt"));
+    await handled;
+
+    const expectedTimeoutMetadata = {
+      ...expectedObservation,
+      failureClass: "provider_silent_after_tool",
+      reasonCode: "acp_method_timeout",
+    };
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        claimId: "claim-prompt",
+        id: "queue-prompt",
+        result: expect.objectContaining({
             ageMs: expect.any(Number),
             ok: false,
             terminal: true,
             ...expectedTimeoutMetadata,
-          }),
         }),
-      ),
+      }),
     );
 
     expect(closeCount).toBe(1);
@@ -894,16 +913,7 @@ describe("bridge session cwd safety", () => {
     );
     expect(logs).toContainEqual(
       expect.objectContaining({
-        event: "bridge.session.tool_result_timeout",
-        queueId: "queue-prompt",
-        reasonCode: "tool_result_timeout",
-        toolCallId: "tool-1",
-      }),
-    );
-    await handled;
-    expect(logs).toContainEqual(
-      expect.objectContaining({
-        error: "tool_result_timeout",
+        error: "acp_method_timeout",
         event: "agent.turn.failed",
         queueId: "queue-prompt",
       }),
@@ -926,6 +936,7 @@ describe("bridge session cwd safety", () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
     let sendCount = 0;
+    let rejectSecondPrompt: ((error: Error) => void) | undefined;
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: (context) => ({
@@ -942,7 +953,9 @@ describe("bridge session cwd safety", () => {
             };
           }
           context.onEvent(toolCallEvent(1));
-          await new Promise(() => {});
+          await new Promise<never>((_resolve, reject) => {
+            rejectSecondPrompt = reject;
+          });
           throw new Error("unreachable");
         },
       }),
@@ -952,7 +965,7 @@ describe("bridge session cwd safety", () => {
     });
 
     await manager.handleQueueItem(promptQueueItem());
-    void manager.handleQueueItem({
+    const handled = manager.handleQueueItem({
       ...promptQueueItem(),
       claimId: "claim-second",
       id: "queue-second",
@@ -960,23 +973,36 @@ describe("bridge session cwd safety", () => {
     });
 
     await eventually(() =>
-      expect(cloud.results).toContainEqual(
+      expect(logs).toContainEqual(
         expect.objectContaining({
-          claimId: "claim-second",
-          id: "queue-second",
-          result: expect.objectContaining({
-            ok: false,
-            reasonCode: "tool_result_timeout",
-            terminal: true,
-          }),
+          event: "bridge.session.tool_result_timeout",
+          queueId: "queue-second",
+          terminal: false,
+          toolCallId: "tool-1",
         }),
       ),
+    );
+    expect(cloud.results).not.toContainEqual(
+      expect.objectContaining({
+        id: "queue-second",
+      }),
+    );
+    rejectSecondPrompt?.(new Error("ACP request timed out: session/prompt"));
+    await handled;
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-second",
+        result: expect.objectContaining({
+          failureClass: "provider_silent_after_tool",
+          reasonCode: "acp_method_timeout",
+          terminal: true,
+        }),
+      }),
     );
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "bridge.session.tool_result_timeout",
         queueId: "queue-second",
-        reasonCode: "tool_result_timeout",
         toolCallId: "tool-1",
       }),
     );
@@ -985,6 +1011,7 @@ describe("bridge session cwd safety", () => {
   test("uses runtime subagent tool policy when tracking pending tool calls", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
+    let rejectPrompt: ((error: Error) => void) | undefined;
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
       createSession: (context) => ({
@@ -992,7 +1019,9 @@ describe("bridge session cwd safety", () => {
         cancel: async () => {},
         sendUserMessage: async () => {
           context.onEvent(toolCallEvent(1, "delegate: inspect OpenUI primitives"));
-          await new Promise(() => {});
+          await new Promise<never>((_resolve, reject) => {
+            rejectPrompt = reject;
+          });
           throw new Error("unreachable");
         },
       }),
@@ -1025,15 +1054,12 @@ describe("bridge session cwd safety", () => {
       bridgeProfileId: "hermes:test",
     });
     await eventually(() =>
-      expect(cloud.results).toContainEqual(
+      expect(logs).toContainEqual(
         expect.objectContaining({
-          claimId: "claim-prompt",
-          id: "queue-prompt",
-          result: expect.objectContaining({
-            ok: false,
-            reasonCode: "tool_result_timeout",
-            terminal: true,
-          }),
+          event: "bridge.session.tool_result_timeout",
+          queueId: "queue-prompt",
+          terminal: false,
+          toolCallId: "tool-1",
         }),
       ),
     );
@@ -1042,15 +1068,76 @@ describe("bridge session cwd safety", () => {
       expect.objectContaining({
         event: "bridge.session.tool_result_timeout",
         queueId: "queue-prompt",
-        reasonCode: "tool_result_timeout",
+        terminal: false,
         timeoutMs: 30,
         toolCallId: "tool-1",
         toolClass: "subagent",
-        toolName: "delegate: inspect OpenUI primitives",
         toolPolicyId: "test-delegate-subagent",
       }),
     );
+    rejectPrompt?.(new Error("ACP request timed out: session/prompt"));
     await handled;
+    expect(cloud.results).toContainEqual(
+      expect.objectContaining({
+        id: "queue-prompt",
+        result: expect.objectContaining({
+          failureClass: "provider_silent_after_tool",
+          reasonCode: "acp_method_timeout",
+          terminal: true,
+        }),
+      }),
+    );
+  });
+
+  test("keeps a structured read standard when its title contains workflow", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(
+            toolCallEvent(1, "read: docs/workflow.md", "read-1", "read"),
+          );
+          context.onEvent(
+            streamChunkEvent("agent_thought_chunk", "continuing", 2),
+          );
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        classificationSource: "structured_kind",
+        event: "bridge.session.tool_call_tracked",
+        toolCallId: "read-1",
+        toolClass: "standard",
+        toolKind: "read",
+        toolPolicyId: "structured-standard-tool",
+      }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        toolCallId: "read-1",
+        trigger: "assistant_output_resumed",
+      }),
+    );
   });
 
   test("clears pending tool timeout when the tool result arrives", async () => {
@@ -1275,7 +1362,7 @@ describe("bridge session cwd safety", () => {
     );
   });
 
-  test("keeps mismatched tool results strict for non-Hermes runtimes", async () => {
+  test("does not terminalize non-Hermes prompts for an unresolved tool alone", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
@@ -1304,9 +1391,7 @@ describe("bridge session cwd safety", () => {
     expect(cloud.results.at(-1)).toMatchObject({
       id: "queue-prompt",
       result: {
-        ok: false,
-        reasonCode: "tool_result_timeout",
-        toolCallId: "tool-2",
+        ok: true,
       },
     });
   });
@@ -6612,12 +6697,14 @@ function toolCallEvent(
   sequence: number,
   toolName = "shell",
   toolCallId = "tool-1",
+  toolKind?: string,
 ): NormalizedBridgeEvent {
   return {
     eventType: "tool_call",
     externalEventId: `session-1:${sequence}:tool_call`,
     part: {
       json: {
+        kind: toolKind,
         state: "input-available",
         toolCallId,
         toolName,

@@ -80,6 +80,7 @@ export const bridgeLogEventNames = [
   "bridge.session.warm_runtime_profiles",
   "bridge.session.warmed",
   "bridge.session.native_subagent_unjoined",
+  "bridge.session.tool_call_tracked",
   "bridge.session.tool_call_reconciled",
   "bridge.session.tool_calls_reconciled",
   "bridge.session.tool_result_id_mismatch",
