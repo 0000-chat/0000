@@ -82,6 +82,7 @@ export const bridgeLogEventNames = [
   "bridge.session.native_subagent_unjoined",
   "bridge.session.tool_call_reconciled",
   "bridge.session.tool_calls_reconciled",
+  "bridge.session.tool_result_id_mismatch",
   "bridge.session.tool_result_timeout",
   "bridge.signal.received",
   "bridge.process.exiting",
