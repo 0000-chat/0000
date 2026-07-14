@@ -112,6 +112,11 @@ export const AGENT_TOOL_BROKER_MCP_TOOL_NAMES = [
   "tools.executeCode",
 ] as const
 export type AgentToolBrokerMcpToolName = (typeof AGENT_TOOL_BROKER_MCP_TOOL_NAMES)[number]
+export const AGENT_TOOL_TOP_LEVEL_MCP_TOOL_NAMES = [
+  ...AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
+  "capabilities.advise",
+] as const
+export type AgentToolTopLevelMcpToolName = (typeof AGENT_TOOL_TOP_LEVEL_MCP_TOOL_NAMES)[number]
 const TOOL_SEARCH_INPUT_SCHEMA = {
   query: z.string().optional(),
   limit: z.number().int().positive().max(50).optional(),
@@ -629,8 +634,8 @@ export function parseAgentToolMcpFeatureFlags(value: string | undefined): Featur
 export function getVisibleAgentToolMcpToolNames(
   _activeToolSurfaces: readonly AgentToolSurface[] = [],
   _enabledFeatureFlags: readonly FeatureFlagKey[] = [],
-): AgentToolBrokerMcpToolName[] {
-  return [...AGENT_TOOL_BROKER_MCP_TOOL_NAMES]
+): AgentToolTopLevelMcpToolName[] {
+  return [...AGENT_TOOL_TOP_LEVEL_MCP_TOOL_NAMES]
 }
 
 export function buildAgentToolMcpEnv(env: NodeJS.ProcessEnv): AgentToolMcpEnv {
@@ -747,9 +752,9 @@ export function buildAgentToolGuideText(options: ZeroChatPolicyOptions = {}): st
   const featureFlags = parseFeatureFlagArray(options.enabledFeatureFlags)
   return `You are operating inside 0000 Chat.
 
-Use the 0000 MCP server for 0000 Chat data and actions. The public bridge MCP surface is hard-switched to a small broker: tools.search finds catalog tools, tools.describe returns schema/risk/approval details, tools.call invokes one catalog tool, tools.executePlan runs bounded multi-step plans, and tools.executeCode runs ephemeral per-turn Code Mode. Individual 0000 tool names are catalog entries passed through the broker, not directly visible MCP tools.
+Use the 0000 MCP server for 0000 Chat data and actions. The public bridge MCP surface is hard-switched to a small broker plus the top-level Architect advisor: tools.search finds catalog tools, tools.describe returns schema/risk/approval details, tools.call invokes one catalog tool, tools.executePlan runs bounded multi-step plans, tools.executeCode runs ephemeral per-turn Code Mode, and capabilities.advise returns 0000-native architecture guidance. Individual 0000 tool names are catalog entries passed through the broker, not directly visible MCP tools.
 
-Broker tools: ${AGENT_TOOL_BROKER_MCP_TOOL_NAMES.join(", ")}.
+Top-level tools: ${AGENT_TOOL_TOP_LEVEL_MCP_TOOL_NAMES.join(", ")}.
 
 Capability packs and routing resources:
 - ${AGENT_TOOL_CAPABILITY_PACKS_RESOURCE}
@@ -777,10 +782,10 @@ agentSessionId: ${env.agentSessionId}
 ${currentThreadLine}bridgeDeviceId: ${env.deviceId}
 appUrl: ${env.appUrl}
 mcpServer: 0000
-activeToolSurfaces: ${activeToolSurfaces} (legacy hint only; direct surface tools are hidden by the broker hard-switch)
+activeToolSurfaces: ${activeToolSurfaces} (legacy hint only; other direct surface tools are hidden by the broker hard-switch)
 enabledFeatureFlags: ${enabledFeatureFlags}
 visibleTools: ${visibleTools.join(",")}
-toolBroker: use tools.search to find 0000 tools, tools.describe for schema/risk, tools.call for one call, tools.executePlan for bounded multi-step calls, and tools.executeCode for ephemeral Code Mode. Do not rely on direct surface tools being visible.
+toolBroker: use capabilities.advise directly for 0000-native architecture guidance; use tools.search to find catalog tools, tools.describe for schema/risk, tools.call for one call, tools.executePlan for bounded multi-step calls, and tools.executeCode for ephemeral Code Mode. Do not rely on other direct surface tools being visible.
 toolGuide: ${AGENT_TOOL_GUIDE_RESOURCE}`
 }
 
@@ -839,6 +844,12 @@ export function createAgentToolsMcpServer(env: AgentToolMcpEnv): McpServer {
       inputSchema: TOOL_EXECUTE_CODE_INPUT_SCHEMA,
     },
     async (input) => toMcpToolResult(await callCatalogTool(env, "tools.executeCode", input)),
+  )
+
+  server.registerTool(
+    "capabilities.advise",
+    buildAgentToolMcpRegistrationMetadata("capabilities.advise"),
+    async (input) => toMcpToolResult(await callCatalogTool(env, "capabilities.advise", input)),
   )
 
   server.registerResource(

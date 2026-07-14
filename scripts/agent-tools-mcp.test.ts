@@ -106,7 +106,7 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_INPUT_SCHEMAS["actions.updateDraft"].safeParse({ actionId: "action_1" }).success).toBe(false)
   })
 
-  test("hard-switches MCP exposure to broker tools only", () => {
+  test("hard-switches MCP exposure to broker tools plus the Architect advisor", () => {
     expect(AGENT_TOOL_BROKER_MCP_TOOL_NAMES).toEqual([
       "tools.search",
       "tools.describe",
@@ -114,9 +114,13 @@ describe("agent tools MCP server helpers", () => {
       "tools.executePlan",
       "tools.executeCode",
     ])
-    expect(getVisibleAgentToolMcpToolNames()).toEqual([...AGENT_TOOL_BROKER_MCP_TOOL_NAMES])
+    expect(getVisibleAgentToolMcpToolNames()).toEqual([
+      ...AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
+      "capabilities.advise",
+    ])
     expect(getVisibleAgentToolMcpToolNames(["thread", "database"], [ARTIFACTS_FEATURE_FLAG_KEY, ACTIONS_RUNTIME_FEATURE_FLAG_KEY])).toEqual([
       ...AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
+      "capabilities.advise",
     ])
   })
 
@@ -348,6 +352,7 @@ describe("agent tools MCP server helpers", () => {
       "tools.call",
       "tools.executePlan",
       "tools.executeCode",
+      "capabilities.advise",
     ])
     expect(registeredToolNames).not.toContain("context.get")
     expect(registeredToolNames).not.toContain("threads.list")
