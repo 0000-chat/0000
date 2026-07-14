@@ -292,6 +292,7 @@ type ToolResultTimeoutDetails = {
 type ToolCallReconciliationTrigger =
   | "assistant_output_resumed"
   | "later_tool_started"
+  | "mismatched_tool_result"
   | "turn_completed";
 
 const NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER =
@@ -1856,7 +1857,39 @@ export class BridgeSessionManager {
       });
       return;
     }
-    this.clearToolCall(queueItemId, toolCallId);
+    const activeTool = this.activeToolCalls.get(queueItemId)?.get(toolCallId);
+    if (activeTool) {
+      this.clearToolCall(queueItemId, toolCallId);
+      return;
+    }
+    if (session.runtimeProfile?.kind !== "hermes") {
+      return;
+    }
+    const pendingStandardTool = Array.from(
+      this.activeToolCalls.get(queueItemId)?.values() ?? [],
+    ).find((tool) => tool.toolClass === "standard");
+    if (!pendingStandardTool) {
+      return;
+    }
+    this.writeLog({
+      level: "warn",
+      event: "bridge.session.tool_result_id_mismatch",
+      queueId: queueItemId,
+      threadId: session.threadId,
+      agentSessionId: session.providerSessionKey,
+      bridgeProfileId: session.runtimeProfile?.id,
+      reasonCode: "provider_progressed_with_mismatched_tool_result",
+      settlementState: "provider_progressed",
+      receivedToolCallId: toolCallId,
+      toolCallId: pendingStandardTool.toolCallId,
+      toolClass: pendingStandardTool.toolClass,
+      toolName: pendingStandardTool.toolName,
+      toolPolicyId: pendingStandardTool.toolPolicyId,
+      toolTimeoutMs: pendingStandardTool.toolTimeoutMs,
+    });
+    this.reconcilePendingToolCalls(queueItemId, session, {
+      trigger: "mismatched_tool_result",
+    });
   }
 
   private reconcilePendingToolCallsIfAssistantOutputResumed(

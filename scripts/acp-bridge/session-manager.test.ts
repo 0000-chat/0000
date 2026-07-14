@@ -1216,6 +1216,145 @@ describe("bridge session cwd safety", () => {
     );
   });
 
+  test("reconciles a pending Hermes standard tool after a mismatched completion", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "search", "tool-1"));
+          context.onEvent(toolCallEvent(2, "shell", "tool-2"));
+          context.onEvent(toolResultEvent(3, "tool-1", "search"));
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: { ok: true },
+    });
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_id_mismatch",
+        receivedToolCallId: "tool-1",
+        toolCallId: "tool-2",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_timeout",
+        toolCallId: "tool-2",
+      }),
+    );
+    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+      expect.objectContaining({
+        eventType: "tool_result",
+        normalizedPayload: expect.objectContaining({
+          json: expect.objectContaining({ toolCallId: "tool-1" }),
+        }),
+      }),
+    );
+  });
+
+  test("keeps mismatched tool results strict for non-Hermes runtimes", async () => {
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "search", "tool-1"));
+          context.onEvent(toolCallEvent(2, "shell", "tool-2"));
+          context.onEvent(toolResultEvent(3, "tool-1", "search"));
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      toolResultTimeoutMs: 5,
+    });
+
+    await manager.handleQueueItem(promptQueueItem());
+
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-prompt",
+      result: {
+        ok: false,
+        reasonCode: "tool_result_timeout",
+        toolCallId: "tool-2",
+      },
+    });
+  });
+
+  test("does not reconcile a Hermes delegate after a mismatched completion", async () => {
+    const cloud = fakeCloudClient();
+    const logs: Array<Record<string, unknown>> = [];
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: (context) => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async () => {
+          context.onEvent(toolCallEvent(1, "delegate_task", "delegate-1"));
+          context.onEvent(toolResultEvent(2, "stale-tool", "search"));
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text: "ok",
+          };
+        },
+      }),
+      livenessTimeoutMs: 10_000,
+      log: (entry) => logs.push(entry),
+      runtimeProfiles: [hermesRuntimeProfile()],
+    });
+
+    await manager.handleQueueItem({
+      ...promptQueueItem(),
+      bridgeProfileId: "hermes:default",
+    });
+
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_result_id_mismatch",
+        toolCallId: "delegate-1",
+      }),
+    );
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({
+        event: "bridge.session.tool_call_reconciled",
+        toolCallId: "delegate-1",
+        trigger: "mismatched_tool_result",
+      }),
+    );
+  });
+
   test("keeps Hermes delegate tools active when later tool work and assistant output overlap", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
