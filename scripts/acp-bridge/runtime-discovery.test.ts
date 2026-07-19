@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -238,6 +239,7 @@ describe("runtime discovery", () => {
   })
 
   test("discovers Codex with context-mode diagnostics", async () => {
+    const commandCalls: string[] = []
     const profiles = await discoverRuntimeProfiles({
       baseAgentCommand: "hermes acp",
       discoverAcpCommands: async () => [
@@ -254,6 +256,7 @@ describe("runtime discovery", () => {
       }),
       runCommand: async (command) => {
         const key = command.join(" ")
+        commandCalls.push(key)
         if (key === "command -v npx") {
           return { ok: true, stdout: "/usr/bin/npx\n" }
         }
@@ -277,7 +280,12 @@ describe("runtime discovery", () => {
     expect(codex).toMatchObject({
       id: "codex:codex-acp",
       command: ["npx", "--yes", "@agentclientprotocol/codex-acp@1.1.4"],
-      diagnostics: { acp: "supported", contextMode: "available", mcpServers: 2 },
+      diagnostics: {
+        acp: "supported",
+        contextMode: "available",
+        mcpServers: 2,
+        version: "@agentclientprotocol/codex-acp@1.1.4",
+      },
       capabilities: {
         nativeSkills: true,
         nativeHooks: true,
@@ -287,6 +295,7 @@ describe("runtime discovery", () => {
         supportsNativeSubagentTools: true,
       },
     })
+    expect(commandCalls).not.toContain("codex --version")
     expect(codex?.availableCommands).toEqual([
       { name: "status", description: "Show session status" },
       { name: "plan", description: "Create a plan", inputHint: "task" },
@@ -300,6 +309,18 @@ describe("runtime discovery", () => {
         cancelTurn: { nativeMethod: "session/cancel", source: "native" },
       },
     })
+  })
+
+  test("documents the maintained Codex ACP adapter and effective Codex override", () => {
+    const runtimeSupport = readFileSync(
+      new URL("../../docs/runtime-support.md", import.meta.url),
+      "utf8",
+    )
+
+    expect(runtimeSupport).toContain("@agentclientprotocol/codex-acp@1.1.4")
+    expect(runtimeSupport).toContain("CODEX_PATH")
+    expect(runtimeSupport).toMatch(/bundl(?:e|ed|es|ing)/i)
+    expect(runtimeSupport).not.toContain("Zed Codex ACP")
   })
 
   test("discovers Codex through npx when bunx is unavailable", async () => {

@@ -235,7 +235,11 @@ async function profileForBuiltIn(
   discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
 ): Promise<BridgeRuntimeProfile> {
   if (builtIn.kind === "codex") {
-    const version = await runCommand(["codex", "--version"])
+    const adapterPackage = builtIn.command.find(
+      (part) =>
+        part === "@agentclientprotocol/codex-acp" ||
+        part.startsWith("@agentclientprotocol/codex-acp@"),
+    )
     const mcpList = await runCommand(["codex", "mcp", "list"])
     const contextMode = await runCommand(["command", "-v", "context-mode"])
     const mcpServers = mcpList.ok
@@ -255,7 +259,7 @@ async function profileForBuiltIn(
           contextMode: contextMode.ok ? "available" : "missing",
           hooks: "unknown",
           mcpServers,
-          version: firstLine(version.stdout),
+          version: adapterPackage,
         },
         capabilities: {
           nativeSkills: true,
