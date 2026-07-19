@@ -100,7 +100,7 @@ const BUILT_INS: Array<{
     kind: "codex",
     label: "Codex",
     command: DEFAULT_CODEX_ACP_COMMAND.split(" "),
-    binary: "bunx",
+    binary: "npx",
     probeTimeoutMs: 30_000,
   },
   {
@@ -190,8 +190,8 @@ export async function discoverRuntimeProfiles(
 function isRetiredCodexAcpCommand(command: string[]): boolean {
   return command.some(
     (part) =>
-      part === "@agentclientprotocol/codex-acp" ||
-      part.startsWith("@agentclientprotocol/codex-acp@"),
+      part === "@zed-industries/codex-acp" ||
+      part.startsWith("@zed-industries/codex-acp@"),
   )
 }
 
