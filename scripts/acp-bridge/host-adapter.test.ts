@@ -23,12 +23,10 @@ describe("bridge host adapter boundary", () => {
         }),
       cleanupStaleClaims: async (...args: unknown[]) =>
         record(calls, "cleanupStaleClaims", args, { released: 1 }),
-      heartbeat: async (...args: unknown[]) => record(calls, "heartbeat", args, { ok: true }),
       markResult: async (...args: unknown[]) => record(calls, "markResult", args, { ok: true }),
     }
     const adapter = new ConvexBridgeHostAdapter(transport)
 
-    await adapter.heartbeat({ status: { connected: true } })
     const claimed = await adapter.claimWork({ limit: 1 })
     await adapter.appendEvents({
       events: [
@@ -58,7 +56,6 @@ describe("bridge host adapter boundary", () => {
     })
 
     expect(calls.map((call) => call.method)).toEqual([
-      "heartbeat",
       "claimWork",
       "appendEvents",
       "markResult",
@@ -66,8 +63,8 @@ describe("bridge host adapter boundary", () => {
       "markResult",
     ])
     expect(diagnosticsResult).toEqual({ ok: true, skipped: 1 })
-    expect(calls[3]?.args).toEqual(["queue-1", { ok: true, claimId: "claim-1" }, "claim-1"])
-    expect(calls[4]?.args).toEqual([
+    expect(calls[2]?.args).toEqual(["queue-1", { ok: true, claimId: "claim-1" }, "claim-1"])
+    expect(calls[3]?.args).toEqual([
       "queue-1",
       { claimId: "claim-1", error: "runtime stopped", ok: false, retryable: true },
       "claim-1",
