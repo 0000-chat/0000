@@ -8,7 +8,8 @@ settings.
 
 `bun run bridge connect <code> --app-url <url>` writes local pairing state to
 `~/.0000/bridge.json`. That file stores the host URL, bridge device identity,
-and bearer token needed for authenticated polling. Do not commit it.
+and bearer token needed for realtime ticket issuance and authenticated durable
+operations. Do not commit it.
 
 The default production host is:
 
@@ -28,9 +29,9 @@ bun run bridge start --runtime-command "npx -y @agentclientprotocol/claude-agent
 ```
 
 Multiple commands can be supplied so the host can import them as separate agent
-profiles. Runtime capabilities are reported by heartbeat and may include close,
-resume, command catalogs, model options, and input support depending on the ACP
-implementation.
+profiles. Runtime capabilities are reported when the bridge obtains its Device
+Room ticket and may include close, resume, command catalogs, model options, and
+input support depending on the ACP implementation.
 
 ## Working Directory Policy
 
@@ -56,7 +57,7 @@ The bridge writes:
 | Path | Purpose |
 | --- | --- |
 | `~/.0000/bridge.json` | Pairing token and host URL |
-| `~/.0000/bridge-status.json` | Local heartbeat/status projection |
+| `~/.0000/bridge-status.json` | Local bridge status projection |
 | `~/.0000/restart-handoff.json` | Short-lived restart/update handoff hints |
 | `~/.0000/bridge.sqlite` | Durable supervisor state and journal, when enabled |
 

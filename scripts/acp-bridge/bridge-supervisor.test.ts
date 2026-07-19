@@ -371,8 +371,6 @@ function fakeHostAdapter(): BridgeHostAdapter & {
     answerInteraction: async () => ({ ok: true }),
     claimWork: async () => ({ raw: {}, workItems: [] }),
     completeWork: async () => ({ ok: true }),
-    heartbeat: async () => ({ ok: true }),
-    pollQueue: async () => ({ ok: true }),
     releaseWork: async () => ({ ok: true }),
   };
 }

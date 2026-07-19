@@ -5,13 +5,15 @@ adapter, not a requirement baked into the bridge runtime.
 
 ## Stable Host Responsibilities
 
-A host adapter must provide authenticated HTTPS endpoints for:
+A host adapter must provide an authenticated realtime connection plus bounded
+HTTPS endpoints for durable work operations:
 
 | Operation | Direction | Purpose |
 | --- | --- | --- |
-| heartbeat | bridge to host | Register liveness, runtime profiles, capabilities, and status |
-| poll queue | bridge to host | Discover queued work without claiming it |
-| claim work | bridge to host | Atomically lease one or more work items |
+| issue realtime ticket | bridge to host | Exchange bridge credentials and a nonce hash for a short-lived, one-time room ticket |
+| connect device room | bidirectional | Deliver wake/control signals and publish compact status/liveness updates |
+| pull control | bridge to host | Recover control state during startup and bounded safety resyncs |
+| claim work | bridge to host | Atomically lease one or more work items, fenced by the current room connection epoch |
 | cleanup work | bridge to host | Release stale or terminal local work |
 | submit result | bridge to host | Persist success, failure, cancellation, and diagnostic result state |
 | append diagnostics | bridge to host | Record structured debug breadcrumbs |
@@ -39,9 +41,11 @@ clearly when required fields are absent.
 
 ## 0000 Chat Specifics
 
-0000 Chat uses Convex-backed queue, heartbeat, diagnostics, and thread
-projection endpoints. The bridge must not import private Convex generated code;
-it talks to those endpoints over the public authenticated HTTP adapter.
+0000 Chat uses a Cloudflare Durable Object Device Room for realtime wake,
+control, status, and liveness traffic. Convex backs queue claims, results,
+diagnostics, control recovery, and thread projection. The bridge must not import
+private Convex generated code; it uses the public realtime protocol and
+authenticated HTTP adapter.
 
 0000-specific hidden prompts and MCP guidance live in
 `scripts/acp-bridge/zero-chat-policy.ts`. Other hosts should supply their own
