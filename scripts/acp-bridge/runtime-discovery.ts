@@ -13,7 +13,11 @@ import {
   profileIdForCommand,
   synthesizeLegacyHermesProfile,
 } from "./runtime-profiles"
-import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
+import {
+  DEFAULT_CLAUDE_CODE_ACP_COMMAND,
+  DEFAULT_CODEX_ACP_COMMAND,
+  isRetiredCodexAcpCommand,
+} from "./runtime-defaults"
 import { SdkAcpRuntimeClient } from "./sdk-acp-runtime-client"
 import { resolveNodeProxyExecutable } from "./acp-node-proxy-launcher"
 
@@ -100,7 +104,7 @@ const BUILT_INS: Array<{
     kind: "codex",
     label: "Codex",
     command: DEFAULT_CODEX_ACP_COMMAND.split(" "),
-    binary: "bunx",
+    binary: "npx",
     probeTimeoutMs: 30_000,
   },
   {
@@ -187,14 +191,6 @@ export async function discoverRuntimeProfiles(
   return dedupeRuntimeProfiles(profiles)
 }
 
-function isRetiredCodexAcpCommand(command: string[]): boolean {
-  return command.some(
-    (part) =>
-      part === "@agentclientprotocol/codex-acp" ||
-      part.startsWith("@agentclientprotocol/codex-acp@"),
-  )
-}
-
 async function resolveBuiltInCommandCandidates(
   builtIn: { command: string[]; binary: string },
   runCommand: (command: string[]) => Promise<CommandResult>,
@@ -235,7 +231,11 @@ async function profileForBuiltIn(
   discoverAcpCommands: (command: string[]) => Promise<BridgeRuntimeAvailableCommand[]>,
 ): Promise<BridgeRuntimeProfile> {
   if (builtIn.kind === "codex") {
-    const version = await runCommand(["codex", "--version"])
+    const adapterPackage = builtIn.command.find(
+      (part) =>
+        part === "@agentclientprotocol/codex-acp" ||
+        part.startsWith("@agentclientprotocol/codex-acp@"),
+    )
     const mcpList = await runCommand(["codex", "mcp", "list"])
     const contextMode = await runCommand(["command", "-v", "context-mode"])
     const mcpServers = mcpList.ok
@@ -255,7 +255,7 @@ async function profileForBuiltIn(
           contextMode: contextMode.ok ? "available" : "missing",
           hooks: "unknown",
           mcpServers,
-          version: firstLine(version.stdout),
+          version: adapterPackage,
         },
         capabilities: {
           nativeSkills: true,

@@ -76,6 +76,7 @@ import {
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
+  normalizeConfiguredAgentCommand,
 } from "./acp-bridge/runtime-defaults";
 import {
   synthesizeLegacyHermesProfile,
@@ -155,7 +156,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.67";
+export const BRIDGE_VERSION = "0.1.68";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -1043,6 +1044,13 @@ export function parseBridgeArgs(argv: string[]): ParsedBridgeArgs {
     positionals.push(value);
   }
 
+  const configuredAgentCommands = flags["agent-command"];
+  if (typeof configuredAgentCommands === "string") {
+    flags["agent-command"] = normalizeConfiguredAgentCommand(configuredAgentCommands);
+  } else if (Array.isArray(configuredAgentCommands)) {
+    flags["agent-command"] = configuredAgentCommands.map(normalizeConfiguredAgentCommand);
+  }
+
   return { command, positionals, flags };
 }
 
@@ -1680,11 +1688,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   }
 
   const agentCommand =
-    getFlag(
-      parsed.flags,
-      "agent-command",
-      process.env.ZERO_CHAT_AGENT_COMMAND,
-    ) ?? defaultAgentCommandForEnvironment();
+    getFlag(parsed.flags, "agent-command") ?? defaultAgentCommandForEnvironment();
   const skillPath = getFlag(
     parsed.flags,
     "skill-path",
@@ -1886,9 +1890,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     getFlag(parsed.flags, "poll-ms", String(DEFAULT_POLL_MS)),
   );
   const localHardMaxInFlight = getLocalHardMaxInFlight(parsed.flags);
+  const environmentAgentCommand = process.env.ZERO_CHAT_AGENT_COMMAND?.trim();
   const agentCommand =
-    getFlag(parsed.flags, "agent-command", DEFAULT_AGENT_COMMAND) ??
-    DEFAULT_AGENT_COMMAND;
+    getFlag(
+      parsed.flags,
+      "agent-command",
+      normalizeConfiguredAgentCommand(
+        environmentAgentCommand || DEFAULT_AGENT_COMMAND,
+      ),
+    ) ?? DEFAULT_AGENT_COMMAND;
   const customRuntimeCommands = getRepeatedFlags(
     parsed.flags,
     "runtime-command",

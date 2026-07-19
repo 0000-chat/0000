@@ -9,10 +9,16 @@ implementations differ.
 | Runtime | Status | Notes |
 | --- | --- | --- |
 | Hermes ACP | Supported | Default runtime command; supports normal prompt work and capability discovery. |
-| Zed Codex ACP | Supported | Use the pinned package command from the README unless testing a newer version. |
+| Codex ACP | Supported | Uses the pinned `@agentclientprotocol/codex-acp@1.1.4` adapter, which includes a compatible `@openai/codex` dependency. |
 | Claude Code ACP | Supported when locally authenticated | Initialization can pass while prompt work fails if the local Claude provider session is logged out. |
 | OpenClaw ACP | Supported with gateway auth | Requires the local gateway and matching remote token configuration. |
 | Custom ACP command | Supported | Use `--runtime-command` or the runtime smoke `--custom-command` option. |
+
+The Codex ACP adapter normally runs the compatible Codex executable bundled by
+its package dependency. Set `CODEX_PATH` only when intentionally overriding
+that executable. Runtime diagnostics report the launched adapter package
+version; they do not treat an unrelated `codex` executable on `PATH` as the
+adapter-effective Codex version.
 
 ## Runtime Capabilities
 

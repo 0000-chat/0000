@@ -43,6 +43,7 @@ import {
   findRuntimeProfile,
   resolveToolCallTimeoutPolicy,
 } from "./runtime-profiles";
+import { hardSwitchRetiredCodexAcpCommand } from "./runtime-defaults";
 import type {
   BridgeSupervisor,
   BridgeSupervisorWorkItem,
@@ -492,12 +493,13 @@ export function buildBridgeLaunchSpec(input: {
     );
   }
   const baseCommand = runtimeProfile?.command ?? input.baseAgentCommand;
-  const agentCommand =
+  const rawAgentCommand =
     runtimeProfile?.kind === "hermes" || (!runtimeProfile && profileName)
       ? resolveHermesProfileAgentCommand(baseCommand, profileName)
       : Array.isArray(baseCommand)
         ? [...baseCommand]
         : splitCommand(baseCommand ?? "hermes acp");
+  const agentCommand = hardSwitchRetiredCodexAcpCommand(rawAgentCommand);
   const runtimeKind = runtimeProfile?.kind ?? inferRuntimeKind(agentCommand);
   const baseKey =
     runtimeProfile?.id ??
