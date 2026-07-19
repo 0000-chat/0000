@@ -276,7 +276,7 @@ describe("runtime discovery", () => {
     const codex = profiles.find((profile) => profile.kind === "codex")
     expect(codex).toMatchObject({
       id: "codex:codex-acp",
-      command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+      command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
       diagnostics: { acp: "supported", contextMode: "available", mcpServers: 2 },
       capabilities: {
         nativeSkills: true,
@@ -373,7 +373,7 @@ describe("runtime discovery", () => {
     })
   })
 
-  test("does not fall back to retired Codex ACP package when Zed Codex probe fails", async () => {
+  test("does not fall back to the stale Zed Codex ACP package when the maintained adapter fails", async () => {
     const probeCalls: string[] = []
     const profiles = await discoverRuntimeProfiles({
       baseAgentCommand: "hermes acp",
@@ -381,7 +381,7 @@ describe("runtime discovery", () => {
       probeAcpCommand: async (command) => {
         const key = command.join(" ")
         probeCalls.push(key)
-        if (key === "bunx @zed-industries/codex-acp@0.16.0") {
+        if (key === "bunx @agentclientprotocol/codex-acp@1.1.4") {
           return { ok: false, reason: "sh: codex-acp: command not found" }
         }
         return { ok: true }
@@ -404,12 +404,13 @@ describe("runtime discovery", () => {
       },
     })
 
-    expect(probeCalls).toContain("bunx @zed-industries/codex-acp@0.16.0")
+    expect(probeCalls).toContain("bunx @agentclientprotocol/codex-acp@1.1.4")
+    expect(probeCalls).not.toContain("bunx @zed-industries/codex-acp@0.16.0")
     expect(probeCalls).not.toContain("bunx --yes @agentclientprotocol/codex-acp@0.0.45")
     expect(probeCalls).not.toContain("npx --yes @agentclientprotocol/codex-acp@0.0.45")
     expect(profiles.find((profile) => profile.kind === "codex")).toMatchObject({
       id: "codex:codex-acp",
-      command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+      command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
       diagnostics: { acp: "unsupported", reason: "sh: codex-acp: command not found" },
       status: "unavailable",
     })
@@ -435,7 +436,7 @@ describe("runtime discovery", () => {
     expect(
       probeCalls.some(
         (call) =>
-          call.command.join(" ") === "bunx @zed-industries/codex-acp@0.16.0" &&
+          call.command.join(" ") === "bunx @agentclientprotocol/codex-acp@1.1.4" &&
           call.timeoutMs === 30_000,
       ),
     ).toBe(true)
@@ -452,7 +453,7 @@ describe("runtime discovery", () => {
         .filter(
           (call) =>
             call.command.join(" ") !== "hermes acp" &&
-            call.command.join(" ") !== "bunx @zed-industries/codex-acp@0.16.0" &&
+            call.command.join(" ") !== "bunx @agentclientprotocol/codex-acp@1.1.4" &&
             call.command.join(" ") !== "openclaw acp",
         )
         .every((call) => call.timeoutMs === undefined),

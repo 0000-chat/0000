@@ -24,7 +24,7 @@ If no runtime command is provided, it uses the default Hermes ACP command.
 
 ```bash
 bun run bridge start --runtime-command "hermes acp"
-bun run bridge start --runtime-command "bunx @zed-industries/codex-acp@0.16.0"
+bun run bridge start --runtime-command "npx --yes @agentclientprotocol/codex-acp@1.1.4"
 bun run bridge start --runtime-command "npx -y @agentclientprotocol/claude-agent-acp@0.39.0"
 ```
 
