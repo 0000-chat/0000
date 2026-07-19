@@ -4722,7 +4722,7 @@ export function bridgeHeartbeatSignature(
     maxInFlight: status.maxInFlight,
     capacity: status.capacity,
     runtimeIdentity: status.runtimeIdentity,
-    processHealth: status.processHealth,
+    processHealth: heartbeatProcessHealthSignature(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
     availability: status.availability,
@@ -4758,6 +4758,39 @@ export function bridgeHeartbeatSignature(
       : undefined,
     updateState: status.updateState,
   });
+}
+
+function heartbeatProcessHealthSignature(
+  processHealth: BridgeStatus["processHealth"],
+) {
+  if (!processHealth) {
+    return undefined;
+  }
+  const { lastReconciledAt: _lastReconciledAt, singletonOwner, ...rest } =
+    processHealth;
+  if (!singletonOwner) {
+    return rest;
+  }
+  const {
+    lastReconciledAt: _singletonLastReconciledAt,
+    duplicateOwner,
+    ...stableSingletonOwner
+  } = singletonOwner;
+  return {
+    ...rest,
+    singletonOwner: {
+      ...stableSingletonOwner,
+      ...(duplicateOwner
+        ? {
+            duplicateOwner: Object.fromEntries(
+              Object.entries(duplicateOwner).filter(
+                ([key]) => key !== "updatedAt",
+              ),
+            ),
+          }
+        : {}),
+    },
+  };
 }
 
 type RuntimeCatalogRefreshStatusTarget = Pick<

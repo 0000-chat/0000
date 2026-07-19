@@ -3208,6 +3208,234 @@ describe("bridge supervisor claim gating", () => {
     expect(status.lastPollAt).toBeUndefined();
   });
 
+  test("heartbeat signature ignores process reconciliation timestamps", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: healthyBridgeProcessHealth(),
+      recentErrors: [],
+    };
+
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        processHealth: {
+          ...status.processHealth!,
+          lastReconciledAt: "2026-07-19T00:00:01.000Z",
+          singletonOwner: {
+            ...status.processHealth!.singletonOwner!,
+            lastReconciledAt: "2026-07-19T00:00:01.000Z",
+          },
+        },
+      }),
+    ).toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("heartbeat signature keeps meaningful process health changes", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: healthyBridgeProcessHealth(),
+      recentErrors: [],
+    };
+
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        processHealth: {
+          ...status.processHealth!,
+          canClaim: false,
+          status: "ambiguous",
+        },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        processHealth: {
+          ...status.processHealth!,
+          singletonOwner: {
+            ...status.processHealth!.singletonOwner!,
+            ownerPath: "/tmp/other-bridge.owner.json",
+          },
+        },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("heartbeat signature ignores duplicate owner lease timestamps", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: duplicateOwnerBridgeProcessHealth(),
+      recentErrors: [],
+    };
+
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        processHealth: {
+          ...status.processHealth!,
+          singletonOwner: {
+            ...status.processHealth!.singletonOwner!,
+            duplicateOwner: {
+              ...status.processHealth!.singletonOwner!.duplicateOwner!,
+              updatedAt: "2026-07-19T00:00:01.000Z",
+            },
+          },
+        },
+      }),
+    ).toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("heartbeat signature keeps duplicate owner identity changes", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: duplicateOwnerBridgeProcessHealth(),
+      recentErrors: [],
+    };
+
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        processHealth: {
+          ...status.processHealth!,
+          singletonOwner: {
+            ...status.processHealth!.singletonOwner!,
+            duplicateOwner: {
+              ...status.processHealth!.singletonOwner!.duplicateOwner!,
+              instanceId: "other-instance",
+            },
+          },
+        },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        processHealth: {
+          ...status.processHealth!,
+          singletonOwner: {
+            ...status.processHealth!.singletonOwner!,
+            duplicateOwner: {
+              ...status.processHealth!.singletonOwner!.duplicateOwner!,
+              pid: 5252,
+            },
+          },
+        },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("heartbeat payload retains duplicate owner lease timestamps", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: duplicateOwnerBridgeProcessHealth(),
+      recentErrors: [],
+    };
+
+    expect(buildHeartbeatStatusPayload(status).processHealth).toMatchObject({
+      singletonOwner: {
+        duplicateOwner: {
+          updatedAt: "2026-07-19T00:00:00.000Z",
+        },
+      },
+    });
+  });
+
+  test("heartbeat payload retains process reconciliation timestamps", () => {
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      processHealth: {
+        ...healthyBridgeProcessHealth(),
+        singletonOwner: {
+          ...healthyBridgeProcessHealth().singletonOwner!,
+          lastReconciledAt: "2026-07-19T00:00:01.000Z",
+        },
+      },
+      recentErrors: [],
+    };
+
+    expect(buildHeartbeatStatusPayload(status).processHealth).toMatchObject({
+      lastReconciledAt: "2026-07-19T00:00:00.000Z",
+      singletonOwner: {
+        lastReconciledAt: "2026-07-19T00:00:01.000Z",
+      },
+    });
+  });
+
+  test("reconciliation timestamp updates do not force a second heartbeat", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const firstNow = Date.UTC(2026, 6, 19, 0, 0, 0);
+    let now = firstNow;
+    let heartbeatCount = 0;
+    let wakeTokenUpdateCount = 0;
+    let reconciliationTime = "2026-07-19T00:00:00.000Z";
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+    const loopInput: BridgeLoopIterationInput = {
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      getProcessHealth: () => healthyBridgeProcessHealth(reconciliationTime),
+      heartbeatIntervalMs: 15_000,
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => now,
+      pollReason: "timer",
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => {
+        heartbeatCount += 1;
+        return {
+          ok: true,
+          wake: {
+            expiresAt: firstNow + 10 * 60_000,
+            refreshAfterMs: 5 * 60_000,
+            token: `wake-${heartbeatCount}`,
+          },
+        };
+      },
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      wakeSignal: {
+        close: async () => {},
+        updateWakeToken: () => {
+          wakeTokenUpdateCount += 1;
+        },
+        wait: async () => "timeout",
+      },
+      writeStatus: async () => {},
+    };
+
+    await runBridgeLoopIteration(loopInput);
+    reconciliationTime = "2026-07-19T00:00:01.000Z";
+    now = firstNow + 1_000;
+    await runBridgeLoopIteration(loopInput);
+
+    expect(heartbeatCount).toBe(1);
+    expect(wakeTokenUpdateCount).toBe(1);
+  });
+
   test("skips queue claims when local journal health is hard-failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
     const logs: Array<Record<string, unknown>> = [];
@@ -4980,6 +5208,57 @@ describe("bridge supervisor claim gating", () => {
     );
   });
 });
+
+function healthyBridgeProcessHealth(
+  lastReconciledAt = "2026-07-19T00:00:00.000Z",
+): NonNullable<BridgeStatus["processHealth"]> {
+  return {
+    ambiguousProcessCount: 0,
+    canClaim: true,
+    childCount: 0,
+    childCountsByRuntimeProfile: {},
+    lastReconciledAt,
+    processCapExceeded: false,
+    singletonOwner: {
+      lastReconciledAt,
+      ownerPath: "/tmp/bridge.owner.json",
+      status: "healthy",
+    },
+    startupReconciliation: {
+      ambiguousProcessCount: 0,
+      lastReconciledAt: "2026-07-18T23:00:00.000Z",
+      orphanedProcessCount: 0,
+      removedDeadProcessCount: 0,
+      retainedProcessCount: 0,
+      status: "healthy",
+      terminatedOrphanedProcessCount: 0,
+      terminatedProcessCount: 0,
+    },
+    status: "healthy",
+  };
+}
+
+function duplicateOwnerBridgeProcessHealth(): NonNullable<
+  BridgeStatus["processHealth"]
+> {
+  const processHealth = healthyBridgeProcessHealth();
+  return {
+    ...processHealth,
+    canClaim: false,
+    singletonOwner: {
+      duplicateOwner: {
+        instanceId: "duplicate-instance",
+        pid: 4242,
+        processStartedAt: "2026-07-18T23:59:00.000Z",
+        updatedAt: "2026-07-19T00:00:00.000Z",
+      },
+      lastReconciledAt: "2026-07-19T00:00:00.000Z",
+      ownerPath: "/tmp/bridge.owner.json",
+      status: "duplicate_owner",
+    },
+    status: "ambiguous",
+  };
+}
 
 function bridgeRegistration(): BridgeRegistration {
   return {
