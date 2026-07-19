@@ -131,6 +131,7 @@ const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_IDLE_HEARTBEAT_MS = 5 * 60_000;
+const DEFAULT_QUEUE_FALLBACK_POLL_MS = 30_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_STALE_CLEANUP_TIMEOUT_MS = 2_000;
@@ -270,7 +271,43 @@ type ProposedAgentProfile = {
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
 type BridgeWakeWaitResult = "signal" | "timeout";
-export type BridgeLoopPollReason = "active" | "startup" | "timer" | "wake";
+export type BridgeLoopPollReason =
+  | "active"
+  | "maintenance"
+  | "startup"
+  | "timer"
+  | "wake";
+
+export function resolveBridgeLoopPollReason(
+  pollReason: BridgeLoopPollReason,
+  wakeSubscriptionActive: boolean,
+  fallback: {
+    fallbackPollIntervalMs?: number;
+    lastPollAt?: string;
+    now?: number;
+  } = {},
+): BridgeLoopPollReason {
+  if (
+    wakeSubscriptionActive ||
+    (pollReason !== "active" && pollReason !== "timer")
+  ) {
+    return pollReason;
+  }
+  const now = fallback.now ?? Date.now();
+  const lastPollAtMs = fallback.lastPollAt
+    ? Date.parse(fallback.lastPollAt)
+    : Number.NaN;
+  const fallbackPollIntervalMs = Math.max(
+    DEFAULT_QUEUE_FALLBACK_POLL_MS,
+    fallback.fallbackPollIntervalMs ?? 0,
+  );
+  const elapsedSincePollMs = now - lastPollAtMs;
+  return !Number.isFinite(lastPollAtMs) ||
+    elapsedSincePollMs < 0 ||
+    elapsedSincePollMs >= fallbackPollIntervalMs
+    ? "wake"
+    : "maintenance";
+}
 
 type BridgeWakeSignal = {
   wait(timeoutMs: number): Promise<BridgeWakeWaitResult>;
@@ -788,6 +825,7 @@ export type BridgeLoopIterationResult = {
 
 export type BridgeRegistrationSchedulerInput<TContext> = {
   context: TContext;
+  contextInFlight: (context: TContext) => number;
   isActive: (context: TContext) => boolean;
   onRestartRequested: (context: TContext) => Promise<void>;
   runContextPass: (
@@ -797,6 +835,7 @@ export type BridgeRegistrationSchedulerInput<TContext> = {
   totalInFlight: () => number;
   waitForWakeSignal: (
     context: TContext,
+    processRestartPending: boolean,
   ) => Promise<BridgeLoopPollReason>;
 };
 
@@ -806,8 +845,14 @@ export async function runBridgeRegistrationScheduler<TContext>(
   let nextPollReason: BridgeLoopPollReason = "startup";
   let processRestartPending = false;
   while (input.isActive(input.context)) {
+    if (processRestartPending && input.totalInFlight() === 0) {
+      await input.onRestartRequested(input.context);
+      return;
+    }
     const pollReason =
-      input.totalInFlight() > 0 ? "active" : nextPollReason;
+      nextPollReason === "timer" && input.contextInFlight(input.context) > 0
+        ? "active"
+        : nextPollReason;
     const result = await input.runContextPass(input.context, pollReason);
     if (result.restartRequested) {
       processRestartPending = true;
@@ -819,7 +864,10 @@ export async function runBridgeRegistrationScheduler<TContext>(
     if (!input.isActive(input.context)) {
       return;
     }
-    nextPollReason = await input.waitForWakeSignal(input.context);
+    nextPollReason = await input.waitForWakeSignal(
+      input.context,
+      processRestartPending,
+    );
   }
 }
 
@@ -2344,7 +2392,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     await persistAggregateStatus();
   };
   const idleWakeSignalTimeoutMs = (context: RuntimeContext) => {
-    const fallbackMs = Math.max(pollMs, 30_000);
+    const fallbackMs = Math.max(pollMs, DEFAULT_QUEUE_FALLBACK_POLL_MS);
     if (!context.wakeSignal.isWakeSubscriptionActive?.()) {
       return fallbackMs;
     }
@@ -2359,11 +2407,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   };
   const waitForContextWakeSignal = async (
     context: RuntimeContext,
+    processRestartPending: boolean,
   ): Promise<BridgeLoopPollReason> => {
     const timeoutMs =
-      totalInFlight() > 0 ? pollMs : idleWakeSignalTimeoutMs(context);
+      processRestartPending || context.inFlightCommands.size > 0
+        ? pollMs
+        : idleWakeSignalTimeoutMs(context);
     const result = await context.wakeSignal.wait(timeoutMs);
-    return result === "signal" ? "wake" : "timer";
+    return result === "signal"
+      ? "wake"
+      : processRestartPending
+        ? "maintenance"
+        : "timer";
   };
 
   await ensureContexts();
@@ -2597,11 +2652,18 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     context: RuntimeContext,
     loopPollReason: BridgeLoopPollReason,
   ): Promise<BridgeLoopIterationResult> => {
-    const pollReason =
-      loopPollReason === "timer" &&
-      !context.wakeSignal.isWakeSubscriptionActive?.()
-        ? "wake"
-        : loopPollReason;
+    const pollReason = resolveBridgeLoopPollReason(
+      loopPollReason,
+      context.wakeSignal.isWakeSubscriptionActive?.() ?? false,
+      {
+        fallbackPollIntervalMs: Math.max(
+          pollMs,
+          DEFAULT_QUEUE_FALLBACK_POLL_MS,
+        ),
+        lastPollAt: context.status.lastPollAt,
+        now: Date.now(),
+      },
+    );
     const bridgeCapacity = buildBridgeCapacitySnapshot(
       contexts.values(),
       localHardMaxInFlight,
@@ -2755,6 +2817,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     const task = runBridgeRegistrationScheduler({
       context,
+      contextInFlight: (candidate) => candidate.inFlightCommands.size,
       isActive: (candidate) =>
         !stopping &&
         !candidate.closing &&
@@ -4392,7 +4455,7 @@ export async function runBridgeLoopIteration(
         !actionableBridgeControlCommand(input.status) &&
         (input.canClaimPromptWork?.() ?? true);
       const shouldPollQueue =
-        pollReason !== "timer" || input.inFlightCommands.size > 0;
+        pollReason === "startup" || pollReason === "wake";
       const claimInput: BridgeQueueClaimInput | undefined =
         !canClaimPromptWork
           ? { lane: "control", limit: 1 }
@@ -6208,12 +6271,17 @@ export function createBridgeWakeSignal(input: {
   let activeToken: string | undefined;
   let activeTokenExpiresAt: number | undefined;
   let activeTokenRefreshAt: number | undefined;
+  let pendingWake = false;
   const waiters = new Set<() => void>();
   const clientFactory =
     input.clientFactory ??
     ((url: string) => new ConvexClient(url) as unknown as BridgeWakeSignalClient);
 
   const wake = () => {
+    if (!closed && waiters.size === 0) {
+      pendingWake = true;
+      return;
+    }
     for (const resolve of Array.from(waiters)) {
       waiters.delete(resolve);
       resolve();
@@ -6287,6 +6355,10 @@ export function createBridgeWakeSignal(input: {
       if (closed) {
         return "timeout";
       }
+      if (pendingWake) {
+        pendingWake = false;
+        return "signal";
+      }
       return await new Promise<BridgeWakeWaitResult>((resolve) => {
         const onWake = () => {
           clearTimeout(timeout);
@@ -6301,6 +6373,7 @@ export function createBridgeWakeSignal(input: {
     },
     close: async () => {
       closed = true;
+      pendingWake = false;
       wake();
       await teardownSubscription(true);
     },

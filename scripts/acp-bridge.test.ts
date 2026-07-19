@@ -15,6 +15,7 @@ import {
   type BridgeRegistration,
   type BridgeStatus,
   type BridgeLoopIterationInput,
+  type BridgeLoopPollReason,
   bridgeHeartbeatSignature,
   consumeBridgeRestartHandoffFile,
   describeStatus,
@@ -42,6 +43,7 @@ import {
   parseBridgeArgs,
   preparePendingAgentConnectionRequest,
   refreshRuntimeConformanceProfilesForTest,
+  resolveBridgeLoopPollReason,
   runtimeConformanceRecordsForSuccessfulCommand,
   reconcileBridgeStartupControlCommandStatus,
   reconcileBridgeStartupControlCommandState,
@@ -1537,6 +1539,34 @@ describe("bridge wake subscription", () => {
 
     expect(closes).toHaveLength(1);
   });
+
+  test("latches an update that arrives before the bridge starts waiting", async () => {
+    let updateCallback: (() => void) | undefined;
+    const signal = createBridgeWakeSignal({
+      clientFactory: () => ({
+        close: async () => {},
+        onUpdate: (_query, _args, callback) => {
+          updateCallback = callback;
+          return { unsubscribe: () => undefined };
+        },
+      }),
+      config: bridgeRegistration(),
+      convexUrl: "https://example.convex.cloud",
+      limit: 2,
+      log: Object.assign(() => undefined, { flush: async () => undefined }),
+    });
+    signal.updateWakeToken?.({
+      expiresAt: Date.now() + 60_000,
+      refreshAfterMs: 30_000,
+      token: "wake-token",
+    });
+
+    updateCallback?.();
+
+    expect(await signal.wait(0)).toBe("signal");
+    expect(await signal.wait(0)).toBe("timeout");
+    await signal.close();
+  });
 });
 
 describe("bridge MCP helper configuration", () => {
@@ -2054,6 +2084,7 @@ describe("bridge supervisor claim gating", () => {
 
     const schedulerA = runBridgeRegistrationScheduler({
       context: { deviceId: "bridge-a" },
+      contextInFlight: () => 0,
       isActive: () => registrationAActive,
       onRestartRequested: async () => {},
       runContextPass: async () => {
@@ -2065,6 +2096,7 @@ describe("bridge supervisor claim gating", () => {
     });
     const schedulerB = runBridgeRegistrationScheduler({
       context: { deviceId: "bridge-b" },
+      contextInFlight: () => 0,
       isActive: () => registrationBActive,
       onRestartRequested: async () => {},
       runContextPass: async () => {
@@ -2091,6 +2123,7 @@ describe("bridge supervisor claim gating", () => {
     let wakeWaits = 0;
     const scheduler = runBridgeRegistrationScheduler({
       context: { deviceId: "bridge-a" },
+      contextInFlight: () => 0,
       isActive: () => active,
       onRestartRequested: async () => {},
       runContextPass: async () => {
@@ -2116,6 +2149,78 @@ describe("bridge supervisor claim gating", () => {
     expect(wakeWaits).toBe(0);
   });
 
+  test("does not let another registration's activity turn an idle timer into active polling", async () => {
+    const context = { deviceId: "bridge-idle", inFlightCount: 0 };
+    const pollReasons: BridgeLoopPollReason[] = [];
+    let active = true;
+
+    await runBridgeRegistrationScheduler({
+      context,
+      contextInFlight: (candidate) => candidate.inFlightCount,
+      isActive: () => active,
+      onRestartRequested: async () => {},
+      runContextPass: async (_candidate, pollReason) => {
+        pollReasons.push(pollReason);
+        if (pollReasons.length === 2) {
+          active = false;
+        }
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 1,
+      waitForWakeSignal: async () => "timer",
+    });
+
+    expect(pollReasons).toEqual(["startup", "timer"]);
+  });
+
+  test("preserves a real wake while the current registration has active work", async () => {
+    const context = { deviceId: "bridge-active", inFlightCount: 1 };
+    const pollReasons: BridgeLoopPollReason[] = [];
+    let active = true;
+
+    await runBridgeRegistrationScheduler({
+      context,
+      contextInFlight: (candidate) => candidate.inFlightCount,
+      isActive: () => active,
+      onRestartRequested: async () => {},
+      runContextPass: async (_candidate, pollReason) => {
+        pollReasons.push(pollReason);
+        if (pollReasons.length === 2) {
+          active = false;
+        }
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 1,
+      waitForWakeSignal: async () => "wake",
+    });
+
+    expect(pollReasons).toEqual(["startup", "wake"]);
+  });
+
+  test("turns only the current registration's active timer into an active pass", async () => {
+    const context = { deviceId: "bridge-active", inFlightCount: 1 };
+    const pollReasons: BridgeLoopPollReason[] = [];
+    let active = true;
+
+    await runBridgeRegistrationScheduler({
+      context,
+      contextInFlight: (candidate) => candidate.inFlightCount,
+      isActive: () => active,
+      onRestartRequested: async () => {},
+      runContextPass: async (_candidate, pollReason) => {
+        pollReasons.push(pollReason);
+        if (pollReasons.length === 2) {
+          active = false;
+        }
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 1,
+      waitForWakeSignal: async () => "timer",
+    });
+
+    expect(pollReasons).toEqual(["startup", "active"]);
+  });
+
   test("defers process restart until all registrations are idle", async () => {
     let active = true;
     let totalInFlight = 1;
@@ -2125,6 +2230,7 @@ describe("bridge supervisor claim gating", () => {
 
     await runBridgeRegistrationScheduler({
       context: { deviceId: "bridge-a" },
+      contextInFlight: () => totalInFlight,
       isActive: () => active,
       onRestartRequested: async () => {
         restartRequests += 1;
@@ -2145,8 +2251,45 @@ describe("bridge supervisor claim gating", () => {
       },
     });
 
-    expect(passes).toBe(2);
+    expect(passes).toBe(1);
     expect(wakeWaits).toBe(1);
+    expect(restartRequests).toBe(1);
+  });
+
+  test("uses short maintenance passes while a process restart waits for another registration", async () => {
+    const context = { deviceId: "bridge-restarting", inFlightCount: 0 };
+    const pollReasons: BridgeLoopPollReason[] = [];
+    const restartPendingAtWait: boolean[] = [];
+    let active = true;
+    let globalInFlight = 1;
+    let restartRequests = 0;
+    let waitCount = 0;
+
+    await runBridgeRegistrationScheduler({
+      context,
+      contextInFlight: (candidate) => candidate.inFlightCount,
+      isActive: () => active,
+      onRestartRequested: async () => {
+        restartRequests += 1;
+        active = false;
+      },
+      runContextPass: async (_candidate, pollReason) => {
+        pollReasons.push(pollReason);
+        return { restartRequested: pollReasons.length === 1 };
+      },
+      totalInFlight: () => globalInFlight,
+      waitForWakeSignal: async (_candidate, processRestartPending) => {
+        restartPendingAtWait.push(processRestartPending);
+        waitCount += 1;
+        if (waitCount === 2) {
+          globalInFlight = 0;
+        }
+        return "maintenance";
+      },
+    });
+
+    expect(restartPendingAtWait).toEqual([true, true]);
+    expect(pollReasons).toEqual(["startup", "maintenance"]);
     expect(restartRequests).toBe(1);
   });
 
@@ -3206,6 +3349,89 @@ describe("bridge supervisor claim gating", () => {
     expect(cleanupRan).toBe(false);
     expect(claimed).toBe(false);
     expect(status.lastPollAt).toBeUndefined();
+  });
+
+  test("active timer pass keeps maintenance running without polling the queue", async () => {
+    const result = await runClaimProbeForPollReason("active", true);
+
+    expect(result.heartbeatCount).toBe(1);
+    expect(result.claimCount).toBe(0);
+  });
+
+  test("restart maintenance passes neither heartbeat nor claim every second", async () => {
+    const result = await runClaimProbeForPollReason("maintenance", false, 2);
+
+    expect(result.heartbeatCount).toBe(1);
+    expect(result.claimCount).toBe(0);
+  });
+
+  test("active registration wake still polls the queue immediately", async () => {
+    const result = await runClaimProbeForPollReason("wake", true);
+
+    expect(result.claimCount).toBe(1);
+  });
+
+  test("inactive wake subscription timer fallback still polls the queue", async () => {
+    const pollReason = resolveBridgeLoopPollReason("timer", false);
+    const result = await runClaimProbeForPollReason(pollReason, false);
+
+    expect(pollReason).toBe("wake");
+    expect(result.claimCount).toBe(1);
+  });
+
+  test("inactive wake subscription active timeout fallback still polls the queue", async () => {
+    const pollReason = resolveBridgeLoopPollReason("active", false);
+    const result = await runClaimProbeForPollReason(pollReason, true);
+
+    expect(pollReason).toBe("wake");
+    expect(result.claimCount).toBe(1);
+  });
+
+  test("throttles inactive active-timeout fallback claims to thirty seconds", async () => {
+    const startedAt = Date.UTC(2026, 6, 19, 12, 0, 0);
+    const firstFallback = resolveBridgeLoopPollReason("active", false, {
+      fallbackPollIntervalMs: 30_000,
+      now: startedAt,
+    });
+    const lastPollAt = new Date(startedAt).toISOString();
+    const insideCadence = [2_000, 15_000, 29_999].map((elapsedMs) =>
+      resolveBridgeLoopPollReason("active", false, {
+        fallbackPollIntervalMs: 30_000,
+        lastPollAt,
+        now: startedAt + elapsedMs,
+      }),
+    );
+    const dueFallback = resolveBridgeLoopPollReason("active", false, {
+      fallbackPollIntervalMs: 30_000,
+      lastPollAt,
+      now: startedAt + 30_000,
+    });
+    const afterReset = resolveBridgeLoopPollReason("active", false, {
+      fallbackPollIntervalMs: 30_000,
+      lastPollAt: new Date(startedAt + 30_000).toISOString(),
+      now: startedAt + 32_000,
+    });
+
+    expect(firstFallback).toBe("wake");
+    expect(insideCadence).toEqual([
+      "maintenance",
+      "maintenance",
+      "maintenance",
+    ]);
+    expect(dueFallback).toBe("wake");
+    expect(afterReset).toBe("maintenance");
+    expect(
+      (await runClaimProbeForPollReason(firstFallback, true)).claimCount,
+    ).toBe(1);
+    expect(
+      (await runClaimProbeForPollReason(insideCadence[0]!, true)).claimCount,
+    ).toBe(0);
+    expect(
+      (await runClaimProbeForPollReason(dueFallback, true)).claimCount,
+    ).toBe(1);
+    expect(
+      (await runClaimProbeForPollReason(afterReset, true)).claimCount,
+    ).toBe(0);
   });
 
   test("heartbeat signature ignores process reconciliation timestamps", () => {
@@ -5269,4 +5495,64 @@ function bridgeRegistration(): BridgeRegistration {
     deviceName: "dev box",
     pairedAt: "2026-06-04T00:00:00.000Z",
   };
+}
+
+async function runClaimProbeForPollReason(
+  pollReason: BridgeLoopPollReason,
+  withInFlightCommand: boolean,
+  passCount = 1,
+): Promise<{ claimCount: number; heartbeatCount: number }> {
+  const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+  const now = Date.UTC(2026, 6, 19, 12, 0, 0);
+  let claimCount = 0;
+  let heartbeatCount = 0;
+  const inFlightCommands = new Map<string, Promise<void>>();
+  if (withInFlightCommand) {
+    inFlightCommands.set("queue-active", new Promise(() => {}));
+  }
+
+  const input: BridgeLoopIterationInput = {
+    claimCommands: async () => {
+      claimCount += 1;
+      return [];
+    },
+    cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+    config: bridgeRegistration(),
+    heartbeatIntervalMs: 15_000,
+    inFlightCommandMetadata: new Map(),
+    inFlightCommands,
+    lastStaleCleanupAt: now,
+    log: Object.assign(() => {}, { flush: async () => {} }),
+    manager: {
+      getStatus: () => ({
+        activeSessions: [],
+        terminalInteractionSessionKeyCount: 0,
+        sessions: [],
+      }),
+      handleQueueItem: async () => {},
+    },
+    maxInFlight: 1,
+    now: () => now,
+    pollReason,
+    recordLoopError: async (error) => {
+      throw error;
+    },
+    sendHeartbeat: async () => {
+      heartbeatCount += 1;
+      return { ok: true };
+    },
+    setLastStaleCleanupAt: () => {},
+    status: {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    },
+    statusPath: join(dir, "status.json"),
+    writeStatus: async () => {},
+  };
+  for (let pass = 0; pass < passCount; pass += 1) {
+    await runBridgeLoopIteration(input);
+  }
+
+  return { claimCount, heartbeatCount };
 }
