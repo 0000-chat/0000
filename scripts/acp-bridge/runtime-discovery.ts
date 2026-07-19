@@ -13,7 +13,11 @@ import {
   profileIdForCommand,
   synthesizeLegacyHermesProfile,
 } from "./runtime-profiles"
-import { DEFAULT_CLAUDE_CODE_ACP_COMMAND, DEFAULT_CODEX_ACP_COMMAND } from "./runtime-defaults"
+import {
+  DEFAULT_CLAUDE_CODE_ACP_COMMAND,
+  DEFAULT_CODEX_ACP_COMMAND,
+  isRetiredCodexAcpCommand,
+} from "./runtime-defaults"
 import { SdkAcpRuntimeClient } from "./sdk-acp-runtime-client"
 import { resolveNodeProxyExecutable } from "./acp-node-proxy-launcher"
 
@@ -185,14 +189,6 @@ export async function discoverRuntimeProfiles(
   }
 
   return dedupeRuntimeProfiles(profiles)
-}
-
-function isRetiredCodexAcpCommand(command: string[]): boolean {
-  return command.some(
-    (part) =>
-      part === "@zed-industries/codex-acp" ||
-      part.startsWith("@zed-industries/codex-acp@"),
-  )
 }
 
 async function resolveBuiltInCommandCandidates(

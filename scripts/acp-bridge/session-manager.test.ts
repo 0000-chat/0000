@@ -7,6 +7,7 @@ import { BridgeSupervisor } from "./bridge-supervisor";
 import {
   BridgeSessionManager,
   bridgeQueueItemMatchesSessionRuntimeScope,
+  buildBridgeLaunchSpec,
   type BridgeSessionContext,
   type BridgeSessionQueueItem,
 } from "./session-manager";
@@ -18,6 +19,29 @@ import type { SdkAcpRuntimeTerminalHandle } from "./sdk-acp-runtime-client";
 import { TerminalHandleRegistry } from "./terminal-handles";
 
 describe("bridge session cwd safety", () => {
+  test("hard-switches retired Codex ACP base launch commands", () => {
+    expect(
+      buildBridgeLaunchSpec({
+        baseAgentCommand: "bunx @zed-industries/codex-acp@0.16.0",
+      }).agentCommand,
+    ).toEqual(["bunx", "@agentclientprotocol/codex-acp@1.1.4"]);
+  });
+
+  test("hard-switches retired Codex ACP commands from cached runtime profiles", () => {
+    expect(
+      buildBridgeLaunchSpec({
+        runtimeProfile: {
+          capabilities: {},
+          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          id: "codex:codex-acp",
+          kind: "codex",
+          label: "Codex",
+          status: "available",
+        },
+      }).agentCommand,
+    ).toEqual(["bunx", "@agentclientprotocol/codex-acp@1.1.4"]);
+  });
+
   test("runtime-scoped active items do not match sessions from another runtime", () => {
     expect(
       bridgeQueueItemMatchesSessionRuntimeScope(
@@ -1908,7 +1932,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -1953,7 +1977,7 @@ describe("bridge session cwd safety", () => {
       "claude-code:claude-acp",
     ]);
     expect(contexts.map((context) => context.agentCommand)).toEqual([
-      ["bunx", "@zed-industries/codex-acp@0.16.0"],
+      ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
       ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.39.0"],
     ]);
     expect(closedProfiles).toContain("codex:codex-acp");
@@ -2104,7 +2128,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -2155,7 +2179,7 @@ describe("bridge session cwd safety", () => {
       runtimeProfiles: [
         {
           capabilities: {},
-          command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+          command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
           id: "codex:codex-acp",
           kind: "codex",
           label: "Codex",
@@ -2177,7 +2201,7 @@ describe("bridge session cwd safety", () => {
     expect(contexts[0]?.runtimeProfile?.id).toBe("codex:codex-acp");
     expect(contexts[0]?.agentCommand).toEqual([
       "bunx",
-      "@zed-industries/codex-acp@0.16.0",
+      "@agentclientprotocol/codex-acp@1.1.4",
     ]);
   });
 

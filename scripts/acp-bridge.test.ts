@@ -79,6 +79,32 @@ function runBridgeLoopIteration(input: BridgeLoopIterationInput) {
 }
 
 describe("bridge command parsing", () => {
+  test("hard-switches retired Codex ACP commands passed explicitly", () => {
+    const parsed = parseBridgeArgs([
+      "start",
+      "--agent-command",
+      "bunx @zed-industries/codex-acp@0.16.0",
+    ]);
+
+    expect(parsed.flags["agent-command"]).toBe(
+      "bunx @agentclientprotocol/codex-acp@1.1.4",
+    );
+  });
+
+  test("preserves maintained and custom ACP commands passed explicitly", () => {
+    expect(
+      parseBridgeArgs([
+        "start",
+        "--agent-command",
+        "npx --yes @agentclientprotocol/codex-acp@1.2.0",
+      ]).flags["agent-command"],
+    ).toBe("npx --yes @agentclientprotocol/codex-acp@1.2.0");
+    expect(
+      parseBridgeArgs(["start", "--agent-command", "my-agent acp --mode custom"])
+        .flags["agent-command"],
+    ).toBe("my-agent acp --mode custom");
+  });
+
   test("bounds conformance requests independently of prompt timeouts", () => {
     expect(runtimeConformanceRequestTimeoutMs(30 * 60_000)).toBe(30_000);
     expect(runtimeConformanceRequestTimeoutMs(5_000)).toBe(5_000);
@@ -1891,6 +1917,14 @@ describe("bridge security defaults", () => {
         CODEX_SANDBOX: "danger-full-access",
       } as NodeJS.ProcessEnv),
     ).toBe(DEFAULT_CLAUDE_CODE_ACP_COMMAND);
+  });
+
+  test("hard-switches a retired Codex ACP command from the environment", () => {
+    expect(
+      defaultAgentCommandForEnvironment({
+        ZERO_CHAT_AGENT_COMMAND: "bunx @zed-industries/codex-acp@0.16.0",
+      } as NodeJS.ProcessEnv),
+    ).toBe("bunx @agentclientprotocol/codex-acp@1.1.4");
   });
 
   test("writes bridge config files with owner-only permissions", async () => {

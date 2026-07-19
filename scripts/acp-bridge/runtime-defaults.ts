@@ -1,6 +1,36 @@
-export const DEFAULT_CODEX_ACP_COMMAND = "npx --yes @agentclientprotocol/codex-acp@1.1.4"
+const CURRENT_CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.1.4"
+export const DEFAULT_CODEX_ACP_COMMAND =
+  `npx --yes ${CURRENT_CODEX_ACP_PACKAGE}`
 export const DEFAULT_CLAUDE_CODE_ACP_COMMAND =
   "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0"
+
+export function isRetiredCodexAcpCommand(command: readonly string[]): boolean {
+  return command.some(isRetiredCodexAcpPackage)
+}
+
+export function hardSwitchRetiredCodexAcpCommand(
+  command: readonly string[],
+): string[] {
+  return command.map((part) =>
+    isRetiredCodexAcpPackage(part)
+      ? CURRENT_CODEX_ACP_PACKAGE
+      : part,
+  )
+}
+
+function isRetiredCodexAcpPackage(value: string): boolean {
+  return (
+    value === "@zed-industries/codex-acp" ||
+    value.startsWith("@zed-industries/codex-acp@")
+  )
+}
+
+export function normalizeConfiguredAgentCommand(command: string): string {
+  const parts = command.trim().split(/\s+/)
+  return isRetiredCodexAcpCommand(parts)
+    ? hardSwitchRetiredCodexAcpCommand(parts).join(" ")
+    : command
+}
 
 export function inferRuntimeId(agentCommand: string): string {
   const normalized = agentCommand.toLowerCase()
@@ -41,6 +71,10 @@ export function defaultProposedAgentName(agentCommand: string, host: string): st
 }
 
 export function defaultAgentCommandForEnvironment(env: NodeJS.ProcessEnv = process.env): string {
+  const configuredAgentCommand = env.ZERO_CHAT_AGENT_COMMAND?.trim()
+  if (configuredAgentCommand) {
+    return normalizeConfiguredAgentCommand(configuredAgentCommand)
+  }
   if (
     hasAnyEnvPrefix(env, "CLAUDE_") ||
     env.CLAUDECODE ||
