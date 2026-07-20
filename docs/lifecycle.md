@@ -24,9 +24,9 @@ Unknown lifecycle commands must fail clearly instead of becoming no-ops.
 `updateWhenIdle` and `restartWhenIdle` control the whole bridge process. When a
 single process hosts multiple registrations, an accepted command fences new
 prompt claims for every registration until all in-flight commands and session
-queues have drained. Control-lane polling, heartbeats, and watchdog
-terminalization continue during the drain so the process can make progress and
-remain observable.
+queues have drained. Device Room control delivery, status/liveness updates,
+bounded control recovery, and watchdog terminalization continue during the
+drain so the process can make progress and remain observable.
 
 Accepted command intent and lifecycle status are persisted for each
 registration. After an unexpected process restart, an interrupted
@@ -143,4 +143,5 @@ Startup recovery is a hard switch:
 
 Process caps are enforced locally. A cap breach does not kill by name or guess;
 it stops new claims, appears in `bridge-status.json` under `processHealth`, and
-is sent in heartbeat status so the host can surface the recovery state.
+is sent in Device Room status updates so the host can surface the recovery
+state.

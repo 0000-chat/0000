@@ -48,10 +48,9 @@ import {
   reconcileBridgeStartupControlCommandStatus,
   reconcileBridgeStartupControlCommandState,
   runBridgeRegistrationScheduler,
-  runBridgeLoopIteration,
+  runBridgeLoopIteration as runBridgeLoopIterationWithoutRoom,
   runProcess,
   runtimeConformanceRequestTimeoutMs,
-  sendHeartbeatWithClient,
   shouldCleanupBridgeOrphanedProcesses,
   upsertBridgeRegistration,
   waitForRestartShutdownTask,
@@ -59,10 +58,7 @@ import {
   writeBridgeRestartHandoffFile,
   writeBridgeStatusFile,
 } from "./acp-bridge";
-import {
-  BridgeCloudHttpError,
-  type BridgeHeartbeatInput,
-} from "./acp-bridge/convex-http";
+import { BridgeCloudHttpError } from "./acp-bridge/convex-http";
 import { openBridgeJournal } from "./acp-bridge/sqlite-journal";
 import {
   defaultAgentCommandForEnvironment,
@@ -71,7 +67,44 @@ import {
 } from "./acp-bridge/runtime-defaults";
 import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles";
 
+function runBridgeLoopIteration(input: BridgeLoopIterationInput) {
+  return runBridgeLoopIterationWithoutRoom({
+    ...input,
+    wakeSignal: input.wakeSignal ?? {
+      close: async () => {},
+      connectionEpoch: () => "test-room-epoch",
+      wait: async () => "timeout",
+    },
+  });
+}
+
 describe("bridge command parsing", () => {
+  test("hard-switches retired Codex ACP commands passed explicitly", () => {
+    const parsed = parseBridgeArgs([
+      "start",
+      "--agent-command",
+      "bunx @zed-industries/codex-acp@0.16.0",
+    ]);
+
+    expect(parsed.flags["agent-command"]).toBe(
+      "bunx @agentclientprotocol/codex-acp@1.1.4",
+    );
+  });
+
+  test("preserves maintained and custom ACP commands passed explicitly", () => {
+    expect(
+      parseBridgeArgs([
+        "start",
+        "--agent-command",
+        "npx --yes @agentclientprotocol/codex-acp@1.2.0",
+      ]).flags["agent-command"],
+    ).toBe("npx --yes @agentclientprotocol/codex-acp@1.2.0");
+    expect(
+      parseBridgeArgs(["start", "--agent-command", "my-agent acp --mode custom"])
+        .flags["agent-command"],
+    ).toBe("my-agent acp --mode custom");
+  });
+
   test("bounds conformance requests independently of prompt timeouts", () => {
     expect(runtimeConformanceRequestTimeoutMs(30 * 60_000)).toBe(30_000);
     expect(runtimeConformanceRequestTimeoutMs(5_000)).toBe(5_000);
@@ -1490,23 +1523,32 @@ describe("bridge Convex URL resolution", () => {
   });
 });
 
-describe("bridge wake subscription", () => {
-  test("activates a Convex work signal subscription after heartbeat provides a wake token", async () => {
-    let updateCallback: (() => void) | undefined;
-    const subscriptions: Array<{ args: Record<string, unknown>; query: unknown }> = [];
+describe("bridge realtime wake signal", () => {
+  test("starts the room client and wakes on realtime events", async () => {
+    let deliverEvent: ((event: { reason: "wake"; wakeIds: string[] }) => void) | undefined;
+    let started = 0;
+    const controlAcks: Array<{ controlId: string; status: string }> = [];
     const closes: number[] = [];
-    const fakeClient = {
-      close: async () => {
-        closes.push(Date.now());
-      },
-      onUpdate: (query: unknown, args: Record<string, unknown>, callback: () => void) => {
-        subscriptions.push({ query, args });
-        updateCallback = callback;
-        return { unsubscribe: () => undefined };
-      },
-    };
     const signal = createBridgeWakeSignal({
-      clientFactory: () => fakeClient,
+      clientFactory: (onEvent) => {
+        deliverEvent = onEvent;
+        return {
+          acknowledgeControl: (controlId, status) => {
+            controlAcks.push({ controlId, status });
+          },
+          acknowledgeResync: () => [],
+          close: async () => {
+            closes.push(Date.now());
+          },
+          connectionEpoch: () => "room-epoch-1",
+          isConnected: () => true,
+          sendLiveness: () => {},
+          sendStatus: () => {},
+          start: async () => {
+            started += 1;
+          },
+        };
+      },
       config: {
         appUrl: "https://0000.chat",
         bridgeToken: "bridge-token",
@@ -1514,58 +1556,87 @@ describe("bridge wake subscription", () => {
         deviceId: "bridge-public-1",
         pairedAt: new Date().toISOString(),
       },
-      convexUrl: "https://example.convex.cloud",
       limit: 2,
       log: Object.assign(() => undefined, { flush: async () => undefined }),
     });
-
-    signal.updateWakeToken?.({
-      expiresAt: Date.now() + 60_000,
-      refreshAfterMs: 30_000,
-      token: "wake-token",
-    });
-
-    expect(subscriptions).toHaveLength(1);
-    expect(subscriptions[0]?.args).toEqual({
-      deviceId: "bridge-public-1",
-      limit: 2,
-      wakeToken: "wake-token",
-    });
+    await Promise.resolve();
+    expect(started).toBe(1);
+    expect(signal.connectionEpoch?.()).toBe("room-epoch-1");
 
     const wait = signal.wait(5_000);
-    updateCallback?.();
-    await wait;
+    deliverEvent?.({ reason: "wake", wakeIds: ["queue-1"] });
+    expect(await wait).toBe("signal");
+    signal.acknowledgeControlStatus?.({
+      command: "restartWhenIdle",
+      requestedAt: 1234,
+      status: "succeeded",
+    });
+    signal.acknowledgeControlStatus?.({
+      command: "restartWhenIdle",
+      requestedAt: 1234,
+      status: "succeeded",
+    });
+    expect(controlAcks).toEqual([{ controlId: "1234", status: "completed" }]);
     await signal.close();
 
     expect(closes).toHaveLength(1);
   });
 
   test("latches an update that arrives before the bridge starts waiting", async () => {
-    let updateCallback: (() => void) | undefined;
+    let deliverEvent: ((event: { reason: "wake"; wakeIds: string[] }) => void) | undefined;
     const signal = createBridgeWakeSignal({
-      clientFactory: () => ({
+      clientFactory: (onEvent) => ({
+        acknowledgeControl: () => {},
+        acknowledgeResync: () => [],
         close: async () => {},
-        onUpdate: (_query, _args, callback) => {
-          updateCallback = callback;
-          return { unsubscribe: () => undefined };
+        connectionEpoch: () => "room-epoch-1",
+        isConnected: () => true,
+        sendLiveness: () => {},
+        sendStatus: () => {},
+        start: async () => {
+          deliverEvent = onEvent;
         },
       }),
       config: bridgeRegistration(),
-      convexUrl: "https://example.convex.cloud",
       limit: 2,
       log: Object.assign(() => undefined, { flush: async () => undefined }),
     });
-    signal.updateWakeToken?.({
-      expiresAt: Date.now() + 60_000,
-      refreshAfterMs: 30_000,
-      token: "wake-token",
-    });
-
-    updateCallback?.();
+    await Promise.resolve();
+    deliverEvent?.({ reason: "wake", wakeIds: ["queue-1"] });
 
     expect(await signal.wait(0)).toBe("signal");
     expect(await signal.wait(0)).toBe("timeout");
     await signal.close();
+  });
+
+  test("returns a terminal wake after server supersession instead of spinning", async () => {
+    let deliverEvent:
+      | ((event: { reason: "superseded" }) => void)
+      | undefined;
+    const signal = createBridgeWakeSignal({
+      clientFactory: (onEvent) => ({
+        acknowledgeControl: () => {},
+        acknowledgeResync: () => [],
+        close: async () => {},
+        connectionEpoch: () => undefined,
+        isConnected: () => false,
+        sendLiveness: () => {},
+        sendStatus: () => {},
+        start: async () => {
+          deliverEvent = onEvent;
+        },
+      }),
+      config: bridgeRegistration(),
+      limit: 2,
+      log: Object.assign(() => undefined, { flush: async () => undefined }),
+    });
+    await Promise.resolve();
+    const waiting = signal.wait(5_000);
+
+    deliverEvent?.({ reason: "superseded" });
+
+    expect(await waiting).toBe("terminal");
+    expect(await signal.wait(0)).toBe("terminal");
   });
 });
 
@@ -1832,7 +1903,7 @@ describe("bridge multi-organization config", () => {
 describe("bridge security defaults", () => {
   test("pins default package-backed ACP runtime commands", () => {
     expect(DEFAULT_CODEX_ACP_COMMAND).toBe(
-      "bunx @zed-industries/codex-acp@0.16.0",
+      "npx --yes @agentclientprotocol/codex-acp@1.1.4",
     );
     expect(DEFAULT_CLAUDE_CODE_ACP_COMMAND).toBe(
       "npx --yes @agentclientprotocol/claude-agent-acp@0.39.0",
@@ -1846,6 +1917,14 @@ describe("bridge security defaults", () => {
         CODEX_SANDBOX: "danger-full-access",
       } as NodeJS.ProcessEnv),
     ).toBe(DEFAULT_CLAUDE_CODE_ACP_COMMAND);
+  });
+
+  test("hard-switches a retired Codex ACP command from the environment", () => {
+    expect(
+      defaultAgentCommandForEnvironment({
+        ZERO_CHAT_AGENT_COMMAND: "bunx @zed-industries/codex-acp@0.16.0",
+      } as NodeJS.ProcessEnv),
+    ).toBe("bunx @agentclientprotocol/codex-acp@1.1.4");
   });
 
   test("writes bridge config files with owner-only permissions", async () => {
@@ -2068,7 +2147,9 @@ describe("bridge process control coordination", () => {
       writeStatus: async () => {},
     });
 
-    expect(claimInputs).toEqual([{ lane: "control", limit: 1 }]);
+    expect(claimInputs).toEqual([
+      { connectionEpoch: "test-room-epoch", lane: "control", limit: 1 },
+    ]);
   });
 });
 
@@ -2147,6 +2228,30 @@ describe("bridge supervisor claim gating", () => {
 
     expect(result).toBe("completed");
     expect(wakeWaits).toBe(0);
+  });
+
+  test("exits a registration scheduler after a terminal room wake", async () => {
+    let passes = 0;
+    let wakeWaits = 0;
+
+    await runBridgeRegistrationScheduler({
+      context: { deviceId: "bridge-a" },
+      contextInFlight: () => 0,
+      isActive: () => true,
+      onRestartRequested: async () => {},
+      runContextPass: async () => {
+        passes += 1;
+        return { restartRequested: false };
+      },
+      totalInFlight: () => 0,
+      waitForWakeSignal: async () => {
+        wakeWaits += 1;
+        return "terminal";
+      },
+    });
+
+    expect(passes).toBe(1);
+    expect(wakeWaits).toBe(1);
   });
 
   test("does not let another registration's activity turn an idle timer into active polling", async () => {
@@ -2424,7 +2529,7 @@ describe("bridge supervisor claim gating", () => {
     const invalidCredentials = buildBridgeRegistrationFailure(
       new BridgeCloudHttpError(
         "POST",
-        "https://example.test/api/agent-bridge/heartbeat",
+        "https://example.test/api/agent-bridge/control/pull",
         401,
         '{"error":"Uncaught Error: Bridge device credentials are invalid"}',
       ),
@@ -3598,7 +3703,6 @@ describe("bridge supervisor claim gating", () => {
     const firstNow = Date.UTC(2026, 6, 19, 0, 0, 0);
     let now = firstNow;
     let heartbeatCount = 0;
-    let wakeTokenUpdateCount = 0;
     let reconciliationTime = "2026-07-19T00:00:00.000Z";
     const status: BridgeStatus = {
       activeSessions: [],
@@ -3645,9 +3749,7 @@ describe("bridge supervisor claim gating", () => {
       statusPath: join(dir, "status.json"),
       wakeSignal: {
         close: async () => {},
-        updateWakeToken: () => {
-          wakeTokenUpdateCount += 1;
-        },
+        connectionEpoch: () => "test-room-epoch",
         wait: async () => "timeout",
       },
       writeStatus: async () => {},
@@ -3659,7 +3761,6 @@ describe("bridge supervisor claim gating", () => {
     await runBridgeLoopIteration(loopInput);
 
     expect(heartbeatCount).toBe(1);
-    expect(wakeTokenUpdateCount).toBe(1);
   });
 
   test("skips queue claims when local journal health is hard-failed", async () => {
@@ -4151,7 +4252,9 @@ describe("bridge supervisor claim gating", () => {
       writeStatus: async () => {},
     });
 
-    expect(claimInputs).toEqual([{ lane: "control", limit: 1 }]);
+    expect(claimInputs).toEqual([
+      { connectionEpoch: "test-room-epoch", lane: "control", limit: 1 },
+    ]);
     expect(handled).toEqual([
       expect.objectContaining({
         id: "queue-permission",
@@ -4706,37 +4809,6 @@ describe("bridge supervisor claim gating", () => {
     ).not.toBe(bridgeHeartbeatSignature(status));
   });
 
-  test("cloud heartbeat forwards bridge instance id and version from runtime identity", async () => {
-    const status: BridgeStatus = {
-      activeSessions: [],
-      connected: true,
-      recentErrors: [],
-      runtimeIdentity: {
-        bridgeVersion: BRIDGE_VERSION,
-        instanceId: "instance-bridge-1",
-        mcpManifestHash: "manifest-a",
-        pid: 4242,
-        processStartedAt: "2026-06-22T00:00:00.000Z",
-        toolPolicyHash: "policy-a",
-      },
-    };
-    let heartbeatInput: Record<string, unknown> | undefined;
-
-    await sendHeartbeatWithClient(bridgeRegistration(), status, {
-      heartbeat: async <TResponse = Record<string, unknown>>(
-        input: BridgeHeartbeatInput,
-      ) => {
-        heartbeatInput = input as Record<string, unknown>;
-        return {} as TResponse;
-      },
-    });
-
-    expect(heartbeatInput).toMatchObject({
-      bridgeInstanceId: "instance-bridge-1",
-      version: BRIDGE_VERSION,
-    });
-  });
-
   test("runProcess rejects instead of hanging past its timeout", async () => {
     const startedAt = Date.now();
 
@@ -4745,130 +4817,6 @@ describe("bridge supervisor claim gating", () => {
     ).rejects.toThrow(/timed out/i);
 
     expect(Date.now() - startedAt).toBeLessThan(1_000);
-  });
-
-  test("retries heartbeat without update state when an older server rejects update target fields", async () => {
-    const status: BridgeStatus = {
-      activeSessions: [],
-      connected: true,
-      recentErrors: [],
-      runtimeIdentity: {
-        bridgeVersion: BRIDGE_VERSION,
-        instanceId: "instance-bridge-1",
-        mcpManifestHash: "manifest-a",
-        pid: 4242,
-        processStartedAt: "2026-06-22T00:00:00.000Z",
-        toolPolicyHash: "policy-a",
-      },
-      updateState: {
-        available: false,
-        channel: "stable",
-        currentVersion: BRIDGE_VERSION,
-        lastCheckedAt: 1_782_820_543_998,
-        latestVersion: BRIDGE_VERSION,
-        requestedAt: 1_782_820_532_649,
-        required: false,
-        status: "restarting",
-        targetVersion: BRIDGE_VERSION,
-      },
-    };
-    const heartbeatInputs: BridgeHeartbeatInput[] = [];
-
-    const result = await sendHeartbeatWithClient(bridgeRegistration(), status, {
-      heartbeat: async <TResponse = Record<string, unknown>>(
-        input: BridgeHeartbeatInput,
-      ) => {
-        heartbeatInputs.push(input);
-        if (heartbeatInputs.length === 1) {
-          throw new BridgeCloudHttpError(
-            "POST",
-            "https://example.test/api/agent-bridge/heartbeat",
-            401,
-            '{"error":"ArgumentValidationError: Object contains extra field `targetVersion` that is not in the validator.\\nPath: .status.updateState"}',
-          );
-        }
-        return {} as TResponse;
-      },
-    });
-
-    expect(result.ok).toBe(true);
-    expect(heartbeatInputs).toHaveLength(2);
-    expect(
-      (heartbeatInputs[0]?.status as Record<string, unknown>).updateState,
-    ).toMatchObject({ targetVersion: BRIDGE_VERSION });
-    expect(
-      (heartbeatInputs[1]?.status as Record<string, unknown>).updateState,
-    ).toBeUndefined();
-  });
-
-  test("retries heartbeat with compatible status when an older server rejects new status fields", async () => {
-    const status: BridgeStatus = {
-      activeSessions: [],
-      connected: true,
-      recentErrors: [],
-      restartHandoff: {
-        consumedAt: "2026-06-30T12:27:34.741Z",
-        createdAt: "2026-06-30T12:27:31.161Z",
-        reason: "restartWhenIdle",
-        runtimeProfileIds: ["codex:codex-acp"],
-        sessionWarmupHints: [],
-        startupPriorityRuntimeProfileIds: [],
-        status: "restarting",
-        targetVersion: BRIDGE_VERSION,
-      },
-      runtimeIdentity: {
-        bridgeVersion: BRIDGE_VERSION,
-        instanceId: "instance-bridge-1",
-        mcpManifestHash: "manifest-a",
-        pid: 4242,
-        processStartedAt: "2026-06-22T00:00:00.000Z",
-        toolPolicyHash: "policy-a",
-      },
-      updateState: {
-        available: false,
-        channel: "stable",
-        currentVersion: BRIDGE_VERSION,
-        lastCheckedAt: 1_782_820_543_998,
-        latestVersion: BRIDGE_VERSION,
-        required: false,
-        status: "upToDate",
-      },
-    };
-    const heartbeatInputs: BridgeHeartbeatInput[] = [];
-
-    const result = await sendHeartbeatWithClient(bridgeRegistration(), status, {
-      heartbeat: async <TResponse = Record<string, unknown>>(
-        input: BridgeHeartbeatInput,
-      ) => {
-        heartbeatInputs.push(input);
-        if (heartbeatInputs.length === 1) {
-          throw new BridgeCloudHttpError(
-            "POST",
-            "https://example.test/api/agent-bridge/heartbeat",
-            401,
-            '{"error":"ArgumentValidationError: Object contains extra field `restartHandoff` that is not in the validator.\\nPath: .status"}',
-          );
-        }
-        return {} as TResponse;
-      },
-    });
-
-    const fallbackStatus = heartbeatInputs[1]?.status as Record<
-      string,
-      unknown
-    >;
-
-    expect(result.ok).toBe(true);
-    expect(heartbeatInputs).toHaveLength(2);
-    expect(
-      (heartbeatInputs[0]?.status as Record<string, unknown>).restartHandoff,
-    ).toBeDefined();
-    expect(fallbackStatus.restartHandoff).toBeUndefined();
-    expect(fallbackStatus.updateState).toBeUndefined();
-    expect(fallbackStatus.connected).toBe(true);
-    expect(fallbackStatus.runtimeIdentity).toMatchObject({
-      instanceId: "instance-bridge-1",
-    });
   });
 
   test("dispatches claimed lifecycle queue commands", async () => {

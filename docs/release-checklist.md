@@ -38,7 +38,7 @@ Release notes must include:
 Record runtime smoke status for:
 
 - Hermes ACP
-- Zed Codex ACP
+- Codex ACP
 - Claude Code ACP
 - OpenClaw ACP
 - one custom ACP command
