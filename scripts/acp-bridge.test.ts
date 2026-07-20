@@ -148,13 +148,17 @@ describe("bridge command parsing", () => {
         receipt: {
           rows: [
             {
+              allowedHosts: ["api.github.com"],
+              allowedUses: ["agent-script"],
               ciphertext: "must-not-cross-the-bridge",
               name: "GITHUB_TOKEN",
+              purpose: "Authenticate GitHub API requests.",
               scope: "user",
               status: "created",
               value: "must-not-cross-the-bridge",
             },
             {
+              allowedHosts: ["api.example.com", "webhooks.example.com"],
               hash: "must-not-cross-the-bridge",
               name: "DEPLOY_KEY",
               scope: "organization",
@@ -180,8 +184,20 @@ describe("bridge command parsing", () => {
       prompt: "The user submitted the requested secret collection.",
       secretCollectionReceipt: {
         rows: [
-          { name: "GITHUB_TOKEN", scope: "user", status: "created" },
-          { name: "DEPLOY_KEY", scope: "organization", status: "updated" },
+          {
+            allowedHosts: ["api.github.com"],
+            allowedUses: ["agent-script"],
+            name: "GITHUB_TOKEN",
+            purpose: "Authenticate GitHub API requests.",
+            scope: "user",
+            status: "created",
+          },
+          {
+            allowedHosts: ["api.example.com", "webhooks.example.com"],
+            name: "DEPLOY_KEY",
+            scope: "organization",
+            status: "updated",
+          },
         ],
       },
       resumePolicy: "durable_continuation",
@@ -192,7 +208,31 @@ describe("bridge command parsing", () => {
     expect(JSON.stringify(command)).not.toContain("must-not-cross-the-bridge");
   });
 
-  test("rejects malformed secret collection receipts", () => {
+  test.each([
+    {
+      allowedHosts: "api.github.com",
+      description: "non-array allowed hosts",
+    },
+    {
+      allowedHosts: ["api.github.com", 7],
+      description: "non-string allowed host",
+    },
+    {
+      allowedHosts: ["api.github.com"],
+      allowedUses: ["agent-script", "other"],
+      description: "unknown allowed use",
+    },
+    {
+      allowedHosts: ["api.github.com"],
+      purpose: 7,
+      description: "non-string purpose",
+    },
+    {
+      allowedHosts: ["api.github.com"],
+      scope: "team",
+      description: "unknown scope",
+    },
+  ])("rejects malformed secret collection receipt: $description", (row) => {
     expect(
       normalizeQueueCommand({
         id: "queue-secret-collection-invalid",
@@ -203,8 +243,9 @@ describe("bridge command parsing", () => {
             rows: [
               {
                 name: "GITHUB_TOKEN",
-                scope: "team",
+                scope: "user",
                 status: "created",
+                ...row,
                 value: "must-not-cross-the-bridge",
               },
             ],

@@ -3370,6 +3370,8 @@ describe("bridge session cwd safety", () => {
     const prompts: string[] = [];
     const continuationPrompt =
       "The user submitted the requested secret collection: GITHUB_TOKEN was created.";
+    const continuationStarted = deferred<void>();
+    const releaseContinuation = deferred<void>();
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({
       cloudClient: cloud,
@@ -3378,6 +3380,10 @@ describe("bridge session cwd safety", () => {
         cancel: async () => {},
         sendUserMessage: async (prompt) => {
           prompts.push(prompt);
+          if (prompt === continuationPrompt) {
+            continuationStarted.resolve();
+            await releaseContinuation.promise;
+          }
           return {
             events: [],
             rawResult: {},
@@ -3398,7 +3404,7 @@ describe("bridge session cwd safety", () => {
       threadId: "thread-1",
       type: "prompt",
     });
-    await manager.handleQueueItem({
+    const continuation = manager.handleQueueItem({
       claimId: "claim-secret-collection",
       externalRequestId: "agent-secret-collection:session-1:123",
       id: "queue-secret-collection",
@@ -3407,12 +3413,44 @@ describe("bridge session cwd safety", () => {
       secretCollectionOutcome: "submitted",
       secretCollectionReceipt: {
         rows: [
-          { name: "GITHUB_TOKEN", scope: "user", status: "created" },
+          {
+            allowedHosts: ["api.github.com"],
+            allowedUses: ["agent-script"],
+            name: "GITHUB_TOKEN",
+            purpose: "Authenticate GitHub API requests.",
+            scope: "user",
+            status: "created",
+            value: "must-not-remain-in-the-active-queue",
+          },
         ],
-      },
+      } as unknown as BridgeSessionQueueItem["secretCollectionReceipt"],
       threadId: "thread-1",
       type: "secret-collection-response",
     });
+
+    await continuationStarted.promise;
+    const activeItem = (
+      manager as unknown as {
+        activeQueueItems: Map<string, BridgeSessionQueueItem>;
+      }
+    ).activeQueueItems.get("queue-secret-collection");
+    expect(activeItem?.secretCollectionReceipt).toEqual({
+      rows: [
+        {
+          allowedHosts: ["api.github.com"],
+          allowedUses: ["agent-script"],
+          name: "GITHUB_TOKEN",
+          purpose: "Authenticate GitHub API requests.",
+          scope: "user",
+          status: "created",
+        },
+      ],
+    });
+    expect(JSON.stringify(activeItem)).not.toContain(
+      "must-not-remain-in-the-active-queue",
+    );
+    releaseContinuation.resolve();
+    await continuation;
 
     expect(prompts).toEqual(["terminalize", continuationPrompt]);
     expect(cloud.results.at(-1)).toMatchObject({

@@ -65,6 +65,7 @@ import {
   type BridgeSessionManagerStatus,
   type BridgeTerminalizationMetadata,
   DEFAULT_TOOL_RESULT_TIMEOUT_MS,
+  normalizeBridgeSecretCollectionReceipt,
   type BridgeSessionQueueItem,
 } from "./acp-bridge/session-manager";
 import { codeAttributionFromUnknown } from "./acp-bridge/git-attribution";
@@ -157,7 +158,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.66";
+export const BRIDGE_VERSION = "0.1.67";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -6860,37 +6861,19 @@ function secretCollectionResponseFromUnknown(
   }
   const continuationPrompt = stringFromUnknown(record.continuationPrompt);
   const outcome = record.outcome;
-  const receiptRecord = recordFromUnknown(record.receipt);
-  const rows = receiptRecord?.rows;
+  const receipt = normalizeBridgeSecretCollectionReceipt(record.receipt);
   if (
     !continuationPrompt ||
     (outcome !== "submitted" && outcome !== "skipped") ||
-    !Array.isArray(rows)
+    !receipt
   ) {
     return undefined;
-  }
-  const normalizedRows: NonNullable<
-    BridgeSessionQueueItem["secretCollectionReceipt"]
-  >["rows"] = [];
-  for (const row of rows) {
-    const rowRecord = recordFromUnknown(row);
-    const name = rowRecord ? stringFromUnknown(rowRecord.name) : undefined;
-    const scope = rowRecord?.scope;
-    const status = rowRecord?.status;
-    if (
-      !name ||
-      (scope !== "user" && scope !== "organization") ||
-      (status !== "created" && status !== "updated" && status !== "skipped")
-    ) {
-      return undefined;
-    }
-    normalizedRows.push({ name, scope, status });
   }
   return {
     continuationPrompt,
     externalRequestId: stringFromUnknown(record.externalRequestId),
     outcome,
-    receipt: { rows: normalizedRows },
+    receipt,
     resumePolicy: "durable_continuation",
   };
 }
