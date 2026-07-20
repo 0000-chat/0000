@@ -1599,7 +1599,7 @@ describe("bridge session cwd safety", () => {
     );
   });
 
-  test("settles Hermes delegate background receipts as detached work", async () => {
+  test("preserves Hermes delegate background receipts when the prompt confirms a join", async () => {
     const cloud = fakeCloudClient();
     const logs: Array<Record<string, unknown>> = [];
     const manager = new BridgeSessionManager({
@@ -1647,6 +1647,7 @@ describe("bridge session cwd safety", () => {
             events: [],
             rawResult: {},
             sessionId: "session-1",
+            stopReason: "end_turn",
             text: "ok",
           };
         },
@@ -1661,40 +1662,19 @@ describe("bridge session cwd safety", () => {
       bridgeProfileId: "hermes:default",
     });
 
-    expect(logs).toContainEqual(
+    expect(logs).not.toContainEqual(
       expect.objectContaining({
         event: "bridge.session.native_subagent_unjoined",
-        reasonCode: "native_subagent_unjoined",
-        settlementState: "detached_unjoined",
         toolCallId: "delegate-1",
-        toolClass: "subagent",
-        toolPolicyId: "hermes-delegate-subagent",
-        trigger: "tool_result_background_receipt",
       }),
     );
-    expect(flattenPersistedEvents(cloud.events)).toContainEqual(
+    expect(flattenPersistedEvents(cloud.events)).not.toContainEqual(
       expect.objectContaining({
-        eventType: "tool_call_update",
         normalizedPayload: expect.objectContaining({
           json: expect.objectContaining({
             reasonCode: "native_subagent_unjoined",
-            runtimeProfileId: "hermes:default",
-            settlementState: "detached_unjoined",
-            state: "detached_unjoined",
             toolCallId: "delegate-1",
-            toolClass: "subagent",
-            toolPolicyId: "hermes-delegate-subagent",
           }),
-          status: "complete",
-          type: "tool_result",
-        }),
-        rawPayload: expect.objectContaining({
-          reasonCode: "native_subagent_unjoined",
-          settlementState: "detached_unjoined",
-          state: "detached_unjoined",
-          toolCallId: "delegate-1",
-          toolClass: "subagent",
-          toolPolicyId: "hermes-delegate-subagent",
         }),
       }),
     );

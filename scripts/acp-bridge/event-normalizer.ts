@@ -285,7 +285,7 @@ export function extractTextFromAcpUpdate(update: unknown): string | undefined {
 }
 
 function parseRuntimeLogSeverity(text: string): RuntimeLogSeverity {
-  if (isRoutineCliStatusLine(text)) {
+  if (isRoutineCliStatusLine(text) || isSuccessfulDelegationReceipt(text)) {
     return "info"
   }
   const explicitSeverity = parseExplicitRuntimeLogSeverity(text)
@@ -311,6 +311,10 @@ function parseRuntimeLogSeverity(text: string): RuntimeLogSeverity {
     return "info"
   }
   return "error"
+}
+
+function isSuccessfulDelegationReceipt(text: string): boolean {
+  return /^✓ \[\d+\/\d+\] .+\s+\(\d+(?:\.\d+)?s\)$/.test(text)
 }
 
 function parseExplicitRuntimeLogSeverity(text: string): RuntimeLogSeverity | undefined {
