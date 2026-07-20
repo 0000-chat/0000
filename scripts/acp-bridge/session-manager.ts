@@ -301,9 +301,6 @@ type ToolCallReconciliationTrigger =
   | "mismatched_tool_result"
   | "turn_completed";
 
-const NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER =
-  "tool_result_background_receipt";
-
 export type BridgeTerminalizationMetadata = {
   ageMs?: number;
   failureClass?: string;
@@ -1728,6 +1725,10 @@ export class BridgeSessionManager {
       if (!isEmptyVisiblePromptResult(result)) {
         this.reconcilePendingToolCalls(queueItemId, session, {
           trigger: "turn_completed",
+          nativeSubagentJoined: nativeSubagentJoinWasConfirmed(
+            result.responseMeta,
+            result.stopReason,
+          ),
         });
       }
       return result;
@@ -1788,27 +1789,6 @@ export class BridgeSessionManager {
           json: mergeRecordMetadata(part.json, metadata),
         },
       };
-      if (isNativeSubagentBackgroundReceipt(activeTool, annotatedEvent)) {
-        const ageMs = Date.now() - activeTool.startedAt;
-        this.writeLog({
-          level: "info",
-          event: "bridge.session.native_subagent_unjoined",
-          queueId: queueItemId,
-          threadId: session.threadId,
-          agentSessionId: session.providerSessionKey,
-          bridgeProfileId: session.runtimeProfile?.id,
-          ageMs,
-          reasonCode: "native_subagent_unjoined",
-          settlementState: "detached_unjoined",
-          toolCallId: activeTool.toolCallId,
-          toolClass: activeTool.toolClass,
-          toolName: activeTool.toolName,
-          toolPolicyId: activeTool.toolPolicyId,
-          toolTimeoutMs: activeTool.toolTimeoutMs,
-          trigger: NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER,
-        });
-        return markNativeSubagentResultDetached(annotatedEvent, activeTool, ageMs);
-      }
       return annotatedEvent;
     }
     const policy = this.resolveToolCallPolicy(session, tool);
@@ -1919,6 +1899,7 @@ export class BridgeSessionManager {
     session: BridgeSessionRecord,
     options: {
       exceptToolCallId?: string;
+      nativeSubagentJoined?: boolean;
       trigger: ToolCallReconciliationTrigger;
     },
   ): void {
@@ -1938,6 +1919,27 @@ export class BridgeSessionManager {
         continue;
       }
       const ageMs = Date.now() - tool.startedAt;
+      if (tool.toolClass === "subagent" && options.nativeSubagentJoined) {
+        this.clearToolCall(queueItemId, tool.toolCallId);
+        clearedToolCallCount += 1;
+        this.writeLog({
+          level: "info",
+          event: "bridge.session.tool_call_reconciled",
+          queueId: queueItemId,
+          threadId: session.threadId,
+          agentSessionId: session.providerSessionKey,
+          bridgeProfileId: session.runtimeProfile?.id,
+          ageMs,
+          settlementState: "joined",
+          toolCallId: tool.toolCallId,
+          toolClass: tool.toolClass,
+          toolName: tool.toolName,
+          toolPolicyId: tool.toolPolicyId,
+          toolTimeoutMs: tool.toolTimeoutMs,
+          trigger: options.trigger,
+        });
+        continue;
+      }
       if (shouldSettleNativeSubagentAsUnjoined(tool, options.trigger)) {
         this.clearToolCall(queueItemId, tool.toolCallId);
         clearedToolCallCount += 1;
@@ -4641,98 +4643,6 @@ function activeToolPolicyMetadata(
   });
 }
 
-function isNativeSubagentBackgroundReceipt(
-  tool: ActiveToolCall,
-  event: NormalizedBridgeEvent,
-): boolean {
-  if (tool.toolClass !== "subagent" || event.part?.type !== "tool_result") {
-    return false;
-  }
-  const state = readToolState(event.part.json)?.toLowerCase();
-  if (
-    state &&
-    !["output-available", "complete", "completed", "success", "succeeded", "ok"].includes(
-      state,
-    )
-  ) {
-    return false;
-  }
-  const text = collectBridgeEventTextForClassification(event).toLowerCase();
-  return (
-    /\bbackground\b/.test(text) &&
-    /\b(?:running|started|launched|spawned|queued)\b/.test(text) &&
-    /\b(?:sub-?agent|delegat(?:e|ed|ion))\b/.test(text)
-  );
-}
-
-function markNativeSubagentResultDetached(
-  event: NormalizedBridgeEvent,
-  tool: ActiveToolCall,
-  ageMs: number,
-): NormalizedBridgeEvent {
-  const metadata = removeUndefinedValues({
-    ageMs,
-    reasonCode: "native_subagent_unjoined",
-    settlementState: "detached_unjoined",
-    state: "detached_unjoined",
-    toolCallId: tool.toolCallId,
-    toolName: tool.toolName,
-    trigger: NATIVE_SUBAGENT_BACKGROUND_RECEIPT_TRIGGER,
-    ...activeToolPolicyMetadata(tool),
-  });
-  const part = event.part ?? { type: "tool_result" as const };
-  return {
-    ...event,
-    payload: mergeRecordMetadata(event.payload, metadata),
-    part: {
-      ...part,
-      json: mergeRecordMetadata(part.json, metadata),
-      status: "complete",
-      text: `${tool.toolName} delegated work is running in the native runtime and was not joined before the turn completed.`,
-      type: "tool_result",
-    },
-  };
-}
-
-function collectBridgeEventTextForClassification(
-  event: NormalizedBridgeEvent,
-): string {
-  const values: string[] = [];
-  const budget = { chars: 0 };
-  collectStringValues(event.part?.text, values, budget);
-  collectStringValues(event.part?.json, values, budget);
-  collectStringValues(event.payload, values, budget);
-  return values.join("\n").slice(0, 20_000);
-}
-
-function collectStringValues(
-  value: unknown,
-  output: string[],
-  budget: { chars: number },
-  depth = 0,
-): void {
-  if (budget.chars > 20_000 || depth > 6 || value == null) {
-    return;
-  }
-  if (typeof value === "string") {
-    output.push(value);
-    budget.chars += value.length;
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      collectStringValues(item, output, budget, depth + 1);
-    }
-    return;
-  }
-  if (!isRecord(value)) {
-    return;
-  }
-  for (const child of Object.values(value)) {
-    collectStringValues(child, output, budget, depth + 1);
-  }
-}
-
 function shouldKeepNativeToolPending(
   tool: ActiveToolCall,
   trigger: ToolCallReconciliationTrigger,
@@ -4740,6 +4650,24 @@ function shouldKeepNativeToolPending(
   return (
     trigger !== "turn_completed" &&
     (tool.toolClass === "subagent" || tool.toolClass === "long_running")
+  );
+}
+
+function nativeSubagentJoinWasConfirmed(
+  responseMeta: unknown,
+  stopReason: string | undefined,
+): boolean {
+  if (stopReason !== "end_turn") {
+    return false;
+  }
+  if (!isRecord(responseMeta) || !isRecord(responseMeta.hermes)) {
+    return true;
+  }
+  const delegation = responseMeta.hermes.delegation;
+  return (
+    !isRecord(delegation) ||
+    (delegation.settlementState !== "timed_out" &&
+      delegation.settlementState !== "cancelled")
   );
 }
 

@@ -91,6 +91,8 @@ test("classifies successful delegation completion diagnostics as suppressible in
   for (const line of [
     "async delegation completed successfully",
     "delegation batch finished successfully",
+    "✓ [1/2] Create /tmp/acp-join-lifecycle-child-a.txt (15.51s)",
+    "✓ [2/2] Create /tmp/acp-join-lifecycle-child-b.txt (24.52s)",
   ]) {
     const diagnostic = classifyRuntimeLogLine(line)
     assert.equal(diagnostic?.severity, "info")
