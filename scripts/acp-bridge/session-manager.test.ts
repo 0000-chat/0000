@@ -3366,6 +3366,64 @@ describe("bridge session cwd safety", () => {
     });
   });
 
+  test("continues a durable secret collection receipt after the ACP session terminalizes", async () => {
+    const prompts: string[] = [];
+    const continuationPrompt =
+      "The user submitted the requested secret collection: GITHUB_TOKEN was created.";
+    const cloud = fakeCloudClient();
+    const manager = new BridgeSessionManager({
+      cloudClient: cloud,
+      createSession: () => ({
+        close: async () => {},
+        cancel: async () => {},
+        sendUserMessage: async (prompt) => {
+          prompts.push(prompt);
+          return {
+            events: [],
+            rawResult: {},
+            sessionId: "session-1",
+            text:
+              prompt === continuationPrompt
+                ? "continuing after secret collection"
+                : "",
+          };
+        },
+      }),
+    });
+
+    await manager.handleQueueItem({
+      claimId: "claim-terminal",
+      id: "queue-terminal",
+      prompt: "terminalize",
+      threadId: "thread-1",
+      type: "prompt",
+    });
+    await manager.handleQueueItem({
+      claimId: "claim-secret-collection",
+      externalRequestId: "agent-secret-collection:session-1:123",
+      id: "queue-secret-collection",
+      prompt: continuationPrompt,
+      resumePolicy: "durable_continuation",
+      secretCollectionOutcome: "submitted",
+      secretCollectionReceipt: {
+        rows: [
+          { name: "GITHUB_TOKEN", scope: "user", status: "created" },
+        ],
+      },
+      threadId: "thread-1",
+      type: "secret-collection-response",
+    });
+
+    expect(prompts).toEqual(["terminalize", continuationPrompt]);
+    expect(cloud.results.at(-1)).toMatchObject({
+      id: "queue-secret-collection",
+      result: {
+        ok: true,
+        text: "continuing after secret collection",
+      },
+    });
+  });
+
   test("bounds remembered terminal interaction session keys", async () => {
     const cloud = fakeCloudClient();
     const manager = new BridgeSessionManager({

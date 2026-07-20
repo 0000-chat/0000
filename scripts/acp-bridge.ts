@@ -157,7 +157,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.65";
+export const BRIDGE_VERSION = "0.1.66";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -6731,11 +6731,22 @@ export function normalizeQueueCommand(
   if (!id || !isQueueCommandType(type)) {
     return undefined;
   }
+  const secretCollectionResponse =
+    type === "secret-collection-response"
+      ? secretCollectionResponseFromUnknown(payload)
+      : undefined;
+  if (type === "secret-collection-response" && !secretCollectionResponse) {
+    return undefined;
+  }
+  const isSecretCollectionResponse = type === "secret-collection-response";
   const payloadText = payload ? stringFromUnknown(payload.text) : undefined;
   const payloadContinuationPrompt = payload
     ? stringFromUnknown(payload.continuationPrompt)
     : undefined;
   const prompt =
+    (type === "secret-collection-response"
+      ? secretCollectionResponse?.continuationPrompt
+      : undefined) ??
     stringFromUnknown(record.prompt) ??
     (type === "prompt" ? payloadText : undefined) ??
     (type === "choice-response"
@@ -6765,38 +6776,122 @@ export function normalizeQueueCommand(
         : new Date(createdAtMs).toISOString()),
     createdAtMs,
     type,
-    attachments: attachmentsFromUnknown(record.attachments),
+    attachments: isSecretCollectionResponse
+      ? undefined
+      : attachmentsFromUnknown(record.attachments),
     threadId: stringFromUnknown(record.threadId),
     sessionId: stringFromUnknown(record.sessionId),
     agentSessionId: stringFromUnknown(record.agentSessionId),
-    codeAttribution: codeAttributionFromUnknown(record.codeAttribution),
-    cwd: stringFromUnknown(record.cwd),
+    codeAttribution: isSecretCollectionResponse
+      ? undefined
+      : codeAttributionFromUnknown(record.codeAttribution),
+    cwd: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.cwd),
     prompt,
-    threadHistory: stringFromUnknown(record.threadHistory),
-    systemPrompt: stringFromUnknown(record.systemPrompt),
-    approvalId: stringFromUnknown(record.approvalId),
+    threadHistory: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.threadHistory),
+    systemPrompt: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.systemPrompt),
+    approvalId: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.approvalId),
     approvalOutcome,
-    approvalReason: stringFromUnknown(record.approvalReason),
+    approvalReason: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.approvalReason),
     approvalLevel:
-      record.approvalLevel === "ask" ||
-      record.approvalLevel === "full_permissions"
-        ? record.approvalLevel
-        : undefined,
+      isSecretCollectionResponse
+        ? undefined
+        : record.approvalLevel === "ask" ||
+            record.approvalLevel === "full_permissions"
+          ? record.approvalLevel
+          : undefined,
     resumePolicy:
-      record.resumePolicy === "live_callback" ||
+      secretCollectionResponse?.resumePolicy ??
+      (record.resumePolicy === "live_callback" ||
       record.resumePolicy === "durable_continuation"
         ? record.resumePolicy
-        : undefined,
-    externalRequestId: stringFromUnknown(record.externalRequestId),
+        : undefined),
+    externalRequestId:
+      type === "secret-collection-response"
+        ? secretCollectionResponse?.externalRequestId
+        : stringFromUnknown(record.externalRequestId),
+    secretCollectionOutcome: secretCollectionResponse?.outcome,
+    secretCollectionReceipt: secretCollectionResponse?.receipt,
     externalSessionId: stringFromUnknown(record.externalSessionId),
-    agentName: stringFromUnknown(record.agentName),
+    agentName: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.agentName),
     bridgeProfileId: stringFromUnknown(record.bridgeProfileId),
     hermesProfileName: stringFromUnknown(record.hermesProfileName),
-    mailboxConversationId: stringFromUnknown(record.mailboxConversationId),
+    mailboxConversationId: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.mailboxConversationId),
     organizationId: stringFromUnknown(record.organizationId),
-    runtimeConfig: stringRecordFromUnknown(record.runtimeConfig),
-    runtimeOptions: runtimeOptionsFromUnknown(record.runtimeOptions),
-    traceId: stringFromUnknown(record.traceId),
+    runtimeConfig: isSecretCollectionResponse
+      ? undefined
+      : stringRecordFromUnknown(record.runtimeConfig),
+    runtimeOptions: isSecretCollectionResponse
+      ? undefined
+      : runtimeOptionsFromUnknown(record.runtimeOptions),
+    traceId: isSecretCollectionResponse
+      ? undefined
+      : stringFromUnknown(record.traceId),
+  };
+}
+
+function secretCollectionResponseFromUnknown(
+  value: unknown,
+):
+  | {
+      continuationPrompt: string;
+      externalRequestId?: string;
+      outcome: "submitted" | "skipped";
+      receipt: BridgeSessionQueueItem["secretCollectionReceipt"];
+      resumePolicy: "durable_continuation";
+    }
+  | undefined {
+  const record = recordFromUnknown(value);
+  if (!record || record.resumePolicy !== "durable_continuation") {
+    return undefined;
+  }
+  const continuationPrompt = stringFromUnknown(record.continuationPrompt);
+  const outcome = record.outcome;
+  const receiptRecord = recordFromUnknown(record.receipt);
+  const rows = receiptRecord?.rows;
+  if (
+    !continuationPrompt ||
+    (outcome !== "submitted" && outcome !== "skipped") ||
+    !Array.isArray(rows)
+  ) {
+    return undefined;
+  }
+  const normalizedRows: NonNullable<
+    BridgeSessionQueueItem["secretCollectionReceipt"]
+  >["rows"] = [];
+  for (const row of rows) {
+    const rowRecord = recordFromUnknown(row);
+    const name = rowRecord ? stringFromUnknown(rowRecord.name) : undefined;
+    const scope = rowRecord?.scope;
+    const status = rowRecord?.status;
+    if (
+      !name ||
+      (scope !== "user" && scope !== "organization") ||
+      (status !== "created" && status !== "updated" && status !== "skipped")
+    ) {
+      return undefined;
+    }
+    normalizedRows.push({ name, scope, status });
+  }
+  return {
+    continuationPrompt,
+    externalRequestId: stringFromUnknown(record.externalRequestId),
+    outcome,
+    receipt: { rows: normalizedRows },
+    resumePolicy: "durable_continuation",
   };
 }
 
@@ -6825,6 +6920,7 @@ function isQueueCommandType(
     value === "approval" ||
     value === "approval-response" ||
     value === "choice-response" ||
+    value === "secret-collection-response" ||
     value === "input-response" ||
     value === "permission-response" ||
     value === "ping" ||

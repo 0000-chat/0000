@@ -38,6 +38,7 @@ export const bridgeLogEventNames = [
   "bridge.axiom_delivery.failed",
   "bridge.control_command.received",
   "bridge.choice_response.continuation",
+  "bridge.secret_collection_response.continuation",
   "bridge.interaction_response.stale_noop",
   "bridge.input_response.continuation",
   "bridge.events.append_failed",

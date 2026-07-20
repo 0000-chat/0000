@@ -91,6 +91,8 @@ export type BridgeSessionQueueItem = {
   approvalReason?: string;
   approvalLevel?: "ask" | "full_permissions";
   resumePolicy?: "live_callback" | "durable_continuation";
+  secretCollectionOutcome?: "submitted" | "skipped";
+  secretCollectionReceipt?: BridgeSecretCollectionReceipt;
   externalRequestId?: string;
   externalSessionId?: string;
   organizationId?: string;
@@ -100,6 +102,14 @@ export type BridgeSessionQueueItem = {
   agentName?: string;
   bridgeProfileId?: string;
   hermesProfileName?: string;
+};
+
+export type BridgeSecretCollectionReceipt = {
+  rows: Array<{
+    name: string;
+    scope: "user" | "organization";
+    status: "created" | "updated" | "skipped";
+  }>;
 };
 
 export type BridgeQueueAttachment = {
@@ -2355,6 +2365,55 @@ export class BridgeSessionManager {
           threadHistory,
           sessionKey: key,
           resultMetadata: { choiceId },
+        }),
+      );
+      return;
+    }
+
+    if (type === "secret-collection-response") {
+      const outcome = item.secretCollectionOutcome;
+      const receipt = item.secretCollectionReceipt;
+      const continuationPrompt = item.prompt?.trim();
+      if (
+        (outcome !== "submitted" && outcome !== "skipped") ||
+        !receipt ||
+        !Array.isArray(receipt.rows) ||
+        !continuationPrompt ||
+        item.resumePolicy !== "durable_continuation"
+      ) {
+        throw new Error(
+          `secret collection response ${item.id} is missing a valid safe receipt`,
+        );
+      }
+      const threadId = item.threadId ?? item.sessionId;
+      const requestedSessionKey = this.sessionKeyForItem(item);
+      if (!key && this.hasActiveRuntimeConflictForItem(item)) {
+        throw new Error(
+          `secret collection response ${item.id} does not match an active ACP session for the requested runtime`,
+        );
+      }
+      const sessionKey = key ?? requestedSessionKey ?? threadId;
+      if (!sessionKey) {
+        throw new Error(`secret collection response ${item.id} is missing threadId`);
+      }
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
+      const threadHistory = normalizeThreadHistory(item.threadHistory);
+      this.writeLog({
+        level: "info",
+        event: "bridge.secret_collection_response.continuation",
+        queueId: item.id,
+        queueType: type,
+        threadId,
+        agentSessionId: key,
+        hasActiveSession: this.sessions.has(sessionKey),
+        hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
+      });
+      await this.runSerializedPrompt(sessionKey, item.id, () =>
+        this.handlePromptNow(item, continuationPrompt, {
+          systemPrompt,
+          threadHistory,
+          sessionKey: key,
+          resultMetadata: { secretCollectionOutcome: outcome },
         }),
       );
       return;
@@ -5089,6 +5148,7 @@ function isApprovalResponseType(type: string): boolean {
     type === "approval-response" ||
     type === "permission-response" ||
     type === "choice-response" ||
+    type === "secret-collection-response" ||
     type === "input-response"
   );
 }
