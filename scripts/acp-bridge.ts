@@ -14,17 +14,17 @@ import {
 } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { ConvexClient } from "convex/browser";
-import { makeFunctionReference } from "convex/server";
-
 import {
   BridgeCloudHttpError,
   BridgeCloudRequestTimeoutError,
   ConvexBridgeCloudClient,
-  type BridgeHeartbeatInput,
   type BridgeQueueClaimInput,
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
+import {
+  BridgeDeviceRealtimeClient,
+  type BridgeRealtimeEvent,
+} from "./acp-bridge/bridge-realtime";
 import {
   AGENT_TOOL_GUIDE_RESOURCE,
   AGENT_TOOL_BROKER_MCP_TOOL_NAMES,
@@ -77,6 +77,7 @@ import {
   DEFAULT_CODEX_ACP_COMMAND,
   inferRuntimeId,
   inferRuntimeLabel,
+  normalizeConfiguredAgentCommand,
 } from "./acp-bridge/runtime-defaults";
 import {
   synthesizeLegacyHermesProfile,
@@ -128,10 +129,8 @@ const DEFAULT_PAIR_PATH = "/api/agent-bridge/pair";
 const DEFAULT_CLAIM_PATH = "/api/agent-bridge/queue/claim";
 const DEFAULT_CLEANUP_STALE_PATH = "/api/agent-bridge/queue/cleanup-stale";
 const DEFAULT_RESULT_PATH = "/api/agent-bridge/queue/result";
-const DEFAULT_HEARTBEAT_PATH = "/api/agent-bridge/heartbeat";
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_HEARTBEAT_MS = 15_000;
-const DEFAULT_IDLE_HEARTBEAT_MS = 5 * 60_000;
 const DEFAULT_QUEUE_FALLBACK_POLL_MS = 30_000;
 const DEFAULT_PROCESS_ORPHAN_CLEANUP_MS = 60_000;
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 10_000;
@@ -158,7 +157,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.67";
+export const BRIDGE_VERSION = "0.1.69";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -271,7 +270,7 @@ type ProposedAgentProfile = {
 
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
-type BridgeWakeWaitResult = "signal" | "timeout";
+type BridgeWakeWaitResult = "signal" | "terminal" | "timeout";
 export type BridgeLoopPollReason =
   | "active"
   | "maintenance"
@@ -314,14 +313,18 @@ type BridgeWakeSignal = {
   wait(timeoutMs: number): Promise<BridgeWakeWaitResult>;
   close(): Promise<void>;
   isWakeSubscriptionActive?(): boolean;
-  nextWakeTokenRefreshAt?(): number | undefined;
-  updateWakeToken?(wake: BridgeWakeToken | undefined): void;
-};
-
-type BridgeWakeToken = {
-  token: string;
-  expiresAt: number;
-  refreshAfterMs: number;
+  connectionEpoch?(): string | undefined;
+  acknowledgeControl?(
+    controlId: string,
+    status: "accepted" | "completed" | "failed",
+  ): void;
+  acknowledgeControlStatus?(
+    status: BridgeControlCommandStatus | undefined,
+  ): void;
+  acknowledgeResync?(): string[];
+  sendLiveness?(liveness: Record<string, unknown>): void;
+  sendStatus?(status: Record<string, unknown>): void;
+  takePendingControlId?(): string | undefined;
 };
 
 export type BridgeStatus = {
@@ -626,20 +629,18 @@ function getBridgeRuntimeIdentity(): BridgeRuntimeIdentity {
 
 function buildBridgeMcpManifestSummary() {
   return {
-    resources: [
-      AGENT_TOOL_GUIDE_RESOURCE,
-      AGENT_TOOL_SESSION_CONTEXT_RESOURCE,
-    ],
+    resources: [AGENT_TOOL_GUIDE_RESOURCE, AGENT_TOOL_SESSION_CONTEXT_RESOURCE],
     serverName: BRIDGE_MCP_SERVER_NAME,
     serverVersion: BRIDGE_MCP_SERVER_VERSION,
     tools: AGENT_TOOL_BROKER_MCP_TOOL_NAMES.map((toolName) => ({
-      inputFields: toolName === "tools.search"
-        ? ["capabilityPack", "effect", "limit", "offset", "query", "risk"]
-        : toolName === "tools.describe"
-          ? ["tool"]
-          : toolName === "tools.call"
-            ? ["input", "tool"]
-            : ["mode", "steps"],
+      inputFields:
+        toolName === "tools.search"
+          ? ["capabilityPack", "effect", "limit", "offset", "query", "risk"]
+          : toolName === "tools.describe"
+            ? ["tool"]
+            : toolName === "tools.call"
+              ? ["input", "tool"]
+              : ["mode", "steps"],
       name: toolName,
     })),
   };
@@ -676,7 +677,10 @@ function readLinuxProcessStartToken(pid: number): string | undefined {
     if (closeParen < 0) {
       return undefined;
     }
-    const fields = stat.slice(closeParen + 2).trim().split(/\s+/);
+    const fields = stat
+      .slice(closeParen + 2)
+      .trim()
+      .split(/\s+/);
     return fields[19];
   } catch {
     return undefined;
@@ -793,7 +797,10 @@ export type BridgeLoopIterationInput = {
   statusPath: string;
   now?: () => number;
   heartbeatIntervalMs?: number;
-  sendHeartbeat?: typeof sendHeartbeat;
+  sendHeartbeat?: (
+    config: BridgeConfig,
+    status: BridgeStatus,
+  ) => Promise<BridgeHeartbeatSendResult>;
   discoverHermesProfiles?: typeof discoverHermesProfiles;
   discoverRuntimeProfiles?: typeof discoverBridgeRuntimeProfiles;
   onRuntimeCatalogRefreshed?: (catalog: {
@@ -837,7 +844,7 @@ export type BridgeRegistrationSchedulerInput<TContext> = {
   waitForWakeSignal: (
     context: TContext,
     processRestartPending: boolean,
-  ) => Promise<BridgeLoopPollReason>;
+  ) => Promise<BridgeLoopPollReason | "terminal">;
 };
 
 export async function runBridgeRegistrationScheduler<TContext>(
@@ -865,10 +872,14 @@ export async function runBridgeRegistrationScheduler<TContext>(
     if (!input.isActive(input.context)) {
       return;
     }
-    nextPollReason = await input.waitForWakeSignal(
+    const wakeResult = await input.waitForWakeSignal(
       input.context,
       processRestartPending,
     );
+    if (wakeResult === "terminal") {
+      return;
+    }
+    nextPollReason = wakeResult;
   }
 }
 
@@ -1032,6 +1043,13 @@ export function parseBridgeArgs(argv: string[]): ParsedBridgeArgs {
     }
 
     positionals.push(value);
+  }
+
+  const configuredAgentCommands = flags["agent-command"];
+  if (typeof configuredAgentCommands === "string") {
+    flags["agent-command"] = normalizeConfiguredAgentCommand(configuredAgentCommands);
+  } else if (Array.isArray(configuredAgentCommands)) {
+    flags["agent-command"] = configuredAgentCommands.map(normalizeConfiguredAgentCommand);
   }
 
   return { command, positionals, flags };
@@ -1292,9 +1310,7 @@ export function buildBridgeCapacitySnapshot(
     processSlotUsage,
     retainedSessionCount,
     totalInFlight,
-    ...(localHardMaxInFlight === undefined
-      ? {}
-      : { localHardMaxInFlight }),
+    ...(localHardMaxInFlight === undefined ? {} : { localHardMaxInFlight }),
   };
 }
 
@@ -1673,11 +1689,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
   }
 
   const agentCommand =
-    getFlag(
-      parsed.flags,
-      "agent-command",
-      process.env.ZERO_CHAT_AGENT_COMMAND,
-    ) ?? defaultAgentCommandForEnvironment();
+    getFlag(parsed.flags, "agent-command") ?? defaultAgentCommandForEnvironment();
   const skillPath = getFlag(
     parsed.flags,
     "skill-path",
@@ -1879,9 +1891,15 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     getFlag(parsed.flags, "poll-ms", String(DEFAULT_POLL_MS)),
   );
   const localHardMaxInFlight = getLocalHardMaxInFlight(parsed.flags);
+  const environmentAgentCommand = process.env.ZERO_CHAT_AGENT_COMMAND?.trim();
   const agentCommand =
-    getFlag(parsed.flags, "agent-command", DEFAULT_AGENT_COMMAND) ??
-    DEFAULT_AGENT_COMMAND;
+    getFlag(
+      parsed.flags,
+      "agent-command",
+      normalizeConfiguredAgentCommand(
+        environmentAgentCommand || DEFAULT_AGENT_COMMAND,
+      ),
+    ) ?? DEFAULT_AGENT_COMMAND;
   const customRuntimeCommands = getRepeatedFlags(
     parsed.flags,
     "runtime-command",
@@ -2054,7 +2072,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
                 runtimeProfileId: profile.id,
                 sessionKey: `runtime-conformance:${profile.id}`,
               },
-              requestTimeoutMs: runtimeConformanceRequestTimeoutMs(requestTimeoutMs),
+              requestTimeoutMs:
+                runtimeConformanceRequestTimeoutMs(requestTimeoutMs),
             }),
           profile,
         }),
@@ -2091,13 +2110,17 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       | undefined;
     return Boolean(
       ownerContext?.supervisor.canClaimWork() &&
-        processWarmCapacityForHealth(
-          ownerContext.supervisor.getProcessHealth(),
-        ) > 0,
+      processWarmCapacityForHealth(ownerContext.supervisor.getProcessHealth()) >
+        0,
     );
   };
   const recordSuccessfulRuntimeConformance = (
-    item: { bridgeProfileId?: string; hermesProfileName?: string; kind?: string; type?: string },
+    item: {
+      bridgeProfileId?: string;
+      hermesProfileName?: string;
+      kind?: string;
+      type?: string;
+    },
     result: Record<string, unknown>,
   ) => {
     if (result.ok !== true) {
@@ -2145,7 +2168,9 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         refreshRuntimeConformanceIfStale: () =>
           refreshRuntimeConformanceIfStale({ force: true }),
         refreshedRuntimeProfiles: runtimeProfiles,
-        statuses: Array.from(contexts.values()).map((context) => context.status),
+        statuses: Array.from(contexts.values()).map(
+          (context) => context.status,
+        ),
       });
     })().catch(() => undefined);
   };
@@ -2227,8 +2252,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         runtimeProfiles,
         currentMcpManifestHash: () =>
           getBridgeRuntimeIdentity().mcpManifestHash,
-        currentToolPolicyHash: () =>
-          getBridgeRuntimeIdentity().toolPolicyHash,
+        currentToolPolicyHash: () => getBridgeRuntimeIdentity().toolPolicyHash,
         requestTimeoutMs,
         toolResultTimeoutMs,
         resumeEnabled,
@@ -2256,12 +2280,6 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         processRegistry,
         supervisor,
         onQueueResultMarked: recordSuccessfulRuntimeConformance,
-      });
-      const wakeSignal = createBridgeWakeSignal({
-        config: registration,
-        convexUrl: getConvexUrl(parsed.flags, registration),
-        limit: initialOrgMaxInFlight,
-        log,
       });
       const initialCapacity = buildBridgeCapacitySnapshot(
         contexts.values(),
@@ -2305,10 +2323,8 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         acpResumeEnabled: resumeEnabled,
         acpIdleTtlMs: idleSessionTtlMs,
         runtimeIdentity: getBridgeRuntimeIdentity(),
-        pendingControlCommand:
-          startupControlCommandState.pendingControlCommand,
-        controlCommandStatus:
-          startupControlCommandState.controlCommandStatus,
+        pendingControlCommand: startupControlCommandState.pendingControlCommand,
+        controlCommandStatus: startupControlCommandState.controlCommandStatus,
         restartHandoff:
           consumedRestartHandoff && handoffEntry
             ? buildRestartHandoffStatus(
@@ -2331,6 +2347,12 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         recentErrors: [],
         localJournal: bridgeSupervisorHealthStatus(supervisor),
       };
+      const wakeSignal = createBridgeWakeSignal({
+        config: registration,
+        limit: initialOrgMaxInFlight,
+        log,
+        status,
+      });
       const context: RuntimeContext = {
         closing: false,
         config: registration,
@@ -2372,8 +2394,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         runtimeConformance: runtimeConformanceSummary(),
         restartHandoffConsumed: Boolean(handoffEntry),
         restartHandoffSeededSessionCount,
-        restartHandoffSessionHintCount:
-          handoffEntry?.sessionWarmupHints.length,
+        restartHandoffSessionHintCount: handoffEntry?.sessionWarmupHints.length,
       });
     }
     for (const [deviceId, context] of contexts) {
@@ -2392,29 +2413,24 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     }
     await persistAggregateStatus();
   };
-  const idleWakeSignalTimeoutMs = (context: RuntimeContext) => {
-    const fallbackMs = Math.max(pollMs, DEFAULT_QUEUE_FALLBACK_POLL_MS);
-    if (!context.wakeSignal.isWakeSubscriptionActive?.()) {
-      return fallbackMs;
-    }
-    const refreshAt = context.wakeSignal.nextWakeTokenRefreshAt?.();
-    if (typeof refreshAt !== "number" || !Number.isFinite(refreshAt)) {
-      return fallbackMs;
-    }
-    const refreshDelayMs = refreshAt - Date.now();
-    return refreshDelayMs > 0
-      ? Math.max(Math.min(refreshDelayMs, DEFAULT_IDLE_HEARTBEAT_MS), pollMs)
-      : fallbackMs;
+  const idleWakeSignalTimeoutMs = () => {
+    return Math.max(pollMs, DEFAULT_QUEUE_FALLBACK_POLL_MS);
   };
   const waitForContextWakeSignal = async (
     context: RuntimeContext,
     processRestartPending: boolean,
-  ): Promise<BridgeLoopPollReason> => {
+  ): Promise<BridgeLoopPollReason | "terminal"> => {
     const timeoutMs =
       processRestartPending || context.inFlightCommands.size > 0
         ? pollMs
-        : idleWakeSignalTimeoutMs(context);
+        : idleWakeSignalTimeoutMs();
     const result = await context.wakeSignal.wait(timeoutMs);
+    if (result === "terminal") {
+      context.closing = true;
+      context.status.connected = false;
+      await persistAggregateStatus();
+      return "terminal";
+    }
     return result === "signal"
       ? "wake"
       : processRestartPending
@@ -2517,10 +2533,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       });
       const shutdownTask = (async () => {
         await context.wakeSignal.close();
-        if (
-          context.loopTask &&
-          context.loopTask !== options.skipLoopTask
-        ) {
+        if (context.loopTask && context.loopTask !== options.skipLoopTask) {
           await context.loopTask.catch(() => undefined);
         }
         if (options.forceRuntimeProcesses) {
@@ -2565,9 +2578,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
     context: RuntimeContext,
     settings: BridgeControlResponse["settings"],
   ) => {
-    const nextMaxInFlight = normalizeControlMaxInFlight(
-      settings?.maxInFlight,
-    );
+    const nextMaxInFlight = normalizeControlMaxInFlight(settings?.maxInFlight);
     if (nextMaxInFlight === undefined) {
       return;
     }
@@ -2610,11 +2621,13 @@ async function startBridge(parsed: ParsedBridgeArgs) {
   process.on("unhandledRejection", (error) => {
     logProcessException("unhandledRejection", error);
   });
-  process.once("SIGINT", () =>
-    void stop({ reason: "process signal", signal: "SIGINT" }),
+  process.once(
+    "SIGINT",
+    () => void stop({ reason: "process signal", signal: "SIGINT" }),
   );
-  process.once("SIGTERM", () =>
-    void stop({ reason: "process signal", signal: "SIGTERM" }),
+  process.once(
+    "SIGTERM",
+    () => void stop({ reason: "process signal", signal: "SIGTERM" }),
   );
 
   const reserveClaimSlotsForContext = (
@@ -2690,7 +2703,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         singletonCanClaim: singletonStatus.canClaim,
       }) &&
       processOrphanCleanupNow - context.lastProcessOrphanCleanupAt >=
-      DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
+        DEFAULT_PROCESS_ORPHAN_CLEANUP_MS
     ) {
       context.lastProcessOrphanCleanupAt = processOrphanCleanupNow;
       try {
@@ -2785,8 +2798,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         warmRuntimeProfileIds,
         context.status,
       ),
-      heartbeatIntervalMs:
-        pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
+      heartbeatIntervalMs: pollReason === "timer" ? 0 : DEFAULT_HEARTBEAT_MS,
       pollReason,
       reserveClaimSlots: () => reserveClaimSlotsForContext(context),
       onRuntimeCatalogRefreshed: async (catalog) => {
@@ -3006,11 +3018,16 @@ function prioritizeRuntimeConformanceProfiles(
 }
 
 function isLaunchSpecRuntimeProfile(profile: BridgeRuntimeProfile): boolean {
-  return Boolean(profile.hermesProfileName) || profile.id.includes("|hermes-profile:");
+  return (
+    Boolean(profile.hermesProfileName) ||
+    profile.id.includes("|hermes-profile:")
+  );
 }
 
 function bridgeInFlightRuntimeProfileIds(
-  contexts: Iterable<{ inFlightCommandMetadata: Map<string, InFlightCommandMetadata> }>,
+  contexts: Iterable<{
+    inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
+  }>,
 ): Set<string> {
   const profileIds = new Set<string>();
   for (const context of contexts) {
@@ -3218,7 +3235,8 @@ function normalizeControlCommandStatus(
     instanceId: stringFromUnknown(value.instanceId),
     requestedAt:
       typeof value.requestedAt === "number" ? value.requestedAt : undefined,
-    startedAt: typeof value.startedAt === "number" ? value.startedAt : undefined,
+    startedAt:
+      typeof value.startedAt === "number" ? value.startedAt : undefined,
     status: value.status,
     targetVersion: boundControlCommandTargetVersion(value.targetVersion),
   });
@@ -3229,8 +3247,7 @@ function sameBridgeControlCommand(
   right: BridgeControlCommandState | undefined,
 ): boolean {
   return (
-    left?.command === right?.command &&
-    left?.requestedAt === right?.requestedAt
+    left?.command === right?.command && left?.requestedAt === right?.requestedAt
   );
 }
 
@@ -3329,7 +3346,8 @@ function buildControlCommandStatus(
     instanceId: stringFromUnknown(patch.instanceId),
     requestedAt:
       typeof patch.requestedAt === "number" ? patch.requestedAt : undefined,
-    startedAt: typeof patch.startedAt === "number" ? patch.startedAt : undefined,
+    startedAt:
+      typeof patch.startedAt === "number" ? patch.startedAt : undefined,
     status,
     targetVersion: boundControlCommandTargetVersion(patch.targetVersion),
   });
@@ -3403,7 +3421,8 @@ function buildBridgeRestartHandoffEntry(
   // relaunch an abandoned provider turn and consume the entire process cap.
   // Runtime profiles are still handed off above; user work is reclaimed from
   // the cloud queue by the normal claim path.
-  const sessionWarmupHints: BridgeRestartHandoffEntry["sessionWarmupHints"] = [];
+  const sessionWarmupHints: BridgeRestartHandoffEntry["sessionWarmupHints"] =
+    [];
   return {
     appUrlHash: bridgeRestartHandoffAppUrlHash(status.appUrl),
     deviceId: status.deviceId,
@@ -3636,7 +3655,11 @@ function consumedRestartHandoffPriorityProfileIds(
     return [];
   }
   return Array.from(
-    new Set(handoff.entries.flatMap((entry) => restartHandoffEntryPriorityProfileIds(entry))),
+    new Set(
+      handoff.entries.flatMap((entry) =>
+        restartHandoffEntryPriorityProfileIds(entry),
+      ),
+    ),
   );
 }
 
@@ -3934,7 +3957,8 @@ async function applyPendingBridgeControlCommand(
       await launchUpdater({
         currentVersion: BRIDGE_VERSION,
         requestedAt: command.requestedAt,
-        restartHandoffPath: input.restartHandoffPath ?? DEFAULT_RESTART_HANDOFF_PATH,
+        restartHandoffPath:
+          input.restartHandoffPath ?? DEFAULT_RESTART_HANDOFF_PATH,
         restartCommand: getBridgeRestartCommand(),
         statusPath: input.statusPath,
       });
@@ -4052,10 +4076,7 @@ function buildWatchdogTerminalizationMetadata(
     metadata[key] = normalized;
     hasStructuredMetadata = true;
   };
-  const addNumber = (
-    key: "ageMs" | "timeoutMs",
-    value: number | undefined,
-  ) => {
+  const addNumber = (key: "ageMs" | "timeoutMs", value: number | undefined) => {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
       return;
     }
@@ -4094,7 +4115,7 @@ function ageMsFromStartedAt(
 export async function runBridgeLoopIteration(
   input: BridgeLoopIterationInput,
 ): Promise<BridgeLoopIterationResult> {
-  const heartbeat = input.sendHeartbeat ?? sendHeartbeat;
+  const heartbeat = input.sendHeartbeat;
   const discoverProfiles =
     input.discoverHermesProfiles ?? discoverHermesProfiles;
   const discoverRuntimeProfiles =
@@ -4231,7 +4252,9 @@ export async function runBridgeLoopIteration(
     }
     const heartbeatNow = currentTime();
     const heartbeatSignature = bridgeHeartbeatSignature(input.status);
+    const pendingControlId = input.wakeSignal?.takePendingControlId?.();
     if (
+      pendingControlId ||
       shouldSendBridgeHeartbeat(
         input.status,
         heartbeatNow,
@@ -4241,7 +4264,17 @@ export async function runBridgeLoopIteration(
     ) {
       input.status.lastHeartbeatAt = new Date(heartbeatNow).toISOString();
       input.status.lastHeartbeatSignature = heartbeatSignature;
-      const heartbeatResult = await heartbeat(input.config, input.status);
+      input.wakeSignal?.sendStatus?.(buildHeartbeatStatusPayload(input.status));
+      input.wakeSignal?.sendLiveness?.({
+        activeSessions: input.status.activeSessions ?? [],
+        observedAt: heartbeatNow,
+      });
+      const heartbeatResult = heartbeat
+        ? await heartbeat(input.config, input.status)
+        : await pullBridgeControl(input.config);
+      if (pendingControlId && heartbeatResult.ok) {
+        input.wakeSignal?.acknowledgeControl?.(pendingControlId, "accepted");
+      }
       if (!heartbeatResult.ok) {
         const message = redactForOutput(heartbeatResult.error.message);
         input.status.recentErrors.push(message);
@@ -4253,8 +4286,6 @@ export async function runBridgeLoopIteration(
           activeSessionCount: input.manager.getStatus().activeSessions.length,
           error: message,
         });
-      } else {
-        input.wakeSignal?.updateWakeToken?.(heartbeatResult.wake);
       }
       if (
         heartbeatResult.ok &&
@@ -4289,11 +4320,7 @@ export async function runBridgeLoopIteration(
         );
         if (controlCommand) {
           const acceptedAt = currentTime();
-          acceptBridgeControlCommand(
-            input.status,
-            controlCommand,
-            acceptedAt,
-          );
+          acceptBridgeControlCommand(input.status, controlCommand, acceptedAt);
           await persistStatus(input.statusPath, input.status);
           restartResult = await applyPendingBridgeControlCommand(
             input.status,
@@ -4365,10 +4392,12 @@ export async function runBridgeLoopIteration(
               });
             }
             await persistStatus(input.statusPath, input.status);
-            const refreshHeartbeatResult = await heartbeat(
-              input.config,
-              input.status,
+            input.wakeSignal?.sendStatus?.(
+              buildHeartbeatStatusPayload(input.status),
             );
+            const refreshHeartbeatResult = heartbeat
+              ? await heartbeat(input.config, input.status)
+              : await pullBridgeControl(input.config);
             if (!refreshHeartbeatResult.ok) {
               const message = redactForOutput(
                 refreshHeartbeatResult.error.message,
@@ -4392,6 +4421,9 @@ export async function runBridgeLoopIteration(
         }
       }
     }
+    input.wakeSignal?.acknowledgeControlStatus?.(
+      input.status.controlCommandStatus,
+    );
     if (restartResult.restartRequested) {
       syncBridgeStatus();
       await persistStatus(input.statusPath, input.status);
@@ -4455,15 +4487,16 @@ export async function runBridgeLoopIteration(
       const canClaimPromptWork =
         !actionableBridgeControlCommand(input.status) &&
         (input.canClaimPromptWork?.() ?? true);
-      const shouldPollQueue =
-        pollReason === "startup" || pollReason === "wake";
-      const claimInput: BridgeQueueClaimInput | undefined =
-        !canClaimPromptWork
-          ? { lane: "control", limit: 1 }
+      const shouldPollQueue = pollReason === "startup" || pollReason === "wake";
+      const connectionEpoch = input.wakeSignal?.connectionEpoch?.();
+      const claimInput: BridgeQueueClaimInput | undefined = !connectionEpoch
+        ? undefined
+        : !canClaimPromptWork
+          ? { connectionEpoch, lane: "control", limit: 1 }
           : availableSlots > 0
-            ? { limit: availableSlots }
+            ? { connectionEpoch, limit: availableSlots }
             : input.inFlightCommands.size > 0
-              ? { lane: "control", limit: 1 }
+              ? { connectionEpoch, lane: "control", limit: 1 }
               : undefined;
       if (claimInput && shouldPollQueue) {
         let processHealth = input.getProcessHealth?.();
@@ -4574,12 +4607,8 @@ export async function runBridgeLoopIteration(
           return { restartRequested: false };
         }
         input.status.lastPollAt = new Date(now).toISOString();
-        const commands = await claim(
-          input.config,
-          claimInput.lane
-            ? claimInput
-            : (claimInput.limit ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS),
-        );
+        const commands = await claim(input.config, claimInput);
+        input.wakeSignal?.acknowledgeResync?.();
         if (commands.length > 0) {
           input.log({
             level: "info",
@@ -4830,8 +4859,11 @@ function heartbeatProcessHealthSignature(
   if (!processHealth) {
     return undefined;
   }
-  const { lastReconciledAt: _lastReconciledAt, singletonOwner, ...rest } =
-    processHealth;
+  const {
+    lastReconciledAt: _lastReconciledAt,
+    singletonOwner,
+    ...rest
+  } = processHealth;
   if (!singletonOwner) {
     return rest;
   }
@@ -4989,7 +5021,8 @@ function syncBridgeRuntimeStatus(
   status.maxInFlight = maxInFlight;
   status.activeSessions = managerStatus.activeSessions;
   status.liveness = normalizeBridgeLivenessStatus(managerStatus.liveness);
-  status.retainedSessions = managerStatus.retainedSessions ?? managerStatus.sessions;
+  status.retainedSessions =
+    managerStatus.retainedSessions ?? managerStatus.sessions;
   status.sessionQueues = managerStatus.sessions;
   delete (status as { activeQueueItemIds?: unknown }).activeQueueItemIds;
   status.inFlightCommands = Array.from(inFlightCommandMetadata.values());
@@ -5534,10 +5567,13 @@ function isSoftRuntimeConformanceBlock(record: {
   );
 }
 
-function launchSpecKeyForCommand(command: BridgeQueueCommand): string | undefined {
+function launchSpecKeyForCommand(
+  command: BridgeQueueCommand,
+): string | undefined {
   const runtimeProfileId = runtimeProfileIdForCommand(command);
   const profileName =
-    command.hermesProfileName?.trim() || legacyHermesProfileNameForCommand(command);
+    command.hermesProfileName?.trim() ||
+    legacyHermesProfileNameForCommand(command);
   if (!profileName || runtimeProfileId !== "hermes:default") {
     return undefined;
   }
@@ -5545,7 +5581,9 @@ function launchSpecKeyForCommand(command: BridgeQueueCommand): string | undefine
 }
 
 function runtimeProfileIdForCommand(command: BridgeQueueCommand): string {
-  return legacyHermesProfileNameForCommand(command) ? "hermes:default" : command.bridgeProfileId!;
+  return legacyHermesProfileNameForCommand(command)
+    ? "hermes:default"
+    : command.bridgeProfileId!;
 }
 
 function legacyHermesProfileNameForCommand(
@@ -5575,7 +5613,9 @@ function launchSpecReasonCode(reasonCode: string | undefined): string {
   }
 }
 
-function commandRequiresRuntimeConformance(command: BridgeQueueCommand): boolean {
+function commandRequiresRuntimeConformance(
+  command: BridgeQueueCommand,
+): boolean {
   const type = command.type ?? command.kind;
   return type === "prompt" || type === "start-session";
 }
@@ -5655,10 +5695,9 @@ async function cleanupStaleClaims(
   input: { limit?: number; requestTimeoutMs?: number } = {},
 ): Promise<QueueCleanupResponse> {
   const { requestTimeoutMs, ...body } = input;
-  return await createCloudClient(
-    config,
-    { requestTimeoutMs },
-  ).cleanupStaleClaims<QueueCleanupResponse>(body);
+  return await createCloudClient(config, {
+    requestTimeoutMs,
+  }).cleanupStaleClaims<QueueCleanupResponse>(body);
 }
 
 type BridgeHeartbeatSendResult =
@@ -5666,7 +5705,6 @@ type BridgeHeartbeatSendResult =
       ok: true;
       control?: BridgeControlResponse;
       enabledFeatureFlags?: string[];
-      wake?: BridgeWakeToken;
     }
   | {
       ok: false;
@@ -5717,19 +5755,21 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
     availability: status.availability,
-    retainedSessions: (status.retainedSessions ?? status.sessionQueues ?? []).map(
-      (session) => ({
-        agentSessionId: session.agentSessionId,
-        bridgeProfileId: session.bridgeProfileId,
-        hermesProfileName: session.hermesProfileName,
-        lastUsedAt: session.lastUsedAt,
-        queueDepth: session.queueDepth,
-        runningQueueItemId: session.runningQueueItemId,
-        runtimeProfileId: session.runtimeProfileId,
-        sessionKey: session.sessionKey,
-        threadId: session.threadId,
-      }),
-    ),
+    retainedSessions: (
+      status.retainedSessions ??
+      status.sessionQueues ??
+      []
+    ).map((session) => ({
+      agentSessionId: session.agentSessionId,
+      bridgeProfileId: session.bridgeProfileId,
+      hermesProfileName: session.hermesProfileName,
+      lastUsedAt: session.lastUsedAt,
+      queueDepth: session.queueDepth,
+      runningQueueItemId: session.runningQueueItemId,
+      runtimeProfileId: session.runtimeProfileId,
+      sessionKey: session.sessionKey,
+      threadId: session.threadId,
+    })),
     sessionQueues: (status.sessionQueues ?? []).map((session) => ({
       agentSessionId: session.agentSessionId,
       bridgeProfileId: session.bridgeProfileId,
@@ -5748,50 +5788,9 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
   };
 }
 
-function buildCompatibleHeartbeatStatusPayload(status: BridgeStatus) {
-  return {
-    activeSessions: status.activeSessions,
-    availability: status.availability,
-    capacity: status.capacity,
-    connected: status.connected,
-    inFlightCommands: status.inFlightCommands ?? [],
-    lastPollAt: status.lastPollAt,
-    lastStaleCleanup: status.lastStaleCleanup,
-    lastStaleCleanupAt: status.lastStaleCleanupAt,
-    lifecycle: status.lifecycle ?? "running",
-    liveness: status.liveness,
-    maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
-    recentErrors: status.recentErrors.slice(-5),
-    retainedSessions: (status.retainedSessions ?? status.sessionQueues ?? []).map(
-      (session) => ({
-        agentSessionId: session.agentSessionId,
-        bridgeProfileId: session.bridgeProfileId,
-        hermesProfileName: session.hermesProfileName,
-        lastUsedAt: session.lastUsedAt,
-        queueDepth: session.queueDepth,
-        runningQueueItemId: session.runningQueueItemId,
-        runtimeProfileId: session.runtimeProfileId,
-        sessionKey: session.sessionKey,
-        threadId: session.threadId,
-      }),
-    ),
-    runtimeConformance: status.runtimeConformance,
-    runtimeIdentity: status.runtimeIdentity,
-    sessionQueues: (status.sessionQueues ?? []).map((session) => ({
-      agentSessionId: session.agentSessionId,
-      bridgeProfileId: session.bridgeProfileId,
-      hermesProfileName: session.hermesProfileName,
-      lastUsedAt: session.lastUsedAt,
-      queueDepth: session.queueDepth,
-      runningQueueItemId: session.runningQueueItemId,
-      runtimeProfileId: session.runtimeProfileId,
-      sessionKey: session.sessionKey,
-      threadId: session.threadId,
-    })),
-  };
-}
-
-function buildHeartbeatUpdateStatePayload(updateState: BridgeStatus["updateState"]) {
+function buildHeartbeatUpdateStatePayload(
+  updateState: BridgeStatus["updateState"],
+) {
   const payload = {
     ...(updateState ?? {
       status: "upToDate" as const,
@@ -5822,8 +5821,7 @@ function buildHeartbeatProcessHealthPayload(
           status: heartbeatStartupReconciliationStatus(
             startupReconciliation.status,
           ),
-          terminatedProcessCount:
-            startupReconciliation.terminatedProcessCount,
+          terminatedProcessCount: startupReconciliation.terminatedProcessCount,
         }
       : undefined,
   };
@@ -5882,9 +5880,7 @@ export function parseHermesProfileListOutput(
   const rows = lines.filter((line) => {
     const trimmed = line.trim();
     return (
-      trimmed &&
-      !trimmed.startsWith("Profile") &&
-      !/^[─\s]+$/.test(trimmed)
+      trimmed && !trimmed.startsWith("Profile") && !/^[─\s]+$/.test(trimmed)
     );
   });
 
@@ -5897,7 +5893,10 @@ export function parseHermesProfileListOutput(
         if (semanticParts) {
           return semanticParts;
         }
-        const whitespaceParts = normalized.trim().split(/\s{2,}/).filter(Boolean);
+        const whitespaceParts = normalized
+          .trim()
+          .split(/\s{2,}/)
+          .filter(Boolean);
         const columnParts =
           columns.length >= 4
             ? columns.map((column, index) => {
@@ -5909,8 +5908,8 @@ export function parseHermesProfileListOutput(
           hasActiveMarker ||
           (whitespaceParts[0]?.endsWith(" —") && whitespaceParts.length >= 3) ||
           (whitespaceParts[0] &&
-          columnParts[0] &&
-          whitespaceParts[0].length > columnParts[0].length)
+            columnParts[0] &&
+            whitespaceParts[0].length > columnParts[0].length)
             ? whitespaceParts
             : columnParts.length >= 4
               ? columnParts
@@ -5970,7 +5969,9 @@ function normalizeHermesProfileNameColumn(value: string): string {
   return value.replace(/\s+—$/, "").trim();
 }
 
-function normalizeHermesPlaceholder(value: string | undefined): string | undefined {
+function normalizeHermesPlaceholder(
+  value: string | undefined,
+): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed || trimmed === "—") {
     return undefined;
@@ -6088,75 +6089,27 @@ export function runProcess(
   });
 }
 
-export async function sendHeartbeat(
+async function pullBridgeControl(
   config: BridgeConfig,
-  status: BridgeStatus,
 ): Promise<BridgeHeartbeatSendResult> {
-  return sendHeartbeatWithClient(config, status, createCloudClient(config));
-}
-
-export async function sendHeartbeatWithClient(
-  _config: BridgeConfig,
-  status: BridgeStatus,
-  client: Pick<ConvexBridgeCloudClient, "heartbeat">,
-): Promise<BridgeHeartbeatSendResult> {
-  const input: BridgeHeartbeatInput = {
-    bridgeInstanceId: status.runtimeIdentity?.instanceId,
-    capabilities: buildHeartbeatCapabilities(status),
-    status: buildHeartbeatStatusPayload(status),
-    version: status.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
-  };
   try {
-    return await sendHeartbeatInput(client, input);
+    const response = await createCloudClient(config).pullControl<{
+      control?: BridgeControlResponse;
+      enabledFeatureFlags?: unknown;
+    }>();
+    return {
+      ok: true,
+      control: response.control,
+      enabledFeatureFlags: stringArrayFromUnknownAllowEmpty(
+        response.enabledFeatureFlags,
+      ),
+    };
   } catch (error) {
-    if (isHeartbeatStatusCompatibilityError(error)) {
-      try {
-        return await sendHeartbeatInput(client, {
-          ...input,
-          status: buildCompatibleHeartbeatStatusPayload(status),
-        });
-      } catch (fallbackError) {
-        if (isTransientHeartbeatError(fallbackError)) {
-          return { ok: false, error: fallbackError };
-        }
-        throw fallbackError;
-      }
-    }
     if (isTransientHeartbeatError(error)) {
       return { ok: false, error };
     }
     throw error;
   }
-}
-
-async function sendHeartbeatInput(
-  client: Pick<ConvexBridgeCloudClient, "heartbeat">,
-  input: BridgeHeartbeatInput,
-): Promise<Extract<BridgeHeartbeatSendResult, { ok: true }>> {
-  const response = await client.heartbeat<{
-    control?: BridgeControlResponse;
-    enabledFeatureFlags?: unknown;
-    wake?: BridgeWakeToken;
-  }>(input);
-  return {
-    ok: true,
-    control: response.control,
-    enabledFeatureFlags: stringArrayFromUnknownAllowEmpty(
-      response.enabledFeatureFlags,
-    ),
-    wake: response.wake,
-  };
-}
-
-function isHeartbeatStatusCompatibilityError(
-  error: unknown,
-): error is BridgeCloudHttpError {
-  return (
-    error instanceof BridgeCloudHttpError &&
-    (error.status === 400 || error.status === 401) &&
-    /ArgumentValidationError/i.test(error.responseBody) &&
-    /Path:\s*\.status(?:\.|\b)|\.status(?:\.|\b)/i.test(error.responseBody)
-  );
 }
 
 export function buildHeartbeatCapabilities(
@@ -6223,7 +6176,6 @@ function createCloudClient(
     requestTimeoutMs:
       options.requestTimeoutMs ?? getCloudRequestTimeoutMs({}, process.env),
     paths: {
-      heartbeat: DEFAULT_HEARTBEAT_PATH,
       queueClaim: DEFAULT_CLAIM_PATH,
       queueCleanupStale: DEFAULT_CLEANUP_STALE_PATH,
       queueResult: DEFAULT_RESULT_PATH,
@@ -6238,132 +6190,101 @@ function getBridgeLogUrl(
   return getFlag(flags, "log-url", env.ZERO_CHAT_BRIDGE_LOG_URL);
 }
 
-type BridgeWakeSignalClient = {
-  close: () => void | Promise<void>;
-  onUpdate: (
-    query: unknown,
-    args: Record<string, unknown>,
-    callback: () => void,
-    onError?: (error: unknown) => void,
-  ) => { unsubscribe?: () => void } | (() => void);
-};
-
 export function createBridgeWakeSignal(input: {
   config: BridgeConfig;
-  convexUrl: string | undefined;
   limit: number;
   log: FlushableBridgeLogger;
-  clientFactory?: (url: string) => BridgeWakeSignalClient;
+  status?: BridgeStatus;
+  clientFactory?: (
+    onEvent: (event: BridgeRealtimeEvent) => void,
+  ) => Pick<
+    BridgeDeviceRealtimeClient,
+    | "acknowledgeControl"
+    | "acknowledgeResync"
+    | "close"
+    | "connectionEpoch"
+    | "isConnected"
+    | "sendLiveness"
+    | "sendStatus"
+    | "start"
+  >;
 }): BridgeWakeSignal {
-  if (!input.convexUrl) {
-    input.log({
-      level: "warn",
-      event: "bridge.subscription.disabled",
-      deviceId: input.config.deviceId,
-      reason: "missing_convex_url",
-      limit: input.limit,
-    });
-    return createTimeoutWakeSignal();
-  }
-
   let closed = false;
-  let client: BridgeWakeSignalClient | undefined;
-  let unsubscribe: (() => void) | undefined;
-  let activeToken: string | undefined;
-  let activeTokenExpiresAt: number | undefined;
-  let activeTokenRefreshAt: number | undefined;
   let pendingWake = false;
-  const waiters = new Set<() => void>();
-  const clientFactory =
-    input.clientFactory ??
-    ((url: string) => new ConvexClient(url) as unknown as BridgeWakeSignalClient);
+  let pendingControlId: string | undefined;
+  let lastControlAckSignature: string | undefined;
+  const waiters = new Set<(result: BridgeWakeWaitResult) => void>();
 
-  const wake = () => {
+  const wake = (result: BridgeWakeWaitResult = "signal") => {
     if (!closed && waiters.size === 0) {
       pendingWake = true;
       return;
     }
     for (const resolve of Array.from(waiters)) {
       waiters.delete(resolve);
-      resolve();
+      resolve(result);
     }
   };
-  const teardownSubscription = async (clearState = false) => {
-    unsubscribe?.();
-    unsubscribe = undefined;
-    const previousClient = client;
-    client = undefined;
-    if (previousClient) {
-      await previousClient.close();
+  const onEvent = (event: BridgeRealtimeEvent) => {
+    if (event.reason === "control") {
+      pendingControlId = event.controlId;
     }
-    if (clearState) {
-      activeToken = undefined;
-      activeTokenExpiresAt = undefined;
-      activeTokenRefreshAt = undefined;
-    }
-  };
-  const subscribe = (wakeToken: BridgeWakeToken) => {
-    if (closed || wakeToken.token === activeToken) {
+    if (event.reason === "revoked" || event.reason === "superseded") {
+      closed = true;
+      wake("terminal");
       return;
     }
-    void teardownSubscription();
-    const now = Date.now();
-    const refreshAfterMs = Math.max(
-      1,
-      Math.min(wakeToken.refreshAfterMs, wakeToken.expiresAt - now),
-    );
-    activeToken = wakeToken.token;
-    activeTokenExpiresAt = wakeToken.expiresAt;
-    activeTokenRefreshAt = now + refreshAfterMs;
-    client = clientFactory(input.convexUrl!);
-    const query = makeFunctionReference<"query">("bridgeOutboundQueue:workSignal");
-    const result = client.onUpdate(
-      query,
-      {
-        deviceId: input.config.deviceId,
-        wakeToken: wakeToken.token,
-        limit: input.limit,
-      },
-      wake,
-      (error) => {
-        input.log({
-          level: "warn",
-          event: "bridge.subscription.error",
-          deviceId: input.config.deviceId,
-          error: redactForOutput(error instanceof Error ? error.message : String(error)),
-        });
-      },
-    );
-    unsubscribe =
-      typeof result === "function" ? result : () => result.unsubscribe?.();
-    input.log({
-      level: "info",
-      event: "bridge.subscription.enabled",
-      deviceId: input.config.deviceId,
-      limit: input.limit,
-    });
+    wake();
   };
+  const client = input.clientFactory
+    ? input.clientFactory(onEvent)
+    : new BridgeDeviceRealtimeClient({
+        appUrl: input.config.appUrl,
+        bridgeApiUrl: input.config.bridgeApiUrl,
+        bridgeToken: input.config.bridgeToken,
+        deviceId: input.config.deviceId,
+        onEvent,
+        ticketMetadata: () => ({
+          bridgeInstanceId: input.status?.runtimeIdentity?.instanceId,
+          capabilities: input.status
+            ? buildHeartbeatCapabilities(input.status)
+            : undefined,
+          version:
+            input.status?.runtimeIdentity?.bridgeVersion ?? BRIDGE_VERSION,
+        }),
+      });
+  void client.start();
 
   input.log({
     level: "info",
-    event: "bridge.subscription.awaiting_wake_token",
+    event: "bridge.realtime.connecting",
     deviceId: input.config.deviceId,
     limit: input.limit,
   });
 
+  const acknowledgeControl = (
+    controlId: string,
+    status: "accepted" | "completed" | "failed",
+  ) => {
+    const signature = `${controlId}:${status}`;
+    if (signature === lastControlAckSignature) return;
+    lastControlAckSignature = signature;
+    client.acknowledgeControl(controlId, status);
+  };
+
   return {
     wait: async (timeoutMs: number) => {
       if (closed) {
-        return "timeout";
+        return "terminal";
       }
       if (pendingWake) {
         pendingWake = false;
         return "signal";
       }
       return await new Promise<BridgeWakeWaitResult>((resolve) => {
-        const onWake = () => {
+        const onWake = (result: BridgeWakeWaitResult) => {
           clearTimeout(timeout);
-          resolve("signal");
+          resolve(result);
         };
         const timeout = setTimeout(() => {
           waiters.delete(onWake);
@@ -6375,54 +6296,32 @@ export function createBridgeWakeSignal(input: {
     close: async () => {
       closed = true;
       pendingWake = false;
-      wake();
-      await teardownSubscription(true);
+      wake("terminal");
+      await client.close();
     },
-    isWakeSubscriptionActive: () =>
-      !closed &&
-      Boolean(unsubscribe) &&
-      typeof activeTokenExpiresAt === "number" &&
-      activeTokenExpiresAt > Date.now(),
-    nextWakeTokenRefreshAt: () => activeTokenRefreshAt,
-    updateWakeToken: (wakeToken) => {
-      if (!wakeToken || wakeToken.expiresAt <= Date.now()) {
+    isWakeSubscriptionActive: () => !closed && client.isConnected(),
+    connectionEpoch: () => client.connectionEpoch(),
+    acknowledgeControl,
+    acknowledgeControlStatus: (status) => {
+      if (typeof status?.requestedAt !== "number") {
         return;
       }
-      subscribe(wakeToken);
+      acknowledgeControl(
+        String(status.requestedAt),
+        status.status === "succeeded"
+          ? "completed"
+          : status.status === "failed"
+            ? "failed"
+            : "accepted",
+      );
     },
-  };
-}
-
-function createTimeoutWakeSignal(): BridgeWakeSignal {
-  let closed = false;
-  const waiters = new Set<() => void>();
-  const wake = () => {
-    for (const resolve of Array.from(waiters)) {
-      waiters.delete(resolve);
-      resolve();
-    }
-  };
-  return {
-    wait: async (timeoutMs: number) => {
-      if (closed) {
-        return "timeout";
-      }
-      await new Promise<void>((resolve) => {
-        const onWake = () => {
-          clearTimeout(timeout);
-          resolve();
-        };
-        const timeout = setTimeout(() => {
-          waiters.delete(onWake);
-          resolve();
-        }, timeoutMs);
-        waiters.add(onWake);
-      });
-      return "timeout";
-    },
-    close: async () => {
-      closed = true;
-      wake();
+    acknowledgeResync: () => client.acknowledgeResync(),
+    sendLiveness: (liveness) => client.sendLiveness(liveness),
+    sendStatus: (status) => client.sendStatus(status),
+    takePendingControlId: () => {
+      const controlId = pendingControlId;
+      pendingControlId = undefined;
+      return controlId;
     },
   };
 }
@@ -6463,7 +6362,9 @@ export async function appendBridgeRegistration(
   registration: BridgeRegistration,
 ): Promise<MultiBridgeConfig> {
   const existing = existsSync(path)
-    ? normalizeAppendableBridgeConfig(await readJsonFile<BridgeConfigFile>(path))
+    ? normalizeAppendableBridgeConfig(
+        await readJsonFile<BridgeConfigFile>(path),
+      )
     : ({ version: 2, registrations: [] } satisfies MultiBridgeConfig);
   const next = upsertBridgeRegistration(existing, registration);
   await writeBridgeConfigFile(path, next);
@@ -6530,7 +6431,11 @@ function pendingAgentConnectionRequestPath(
     .update(code.trim().toUpperCase())
     .digest("hex")
     .slice(0, 32);
-  return join(dirname(configPath), "agent-connection-requests", `${codeHash}.json`);
+  return join(
+    dirname(configPath),
+    "agent-connection-requests",
+    `${codeHash}.json`,
+  );
 }
 
 function normalizePendingAgentConnectionRequest(
@@ -6937,7 +6842,9 @@ function stringArrayFromUnknown(value: unknown): string[] | undefined {
   return result.length > 0 ? result : undefined;
 }
 
-function stringArrayFromUnknownAllowEmpty(value: unknown): string[] | undefined {
+function stringArrayFromUnknownAllowEmpty(
+  value: unknown,
+): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return Array.from(
     new Set(

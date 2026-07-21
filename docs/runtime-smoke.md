@@ -60,20 +60,29 @@ bun run bridge:smoke-runtimes -- --json
 ## Cloud Registration Smoke
 
 Use the cloud smoke check when you need to verify that the bridge registrations
-in `~/.0000/bridge.json` can authenticate, heartbeat, and poll the 0000 bridge
-queue endpoint:
+in `~/.0000/bridge.json` can authenticate, obtain a one-time ticket, and connect
+to the 0000 Device Room:
 
 ```bash
 bun run bridge:smoke-cloud
 ```
 
-The default cloud smoke is intentionally non-claiming. It does not take queued
-work. When you are deliberately running a live bridge smoke window and want to
-prove the claim endpoint too, pass:
+The default cloud smoke is intentionally non-disruptive and non-claiming. It
+validates ticket issuance without opening the singleton Device Room connection,
+calling the mutating control-pull endpoint, or taking queued work. It therefore
+does not replace a live bridge or consume pending control delivery.
+
+To prove the realtime connection and epoch-fenced claim endpoint, first stop the
+bridge service. Then pass both the claim flag and the explicit stopped-bridge
+assertion:
 
 ```bash
-bun run bridge:smoke-cloud -- --include-claim
+bun run bridge:smoke-cloud -- --include-claim --bridge-stopped
 ```
+
+Never use `--bridge-stopped` while that device's bridge runtime is live. The
+probe intentionally becomes the singleton Device Room connection and
+supersedes any existing connection for the same device id.
 
 Rows that fail with `bridge_credentials_invalid` or
 `bridge_device_not_paired` usually mean the local config contains a stale

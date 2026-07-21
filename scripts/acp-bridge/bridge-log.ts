@@ -59,6 +59,7 @@ export const bridgeLogEventNames = [
   "bridge.queue.cleanup_stale_timeout",
   "bridge.registration.claim_skipped",
   "bridge.registration.disabled",
+  "bridge.realtime.connecting",
   "bridge.queue_item.complete",
   "bridge.queue_item.error",
   "bridge.queue_item.externally_terminalized",

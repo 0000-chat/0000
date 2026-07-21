@@ -1,9 +1,7 @@
 import type {
   BridgeEventInput,
-  BridgeHeartbeatInput,
   BridgeQueueClaimInput,
   BridgeQueueCommand,
-  BridgeQueuePollInput,
   BridgeQueueResult,
 } from "./convex-http"
 
@@ -70,8 +68,6 @@ export interface BridgeHostAdapter {
   answerInteraction(input: BridgeAnswerInteractionInput): Promise<Record<string, unknown>>
   claimWork(input?: BridgeQueueClaimInput): Promise<BridgeClaimWorkResult>
   completeWork(input: BridgeCompleteWorkInput): Promise<Record<string, unknown>>
-  heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>>
-  pollQueue(input?: BridgeQueuePollInput): Promise<Record<string, unknown>>
   releaseWork(input: BridgeReleaseWorkInput): Promise<Record<string, unknown>>
 }
 
@@ -79,25 +75,15 @@ type ConvexBridgeTransport = {
   appendEvents(events: BridgeEventInput[]): Promise<Record<string, unknown>>
   claimWork(input?: BridgeQueueClaimInput): Promise<Record<string, unknown>>
   cleanupStaleClaims(input?: Record<string, unknown>): Promise<Record<string, unknown>>
-  heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>>
   markResult(
     commandId: string,
     result: BridgeQueueResult,
     claimId?: string,
   ): Promise<Record<string, unknown>>
-  pollQueue(input?: BridgeQueuePollInput): Promise<Record<string, unknown>>
 }
 
 export class ConvexBridgeHostAdapter implements BridgeHostAdapter {
   constructor(private readonly transport: Partial<ConvexBridgeTransport>) {}
-
-  async heartbeat(input: BridgeHeartbeatInput): Promise<Record<string, unknown>> {
-    return await this.callTransport("heartbeat", input)
-  }
-
-  async pollQueue(input: BridgeQueuePollInput = {}): Promise<Record<string, unknown>> {
-    return await this.callTransport("pollQueue", input)
-  }
 
   async claimWork(input: BridgeQueueClaimInput = {}): Promise<BridgeClaimWorkResult> {
     const raw = await this.callTransport("claimWork", input)

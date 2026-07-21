@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
-import { cloudSmokeExitCode, selectRegistrations } from "./cloud-smoke"
+import {
+  cloudSmokeExitCode,
+  selectRegistrations,
+  validateCloudSmokeFlags,
+} from "./cloud-smoke"
 
 describe("bridge cloud smoke filters", () => {
   test("can focus a single bridge registration by device id", () => {
@@ -28,16 +32,26 @@ describe("bridge cloud smoke filters", () => {
         {
           appUrl: "https://0000.chat",
           deviceId: "bridge_active",
-          heartbeat: { ok: true, status: "pass" },
-          poll: { ok: true, status: "pass" },
+          realtime: { ok: true, status: "pass" },
         },
         {
           appUrl: "https://0000.chat",
           deviceId: "bridge_stale",
-          heartbeat: { detail: "bridge_device_not_paired", ok: false, status: "fail" },
-          poll: { detail: "bridge_device_not_paired", ok: false, status: "fail" },
+          realtime: { detail: "bridge_device_not_paired", ok: false, status: "fail" },
         },
       ]),
     ).toBe(1)
+  })
+
+  test("requires an explicit stopped-bridge assertion before a claim probe", () => {
+    expect(() =>
+      validateCloudSmokeFlags({ bridgeStopped: false, includeClaim: true }),
+    ).toThrow(/requires --bridge-stopped/)
+    expect(() =>
+      validateCloudSmokeFlags({ bridgeStopped: true, includeClaim: true }),
+    ).not.toThrow()
+    expect(() =>
+      validateCloudSmokeFlags({ bridgeStopped: false, includeClaim: false }),
+    ).not.toThrow()
   })
 })

@@ -12,7 +12,7 @@ const profile = (overrides: Partial<BridgeRuntimeProfile>): BridgeRuntimeProfile
   id: "codex:codex-acp",
   kind: "codex",
   label: "Codex",
-  command: ["bunx", "@zed-industries/codex-acp@0.16.0"],
+  command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
   status: "available",
   diagnostics: { acp: "supported" },
   availableCommands: [],
