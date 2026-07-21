@@ -168,6 +168,129 @@ describe("bridge command parsing", () => {
     });
   });
 
+  test("normalizes secret collection responses with only a metadata receipt", () => {
+    const command = normalizeQueueCommand({
+      agentSessionId: "agent-session-1",
+      id: "queue-secret-collection",
+      kind: "secret-collection-response",
+      payload: {
+        continuationPrompt:
+          "The user submitted the requested secret collection.",
+        externalRequestId: "agent-secret-collection:agent-session-1:123",
+        fingerprint: "must-not-cross-the-bridge",
+        receipt: {
+          rows: [
+            {
+              allowedHosts: ["api.github.com"],
+              allowedUses: ["agent-script"],
+              ciphertext: "must-not-cross-the-bridge",
+              name: "GITHUB_TOKEN",
+              purpose: "Authenticate GitHub API requests.",
+              scope: "user",
+              status: "created",
+              value: "must-not-cross-the-bridge",
+            },
+            {
+              allowedHosts: ["api.example.com", "webhooks.example.com"],
+              hash: "must-not-cross-the-bridge",
+              name: "DEPLOY_KEY",
+              scope: "organization",
+              status: "updated",
+            },
+          ],
+        },
+        outcome: "submitted",
+        resumePolicy: "durable_continuation",
+        value: "must-not-cross-the-bridge",
+      },
+      cwd: "must-not-cross-the-bridge",
+      prompt: "must-not-cross-the-bridge",
+      systemPrompt: "must-not-cross-the-bridge",
+      threadHistory: "must-not-cross-the-bridge",
+      threadId: "thread-1",
+    });
+
+    expect(command).toEqual({
+      agentSessionId: "agent-session-1",
+      externalRequestId: "agent-secret-collection:agent-session-1:123",
+      id: "queue-secret-collection",
+      prompt: "The user submitted the requested secret collection.",
+      secretCollectionReceipt: {
+        rows: [
+          {
+            allowedHosts: ["api.github.com"],
+            allowedUses: ["agent-script"],
+            name: "GITHUB_TOKEN",
+            purpose: "Authenticate GitHub API requests.",
+            scope: "user",
+            status: "created",
+          },
+          {
+            allowedHosts: ["api.example.com", "webhooks.example.com"],
+            name: "DEPLOY_KEY",
+            scope: "organization",
+            status: "updated",
+          },
+        ],
+      },
+      resumePolicy: "durable_continuation",
+      secretCollectionOutcome: "submitted",
+      threadId: "thread-1",
+      type: "secret-collection-response",
+    });
+    expect(JSON.stringify(command)).not.toContain("must-not-cross-the-bridge");
+  });
+
+  test.each([
+    {
+      allowedHosts: "api.github.com",
+      description: "non-array allowed hosts",
+    },
+    {
+      allowedHosts: ["api.github.com", 7],
+      description: "non-string allowed host",
+    },
+    {
+      allowedHosts: ["api.github.com"],
+      allowedUses: ["agent-script", "other"],
+      description: "unknown allowed use",
+    },
+    {
+      allowedHosts: ["api.github.com"],
+      purpose: 7,
+      description: "non-string purpose",
+    },
+    {
+      allowedHosts: ["api.github.com"],
+      scope: "team",
+      description: "unknown scope",
+    },
+  ])("rejects malformed secret collection receipt: $description", (row) => {
+    expect(
+      normalizeQueueCommand({
+        id: "queue-secret-collection-invalid",
+        kind: "secret-collection-response",
+        payload: {
+          continuationPrompt: "This must not be accepted.",
+          receipt: {
+            rows: [
+              {
+                name: "GITHUB_TOKEN",
+                scope: "user",
+                status: "created",
+                ...row,
+                value: "must-not-cross-the-bridge",
+              },
+            ],
+          },
+          outcome: "submitted",
+          resumePolicy: "durable_continuation",
+        },
+        threadId: "thread-1",
+      }),
+    ).toBeUndefined();
+  });
+
   test("normalizes legacy prompt payload text", () => {
     expect(
       normalizeQueueCommand({

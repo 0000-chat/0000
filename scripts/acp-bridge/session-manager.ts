@@ -92,6 +92,8 @@ export type BridgeSessionQueueItem = {
   approvalReason?: string;
   approvalLevel?: "ask" | "full_permissions";
   resumePolicy?: "live_callback" | "durable_continuation";
+  secretCollectionOutcome?: "submitted" | "skipped";
+  secretCollectionReceipt?: BridgeSecretCollectionReceipt;
   externalRequestId?: string;
   externalSessionId?: string;
   organizationId?: string;
@@ -102,6 +104,62 @@ export type BridgeSessionQueueItem = {
   bridgeProfileId?: string;
   hermesProfileName?: string;
 };
+
+export type BridgeSecretCollectionReceipt = {
+  rows: Array<{
+    allowedHosts: string[];
+    allowedUses?: Array<"agent-script" | "app-action">;
+    name: string;
+    purpose?: string;
+    scope: "user" | "organization";
+    status: "created" | "updated" | "skipped";
+  }>;
+};
+
+/**
+ * Rebuilds the only secret-collection data the bridge may retain. Values and
+ * value-derived fields are intentionally not part of this type or output.
+ */
+export function normalizeBridgeSecretCollectionReceipt(
+  value: unknown,
+): BridgeSecretCollectionReceipt | undefined {
+  const receipt = recordFromUnknown(value);
+  const rows = receipt?.rows;
+  if (!Array.isArray(rows)) {
+    return undefined;
+  }
+
+  const normalizedRows: BridgeSecretCollectionReceipt["rows"] = [];
+  for (const row of rows) {
+    const record = recordFromUnknown(row);
+    const name = stringFromUnknown(record?.name);
+    const scope = record?.scope;
+    const status = record?.status;
+    const allowedHosts = strictStringArrayFromUnknown(record?.allowedHosts);
+    const allowedUses = optionalSecretAllowedUsesFromUnknown(record?.allowedUses);
+    const purpose = optionalTrimmedStringFromUnknown(record?.purpose);
+    if (
+      !record ||
+      !name ||
+      (scope !== "user" && scope !== "organization") ||
+      (status !== "created" && status !== "updated" && status !== "skipped") ||
+      !allowedHosts ||
+      allowedUses === null ||
+      purpose === null
+    ) {
+      return undefined;
+    }
+    normalizedRows.push({
+      allowedHosts,
+      ...(allowedUses ? { allowedUses } : {}),
+      name,
+      ...(purpose ? { purpose } : {}),
+      scope,
+      status,
+    });
+  }
+  return { rows: normalizedRows };
+}
 
 export type BridgeQueueAttachment = {
   access?: {
@@ -879,6 +937,17 @@ export class BridgeSessionManager {
 
   async handleQueueItem(item: BridgeSessionQueueItem): Promise<void> {
     const type = normalizeType(item);
+    if (type === "secret-collection-response") {
+      const receipt = normalizeBridgeSecretCollectionReceipt(
+        item.secretCollectionReceipt,
+      );
+      if (!receipt) {
+        throw new Error(
+          `secret collection response ${item.id} is missing a valid safe receipt`,
+        );
+      }
+      item = { ...item, secretCollectionReceipt: receipt };
+    }
     this.activeQueueItems.set(item.id, item);
     this.supervisor?.recordQueued(this.supervisorWorkItem(item));
     this.supervisor?.recordClaimed(this.supervisorWorkItem(item));
@@ -2359,6 +2428,55 @@ export class BridgeSessionManager {
           threadHistory,
           sessionKey: key,
           resultMetadata: { choiceId },
+        }),
+      );
+      return;
+    }
+
+    if (type === "secret-collection-response") {
+      const outcome = item.secretCollectionOutcome;
+      const receipt = item.secretCollectionReceipt;
+      const continuationPrompt = item.prompt?.trim();
+      if (
+        (outcome !== "submitted" && outcome !== "skipped") ||
+        !receipt ||
+        !Array.isArray(receipt.rows) ||
+        !continuationPrompt ||
+        item.resumePolicy !== "durable_continuation"
+      ) {
+        throw new Error(
+          `secret collection response ${item.id} is missing a valid safe receipt`,
+        );
+      }
+      const threadId = item.threadId ?? item.sessionId;
+      const requestedSessionKey = this.sessionKeyForItem(item);
+      if (!key && this.hasActiveRuntimeConflictForItem(item)) {
+        throw new Error(
+          `secret collection response ${item.id} does not match an active ACP session for the requested runtime`,
+        );
+      }
+      const sessionKey = key ?? requestedSessionKey ?? threadId;
+      if (!sessionKey) {
+        throw new Error(`secret collection response ${item.id} is missing threadId`);
+      }
+      const systemPrompt = normalizeSystemPrompt(item.systemPrompt);
+      const threadHistory = normalizeThreadHistory(item.threadHistory);
+      this.writeLog({
+        level: "info",
+        event: "bridge.secret_collection_response.continuation",
+        queueId: item.id,
+        queueType: type,
+        threadId,
+        agentSessionId: key,
+        hasActiveSession: this.sessions.has(sessionKey),
+        hasQueuedSessionWork: this.sessionQueueState.has(sessionKey),
+      });
+      await this.runSerializedPrompt(sessionKey, item.id, () =>
+        this.handlePromptNow(item, continuationPrompt, {
+          systemPrompt,
+          threadHistory,
+          sessionKey: key,
+          resultMetadata: { secretCollectionOutcome: outcome },
         }),
       );
       return;
@@ -5019,6 +5137,7 @@ function isApprovalResponseType(type: string): boolean {
     type === "approval-response" ||
     type === "permission-response" ||
     type === "choice-response" ||
+    type === "secret-collection-response" ||
     type === "input-response"
   );
 }
@@ -5277,6 +5396,60 @@ function createHashReader(
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function recordFromUnknown(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function strictStringArrayFromUnknown(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    return undefined;
+  }
+  return value;
+}
+
+function optionalSecretAllowedUsesFromUnknown(
+  value: unknown,
+): Array<"agent-script" | "app-action"> | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  const uses: Array<"agent-script" | "app-action"> = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (
+      (entry !== "agent-script" && entry !== "app-action") ||
+      seen.has(entry)
+    ) {
+      return null;
+    }
+    seen.add(entry);
+    uses.push(entry);
+  }
+  return uses;
+}
+
+function optionalTrimmedStringFromUnknown(
+  value: unknown,
+): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return stringFromUnknown(value) ?? null;
 }
 
 function elapsedSince(startMs: number | undefined, nowMs: number): number | undefined {
