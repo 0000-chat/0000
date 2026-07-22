@@ -7,9 +7,21 @@ import {
 
 describe("bridge availability", () => {
   test("classifies auth failures separately from retryable cloud failures", () => {
+    expect(
+      classifyBridgeCloudFailure({
+        status: 401,
+        body: '{"error":"Instance not served by this Conductor"}',
+      }),
+    ).toBe("retryable")
     expect(classifyBridgeCloudFailure({ status: 401, body: "bridge token is invalid" })).toBe(
       "auth_failed",
     )
+    expect(
+      classifyBridgeCloudFailure({
+        status: 401,
+        body: '{"error":"Bridge device credentials are invalid"}',
+      }),
+    ).toBe("auth_failed")
     expect(classifyBridgeCloudFailure({ status: 403, body: "bridge device revoked" })).toBe(
       "auth_failed",
     )

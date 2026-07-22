@@ -2658,6 +2658,15 @@ describe("bridge supervisor claim gating", () => {
       ),
       Date.UTC(2026, 5, 5, 10, 1, 0),
     );
+    const conductorRoutingFailure = buildBridgeRegistrationFailure(
+      new BridgeCloudHttpError(
+        "POST",
+        "https://example.test/api/agent-bridge/control/pull",
+        401,
+        '{"error":"Instance not served by this Conductor"}',
+      ),
+      Date.UTC(2026, 5, 5, 10, 2, 0),
+    );
 
     expect(notPaired).toEqual(
       expect.objectContaining({
@@ -2671,6 +2680,7 @@ describe("bridge supervisor claim gating", () => {
         reasonCode: "bridge_credentials_invalid",
       }),
     );
+    expect(conductorRoutingFailure).toBeUndefined();
   });
 
   test("disables stale bridge registrations instead of retrying queue claims", async () => {
@@ -2731,6 +2741,61 @@ describe("bridge supervisor claim gating", () => {
         event: "bridge.registration.disabled",
         reason: "bridge_device_not_paired",
       }),
+    );
+  });
+
+  test("retries Conductor routing failures without disabling the registration", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const retryErrors: unknown[] = [];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+    };
+    const conductorError = new BridgeCloudHttpError(
+      "POST",
+      "https://example.test/api/agent-bridge/control/pull",
+      401,
+      '{"error":"Instance not served by this Conductor"}',
+    );
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => {
+        throw conductorError;
+      },
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      lastStaleCleanupAt: 0,
+      log: Object.assign((entry: Record<string, unknown>) => logs.push(entry), {
+        flush: async () => {},
+      }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          terminalInteractionSessionKeyCount: 0,
+          sessions: [],
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 5, 10, 3, 0),
+      recordLoopError: async (error) => {
+        retryErrors.push(error);
+      },
+      sendHeartbeat: async () => ({ ok: true }),
+      setLastStaleCleanupAt: () => {},
+      status,
+      statusPath: join(dir, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(retryErrors).toEqual([conductorError]);
+    expect(status.registrationFailure).toBeUndefined();
+    expect(logs).not.toContainEqual(
+      expect.objectContaining({ event: "bridge.registration.disabled" }),
     );
   });
 
