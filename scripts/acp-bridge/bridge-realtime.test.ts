@@ -35,6 +35,22 @@ describe("bridge device realtime protocol", () => {
     expect(coordinator.pendingWakeIds()).toEqual([]);
   });
 
+  test("acknowledges only attempted wake ids and retains the rest", () => {
+    const coordinator = new BridgeRealtimeCoordinator();
+    coordinator.receive(
+      JSON.stringify({
+        type: "wake",
+        wakeIds: ["queue_1", "queue_2", "queue_3"],
+      }),
+    );
+
+    expect(coordinator.acknowledgeResync(["queue_1", "queue_3"])).toEqual([
+      "queue_1",
+      "queue_3",
+    ]);
+    expect(coordinator.pendingWakeIds()).toEqual(["queue_2"]);
+  });
+
   test("captures the server-issued connection epoch before startup resync", () => {
     const coordinator = new BridgeRealtimeCoordinator();
     expect(
