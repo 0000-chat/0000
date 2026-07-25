@@ -157,7 +157,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.70";
+export const BRIDGE_VERSION = "0.1.71";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -271,6 +271,10 @@ type ProposedAgentProfile = {
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
 type BridgeWakeWaitResult = "signal" | "terminal" | "timeout";
+type BridgeTargetedQueueClaim = {
+  queueItemIds: string[];
+  resyncGeneration: number;
+};
 export type BridgeLoopPollReason =
   | "active"
   | "maintenance"
@@ -321,7 +325,8 @@ type BridgeWakeSignal = {
   acknowledgeControlStatus?(
     status: BridgeControlCommandStatus | undefined,
   ): void;
-  acknowledgeResync?(): string[];
+  acknowledgeResync?(wakeIds?: string[], resyncGeneration?: number): string[];
+  pendingTargetedQueueClaim?(): BridgeTargetedQueueClaim | undefined;
   sendLiveness?(liveness: Record<string, unknown>): void;
   sendStatus?(status: Record<string, unknown>): void;
   takePendingControlId?(): string | undefined;
@@ -4499,6 +4504,27 @@ export async function runBridgeLoopIteration(
               ? { connectionEpoch, lane: "control", limit: 1 }
               : undefined;
       if (claimInput && shouldPollQueue) {
+        const pendingTargetedQueueClaim =
+          claimInput.lane === undefined && pollReason === "wake"
+            ? input.wakeSignal
+                ?.pendingTargetedQueueClaim?.()
+            : undefined;
+        const targetedQueueItemIds =
+          pendingTargetedQueueClaim?.queueItemIds.slice(0, claimInput.limit);
+        const targetedQueueClaim =
+          pendingTargetedQueueClaim &&
+          targetedQueueItemIds &&
+          targetedQueueItemIds.length > 0
+            ? {
+                queueItemIds: targetedQueueItemIds,
+                resyncGeneration:
+                  pendingTargetedQueueClaim.resyncGeneration,
+              }
+            : undefined;
+        const resolvedClaimInput =
+          targetedQueueClaim
+            ? { ...claimInput, queueItemIds: targetedQueueClaim.queueItemIds }
+            : claimInput;
         let processHealth = input.getProcessHealth?.();
         if (processHealth) {
           input.status.processHealth = processHealth;
@@ -4607,8 +4633,32 @@ export async function runBridgeLoopIteration(
           return { restartRequested: false };
         }
         input.status.lastPollAt = new Date(now).toISOString();
-        const commands = await claim(input.config, claimInput);
-        input.wakeSignal?.acknowledgeResync?.();
+        let commands = await claim(input.config, resolvedClaimInput);
+        if (targetedQueueClaim) {
+          const accountedQueueItemIds = new Set(
+            commands.map((command) => command.id),
+          );
+          const hasUnaccountedTarget = targetedQueueClaim.queueItemIds.some(
+            (queueItemId) => !accountedQueueItemIds.has(queueItemId),
+          );
+          const remainingCapacity = Math.max(
+            0,
+            (claimInput.limit ?? 0) - commands.length,
+          );
+          if (hasUnaccountedTarget && remainingCapacity > 0) {
+            const fallbackCommands = await claim(input.config, {
+              ...claimInput,
+              limit: remainingCapacity,
+            });
+            commands = [...commands, ...fallbackCommands];
+          }
+        }
+        if (claimInput.lane === undefined) {
+          input.wakeSignal?.acknowledgeResync?.(
+            targetedQueueClaim?.queueItemIds,
+            targetedQueueClaim?.resyncGeneration,
+          );
+        }
         if (commands.length > 0) {
           input.log({
             level: "info",
@@ -6204,6 +6254,7 @@ export function createBridgeWakeSignal(input: {
     | "close"
     | "connectionEpoch"
     | "isConnected"
+    | "pendingWakeIds"
     | "sendLiveness"
     | "sendStatus"
     | "start"
@@ -6211,6 +6262,8 @@ export function createBridgeWakeSignal(input: {
 }): BridgeWakeSignal {
   let closed = false;
   let pendingWake = false;
+  let broadClaimRequired = false;
+  let resyncGeneration = 0;
   let pendingControlId: string | undefined;
   let lastControlAckSignature: string | undefined;
   const waiters = new Set<(result: BridgeWakeWaitResult) => void>();
@@ -6226,6 +6279,10 @@ export function createBridgeWakeSignal(input: {
     }
   };
   const onEvent = (event: BridgeRealtimeEvent) => {
+    if (event.reason === "resync") {
+      resyncGeneration += 1;
+      broadClaimRequired = true;
+    }
     if (event.reason === "control") {
       pendingControlId = event.controlId;
     }
@@ -6315,7 +6372,27 @@ export function createBridgeWakeSignal(input: {
             : "accepted",
       );
     },
-    acknowledgeResync: () => client.acknowledgeResync(),
+    acknowledgeResync: (wakeIds, acknowledgedResyncGeneration) => {
+      const acknowledged = client.acknowledgeResync(wakeIds);
+      if (
+        wakeIds === undefined ||
+        (acknowledgedResyncGeneration === resyncGeneration &&
+          !broadClaimRequired)
+      ) {
+        broadClaimRequired = false;
+      }
+      if (client.pendingWakeIds().length > 0) {
+        wake();
+      }
+      return acknowledged;
+    },
+    pendingTargetedQueueClaim: () =>
+      broadClaimRequired || !client.isConnected()
+        ? undefined
+        : {
+            queueItemIds: client.pendingWakeIds(),
+            resyncGeneration,
+          },
     sendLiveness: (liveness) => client.sendLiveness(liveness),
     sendStatus: (status) => client.sendStatus(status),
     takePendingControlId: () => {

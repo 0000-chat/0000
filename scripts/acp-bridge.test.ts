@@ -1651,7 +1651,9 @@ describe("bridge realtime wake signal", () => {
     let deliverEvent: ((event: { reason: "wake"; wakeIds: string[] }) => void) | undefined;
     let started = 0;
     const controlAcks: Array<{ controlId: string; status: string }> = [];
+    const resyncAcks: string[][] = [];
     const closes: number[] = [];
+    let pendingWakeIds = ["queue-1", "queue-2"];
     const signal = createBridgeWakeSignal({
       clientFactory: (onEvent) => {
         deliverEvent = onEvent;
@@ -1659,12 +1661,20 @@ describe("bridge realtime wake signal", () => {
           acknowledgeControl: (controlId, status) => {
             controlAcks.push({ controlId, status });
           },
-          acknowledgeResync: () => [],
+          acknowledgeResync: (wakeIds) => {
+            const acknowledged = wakeIds ?? [...pendingWakeIds];
+            resyncAcks.push(acknowledged);
+            pendingWakeIds = pendingWakeIds.filter(
+              (wakeId) => !acknowledged.includes(wakeId),
+            );
+            return acknowledged;
+          },
           close: async () => {
             closes.push(Date.now());
           },
           connectionEpoch: () => "room-epoch-1",
           isConnected: () => true,
+          pendingWakeIds: () => [...pendingWakeIds],
           sendLiveness: () => {},
           sendStatus: () => {},
           start: async () => {
@@ -1689,6 +1699,19 @@ describe("bridge realtime wake signal", () => {
     const wait = signal.wait(5_000);
     deliverEvent?.({ reason: "wake", wakeIds: ["queue-1"] });
     expect(await wait).toBe("signal");
+    const targetedClaim = signal.pendingTargetedQueueClaim?.();
+    expect(targetedClaim?.queueItemIds).toEqual(["queue-1", "queue-2"]);
+    expect(
+      signal.acknowledgeResync?.(
+        ["queue-1"],
+        targetedClaim?.resyncGeneration,
+      ),
+    ).toEqual(["queue-1"]);
+    expect(resyncAcks).toEqual([["queue-1"]]);
+    expect(signal.pendingTargetedQueueClaim?.()?.queueItemIds).toEqual([
+      "queue-2",
+    ]);
+    expect(await signal.wait(0)).toBe("signal");
     signal.acknowledgeControlStatus?.({
       command: "restartWhenIdle",
       requestedAt: 1234,
@@ -1705,6 +1728,60 @@ describe("bridge realtime wake signal", () => {
     expect(closes).toHaveLength(1);
   });
 
+  test("forces a broad claim after safety resync or disconnect", async () => {
+    let deliverEvent:
+      | ((event: {
+          reason: "resync";
+          wakeIds: string[];
+        }) => void)
+      | undefined;
+    let connected = true;
+    let pendingWakeIds = ["queue-1"];
+    const signal = createBridgeWakeSignal({
+      clientFactory: (onEvent) => ({
+        acknowledgeControl: () => {},
+        acknowledgeResync: (wakeIds) => {
+          const acknowledged = wakeIds ?? [...pendingWakeIds];
+          pendingWakeIds = pendingWakeIds.filter(
+            (wakeId) => !acknowledged.includes(wakeId),
+          );
+          return acknowledged;
+        },
+        close: async () => {},
+        connectionEpoch: () => (connected ? "room-epoch-1" : undefined),
+        isConnected: () => connected,
+        pendingWakeIds: () => [...pendingWakeIds],
+        sendLiveness: () => {},
+        sendStatus: () => {},
+        start: async () => {
+          deliverEvent = onEvent;
+        },
+      }),
+      config: bridgeRegistration(),
+      limit: 2,
+      log: Object.assign(() => undefined, { flush: async () => undefined }),
+    });
+    await Promise.resolve();
+
+    const inFlightTargetedClaim = signal.pendingTargetedQueueClaim?.();
+    expect(inFlightTargetedClaim?.queueItemIds).toEqual(["queue-1"]);
+    deliverEvent?.({ reason: "resync", wakeIds: ["queue-1"] });
+    expect(signal.pendingTargetedQueueClaim?.()).toBeUndefined();
+
+    signal.acknowledgeResync?.(
+      inFlightTargetedClaim?.queueItemIds,
+      inFlightTargetedClaim?.resyncGeneration,
+    );
+    expect(signal.pendingTargetedQueueClaim?.()).toBeUndefined();
+
+    signal.acknowledgeResync?.();
+    expect(signal.pendingTargetedQueueClaim?.()?.queueItemIds).toEqual([]);
+
+    connected = false;
+    expect(signal.pendingTargetedQueueClaim?.()).toBeUndefined();
+    await signal.close();
+  });
+
   test("latches an update that arrives before the bridge starts waiting", async () => {
     let deliverEvent: ((event: { reason: "wake"; wakeIds: string[] }) => void) | undefined;
     const signal = createBridgeWakeSignal({
@@ -1714,6 +1791,7 @@ describe("bridge realtime wake signal", () => {
         close: async () => {},
         connectionEpoch: () => "room-epoch-1",
         isConnected: () => true,
+        pendingWakeIds: () => [],
         sendLiveness: () => {},
         sendStatus: () => {},
         start: async () => {
@@ -1743,6 +1821,7 @@ describe("bridge realtime wake signal", () => {
         close: async () => {},
         connectionEpoch: () => undefined,
         isConnected: () => false,
+        pendingWakeIds: () => [],
         sendLiveness: () => {},
         sendStatus: () => {},
         start: async () => {
@@ -3597,6 +3676,104 @@ describe("bridge supervisor claim gating", () => {
     const result = await runClaimProbeForPollReason("wake", true);
 
     expect(result.claimCount).toBe(1);
+  });
+
+  test("avoids a broad scan when a targeted wake is fully accounted for", async () => {
+    let pendingWakeIds = ["queue-a"];
+    const acknowledgedWakeIds: string[][] = [];
+    const result = await runClaimProbeForPollReason("wake", false, 1, {
+      acknowledgeResync: (wakeIds) => {
+        const acknowledged = wakeIds ?? [...pendingWakeIds];
+        acknowledgedWakeIds.push(acknowledged);
+        pendingWakeIds = pendingWakeIds.filter(
+          (wakeId) => !acknowledged.includes(wakeId),
+        );
+        return acknowledged;
+      },
+      close: async () => {},
+      connectionEpoch: () => "test-room-epoch",
+      isWakeSubscriptionActive: () => true,
+      pendingTargetedQueueClaim: () => ({
+        queueItemIds: [...pendingWakeIds],
+        resyncGeneration: 1,
+      }),
+      wait: async () => "timeout",
+    }, async () => [
+      {
+        agentSessionId: "agent-session-a",
+        claimId: "claim-a",
+        id: "queue-a",
+        prompt: "run A",
+        threadId: "thread-a",
+        type: "prompt",
+      },
+    ]);
+
+    expect(result.claimInputs).toEqual([
+      {
+        connectionEpoch: "test-room-epoch",
+        limit: 1,
+        queueItemIds: ["queue-a"],
+      },
+    ]);
+    expect(acknowledgedWakeIds).toEqual([["queue-a"]]);
+  });
+
+  test("broad-fallbacks immediately when a terminal wake exposes serialized work", async () => {
+    const claimResponses = [
+      [],
+      [
+        {
+          agentSessionId: "agent-session-b",
+          claimId: "claim-b",
+          id: "queue-b",
+          prompt: "run B",
+          threadId: "thread-b",
+          type: "prompt" as const,
+        },
+      ],
+    ];
+    const result = await runClaimProbeForPollReason("wake", false, 1, {
+      acknowledgeResync: (wakeIds) => wakeIds ?? ["queue-a-terminal"],
+      close: async () => {},
+      connectionEpoch: () => "test-room-epoch",
+      isWakeSubscriptionActive: () => true,
+      pendingTargetedQueueClaim: () => ({
+        queueItemIds: ["queue-a-terminal"],
+        resyncGeneration: 1,
+      }),
+      wait: async () => "timeout",
+    }, async () => claimResponses.shift() ?? []);
+
+    expect(result.claimInputs).toEqual([
+      {
+        connectionEpoch: "test-room-epoch",
+        limit: 1,
+        queueItemIds: ["queue-a-terminal"],
+      },
+      { connectionEpoch: "test-room-epoch", limit: 1 },
+    ]);
+    expect(result.claimCount).toBe(2);
+  });
+
+  test("keeps safety and reconnect wake passes as broad fallback claims", async () => {
+    const acknowledgedWakeIds: Array<string[] | undefined> = [];
+    const result = await runClaimProbeForPollReason("wake", false, 1, {
+      acknowledgeResync: (wakeIds) => {
+        acknowledgedWakeIds.push(wakeIds);
+        return wakeIds ?? ["queue-a"];
+      },
+      close: async () => {},
+      connectionEpoch: () => "test-room-epoch",
+      isWakeSubscriptionActive: () => true,
+      pendingTargetedQueueClaim: () => undefined,
+      wait: async () => "timeout",
+    });
+
+    expect(result.claimInputs).toEqual([
+      { connectionEpoch: "test-room-epoch", limit: 1 },
+    ]);
+    expect(acknowledgedWakeIds).toEqual([undefined]);
   });
 
   test("inactive wake subscription timer fallback still polls the queue", async () => {
@@ -5572,10 +5749,17 @@ async function runClaimProbeForPollReason(
   pollReason: BridgeLoopPollReason,
   withInFlightCommand: boolean,
   passCount = 1,
-): Promise<{ claimCount: number; heartbeatCount: number }> {
+  wakeSignal?: BridgeLoopIterationInput["wakeSignal"],
+  claimCommands?: BridgeLoopIterationInput["claimCommands"],
+): Promise<{
+  claimCount: number;
+  claimInputs: unknown[];
+  heartbeatCount: number;
+}> {
   const dir = await mkdtemp(join(tmpdir(), "0000-bridge-loop-"));
   const now = Date.UTC(2026, 6, 19, 12, 0, 0);
   let claimCount = 0;
+  const claimInputs: unknown[] = [];
   let heartbeatCount = 0;
   const inFlightCommands = new Map<string, Promise<void>>();
   if (withInFlightCommand) {
@@ -5583,9 +5767,10 @@ async function runClaimProbeForPollReason(
   }
 
   const input: BridgeLoopIterationInput = {
-    claimCommands: async () => {
+    claimCommands: async (config, claimInput) => {
       claimCount += 1;
-      return [];
+      claimInputs.push(claimInput);
+      return claimCommands ? await claimCommands(config, claimInput) : [];
     },
     cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
     config: bridgeRegistration(),
@@ -5620,10 +5805,11 @@ async function runClaimProbeForPollReason(
     },
     statusPath: join(dir, "status.json"),
     writeStatus: async () => {},
+    wakeSignal,
   };
   for (let pass = 0; pass < passCount; pass += 1) {
     await runBridgeLoopIteration(input);
   }
 
-  return { claimCount, heartbeatCount };
+  return { claimCount, claimInputs, heartbeatCount };
 }

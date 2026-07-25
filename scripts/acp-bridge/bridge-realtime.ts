@@ -51,9 +51,12 @@ export class BridgeRealtimeCoordinator {
     return [...this.wakeIds];
   }
 
-  acknowledgeResync() {
-    const acknowledged = [...this.wakeIds];
-    this.wakeIds = [];
+  acknowledgeResync(wakeIds?: string[]) {
+    const requested = new Set(wakeIds ?? this.wakeIds);
+    const acknowledged = this.wakeIds.filter((wakeId) =>
+      requested.has(wakeId),
+    );
+    this.wakeIds = this.wakeIds.filter((wakeId) => !requested.has(wakeId));
     return acknowledged;
   }
 }
@@ -175,10 +178,11 @@ export class BridgeDeviceRealtimeClient {
     return this.coordinator.pendingWakeIds();
   }
 
-  acknowledgeResync() {
-    const wakeIds = this.coordinator.acknowledgeResync();
-    this.send({ type: "resync_complete", wakeIds });
-    return wakeIds;
+  acknowledgeResync(wakeIds?: string[]) {
+    const acknowledgedWakeIds =
+      this.coordinator.acknowledgeResync(wakeIds);
+    this.send({ type: "resync_complete", wakeIds: acknowledgedWakeIds });
+    return acknowledgedWakeIds;
   }
 
   sendStatus(status: Record<string, unknown>) {
