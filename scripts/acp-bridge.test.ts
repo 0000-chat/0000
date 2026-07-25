@@ -65,7 +65,10 @@ import {
   DEFAULT_CLAUDE_CODE_ACP_COMMAND,
   DEFAULT_CODEX_ACP_COMMAND,
 } from "./acp-bridge/runtime-defaults";
-import type { BridgeRuntimeProfile } from "./acp-bridge/runtime-profiles";
+import {
+  profileIdForCommand,
+  type BridgeRuntimeProfile,
+} from "./acp-bridge/runtime-profiles";
 
 function runBridgeLoopIteration(input: BridgeLoopIterationInput) {
   return runBridgeLoopIterationWithoutRoom({
@@ -3890,6 +3893,88 @@ describe("bridge supervisor claim gating", () => {
             ownerPath: "/tmp/other-bridge.owner.json",
           },
         },
+      }),
+    ).not.toBe(bridgeHeartbeatSignature(status));
+  });
+
+  test("heartbeat payload sanitizes real custom runtime profile identities", () => {
+    const customCommands = [
+      ["custom-acp", "--auth", "sk-live-auth-value"],
+      ["custom-acp", "--token", "sk-live-token-value"],
+      ["custom-acp", "--api-key", "sk-live-api-key-value"],
+    ];
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: customCommands.map((command) => ({
+          capabilities: { sessionMcpServers: true },
+          command,
+          defaultCwd: "/home/don/private-project",
+          diagnostics: {
+            acp: "supported",
+            reason: "authorization token failed",
+          },
+          id: profileIdForCommand("unknown-acp", command),
+          kind: "unknown-acp",
+          label: command.join(" "),
+          status: "available",
+        })),
+    };
+
+    const profiles = buildHeartbeatStatusPayload(status).runtimeProfiles ?? [];
+    expect(profiles).toHaveLength(3);
+    expect(new Set(profiles.map((profile) => profile.id)).size).toBe(3);
+    expect(
+      profiles.every(
+        (profile) =>
+          profile.id.startsWith("unknown-acp:status-") &&
+          profile.kind === "unknown-acp" &&
+          profile.label === "Custom ACP" &&
+          profile.status === "available",
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(profiles)).not.toMatch(
+      /sk-live|--auth|--token|--api-key|private-project|authorization/i,
+    );
+
+    const unavailableStatus: BridgeStatus = {
+      ...status,
+      runtimeProfiles: status.runtimeProfiles?.map((profile) => ({
+        ...profile,
+        status: "unavailable",
+      })),
+    };
+    expect(
+      buildHeartbeatStatusPayload(unavailableStatus).runtimeProfiles?.map(
+        (profile) => profile.id,
+      ),
+    ).toEqual(profiles.map((profile) => profile.id));
+    expect(bridgeHeartbeatSignature(unavailableStatus)).not.toBe(
+      bridgeHeartbeatSignature(status),
+    );
+  });
+
+  test("heartbeat signature keeps runtime profile availability changes", () => {
+    const availableProfile: BridgeRuntimeProfile = {
+      capabilities: {},
+      command: ["bunx", "@agentclientprotocol/codex-acp@1.1.4"],
+      id: "codex:codex-acp",
+      kind: "codex",
+      label: "Codex",
+      status: "available",
+    };
+    const status: BridgeStatus = {
+      activeSessions: [],
+      connected: true,
+      recentErrors: [],
+      runtimeProfiles: [availableProfile],
+    };
+
+    expect(
+      bridgeHeartbeatSignature({
+        ...status,
+        runtimeProfiles: [{ ...availableProfile, status: "unavailable" }],
       }),
     ).not.toBe(bridgeHeartbeatSignature(status));
   });
