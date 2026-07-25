@@ -157,7 +157,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.71";
+export const BRIDGE_VERSION = "0.1.72";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -4841,6 +4841,7 @@ export function bridgeHeartbeatSignature(
     | "pendingControlCommand"
     | "processHealth"
     | "runtimeConformance"
+    | "runtimeProfiles"
     | "liveness"
     | "availability"
     | "capacity"
@@ -4865,6 +4866,9 @@ export function bridgeHeartbeatSignature(
     maxInFlight: status.maxInFlight,
     capacity: status.capacity,
     runtimeIdentity: status.runtimeIdentity,
+    runtimeProfiles: buildHeartbeatRuntimeProfilesPayload(
+      status.runtimeProfiles,
+    ),
     processHealth: heartbeatProcessHealthSignature(status.processHealth),
     runtimeConformance: status.runtimeConformance,
     liveness: status.liveness,
@@ -5789,6 +5793,9 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     maxInFlight: status.maxInFlight ?? DEFAULT_ORG_MAX_IN_FLIGHT_COMMANDS,
     capacity: status.capacity,
     runtimeIdentity: status.runtimeIdentity,
+    runtimeProfiles: buildHeartbeatRuntimeProfilesPayload(
+      status.runtimeProfiles,
+    ),
     restartHandoff: status.restartHandoff
       ? {
           consumedAt: status.restartHandoff.consumedAt,
@@ -5836,6 +5843,51 @@ export function buildHeartbeatStatusPayload(status: BridgeStatus) {
     lastStaleCleanup: status.lastStaleCleanup,
     recentErrors: status.recentErrors.slice(-5),
   };
+}
+
+function buildHeartbeatRuntimeProfilesPayload(
+  runtimeProfiles: BridgeStatus["runtimeProfiles"],
+) {
+  if (!runtimeProfiles) {
+    return undefined;
+  }
+  return runtimeProfiles
+    .flatMap((profile) => {
+      const id = heartbeatRuntimeProfileId(profile);
+      if (!id) {
+        return [];
+      }
+      return [
+        compact({
+          hermesProfileName: safeProfileText(profile.hermesProfileName, 80),
+          id,
+          kind: profile.kind,
+          label:
+            profile.kind === "unknown-acp"
+              ? "Custom ACP"
+              : safeProfileText(profile.label, 120),
+          status: profile.status,
+        }),
+      ];
+    })
+    .slice(0, 100);
+}
+
+function heartbeatRuntimeProfileId(
+  profile: BridgeRuntimeProfile,
+): string | undefined {
+  const id = safeProfileText(profile.id, 160);
+  if (profile.kind !== "unknown-acp" && id) {
+    return id;
+  }
+  if (!profile.id) {
+    return undefined;
+  }
+  const digest = createHash("sha256")
+    .update(profile.id)
+    .digest("hex")
+    .slice(0, 24);
+  return `${profile.kind}:status-${digest}`;
 }
 
 function buildHeartbeatUpdateStatePayload(
