@@ -76,6 +76,7 @@ export const bridgeLogEventNames = [
   "bridge.session.ready",
   "bridge.runtime_profiles.restart_requested",
   "bridge.session.mcp_manifest_changed",
+  "bridge.session.tool_surface_changed",
   "bridge.session.quiet_degraded",
   "bridge.session.runtime_profile_changed",
   "bridge.session.warm_failed",

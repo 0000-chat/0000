@@ -1854,6 +1854,7 @@ describe("bridge MCP helper configuration", () => {
 
     expect(
       buildAgentToolsMcpServers({
+        activeToolSurfaces: ["action"],
         agentSessionId: "agent_session_1",
         agentToolsUrl: "https://0000.chat",
         appUrl: "https://0000.chat",
@@ -1872,6 +1873,7 @@ describe("bridge MCP helper configuration", () => {
           { name: "ZERO_CHAT_AGENT_TOOLS_URL", value: "https://0000.chat" },
           { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: "bridge_a" },
           { name: "ZERO_CHAT_THREAD_ID", value: "thread_1" },
+          { name: "ZERO_CHAT_ACTIVE_TOOL_SURFACES", value: "action" },
           { name: "ZERO_CHAT_ENABLED_FEATURE_FLAGS", value: "artifacts" },
           { name: "ZERO_CHAT_BRIDGE_TOKEN", value: "token-a" },
         ],

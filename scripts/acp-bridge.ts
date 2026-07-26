@@ -728,6 +728,7 @@ export type HermesProfileSummary = {
 };
 
 type AgentToolsMcpServerInput = {
+  activeToolSurfaces?: string[];
   agentSessionId: string;
   appUrl: string;
   agentToolsUrl?: string;
@@ -1409,6 +1410,14 @@ export function buildAgentToolsMcpServers(
         { name: "ZERO_CHAT_BRIDGE_DEVICE_ID", value: input.deviceId },
         ...(input.threadId
           ? [{ name: "ZERO_CHAT_THREAD_ID", value: input.threadId }]
+          : []),
+        ...(input.activeToolSurfaces?.length
+          ? [
+              {
+                name: "ZERO_CHAT_ACTIVE_TOOL_SURFACES",
+                value: input.activeToolSurfaces.join(","),
+              },
+            ]
           : []),
         ...(input.enabledFeatureFlags?.length
           ? [
@@ -2263,7 +2272,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
         resumeEnabled,
         idleSessionTtlMs,
         requireScopedIdentity: true,
-        createMcpServers: ({ agentSessionId, threadId }) => {
+        createMcpServers: ({ activeToolSurfaces, agentSessionId, threadId }) => {
           const currentRegistration = runtimeContext?.config ?? registration;
           if (!agentSessionId) {
             throw new Error(
@@ -2271,6 +2280,7 @@ async function startBridge(parsed: ParsedBridgeArgs) {
             );
           }
           return buildAgentToolsMcpServers({
+            activeToolSurfaces,
             agentSessionId,
             appUrl: currentRegistration.appUrl,
             agentToolsUrl: currentRegistration.appUrl,
