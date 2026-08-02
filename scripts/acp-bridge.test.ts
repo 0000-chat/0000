@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -83,6 +83,16 @@ function runBridgeLoopIteration(input: BridgeLoopIterationInput) {
 }
 
 describe("bridge command parsing", () => {
+  test("keeps the bridge:connect code argument positional", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { scripts?: Record<string, string> };
+
+    expect(packageJson.scripts?.["bridge:connect"]).toBe(
+      "bun scripts/acp-bridge.ts connect",
+    );
+  });
+
   test("hard-switches retired Codex ACP commands passed explicitly", () => {
     const parsed = parseBridgeArgs([
       "start",
