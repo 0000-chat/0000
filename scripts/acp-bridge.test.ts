@@ -12,6 +12,7 @@ import {
   buildBridgeDoctorReport,
   buildBridgeRegistrationFailure,
   buildHeartbeatStatusPayload,
+  buildMachineEnrollmentRequest,
   type BridgeRegistration,
   type BridgeStatus,
   type BridgeLoopIterationInput,
@@ -128,7 +129,12 @@ describe("bridge command parsing", () => {
     expect(getToolResultTimeoutMs(explicit.flags, {})).toBe(900_000);
   });
 
-  test("accepts connect-org as a legacy alias for connect", () => {
+  test("normalizes enrollment aliases with their intended target mode", () => {
+    expect(parseBridgeArgs(["enroll", "CODE"])).toEqual({
+      command: "enroll",
+      flags: {},
+      positionals: ["CODE"],
+    });
     expect(
       parseBridgeArgs([
         "connect-org",
@@ -137,9 +143,78 @@ describe("bridge command parsing", () => {
         "https://0000.chat",
       ]),
     ).toEqual({
-      command: "connect",
-      flags: { "app-url": "https://0000.chat" },
+      command: "enroll",
+      flags: { "app-url": "https://0000.chat", "register-agent": true },
       positionals: ["CODE"],
+    });
+    expect(parseBridgeArgs(["connect", "CODE"])).toEqual({
+      command: "enroll",
+      flags: { "register-agent": true },
+      positionals: ["CODE"],
+    });
+    expect(parseBridgeArgs(["pair", "CODE", "--register-agent"])).toEqual({
+      command: "enroll",
+      flags: {},
+      positionals: ["CODE"],
+    });
+  });
+
+  test("builds a machine-only enrollment request without an agent target", () => {
+    expect(
+      buildMachineEnrollmentRequest({
+        code: "MACHINE01",
+        deviceName: "host bridge",
+        host: "host",
+        platform: "linux",
+        requestedBridgeToken: "a".repeat(43),
+        requestedDeviceId: "bridge_0123456789abcdef01234567",
+      }),
+    ).toEqual({
+      code: "MACHINE01",
+      deviceName: "host bridge",
+      host: "host",
+      platform: "linux",
+      requestedBridgeToken: "a".repeat(43),
+      requestedDeviceId: "bridge_0123456789abcdef01234567",
+      targetMode: false,
+    });
+  });
+
+  test("builds a stable agent target enrollment request", () => {
+    const proposedProfile = {
+      agentCommand: "codex acp",
+      bridgeVersion: BRIDGE_VERSION,
+      defaultCwd: "/work",
+      hostLabel: "host",
+      installMode: "manual",
+      proposedAgentName: "Codex on host",
+      runtimeId: "codex",
+      runtimeLabel: "Codex",
+    };
+
+    expect(
+      buildMachineEnrollmentRequest({
+        code: "MACHINE01",
+        deviceName: "Codex on host",
+        host: "host",
+        platform: "linux",
+        profileIdentity: "default",
+        proposedProfile,
+        registerAgent: true,
+        requestedBridgeToken: "a".repeat(43),
+        requestedDeviceId: "bridge_0123456789abcdef01234567",
+      }),
+    ).toEqual({
+      code: "MACHINE01",
+      deviceName: "Codex on host",
+      host: "host",
+      platform: "linux",
+      profileIdentity: "default",
+      proposedProfile,
+      registerAgent: true,
+      requestedBridgeToken: "a".repeat(43),
+      requestedDeviceId: "bridge_0123456789abcdef01234567",
+      targetMode: true,
     });
   });
 

@@ -125,7 +125,6 @@ const DEFAULT_PROCESS_REGISTRY_DIR = join(
   ".0000",
   "bridge-processes",
 );
-const DEFAULT_PAIR_PATH = "/api/agent-bridge/pair";
 const DEFAULT_CLAIM_PATH = "/api/agent-bridge/queue/claim";
 const DEFAULT_CLEANUP_STALE_PATH = "/api/agent-bridge/queue/cleanup-stale";
 const DEFAULT_RESULT_PATH = "/api/agent-bridge/queue/result";
@@ -148,8 +147,8 @@ const DEFAULT_ACP_RESUME_ENABLED = false;
 const DEFAULT_ACP_IDLE_TTL_MS = 30 * 60_000;
 const PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS = 2;
 const DEFAULT_ALLOW_REMOTE_CWD = true;
-const DEFAULT_AGENT_CONNECTION_REGISTER_PATH =
-  "/api/agent-connections/register";
+const DEFAULT_MACHINE_ENROLLMENT_REGISTER_PATH =
+  "/api/machine-enrollments/register";
 const DEFAULT_AGENT_SKILL_PATH = join(
   homedir(),
   ".claude",
@@ -192,9 +191,8 @@ type BridgeProcessHealth = AcpBridgeProcessHealth & {
 };
 
 export type BridgeCommandName =
-  | "connect"
   | "doctor"
-  | "pair"
+  | "enroll"
   | "start"
   | "status"
   | "help";
@@ -256,7 +254,7 @@ type QueueCleanupResponse = {
   released?: unknown;
 };
 
-type ProposedAgentProfile = {
+export type ProposedAgentProfile = {
   agentCommand: string;
   bridgeVersion: string;
   defaultCwd: string;
@@ -267,6 +265,57 @@ type ProposedAgentProfile = {
   runtimeLabel: string;
   skillInstallPath?: string;
 };
+
+export function buildProposedAgentProfile(input: {
+  agentCommand: string;
+  defaultCwd: string;
+  host: string;
+  installMode: string;
+  proposedAgentName?: string;
+  runtimeId?: string;
+  runtimeLabel?: string;
+  skillPath?: string;
+}): ProposedAgentProfile {
+  return {
+    agentCommand: input.agentCommand,
+    bridgeVersion: BRIDGE_VERSION,
+    defaultCwd: input.defaultCwd,
+    hostLabel: input.host,
+    installMode: input.installMode,
+    proposedAgentName:
+      input.proposedAgentName ??
+      defaultProposedAgentName(input.agentCommand, input.host),
+    runtimeId: input.runtimeId ?? inferRuntimeId(input.agentCommand),
+    runtimeLabel: input.runtimeLabel ?? inferRuntimeLabel(input.agentCommand),
+    skillInstallPath: input.skillPath,
+  };
+}
+
+export function buildMachineEnrollmentRequest(input: {
+  code: string;
+  deviceName: string;
+  host: string;
+  platform: string;
+  profileIdentity?: string;
+  proposedProfile?: ProposedAgentProfile;
+  registerAgent?: boolean;
+  requestedBridgeToken: string;
+  requestedDeviceId: string;
+}): Record<string, unknown> {
+  const registerAgent = input.registerAgent === true;
+  return compact({
+    code: input.code,
+    deviceName: input.deviceName,
+    host: input.host,
+    platform: input.platform,
+    profileIdentity: registerAgent ? input.profileIdentity : undefined,
+    proposedProfile: registerAgent ? input.proposedProfile : undefined,
+    registerAgent: registerAgent || undefined,
+    requestedBridgeToken: input.requestedBridgeToken,
+    requestedDeviceId: input.requestedDeviceId,
+    targetMode: registerAgent,
+  });
+}
 
 type BridgeQueueCommand = BridgeSessionQueueItem;
 
@@ -1057,6 +1106,12 @@ export function parseBridgeArgs(argv: string[]): ParsedBridgeArgs {
     flags["agent-command"] = configuredAgentCommands.map(normalizeConfiguredAgentCommand);
   }
 
+  if (rawCommand === "connect" || rawCommand === "connect-org") {
+    flags["register-agent"] = true;
+  } else if (rawCommand === "pair") {
+    delete flags["register-agent"];
+  }
+
   return { command, positionals, flags };
 }
 
@@ -1657,10 +1712,8 @@ export function splitCommand(command: string): string[] {
 async function main() {
   const parsed = parseBridgeArgs(process.argv.slice(2));
   try {
-    if (parsed.command === "connect") {
-      await connectBridge(parsed);
-    } else if (parsed.command === "pair") {
-      await pairBridge(parsed);
+    if (parsed.command === "enroll") {
+      await enrollBridge(parsed);
     } else if (parsed.command === "start") {
       await startBridge(parsed);
     } else if (parsed.command === "status") {
@@ -1678,10 +1731,10 @@ async function main() {
   }
 }
 
-async function connectBridge(parsed: ParsedBridgeArgs) {
+async function enrollBridge(parsed: ParsedBridgeArgs) {
   const code = getFlag(parsed.flags, "code") ?? parsed.positionals[0];
   if (!code) {
-    throw new Error("connect requires a connection code");
+    throw new Error("enroll requires a machine enrollment code");
   }
 
   const appUrl = getFlag(
@@ -1690,40 +1743,42 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
     process.env.ZERO_CHAT_APP_URL,
   );
   if (!appUrl) {
-    throw new Error("connect requires --app-url or ZERO_CHAT_APP_URL");
+    throw new Error("enroll requires --app-url or ZERO_CHAT_APP_URL");
   }
 
-  const agentCommand =
-    getFlag(parsed.flags, "agent-command") ?? defaultAgentCommandForEnvironment();
-  const skillPath = getFlag(
-    parsed.flags,
-    "skill-path",
-    process.env.ZERO_CHAT_SKILL_PATH,
-  );
-  const installMode =
-    getFlag(
-      parsed.flags,
-      "install-mode",
-      process.env.ZERO_CHAT_BRIDGE_INSTALL_MODE,
-    ) ?? "unknown";
-  const proposedProfile: ProposedAgentProfile = {
-    agentCommand,
-    bridgeVersion: BRIDGE_VERSION,
-    defaultCwd:
-      getFlag(parsed.flags, "default-cwd", process.cwd()) ?? process.cwd(),
-    hostLabel: hostname(),
-    installMode,
-    proposedAgentName:
-      getFlag(parsed.flags, "agent-name") ??
-      defaultProposedAgentName(agentCommand, hostname()),
-    runtimeId:
-      getFlag(parsed.flags, "runtime-id") ?? inferRuntimeId(agentCommand),
-    runtimeLabel:
-      getFlag(parsed.flags, "runtime-label") ?? inferRuntimeLabel(agentCommand),
-    skillInstallPath: skillPath,
-  };
+  const registerAgent = parsed.flags["register-agent"] === true;
+  const agentCommand = registerAgent
+    ? getFlag(parsed.flags, "agent-command") ?? defaultAgentCommandForEnvironment()
+    : undefined;
+  const skillPath = registerAgent
+    ? getFlag(parsed.flags, "skill-path", process.env.ZERO_CHAT_SKILL_PATH)
+    : undefined;
+  const installMode = registerAgent
+    ? getFlag(
+        parsed.flags,
+        "install-mode",
+        process.env.ZERO_CHAT_BRIDGE_INSTALL_MODE,
+      ) ?? "unknown"
+    : undefined;
+  const proposedProfile = agentCommand
+    ? buildProposedAgentProfile({
+        agentCommand,
+        defaultCwd:
+          getFlag(parsed.flags, "default-cwd", process.cwd()) ?? process.cwd(),
+        host: hostname(),
+        installMode: installMode ?? "unknown",
+        runtimeId: getFlag(parsed.flags, "runtime-id"),
+        runtimeLabel: getFlag(parsed.flags, "runtime-label"),
+        skillPath,
+        proposedAgentName: getFlag(parsed.flags, "agent-name"),
+      })
+    : undefined;
+  const deviceName =
+    proposedProfile?.proposedAgentName ??
+    getFlag(parsed.flags, "device-name", `${hostname()} bridge`) ??
+    `${hostname()} bridge`;
 
-  if (skillPath) {
+  if (skillPath && agentCommand) {
     await writeAgentConnectionSkill(skillPath, {
       appUrl,
       agentCommand,
@@ -1737,23 +1792,31 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
     getFlag(
       parsed.flags,
       "register-path",
-      DEFAULT_AGENT_CONNECTION_REGISTER_PATH,
-    ) ?? DEFAULT_AGENT_CONNECTION_REGISTER_PATH,
+      DEFAULT_MACHINE_ENROLLMENT_REGISTER_PATH,
+    ) ?? DEFAULT_MACHINE_ENROLLMENT_REGISTER_PATH,
   );
   const configPath = getConfigPath(parsed.flags);
   const pendingRequest = await preparePendingAgentConnectionRequest(
     configPath,
     code,
   );
-  const response = await postJson<PairResponse>(endpoint, undefined, {
-    code,
-    deviceName: proposedProfile.proposedAgentName,
-    host: hostname(),
-    platform: process.platform,
-    proposedProfile,
-    requestedBridgeToken: pendingRequest.bridgeToken,
-    requestedDeviceId: pendingRequest.deviceId,
-  });
+  const response = await postJson<PairResponse>(
+    endpoint,
+    undefined,
+    buildMachineEnrollmentRequest({
+      code,
+      deviceName,
+      host: hostname(),
+      platform: process.platform,
+      profileIdentity: registerAgent
+        ? getFlag(parsed.flags, "profile-identity", "default") ?? "default"
+        : undefined,
+      proposedProfile,
+      registerAgent,
+      requestedBridgeToken: pendingRequest.bridgeToken,
+      requestedDeviceId: pendingRequest.deviceId,
+    }),
+  );
 
   const deviceId = readString(response.deviceId, "deviceId");
   const bridgeToken = readString(
@@ -1764,7 +1827,7 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
     appUrl,
     bridgeToken,
     deviceId,
-    deviceName: proposedProfile.proposedAgentName,
+    deviceName,
     enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
     pairedAt: new Date().toISOString(),
   };
@@ -1795,95 +1858,24 @@ async function connectBridge(parsed: ParsedBridgeArgs) {
       activeSessions: [],
       recentErrors: [],
     })),
-    setupSummary: compact({
-      agentCommand,
-      bridgeVersion: BRIDGE_VERSION,
-      configPath,
-      defaultCwd: proposedProfile.defaultCwd,
-      installMode,
-      skillInstallPath: skillPath,
-    }),
+    setupSummary: registerAgent
+      ? compact({
+          agentCommand,
+          bridgeVersion: BRIDGE_VERSION,
+          configPath,
+          defaultCwd: proposedProfile?.defaultCwd,
+          installMode,
+          skillInstallPath: skillPath,
+        })
+      : undefined,
   });
   await clearPendingAgentConnectionRequest(pendingRequest);
 
   writeStdout(
-    `Connected pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`,
+    registerAgent
+      ? `Enrolled pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`
+      : `Enrolled pending machine ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this machine before it can run work.\n`,
   );
-}
-
-async function pairBridge(parsed: ParsedBridgeArgs) {
-  const code = getFlag(parsed.flags, "code") ?? parsed.positionals[0];
-  if (!code) {
-    throw new Error(
-      "pair requires a pairing code: bun scripts/acp-bridge.ts pair <code> --app-url <url>",
-    );
-  }
-
-  const appUrl = getFlag(
-    parsed.flags,
-    "app-url",
-    process.env.ZERO_CHAT_APP_URL,
-  );
-  if (!appUrl) {
-    throw new Error("pair requires --app-url or ZERO_CHAT_APP_URL");
-  }
-
-  const configPath = getConfigPath(parsed.flags);
-  const deviceName =
-    getFlag(parsed.flags, "device-name", `${hostname()} bridge`) ??
-    `${hostname()} bridge`;
-  const pairPath =
-    getFlag(parsed.flags, "pair-path", DEFAULT_PAIR_PATH) ?? DEFAULT_PAIR_PATH;
-  const endpoint = buildEndpoint(appUrl, pairPath);
-  const response = await postJson<PairResponse>(endpoint, undefined, {
-    code,
-    deviceName,
-    host: hostname(),
-    runtime: "bun",
-  });
-
-  const deviceId = readString(response.deviceId, "deviceId");
-  const bridgeToken = readString(
-    response.bridgeToken ?? response.token,
-    "bridgeToken",
-  );
-  const config: BridgeConfig = {
-    deviceId,
-    bridgeToken,
-    appUrl,
-    deviceName,
-    enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
-    pairedAt: new Date().toISOString(),
-  };
-
-  const bridgeApiUrl = stringFromUnknown(
-    response.bridgeApiUrl ?? response.endpoint,
-  );
-  if (bridgeApiUrl) {
-    config.bridgeApiUrl = bridgeApiUrl;
-  }
-  const logIngestUrl = getFlag(parsed.flags, "log-url");
-  if (logIngestUrl) {
-    config.logIngestUrl = logIngestUrl;
-  }
-
-  const updatedConfig = await appendBridgeRegistration(configPath, config);
-  await writeStatus(getStatusPath(parsed.flags), {
-    deviceId,
-    appUrl,
-    connected: false,
-    activeSessions: [],
-    recentErrors: [],
-    registrations: updatedConfig.registrations.map((registration) => ({
-      deviceId: registration.deviceId,
-      appUrl: registration.appUrl,
-      deviceName: registration.deviceName,
-      connected: false,
-      activeSessions: [],
-      recentErrors: [],
-    })),
-  });
-  writeStdout(`Paired bridge device ${deviceId}.\nConfig: ${configPath}\n`);
 }
 
 async function startBridge(parsed: ParsedBridgeArgs) {
@@ -5284,13 +5276,12 @@ function filterDoctorSnapshot(
 }
 
 function normalizeCommand(command?: string): BridgeCommandName {
-  if (command === "connect-org") {
-    return "connect";
+  if (command === "connect-org" || command === "connect" || command === "pair") {
+    return "enroll";
   }
   if (
-    command === "connect" ||
     command === "doctor" ||
-    command === "pair" ||
+    command === "enroll" ||
     command === "start" ||
     command === "status"
   ) {
@@ -5319,16 +5310,16 @@ function helpText(): string {
     "0000 Chat ACP bridge",
     "",
     "Usage:",
-    `  bun scripts/acp-bridge.ts connect <code> --app-url <url> [--agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--skill-path <path>]`,
-    "  bun scripts/acp-bridge.ts pair <code> --app-url <url> [--device-name <name>] [--log-url <url>]",
+    `  bun scripts/acp-bridge.ts enroll <code> --app-url <url> [--device-name <name>] [--register-agent --agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}" --profile-identity <profile-id> --skill-path <path>]`,
+    "  connect and connect-org are agent-registration aliases; pair is a machine-only alias.",
     `  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]`,
     "  bun scripts/acp-bridge.ts status",
     "  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]",
     "",
     "Environment:",
-    "  ZERO_CHAT_APP_URL                         Default app URL for connect or pair",
-    "  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for connect",
-    `  ZERO_CHAT_SKILL_PATH                      Local skill path for connect (default from install script: ${DEFAULT_AGENT_SKILL_PATH})`,
+    "  ZERO_CHAT_APP_URL                         Default app URL for enroll",
+    "  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for agent enrollment",
+    `  ZERO_CHAT_SKILL_PATH                      Local skill path for agent enrollment (default from install script: ${DEFAULT_AGENT_SKILL_PATH})`,
     `  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})`,
     "  ZERO_CHAT_BRIDGE_MAX_IN_FLIGHT           Optional local hard cap across all registered organizations",
     "  ZERO_CHAT_BRIDGE_WARM_RUNTIME_PROFILES   Comma-separated runtime profile ids to warm from recent scoped sessions (default: disabled)",
@@ -6663,7 +6654,7 @@ bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentComm
 3. If the bridge config is missing, ask the human to generate a new 0000 agent connection code, then run:
 
 \`\`\`bash
-bun scripts/acp-bridge.ts connect <code> --app-url ${JSON.stringify(input.appUrl)} --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
+bun scripts/acp-bridge.ts enroll <code> --app-url ${JSON.stringify(input.appUrl)} --register-agent --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
 \`\`\`
 
 ## Local State
