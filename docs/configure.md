@@ -4,17 +4,17 @@ The bridge is host-agnostic ACP infrastructure with a 0000 Chat host adapter.
 Configuration is split between local runtime settings and host-provided queue
 settings.
 
-## Local Pairing
+## Machine Enrollment
 
-`bun run bridge connect <code> --app-url <url>` writes local pairing state to
+`bun run bridge enroll <code> --app-url <url> --register-agent` writes local pairing state to
 `~/.0000/bridge.json`. That file stores the host URL, bridge device identity,
 and bearer token needed for realtime ticket issuance and authenticated durable
-operations. Do not commit it.
+operations. The command also registers a pending agent target. Do not commit it.
 
 The default production host is:
 
 ```bash
-bun run bridge connect "$CODE" --app-url "https://0000.chat"
+bun run bridge enroll "$CODE" --app-url "https://0000.chat" --register-agent
 ```
 
 ## Runtime Commands
