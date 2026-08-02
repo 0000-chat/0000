@@ -5367,6 +5367,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read one 0000 Chat thread and its recent cached messages. Use this for current-thread continuity when context.get or threads.current identifies the thread; do not use messages.search for current-thread recovery.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "explicit_threads",
+        "requiredExplicitInputFields": [
+          "threadId"
+        ]
+      },
       "inputSchema": {
         "limit": {
           "kind": "number",
