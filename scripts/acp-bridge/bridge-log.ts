@@ -49,6 +49,8 @@ export const bridgeLogEventNames = [
   "bridge.hermes_profiles.refresh",
   "bridge.hermes_profiles.refresh_error",
   "bridge.log_delivery.failed",
+  "bridge.machine_mcp.installed",
+  "bridge.machine_mcp.installation_failed",
   "bridge.loop.error",
   "bridge.exception",
   "bridge.process.orphan_cleanup",

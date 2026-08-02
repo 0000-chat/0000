@@ -1,5 +1,7 @@
 export const DEFAULT_BRIDGE_PATHS = {
   controlPull: "/api/agent-bridge/control/pull",
+  mcpCredentialClaim: "/api/machine-enrollments/mcp/claim",
+  mcpInstallationReport: "/api/machine-enrollments/mcp/report",
   queueClaim: "/api/agent-bridge/queue/claim",
   queueCleanupStale: "/api/agent-bridge/queue/cleanup-stale",
   queueResult: "/api/agent-bridge/queue/result",
@@ -37,6 +39,20 @@ export type BridgeQueueCleanupInput = {
   dryRun?: boolean;
   limit?: number;
   staleAfterMs?: number;
+};
+
+export type MachineMcpCredentialClaim = {
+  credential: string;
+  credentialVersion: number;
+  targetId: string;
+};
+
+export type MachineMcpInstallationReport = {
+  credentialVersion: number;
+  failureCode?: string;
+  restartRequired?: boolean;
+  status: "ready" | "failed";
+  targetId: string;
 };
 
 export type BridgeQueueCommand = Record<string, unknown> & {
@@ -160,6 +176,24 @@ export class ConvexBridgeCloudClient {
   async pullControl<TResponse = Record<string, unknown>>(): Promise<TResponse> {
     return await this.post<TResponse>(this.paths.controlPull, {
       deviceId: this.deviceId,
+    });
+  }
+
+  async claimMachineMcpCredential<
+    TResponse = MachineMcpCredentialClaim,
+  >(targetId: string): Promise<TResponse> {
+    return await this.post<TResponse>(this.paths.mcpCredentialClaim, {
+      deviceId: this.deviceId,
+      targetId,
+    });
+  }
+
+  async reportMachineMcpInstallation<
+    TResponse = Record<string, unknown>,
+  >(input: MachineMcpInstallationReport): Promise<TResponse> {
+    return await this.post<TResponse>(this.paths.mcpInstallationReport, {
+      deviceId: this.deviceId,
+      ...compact(input),
     });
   }
 

@@ -211,6 +211,7 @@ describe("bridge command parsing", () => {
         profileIdentity: "default",
         proposedProfile,
         registerAgent: true,
+        requestMcp: true,
         requestedBridgeToken: "a".repeat(43),
         requestedDeviceId: "bridge_0123456789abcdef01234567",
       }),
@@ -224,6 +225,7 @@ describe("bridge command parsing", () => {
       registerAgent: true,
       requestedBridgeToken: "a".repeat(43),
       requestedDeviceId: "bridge_0123456789abcdef01234567",
+      requestMcp: true,
       targetMode: true,
     });
   });
@@ -1931,6 +1933,56 @@ describe("bridge realtime wake signal", () => {
 });
 
 describe("bridge MCP helper configuration", () => {
+  test("applies pending Machine MCP installation controls without credentials", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-machine-mcp-"));
+    const installed: unknown[] = [];
+
+    await runBridgeLoopIteration({
+      claimCommands: async () => [],
+      cleanupStaleClaims: async () => ({ inspected: 0, released: 0 }),
+      config: bridgeRegistration(),
+      inFlightCommandMetadata: new Map(),
+      inFlightCommands: new Map(),
+      installMachineMcp: async (installation) => {
+        installed.push(installation);
+      },
+      lastStaleCleanupAt: 0,
+      log: Object.assign(() => {}, { flush: async () => {} }),
+      manager: {
+        getStatus: () => ({
+          activeSessions: [],
+          sessions: [],
+          terminalInteractionSessionKeyCount: 0,
+        }),
+        handleQueueItem: async () => {},
+      },
+      maxInFlight: 1,
+      now: () => Date.UTC(2026, 5, 22, 9, 0, 0),
+      recordLoopError: async (error) => {
+        throw error;
+      },
+      sendHeartbeat: async () => ({
+        control: {
+          mcpInstallations: [{
+            profileIdentity: "work",
+            runtimeId: "hermes",
+            targetId: "target_123",
+          }],
+        },
+        ok: true,
+      }),
+      setLastStaleCleanupAt: () => {},
+      status: { activeSessions: [], connected: true, recentErrors: [] },
+      statusPath: join(directory, "status.json"),
+      writeStatus: async () => {},
+    });
+
+    expect(installed).toEqual([
+      { profileIdentity: "work", runtimeId: "hermes", targetId: "target_123" },
+    ]);
+    expect(JSON.stringify(installed)).not.toContain("credential");
+  });
+
   test("uses public app URL for agent tool invocation", () => {
     const expectedAgentToolsMcpScriptPath = join(
       dirname(fileURLToPath(import.meta.url)),

@@ -67,19 +67,21 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "whenToUse": "Use for explicit settings, secrets, agent directory, or approval-mode administration."
     },
     "apps": {
-      "approvalBehavior": "App/revision/generation writes may require approval; validation/list/read are direct.",
+      "approvalBehavior": "App/revision/generation writes may require approval; React publish, disable, and rollback cross an explicit approval boundary; validation/list/read are direct.",
       "contexts": [
         "app",
         "space"
       ],
       "defaultVisibility": "contextual",
-      "description": "Prompt-backed 0000 OpenUI apps, revisions, validated generations, and app archives.",
+      "description": "Prompt-backed OpenUI apps plus checked React code app authoring, revisions, publishing, rollback, and archives.",
       "effectTypes": [
         "read",
-        "schema_write"
+        "schema_write",
+        "interaction_write",
+        "admin_write"
       ],
       "name": "apps",
-      "title": "OpenUI apps",
+      "title": "Apps",
       "toolNames": [
         "apps.list",
         "apps.get",
@@ -89,9 +91,22 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "apps.listGenerations",
         "apps.update",
         "apps.archive",
-        "apps.validateOpenUi"
+        "apps.validateOpenUi",
+        "apps.code.describeRuntime",
+        "apps.code.startEdit",
+        "apps.code.listFiles",
+        "apps.code.readFiles",
+        "apps.code.reserveSource",
+        "apps.code.completeSource",
+        "apps.code.putFiles",
+        "apps.code.checkProject",
+        "apps.code.readCheck",
+        "apps.code.publishRevision",
+        "apps.code.discardEdit",
+        "apps.code.disable",
+        "apps.code.rollback"
       ],
-      "whenNotToUse": "Do not create standalone HTML/local files; do not use apps.update for prompt-backed creation or revision work.",
+      "whenNotToUse": "Do not create standalone HTML/local files; React code source stays in bounded remote authoring transport; do not use apps.update for prompt-backed creation or revision work.",
       "whenToUse": "Use when the user asks to create, improve, refresh, inspect, or archive a 0000 app/dashboard."
     },
     "artifacts": {
@@ -193,8 +208,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "toolNames": [
         "databases.list",
         "databases.get",
+        "databases.listFieldOptions",
         "databases.create",
         "databases.createField",
+        "databases.deleteField",
         "databases.listRows",
         "databases.getRow",
         "databases.searchRows",
@@ -204,8 +221,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "databases.listRelationshipDefinitions",
         "databases.listRowRelationships",
         "databases.createRelationshipDefinition",
+        "databases.deleteRelationshipDefinition",
         "databases.createRelationship",
         "databases.deleteRelationship",
+        "databases.delete",
         "databaseViews.list",
         "databaseViews.get",
         "databaseViews.getDefault",
@@ -235,9 +254,9 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "toolNames": [
         "runtime.readEvidence",
         "bridgeDevices.list",
-        "bridgeDevices.listPairingCodes",
-        "bridgeDevices.createPairingCode",
-        "bridgeDevices.revokePairingCode",
+        "machineEnrollments.listActive",
+        "machineEnrollments.create",
+        "machineEnrollments.regenerate",
         "bridgeDevices.revoke",
         "bridgeDevices.delete",
         "bridgeDevices.renameLocation",
@@ -637,6 +656,453 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "apps.code.checkProject": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "Run the isolated React code project check and return the exact candidate and diagnostic receipt.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "capabilityManifest": {
+          "kind": "unknown"
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.completeSource": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "apps",
+      "description": "Complete a previously uploaded bounded React code source blob and return its exact receipt.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        },
+        "sourceBlobId": {
+          "kind": "string",
+          "sensitive": true
+        }
+      },
+      "risk": "user_interaction",
+      "sensitiveInput": true,
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.describeRuntime": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "Read the React code app runtime contract and bounded authoring limits before starting an edit.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {},
+      "risk": "read",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.disable": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "explicit_trust_boundary",
+      "capabilityPack": "apps",
+      "description": "Disable an owned React code app at the explicit user trust boundary. Reuse the same operationId after transport loss.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.discardEdit": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "apps",
+      "description": "Discard one inert React code edit. Reuse the same operationId after transport loss.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "user_interaction",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.listFiles": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "List metadata for the files in one owned React code app edit without returning source bytes.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.publishRevision": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "explicit_trust_boundary",
+      "capabilityPack": "apps",
+      "description": "Publish only the exact successfully checked React code candidate. Do not claim success until the publish receipt returns.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "candidateHash": {
+          "kind": "string"
+        },
+        "capabilityManifestHash": {
+          "kind": "string"
+        },
+        "checkId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.putFiles": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "apps",
+      "description": "Replace a bounded batch of React code app draft files using completed source blobs. Reuse the same operationId after transport loss.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "expectedProjectVersion": {
+          "kind": "number"
+        },
+        "files": {
+          "items": {
+            "fields": {
+              "logicalPath": {
+                "kind": "string"
+              },
+              "sourceBlobId": {
+                "kind": "string"
+              }
+            },
+            "kind": "object"
+          },
+          "kind": "array",
+          "sensitive": true
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "user_interaction",
+      "sensitiveInput": true,
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.readCheck": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "Read bounded diagnostics and status for one exact React code project check.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "checkId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.readFiles": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "apps",
+      "description": "Read at most ten explicit React code app source files through the bounded remote authoring transport. Never rely on local files.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "paths": {
+          "items": {
+            "kind": "string"
+          },
+          "kind": "array",
+          "sensitive": true
+        }
+      },
+      "risk": "read",
+      "sensitiveInput": true,
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.reserveSource": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "apps",
+      "description": "Reserve bounded private source storage for one React code app file. ACP and hosted agents may provide exactly one bounded sourceText or sourceBase64 payload; the transport computes byteLength and sha256, uploads privately, and completes the source receipt. Reuse the same operationId and completionOperationId after transport loss.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "byteLength": {
+          "kind": "number",
+          "optional": true,
+          "sensitive": true
+        },
+        "completionOperationId": {
+          "kind": "string",
+          "optional": true
+        },
+        "editSessionId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        },
+        "sha256": {
+          "kind": "string",
+          "optional": true,
+          "sensitive": true
+        },
+        "sourceBase64": {
+          "kind": "string",
+          "optional": true,
+          "sensitive": true
+        },
+        "sourceText": {
+          "kind": "string",
+          "optional": true,
+          "sensitive": true
+        }
+      },
+      "risk": "user_interaction",
+      "sensitiveInput": true,
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.rollback": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "explicit_trust_boundary",
+      "capabilityPack": "apps",
+      "description": "Roll back an owned React code app to its prior sealed revision at the explicit user trust boundary. Reuse the same operationId after transport loss.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.startEdit": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "apps",
+      "description": "Create or resume an inert React code app edit. Reuse the same operationId after transport loss.",
+      "effect": "interaction_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "appId": {
+          "kind": "string"
+        },
+        "operationId": {
+          "kind": "string"
+        }
+      },
+      "risk": "user_interaction",
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
     "apps.create": {
       "annotations": {
         "destructiveHint": false,
@@ -649,6 +1115,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Create a saved prompt-backed 0000 app for a space with an initial app revision. For prompt-backed OpenUI apps, generate, validate, and save the first OpenUI output with apps.generateFromRevision so it appears in the app. Raw OpenUI must begin with root = AppCanvas(...), not AppCanvas { ... } or JSX. Supported OpenUI app components: AppCanvas, Section, MetricRow, Metric, Sparkline, BarChart, WorkloadPanel, WorkloadBar, SignalPanel, Signal, Timeline, TimelineItem, FocusList, FocusItem, DataTable, Badge, Alert, Progress, Card, EmptyState, Disclosure, Tabs, Tab, AvatarLabel, ItemList, Item. Exact signatures: AppCanvas(title, summary, generatedAtDate, sections); Section(title, description, layout, children) where layout is \"single\" or \"split\"; MetricRow(metrics); Metric(label, value, delta, detail, tone, sparkline) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Sparkline(values, tone?); BarChart(title, description, labels, values, tone?) where labels is a string array with 1-12 entries, values is a matching array of non-negative numbers, and tone is \"calm\", \"good\", \"risk\", or \"urgent\"; WorkloadPanel(title, description, bars); WorkloadBar(label, value, count, tone) where value is a 0-100 number; SignalPanel(title, signals); Signal(label, summary, tone); Timeline(title, items); TimelineItem(time, title, detail, tone); FocusList(title, items); FocusItem(title, owner, due, priority) where priority is \"high\", \"medium\", or \"low\"; DataTable(title, columns, rows, caption?) where columns is a string array up to 8 values and rows is a string[][] up to 25 rows and 8 cells per row; Badge(label, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Alert(title, detail, tone) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Progress(label, value, detail?, tone?) where value is a 0-100 number and tone is \"calm\", \"good\", \"risk\", or \"urgent\"; Card(title, description, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; EmptyState(title, description, actionLabel?) where actionLabel is decorative only and does not perform an action; Disclosure(title, summary, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; Tabs(tabs) where tabs is an array of Tab entries and is display-only; Tab(label, children) where children may contain only Badge, Progress, Alert, ItemList, DataTable, EmptyState, or AvatarLabel; AvatarLabel(name, subtitle?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\"; ItemList(title, items); Item(title, description, meta?, tone?) where tone is \"calm\", \"good\", \"risk\", or \"urgent\". Do not use LiveRecord or LiveView unless the active organization has the real-time-apps feature flag; when access is unknown, use static OpenUI components. Use this valid shape as the model for generated openuiRaw: root = AppCanvas(\"Agent work health\", \"A generated operating read for this space.\", \"2026-06-14\", [overview, operations, charts, next])\n\noverview = Section(\"Current shape\", \"The most important static sample metrics.\", \"single\", [metrics])\nmetrics = MetricRow([m1, m2, m3, m4])\nm1 = Metric(\"Revenue\", \"$128.4K\", \"+12%\", \"Monthly recurring revenue is trending upward.\", \"good\", s1)\nm2 = Metric(\"Users\", \"24.1K\", \"+5.3%\", \"Active users increased across the sample period.\", \"good\", s2)\nm3 = Metric(\"Conversion\", \"3.2%\", \"-0.1%\", \"Conversion is nearly flat and worth watching.\", \"risk\", s3)\nm4 = Metric(\"Uptime\", \"99.99%\", \"stable\", \"Service reliability is inside target.\", \"calm\", s4)\ns1 = Sparkline([82, 84, 86, 90, 94, 99], \"good\")\ns2 = Sparkline([19, 20, 21, 22, 23, 24], \"good\")\ns3 = Sparkline([4, 3.8, 3.5, 3.4, 3.3, 3.2], \"risk\")\ns4 = Sparkline([99.9, 99.95, 99.98, 99.99], \"calm\")\n\noperations = Section(\"Operating signals\", \"Capacity and health signals for the sample app.\", \"split\", [workload, signals])\nworkload = WorkloadPanel(\"Team utilization\", \"Static sample allocation by team.\", [w1, w2, w3])\nw1 = WorkloadBar(\"Engineering\", 85, \"85%\", \"risk\")\nw2 = WorkloadBar(\"Design\", 62, \"62%\", \"calm\")\nw3 = WorkloadBar(\"Marketing\", 44, \"44%\", \"good\")\nsignals = SignalPanel(\"Service health\", [sig1, sig2, sig3])\nsig1 = Signal(\"API\", \"Operational\", \"good\")\nsig2 = Signal(\"CDN\", \"Degraded\", \"risk\")\nsig3 = Signal(\"Search\", \"Down\", \"urgent\")\n\ncharts = Section(\"Growth\", \"A bounded categorical comparison.\", \"single\", [revenue])\nrevenue = BarChart(\"Quarterly revenue\", \"USD in thousands\", [\"Q1\", \"Q2\", \"Q3\", \"Q4\"], [82, 96, 104, 128], \"good\")\n\nnext = Section(\"Next actions\", \"Static sample activity, priorities, and phase-one surfaces.\", \"split\", [timeline, focus, card, table])\ntimeline = Timeline(\"Recent activity\", [t1, t2])\nt1 = TimelineItem(\"2 hours ago\", \"Deployment shipped\", \"Version 2.14 reached production.\", \"good\")\nt2 = TimelineItem(\"5 hours ago\", \"Incident resolved\", \"Search timeout mitigation completed.\", \"risk\")\nfocus = FocusList(\"Priority items\", [f1, f2])\nf1 = FocusItem(\"Fix search indexing pipeline\", \"Alex\", \"Today\", \"high\")\nf2 = FocusItem(\"Finalize roadmap review\", \"Sam\", \"Tomorrow\", \"medium\")\ncard = Card(\"Launch readiness\", \"Static shadcn-inspired display primitives.\", [badge, progress, alert, people, empty])\nbadge = Badge(\"On track\", \"good\")\nprogress = Progress(\"Checklist\", 72, \"Five of seven checks are complete.\", \"good\")\nalert = Alert(\"Watch search\", \"Index latency needs one more verification pass.\", \"risk\")\npeople = ItemList(\"Owners\", [owner1, owner2])\nowner1 = Item(\"Engineering\", \"Pipeline mitigation and rollout checks.\", \"Alex\", \"good\")\nowner2 = Item(\"Product\", \"Customer note and launch criteria.\", \"Sam\", \"calm\")\nempty = EmptyState(\"No blockers\", \"No critical unresolved blockers are currently listed.\", \"Add blocker\")\ntable = DataTable(\"Readiness matrix\", [\"Area\", \"Status\"], [[\"API\", \"Ready\"], [\"Search\", \"Watching\"]], \"Static sample rows\"). Do not create HTML files, folders, standalone apps, or local artifacts for app requests; native app types such as markdown decks are still saved 0000 apps, not local files.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "apps",
+        "requiredExplicitInputFields": [
+          "spaceIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "designBrief": {
           "kind": "string",
@@ -770,6 +1242,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read one saved 0000 app by id or slug, including its type-specific metadata and generated output when available.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "apps",
+        "requiredExplicitInputFields": [
+          "appIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "appIdOrSlug": {
           "kind": "string"
@@ -802,6 +1280,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "List saved 0000 apps for a space, including OpenUI apps, markdown decks, and future app types.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "apps",
+        "requiredExplicitInputFields": [
+          "spaceIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "includeArchived": {
           "kind": "boolean",
@@ -862,6 +1346,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Legacy update for a saved 0000 app title or raw generated output. Do not use for prompt-backed app creation or edits; prefer apps.createRevision for prompt changes and apps.generateFromRevision for generated OpenUI output. Do not create HTML files or local artifacts.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "apps",
+        "requiredExplicitInputFields": [
+          "appIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "appIdOrSlug": {
           "kind": "string"
@@ -956,6 +1446,9 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Create a small durable org-visible artifact inline. Use this for markdown notes, plans, JSON, and other durable content that should live in 0000 Chat instead of local files. Actions/actions remain first-class; use action tools for runnable code.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "artifacts"
+      },
       "featureFlagKey": "artifacts",
       "inputSchema": {
         "content": {
@@ -1243,6 +1736,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Patch an inline markdown/text artifact by replacing exact oldText with newText in a new version. Read with artifacts.readContent first and pass expectedVersionId; if oldText appears more than once, provide more context or set replaceAll true.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "artifacts",
+        "requiredExplicitInputFields": [
+          "artifactId"
+        ]
+      },
       "featureFlagKey": "artifacts",
       "inputSchema": {
         "artifactId": {
@@ -1316,6 +1815,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read artifact metadata and current version metadata by id or slug. Use artifacts.readContent for inline markdown/text content and artifacts.getContentUrl for R2-backed bytes.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "artifacts",
+        "requiredExplicitInputFields": [
+          "artifactId"
+        ]
+      },
       "featureFlagKey": "artifacts",
       "inputSchema": {
         "artifactId": {
@@ -1346,6 +1851,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read inline markdown/text artifact content directly by id or slug. Use this before editing artifacts like local markdown files; returns content, versionId, contentHash, format, and artifact metadata. R2-backed or binary content is rejected.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "artifacts",
+        "requiredExplicitInputFields": [
+          "artifactId"
+        ]
+      },
       "featureFlagKey": "artifacts",
       "inputSchema": {
         "artifactId": {
@@ -1380,6 +1891,9 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Search durable artifacts in the current organization. Use this before creating local files when looking for existing plans, reports, exported files, or generated content.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "artifacts"
+      },
       "featureFlagKey": "artifacts",
       "inputSchema": {
         "kind": {
@@ -1435,6 +1949,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Replace an inline markdown/text artifact with a new version. Read with artifacts.readContent first, pass the returned expectedVersionId, and optionally expectedContentHash to avoid overwriting concurrent edits. Use this like a whole-file markdown save.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "artifacts",
+        "requiredExplicitInputFields": [
+          "artifactId"
+        ]
+      },
       "featureFlagKey": "artifacts",
       "inputSchema": {
         "artifactId": {
@@ -1501,6 +2021,13 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Create a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For loops, set startImmediately=true to run the first step now, or provide schedule to start later. Use loopKind=goal with goalPrompt, goalEvaluationPrompt, and maxIterations when the loop should stop after runtime goal evaluation. For thread-event triggers, prefer triggerConfig with spaceScope, spaceId, threadTagIds, and threadTagMatch ('all' or 'any'); threadTagSlugs is accepted only for legacy compatibility. For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "automations",
+        "requiredExplicitInputFields": [
+          "agentIdOrSlug",
+          "spaceIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "agentId": {
           "kind": "string",
@@ -1686,6 +2213,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Use this to disable a scheduled agent automation and cancel pending schedule handles.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "automations",
+        "requiredExplicitInputFields": [
+          "automationId"
+        ]
+      },
       "inputSchema": {
         "automationId": {
           "kind": "string"
@@ -1710,6 +2243,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read one scheduled agent automation and recent run history.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "automations",
+        "requiredExplicitInputFields": [
+          "automationId"
+        ]
+      },
       "inputSchema": {
         "automationId": {
           "kind": "string"
@@ -1734,6 +2273,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "List space-scoped scheduled agent automations.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "automations",
+        "requiredExplicitInputFields": [
+          "spaceIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "includeDisabled": {
           "kind": "boolean",
@@ -1762,6 +2307,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Run a scheduled agent automation immediately.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "automations",
+        "requiredExplicitInputFields": [
+          "automationId"
+        ]
+      },
       "inputSchema": {
         "automationId": {
           "kind": "string"
@@ -1786,6 +2337,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Update a space-scoped scheduled agent automation, loop, or trigger. Set approvalLevel='full_permissions' only when the user explicitly asks for trusted automation to run without per-action approvals. For thread-event triggers, prefer triggerConfig with spaceScope, spaceId, threadTagIds, and threadTagMatch ('all' or 'any'); threadTagSlugs is accepted only for legacy compatibility. For a database record changed or row updated trigger, set automationType='trigger', triggerKind='database_mutation', and triggerConfig={tableId:'<database slug or ID>', operations:['create','update','archive','restore']}; tableId may be a dynamic database slug or ID, and this watches the table for records created, updated, archived, or restored. Inspect existing databases with databases.list before choosing a table.",
       "effect": "schema_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "automations",
+        "requiredExplicitInputFields": [
+          "automationId"
+        ]
+      },
       "inputSchema": {
         "agentId": {
           "kind": "string",
@@ -1979,34 +2536,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
-    "bridgeDevices.createPairingCode": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to create a short-lived pairing code for connecting a new local bridge device.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "label": {
-          "kind": "string",
-          "optional": true
-        },
-        "ttlMs": {
-          "kind": "number",
-          "optional": true
-        }
-      },
-      "risk": "mutating_write",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
     "bridgeDevices.delete": {
       "annotations": {
         "destructiveHint": true,
@@ -2040,25 +2569,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "approvalBehavior": "read_only",
       "capabilityPack": "admin",
       "description": "Use this to list connected bridge devices, their status, capabilities, active sessions, and queued work.",
-      "effect": "read",
-      "executionMode": "read",
-      "inputSchema": {},
-      "risk": "read",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.listPairingCodes": {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": true
-      },
-      "approvalBehavior": "read_only",
-      "capabilityPack": "admin",
-      "description": "Use this to list active and recently used bridge pairing codes for the current user.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {},
@@ -2177,29 +2687,6 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "executionMode": "mutation",
       "inputSchema": {
         "deviceId": {
-          "kind": "string"
-        }
-      },
-      "risk": "destructive",
-      "surfaces": [
-        "settings"
-      ],
-      "visibility": "surface-scoped"
-    },
-    "bridgeDevices.revokePairingCode": {
-      "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "approvalBehavior": "approval_gated_write",
-      "capabilityPack": "admin",
-      "description": "Use this to revoke an unused bridge pairing code before it expires.",
-      "effect": "admin_write",
-      "executionMode": "mutation",
-      "inputSchema": {
-        "pairingCodeId": {
           "kind": "string"
         }
       },
@@ -2557,6 +3044,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Create a row in a dynamic database table.",
       "effect": "row_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "databases_records",
+        "requiredExplicitInputFields": [
+          "tableId"
+        ]
+      },
       "inputSchema": {
         "attributes": {
           "kind": "record",
@@ -2570,6 +3063,64 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         }
       },
       "risk": "mutating_write",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.delete": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Archive one dynamic database table by immutable ID. First call without confirmation to review impact; repeat with confirmation='DELETE' to archive it.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "confirmation": {
+          "kind": "literal",
+          "optional": true,
+          "value": "DELETE"
+        },
+        "tableId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.deleteField": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Archive one dynamic database field by immutable ID. First call without confirmation to review impact; repeat with confirmation='DELETE' to archive it.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "confirmation": {
+          "kind": "literal",
+          "optional": true,
+          "value": "DELETE"
+        },
+        "fieldId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
       "surfaces": [
         "database",
         "space"
@@ -2603,6 +3154,35 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "databases.deleteRelationshipDefinition": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "databases",
+      "description": "Delete one dynamic database relationship definition by immutable ID. First call without confirmation to review impact; repeat with confirmation='DELETE' to delete it.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "confirmation": {
+          "kind": "literal",
+          "optional": true,
+          "value": "DELETE"
+        },
+        "relationshipDefinitionId": {
+          "kind": "string"
+        }
+      },
+      "risk": "destructive",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
     "databases.deleteRow": {
       "annotations": {
         "destructiveHint": false,
@@ -2612,14 +3192,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "approval_gated_write",
       "capabilityPack": "databases",
-      "description": "Use this to delete a row in a dynamic database table. Archives by default; hard-deletes only with permanent=true.",
+      "description": "Archive a row in a dynamic database table.",
       "effect": "row_write",
       "executionMode": "mutation",
       "inputSchema": {
-        "permanent": {
-          "kind": "boolean",
-          "optional": true
-        },
         "rowId": {
           "kind": "string"
         }
@@ -2643,6 +3219,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read one dynamic database table definition.",
       "effect": "read",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "databases_records",
+        "requiredExplicitInputFields": [
+          "tableIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "tableIdOrSlug": {
           "kind": "string"
@@ -2667,6 +3249,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read one row in a dynamic database table.",
       "effect": "read",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "databases_records",
+        "requiredExplicitInputFields": [
+          "rowId"
+        ]
+      },
       "inputSchema": {
         "rowId": {
           "kind": "string"
@@ -2691,10 +3279,48 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "List user-created dynamic database tables.",
       "effect": "read",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "databases_records"
+      },
       "inputSchema": {
         "includeArchived": {
           "kind": "boolean",
           "optional": true
+        }
+      },
+      "risk": "read",
+      "surfaces": [
+        "database",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "databases.listFieldOptions": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "databases",
+      "description": "List one bounded page of options for a select field. Continue with the opaque cursor until isDone when the complete catalog is needed.",
+      "effect": "read",
+      "executionMode": "mutation",
+      "inputSchema": {
+        "cursor": {
+          "kind": "string",
+          "optional": true
+        },
+        "fieldIdOrKey": {
+          "kind": "string"
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
+        },
+        "tableIdOrSlug": {
+          "kind": "string"
         }
       },
       "risk": "read",
@@ -2746,10 +3372,14 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "databases",
-      "description": "List true related-record links for one dynamic database row, including source/target row ids, labels, metadata, and related row summaries.",
+      "description": "List one bounded page of true related-record links for a dynamic database row, including source/target row ids, labels, metadata, related row summaries, and an opaque continuation cursor.",
       "effect": "read",
       "executionMode": "mutation",
       "inputSchema": {
+        "cursor": {
+          "kind": "string",
+          "optional": true
+        },
         "direction": {
           "kind": "enum",
           "optional": true,
@@ -2758,6 +3388,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
             "reverse",
             "both"
           ]
+        },
+        "limit": {
+          "kind": "number",
+          "optional": true
         },
         "relationshipDefinitionId": {
           "kind": "string",
@@ -2786,6 +3420,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "List rows in a dynamic database table.",
       "effect": "read",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "databases_records",
+        "requiredExplicitInputFields": [
+          "tableIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "cursor": {
           "kind": "string",
@@ -2860,6 +3500,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Update a row in a dynamic database table.",
       "effect": "row_write",
       "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "databases_records",
+        "requiredExplicitInputFields": [
+          "rowId"
+        ]
+      },
       "inputSchema": {
         "attributes": {
           "kind": "record",
@@ -3120,6 +3766,79 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       ],
       "visibility": "surface-scoped"
     },
+    "machineEnrollments.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to create a short-lived Machine enrollment. Set registerAgent when the Machine should also report proposed Agent targets.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "machines",
+      "inputSchema": {
+        "registerAgent": {
+          "kind": "boolean",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "machineEnrollments.listActive": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "approvalBehavior": "read_only",
+      "capabilityPack": "admin",
+      "description": "Use this to list active Machine enrollments and their registration state.",
+      "effect": "read",
+      "executionMode": "read",
+      "featureFlagKey": "machines",
+      "inputSchema": {},
+      "risk": "read",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "machineEnrollments.regenerate": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "admin",
+      "description": "Use this to replace an unregistered Machine enrollment with a new short-lived enrollment.",
+      "effect": "admin_write",
+      "executionMode": "mutation",
+      "featureFlagKey": "machines",
+      "inputSchema": {
+        "enrollmentId": {
+          "kind": "string"
+        },
+        "registerAgent": {
+          "kind": "boolean",
+          "optional": true
+        }
+      },
+      "risk": "mutating_write",
+      "surfaces": [
+        "settings"
+      ],
+      "visibility": "surface-scoped"
+    },
     "messages.search": {
       "annotations": {
         "destructiveHint": false,
@@ -3371,7 +4090,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "approvalBehavior": "read_only",
       "capabilityPack": "core",
-      "description": "Read one first-class 0000 Chat object through a typed reference. Use after context.get, objects.search, or another tool returns an object ref.",
+      "description": "Read one first-class 0000 Chat object through a typed reference. Thread objects return metadata by default; pass include: [\"content\"] for the latest bounded transcript, or use threads.read. Use after context.get, objects.search, or another tool returns an object ref.",
       "effect": "read",
       "executionMode": "read",
       "inputSchema": {
@@ -3799,6 +4518,12 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "Read one 0000 Chat space by id or slug.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "organizations_spaces",
+        "requiredExplicitInputFields": [
+          "spaceIdOrSlug"
+        ]
+      },
       "inputSchema": {
         "includeArchived": {
           "kind": "boolean",
@@ -3826,6 +4551,9 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       "description": "List 0000 Chat spaces in the current organization.",
       "effect": "read",
       "executionMode": "read",
+      "externalAccess": {
+        "capabilityPack": "organizations_spaces"
+      },
       "inputSchema": {
         "includeArchived": {
           "kind": "boolean",
@@ -4950,6 +5678,19 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "apps.update",
     "apps.archive",
     "apps.validateOpenUi",
+    "apps.code.describeRuntime",
+    "apps.code.startEdit",
+    "apps.code.listFiles",
+    "apps.code.readFiles",
+    "apps.code.reserveSource",
+    "apps.code.completeSource",
+    "apps.code.putFiles",
+    "apps.code.checkProject",
+    "apps.code.readCheck",
+    "apps.code.publishRevision",
+    "apps.code.discardEdit",
+    "apps.code.disable",
+    "apps.code.rollback",
     "automations.list",
     "automations.get",
     "automations.create",
@@ -4958,8 +5699,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "automations.runNow",
     "databases.list",
     "databases.get",
+    "databases.listFieldOptions",
     "databases.create",
     "databases.createField",
+    "databases.deleteField",
     "databases.listRows",
     "databases.getRow",
     "databases.searchRows",
@@ -4969,8 +5712,10 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "databases.listRelationshipDefinitions",
     "databases.listRowRelationships",
     "databases.createRelationshipDefinition",
+    "databases.deleteRelationshipDefinition",
     "databases.createRelationship",
     "databases.deleteRelationship",
+    "databases.delete",
     "databaseViews.list",
     "databaseViews.get",
     "databaseViews.getDefault",
@@ -4994,9 +5739,9 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "artifacts.patchText",
     "artifacts.link",
     "bridgeDevices.list",
-    "bridgeDevices.listPairingCodes",
-    "bridgeDevices.createPairingCode",
-    "bridgeDevices.revokePairingCode",
+    "machineEnrollments.listActive",
+    "machineEnrollments.create",
+    "machineEnrollments.regenerate",
     "bridgeDevices.revoke",
     "bridgeDevices.delete",
     "bridgeDevices.renameLocation",

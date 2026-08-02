@@ -22,6 +22,12 @@ import {
   type BridgeQueueResult,
 } from "./acp-bridge/convex-http";
 import {
+  machineMcpCredentialsDirectory,
+  provisionMachineMcpInstallation,
+  runMachineMcpCommand,
+  type MachineMcpInstallation,
+} from "./machine-mcp";
+import {
   BridgeDeviceRealtimeClient,
   type BridgeRealtimeEvent,
 } from "./acp-bridge/bridge-realtime";
@@ -156,7 +162,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.72";
+export const BRIDGE_VERSION = "0.1.73";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -299,6 +305,7 @@ export function buildMachineEnrollmentRequest(input: {
   profileIdentity?: string;
   proposedProfile?: ProposedAgentProfile;
   registerAgent?: boolean;
+  requestMcp?: boolean;
   requestedBridgeToken: string;
   requestedDeviceId: string;
 }): Record<string, unknown> {
@@ -311,6 +318,7 @@ export function buildMachineEnrollmentRequest(input: {
     profileIdentity: registerAgent ? input.profileIdentity : undefined,
     proposedProfile: registerAgent ? input.proposedProfile : undefined,
     registerAgent: registerAgent || undefined,
+    requestMcp: registerAgent && input.requestMcp === true ? true : undefined,
     requestedBridgeToken: input.requestedBridgeToken,
     requestedDeviceId: input.requestedDeviceId,
     targetMode: registerAgent,
@@ -838,6 +846,9 @@ export type BridgeLoopIterationInput = {
   statusMaxInFlight?: number;
   getStatusMaxInFlight?: () => number;
   applySettingsControl?: (settings: BridgeControlResponse["settings"]) => void;
+  installMachineMcp?: (
+    installation: MachineMcpInstallation,
+  ) => Promise<void>;
   manager: BridgeLoopManager;
   inFlightCommands: Map<string, Promise<void>>;
   inFlightCommandMetadata: Map<string, InFlightCommandMetadata>;
@@ -1813,6 +1824,7 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
         : undefined,
       proposedProfile,
       registerAgent,
+      requestMcp: registerAgent,
       requestedBridgeToken: pendingRequest.bridgeToken,
       requestedDeviceId: pendingRequest.deviceId,
     }),
@@ -2773,6 +2785,25 @@ async function startBridge(parsed: ParsedBridgeArgs) {
       cloudRequestTimeoutMs,
       applySettingsControl: (settings) => {
         applyBridgeSettingsControl(context, settings);
+      },
+      installMachineMcp: async (installation) => {
+        const cloud = createCloudClient(context.config, {
+          requestTimeoutMs: cloudRequestTimeoutMs,
+        });
+        await provisionMachineMcpInstallation({
+          claimCredential: async (targetId) =>
+            await cloud.claimMachineMcpCredential(targetId),
+          connectorScript: join(
+            dirname(fileURLToPath(import.meta.url)),
+            "hosted-mcp-connector.ts",
+          ),
+          credentialsDirectory: machineMcpCredentialsDirectory(configPath),
+          installation,
+          reportInstallation: async (report) => {
+            await cloud.reportMachineMcpInstallation(report);
+          },
+          run: runMachineMcpCommand,
+        });
       },
       applyFeatureFlagsControl: async () => {
         await appendBridgeRegistration(configPath, context.config);
@@ -4305,7 +4336,8 @@ export async function runBridgeLoopIteration(
         (heartbeatResult.control?.settings ||
           heartbeatResult.control?.refreshHermesProfiles ||
           heartbeatResult.control?.refreshRuntimeProfiles ||
-          heartbeatResult.control?.command)
+          heartbeatResult.control?.command ||
+          heartbeatResult.control?.mcpInstallations)
       ) {
         if (heartbeatResult.control.settings) {
           input.applySettingsControl?.(heartbeatResult.control.settings);
@@ -4331,6 +4363,28 @@ export async function runBridgeLoopIteration(
             command: controlCommand.command,
             restartRequested: restartResult.restartRequested,
           });
+        }
+        for (const installation of machineMcpInstallationsFromUnknown(
+          heartbeatResult.control.mcpInstallations,
+        )) {
+          try {
+            await input.installMachineMcp?.(installation);
+            input.log({
+              level: "info",
+              event: "bridge.machine_mcp.installed",
+              deviceId: input.config.deviceId,
+              runtimeId: installation.runtimeId,
+              targetId: installation.targetId,
+            });
+          } catch {
+            input.log({
+              level: "warn",
+              event: "bridge.machine_mcp.installation_failed",
+              deviceId: input.config.deviceId,
+              runtimeId: installation.runtimeId,
+              targetId: installation.targetId,
+            });
+          }
         }
         try {
           if (
@@ -5770,7 +5824,36 @@ type BridgeControlResponse = {
   refreshRuntimeProfiles?: {
     requestedAt?: unknown;
   };
+  mcpInstallations?: unknown;
 };
+
+function machineMcpInstallationsFromUnknown(
+  value: unknown,
+): MachineMcpInstallation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      return [];
+    }
+    const record = candidate as Record<string, unknown>;
+    if (
+      typeof record.targetId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(record.targetId) ||
+      typeof record.runtimeId !== "string" ||
+      !/^[a-z_]{1,64}$/.test(record.runtimeId) ||
+      (record.profileIdentity !== undefined && typeof record.profileIdentity !== "string")
+    ) {
+      return [];
+    }
+    return [{
+      ...(typeof record.profileIdentity === "string"
+        ? { profileIdentity: record.profileIdentity }
+        : {}),
+      runtimeId: record.runtimeId,
+      targetId: record.targetId,
+    }];
+  });
+}
 
 export function buildHeartbeatStatusPayload(status: BridgeStatus) {
   return {
