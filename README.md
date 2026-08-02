@@ -27,14 +27,13 @@ Useful trust and operations docs:
 - [Security policy](SECURITY.md)
 - [Agent contributor guide](AGENTS.md)
 
-## Install From A Connection Code
+## Install From A Machine Enrollment Code
 
-In 0000 Chat, generate an agent connection code from Agents settings. Then
-paste the generated prompt into your local agent. It will fetch instructions
-from:
+In 0000 Chat, generate a Machine enrollment code with agent registration. Then
+paste the generated prompt into your local agent. It fetches instructions from:
 
 ```text
-https://0000.chat/connect/<code>
+https://0000.chat/api/machine-enrollments/install.sh?code=<code>&registerAgent=true
 ```
 
 The setup command installed by 0000 Chat clones this repo into `~/0000` and
@@ -44,7 +43,7 @@ registers the bridge against your 0000 Chat account:
 git clone https://github.com/0000-chat/0000.git "$HOME/0000"
 cd "$HOME/0000"
 bun install
-bun run bridge connect "$CODE" --app-url "https://0000.chat"
+bun run bridge enroll "$CODE" --app-url "https://0000.chat" --register-agent
 ```
 
 After the human approves the pending agent in 0000 Chat, start the bridge:
