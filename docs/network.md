@@ -7,8 +7,8 @@ app code or generated backend clients.
 
 | Endpoint | Direction | Purpose | Auth |
 | --- | --- | --- | --- |
-| `/api/agent-connections/install.sh?code=<code>` | Download from app | Fetch connection-code installer | Short-lived connection code |
-| `/api/agent-connections/register` | Bridge to app | Register a pending bridge for approval | Short-lived connection code |
+| `/api/machine-enrollments/install.sh?code=<code>` | Download from app | Fetch Machine enrollment installer | Short-lived Machine enrollment code |
+| `/api/machine-enrollments/register` | Bridge to app | Register a pending Machine and optional agent target for approval | Short-lived Machine enrollment code |
 | `/api/agent-bridge/validate` | Bridge to app | Validate bridge token and device id | Bridge bearer token |
 | `/api/agent-bridge/claim` | Bridge to app | Claim queued work for this bridge | Bridge bearer token |
 | `/api/agent-bridge/events` | Bridge to app | Post normalized agent events and results | Bridge bearer token |
@@ -16,6 +16,9 @@ app code or generated backend clients.
 
 The app URL is provided during pairing. Production installs use
 `https://0000.chat`.
+
+Older bridge versions can use the legacy agent-connection endpoints. New
+installations use the Machine enrollment endpoints above.
 
 ## Data Sent
 

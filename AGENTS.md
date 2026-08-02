@@ -29,7 +29,8 @@ bun run typecheck
 Common scripts:
 
 - `bun run bridge`: run the bridge CLI.
-- `bun run bridge:connect`: connect from a 0000 Chat connection code.
+- `bun run bridge:enroll`: enroll a Machine; add `--register-agent` to enroll an agent target.
+- `bun run bridge:connect`: legacy shortcut for agent enrollment from a 0000 Chat Machine enrollment code.
 - `bun run bridge:start`: start the paired bridge.
 - `bun test`: run bridge tests.
 - `bun run typecheck`: run TypeScript checking.
@@ -88,4 +89,3 @@ Use direct pushes to `main` only when the human explicitly asks for that path.
   API contracts.
 - If a change requires Convex schema, settings UI, connection-code generation,
   or queue/API changes, make the app-side change in `/home/ubuntu/0000-chat`.
-

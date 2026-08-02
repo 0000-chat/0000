@@ -7,6 +7,7 @@
   "scripts": {
     "bridge": "bun scripts/acp-bridge.ts",
     "bridge:connect": "bun scripts/acp-bridge.ts connect",
+    "bridge:enroll": "bun scripts/acp-bridge.ts enroll",
     "bridge:dev": "bun scripts/bridge-dev-supervisor.ts",
     "bridge:smoke-cloud": "bun scripts/acp-bridge/cloud-smoke.ts",
     "bridge:smoke-runtimes": "bun scripts/acp-bridge/runtime-smoke.ts",

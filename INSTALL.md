@@ -1,10 +1,10 @@
 # Install Details
 
-0000 Chat installs this bridge through a short-lived connection code. The
-connection page shows a command like:
+0000 Chat installs this bridge through a short-lived Machine enrollment code. The
+enrollment page shows a command like:
 
 ```bash
-curl -fsSL https://0000.chat/api/agent-connections/install.sh?code=<code> | bash
+curl -fsSL "https://0000.chat/api/machine-enrollments/install.sh?code=<code>&registerAgent=true" | bash
 ```
 
 ## What The Installer Does
@@ -15,9 +15,9 @@ The generated script is intentionally small and predictable:
 2. Clones or updates this repository at `$HOME/0000` to the release tag chosen
    by the installer.
 3. Runs `bun install`.
-4. Runs `bun run bridge connect <code> --app-url https://0000.chat`.
+4. Runs `bun run bridge enroll <code> --app-url https://0000.chat --register-agent`.
 5. Writes a local agent skill so the coding agent knows how to reconnect.
-6. Registers a pending bridge connection for human approval in 0000 Chat.
+6. Registers a pending Machine and agent target for human approval in 0000 Chat.
 
 The repository clone command is currently:
 
@@ -45,17 +45,17 @@ the same steps manually:
 git clone --branch "v0.1.9" --depth 1 https://github.com/0000-chat/0000.git "$HOME/0000"
 cd "$HOME/0000"
 bun install
-bun run bridge connect "<connection-code>" --app-url "https://0000.chat" --skill-path "$HOME/.claude/skills/0000/SKILL.md" --install-mode "manual"
+bun run bridge enroll "<machine-enrollment-code>" --app-url "https://0000.chat" --register-agent --skill-path "$HOME/.claude/skills/0000/SKILL.md" --install-mode "manual"
 ```
 
-After 0000 Chat shows the pending bridge, approve it in the app, then start:
+After 0000 Chat shows the pending Machine and agent target, approve them in the app, then start:
 
 ```bash
 cd "$HOME/0000"
 bun run bridge start
 ```
 
-Connection codes are short lived. Generate a fresh code from 0000 Chat when
+Machine enrollment codes are short lived. Generate a fresh code from 0000 Chat when
 you are ready to run the manual command.
 
 ## Files Written
