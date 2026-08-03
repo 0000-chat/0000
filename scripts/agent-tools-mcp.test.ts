@@ -160,6 +160,27 @@ describe("agent tools MCP server helpers", () => {
     })
   })
 
+  test("derives Machine catalog access from generated manifest feature flags", () => {
+    expect(parseAgentToolMcpFeatureFlags("machines,future-flag")).toEqual(["machines"])
+
+    const withoutFlag = searchAgentToolCatalog({ query: "list active machine enrollments", limit: 10 })
+    expect(withoutFlag.items.map((item) => item.tool)).not.toContain("machineEnrollments.listActive")
+    expect(describeAgentToolCatalogEntry("machineEnrollments.listActive")).toMatchObject({
+      error: { code: "tool_not_found" },
+    })
+
+    const withFlag = searchAgentToolCatalog({
+      enabledFeatureFlags: ["machines"],
+      limit: 10,
+      query: "list active machine enrollments",
+    })
+    expect(withFlag.items.map((item) => item.tool)).toContain("machineEnrollments.listActive")
+    expect(describeAgentToolCatalogEntry("machineEnrollments.listActive", ["machines"])).toMatchObject({
+      capabilityPack: "admin",
+      tool: "machineEnrollments.listActive",
+    })
+  })
+
   test("loads bridge env including active surfaces and feature flags", () => {
     expect(buildAgentToolMcpEnv({
       ZERO_CHAT_ACTIVE_TOOL_SURFACES: "thread,database,unknown,thread",

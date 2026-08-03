@@ -1669,7 +1669,32 @@ export function buildEndpoint(baseUrl: string, path: string): string {
 }
 
 function normalizePublicOrigin(value: string): string {
-  return buildEndpoint(value, "/").replace(/\/$/, "");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(
+      "repair-config requires a valid http or https origin without credentials",
+    );
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username.length > 0 ||
+    url.password.length > 0
+  ) {
+    throw new Error(
+      "repair-config requires a valid http or https origin without credentials",
+    );
+  }
+  return url.origin;
+}
+
+function matchesPublicOrigin(value: string, publicOrigin: string): boolean {
+  try {
+    return normalizePublicOrigin(value) === publicOrigin;
+  } catch {
+    return false;
+  }
 }
 
 function splitCommaSeparatedList(value: string | undefined): string[] {
@@ -1912,22 +1937,40 @@ async function repairBridgeConfig(parsed: ParsedBridgeArgs) {
 
   const publicOrigin = normalizePublicOrigin(appUrl);
   const configPath = getConfigPath(parsed.flags);
-  const config = await readBridgeConfigFile(configPath);
+  const rawConfig = await readJsonFile<unknown>(configPath);
+  const config = normalizeBridgeConfigFile(rawConfig);
+  const rawDocument = recordFromUnknown(rawConfig);
+  if (!rawDocument) {
+    throw new Error("Bridge config must be an object");
+  }
+  const rawRegistrationValues =
+    rawDocument.version === 2 && Array.isArray(rawDocument.registrations)
+      ? rawDocument.registrations
+      : [rawDocument];
   let repairedCount = 0;
-  const registrations = config.registrations.map((registration) => {
+  const registrations = rawRegistrationValues.map((rawValue, index) => {
+    const rawRegistration = recordFromUnknown(rawValue);
+    const registration = config.registrations[index];
+    if (!rawRegistration || !registration) {
+      throw new Error("Bridge registration must be an object");
+    }
     if (
-      normalizePublicOrigin(registration.appUrl) !== publicOrigin ||
+      !matchesPublicOrigin(registration.appUrl, publicOrigin) ||
       (registration.bridgeApiUrl !== undefined &&
-        normalizePublicOrigin(registration.bridgeApiUrl) === publicOrigin)
+        matchesPublicOrigin(registration.bridgeApiUrl, publicOrigin))
     ) {
-      return registration;
+      return rawRegistration;
     }
     repairedCount += 1;
-    return { ...registration, bridgeApiUrl: publicOrigin };
+    return { ...rawRegistration, bridgeApiUrl: publicOrigin };
   });
 
   if (repairedCount > 0) {
-    await writeBridgeConfigFile(configPath, { version: 2, registrations });
+    const repairedConfig =
+      rawDocument.version === 2
+        ? { ...rawDocument, registrations }
+        : { version: 2, registrations };
+    await writeBridgeConfigFile(configPath, repairedConfig);
   } else {
     await ensureSecureBridgeConfigFile(configPath);
   }

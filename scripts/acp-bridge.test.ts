@@ -156,6 +156,10 @@ describe("bridge command parsing", () => {
     const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-v2-"));
     const path = join(dir, "bridge.json");
     await writeBridgeConfigFile(path, {
+      futureRootField: {
+        enabled: true,
+        revision: 7,
+      },
       version: 2,
       registrations: [
         {
@@ -164,6 +168,9 @@ describe("bridge command parsing", () => {
           bridgeToken: "main-token",
           deviceId: "bridge_main",
           deviceName: "Main bridge",
+          futureRegistrationField: {
+            labels: ["primary", "stable"],
+          },
           pairedAt: "2026-08-03T00:00:00.000Z",
         },
         {
@@ -172,6 +179,10 @@ describe("bridge command parsing", () => {
           bridgeToken: "staging-token",
           deviceId: "bridge_staging",
           deviceName: "Staging bridge",
+          futureRegistrationField: {
+            labels: ["staging"],
+            revision: 11,
+          },
           pairedAt: "2026-08-03T00:00:00.000Z",
         },
       ],
@@ -191,16 +202,74 @@ describe("bridge command parsing", () => {
     expect(second.exitCode).toBe(0);
     expect(second.stdout).toContain("repaired 0 bridge registrations");
     expect(await readFile(path, "utf8")).toBe(firstConfig);
+    expect(repaired.futureRootField).toEqual({
+      enabled: true,
+      revision: 7,
+    });
     expect(repaired.registrations).toEqual([
       expect.objectContaining({
         appUrl: "https://0000.chat",
         bridgeApiUrl: "https://0000.chat",
+        futureRegistrationField: {
+          labels: ["primary", "stable"],
+        },
       }),
-      expect.objectContaining({
+      {
         appUrl: "https://staging.0000.chat",
         bridgeApiUrl: "https://platform-actions.0000.chat",
-      }),
+        bridgeToken: "staging-token",
+        deviceId: "bridge_staging",
+        deviceName: "Staging bridge",
+        futureRegistrationField: {
+          labels: ["staging"],
+          revision: 11,
+        },
+        pairedAt: "2026-08-03T00:00:00.000Z",
+      },
     ]);
+  });
+
+  test("rejects credential-bearing repair origins without exposing credentials", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-credentials-"));
+    const path = join(dir, "bridge.json");
+    await writeBridgeConfigFile(path, {
+      version: 2,
+      registrations: [bridgeRegistration()],
+    });
+    const before = await readFile(path, "utf8");
+    const password = "repair-password-must-not-print";
+
+    const result = await runBridgeCli(
+      ["repair-config", "--app-url", `https://repair-user:${password}@0000.chat/path`],
+      { ZERO_CHAT_BRIDGE_CONFIG: path },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("http or https origin without credentials");
+    expect(`${result.stdout}${result.stderr}`).not.toContain(password);
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect(await readFile(path, "utf8")).not.toContain(password);
+  });
+
+  test("rejects non-HTTP repair origins without changing config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-protocol-"));
+    const path = join(dir, "bridge.json");
+    await writeBridgeConfigFile(path, {
+      version: 2,
+      registrations: [bridgeRegistration()],
+    });
+    const before = await readFile(path, "utf8");
+
+    const result = await runBridgeCli(
+      ["repair-config", "--app-url", "file:///tmp/0000-chat"],
+      { ZERO_CHAT_BRIDGE_CONFIG: path },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("http or https origin without credentials");
+    expect(await readFile(path, "utf8")).toBe(before);
   });
 
   test("keeps explicit help successful but rejects unsupported bridge commands", async () => {
