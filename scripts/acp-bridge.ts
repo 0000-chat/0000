@@ -162,7 +162,9 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.75";
+export const BRIDGE_VERSION = "0.1.76";
+const PUBLIC_APP_ORIGIN = "https://0000.chat";
+const PUBLIC_BRIDGE_API_ORIGIN = "https://api.0000.chat";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
 const BRIDGE_MCP_SERVER_NAME = "0000-agent-tools";
 const BRIDGE_MCP_SERVER_VERSION = "0.2.0";
@@ -1936,6 +1938,8 @@ async function repairBridgeConfig(parsed: ParsedBridgeArgs) {
   }
 
   const publicOrigin = normalizePublicOrigin(appUrl);
+  const bridgeApiOrigin =
+    publicOrigin === PUBLIC_APP_ORIGIN ? PUBLIC_BRIDGE_API_ORIGIN : publicOrigin;
   const configPath = getConfigPath(parsed.flags);
   const rawConfig = await readJsonFile<unknown>(configPath);
   const config = normalizeBridgeConfigFile(rawConfig);
@@ -1957,12 +1961,12 @@ async function repairBridgeConfig(parsed: ParsedBridgeArgs) {
     if (
       !matchesPublicOrigin(registration.appUrl, publicOrigin) ||
       (registration.bridgeApiUrl !== undefined &&
-        matchesPublicOrigin(registration.bridgeApiUrl, publicOrigin))
+        matchesPublicOrigin(registration.bridgeApiUrl, bridgeApiOrigin))
     ) {
       return rawRegistration;
     }
     repairedCount += 1;
-    return { ...rawRegistration, bridgeApiUrl: publicOrigin };
+    return { ...rawRegistration, bridgeApiUrl: bridgeApiOrigin };
   });
 
   if (repairedCount > 0) {
