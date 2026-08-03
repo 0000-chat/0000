@@ -74,6 +74,7 @@ describe("agent tools MCP server helpers", () => {
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("runtime.readEvidence")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("notifications.getBrowserConfig")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("actions.updateDraft")
+    expect(AGENT_TOOL_MCP_TOOL_NAMES).toContain("apps.code.create")
     expect(AGENT_TOOL_MCP_TOOL_NAMES).not.toContain("github.createPullRequest")
     expect(AGENT_TOOL_MCP_TOOL_NAMES.some((name) => name.startsWith("scripts."))).toBe(false)
   })
