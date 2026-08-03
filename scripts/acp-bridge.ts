@@ -85,6 +85,7 @@ import {
   inferRuntimeLabel,
   normalizeConfiguredAgentCommand,
 } from "./acp-bridge/runtime-defaults";
+import { resolveEnrollmentAgentTarget } from "./acp-bridge/enrollment-target";
 import {
   synthesizeLegacyHermesProfile,
   type BridgeRuntimeProfile,
@@ -117,6 +118,7 @@ export {
   inferRuntimeId,
   inferRuntimeLabel,
 } from "./acp-bridge/runtime-defaults";
+export { resolveEnrollmentAgentTarget } from "./acp-bridge/enrollment-target";
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".0000", "bridge.json");
 const DEFAULT_STATUS_PATH = join(homedir(), ".0000", "bridge-status.json");
@@ -162,7 +164,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.77";
+export const BRIDGE_VERSION = "0.1.78";
 const PUBLIC_APP_ORIGIN = "https://0000.chat";
 const PUBLIC_BRIDGE_API_ORIGIN = "https://api.0000.chat";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
@@ -1795,9 +1797,17 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
   }
 
   const registerAgent = parsed.flags["register-agent"] === true;
-  const agentCommand = registerAgent
+  const requestedAgentCommand = registerAgent
     ? getFlag(parsed.flags, "agent-command") ?? defaultAgentCommandForEnvironment()
     : undefined;
+  const enrollmentTarget = requestedAgentCommand
+    ? resolveEnrollmentAgentTarget({
+        agentCommand: requestedAgentCommand,
+        env: process.env,
+        profileIdentity: getFlag(parsed.flags, "profile-identity"),
+      })
+    : undefined;
+  const agentCommand = enrollmentTarget?.agentCommand;
   const skillPath = registerAgent
     ? getFlag(parsed.flags, "skill-path", process.env.ZERO_CHAT_SKILL_PATH)
     : undefined;
@@ -1831,6 +1841,7 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
       appUrl,
       agentCommand,
       configPath: getConfigPath(parsed.flags),
+      profileIdentity: enrollmentTarget?.profileIdentity ?? "default",
       skillPath,
     });
   }
@@ -1857,7 +1868,7 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
       host: hostname(),
       platform: process.platform,
       profileIdentity: registerAgent
-        ? getFlag(parsed.flags, "profile-identity", "default") ?? "default"
+        ? enrollmentTarget?.profileIdentity ?? "default"
         : undefined,
       proposedProfile,
       registerAgent,
@@ -6821,6 +6832,7 @@ async function writeAgentConnectionSkill(
     agentCommand: string;
     appUrl: string;
     configPath: string;
+    profileIdentity: string;
     skillPath: string;
   },
 ): Promise<void> {
@@ -6841,7 +6853,7 @@ bun scripts/acp-bridge.ts start --agent-command ${JSON.stringify(input.agentComm
 3. If the bridge config is missing, ask the human to generate a new 0000 agent connection code, then run:
 
 \`\`\`bash
-bun scripts/acp-bridge.ts enroll <code> --app-url ${JSON.stringify(input.appUrl)} --register-agent --agent-command ${JSON.stringify(input.agentCommand)} --skill-path ${JSON.stringify(input.skillPath)}
+bun scripts/acp-bridge.ts enroll <code> --app-url ${JSON.stringify(input.appUrl)} --register-agent --agent-command ${JSON.stringify(input.agentCommand)} --profile-identity ${JSON.stringify(input.profileIdentity)} --skill-path ${JSON.stringify(input.skillPath)}
 \`\`\`
 
 ## Local State
