@@ -93,6 +93,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
         "apps.archive",
         "apps.validateOpenUi",
         "apps.code.describeRuntime",
+        "apps.code.create",
         "apps.code.startEdit",
         "apps.code.listFiles",
         "apps.code.readFiles",
@@ -720,6 +721,43 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
       },
       "risk": "user_interaction",
       "sensitiveInput": true,
+      "surfaces": [
+        "app",
+        "space"
+      ],
+      "visibility": "surface-scoped"
+    },
+    "apps.code.create": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "approvalBehavior": "approval_gated_write",
+      "capabilityPack": "apps",
+      "description": "Create or resume creation of an inert React code app in one explicit space. Reuse the same operationId after transport loss, then pass the returned appId to apps.code.startEdit.",
+      "effect": "schema_write",
+      "executionMode": "mutation",
+      "externalAccess": {
+        "capabilityPack": "apps",
+        "requiredExplicitInputFields": [
+          "spaceIdOrSlug"
+        ]
+      },
+      "featureFlagKey": "react-code-apps",
+      "inputSchema": {
+        "operationId": {
+          "kind": "string"
+        },
+        "spaceIdOrSlug": {
+          "kind": "string"
+        },
+        "title": {
+          "kind": "string"
+        }
+      },
+      "risk": "mutating_write",
       "surfaces": [
         "app",
         "space"
@@ -5685,6 +5723,7 @@ export const AGENT_TOOL_MANIFEST_SNAPSHOT = ({
     "apps.archive",
     "apps.validateOpenUi",
     "apps.code.describeRuntime",
+    "apps.code.create",
     "apps.code.startEdit",
     "apps.code.listFiles",
     "apps.code.readFiles",
