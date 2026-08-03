@@ -82,6 +82,28 @@ function runBridgeLoopIteration(input: BridgeLoopIterationInput) {
   });
 }
 
+async function runBridgeCli(
+  args: string[],
+  env: Record<string, string | undefined> = {},
+) {
+  const bridgeProcess = Bun.spawn({
+    cmd: [
+      process.execPath,
+      fileURLToPath(new URL("./acp-bridge.ts", import.meta.url)),
+      ...args,
+    ],
+    env: { ...process.env, ...env },
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    bridgeProcess.exited,
+    new Response(bridgeProcess.stdout).text(),
+    new Response(bridgeProcess.stderr).text(),
+  ]);
+  return { exitCode, stderr, stdout };
+}
+
 describe("bridge command parsing", () => {
   test("keeps the bridge:connect code argument positional", async () => {
     const packageJson = JSON.parse(
@@ -91,6 +113,182 @@ describe("bridge command parsing", () => {
     expect(packageJson.scripts?.["bridge:connect"]).toBe(
       "bun scripts/acp-bridge.ts connect",
     );
+  });
+
+  test("repairs matching legacy bridge API origins without exposing tokens", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-legacy-"));
+    const path = join(dir, "bridge.json");
+    await writeFile(
+      path,
+      `${JSON.stringify({
+        appUrl: "https://0000.chat/",
+        bridgeApiUrl: "https://platform-actions.0000.chat",
+        bridgeToken: "legacy-token-must-not-print",
+        deviceId: "bridge_legacy",
+        deviceName: "Legacy bridge",
+        pairedAt: "2026-08-03T00:00:00.000Z",
+      })}\n`,
+    );
+
+    const result = await runBridgeCli(["repair-config", "--app-url", "https://0000.chat"], {
+      ZERO_CHAT_BRIDGE_CONFIG: path,
+    });
+    const repaired = JSON.parse(await readFile(path, "utf8"));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("repaired 1 bridge registration");
+    expect(result.stdout).not.toContain("legacy-token-must-not-print");
+    expect(repaired).toMatchObject({
+      version: 2,
+      registrations: [
+        expect.objectContaining({
+          appUrl: "https://0000.chat/",
+          bridgeApiUrl: "https://0000.chat",
+          bridgeToken: "legacy-token-must-not-print",
+        }),
+      ],
+    });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  test("repairs only matching v2 registrations and is idempotent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-v2-"));
+    const path = join(dir, "bridge.json");
+    await writeBridgeConfigFile(path, {
+      futureRootField: {
+        enabled: true,
+        revision: 7,
+      },
+      version: 2,
+      registrations: [
+        {
+          appUrl: "https://0000.chat",
+          bridgeApiUrl: "https://platform-actions.0000.chat",
+          bridgeToken: "main-token",
+          deviceId: "bridge_main",
+          deviceName: "Main bridge",
+          futureRegistrationField: {
+            labels: ["primary", "stable"],
+          },
+          pairedAt: "2026-08-03T00:00:00.000Z",
+        },
+        {
+          appUrl: "https://staging.0000.chat",
+          bridgeApiUrl: "https://platform-actions.0000.chat",
+          bridgeToken: "staging-token",
+          deviceId: "bridge_staging",
+          deviceName: "Staging bridge",
+          futureRegistrationField: {
+            labels: ["staging"],
+            revision: 11,
+          },
+          pairedAt: "2026-08-03T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const first = await runBridgeCli(["repair-config", "--app-url", "https://0000.chat"], {
+      ZERO_CHAT_BRIDGE_CONFIG: path,
+    });
+    const firstConfig = await readFile(path, "utf8");
+    const second = await runBridgeCli(["repair-config", "--app-url", "https://0000.chat"], {
+      ZERO_CHAT_BRIDGE_CONFIG: path,
+    });
+    const repaired = JSON.parse(await readFile(path, "utf8"));
+
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain("repaired 1 bridge registration");
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("repaired 0 bridge registrations");
+    expect(await readFile(path, "utf8")).toBe(firstConfig);
+    expect(repaired.futureRootField).toEqual({
+      enabled: true,
+      revision: 7,
+    });
+    expect(repaired.registrations).toEqual([
+      expect.objectContaining({
+        appUrl: "https://0000.chat",
+        bridgeApiUrl: "https://0000.chat",
+        futureRegistrationField: {
+          labels: ["primary", "stable"],
+        },
+      }),
+      {
+        appUrl: "https://staging.0000.chat",
+        bridgeApiUrl: "https://platform-actions.0000.chat",
+        bridgeToken: "staging-token",
+        deviceId: "bridge_staging",
+        deviceName: "Staging bridge",
+        futureRegistrationField: {
+          labels: ["staging"],
+          revision: 11,
+        },
+        pairedAt: "2026-08-03T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  test("rejects credential-bearing repair origins without exposing credentials", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-credentials-"));
+    const path = join(dir, "bridge.json");
+    await writeBridgeConfigFile(path, {
+      version: 2,
+      registrations: [bridgeRegistration()],
+    });
+    const before = await readFile(path, "utf8");
+    const password = "repair-password-must-not-print";
+
+    const result = await runBridgeCli(
+      ["repair-config", "--app-url", `https://repair-user:${password}@0000.chat/path`],
+      { ZERO_CHAT_BRIDGE_CONFIG: path },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("http or https origin without credentials");
+    expect(`${result.stdout}${result.stderr}`).not.toContain(password);
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect(await readFile(path, "utf8")).not.toContain(password);
+  });
+
+  test("rejects non-HTTP repair origins without changing config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "0000-bridge-repair-protocol-"));
+    const path = join(dir, "bridge.json");
+    await writeBridgeConfigFile(path, {
+      version: 2,
+      registrations: [bridgeRegistration()],
+    });
+    const before = await readFile(path, "utf8");
+
+    const result = await runBridgeCli(
+      ["repair-config", "--app-url", "file:///tmp/0000-chat"],
+      { ZERO_CHAT_BRIDGE_CONFIG: path },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("http or https origin without credentials");
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("keeps explicit help successful but rejects unsupported bridge commands", async () => {
+    const helpResults = await Promise.all([
+      runBridgeCli([]),
+      runBridgeCli(["help"]),
+      runBridgeCli(["--help"]),
+      runBridgeCli(["-h"]),
+    ]);
+    const unsupported = await runBridgeCli(["not-a-bridge-command"]);
+
+    for (const help of helpResults) {
+      expect(help.exitCode).toBe(0);
+      expect(help.stdout).toContain("Usage:");
+      expect(help.stderr).toBe("");
+    }
+    expect(unsupported.exitCode).toBe(1);
+    expect(unsupported.stdout).toBe("");
+    expect(unsupported.stderr).toContain("Unsupported bridge command");
   });
 
   test("hard-switches retired Codex ACP commands passed explicitly", () => {

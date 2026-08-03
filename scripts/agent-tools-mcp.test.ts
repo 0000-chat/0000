@@ -16,6 +16,7 @@ import {
   executeCatalogPlan,
   getVisibleAgentToolMcpToolNames,
   invokeAgentToolOverHttp,
+  parseAgentToolMcpFeatureFlags,
   searchAgentToolCatalog,
   toMcpToolResult,
 } from "./agent-tools-mcp"
@@ -136,6 +137,48 @@ describe("agent tools MCP server helpers", () => {
     expect("error" in withoutActionsRun).toBe(true)
     const withActionsRun = describeAgentToolCatalogEntry("actions.run", [ACTIONS_RUNTIME_FEATURE_FLAG_KEY])
     expect(withActionsRun).toMatchObject({ capabilityPack: "actions", tool: "actions.run" })
+  })
+
+  test("keeps React code catalog tools fail-closed until their feature flag is present", () => {
+    expect(parseAgentToolMcpFeatureFlags("react-code-apps,future-flag")).toEqual(["react-code-apps"])
+
+    const withoutFlag = searchAgentToolCatalog({ query: "describe runtime", limit: 10 })
+    expect(withoutFlag.items.map((item) => item.tool)).not.toContain("apps.code.describeRuntime")
+    expect(describeAgentToolCatalogEntry("apps.code.describeRuntime")).toMatchObject({
+      error: { code: "tool_not_found" },
+    })
+
+    const withFlag = searchAgentToolCatalog({
+      enabledFeatureFlags: ["react-code-apps"],
+      limit: 10,
+      query: "describe runtime",
+    })
+    expect(withFlag.items.map((item) => item.tool)).toContain("apps.code.describeRuntime")
+    expect(describeAgentToolCatalogEntry("apps.code.describeRuntime", ["react-code-apps"])).toMatchObject({
+      capabilityPack: "apps",
+      tool: "apps.code.describeRuntime",
+    })
+  })
+
+  test("derives Machine catalog access from generated manifest feature flags", () => {
+    expect(parseAgentToolMcpFeatureFlags("machines,future-flag")).toEqual(["machines"])
+
+    const withoutFlag = searchAgentToolCatalog({ query: "list active machine enrollments", limit: 10 })
+    expect(withoutFlag.items.map((item) => item.tool)).not.toContain("machineEnrollments.listActive")
+    expect(describeAgentToolCatalogEntry("machineEnrollments.listActive")).toMatchObject({
+      error: { code: "tool_not_found" },
+    })
+
+    const withFlag = searchAgentToolCatalog({
+      enabledFeatureFlags: ["machines"],
+      limit: 10,
+      query: "list active machine enrollments",
+    })
+    expect(withFlag.items.map((item) => item.tool)).toContain("machineEnrollments.listActive")
+    expect(describeAgentToolCatalogEntry("machineEnrollments.listActive", ["machines"])).toMatchObject({
+      capabilityPack: "admin",
+      tool: "machineEnrollments.listActive",
+    })
   })
 
   test("loads bridge env including active surfaces and feature flags", () => {

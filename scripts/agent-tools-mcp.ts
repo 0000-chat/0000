@@ -7,10 +7,15 @@ import { AGENT_TOOL_MANIFEST_SNAPSHOT } from "./agent-tool-manifest-snapshot"
 import {
   ACTIONS_RUNTIME_FEATURE_FLAG_KEY,
   ARTIFACTS_FEATURE_FLAG_KEY,
+  REACT_CODE_APPS_FEATURE_FLAG_KEY,
   type ZeroChatPolicyOptions,
 } from "./acp-bridge/zero-chat-policy"
 
-export { ACTIONS_RUNTIME_FEATURE_FLAG_KEY, ARTIFACTS_FEATURE_FLAG_KEY }
+export {
+  ACTIONS_RUNTIME_FEATURE_FLAG_KEY,
+  ARTIFACTS_FEATURE_FLAG_KEY,
+  REACT_CODE_APPS_FEATURE_FLAG_KEY,
+}
 
 export const AGENT_TOOL_MCP_MANIFEST = AGENT_TOOL_MANIFEST_SNAPSHOT.AGENT_TOOL_MANIFEST
 export const AGENT_TOOL_MCP_TOOL_NAMES = AGENT_TOOL_MANIFEST_SNAPSHOT.AGENT_TOOL_MANIFEST_NAMES
@@ -20,7 +25,11 @@ export const AGENT_TOOL_CAPABILITY_PACK_ORDER = AGENT_TOOL_MANIFEST_SNAPSHOT.AGE
 type AgentToolMcpToolName = (typeof AGENT_TOOL_MCP_TOOL_NAMES)[number]
 type AgentToolCapabilityPackName = (typeof AGENT_TOOL_CAPABILITY_PACK_ORDER)[number]
 type AgentToolSurface = "thread" | "space" | "database" | "app" | "automation" | "settings" | "action"
-type FeatureFlagKey = typeof ARTIFACTS_FEATURE_FLAG_KEY | typeof ACTIONS_RUNTIME_FEATURE_FLAG_KEY
+type FeatureFlagKeyFromManifestEntry<Entry> =
+  Entry extends { readonly featureFlagKey: infer Key extends string } ? Key : never
+type FeatureFlagKey = FeatureFlagKeyFromManifestEntry<
+  (typeof AGENT_TOOL_MCP_MANIFEST)[AgentToolMcpToolName]
+>
 type AgentToolInputSchemaField =
   | { kind: "array"; items: AgentToolInputSchemaField; nullable?: true; optional?: true; sensitive?: true }
   | { kind: "boolean"; nullable?: true; optional?: true; sensitive?: true }
@@ -47,7 +56,13 @@ type AgentToolManifestEntry = {
   surfaces?: readonly AgentToolSurface[]
   visibility: "core" | "deferred" | "surface-scoped"
 }
-const DEFINED_FEATURE_FLAGS = new Set<string>([ARTIFACTS_FEATURE_FLAG_KEY, ACTIONS_RUNTIME_FEATURE_FLAG_KEY])
+const DEFINED_FEATURE_FLAGS = new Set<string>(
+  Object.values(AGENT_TOOL_MCP_MANIFEST).flatMap((entry) =>
+    "featureFlagKey" in entry && typeof entry.featureFlagKey === "string"
+      ? [entry.featureFlagKey]
+      : [],
+  ),
+)
 const AGENT_TOOL_MCP_SURFACES = [
   "thread",
   "space",
