@@ -144,7 +144,7 @@ describe("bridge command parsing", () => {
       registrations: [
         expect.objectContaining({
           appUrl: "https://0000.chat/",
-          bridgeApiUrl: "https://0000.chat",
+          bridgeApiUrl: "https://api.0000.chat",
           bridgeToken: "legacy-token-must-not-print",
         }),
       ],
@@ -164,7 +164,7 @@ describe("bridge command parsing", () => {
       registrations: [
         {
           appUrl: "https://0000.chat",
-          bridgeApiUrl: "https://platform-actions.0000.chat",
+          bridgeApiUrl: "https://0000.chat",
           bridgeToken: "main-token",
           deviceId: "bridge_main",
           deviceName: "Main bridge",
@@ -209,7 +209,7 @@ describe("bridge command parsing", () => {
     expect(repaired.registrations).toEqual([
       expect.objectContaining({
         appUrl: "https://0000.chat",
-        bridgeApiUrl: "https://0000.chat",
+        bridgeApiUrl: "https://api.0000.chat",
         futureRegistrationField: {
           labels: ["primary", "stable"],
         },
