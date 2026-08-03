@@ -5,6 +5,7 @@ export const ZERO_CHAT_APP_CONTEXT_POLICY = `The user's messages are sent from t
 
 export const ARTIFACTS_FEATURE_FLAG_KEY = "artifacts"
 export const ACTIONS_RUNTIME_FEATURE_FLAG_KEY = "actions-runtime"
+export const REACT_CODE_APPS_FEATURE_FLAG_KEY = "react-code-apps"
 
 export type ZeroChatPolicyOptions = {
   enabledFeatureFlags?: readonly string[]

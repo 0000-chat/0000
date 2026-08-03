@@ -199,9 +199,11 @@ type BridgeProcessHealth = AcpBridgeProcessHealth & {
 export type BridgeCommandName =
   | "doctor"
   | "enroll"
+  | "repair-config"
   | "start"
   | "status"
-  | "help";
+  | "help"
+  | "unknown";
 
 type FlagValue = string | true | string[];
 type FlagMap = Record<string, FlagValue>;
@@ -1666,6 +1668,10 @@ export function buildEndpoint(baseUrl: string, path: string): string {
   return url.toString();
 }
 
+function normalizePublicOrigin(value: string): string {
+  return buildEndpoint(value, "/").replace(/\/$/, "");
+}
+
 function splitCommaSeparatedList(value: string | undefined): string[] {
   if (!value) {
     return [];
@@ -1731,6 +1737,10 @@ async function main() {
       await showStatus(parsed);
     } else if (parsed.command === "doctor") {
       await showDoctor(parsed);
+    } else if (parsed.command === "repair-config") {
+      await repairBridgeConfig(parsed);
+    } else if (parsed.command === "unknown") {
+      throw new Error("Unsupported bridge command. Run `bridge help` for usage.");
     } else {
       writeStdout(helpText());
     }
@@ -1887,6 +1897,43 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     registerAgent
       ? `Enrolled pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`
       : `Enrolled pending machine ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this machine before it can run work.\n`,
+  );
+}
+
+async function repairBridgeConfig(parsed: ParsedBridgeArgs) {
+  const appUrl = getFlag(
+    parsed.flags,
+    "app-url",
+    process.env.ZERO_CHAT_APP_URL,
+  );
+  if (!appUrl) {
+    throw new Error("repair-config requires --app-url or ZERO_CHAT_APP_URL");
+  }
+
+  const publicOrigin = normalizePublicOrigin(appUrl);
+  const configPath = getConfigPath(parsed.flags);
+  const config = await readBridgeConfigFile(configPath);
+  let repairedCount = 0;
+  const registrations = config.registrations.map((registration) => {
+    if (
+      normalizePublicOrigin(registration.appUrl) !== publicOrigin ||
+      (registration.bridgeApiUrl !== undefined &&
+        normalizePublicOrigin(registration.bridgeApiUrl) === publicOrigin)
+    ) {
+      return registration;
+    }
+    repairedCount += 1;
+    return { ...registration, bridgeApiUrl: publicOrigin };
+  });
+
+  if (repairedCount > 0) {
+    await writeBridgeConfigFile(configPath, { version: 2, registrations });
+  } else {
+    await ensureSecureBridgeConfigFile(configPath);
+  }
+
+  writeStdout(
+    `repaired ${repairedCount} bridge registration${repairedCount === 1 ? "" : "s"} for ${publicOrigin}\n`,
   );
 }
 
@@ -5336,12 +5383,21 @@ function normalizeCommand(command?: string): BridgeCommandName {
   if (
     command === "doctor" ||
     command === "enroll" ||
+    command === "repair-config" ||
     command === "start" ||
     command === "status"
   ) {
     return command;
   }
-  return "help";
+  if (
+    command === undefined ||
+    command === "help" ||
+    command === "--help" ||
+    command === "-h"
+  ) {
+    return "help";
+  }
+  return "unknown";
 }
 
 export function buildStartupSecuritySummary(input: {
@@ -5367,11 +5423,12 @@ function helpText(): string {
     `  bun scripts/acp-bridge.ts enroll <code> --app-url <url> [--device-name <name>] [--register-agent --agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}" --profile-identity <profile-id> --skill-path <path>]`,
     "  connect and connect-org are agent-registration aliases; pair is a machine-only alias.",
     `  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]`,
+    "  bun scripts/acp-bridge.ts repair-config --app-url <url>",
     "  bun scripts/acp-bridge.ts status",
     "  bun scripts/acp-bridge.ts doctor [--trace <trace-id>] [--device-id <bridge-device-id>] [--journal-file <path>]",
     "",
     "Environment:",
-    "  ZERO_CHAT_APP_URL                         Default app URL for enroll",
+    "  ZERO_CHAT_APP_URL                         Default app URL for enroll and repair-config",
     "  ZERO_CHAT_AGENT_COMMAND                   Default ACP agent command for agent enrollment",
     `  ZERO_CHAT_SKILL_PATH                      Local skill path for agent enrollment (default from install script: ${DEFAULT_AGENT_SKILL_PATH})`,
     `  ZERO_CHAT_BRIDGE_CONFIG                  Config path (default: ${DEFAULT_CONFIG_PATH})`,
