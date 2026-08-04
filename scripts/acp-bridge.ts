@@ -1961,6 +1961,9 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     configPath,
     legacyRegistrationCount,
   });
+  if (!bridgeInstallationId && legacyRegistrationCount > 0) {
+    throw new Error("legacy_installation_recovery_required");
+  }
   const generatedRequest = existingRegistration
     ? undefined
     : await preparePendingAgentConnectionRequest(configPath, code);

@@ -535,6 +535,53 @@ describe("bridge command parsing", () => {
     }
   });
 
+  test("fails closed after an active legacy identity lookup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-legacy-active-"));
+    const configPath = join(directory, "bridge.json");
+    const statusPath = join(directory, "bridge-status.json");
+    let registerRequests = 0;
+    const server = Bun.serve({
+      fetch: async (request) => {
+        if (new URL(request.url).pathname.endsWith("registration-identity")) {
+          return Response.json({
+            enrollmentOrganizationMatch: true,
+            organizationId: "org-a",
+            registrationState: "active",
+          });
+        }
+        registerRequests += 1;
+        return Response.json({});
+      },
+      port: 0,
+    });
+    await writeBridgeConfigFile(configPath, {
+      appUrl: server.url.toString(),
+      bridgeToken: "a".repeat(43),
+      deviceId: "bridge_0123456789abcdef01234567",
+      deviceName: "Legacy bridge",
+      pairedAt: "2026-06-01T00:00:00.000Z",
+    });
+
+    try {
+      const result = await runBridgeCli(
+        ["enroll", "MACHINE01", "--app-url", server.url.toString()],
+        {
+          ZERO_CHAT_BRIDGE_CONFIG: configPath,
+          ZERO_CHAT_BRIDGE_STATUS: statusPath,
+        },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("legacy_installation_recovery_required");
+      expect(registerRequests).toBe(0);
+      expect(JSON.parse(await readFile(configPath, "utf8"))).not.toHaveProperty(
+        "bridgeInstallationId",
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses the stored bridge credential proof when enrollment reuses a registration", async () => {
     const directory = await mkdtemp(join(tmpdir(), "0000-bridge-enroll-reuse-"));
     const configPath = join(directory, "bridge.json");
