@@ -235,6 +235,7 @@ export type BridgeRegistration = {
 export type BridgeConfig = BridgeRegistration;
 
 export type MultiBridgeConfig = {
+  bridgeInstallationId?: string;
   version: 2;
   registrations: BridgeRegistration[];
 };
@@ -318,9 +319,11 @@ export function buildProposedAgentProfile(input: {
 }
 
 export function buildMachineEnrollmentRequest(input: {
+  bridgeInstallationId?: string;
   code: string;
   deviceName: string;
   host: string;
+  legacyRegistrationCount: number;
   platform: string;
   profileIdentity?: string;
   proposedProfile?: ProposedAgentProfile;
@@ -331,9 +334,11 @@ export function buildMachineEnrollmentRequest(input: {
 }): Record<string, unknown> {
   const registerAgent = input.registerAgent === true;
   return compact({
+    bridgeInstallationId: input.bridgeInstallationId,
     code: input.code,
     deviceName: input.deviceName,
     host: input.host,
+    legacyRegistrationCount: input.legacyRegistrationCount,
     platform: input.platform,
     profileIdentity: registerAgent ? input.profileIdentity : undefined,
     proposedProfile: registerAgent ? input.proposedProfile : undefined,
@@ -383,7 +388,11 @@ export function reconcileEnrollmentBridgeRegistrations(
       entry.deviceId === registration.deviceId || !superseded.has(entry.deviceId),
   );
   return upsertBridgeRegistration(
-    { version: 2, registrations: retained },
+    {
+      bridgeInstallationId: config.bridgeInstallationId,
+      version: 2,
+      registrations: retained,
+    },
     registration,
   );
 }
@@ -1097,7 +1106,13 @@ export function normalizeBridgeConfigFile(raw: unknown): MultiBridgeConfig {
     if (registrations.length === 0) {
       throw new Error("Bridge config has no registrations");
     }
-    return { version: 2, registrations };
+    return compact({
+      bridgeInstallationId: normalizeBridgeInstallationId(
+        record.bridgeInstallationId,
+      ),
+      version: 2,
+      registrations,
+    });
   }
   return { version: 2, registrations: [normalizeBridgeRegistration(record)] };
 }
@@ -1115,7 +1130,22 @@ export function upsertBridgeRegistration(
   } else {
     registrations.push(registration);
   }
-  return { version: 2, registrations };
+  return compact({
+    bridgeInstallationId: config.bridgeInstallationId,
+    version: 2,
+    registrations,
+  });
+}
+
+function normalizeBridgeInstallationId(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const installationId = readString(value, "bridgeInstallationId").toLowerCase();
+  if (!/^[a-f0-9]{32}$/.test(installationId)) {
+    throw new Error("bridgeInstallationId must be a 32-character opaque ID");
+  }
+  return installationId;
 }
 
 function normalizeBridgeRegistration(raw: unknown): BridgeRegistration {
@@ -1920,10 +1950,16 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     ) ?? DEFAULT_MACHINE_ENROLLMENT_REGISTER_PATH,
   );
   const configPath = getConfigPath(parsed.flags);
+  const bridgeInstallationId = await ensureBridgeInstallationId(configPath);
+  const legacyRegistrationCount = bridgeInstallationId
+    ? 0
+    : (await readBridgeConfigFile(configPath)).registrations.length;
   const existingRegistration = await resolveEnrollmentRegistration({
     appUrl,
+    bridgeInstallationId,
     code,
     configPath,
+    legacyRegistrationCount,
   });
   const generatedRequest = existingRegistration
     ? undefined
@@ -1936,9 +1972,11 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     endpoint,
     undefined,
     buildMachineEnrollmentRequest({
+      bridgeInstallationId,
       code,
       deviceName,
       host: hostname(),
+      legacyRegistrationCount,
       platform: process.platform,
       profileIdentity,
       proposedProfile,
@@ -6752,6 +6790,21 @@ async function postJson<T>(
 
   const text = await response.text();
   if (!response.ok) {
+    if (
+      response.status === 409 &&
+      (() => {
+        try {
+          return (
+            recordFromUnknown(JSON.parse(text))
+              ?.legacyInstallationRecoveryRequired === true
+          );
+        } catch {
+          return false;
+        }
+      })()
+    ) {
+      throw new Error("legacy_installation_recovery_required");
+    }
     throw new Error(`POST ${url} failed (${response.status}): ${text}`);
   }
   return (text.length > 0 ? JSON.parse(text) : {}) as T;
@@ -6764,6 +6817,46 @@ async function readJsonFile<T>(path: string): Promise<T> {
 
 async function readBridgeConfigFile(path: string): Promise<MultiBridgeConfig> {
   return normalizeBridgeConfigFile(await readJsonFile<BridgeConfigFile>(path));
+}
+
+export async function ensureBridgeInstallationId(
+  path: string,
+): Promise<string | undefined> {
+  if (existsSync(path)) {
+    const raw = await readJsonFile<unknown>(path);
+    const config = normalizeAppendableBridgeConfig(raw);
+    if (config.bridgeInstallationId) {
+      await ensureSecureBridgeConfigFile(path);
+      return config.bridgeInstallationId;
+    }
+    if (config.registrations.length > 0) {
+      return undefined;
+    }
+
+    const record = recordFromUnknown(raw);
+    if (!record) {
+      throw new Error("Bridge config must be an object");
+    }
+    const bridgeInstallationId = randomBytes(16).toString("hex");
+    const next =
+      record.version === 2
+        ? { ...record, bridgeInstallationId }
+        : {
+            bridgeInstallationId,
+            registrations: [record],
+            version: 2,
+          };
+    await writeBridgeConfigFile(path, next);
+    return bridgeInstallationId;
+  }
+
+  const bridgeInstallationId = randomBytes(16).toString("hex");
+  await writeBridgeConfigFile(path, {
+    bridgeInstallationId,
+    registrations: [],
+    version: 2,
+  });
+  return bridgeInstallationId;
 }
 
 export async function appendBridgeRegistration(
@@ -6787,18 +6880,27 @@ export async function appendBridgeRegistration(
 
 export async function resolveEnrollmentRegistration(input: {
   appUrl: string;
+  bridgeInstallationId?: string;
   code: string;
   configPath: string;
+  legacyRegistrationCount?: number;
   identityLookup?: (
     candidate: BridgeRegistration,
-    request: { code: string; deviceId: string },
+    request: {
+      bridgeInstallationId?: string;
+      code: string;
+      deviceId: string;
+      legacyRegistrationCount?: number;
+    },
   ) => Promise<EnrollmentRegistrationIdentityResponse>;
 }): Promise<BridgeRegistration | undefined> {
   if (!existsSync(input.configPath)) {
     return undefined;
   }
 
-  const config = await readBridgeConfigFile(input.configPath);
+  const config = normalizeAppendableBridgeConfig(
+    await readJsonFile<BridgeConfigFile>(input.configPath),
+  );
   const identityEndpoint = buildEndpoint(
     input.appUrl,
     DEFAULT_MACHINE_ENROLLMENT_REGISTRATION_IDENTITY_PATH,
@@ -6808,7 +6910,12 @@ export async function resolveEnrollmentRegistration(input: {
     if (!matchesPublicOrigin(candidate.appUrl, publicOrigin)) {
       continue;
     }
-    const request = { code: input.code, deviceId: candidate.deviceId };
+    const request = compact({
+      bridgeInstallationId: input.bridgeInstallationId,
+      code: input.code,
+      deviceId: candidate.deviceId,
+      legacyRegistrationCount: input.legacyRegistrationCount,
+    });
     const identity = input.identityLookup
       ? await input.identityLookup(candidate, request)
       : await postJson<EnrollmentRegistrationIdentityResponse>(
@@ -6858,7 +6965,13 @@ function normalizeAppendableBridgeConfig(raw: unknown): MultiBridgeConfig {
     Array.isArray(record.registrations) &&
     record.registrations.length === 0
   ) {
-    return { version: 2, registrations: [] };
+    return compact({
+      bridgeInstallationId: normalizeBridgeInstallationId(
+        record.bridgeInstallationId,
+      ),
+      version: 2,
+      registrations: [],
+    });
   }
   return normalizeBridgeConfigFile(raw);
 }

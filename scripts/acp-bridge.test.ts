@@ -23,6 +23,7 @@ import {
   deriveConvexCloudUrl,
   appendBridgeRegistration,
   ensureSecureBridgeConfigFile,
+  ensureBridgeInstallationId,
   buildAgentToolsMcpServers,
   buildStartupSecuritySummary,
   createBridgeWakeSignal,
@@ -377,7 +378,9 @@ describe("bridge command parsing", () => {
         code: "MACHINE01",
         deviceName: "host bridge",
         host: "host",
+        legacyRegistrationCount: 0,
         platform: "linux",
+        bridgeInstallationId: "0123456789abcdef0123456789abcdef",
         requestedBridgeToken: "a".repeat(43),
         requestedDeviceId: "bridge_0123456789abcdef01234567",
       }),
@@ -385,7 +388,9 @@ describe("bridge command parsing", () => {
       code: "MACHINE01",
       deviceName: "host bridge",
       host: "host",
+      legacyRegistrationCount: 0,
       platform: "linux",
+      bridgeInstallationId: "0123456789abcdef0123456789abcdef",
       requestedBridgeToken: "a".repeat(43),
       requestedDeviceId: "bridge_0123456789abcdef01234567",
       targetMode: false,
@@ -409,7 +414,9 @@ describe("bridge command parsing", () => {
         code: "MACHINE01",
         deviceName: "Codex on host",
         host: "host",
+        legacyRegistrationCount: 0,
         platform: "linux",
+        bridgeInstallationId: "0123456789abcdef0123456789abcdef",
         profileIdentity: "default",
         proposedProfile,
         registerAgent: true,
@@ -421,7 +428,9 @@ describe("bridge command parsing", () => {
       code: "MACHINE01",
       deviceName: "Codex on host",
       host: "host",
+      legacyRegistrationCount: 0,
       platform: "linux",
+      bridgeInstallationId: "0123456789abcdef0123456789abcdef",
       profileIdentity: "default",
       proposedProfile,
       registerAgent: true,
@@ -430,6 +439,161 @@ describe("bridge command parsing", () => {
       requestMcp: true,
       targetMode: true,
     });
+  });
+
+  test("sends the persisted installation ID during CLI enrollment", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-enroll-id-"));
+    const configPath = join(directory, "bridge.json");
+    const statusPath = join(directory, "bridge-status.json");
+    const requests: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      fetch: async (request) => {
+        requests.push((await request.json()) as Record<string, unknown>);
+        return Response.json({
+          bridgeToken: "b".repeat(43),
+          deviceId: "bridge_0123456789abcdef01234567",
+          organizationId: "org-a",
+        });
+      },
+      port: 0,
+    });
+
+    try {
+      const result = await runBridgeCli(
+        ["enroll", "MACHINE01", "--app-url", server.url.toString()],
+        {
+          ZERO_CHAT_BRIDGE_CONFIG: configPath,
+          ZERO_CHAT_BRIDGE_STATUS: statusPath,
+        },
+      );
+
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        bridgeInstallationId: expect.stringMatching(/^[a-f0-9]{32}$/),
+        legacyRegistrationCount: 0,
+      });
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toMatchObject({
+        bridgeInstallationId: requests[0]?.bridgeInstallationId,
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("fails closed before enrollment when legacy recovery is required", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-legacy-recovery-"));
+    const configPath = join(directory, "bridge.json");
+    const statusPath = join(directory, "bridge-status.json");
+    let identityRequest: Record<string, unknown> | undefined;
+    let registerRequests = 0;
+    const server = Bun.serve({
+      fetch: async (request) => {
+        if (new URL(request.url).pathname.endsWith("registration-identity")) {
+          identityRequest = (await request.json()) as Record<string, unknown>;
+          return Response.json(
+            { legacyInstallationRecoveryRequired: true },
+            { status: 409 },
+          );
+        }
+        registerRequests += 1;
+        return Response.json({});
+      },
+      port: 0,
+    });
+    await writeBridgeConfigFile(configPath, {
+      appUrl: server.url.toString(),
+      bridgeToken: "a".repeat(43),
+      deviceId: "bridge_0123456789abcdef01234567",
+      deviceName: "Legacy bridge",
+      pairedAt: "2026-06-01T00:00:00.000Z",
+    });
+
+    try {
+      const result = await runBridgeCli(
+        ["enroll", "MACHINE01", "--app-url", server.url.toString()],
+        {
+          ZERO_CHAT_BRIDGE_CONFIG: configPath,
+          ZERO_CHAT_BRIDGE_STATUS: statusPath,
+        },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("legacy_installation_recovery_required");
+      expect(identityRequest).toEqual({
+        code: "MACHINE01",
+        deviceId: "bridge_0123456789abcdef01234567",
+        legacyRegistrationCount: 1,
+      });
+      expect(registerRequests).toBe(0);
+      expect(JSON.parse(await readFile(configPath, "utf8"))).not.toHaveProperty(
+        "bridgeInstallationId",
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("uses the stored bridge credential proof when enrollment reuses a registration", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-enroll-reuse-"));
+    const configPath = join(directory, "bridge.json");
+    const statusPath = join(directory, "bridge-status.json");
+    const registrationRequests: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      fetch: async (request) => {
+        if (new URL(request.url).pathname.endsWith("registration-identity")) {
+          return Response.json({
+            enrollmentOrganizationMatch: true,
+            organizationId: "org-a",
+            registrationState: "active",
+          });
+        }
+        registrationRequests.push(
+          (await request.json()) as Record<string, unknown>,
+        );
+        return Response.json({
+          bridgeToken: "a".repeat(43),
+          deviceId: "bridge_0123456789abcdef01234567",
+          organizationId: "org-a",
+        });
+      },
+      port: 0,
+    });
+    await writeBridgeConfigFile(configPath, {
+      bridgeInstallationId: "0123456789abcdef0123456789abcdef",
+      registrations: [
+        {
+          appUrl: server.url.toString(),
+          bridgeToken: "a".repeat(43),
+          deviceId: "bridge_0123456789abcdef01234567",
+          deviceName: "Existing bridge",
+          pairedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+      version: 2,
+    });
+
+    try {
+      const result = await runBridgeCli(
+        ["enroll", "MACHINE01", "--app-url", server.url.toString()],
+        {
+          ZERO_CHAT_BRIDGE_CONFIG: configPath,
+          ZERO_CHAT_BRIDGE_STATUS: statusPath,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(registrationRequests).toHaveLength(1);
+      expect(registrationRequests[0]).toMatchObject({
+        bridgeInstallationId: "0123456789abcdef0123456789abcdef",
+        legacyRegistrationCount: 0,
+        requestedBridgeToken: "a".repeat(43),
+        requestedDeviceId: "bridge_0123456789abcdef01234567",
+      });
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("normalizes the default Codex enrollment profile identity", () => {
@@ -2315,6 +2479,26 @@ describe("bridge MCP helper configuration", () => {
 });
 
 describe("bridge multi-organization config", () => {
+  test("persists one installation ID when a fresh config is read repeatedly", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-installation-"));
+    const configPath = join(directory, "bridge.json");
+    await writeBridgeConfigFile(configPath, {
+      version: 2,
+      registrations: [],
+    });
+
+    const first = await ensureBridgeInstallationId(configPath);
+    const second = await ensureBridgeInstallationId(configPath);
+    const saved = JSON.parse(await readFile(configPath, "utf8"));
+
+    expect(first).toMatch(/^[a-f0-9]{32}$/);
+    expect(second).toBe(first);
+    expect(saved).toMatchObject({
+      version: 2,
+      bridgeInstallationId: first,
+    });
+  });
+
   test("normalizes legacy single-device bridge configs into one registration", () => {
     expect(
       normalizeBridgeConfigFile({
