@@ -38,6 +38,7 @@ import {
   hasPendingBridgeProcessControl,
   isBridgeProcessIdleForRestart,
   normalizeBridgeConfigFile,
+  normalizeEnrollmentProfileIdentity,
   normalizeQueueCommand,
   discoverHermesProfilesFromDisk,
   parseHermesProfileListOutput,
@@ -54,6 +55,9 @@ import {
   runtimeConformanceRequestTimeoutMs,
   shouldCleanupBridgeOrphanedProcesses,
   upsertBridgeRegistration,
+  selectEnrollmentRegistration,
+  reconcileEnrollmentBridgeRegistrations,
+  resolveEnrollmentRegistration,
   waitForRestartShutdownTask,
   writeBridgeConfigFile,
   writeBridgeRestartHandoffFile,
@@ -426,6 +430,27 @@ describe("bridge command parsing", () => {
       requestMcp: true,
       targetMode: true,
     });
+  });
+
+  test("normalizes the default Codex enrollment profile identity", () => {
+    expect(
+      normalizeEnrollmentProfileIdentity({ runtimeId: "codex" }),
+    ).toBe("codex:codex-acp");
+  });
+
+  test("requires an explicit Hermes enrollment profile identity", () => {
+    expect(() =>
+      normalizeEnrollmentProfileIdentity({ runtimeId: "hermes" }),
+    ).toThrow("Hermes enrollment requires --profile-identity");
+  });
+
+  test("normalizes a named Hermes enrollment profile identity", () => {
+    expect(
+      normalizeEnrollmentProfileIdentity({
+        profileIdentity: "work",
+        runtimeId: "hermes",
+      }),
+    ).toBe("hermes:work");
   });
 
   test("normalizes choice response payload text into legacy command fields", () => {
@@ -2354,6 +2379,143 @@ describe("bridge multi-organization config", () => {
         deviceName: "Org B renamed",
         pairedAt: "2026-06-01T00:02:00.000Z",
       },
+    ]);
+  });
+
+  test("selects only a same-organization active bridge registration for enrollment", () => {
+    const registration = selectEnrollmentRegistration(
+      [
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "token-a",
+          deviceId: "bridge_a",
+          deviceName: "Org A laptop",
+          organizationId: "org-a",
+          pairedAt: "2026-06-01T00:00:00.000Z",
+        },
+        {
+          appUrl: "https://0000.chat",
+          bridgeToken: "token-b",
+          deviceId: "bridge_b",
+          deviceName: "Org B laptop",
+          organizationId: "org-b",
+          pairedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+      "org-b",
+    );
+
+    expect(registration?.deviceId).toBe("bridge_b");
+  });
+
+  test("persists a bridge registration organization ID", () => {
+    expect(
+      normalizeBridgeConfigFile({
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-a",
+        deviceId: "bridge_a",
+        deviceName: "Laptop",
+        organizationId: "org-a",
+        pairedAt: "2026-06-01T00:00:00.000Z",
+      }).registrations[0]?.organizationId,
+    ).toBe("org-a");
+  });
+
+  test("recovers a legacy registration organization through authenticated identity lookup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-identity-"));
+    const configPath = join(directory, "bridge.json");
+    await writeBridgeConfigFile(configPath, {
+      appUrl: "https://0000.chat",
+      bridgeToken: "token-a",
+      deviceId: "bridge_a",
+      deviceName: "Laptop",
+      pairedAt: "2026-06-01T00:00:00.000Z",
+    });
+
+    const registration = await resolveEnrollmentRegistration({
+      appUrl: "https://0000.chat",
+      code: "MACHINE01",
+      configPath,
+      identityLookup: async (candidate, request) => {
+        expect(candidate.bridgeToken).toBe("token-a");
+        expect(request).toEqual({ code: "MACHINE01", deviceId: "bridge_a" });
+        return {
+          enrollmentOrganizationMatch: true,
+          organizationId: "org-a",
+          registrationState: "active",
+        };
+      },
+    });
+
+    expect(registration).toMatchObject({
+      deviceId: "bridge_a",
+      organizationId: "org-a",
+    });
+  });
+
+  test("does not reuse a valid registration from a different enrollment organization", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "0000-bridge-identity-mismatch-"));
+    const configPath = join(directory, "bridge.json");
+    await writeBridgeConfigFile(configPath, {
+      appUrl: "https://0000.chat",
+      bridgeToken: "token-a",
+      deviceId: "bridge_a",
+      deviceName: "Other organization laptop",
+      organizationId: "org-a",
+      pairedAt: "2026-06-01T00:00:00.000Z",
+    });
+
+    const registration = await resolveEnrollmentRegistration({
+      appUrl: "https://0000.chat",
+      code: "MACHINE01",
+      configPath,
+      identityLookup: async () => ({
+        enrollmentOrganizationMatch: false,
+        organizationId: "org-a",
+        registrationState: "active",
+      }),
+    });
+
+    expect(registration).toBeUndefined();
+  });
+
+  test("removes superseded registrations while preserving the enrollment result", () => {
+    const result = reconcileEnrollmentBridgeRegistrations(
+      {
+        registrations: [
+          {
+            appUrl: "https://0000.chat",
+            bridgeToken: "token-old",
+            deviceId: "bridge_old",
+            deviceName: "Old bridge",
+            organizationId: "org-a",
+            pairedAt: "2026-06-01T00:00:00.000Z",
+          },
+          {
+            appUrl: "https://0000.chat",
+            bridgeToken: "token-other",
+            deviceId: "bridge_other",
+            deviceName: "Other org bridge",
+            organizationId: "org-b",
+            pairedAt: "2026-06-01T00:00:00.000Z",
+          },
+        ],
+        version: 2,
+      },
+      {
+        appUrl: "https://0000.chat",
+        bridgeToken: "token-new",
+        deviceId: "bridge_new",
+        deviceName: "Replacement bridge",
+        organizationId: "org-a",
+        pairedAt: "2026-06-02T00:00:00.000Z",
+      },
+      ["bridge_old"],
+    );
+
+    expect(result.registrations.map((entry) => entry.deviceId)).toEqual([
+      "bridge_other",
+      "bridge_new",
     ]);
   });
 

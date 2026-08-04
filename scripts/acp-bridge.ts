@@ -155,6 +155,8 @@ const PROCESS_PRESSURE_TARGET_FREE_PROCESS_SLOTS = 2;
 const DEFAULT_ALLOW_REMOTE_CWD = true;
 const DEFAULT_MACHINE_ENROLLMENT_REGISTER_PATH =
   "/api/machine-enrollments/register";
+const DEFAULT_MACHINE_ENROLLMENT_REGISTRATION_IDENTITY_PATH =
+  "/api/machine-enrollments/registration-identity";
 const DEFAULT_AGENT_SKILL_PATH = join(
   homedir(),
   ".claude",
@@ -221,6 +223,7 @@ export type BridgeRegistration = {
   bridgeToken: string;
   appUrl: string;
   deviceName: string;
+  organizationId?: string;
   pairedAt: string;
   bridgeApiUrl?: string;
   enabledFeatureFlags?: string[];
@@ -245,6 +248,17 @@ type PairResponse = {
   endpoint?: unknown;
   logIngestUrl?: unknown;
   logUrl?: unknown;
+  organizationId?: unknown;
+  machineStatus?: unknown;
+  agentStatus?: unknown;
+  mcpGrantStatus?: unknown;
+  supersededDeviceIds?: unknown;
+};
+
+type EnrollmentRegistrationIdentityResponse = {
+  enrollmentOrganizationMatch?: unknown;
+  organizationId?: unknown;
+  registrationState?: unknown;
 };
 
 export type PendingAgentConnectionRequest = {
@@ -327,6 +341,49 @@ export function buildMachineEnrollmentRequest(input: {
     requestedDeviceId: input.requestedDeviceId,
     targetMode: registerAgent,
   });
+}
+
+export function normalizeEnrollmentProfileIdentity(input: {
+  profileIdentity?: string;
+  runtimeId: string;
+}): string {
+  const runtimeId = input.runtimeId.trim().toLowerCase();
+  const requested = input.profileIdentity?.trim();
+  if (runtimeId === "hermes" && !requested) {
+    throw new Error(
+      "Hermes enrollment requires --profile-identity so 0000 can select the correct Hermes profile.",
+    );
+  }
+
+  const profile = requested || (runtimeId === "codex" ? "codex-acp" : runtimeId);
+  return profile.startsWith(`${runtimeId}:`)
+    ? profile
+    : `${runtimeId}:${profile}`;
+}
+
+export function selectEnrollmentRegistration(
+  registrations: BridgeRegistration[],
+  organizationId: string,
+): BridgeRegistration | undefined {
+  return registrations.find(
+    (registration) => registration.organizationId === organizationId,
+  );
+}
+
+export function reconcileEnrollmentBridgeRegistrations(
+  config: MultiBridgeConfig,
+  registration: BridgeRegistration,
+  supersededDeviceIds: string[] | undefined,
+): MultiBridgeConfig {
+  const superseded = new Set(supersededDeviceIds ?? []);
+  const retained = config.registrations.filter(
+    (entry) =>
+      entry.deviceId === registration.deviceId || !superseded.has(entry.deviceId),
+  );
+  return upsertBridgeRegistration(
+    { version: 2, registrations: retained },
+    registration,
+  );
 }
 
 type BridgeQueueCommand = BridgeSessionQueueItem;
@@ -1077,6 +1134,7 @@ function normalizeBridgeRegistration(raw: unknown): BridgeRegistration {
     deviceName,
     enabledFeatureFlags: stringArrayFromUnknown(record.enabledFeatureFlags),
     logIngestUrl: stringFromUnknown(record.logIngestUrl),
+    organizationId: stringFromUnknown(record.organizationId),
     pairedAt,
   });
 }
@@ -1825,6 +1883,13 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     proposedProfile?.proposedAgentName ??
     getFlag(parsed.flags, "device-name", `${hostname()} bridge`) ??
     `${hostname()} bridge`;
+  const profileIdentity =
+    registerAgent && proposedProfile
+      ? normalizeEnrollmentProfileIdentity({
+          profileIdentity: getFlag(parsed.flags, "profile-identity"),
+          runtimeId: proposedProfile.runtimeId,
+        })
+      : undefined;
 
   if (skillPath && agentCommand) {
     await writeAgentConnectionSkill(skillPath, {
@@ -1844,10 +1909,18 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     ) ?? DEFAULT_MACHINE_ENROLLMENT_REGISTER_PATH,
   );
   const configPath = getConfigPath(parsed.flags);
-  const pendingRequest = await preparePendingAgentConnectionRequest(
-    configPath,
+  const existingRegistration = await resolveEnrollmentRegistration({
+    appUrl,
     code,
-  );
+    configPath,
+  });
+  const generatedRequest = existingRegistration
+    ? undefined
+    : await preparePendingAgentConnectionRequest(configPath, code);
+  const enrollmentCredentials = existingRegistration ?? generatedRequest;
+  if (!enrollmentCredentials) {
+    throw new Error("Could not prepare Machine enrollment credentials.");
+  }
   const response = await postJson<PairResponse>(
     endpoint,
     undefined,
@@ -1856,14 +1929,12 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
       deviceName,
       host: hostname(),
       platform: process.platform,
-      profileIdentity: registerAgent
-        ? getFlag(parsed.flags, "profile-identity", "default") ?? "default"
-        : undefined,
+      profileIdentity,
       proposedProfile,
       registerAgent,
       requestMcp: registerAgent,
-      requestedBridgeToken: pendingRequest.bridgeToken,
-      requestedDeviceId: pendingRequest.deviceId,
+      requestedBridgeToken: enrollmentCredentials.bridgeToken,
+      requestedDeviceId: enrollmentCredentials.deviceId,
     }),
   );
 
@@ -1872,6 +1943,7 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     response.bridgeToken ?? response.token,
     "bridgeToken",
   );
+  const organizationId = readString(response.organizationId, "organizationId");
   const config: BridgeConfig = {
     appUrl,
     bridgeToken,
@@ -1879,6 +1951,7 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     deviceName,
     enabledFeatureFlags: stringArrayFromUnknown(response.enabledFeatureFlags),
     pairedAt: new Date().toISOString(),
+    organizationId,
   };
 
   const bridgeApiUrl = stringFromUnknown(
@@ -1892,7 +1965,18 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
     config.logIngestUrl = logIngestUrl;
   }
 
-  const updatedConfig = await appendBridgeRegistration(configPath, config);
+  const machineStatus = enrollmentResultStatus(
+    response.machineStatus,
+    "machineStatus",
+  );
+  const agentStatus = enrollmentResultStatus(response.agentStatus, "agentStatus");
+  const mcpGrantStatus = enrollmentResultStatus(
+    response.mcpGrantStatus,
+    "mcpGrantStatus",
+  );
+  const updatedConfig = await appendBridgeRegistration(configPath, config, {
+    supersededDeviceIds: stringArrayFromUnknown(response.supersededDeviceIds),
+  });
   await writeStatus(getStatusPath(parsed.flags), {
     deviceId,
     appUrl,
@@ -1914,16 +1998,22 @@ async function enrollBridge(parsed: ParsedBridgeArgs) {
           configPath,
           defaultCwd: proposedProfile?.defaultCwd,
           installMode,
+          machineStatus,
+          agentStatus,
+          mcpGrantStatus,
+          profileIdentity,
           skillInstallPath: skillPath,
         })
       : undefined,
   });
-  await clearPendingAgentConnectionRequest(pendingRequest);
+  if (generatedRequest) {
+    await clearPendingAgentConnectionRequest(generatedRequest);
+  }
 
   writeStdout(
     registerAgent
-      ? `Enrolled pending agent bridge ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`
-      : `Enrolled pending machine ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this machine before it can run work.\n`,
+      ? `Enrolled ${agentStatus ?? "pending"} agent on ${machineStatus ?? "pending"} machine ${deviceId}${mcpGrantStatus ? `; MCP grant ${mcpGrantStatus}` : ""}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this agent before it can run work.\n`
+      : `Enrolled ${machineStatus ?? "pending"} machine ${deviceId}.\nConfig: ${configPath}\nOpen 0000 Chat to approve this machine before it can run work.\n`,
   );
 }
 
@@ -5468,6 +5558,7 @@ function helpText(): string {
     "",
     "Usage:",
     `  bun scripts/acp-bridge.ts enroll <code> --app-url <url> [--device-name <name>] [--register-agent --agent-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}" --profile-identity <profile-id> --skill-path <path>]`,
+    "  --profile-identity is required for Hermes enrollment so the correct profile is registered.",
     "  connect and connect-org are agent-registration aliases; pair is a machine-only alias.",
     `  bun scripts/acp-bridge.ts start [--agent-command "hermes acp"] [--runtime-command "${DEFAULT_CODEX_ACP_COMMAND}"] [--runtime-command "${DEFAULT_CLAUDE_CODE_ACP_COMMAND}"] [--poll-ms 2000] [--max-in-flight <local-hard-cap>] [--warm-runtime-profile <profile-id>] [--request-timeout-ms ${DEFAULT_ACP_REQUEST_TIMEOUT_MS}] [--cloud-request-timeout-ms ${DEFAULT_CLOUD_REQUEST_TIMEOUT_MS}] [--allow-remote-cwd] [--log-url <url>]`,
     "  bun scripts/acp-bridge.ts repair-config --app-url <url>",
@@ -6667,15 +6758,86 @@ async function readBridgeConfigFile(path: string): Promise<MultiBridgeConfig> {
 export async function appendBridgeRegistration(
   path: string,
   registration: BridgeRegistration,
+  options: { supersededDeviceIds?: string[] } = {},
 ): Promise<MultiBridgeConfig> {
   const existing = existsSync(path)
     ? normalizeAppendableBridgeConfig(
         await readJsonFile<BridgeConfigFile>(path),
       )
     : ({ version: 2, registrations: [] } satisfies MultiBridgeConfig);
-  const next = upsertBridgeRegistration(existing, registration);
+  const next = reconcileEnrollmentBridgeRegistrations(
+    existing,
+    registration,
+    options.supersededDeviceIds,
+  );
   await writeBridgeConfigFile(path, next);
   return next;
+}
+
+export async function resolveEnrollmentRegistration(input: {
+  appUrl: string;
+  code: string;
+  configPath: string;
+  identityLookup?: (
+    candidate: BridgeRegistration,
+    request: { code: string; deviceId: string },
+  ) => Promise<EnrollmentRegistrationIdentityResponse>;
+}): Promise<BridgeRegistration | undefined> {
+  if (!existsSync(input.configPath)) {
+    return undefined;
+  }
+
+  const config = await readBridgeConfigFile(input.configPath);
+  const identityEndpoint = buildEndpoint(
+    input.appUrl,
+    DEFAULT_MACHINE_ENROLLMENT_REGISTRATION_IDENTITY_PATH,
+  );
+  const publicOrigin = normalizePublicOrigin(input.appUrl);
+  for (const candidate of config.registrations) {
+    if (!matchesPublicOrigin(candidate.appUrl, publicOrigin)) {
+      continue;
+    }
+    const request = { code: input.code, deviceId: candidate.deviceId };
+    const identity = input.identityLookup
+      ? await input.identityLookup(candidate, request)
+      : await postJson<EnrollmentRegistrationIdentityResponse>(
+          identityEndpoint,
+          candidate.bridgeToken,
+          request,
+        );
+    const state = stringFromUnknown(identity.registrationState) ?? "active";
+    if (state === "revoked" || state === "superseded") {
+      throw new Error(
+        `Existing bridge registration ${candidate.deviceId} is ${state}; repair its local registration before enrollment.`,
+      );
+    }
+    if (state !== "active") {
+      throw new Error(
+        `Existing bridge registration ${candidate.deviceId} returned an invalid registration state.`,
+      );
+    }
+    if (identity.enrollmentOrganizationMatch !== true) {
+      continue;
+    }
+    return {
+      ...candidate,
+      organizationId: readString(identity.organizationId, "organizationId"),
+    };
+  }
+  return undefined;
+}
+
+function enrollmentResultStatus(
+  value: unknown,
+  name: string,
+): "created" | "reused" | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === "created" || value === "reused") {
+    return value;
+  }
+  throw new Error(`pair response has invalid ${name}`);
 }
 
 function normalizeAppendableBridgeConfig(raw: unknown): MultiBridgeConfig {
