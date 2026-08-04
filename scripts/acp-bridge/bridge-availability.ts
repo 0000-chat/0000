@@ -18,6 +18,9 @@ export function classifyBridgeCloudFailure(input: {
   status?: number
 }): "auth_failed" | "retryable" {
   const body = input.body ?? ""
+  if (/instance not served by this conductor/i.test(body)) {
+    return "retryable"
+  }
   if (
     input.status === 401 ||
     input.status === 403 ||
