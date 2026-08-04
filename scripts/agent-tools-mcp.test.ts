@@ -650,6 +650,21 @@ describe("agent tools MCP server helpers", () => {
     expect(result.content[0]?.text).toContain('"tool": "apps.create"')
   })
 
+  test("returns approval requests as actionable MCP results instead of generic errors", () => {
+    const result = toMcpToolResult({
+      interactionId: "interaction_publish_1",
+      needsApproval: true,
+      ok: false,
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({
+      interactionId: "interaction_publish_1",
+      needsApproval: true,
+      ok: false,
+    })
+  })
+
   test("returns executePlan partial failures as readable plan results instead of generic MCP errors", async () => {
     const originalFetch = globalThis.fetch
     const calls: string[] = []
