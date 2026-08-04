@@ -265,6 +265,269 @@ describe("agent tools MCP server helpers", () => {
     })
   })
 
+  test("uploads bounded React source and completes it without sending source bytes to Convex", async () => {
+    const requests: Request[] = []
+    const sourceText = "export default function App() { return <main>Hello</main> }"
+
+    const result = await invokeAgentToolOverHttp(
+      {
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test/app",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+      },
+      "apps.code.reserveSource",
+      {
+        appId: "react_app_1",
+        completionOperationId: "complete_source_1",
+        editSessionId: "react_edit_1",
+        operationId: "reserve_source_1",
+        sourceText,
+      },
+      async (input, init) => {
+        const request = new Request(input, init)
+        requests.push(request.clone())
+        if (request.url === "https://upload.example.test/source") {
+          expect(await request.text()).toBe(sourceText)
+          expect(request.headers.get("x-upload-token")).toBe("bounded")
+          expect(request.redirect).toBe("error")
+          return new Response(null, { status: 200 })
+        }
+        const body = (await request.json()) as {
+          agentSessionId: string
+          deviceId: string
+          input: Record<string, unknown>
+          tool: string
+        }
+        if (body.tool === "apps.code.reserveSource") {
+          expect(body.input.sourceText).toBeUndefined()
+          expect(body.input.sourceBase64).toBeUndefined()
+          expect(body.input.byteLength).toBe(new TextEncoder().encode(sourceText).byteLength)
+          expect(body.input.sha256).toMatch(/^[a-f0-9]{64}$/)
+          return Response.json({
+            ok: true,
+            result: {
+              requiredUploadHeaders: { "x-upload-token": "bounded" },
+              sourceBlobId: "source_blob_1",
+              status: "pending",
+              uploadUrl: "https://upload.example.test/source",
+            },
+          })
+        }
+        expect(body).toEqual({
+          agentSessionId: "agent_session_1",
+          deviceId: "device_123",
+          input: {
+            appId: "react_app_1",
+            editSessionId: "react_edit_1",
+            operationId: "complete_source_1",
+            sourceBlobId: "source_blob_1",
+          },
+          tool: "apps.code.completeSource",
+        })
+        return Response.json({
+          ok: true,
+          result: { replayed: false, sourceBlobId: "source_blob_1", status: "available" },
+        })
+      },
+    )
+
+    expect(result).toEqual({
+      ok: true,
+      result: { replayed: false, sourceBlobId: "source_blob_1", status: "available" },
+    })
+    expect(requests).toHaveLength(3)
+  })
+
+  test("does not expose a signed upload URL when the private source upload fails", async () => {
+    const privateMarker = "private-upload-signature"
+    const result = await invokeAgentToolOverHttp(
+      {
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+      },
+      "apps.code.reserveSource",
+      {
+        appId: "react_app_1",
+        editSessionId: "react_edit_1",
+        operationId: "reserve_source_failed_upload",
+        sourceText: "export default function App() { return null }",
+      },
+      async (input, init) => {
+        const request = new Request(input, init)
+        if (request.url.startsWith("https://upload.example.test/source")) {
+          throw new Error(`fetch failed for ${request.url}`)
+        }
+        return Response.json({
+          ok: true,
+          result: {
+            sourceBlobId: "source_blob_1",
+            status: "pending",
+            uploadUrl: `https://upload.example.test/source?signature=${privateMarker}`,
+          },
+        })
+      },
+    )
+
+    expect(result).toMatchObject({
+      error: "React code source upload failed",
+      ok: false,
+      tool: "apps.code.reserveSource",
+    })
+    expect(JSON.stringify(result)).not.toContain(privateMarker)
+  })
+
+  test("preserves a failed React source reservation receipt without attempting upload", async () => {
+    let requests = 0
+    const result = await invokeAgentToolOverHttp(
+      {
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+      },
+      "apps.code.reserveSource",
+      {
+        appId: "react_app_1",
+        editSessionId: "react_edit_1",
+        operationId: "reserve_source_unavailable",
+        sourceText: "export default null",
+      },
+      async () => {
+        requests += 1
+        return new Response("unavailable", { status: 503 })
+      },
+    )
+
+    expect(result).toEqual({
+      error: "Agent tool request failed with HTTP 503",
+      httpStatus: 503,
+      ok: false,
+      reasonCode: "HTTP_ERROR",
+      retryable: true,
+      tool: "apps.code.reserveSource",
+    })
+    expect(requests).toBe(1)
+  })
+
+  test.each([409, 412])("completes React source after a replay-safe %s upload response", async (status) => {
+    const tools: string[] = []
+    const result = await invokeAgentToolOverHttp(
+      {
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+      },
+      "apps.code.reserveSource",
+      {
+        appId: "react_app_1",
+        editSessionId: "react_edit_1",
+        operationId: `reserve_source_${status}`,
+        sourceBase64: Buffer.from("export default null").toString("base64"),
+      },
+      async (input, init) => {
+        const request = new Request(input, init)
+        if (request.url === "https://upload.example.test/source") {
+          return new Response(null, { status })
+        }
+        const body = await request.json() as { tool: string }
+        tools.push(body.tool)
+        return body.tool === "apps.code.reserveSource"
+          ? Response.json({
+              ok: true,
+              result: {
+                sourceBlobId: "source_blob_1",
+                status: "pending",
+                uploadUrl: "https://upload.example.test/source",
+              },
+            })
+          : Response.json({
+              ok: true,
+              result: { replayed: true, sourceBlobId: "source_blob_1", status: "available" },
+            })
+      },
+    )
+
+    expect(result).toMatchObject({ ok: true, result: { status: "available" } })
+    expect(tools).toEqual(["apps.code.reserveSource", "apps.code.completeSource"])
+  })
+
+  test("rejects invalid React source payloads before reserving private storage", async () => {
+    const requests: Request[] = []
+    const invoke = async (input: Record<string, unknown>) => await invokeAgentToolOverHttp(
+      {
+        agentSessionId: "agent_session_1",
+        appUrl: "https://chat.example.test",
+        bridgeToken: "secret-token",
+        deviceId: "device_123",
+      },
+      "apps.code.reserveSource",
+      {
+        appId: "react_app_1",
+        editSessionId: "react_edit_1",
+        operationId: "reserve_source_invalid",
+        ...input,
+      },
+      async (requestInput, init) => {
+        requests.push(new Request(requestInput, init))
+        return Response.json({ ok: true, result: {} })
+      },
+    )
+
+    for (const input of [
+      { sourceText: "" },
+      { sourceBase64: "not-base64" },
+      { sourceBase64: "eA==", sourceText: "x" },
+      { sourceText: "x".repeat(48 * 1024 + 1) },
+      { byteLength: 2, sourceText: "x" },
+      { sha256: "0".repeat(64), sourceText: "x" },
+    ]) {
+      expect(await invoke(input)).toMatchObject({ ok: false, tool: "apps.code.reserveSource" })
+    }
+    expect(requests).toHaveLength(0)
+  })
+
+  test("rejects unsafe React source upload URLs and headers before the signed PUT", async () => {
+    for (const reservation of [
+      { sourceBlobId: "source_blob_1", status: "pending", uploadUrl: "http://upload.example.test/source" },
+      { sourceBlobId: "source_blob_1", status: "pending", uploadUrl: "https://user@upload.example.test/source" },
+      { sourceBlobId: "source_blob_1", status: "pending", uploadUrl: "https://upload.example.test/source#private" },
+      {
+        requiredUploadHeaders: { "invalid header": "private" },
+        sourceBlobId: "source_blob_1",
+        status: "pending",
+        uploadUrl: "https://upload.example.test/source",
+      },
+    ]) {
+      let uploadCalls = 0
+      const result = await invokeAgentToolOverHttp(
+        {
+          agentSessionId: "agent_session_1",
+          appUrl: "https://chat.example.test",
+          bridgeToken: "secret-token",
+          deviceId: "device_123",
+        },
+        "apps.code.reserveSource",
+        {
+          appId: "react_app_1",
+          editSessionId: "react_edit_1",
+          operationId: "reserve_source_unsafe",
+          sourceText: "export default null",
+        },
+        async (input, init) => {
+          const request = new Request(input, init)
+          if (request.url !== "https://chat.example.test/api/agent-tools/invoke") uploadCalls += 1
+          return Response.json({ ok: true, result: reservation })
+        },
+      )
+      expect(result).toMatchObject({ ok: false, tool: "apps.code.reserveSource" })
+      expect(uploadCalls).toBe(0)
+    }
+  })
+
   test("returns structured error details for timeout, HTTP, JSON, app, and fetch failures", async () => {
     await expect(invokeAgentToolOverHttp(
       { agentSessionId: "agent_session_1", appUrl: "https://chat.example.test/app", bridgeToken: "secret-token", deviceId: "device_123" },
