@@ -742,8 +742,10 @@ async function invokeAgentToolRequestOverHttp(
       if (isErrorPayload(payload)) {
         return buildAgentToolInvokeFailure({
           error: payload.error,
-          reasonCode: "APP_ERROR",
+          httpStatus: typeof payload.httpStatus === "number" ? payload.httpStatus : undefined,
+          reasonCode: isAgentToolInvokeFailureReasonCode(payload.reasonCode) ? payload.reasonCode : "APP_ERROR",
           retryable: typeof payload.retryable === "boolean" ? payload.retryable : undefined,
+          timeoutMs: typeof payload.timeoutMs === "number" ? payload.timeoutMs : undefined,
           tool,
         })
       }
@@ -825,12 +827,35 @@ function boundedUploadHeaders(value: unknown): Record<string, string> {
   }
   const entries = Object.entries(value as Record<string, unknown>)
   if (entries.length > 16) throw new Error("React code source upload headers are invalid")
+  const seen = new Set<string>()
+  const forbidden = new Set([
+    "authorization", "connection", "content-length", "cookie", "host", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+  ])
   return Object.fromEntries(entries.map(([name, headerValue]) => {
-    if (!/^[a-z0-9-]{1,64}$/i.test(name) || typeof headerValue !== "string" || headerValue.length > 512) {
+    const normalizedName = name.toLowerCase()
+    if (
+      !/^[a-z0-9-]{1,64}$/i.test(name) ||
+      seen.has(normalizedName) ||
+      forbidden.has(normalizedName) ||
+      typeof headerValue !== "string" ||
+      headerValue.length > 512 ||
+      /[\0-\x08\x0a-\x1f\x7f]/.test(headerValue)
+    ) {
       throw new Error("React code source upload headers are invalid")
     }
+    seen.add(normalizedName)
     return [name, headerValue]
   }))
+}
+
+function remainingReactSourceOptions(
+  deadlineMs: number,
+  totalTimeoutMs: number,
+): AgentToolHttpInvokeOptions {
+  const timeoutMs = deadlineMs - Date.now()
+  if (timeoutMs <= 0) throw new Error(`React code source transport timed out after ${totalTimeoutMs}ms`)
+  return { timeoutMs }
 }
 
 async function putReactCodeSourceOverHttp(
@@ -883,6 +908,8 @@ async function uploadReactCodeSourceOverHttp(
   options: AgentToolHttpInvokeOptions,
 ): Promise<AgentToolInvokeResult | unknown> {
   try {
+    const totalTimeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_AGENT_TOOL_HTTP_TIMEOUT_MS)
+    const deadlineMs = Date.now() + totalTimeoutMs
     const bytes = reactCodeSourceBytes(input)
     const sha256 = await sha256Hex(bytes)
     if (input.byteLength !== undefined && input.byteLength !== bytes.byteLength) {
@@ -896,11 +923,12 @@ async function uploadReactCodeSourceOverHttp(
         ? input.operationId
         : undefined
     if (!operationId) throw new Error("operationId is invalid")
+    const operationIdHash = await sha256Hex(new TextEncoder().encode(operationId))
     const completionOperationId =
       typeof input.completionOperationId === "string" &&
       /^[A-Za-z0-9_-]{1,128}$/.test(input.completionOperationId)
         ? input.completionOperationId
-        : `${operationId.slice(0, 119)}_complete`
+        : `${operationId.slice(0, 86)}_complete_${operationIdHash.slice(0, 32)}`
 
     const reservationResponse = await invokeAgentToolRequestOverHttp(
       env,
@@ -914,7 +942,7 @@ async function uploadReactCodeSourceOverHttp(
         sourceText: undefined,
       },
       fetchImpl,
-      options,
+      remainingReactSourceOptions(deadlineMs, totalTimeoutMs),
     )
     if (
       reservationResponse &&
@@ -947,7 +975,7 @@ async function uploadReactCodeSourceOverHttp(
         bytes,
         reservation.requiredUploadHeaders,
         fetchImpl,
-        options,
+        remainingReactSourceOptions(deadlineMs, totalTimeoutMs),
       )
     } else if (reservation.status !== "available") {
       throw new Error("React code source reservation returned an invalid status")
@@ -962,7 +990,7 @@ async function uploadReactCodeSourceOverHttp(
         sourceBlobId,
       },
       fetchImpl,
-      options,
+      remainingReactSourceOptions(deadlineMs, totalTimeoutMs),
     )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -1202,6 +1230,7 @@ function sanitizeErrorText(input: string): string {
     .replace(/authorization\s*:\s*[^\s,]+/gi, "authorization: [redacted]")
     .replace(/bearer\s+[^\s,]+/gi, "Bearer [redacted]")
     .replace(/(bridgeToken|token|authToken|authorization)["']?\s*[:=]\s*["'][^"']+["']/gi, "$1: [redacted]")
+    .replace(/(https?:\/\/[^\s?#]+)\?[^\s#]*/gi, "$1?[redacted]")
     .replace(/\s+/g, " ")
     .trim()
   return redacted.length <= MAX_ERROR_TEXT_LENGTH ? redacted : `${redacted.slice(0, MAX_ERROR_TEXT_LENGTH - 12).trimEnd()} [truncated]`
@@ -1232,7 +1261,18 @@ function boundToolFailureForMcp(result: unknown): AgentToolInvokeFailure {
   }
 }
 
-function isErrorPayload(payload: unknown): payload is { error: string; ok?: false; retryable?: boolean } {
+function isAgentToolInvokeFailureReasonCode(value: unknown): value is AgentToolInvokeFailureReasonCode {
+  return value === "APP_ERROR" || value === "FETCH_ERROR" || value === "HTTP_ERROR" || value === "INVALID_JSON" || value === "TIMEOUT"
+}
+
+function isErrorPayload(payload: unknown): payload is {
+  error: string
+  httpStatus?: number
+  ok?: false
+  reasonCode?: unknown
+  retryable?: boolean
+  timeoutMs?: number
+} {
   return Boolean(
     payload &&
       typeof payload === "object" &&

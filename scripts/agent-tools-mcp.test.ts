@@ -412,6 +412,68 @@ describe("agent tools MCP server helpers", () => {
     expect(requests).toBe(1)
   })
 
+  test("redacts signed URLs in failed React source reservation receipts", async () => {
+    const marker = "private-reservation-signature"
+    const result = await invokeAgentToolOverHttp(
+      { agentSessionId: "agent_session_1", appUrl: "https://chat.example.test", bridgeToken: "secret-token", deviceId: "device_123" },
+      "apps.code.reserveSource",
+      { appId: "react_app_1", editSessionId: "react_edit_1", operationId: "reserve_failed", sourceText: "export default null" },
+      async () => Response.json({
+        error: `Upload failed at https://upload.example.test/source?signature=${marker}`,
+        httpStatus: 503,
+        ok: false,
+        reasonCode: "HTTP_ERROR",
+        retryable: true,
+      }),
+    )
+
+    expect(result).toMatchObject({ httpStatus: 503, ok: false, reasonCode: "HTTP_ERROR", retryable: true })
+    expect(JSON.stringify(result)).not.toContain(marker)
+  })
+
+  test("derives distinct bounded completion operation IDs for long reservation IDs", async () => {
+    const completionIds: string[] = []
+    for (const suffix of ["a", "b"]) {
+      const operationId = `${"x".repeat(127)}${suffix}`
+      await invokeAgentToolOverHttp(
+        { agentSessionId: "agent_session_1", appUrl: "https://chat.example.test", bridgeToken: "secret-token", deviceId: "device_123" },
+        "apps.code.reserveSource",
+        { appId: "react_app_1", editSessionId: "react_edit_1", operationId, sourceText: "export default null" },
+        async (input, init) => {
+          const request = new Request(input, init)
+          if (request.url === "https://upload.example.test/source") return new Response(null, { status: 200 })
+          const body = await request.json() as { input: { operationId: string }; tool: string }
+          if (body.tool === "apps.code.completeSource") completionIds.push(body.input.operationId)
+          return body.tool === "apps.code.reserveSource"
+            ? Response.json({ ok: true, result: { sourceBlobId: `blob_${suffix}`, status: "pending", uploadUrl: "https://upload.example.test/source" } })
+            : Response.json({ ok: true, result: { status: "available" } })
+        },
+      )
+    }
+    expect(completionIds).toHaveLength(2)
+    expect(completionIds[0]).not.toBe(completionIds[1])
+    expect(completionIds.every((value) => value.length <= 128)).toBe(true)
+  })
+
+  test("applies one timeout budget across React source reserve, upload, and complete", async () => {
+    let requests = 0
+    const result = await invokeAgentToolOverHttp(
+      { agentSessionId: "agent_session_1", appUrl: "https://chat.example.test", bridgeToken: "secret-token", deviceId: "device_123" },
+      "apps.code.reserveSource",
+      { appId: "react_app_1", editSessionId: "react_edit_1", operationId: "reserve_slow", sourceText: "export default null" },
+      async (input, init) => {
+        requests += 1
+        await Bun.sleep(15)
+        const request = new Request(input, init)
+        if (request.url === "https://upload.example.test/source") return new Response(null, { status: 200 })
+        return Response.json({ ok: true, result: { sourceBlobId: "source_blob_1", status: "pending", uploadUrl: "https://upload.example.test/source" } })
+      },
+      { timeoutMs: 25 },
+    )
+    expect(result).toMatchObject({ ok: false, reasonCode: "TIMEOUT", retryable: true })
+    expect(requests).toBe(2)
+  })
+
   test.each([409, 412])("completes React source after a replay-safe %s upload response", async (status) => {
     const tools: string[] = []
     const result = await invokeAgentToolOverHttp(
@@ -497,6 +559,18 @@ describe("agent tools MCP server helpers", () => {
       { sourceBlobId: "source_blob_1", status: "pending", uploadUrl: "https://upload.example.test/source#private" },
       {
         requiredUploadHeaders: { "invalid header": "private" },
+        sourceBlobId: "source_blob_1",
+        status: "pending",
+        uploadUrl: "https://upload.example.test/source",
+      },
+      {
+        requiredUploadHeaders: { Host: "private.example.test" },
+        sourceBlobId: "source_blob_1",
+        status: "pending",
+        uploadUrl: "https://upload.example.test/source",
+      },
+      {
+        requiredUploadHeaders: { "X-Test": "one", "x-test": "two" },
         sourceBlobId: "source_blob_1",
         status: "pending",
         uploadUrl: "https://upload.example.test/source",
