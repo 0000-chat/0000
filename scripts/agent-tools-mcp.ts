@@ -1004,9 +1004,23 @@ async function uploadReactCodeSourceOverHttp(
 }
 
 export function toMcpToolResult(result: unknown, options: { markOkFalseAsError?: boolean } = {}) {
-  const record = result && typeof result === "object" ? (result as { ok?: unknown }) : undefined
-  const markAsError = record?.ok === false && options.markOkFalseAsError !== false
-  const text = markAsError ? JSON.stringify(boundToolFailureForMcp(result), null, 2) : JSON.stringify(result, null, 2)
+  const record = result && typeof result === "object"
+    ? result as { interactionId?: unknown; needsApproval?: unknown; ok?: unknown }
+    : undefined
+  const approvalRequest =
+    record?.ok === false &&
+    record.needsApproval === true &&
+    typeof record.interactionId === "string" &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(record.interactionId)
+  const markAsError =
+    record?.ok === false &&
+    !approvalRequest &&
+    options.markOkFalseAsError !== false
+  const text = approvalRequest
+    ? JSON.stringify({ interactionId: record.interactionId, needsApproval: true, ok: false }, null, 2)
+    : markAsError
+      ? JSON.stringify(boundToolFailureForMcp(result), null, 2)
+      : JSON.stringify(result, null, 2)
   return {
     content: [{ type: "text" as const, text }],
     ...(markAsError ? { isError: true } : {}),
