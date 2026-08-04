@@ -164,7 +164,7 @@ const DEFAULT_AGENT_SKILL_PATH = join(
   "0000",
   "SKILL.md",
 );
-export const BRIDGE_VERSION = "0.1.79";
+export const BRIDGE_VERSION = "0.1.80";
 const PUBLIC_APP_ORIGIN = "https://0000.chat";
 const PUBLIC_BRIDGE_API_ORIGIN = "https://api.0000.chat";
 const BRIDGE_LOCAL_STATE_MODE = 0o600;
