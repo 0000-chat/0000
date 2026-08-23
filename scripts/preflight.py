@@ -4,7 +4,6 @@ import dataclasses
 import json
 import pathlib
 import shutil
-import socket
 import subprocess
 import time
 
@@ -23,7 +22,9 @@ class HostFacts:
     swap_out_delta: int
     bound_ports: frozenset[int]
     docker_compose: bool
-    dns_addresses: frozenset[str]
+    dns_a_records: dict[str, tuple[str, ...]]
+    dns_aaaa_records: dict[str, tuple[str, ...]]
+    collection_failures: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,19 +97,37 @@ def has_docker_compose() -> bool:
     ).returncode == 0
 
 
-def resolve_domains() -> frozenset[str]:
-    addresses = set()
+def query_dns_records(
+    record_type: str,
+) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
+    records = {}
+    errors = []
     for domain in DOMAINS:
         try:
-            for item in socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM):
-                addresses.add(item[4][0])
-        except socket.gaierror:
+            result = subprocess.run(
+                ["dig", "+short", domain, record_type],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            records.update({name: () for name in DOMAINS})
+            errors.append(f"DNS {record_type} query failed: dig is unavailable")
+            break
+        except subprocess.CalledProcessError:
+            records[domain] = ()
+            errors.append(f"DNS {record_type} query failed for {domain}")
             continue
-    return frozenset(addresses)
+        records[domain] = tuple(
+            line.strip() for line in result.stdout.splitlines() if line.strip()
+        )
+    return records, tuple(errors)
 
 
 def collect() -> HostFacts:
     swap_in, swap_out = swap_delta()
+    dns_a_records, a_errors = query_dns_records("A")
+    dns_aaaa_records, aaaa_errors = query_dns_records("AAAA")
     return HostFacts(
         ubuntu_version=parse_os_release(),
         free_disk_bytes=shutil.disk_usage("/").free,
@@ -117,12 +136,14 @@ def collect() -> HostFacts:
         swap_out_delta=swap_out,
         bound_ports=listening_ports(),
         docker_compose=has_docker_compose(),
-        dns_addresses=resolve_domains(),
+        dns_a_records=dns_a_records,
+        dns_aaaa_records=dns_aaaa_records,
+        collection_failures=a_errors + aaaa_errors,
     )
 
 
 def evaluate(facts: HostFacts, expected_ip: str) -> Report:
-    failures = []
+    failures = list(facts.collection_failures)
     if not is_supported_ubuntu(facts.ubuntu_version):
         failures.append("Ubuntu 24.04 or 26.04 LTS is required")
     if not has_required_disk(facts.free_disk_bytes):
@@ -135,8 +156,11 @@ def evaluate(facts: HostFacts, expected_ip: str) -> Report:
         failures.append("ports 80 and 443 must be free")
     if not facts.docker_compose:
         failures.append("Docker Compose v2 is required")
-    if expected_ip not in facts.dns_addresses:
-        failures.append("both Matrix DNS names must resolve to the expected IP")
+    for domain in DOMAINS:
+        if facts.dns_a_records.get(domain, ()) != (expected_ip,):
+            failures.append(f"{domain} must have exactly one A record for {expected_ip}")
+        if facts.dns_aaaa_records.get(domain, ()):
+            failures.append(f"{domain} must not have an AAAA record")
     return Report(tuple(failures), facts)
 
 
@@ -147,7 +171,13 @@ def main() -> int:
     report = evaluate(collect(), args.expected_ip)
     facts = dataclasses.asdict(report.facts)
     facts["bound_ports"] = sorted(report.facts.bound_ports)
-    facts["dns_addresses"] = sorted(report.facts.dns_addresses)
+    facts["dns_a_records"] = {
+        domain: list(records) for domain, records in report.facts.dns_a_records.items()
+    }
+    facts["dns_aaaa_records"] = {
+        domain: list(records)
+        for domain, records in report.facts.dns_aaaa_records.items()
+    }
     print(json.dumps({"failures": report.failures, "facts": facts}, indent=2, sort_keys=True))
     return 1 if report.failures else 0
 
