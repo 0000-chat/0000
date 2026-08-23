@@ -22,6 +22,7 @@ fi
 
 cp deploy/synapse/log.config "$runtime_dir/synapse/log.config"
 chmod 0600 "$runtime_dir/synapse/log.config"
+chown --reference="$runtime_dir/synapse/homeserver.yaml" "$runtime_dir/synapse/log.config"
 
 python3 scripts/render-synapse-config.py \
   --postgres-env "$runtime_dir/secrets/postgres.env" \
