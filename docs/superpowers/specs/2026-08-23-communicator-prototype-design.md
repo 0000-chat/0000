@@ -77,6 +77,7 @@ The prototype runs on the current `ovh-vps` host, which has sufficient CPU and m
 
 Installation may begin only after all of these checks pass:
 
+- The host runs supported Ubuntu 26.04 LTS. Ubuntu 25.10 reached end of life on 2026-07-09 and must be upgraded before deployment.
 - At least 50 GB of disk space is free.
 - Swap use has been investigated and current memory pressure is safe.
 - Existing services and required ports have been inventoried.
@@ -84,6 +85,8 @@ Installation may begin only after all of these checks pass:
 - Only SSH, HTTP, and HTTPS are exposed for the Communicator stack.
 - An encrypted off-server backup destination is available.
 - Disk, memory, and service-health monitoring is enabled.
+
+Official lifecycle reference: <https://ubuntu.com/about/release-cycle>
 
 The compromised Contabo VPS is not part of this prototype. It must be rebuilt from a known-clean image before any future use.
 
