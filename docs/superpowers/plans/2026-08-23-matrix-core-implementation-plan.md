@@ -38,6 +38,89 @@ This plan does not implement:
 - The Matrix event consumer.
 - Queues, Durable Objects, Workers, R2, or any other Cloudflare data-plane component.
 
+## Execution contract for GPT-5.6 Luna at xhigh effort
+
+This plan is intentionally executable by an agent that has no prior project context. The executor must follow these rules exactly.
+
+### Required reading and workspace
+
+1. Read `docs/PROPOSAL.md` first.
+2. Read `docs/superpowers/specs/2026-08-23-communicator-prototype-design.md` second.
+3. Read this section and only the current task before starting that task. Do not load or start subsequent tasks early.
+4. Work in an isolated Git worktree on a branch other than `main`. The implementation branch must start from `origin/plan/matrix-core`.
+5. Run every command from the worktree root unless the step gives a different directory.
+6. Before changing a file, run `git status --short`. Stop and ask the user if it shows changes that the current task did not create.
+7. Treat the code blocks in this plan as exact content. Copy them without redesigning, shortening, upgrading, or refactoring them.
+8. Do not replace image versions or digests. A version change requires a separate plan update supported by current official documentation.
+
+Use this one-time setup from `/home/ubuntu/communicator`:
+
+```bash
+git fetch origin
+if [[ -d .worktrees/implement-matrix-core ]]; then
+  cd .worktrees/implement-matrix-core
+  test "$(git branch --show-current)" = "feat/matrix-core"
+else
+  git worktree add .worktrees/implement-matrix-core -b feat/matrix-core origin/plan/matrix-core
+  cd .worktrees/implement-matrix-core
+fi
+git status --short --branch
+```
+
+Expected: the branch is `feat/matrix-core`, it is based on `origin/plan/matrix-core`, and the worktree has no uncommitted files. If the branch exists but is not attached to this worktree, stop and ask the primary agent to inspect it; do not delete or recreate it.
+
+### One-task execution loop
+
+For each task, use this exact loop:
+
+1. Put only that task into the active session plan.
+2. Confirm that every dependency in the gate table below is complete.
+3. Perform one checkbox step at a time and in the listed order.
+4. After a file-creation step, confirm that each named file exists and is not empty. Do not claim the step passed because the write command returned successfully.
+5. After a test step, run the exact command and compare the result with the stated `Expected:` result.
+6. If an expected failure unexpectedly passes, stop. The test is not proving the intended behavior.
+7. If an expected pass fails, preserve the non-secret error output and use `superpowers:systematic-debugging`. Do not make speculative edits.
+8. After a commit step, run `git status --short` and `git show --stat --oneline --decorate HEAD`. Expected: the worktree is clean and the commit contains only the current task's files.
+9. Stop after the task. Report the commit hash, changed files, checks run, exact pass or fail result, and the next gate. Do not begin the next task in the same subagent turn.
+
+The Markdown checkboxes identify steps. Do not edit this plan merely to mark a checkbox. Track completion in the active session plan and in the final task report so implementation commits contain only implementation artifacts.
+
+### Step completion rules
+
+| Step type | Required evidence before it is complete |
+|---|---|
+| Create or modify a file | The named path exists, is non-empty, and matches the complete code block in this plan. |
+| Expected-failure test | The command exits non-zero for the stated reason, not because of an import, syntax, permission, or environment mistake unless that is the stated reason. |
+| Expected-pass test | The command exits `0` and its output matches the stated result. |
+| Commit | The commit succeeds, the worktree is clean, and the commit contains only the files listed for that task. |
+| Manual validation | The user or operator reports the observed result. The agent must not infer a pass. |
+| External-state validation | Fresh evidence confirms DNS, TLS, service health, backup, or restore state. Cached or planned state is not evidence. |
+
+### Dependency and authority gates
+
+| Task | May start when | Mandatory stop or approval |
+|---|---|---|
+| 1 | The isolated implementation worktree is clean. | None; this task is repository-only and read-only host inspection. |
+| 2 | Task 1 is committed. | Stop at Step 4. Continue only after the user confirms a completed provider snapshot and the maintenance window. Never automate disk deletion or the operating-system upgrade. |
+| 3 | Task 2 Step 5 reports an empty `failures` array. | Stop if the supported-host gate is not clean. |
+| 4 | Task 3 is committed. | No substitutions for the pinned image references. |
+| 5 | Task 4 is committed and its repository-contract tests pass. | Do not expose Synapse or PostgreSQL directly on a host port. |
+| 6 | Task 5 is committed and Task 2's host gate still passes with fresh evidence. | Step 5 mutates the host. Continue only after the user explicitly approves deployment in the current session. |
+| 7 | All three core services are healthy. | Manual E2EE checks and break-glass checks require the user's observed results. Never print passwords, access tokens, or recovery keys. |
+| 8 | Task 7 is complete. | The user must provide or confirm the off-server restic destination and password-file path. Do not create paid infrastructure or transmit secrets without approval. |
+| 9 | Backup and isolated restoration both pass. | The 24-hour soak uses elapsed real time. Do not simulate it or mark it complete early. |
+
+### Required subagent prompt
+
+When `superpowers:subagent-driven-development` dispatches a fresh Luna worker, use this prompt and replace only `<N>`:
+
+```text
+Implement only Task <N> from docs/superpowers/plans/2026-08-23-matrix-core-implementation-plan.md.
+Use GPT-5.6 Luna with xhigh effort. First read docs/PROPOSAL.md, the approved prototype design, and the plan's "Execution contract for GPT-5.6 Luna at xhigh effort" section. Then read Task <N> only.
+Follow every step in order. Copy specified file content exactly. Run every stated check. Do not start another task. Do not perform a manual or external action without the approval required by the gate table.
+Return only: outcome; files changed; verification commands and results; commit hash; blockers or next gate. Never include secret values.
+```
+
 ## File map
 
 Create these files:
