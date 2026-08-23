@@ -24,10 +24,10 @@ logs/
 *.registration.yaml
 
 # Local tooling
+.worktrees/
 .DS_Store
 .idea/
 .vscode/
 node_modules/
 coverage/
 dist/
-
