@@ -5,6 +5,8 @@ services:
     image: ${POSTGRES_IMAGE}
     env_file:
       - ${COMMUNICATOR_RUNTIME_DIR}/secrets/postgres.env
+    environment:
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
     volumes:
       - ${COMMUNICATOR_RUNTIME_DIR}/postgres:/var/lib/postgresql/data
     healthcheck:
