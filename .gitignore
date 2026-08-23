@@ -1,0 +1,33 @@
+# Local environment and secret material
+.env
+.env.*
+!.env.example
+secrets/
+config/generated/
+
+# Runtime state
+data/
+volumes/
+backups/
+exports/
+media/
+logs/
+
+# Credentials, databases, and generated registrations
+*.key
+*.pem
+*.p12
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.registration.yaml
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+coverage/
+dist/
+
