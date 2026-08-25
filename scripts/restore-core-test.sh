@@ -37,10 +37,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_healthy() {
+  service=$1
+  container_id=$(docker compose --env-file deploy/images.lock.env ps -q "$service")
+  if [[ -z "$container_id" ]]; then
+    echo "isolated container missing: $service" >&2
+    docker compose --env-file deploy/images.lock.env ps >&2
+    exit 1
+  fi
+
+  for _ in $(seq 1 180); do
+    container_status=$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || printf 'missing')
+    health_status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container_id" 2>/dev/null || printf 'missing')
+    if [[ "$container_status" == running && "$health_status" == healthy ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "isolated service did not become healthy: $service" >&2
+  docker compose --env-file deploy/images.lock.env ps >&2
+  docker inspect --format '{{.Name}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container_id" >&2 2>/dev/null || true
+  exit 1
+}
+
 docker compose --env-file deploy/images.lock.env up -d postgres
+wait_for_healthy postgres
 docker compose --env-file deploy/images.lock.env exec -T postgres \
   pg_restore -U synapse -d synapse --clean --if-exists < "$payload/synapse.pgdump"
 docker compose --env-file deploy/images.lock.env up -d synapse
+wait_for_healthy synapse
 docker compose --env-file deploy/images.lock.env exec -T synapse \
   python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8008/health", timeout=5)'
 docker compose --env-file deploy/images.lock.env down
