@@ -10,6 +10,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class RuntimeInitTests(unittest.TestCase):
+    def test_whatsapp_runtime_guard_matches_locked_image_digest(self):
+        script = (ROOT / "scripts/init-whatsapp-runtime.sh").read_text()
+        lock = dict(
+            line.split("=", 1)
+            for line in (ROOT / "deploy/images.lock.env").read_text().splitlines()
+            if line and not line.startswith("#")
+        )
+        self.assertIn(f'[[ "$WHATSAPP_IMAGE" == {lock["WHATSAPP_IMAGE"]} ]]', script)
+
     def test_creates_private_secret_files_without_printing_values(self):
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ | {"COMMUNICATOR_RUNTIME_DIR": directory}

@@ -14,7 +14,7 @@ set -a
 source deploy/images.lock.env
 set +a
 [[ "$project" == communicator ]]
-[[ "$WHATSAPP_IMAGE" == dock.mau.dev/mautrix/whatsapp:v26.08@sha256:86237c4d0d33a1e08910b1f820e6c561f9b8e21dc26943caf266e01087002 ]]
+[[ "$WHATSAPP_IMAGE" == dock.mau.dev/mautrix/whatsapp:v26.08@sha256:86237c4d0d33a1e08910b1f820e6c561f9b8e21dc26943caf266e01021087002 ]]
 install -d -m 0700 "$whatsapp_dir"
 
 if [[ ! -f "$config" ]]; then
