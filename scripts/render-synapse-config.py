@@ -2,6 +2,7 @@
 import argparse
 import os
 import pathlib
+import stat
 import string
 
 
@@ -22,8 +23,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--postgres-env", type=pathlib.Path, required=True)
     parser.add_argument("--registration-secret", type=pathlib.Path, required=True)
+    parser.add_argument("--whatsapp-registration", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
+
+    if not args.whatsapp_registration.is_file():
+        raise SystemExit("WhatsApp registration must be a regular file")
+    if stat.S_IMODE(args.whatsapp_registration.stat().st_mode) & 0o077:
+        raise SystemExit("WhatsApp registration permissions are too broad")
 
     values = read_env(args.postgres_env)
     substitutions = {

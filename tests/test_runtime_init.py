@@ -25,6 +25,14 @@ class RuntimeInitTests(unittest.TestCase):
             self.assertEqual(0o600, stat.S_IMODE(secret.stat().st_mode))
             self.assertIn("POSTGRES_PASSWORD=", secret.read_text())
             self.assertNotIn(secret.read_text().split("=", 1)[1].strip(), result.stdout)
+            self.assertTrue((pathlib.Path(directory) / "whatsapp").is_dir())
+            self.assertTrue((pathlib.Path(directory) / "whatsapp-backups").is_dir())
+            bridge_password = pathlib.Path(directory) / "secrets/whatsapp-db.password"
+            bridge_env = pathlib.Path(directory) / "secrets/whatsapp-db.env"
+            self.assertEqual(0o600, stat.S_IMODE(bridge_password.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(bridge_env.stat().st_mode))
+            self.assertIn("WHATSAPP_DB_PASSWORD=", bridge_env.read_text())
+            self.assertNotIn(bridge_password.read_text().strip(), result.stdout)
 
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -32,8 +40,11 @@ class RuntimeInitTests(unittest.TestCase):
             subprocess.run([ROOT / "scripts/init-runtime.sh"], env=env, check=True)
             secret = pathlib.Path(directory) / "secrets/postgres.env"
             before = secret.read_text()
+            bridge_password = pathlib.Path(directory) / "secrets/whatsapp-db.password"
+            bridge_before = bridge_password.read_text()
             subprocess.run([ROOT / "scripts/init-runtime.sh"], env=env, check=True)
             self.assertEqual(before, secret.read_text())
+            self.assertEqual(bridge_before, bridge_password.read_text())
 
 
 if __name__ == "__main__":

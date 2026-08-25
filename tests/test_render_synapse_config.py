@@ -12,15 +12,19 @@ class RenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = pathlib.Path(directory) / "postgres.env"
             registration = pathlib.Path(directory) / "registration-secret"
+            appservice = pathlib.Path(directory) / "whatsapp-registration.yaml"
             output = pathlib.Path(directory) / "homeserver.yaml"
             source.write_text("POSTGRES_DB=synapse\nPOSTGRES_USER=synapse\nPOSTGRES_PASSWORD=correct-horse-battery-staple\n")
             registration.write_text("registration-secret-value\n")
+            appservice.write_text("id: whatsapp\n")
+            appservice.chmod(0o600)
             result = subprocess.run(
                 [
                     "python3",
                     ROOT / "scripts/render-synapse-config.py",
                     "--postgres-env", source,
                     "--registration-secret", registration,
+                    "--whatsapp-registration", appservice,
                     "--output", output,
                 ],
                 check=True,
@@ -32,6 +36,8 @@ class RenderTests(unittest.TestCase):
             self.assertNotIn("correct-horse-battery-staple", result.stdout)
             self.assertIn("enable_registration: false", rendered)
             self.assertIn("federation_domain_whitelist: []", rendered)
+            self.assertIn("app_service_config_files:", rendered)
+            self.assertIn("/data/whatsapp-registration.yaml", rendered)
 
 
 if __name__ == "__main__":
