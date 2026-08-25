@@ -14,7 +14,10 @@ class RepositoryContractTests(unittest.TestCase):
         locked_images = dict(
             line.split("=", 1) for line in lock.splitlines() if line and not line.startswith("#")
         )
-        self.assertEqual({"POSTGRES_IMAGE", "CADDY_IMAGE", "SYNAPSE_IMAGE"}, set(image_variables))
+        self.assertEqual(
+            {"POSTGRES_IMAGE", "CADDY_IMAGE", "SYNAPSE_IMAGE", "WHATSAPP_IMAGE"},
+            set(image_variables),
+        )
         self.assertTrue(all("@sha256:" in locked_images[name] for name in image_variables))
 
     def test_only_caddy_publishes_ports(self):

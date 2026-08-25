@@ -32,6 +32,23 @@ services:
     restart: unless-stopped
     networks: [core]
 
+  whatsapp:
+    image: ${WHATSAPP_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/whatsapp:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:29318/_matrix/mau/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+    networks: [core]
+
   caddy:
     image: ${CADDY_IMAGE}
     depends_on:
