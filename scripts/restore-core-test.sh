@@ -23,6 +23,7 @@ payload=$(find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n
 install -d -m 0700 "$restore_root/runtime/postgres" "$restore_root/runtime/synapse" "$restore_root/runtime/secrets"
 cp -a "$payload/secrets/." "$restore_root/runtime/secrets/"
 cp -a "$payload/synapse-data/." "$restore_root/runtime/synapse/"
+chown -R 991:991 "$restore_root/runtime/synapse"
 
 cd "$repo_dir"
 set -a

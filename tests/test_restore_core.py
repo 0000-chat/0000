@@ -18,6 +18,11 @@ class RestoreCoreTests(unittest.TestCase):
         self.assertIn("wait_for_healthy postgres", restore_section)
         self.assertIn("wait_for_healthy synapse", source)
         self.assertLess(source.index("wait_for_healthy synapse"), source.index("127.0.0.1:8008/health"))
+        self.assertIn('chown -R 991:991 "$restore_root/runtime/synapse"', source)
+        self.assertLess(
+            source.index('chown -R 991:991 "$restore_root/runtime/synapse"'),
+            source.index("docker compose --env-file deploy/images.lock.env up -d synapse"),
+        )
 
 
 if __name__ == "__main__":
