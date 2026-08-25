@@ -27,6 +27,8 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn('"443:443"', compose)
         self.assertNotIn("5432:5432", compose)
         self.assertNotIn("8008:8008", compose)
+        self.assertNotIn("29318:29318", compose)
+        self.assertNotIn("2019:2019", compose)
 
     def test_cloudflare_products_are_not_services(self):
         compose = (ROOT / "compose.yaml").read_text().lower()
