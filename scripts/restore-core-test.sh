@@ -19,11 +19,17 @@ restic restore latest --tag communicator-core --target "$restore_root/restic"
 
 payload=$(find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n' -quit)
 [[ -n "$payload" ]]
+[[ -f "$payload/whatsapp.pgdump" ]]
 
-install -d -m 0700 "$restore_root/runtime/postgres" "$restore_root/runtime/synapse" "$restore_root/runtime/secrets"
+install -d -m 0700 "$restore_root/runtime/postgres" "$restore_root/runtime/synapse" "$restore_root/runtime/whatsapp" "$restore_root/runtime/secrets"
 cp -a "$payload/secrets/." "$restore_root/runtime/secrets/"
 cp -a "$payload/synapse-data/." "$restore_root/runtime/synapse/"
+cp -a "$payload/whatsapp-data/." "$restore_root/runtime/whatsapp/"
 chown -R 991:991 "$restore_root/runtime/synapse"
+chown -R 1337:1337 "$restore_root/runtime/whatsapp"
+[[ "$(stat -c '%a' "$restore_root/runtime/whatsapp/config.yaml")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/whatsapp/registration.yaml")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/whatsapp-db.password")" == 600 ]]
 
 cd "$repo_dir"
 set -a
@@ -66,6 +72,25 @@ docker compose --env-file deploy/images.lock.env up -d postgres
 wait_for_healthy postgres
 docker compose --env-file deploy/images.lock.env exec -T postgres \
   pg_restore -U synapse -d synapse --clean --if-exists < "$payload/synapse.pgdump"
+./scripts/init-whatsapp-db.sh
+docker compose --env-file deploy/images.lock.env exec -T postgres \
+  pg_restore -U synapse -d whatsapp_bridge --clean --if-exists --no-owner < "$payload/whatsapp.pgdump"
+whatsapp_table_count=$(docker compose --env-file deploy/images.lock.env exec -T postgres \
+  psql -At -U synapse -d whatsapp_bridge -c \
+  "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public'")
+[[ "$whatsapp_table_count" =~ ^[1-9][0-9]*$ ]]
+echo "whatsapp_restore_tables=PASS"
+
+install -d -o 1337 -g 1337 -m 0700 "$restore_root/validation"
+docker run --rm --network none \
+  -v "$restore_root/runtime/whatsapp/config.yaml:/data/config.yaml:ro" \
+  -v "$restore_root/validation:/validation" \
+  "$WHATSAPP_IMAGE" /usr/bin/mautrix-whatsapp \
+  -c /data/config.yaml -n --generate-registration -r /validation/registration.yaml >/dev/null
+[[ -s "$restore_root/validation/registration.yaml" ]]
+rm -rf -- "$restore_root/validation"
+echo "whatsapp_config=PASS"
+
 docker compose --env-file deploy/images.lock.env up -d synapse
 wait_for_healthy synapse
 docker compose --env-file deploy/images.lock.env exec -T synapse \

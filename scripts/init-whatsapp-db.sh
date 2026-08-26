@@ -12,7 +12,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[[ "$project" == communicator ]]
+[[ "$project" == communicator || "$project" == communicator-restore-test ]]
 [[ -f "$password_file" ]]
 [[ "$(stat -c '%a' "$password_file")" == 600 ]]
 chmod 0600 "$sql_file"
