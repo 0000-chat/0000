@@ -29,17 +29,48 @@ content and also include:
 - bridge encryption material, persisted connection/session state, and required
   Messenger media metadata.
 
-The production backup stops only `messenger whatsapp synapse` for the bounded
-dump window, runs restic backup and check, and returns all five services to
-healthy operation with a bounded `up --wait` command. It must not expose
+The production backup stops only the private bridge/core services
+telegram messenger whatsapp synapse for the bounded dump window, runs restic
+backup and check, and returns all six Compose services to healthy operation
+with a bounded up --wait command. It must not expose
 registration/config contents or account/session data.
 
-The isolated restore uses `COMPOSE_PROJECT_NAME=communicator-restore-test`
-and a fresh timestamped runtime. It initializes and restores the isolated
-Synapse, WhatsApp, and `messenger_bridge` databases, checks a positive public
+The isolated restore uses COMPOSE_PROJECT_NAME=communicator-restore-test and a
+fresh timestamped runtime. It initializes and restores the isolated Synapse,
+WhatsApp, Messenger, and messenger_bridge databases, checks a positive public
 table count, and validates the restored Messenger config with the pinned
-image on `--network none`. It starts isolated PostgreSQL and Synapse only;
-the restored Messenger service is never started and cannot reconnect the
-restored Human session to Meta. Agent onboarding is deferred by user and no
-Agent session is created. Preserve the successful restore evidence directory
-until separately approved cleanup.
+image on --network none. It starts isolated PostgreSQL and Synapse only; the
+restored Messenger and Telegram services are never started and cannot
+reconnect a restored Human session to an external service. Agent onboarding
+is deferred by user and no Agent session is created. Preserve the successful
+restore evidence directory until separately approved cleanup.
+## Telegram bridge recovery
+
+The Telegram recovery payload is part of the same encrypted backup and is
+restored into the disposable restore-test project only:
+
+- the telegram_bridge database dump;
+- the Telegram runtime configuration, session pickle, and appservice
+  registration;
+- the Synapse-side Telegram registration;
+- the protected API ID, API hash, database password, and environment files.
+
+Require the backup and restore scripts to stop and restart all bridges through
+the approved Compose project, while preserving the existing WhatsApp and
+Messenger payloads and health checks. Require both the Telegram table marker
+and telegram_config=PASS. The restored configuration must be validated with
+the pinned image and network none; never start a Telegram client or contact
+Telegram during an isolated restore.
+
+The restore test must use a separate Compose project, a disposable runtime
+directory, and a restore-test PostgreSQL database. It must prove positive
+Telegram public-table restoration without dropping or overwriting the
+production database, and it must leave production Telegram session state and
+Matrix history untouched.
+
+For rollback or recovery of a bad release, restore the prior verified release
+and protected Synapse configuration, then rerun core, WhatsApp, Messenger,
+and Telegram validators. Preserve Telegram session state, registrations,
+portal rooms, users, secrets, and retention behavior. Recovery must not
+automatically log the Telegram account out, remove its Telegram device,
+change split_portals, or delete portal rooms.
