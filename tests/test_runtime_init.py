@@ -84,6 +84,34 @@ class RuntimeInitTests(unittest.TestCase):
             self.assertEqual(0o600, stat.S_IMODE(bridge_env.stat().st_mode))
             self.assertIn("WHATSAPP_DB_PASSWORD=", bridge_env.read_text())
             self.assertNotIn(bridge_password.read_text().strip(), result.stdout)
+            for directory_name in ("telegram", "telegram-backups"):
+                directory_path = pathlib.Path(directory) / directory_name
+                self.assertTrue(directory_path.is_dir())
+                self.assertEqual(0o700, stat.S_IMODE(directory_path.stat().st_mode))
+            telegram_password = pathlib.Path(directory) / "secrets/telegram-db.password"
+            telegram_env = pathlib.Path(directory) / "secrets/telegram-db.env"
+            self.assertEqual(0o600, stat.S_IMODE(telegram_password.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(telegram_env.stat().st_mode))
+            self.assertIn("TELEGRAM_DB_PASSWORD=", telegram_env.read_text())
+            self.assertNotIn(telegram_password.read_text().strip(), result.stdout)
+
+            self.assertFalse((pathlib.Path(directory) / "secrets/telegram-api-id").exists())
+            self.assertFalse((pathlib.Path(directory) / "secrets/telegram-api-hash").exists())
+
+    def test_runtime_initializer_does_not_manage_telegram_api_credentials(self):
+        script = (ROOT / "scripts/init-runtime.sh").read_text()
+        self.assertNotIn("telegram-api-id", script)
+        self.assertNotIn("telegram-api-hash", script)
+
+    def test_telegram_database_initializer_is_additive(self):
+        initializer = ROOT / "scripts/init-telegram-db.sh"
+        self.assertTrue(initializer.exists())
+        source = initializer.read_text()
+        self.assertIn("CREATE ROLE telegram_bridge", source)
+        self.assertIn("ALTER ROLE telegram_bridge", source)
+        self.assertIn("CREATE DATABASE telegram_bridge OWNER telegram_bridge", source)
+        for forbidden in ("DROP DATABASE", "DROP ROLE", "compose down", "rm -rf"):
+            self.assertNotIn(forbidden, source)
 
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -95,10 +123,14 @@ class RuntimeInitTests(unittest.TestCase):
             bridge_before = bridge_password.read_text()
             messenger_password = pathlib.Path(directory) / "secrets/messenger-db.password"
             messenger_before = messenger_password.read_text()
+            telegram_password = pathlib.Path(directory) / "secrets/telegram-db.password"
+            self.assertTrue(telegram_password.exists())
+            telegram_before = telegram_password.read_text()
             subprocess.run([ROOT / "scripts/init-runtime.sh"], env=env, check=True)
             self.assertEqual(before, secret.read_text())
             self.assertEqual(bridge_before, bridge_password.read_text())
             self.assertEqual(messenger_before, messenger_password.read_text())
+            self.assertEqual(telegram_before, telegram_password.read_text())
 
     def test_messenger_database_initializer_is_additive(self):
         script = (ROOT / "scripts/init-messenger-db.sh").read_text()

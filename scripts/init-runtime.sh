@@ -16,7 +16,9 @@ install -d -m 0700 \
   "$runtime_dir/whatsapp" \
   "$runtime_dir/whatsapp-backups" \
   "$runtime_dir/messenger" \
-  "$runtime_dir/messenger-backups"
+  "$runtime_dir/messenger-backups" \
+  "$runtime_dir/telegram" \
+  "$runtime_dir/telegram-backups"
 
 postgres_env="$runtime_dir/secrets/postgres.env"
 if [[ ! -e "$postgres_env" ]]; then
@@ -68,5 +70,24 @@ if [[ ! -e "$messenger_env" ]]; then
   mv "$temporary_env" "$messenger_env"
 fi
 chmod 0600 "$messenger_env"
+
+telegram_password="$runtime_dir/secrets/telegram-db.password"
+if [[ ! -e "$telegram_password" ]]; then
+  openssl rand -base64 48 | tr -d '\n' > "$telegram_password"
+  printf '\n' >> "$telegram_password"
+fi
+chmod 0600 "$telegram_password"
+
+telegram_env="$runtime_dir/secrets/telegram-db.env"
+if [[ ! -e "$telegram_env" ]]; then
+  temporary_env=$(mktemp "$runtime_dir/secrets/telegram-db.env.XXXXXX")
+  chmod 0600 "$temporary_env"
+  {
+    printf 'TELEGRAM_DB_PASSWORD='
+    cat "$telegram_password"
+  } > "$temporary_env"
+  mv "$temporary_env" "$telegram_env"
+fi
+chmod 0600 "$telegram_env"
 
 printf 'runtime initialized at %s\n' "$runtime_dir"
