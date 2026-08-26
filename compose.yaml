@@ -49,6 +49,23 @@ services:
     restart: unless-stopped
     networks: [core]
 
+  messenger:
+    image: ${MESSENGER_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/messenger:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:29319/_matrix/mau/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+    networks: [core]
+
   caddy:
     image: ${CADDY_IMAGE}
     depends_on:
