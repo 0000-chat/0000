@@ -19,6 +19,13 @@ class RuntimeInitTests(unittest.TestCase):
         )
         self.assertIn(f'[[ "$WHATSAPP_IMAGE" == {lock["WHATSAPP_IMAGE"]} ]]', script)
 
+    def test_official_generation_precedes_project_config_render(self):
+        script = (ROOT / "scripts/init-whatsapp-runtime.sh").read_text()
+        generation = 'if [[ ! -f "$config" || ! -f "$registration" ]]; then'
+        self.assertIn(generation, script)
+        self.assertLess(script.index(generation), script.index("python3 scripts/render-whatsapp-config.py"))
+        self.assertEqual(1, script.count("docker compose --env-file deploy/images.lock.env --project-name \"$project\" run --rm --no-deps whatsapp"))
+
     def test_creates_private_secret_files_without_printing_values(self):
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ | {"COMMUNICATOR_RUNTIME_DIR": directory}
