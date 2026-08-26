@@ -51,7 +51,7 @@ class WhatsAppValidationTests(unittest.TestCase):
     def test_core_validator_requires_the_bridge_service(self):
         self.assertIn('runtime_dir=${COMMUNICATOR_RUNTIME_DIR:-/srv/communicator}', self.core_validator)
         self.assertIn('project=${COMPOSE_PROJECT_NAME:-communicator}', self.core_validator)
-        self.assertIn("caddy\\npostgres\\nsynapse\\nwhatsapp\\n", self.core_validator)
+        self.assertIn("caddy\\nmessenger\\npostgres\\nsynapse\\nwhatsapp\\n", self.core_validator)
 
 
 if __name__ == "__main__":
