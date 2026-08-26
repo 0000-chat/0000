@@ -88,6 +88,8 @@ def parse_permissions(lines: list[str]) -> dict[str, str] | None:
         rf'^{re.escape(" " * child_indent)}("(?:[^"\\]|\\.)*"):\s+(relay|user|admin)$'
     )
     for line in block:
+        if len(line) - len(line.lstrip(" ")) != child_indent:
+            return None
         match = pattern.fullmatch(line)
         if not match:
             return None
@@ -106,6 +108,8 @@ def parse_relay(lines: list[str]) -> dict[str, str] | None:
     parsed: dict[str, str] = {}
     pattern = re.compile(rf"^{re.escape(' ' * child_indent)}([a-z_]+):\s+(.+)$")
     for line in block:
+        if len(line) - len(line.lstrip(" ")) != child_indent:
+            continue
         match = pattern.fullmatch(line)
         if not match or match.group(1) in parsed:
             return None
