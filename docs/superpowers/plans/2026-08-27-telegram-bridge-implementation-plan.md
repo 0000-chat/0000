@@ -172,11 +172,17 @@ git cat-file -e origin/main:scripts/validate-messenger.sh
 git cat-file -e origin/main:docs/runbooks/mautrix-messenger-validation.md
 ```
 
-Expected: clean worktree and all three Messenger artifacts on `origin/main`.
-If any artifact is missing, stop. Planning may continue, but implementation and
-all Contabo mutations remain blocked until Messenger is merged and accepted.
+Expected today: a clean worktree. Record each Messenger artifact as PRESENT or
+PENDING. If all three are present, continue with Step 2. If any is pending,
+record `telegram_integration_gate=PENDING`, skip Steps 2 and 4-6 for now, run
+the source-only Step 3, and continue Tasks 2-8 as parallel local development
+from this branch. Shared files may be changed normally in this isolated
+worktree, but never copy whole files from another worktree and never touch
+Contabo. Task 9 requires returning to this gate, rebasing onto the accepted
+Messenger implementation, resolving conflicts semantically, and rerunning
+every verification before implementation commits may be pushed or deployed.
 
-- [ ] **Step 2: Rebase only after Step 1 passes**
+- [ ] **Step 2: Rebase when the integration gate is available**
 
 ```bash
 git rebase origin/main
@@ -186,10 +192,12 @@ bash -n scripts/*.sh
 python3 -m py_compile scripts/*.py
 ```
 
-Expected: clean rebase and the full merged baseline green. If a conflict affects
-shared implementation files, abort the rebase and ask the coordinating session;
-do not guess. A conflict limited to planning-document ancestry may be resolved by
-preserving this complete Telegram plan.
+Expected when the gate is available: clean rebase and the full merged baseline
+green. Resolve conflicts field-by-field while preserving all accepted
+WhatsApp and Messenger behavior; never replace shared files wholesale with
+older worktree copies. If the gate is pending, leave this checkbox and Steps
+4-6 open and return to all of them at Task 9. That does not block local Tasks
+2-8.
 
 - [ ] **Step 3: Re-verify the immutable upstream image**
 
@@ -1061,7 +1069,30 @@ git commit -m "docs: add Telegram bridge operations"
 
 **Files:** No new files unless a test-backed correction is required.
 
-- [ ] **Step 1: Run the complete local gate**
+- [ ] **Step 1: Close the Messenger integration gate and rebase**
+
+```bash
+cd /home/ubuntu/communicator/.worktrees/telegram-bridge
+git fetch origin
+git cat-file -e origin/main:scripts/init-messenger-runtime.sh
+git cat-file -e origin/main:scripts/validate-messenger.sh
+git cat-file -e origin/main:docs/runbooks/mautrix-messenger-validation.md
+git rebase origin/main
+```
+
+All three artifact checks are mandatory here. If any is missing, report
+`telegram_integration_gate=BLOCKED_BY_MESSENGER` with only the missing file
+names, stop before pushing implementation commits or mutating Contabo, and
+wait for the coordinator. This expected sequencing gate is not permission to
+weaken tests or copy from another worktree.
+
+Resolve rebase conflicts field-by-field. Preserve all accepted Messenger
+service, database, registration, backup, restore, validation, and runbook
+behavior while adding Telegram. Rerun the focused test for each resolved shared
+file. Then return to Task 1 Steps 4-6 and require all remote, resource, and
+recovery gates before continuing.
+
+- [ ] **Step 2: Run the complete local gate**
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -1073,7 +1104,7 @@ git status --short --branch
 
 Require zero failures and a clean worktree.
 
-- [ ] **Step 2: Run the secret and scope scan**
+- [ ] **Step 3: Run the secret and scope scan**
 
 ```bash
 ! rg --pcre2 -n --hidden --glob '!*.pyc' --glob '!.git/**' \
@@ -1087,7 +1118,7 @@ Require zero failures and a clean worktree.
 Fake unit-test values must remain visibly fake and must not match the production
 secret patterns.
 
-- [ ] **Step 3: Push without creating the PR yet**
+- [ ] **Step 4: Push without creating the PR yet**
 
 ```bash
 git push -u origin codex/telegram-bridge
