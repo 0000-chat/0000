@@ -26,6 +26,7 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 4. Preserve the current Synapse configuration and checksum in a root-only timestamped rollback file. Never copy its contents into operator output.
 5. Activate the verified release and run `sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/deploy-core.sh`.
 6. Require PostgreSQL, Synapse, Caddy, and WhatsApp to be healthy. The bridge uses only the existing internal Compose network; it has no published port and no Caddy route.
+   The deployment waits for PostgreSQL, initializes the separate bridge database/runtime, installs the appservice registration, and force-recreates Synapse, Caddy, and WhatsApp so registration changes are loaded. It does not recreate volumes or drop databases.
 7. Run `validate-core.sh`, `validate-whatsapp.sh`, and the public Matrix/well-known HTTPS checks. Public registration and federation/key endpoints must remain disabled/404.
 8. For rollback, stop only the WhatsApp service if needed, activate the previous release, restore the protected pre-change Synapse configuration, restart Synapse with health checks, and leave the bridge database/runtime intact. Never delete PostgreSQL volumes, Matrix data, bridge session state, users, rooms, or secrets as part of rollback.
 9. Do not pair a WhatsApp account during release deployment. Pairing is a separate user checkpoint requiring interactive QR or pairing-code entry.
