@@ -95,6 +95,32 @@ class MessengerRenderTests(unittest.TestCase):
             self.assertNotIn("stable-messenger-pickle", result.stdout)
             self.assertEqual([], list(pathlib.Path(directory).glob(".config.yaml.*")))
 
+    def test_renders_upstream_root_policy_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            password_file = directory / "db.password"
+            output = directory / "config.yaml"
+            password_file.write_text("fake-password\n")
+            password_file.chmod(0o600)
+            subprocess.run(
+                [
+                    "python3", RENDERER,
+                    "--db-password-file", password_file,
+                    "--output", output,
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            rendered = output.read_text()
+            self.assertIn(
+                "provisioning:\n  shared_secret: disable\n  allow_matrix_auth: false\n"
+                "  debug_endpoints: false\n  enable_session_transfers: false",
+                rendered,
+            )
+            self.assertIn("public_media:\n  enabled: false", rendered)
+            self.assertIn("direct_media:\n  enabled: false", rendered)
+
     def test_requires_password_file_and_private_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)

@@ -36,10 +36,10 @@ python3 scripts/validate_messenger_policy.py "$config" >/dev/null
    .encryption.default == true and
    .encryption.require == true and
    .matrix.federate_rooms == false and
-   .matrix.provisioning.shared_secret == "disable" and
-   .matrix.provisioning.allow_matrix_auth == false and
-   .matrix.public_media.enabled == false and
-   .matrix.direct_media.enabled == false and
+   .provisioning.shared_secret == "disable" and
+   .provisioning.allow_matrix_auth == false and
+   .public_media.enabled == false and
+   .direct_media.enabled == false and
    .bridge.split_portals == true and
    .bridge.relay.enabled == false and
    .backfill.enabled == false' \

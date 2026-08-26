@@ -40,6 +40,10 @@ class MessengerValidationTests(unittest.TestCase):
         self.assertIn('registration="$runtime_dir/synapse/messenger-registration.yaml"', self.validator)
         self.assertIn('bridge_registration="$runtime_dir/messenger/registration.yaml"', self.validator)
         self.assertIn('python3 scripts/validate_messenger_policy.py "$config"', self.validator)
+        self.assertIn('.provisioning.shared_secret == "disable"', self.validator)
+        self.assertIn('.provisioning.allow_matrix_auth == false', self.validator)
+        self.assertIn('.public_media.enabled == false', self.validator)
+        self.assertIn('.direct_media.enabled == false', self.validator)
         self.assertIn(":(5432|8008|8448|29319|2019)$", self.validator)
 
     def test_validator_emits_only_approved_markers_and_safe_diagnostics(self):

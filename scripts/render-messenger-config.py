@@ -89,6 +89,18 @@ matrix:
   direct_media:
     enabled: false
 
+provisioning:
+  shared_secret: disable
+  allow_matrix_auth: false
+  debug_endpoints: false
+  enable_session_transfers: false
+
+public_media:
+  enabled: false
+
+direct_media:
+  enabled: false
+
 backfill:
   enabled: false
   max_initial_messages: 0
