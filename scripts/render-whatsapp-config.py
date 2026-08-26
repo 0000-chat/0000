@@ -76,6 +76,7 @@ encryption:
   require: true
   appservice: false
   msc4190: false
+  pickle_key: {pickle_key}
 """
 
 
@@ -103,6 +104,32 @@ def read_registration_tokens(path: pathlib.Path) -> dict[str, str]:
     return tokens
 
 
+def read_existing_pickle_key(path: pathlib.Path) -> str:
+    if not path.is_file():
+        return "generate"
+
+    in_encryption = False
+    pickle_line = re.compile(r"^\s+pickle_key:\s*(.*?)\s*$")
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            in_encryption = line.split(":", 1)[0].strip() == "encryption"
+            continue
+        if not in_encryption:
+            continue
+        match = pickle_line.fullmatch(line)
+        if not match:
+            continue
+        value = match.group(1)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not value:
+            raise SystemExit("existing encryption pickle key is empty")
+        return value
+    return "generate"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-password-file", type=pathlib.Path, required=True)
@@ -119,6 +146,7 @@ def main() -> int:
     if not password:
         raise SystemExit("database password file is empty")
     tokens = read_registration_tokens(args.registration)
+    pickle_key = read_existing_pickle_key(args.output)
 
     database_uri = (
         "postgres://whatsapp_bridge:"
@@ -129,6 +157,7 @@ def main() -> int:
         database_uri=database_uri,
         as_token=json.dumps(tokens["as_token"]),
         hs_token=json.dumps(tokens["hs_token"]),
+        pickle_key=json.dumps(pickle_key),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(

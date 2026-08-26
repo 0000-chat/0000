@@ -20,6 +20,7 @@ class WhatsAppRenderTests(unittest.TestCase):
             password_file.chmod(0o600)
             registration.write_text('as_token: "test-as-token"\nhs_token: "test-hs-token"\n')
             registration.chmod(0o600)
+            output.write_text('encryption:\n    pickle_key: "stable-pickle-key"\n')
             result = subprocess.run(
                 [
                     "python3",
@@ -49,6 +50,7 @@ class WhatsAppRenderTests(unittest.TestCase):
             self.assertIn("max_initial_conversations: 0", rendered)
             self.assertIn('as_token: "test-as-token"', rendered)
             self.assertIn('hs_token: "test-hs-token"', rendered)
+            self.assertIn('pickle_key: "stable-pickle-key"', rendered)
             self.assertEqual(0o600, stat.S_IMODE(output.stat().st_mode))
             self.assertNotIn(password, result.stdout)
             self.assertNotIn("test-as-token", result.stdout)
