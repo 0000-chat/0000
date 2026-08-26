@@ -106,14 +106,14 @@ def parse_relay(lines: list[str]) -> dict[str, str] | None:
         return None
     block, child_indent = nested
     parsed: dict[str, str] = {}
-    pattern = re.compile(rf"^{re.escape(' ' * child_indent)}([a-z_]+):\s+(.+)$")
+    pattern = re.compile(rf"^{re.escape(' ' * child_indent)}([a-z_]+):(?:\s+(.+))?$")
     for line in block:
         if len(line) - len(line.lstrip(" ")) != child_indent:
             continue
         match = pattern.fullmatch(line)
         if not match or match.group(1) in parsed:
             return None
-        parsed[match.group(1)] = match.group(2)
+        parsed[match.group(1)] = match.group(2) or ""
     return parsed
 
 

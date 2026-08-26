@@ -38,7 +38,8 @@ UPSTREAM_NORMALIZED_CONFIG = '''bridge:
         allow_bridge: false
         default_relays: []
         user_distinguishers: []
-        message_formats: {}
+        message_formats:
+            text: plain
         displayname_format: "{displayname}"
 '''
 
