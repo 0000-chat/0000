@@ -1,0 +1,170 @@
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+VALID_CONFIG = '''network:
+  api_id: 12345
+  api_hash: "00000000000000000000000000000000"
+  member_list:
+    max_initial_sync: 0
+    sync_broadcast_channels: false
+    skip_deleted: true
+  sync:
+    update_limit: 0
+    create_limit: 0
+    login_sync_limit: 0
+    direct_chats: true
+  takeout:
+    dialog_sync: false
+    forward_backfill: false
+    backward_backfill: false
+  contact_avatars: false
+  contact_names: false
+  disable_view_once: true
+  bridge_communities: false
+bridge:
+  command_prefix: "!tg"
+  personal_filtering_spaces: true
+  private_chat_portal_meta: true
+  async_events: false
+  split_portals: true
+  deduplicate_matrix_messages: true
+  kick_matrix_users: true
+  enable_send_state_requests: false
+  phone_numbers_in_profile: false
+  cleanup_on_logout:
+    enabled: false
+  relay:
+    enabled: false
+    admin_only: true
+    default_relays: []
+  permissions:
+    "*": relay
+    "@human:communicator.0000.gold": user
+    "@platform-admin:communicator.0000.gold": admin
+database:
+  type: postgres
+  uri: "postgres://telegram_bridge:fake@postgres/telegram_bridge?sslmode=disable"
+  max_open_conns: 5
+  max_idle_conns: 1
+homeserver:
+  address: http://synapse:8008
+  domain: communicator.0000.gold
+  software: standard
+appservice:
+  address: http://telegram:29317
+  public_address: null
+  hostname: 0.0.0.0
+  port: 29317
+  id: telegram
+  bot:
+    username: telegrambot
+  as_token: "test-as-token"
+  hs_token: "test-hs-token"
+  ephemeral_events: true
+  async_transactions: false
+  username_template: "telegram_{{.}}"
+matrix:
+  delivery_receipts: true
+  federate_rooms: false
+analytics:
+  token: null
+provisioning:
+  shared_secret: disable
+  allow_matrix_auth: false
+  debug_endpoints: false
+  enable_session_transfers: false
+public_media:
+  enabled: false
+direct_media:
+  enabled: false
+backfill:
+  enabled: false
+  max_initial_messages: 0
+  max_catchup_messages: 0
+  threads:
+    max_initial_messages: 0
+  queue:
+    enabled: false
+    manual: false
+double_puppet:
+  servers: {}
+  allow_discovery: false
+  secrets: {}
+encryption:
+  allow: true
+  default: true
+  require: true
+  appservice: false
+  msc4190: false
+  msc4392: false
+  self_sign: false
+  allow_key_sharing: true
+  plaintext_mentions: false
+  pickle_key: "fake-pickle-key"
+env_config_prefix: null
+logging:
+  min_level: info
+  writers:
+    - type: stdout
+      format: pretty-colored
+'''
+
+
+class TelegramPolicyTests(unittest.TestCase):
+    def validate(self, content):
+        with tempfile.TemporaryDirectory() as directory:
+            config = pathlib.Path(directory) / "config.yaml"
+            config.write_text(content)
+            return subprocess.run(
+                ["python3", ROOT / "scripts/validate_telegram_policy.py", config],
+                text=True,
+                capture_output=True,
+            )
+
+    def test_accepts_exact_approved_policy(self):
+        result = self.validate(VALID_CONFIG)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("telegram_policy=PASS\n", result.stdout)
+
+    def test_rejects_agent_permission_and_extra_user(self):
+        self.assertNotEqual(
+            0,
+            self.validate(
+                VALID_CONFIG.replace(
+                    '"@platform-admin:communicator.0000.gold": admin',
+                    '"@agent:communicator.0000.gold": user\n    "@platform-admin:communicator.0000.gold": admin',
+                )
+            ).returncode,
+        )
+
+    def test_rejects_broadened_security_settings(self):
+        mutations = (
+            ("split_portals: true", "split_portals: false"),
+            ("relay:\n    enabled: false", "relay:\n    enabled: true"),
+            ("federate_rooms: false", "federate_rooms: true"),
+            ("max_initial_sync: 0", "max_initial_sync: 10"),
+            ("allow_matrix_auth: false", "allow_matrix_auth: true"),
+        )
+        for before, after in mutations:
+            with self.subTest(after=after):
+                self.assertNotEqual(0, self.validate(VALID_CONFIG.replace(before, after)).returncode)
+
+    def test_rejects_public_or_sensitive_connector_changes(self):
+        mutations = (
+            ("public_address: null", "public_address: https://example.invalid"),
+            ("token: null", 'token: "analytics-secret"'),
+            ("servers: {}", "servers:\n    example: secret"),
+            ('"@human:communicator.0000.gold": user', '"@human:communicator.0000.gold": admin'),
+        )
+        for before, after in mutations:
+            with self.subTest(after=after):
+                self.assertNotEqual(0, self.validate(VALID_CONFIG.replace(before, after)).returncode)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
