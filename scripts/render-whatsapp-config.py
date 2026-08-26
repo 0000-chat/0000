@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import pathlib
+import re
 import stat
 import tempfile
 from urllib.parse import quote
@@ -19,6 +21,8 @@ appservice:
   id: whatsapp
   bot:
     username: whatsappbot
+  as_token: {as_token}
+  hs_token: {hs_token}
 
 database:
   type: postgres
@@ -75,9 +79,34 @@ encryption:
 """
 
 
+def read_registration_tokens(path: pathlib.Path) -> dict[str, str]:
+    if not path.is_file():
+        raise SystemExit("registration file is missing")
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise SystemExit("registration file permissions are too broad")
+
+    tokens: dict[str, str] = {}
+    token_line = re.compile(r"^(as_token|hs_token):\s*(.*?)\s*$")
+    for line in path.read_text().splitlines():
+        match = token_line.fullmatch(line)
+        if not match:
+            continue
+        key, value = match.groups()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not value:
+            raise SystemExit("registration token is empty")
+        tokens[key] = value
+
+    if set(tokens) != {"as_token", "hs_token"}:
+        raise SystemExit("registration tokens are missing")
+    return tokens
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-password-file", type=pathlib.Path, required=True)
+    parser.add_argument("--registration", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
 
@@ -89,13 +118,18 @@ def main() -> int:
     password = password_path.read_text().strip()
     if not password:
         raise SystemExit("database password file is empty")
+    tokens = read_registration_tokens(args.registration)
 
     database_uri = (
         "postgres://whatsapp_bridge:"
         + quote(password, safe="")
         + "@postgres/whatsapp_bridge?sslmode=disable"
     )
-    rendered = CONFIG_TEMPLATE.format(database_uri=database_uri)
+    rendered = CONFIG_TEMPLATE.format(
+        database_uri=database_uri,
+        as_token=json.dumps(tokens["as_token"]),
+        hs_token=json.dumps(tokens["hs_token"]),
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{args.output.name}.", dir=args.output.parent

@@ -14,15 +14,20 @@ class WhatsAppRenderTests(unittest.TestCase):
         password = "p@ss:word/with?hash#'quote"
         with tempfile.TemporaryDirectory() as directory:
             password_file = pathlib.Path(directory) / "db.password"
+            registration = pathlib.Path(directory) / "registration.yaml"
             output = pathlib.Path(directory) / "config.yaml"
             password_file.write_text(password + "\n")
             password_file.chmod(0o600)
+            registration.write_text('as_token: "test-as-token"\nhs_token: "test-hs-token"\n')
+            registration.chmod(0o600)
             result = subprocess.run(
                 [
                     "python3",
                     ROOT / "scripts/render-whatsapp-config.py",
                     "--db-password-file",
                     password_file,
+                    "--registration",
+                    registration,
                     "--output",
                     output,
                 ],
@@ -42,8 +47,12 @@ class WhatsAppRenderTests(unittest.TestCase):
             self.assertIn('"@platform-admin:communicator.0000.gold": admin', rendered)
             self.assertIn("shared_secret: disable", rendered)
             self.assertIn("max_initial_conversations: 0", rendered)
+            self.assertIn('as_token: "test-as-token"', rendered)
+            self.assertIn('hs_token: "test-hs-token"', rendered)
             self.assertEqual(0o600, stat.S_IMODE(output.stat().st_mode))
             self.assertNotIn(password, result.stdout)
+            self.assertNotIn("test-as-token", result.stdout)
+            self.assertNotIn("test-hs-token", result.stdout)
 
     def test_requires_password_file(self):
         with tempfile.TemporaryDirectory() as directory:

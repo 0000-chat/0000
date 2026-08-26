@@ -23,6 +23,7 @@ fi
 [[ -f "$registration" ]]
 python3 scripts/render-whatsapp-config.py \
   --db-password-file "$runtime_dir/secrets/whatsapp-db.password" \
+  --registration "$registration" \
   --output "$config" >/dev/null
 
 chown 1337:1337 "$config" "$whatsapp_dir"
