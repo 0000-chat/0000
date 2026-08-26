@@ -5,6 +5,7 @@ import unittest
 SCRIPT = Path(__file__).parents[1] / "scripts" / "restore-core-test.sh"
 DB_INIT = Path(__file__).parents[1] / "scripts" / "init-whatsapp-db.sh"
 MESSENGER_DB_INIT = Path(__file__).parents[1] / "scripts" / "init-messenger-db.sh"
+TELEGRAM_DB_INIT = Path(__file__).parents[1] / "scripts" / "init-telegram-db.sh"
 
 
 class RestoreCoreTests(unittest.TestCase):
@@ -67,6 +68,31 @@ class RestoreCoreTests(unittest.TestCase):
         self.assertIn("messenger_config=PASS", source)
         self.assertNotIn("up -d messenger", source)
         self.assertNotIn("start messenger", source)
+
+    def test_restores_telegram_and_validates_it_offline_without_starting_client(self):
+        source = SCRIPT.read_text()
+        telegram_db_init = TELEGRAM_DB_INIT.read_text()
+
+        for required in (
+            '[[ -f "$payload/telegram.pgdump" ]]',
+            'cp -a "$payload/telegram-data/." "$restore_root/runtime/telegram/"',
+            'cp -a "$payload/telegram-secrets/." "$restore_root/runtime/secrets/"',
+            'chown -R 1337:1337 "$restore_root/runtime/telegram"',
+            '"$restore_root/runtime/secrets/telegram-api-id"',
+            "pg_restore -U synapse -d telegram_bridge --clean --if-exists --no-owner",
+            "information_schema.tables",
+            "telegram_restore_tables=PASS",
+            'docker run --rm --network none',
+            "/usr/bin/mautrix-telegram",
+            "-c /validation/config.yaml -g -r /validation/registration.yaml",
+            "telegram_config=PASS",
+        ):
+            self.assertIn(required, source)
+        self.assertIn("./scripts/init-telegram-db.sh", source)
+        self.assertIn('"$project" == communicator-restore-test', telegram_db_init)
+        self.assertNotIn("up -d telegram", source)
+        self.assertNotIn("start telegram", source)
+        self.assertNotIn("--network host", source)
 
 
 if __name__ == "__main__":

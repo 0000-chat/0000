@@ -21,16 +21,29 @@ payload=$(find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n
 [[ -n "$payload" ]]
 [[ -f "$payload/whatsapp.pgdump" ]]
 [[ -f "$payload/messenger.pgdump" ]]
+[[ -f "$payload/telegram.pgdump" ]]
 
-install -d -m 0700 "$restore_root/runtime/postgres" "$restore_root/runtime/synapse" "$restore_root/runtime/whatsapp" "$restore_root/runtime/messenger" "$restore_root/runtime/secrets"
+install -d -m 0700 \
+  "$restore_root/runtime/postgres" \
+  "$restore_root/runtime/synapse" \
+  "$restore_root/runtime/whatsapp" \
+  "$restore_root/runtime/messenger" \
+  "$restore_root/runtime/telegram" \
+  "$restore_root/runtime/secrets"
 cp -a "$payload/secrets/." "$restore_root/runtime/secrets/"
+cp -a "$payload/telegram-secrets/." "$restore_root/runtime/secrets/"
 cp -a "$payload/synapse-data/." "$restore_root/runtime/synapse/"
 cp -a "$payload/whatsapp-data/." "$restore_root/runtime/whatsapp/"
 cp -a "$payload/messenger-data/." "$restore_root/runtime/messenger/"
+cp -a "$payload/telegram-data/." "$restore_root/runtime/telegram/"
+mv "$restore_root/runtime/telegram/synapse-registration.yaml" "$restore_root/runtime/synapse/telegram-registration.yaml"
+chown -R root:root "$restore_root/runtime/secrets"
+find "$restore_root/runtime/secrets" -type f -exec chmod 0600 {} +
 chown -R 991:991 "$restore_root/runtime/synapse"
 chown -R 1337:1337 "$restore_root/runtime/whatsapp"
 chown -R 1337:1337 "$restore_root/runtime/messenger"
 [[ -f "$restore_root/runtime/synapse/messenger-registration.yaml" ]]
+[[ -f "$restore_root/runtime/synapse/telegram-registration.yaml" ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/whatsapp/config.yaml")" == 600 ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/whatsapp/registration.yaml")" == 600 ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/secrets/whatsapp-db.password")" == 600 ]]
@@ -38,6 +51,13 @@ chown -R 1337:1337 "$restore_root/runtime/messenger"
 [[ "$(stat -c '%a' "$restore_root/runtime/messenger/registration.yaml")" == 600 ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/secrets/messenger-db.password")" == 600 ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/secrets/messenger-db.env")" == 600 ]]
+chown -R 1337:1337 "$restore_root/runtime/telegram"
+[[ "$(stat -c '%a' "$restore_root/runtime/telegram/config.yaml")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/telegram/registration.yaml")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/telegram-db.password")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/telegram-db.env")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/telegram-api-id")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/telegram-api-hash")" == 600 ]]
 
 cd "$repo_dir"
 set -a
@@ -97,6 +117,15 @@ messenger_table_count=$(docker compose --env-file deploy/images.lock.env exec -T
 [[ "$messenger_table_count" =~ ^[1-9][0-9]*$ ]]
 echo "messenger_restore_tables=PASS"
 
+./scripts/init-telegram-db.sh
+docker compose --env-file deploy/images.lock.env exec -T postgres \
+  pg_restore -U synapse -d telegram_bridge --clean --if-exists --no-owner < "$payload/telegram.pgdump"
+telegram_table_count=$(docker compose --env-file deploy/images.lock.env exec -T postgres \
+  psql -At -U synapse -d telegram_bridge -c \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
+[[ "$telegram_table_count" =~ ^[1-9][0-9]*$ ]]
+echo "telegram_restore_tables=PASS"
+
 install -d -o 1337 -g 1337 -m 0700 "$restore_root/validation"
 install -o 1337 -g 1337 -m 0600 \
   "$restore_root/runtime/whatsapp/config.yaml" "$restore_root/validation/config.yaml"
@@ -119,6 +148,18 @@ docker run --rm --network none \
 [[ -s "$restore_root/validation/registration.yaml" ]]
 rm -rf -- "$restore_root/validation"
 echo "messenger_config=PASS"
+
+install -d -o 1337 -g 1337 -m 0700 "$restore_root/telegram-validation"
+install -o 1337 -g 1337 -m 0600 \
+  "$restore_root/runtime/telegram/config.yaml" "$restore_root/telegram-validation/config.yaml"
+docker run --rm --network none \
+  --entrypoint /usr/bin/mautrix-telegram \
+  -v "$restore_root/telegram-validation:/validation" \
+  "$TELEGRAM_IMAGE" \
+  -c /validation/config.yaml -g -r /validation/registration.yaml >/dev/null
+[[ -s "$restore_root/telegram-validation/registration.yaml" ]]
+rm -rf -- "$restore_root/telegram-validation"
+echo "telegram_config=PASS"
 
 docker compose --env-file deploy/images.lock.env up -d synapse
 wait_for_healthy synapse
