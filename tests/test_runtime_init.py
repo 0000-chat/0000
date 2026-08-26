@@ -113,6 +113,43 @@ class RuntimeInitTests(unittest.TestCase):
         for forbidden in ("DROP DATABASE", "DROP ROLE", "compose down", "rm -rf"):
             self.assertNotIn(forbidden, source)
 
+    def test_telegram_runtime_bootstraps_before_render_and_guards_image(self):
+        runtime = ROOT / "scripts/init-telegram-runtime.sh"
+        self.assertTrue(runtime.exists())
+        source = runtime.read_text()
+        lock = dict(
+            line.split("=", 1)
+            for line in (ROOT / "deploy/images.lock.env").read_text().splitlines()
+            if line and not line.startswith("#")
+        )
+        self.assertIn(f'[[ "$TELEGRAM_IMAGE" == {lock["TELEGRAM_IMAGE"]} ]]', source)
+        self.assertIn('[[ "$project" == communicator ]]', source)
+        self.assertEqual(
+            2,
+            source.count(
+                'docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps telegram'
+            ),
+        )
+        config_generation = source.index('if [[ ! -f "$config" ]]; then')
+        first_render = source.index("python3 scripts/render-telegram-config.py")
+        registration_generation = source.index(
+            'if [[ ! -f "$registration" ]]; then', config_generation + 1
+        )
+        final_render = source.index("python3 scripts/render-telegram-config.py", first_render + 1)
+        self.assertLess(
+            config_generation,
+            first_render,
+        )
+        self.assertLess(first_render, registration_generation)
+        self.assertLess(registration_generation, final_render)
+        for required in (
+            'telegram-api-id',
+            'telegram-api-hash',
+            'stat -c',
+            'install -o 991 -g 991 -m 0600',
+        ):
+            self.assertIn(required, source)
+
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ | {"COMMUNICATOR_RUNTIME_DIR": directory}
