@@ -18,6 +18,37 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 10. Never print, copy into Git, or send the contents of `/srv/communicator/secrets`.
 11. Perform backup and clean restoration before bridge planning begins.
 
+## Messenger bridge release
+
+1. Verify `codex/messenger-bridge` is clean and record the exact commit and
+   archive SHA-256. The pinned Messenger image digest must match the approved
+   plan.
+2. Verify `contabo-eu` is hostname `vmi3501337`, `eth0` owns `169.58.160.23`,
+   the active release is the intended clean release, and the provider snapshot
+   and encrypted restic prerequisites are current.
+3. Transfer only the verified archive to a fresh remote temporary path and
+   compare its checksum before extraction under
+   `/opt/communicator/releases/<commit>`.
+4. Preserve a protected timestamped rollback record without printing its
+   contents. Run `deploy-core.sh` only with
+   `COMMUNICATOR_RUNTIME_DIR=/srv/communicator` and
+   `COMPOSE_PROJECT_NAME=communicator`.
+5. Require the deployment order: PostgreSQL health, additive WhatsApp and
+   Messenger database initialization, preserved/generated bridge config and
+   registrations, Synapse render with both registrations, Synapse and Caddy,
+   WhatsApp, then Messenger. No volumes or databases are recreated.
+6. Run `validate-core.sh`, `validate-whatsapp.sh`, and
+   `validate-messenger.sh`, then public Matrix and well-known HTTPS checks.
+   Require no host listener on 29319 and keep public registration and
+   federation/key endpoints disabled/404.
+7. Before either Messenger login, require a fresh encrypted backup and a
+   clean isolated restore. Pair Human and Agent only from their separate
+   encrypted bridge-bot rooms and only through the user checkpoint.
+8. For pre-login rollback, activate the previous verified release and restore
+   only the protected pre-change Synapse configuration. After login, preserve
+   Messenger database/runtime, registrations, encryption/session state, rooms,
+   and both account sessions. Never log out or unlink as rollback.
+
 ## Personal WhatsApp bridge release
 
 1. Verify `feat/matrix-core` is clean and record the exact release commit and archive SHA-256.
