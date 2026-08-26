@@ -35,11 +35,18 @@ def indented_block(lines: list[str], header: str, child_indent: int) -> list[str
 
 
 def parse_permissions(lines: list[str]) -> dict[str, str] | None:
-    block = indented_block(lines, "  permissions:", 4)
-    if block is None:
+    candidates = []
+    for header, child_indent in (("  permissions:", 4), ("    permissions:", 8)):
+        block = indented_block(lines, header, child_indent)
+        if block is not None:
+            candidates.append((block, child_indent))
+    if len(candidates) != 1:
         return None
+    block, child_indent = candidates[0]
     parsed: dict[str, str] = {}
-    pattern = re.compile(r'^    ("(?:[^"\\]|\\.)*"):\s+(relay|user|admin)$')
+    pattern = re.compile(
+        rf'^{" " * child_indent}("(?:[^"\\]|\\.)*"):\s+(relay|user|admin)$'
+    )
     for line in block:
         match = pattern.fullmatch(line)
         if not match:
@@ -52,16 +59,25 @@ def parse_permissions(lines: list[str]) -> dict[str, str] | None:
 
 
 def parse_relay(lines: list[str]) -> dict[str, str] | None:
-    block = indented_block(lines, "relay:", 2)
-    if block is None:
+    candidates = []
+    for header, child_indent in (("relay:", 2), ("    relay:", 8)):
+        block = indented_block(lines, header, child_indent)
+        if block is not None:
+            candidates.append((block, child_indent))
+    if len(candidates) != 1:
         return None
+    block, child_indent = candidates[0]
     parsed: dict[str, str] = {}
-    pattern = re.compile(r"^  ([a-z_]+):\s+(.+)$")
+    pattern = re.compile(rf'^{" " * child_indent}(enabled|admin_only|default_relays):\s+(.+)$')
     for line in block:
         match = pattern.fullmatch(line)
-        if not match or match.group(1) in parsed:
+        if not match:
+            continue
+        if match.group(1) in parsed:
             return None
         parsed[match.group(1)] = match.group(2)
+    if set(parsed) != set(EXPECTED_RELAY):
+        return None
     return parsed
 
 

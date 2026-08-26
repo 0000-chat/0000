@@ -18,6 +18,23 @@ relay:
   default_relays: []
 '''
 
+IMAGE_GENERATED_CONFIG = '''bridge:
+    split_portals: false
+    relay:
+        enabled: false
+        admin_only: true
+        allow_bridge: true
+        default_relays: []
+    permissions:
+        "*": relay
+        "@human:communicator.0000.gold": user
+        "@agent:communicator.0000.gold": user
+        "@platform-admin:communicator.0000.gold": admin
+
+database:
+  type: postgres
+'''
+
 
 class WhatsAppPolicyTests(unittest.TestCase):
     def validate(self, content: str) -> bool:
@@ -28,6 +45,9 @@ class WhatsAppPolicyTests(unittest.TestCase):
 
     def test_accepts_exact_approved_policy(self):
         self.assertTrue(self.validate(VALID_CONFIG))
+
+    def test_accepts_image_generated_nested_policy(self):
+        self.assertTrue(self.validate(IMAGE_GENERATED_CONFIG))
 
     def test_rejects_missing_agent(self):
         self.assertFalse(
