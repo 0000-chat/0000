@@ -7,7 +7,7 @@ Approved design for the first Communicator prototype.
 - Date: 2026-08-23
 - Audience: Communicator developer and system administrator
 - Source architecture: `docs/PROPOSAL.md`
-- Deployment host: `ovh-vps`
+- Deployment host: `contabo-eu` (`169.58.160.23`)
 
 ## Simple explanation
 
@@ -73,19 +73,22 @@ Application tenant and principal identifiers do not depend on the Matrix domain.
 
 ## Host readiness
 
-The prototype runs on the current `ovh-vps` host, which has sufficient CPU and memory but insufficient free disk at design time.
+The prototype runs on the dedicated `contabo-eu` host. It was reinstalled from a known-clean Contabo image and has 6 vCPU, 12 GB RAM, and a 200 GB SSD.
 
 Installation may begin only after all of these checks pass:
 
+- The host runs supported Ubuntu 24.04 LTS.
 - At least 50 GB of disk space is free.
-- Swap use has been investigated and current memory pressure is safe.
+- Compressed zram swap is active and current memory pressure is safe.
 - Existing services and required ports have been inventoried.
 - DNS records resolve correctly.
 - Only SSH, HTTP, and HTTPS are exposed for the Communicator stack.
 - An encrypted off-server backup destination is available.
 - Disk, memory, and service-health monitoring is enabled.
 
-The compromised Contabo VPS is not part of this prototype. It must be rebuilt from a known-clean image before any future use.
+Official lifecycle reference: <https://ubuntu.com/about/release-cycle>
+
+The previous compromised installation was erased. No Docker volume, database, executable, secret, or system configuration from that installation may be restored.
 
 ## Deployment architecture
 

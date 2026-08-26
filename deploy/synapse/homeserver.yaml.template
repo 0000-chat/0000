@@ -1,0 +1,50 @@
+server_name: "communicator.0000.gold"
+public_baseurl: "https://matrix.communicator.0000.gold/"
+pid_file: /data/homeserver.pid
+web_client_location: null
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: "${POSTGRES_PASSWORD}"
+    database: synapse
+    host: postgres
+    port: 5432
+    cp_min: 5
+    cp_max: 10
+
+log_config: /data/log.config
+media_store_path: /data/media_store
+signing_key_path: /data/communicator.0000.gold.signing.key
+registration_shared_secret: "${REGISTRATION_SHARED_SECRET}"
+report_stats: false
+
+app_service_config_files:
+  - /data/whatsapp-registration.yaml
+
+enable_registration: false
+enable_registration_without_verification: false
+allow_profile_lookup_over_federation: false
+allow_device_name_lookup_over_federation: false
+federation_domain_whitelist: []
+federation_whitelist_endpoint_enabled: false
+
+user_directory:
+  enabled: false
+  search_all_users: false
+  exclude_remote_users: true
+
+encryption_enabled_by_default_for_room_type: invite
+max_upload_size: 50M
+url_preview_enabled: false

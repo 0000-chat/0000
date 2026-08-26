@@ -5,7 +5,7 @@
 - Status: Draft
 - Purpose: Technical and commercial feasibility proposal
 - Intended audience: Product, engineering, security, and operations
-- Proposed pilot host: `contabo-eu-pilot` (`169.58.160.23`)
+- Proposed pilot host: `contabo-eu` (`169.58.160.23`)
 
 ## Executive summary
 
@@ -312,7 +312,7 @@ These are planning estimates rather than hard platform limits. Active message ra
 
 ### Contabo
 
-Contabo is suitable for the pilot. Current relevant advertised options are approximately:
+Contabo is suitable for the pilot. The provisioned 2026 Cloud VPS has 6 vCPU, 12 GB RAM, and a 200 GB SSD, which is sufficient for the personal prototype. Earlier advertised examples were:
 
 | Plan | Resources | Use |
 | --- | --- | --- |
@@ -321,7 +321,7 @@ Contabo is suitable for the pilot. Current relevant advertised options are appro
 | Cloud VPS 30 | 8 vCPU, 24 GB, 200 GB NVMe | Recommended pilot with production headroom |
 | Cloud VDS S | Dedicated CPU, 24 GB, 180 GB NVMe | Upgrade for established production traffic |
 
-The proposal recommends **Cloud VPS 30** with Ubuntu 24.04 LTS, PostgreSQL 16 or newer, 4-8 GB emergency swap, and no public Matrix federation initially.
+The pilot uses the provisioned 6 vCPU, 12 GB, 200 GB SSD VPS with Ubuntu 24.04 LTS, PostgreSQL 16 or newer, compressed zram swap, and no public Matrix federation initially. Resize only when measurements show sustained CPU, memory, or I/O pressure.
 
 Prefer NVMe over a capacity-oriented storage VPS for PostgreSQL latency. Use R2 for scalable archive capacity. Set alerts at approximately 70% disk utilization and define explicit Synapse media and log retention.
 
@@ -451,17 +451,21 @@ The platform should distinguish between operational retention, customer-visible 
 The proposed server is identified as:
 
 ```text
-Alias: contabo-eu-pilot
+Alias: contabo-eu
 Host: 169.58.160.23
 ```
 
-Connectivity was tested from the current development environment:
+Current verified access and host state:
 
-- The alias `contabo-eu-pilot` is not configured locally.
-- The supplied IP responds on SSH.
-- Authentication as `ubuntu` failed with `Permission denied (publickey,password)`.
+- SSH uses the dedicated `admin` account and a dedicated Ed25519 key.
+- SSH password authentication and root login are disabled.
+- Ubuntu 24.04 LTS, 6 vCPU, 12 GB RAM, and approximately 200 GB disk are present.
+- Docker Engine and Compose are installed from Docker's official Ubuntu repository.
+- The firewall permits only SSH, HTTP, and HTTPS inbound.
+- Static IPv4 and IPv6 connectivity are operational.
+- Host IPv6 remains enabled and tested, but Matrix hostname AAAA publication is intentionally deferred until a separate IPv6 ingress test is approved.
 
-Provisioning cannot begin until the correct SSH username is confirmed and an authorized public key is installed or made available.
+Repository development remains local. Host-affecting commands run explicitly through the verified `contabo-eu` SSH alias, and releases are transferred without Git history, local environment files, runtime data, or secrets.
 
 ## Open decisions
 
