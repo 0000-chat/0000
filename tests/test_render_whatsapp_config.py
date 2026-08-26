@@ -45,6 +45,15 @@ class WhatsAppRenderTests(unittest.TestCase):
             self.assertIn(expected_uri, rendered)
             self.assertIn('"*": relay', rendered)
             self.assertIn('"@human:communicator.0000.gold": user', rendered)
+            self.assertIn('"@agent:communicator.0000.gold": user', rendered)
+            permission_block = rendered.split("  permissions:\n", 1)[1].split("\n\nrelay:", 1)[0]
+            self.assertEqual(
+                '''    "*": relay
+    "@human:communicator.0000.gold": user
+    "@agent:communicator.0000.gold": user
+    "@platform-admin:communicator.0000.gold": admin''',
+                permission_block,
+            )
             self.assertIn('"@platform-admin:communicator.0000.gold": admin', rendered)
             self.assertIn("shared_secret: disable", rendered)
             self.assertIn("max_initial_conversations: 0", rendered)

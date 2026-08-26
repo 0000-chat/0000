@@ -39,6 +39,7 @@ bridge:
   permissions:
     "*": relay
     "@human:communicator.0000.gold": user
+    "@agent:communicator.0000.gold": user
     "@platform-admin:communicator.0000.gold": admin
 
 relay:
