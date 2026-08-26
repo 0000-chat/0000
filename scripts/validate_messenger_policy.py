@@ -15,6 +15,8 @@ EXPECTED_PERMISSIONS = {
 EXPECTED_RELAY = {
     "enabled": "false",
     "admin_only": "true",
+    "prefer_default": "true",
+    "allow_bridge": "false",
     "default_relays": "[]",
 }
 
