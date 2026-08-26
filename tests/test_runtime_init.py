@@ -10,6 +10,30 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class RuntimeInitTests(unittest.TestCase):
+    def test_messenger_runtime_guard_matches_locked_image_digest(self):
+        script = (ROOT / "scripts/init-messenger-runtime.sh").read_text()
+        lock = dict(
+            line.split("=", 1)
+            for line in (ROOT / "deploy/images.lock.env").read_text().splitlines()
+            if line and not line.startswith("#")
+        )
+        self.assertIn(f'[[ "$MESSENGER_IMAGE" == {lock["MESSENGER_IMAGE"]} ]]', script)
+
+    def test_messenger_bootstrap_renders_before_and_after_registration(self):
+        script = (ROOT / "scripts/init-messenger-runtime.sh").read_text()
+        upstream = 'docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps messenger'
+        renderer = "python3 scripts/render-messenger-config.py"
+        config_generation = 'if [[ ! -f "$config" ]]; then'
+        registration_generation = 'if [[ ! -f "$registration" ]]; then'
+        self.assertIn('[[ "$project" == communicator ]]', script)
+        self.assertIn(config_generation, script)
+        self.assertIn(registration_generation, script)
+        self.assertEqual(2, script.count(upstream))
+        self.assertEqual(2, script.count(renderer))
+        self.assertLess(script.index(config_generation), script.index(registration_generation))
+        self.assertLess(script.index(registration_generation), script.index(renderer))
+        self.assertIn("--registration", script)
+
     def test_whatsapp_runtime_guard_matches_locked_image_digest(self):
         script = (ROOT / "scripts/init-whatsapp-runtime.sh").read_text()
         lock = dict(
