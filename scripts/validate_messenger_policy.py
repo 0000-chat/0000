@@ -37,17 +37,51 @@ def indented_block(lines: list[str], header: str, child_indent: int) -> list[str
 
 
 def exact_scalar(block: list[str], key: str) -> str | None:
-    pattern = re.compile(rf"^  {re.escape(key)}:\s+(.+)$")
+    indents = [
+        len(line) - len(line.lstrip(" "))
+        for line in block
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not indents:
+        return None
+    child_indent = min(indents)
+    pattern = re.compile(rf"^{re.escape(' ' * child_indent)}{re.escape(key)}:\s+(.+)$")
     values = [match.group(1) for line in block if (match := pattern.fullmatch(line))]
     return values[0] if len(values) == 1 else None
 
 
-def parse_permissions(lines: list[str]) -> dict[str, str] | None:
-    block = indented_block(lines, "  permissions:", 4)
-    if block is None:
+def nested_block(lines: list[str], key: str) -> tuple[list[str], int] | None:
+    matches = [
+        (index, len(line) - len(line.lstrip(" ")))
+        for index, line in enumerate(lines)
+        if line.strip() == f"{key}:" and line.startswith(" ")
+    ]
+    if len(matches) != 1:
         return None
+    index, header_indent = matches[0]
+    block: list[str] = []
+    for line in lines[index + 1 :]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= header_indent:
+            break
+        block.append(line)
+    indents = [len(line) - len(line.lstrip(" ")) for line in block]
+    if not indents:
+        return None
+    return block, min(indents)
+
+
+def parse_permissions(lines: list[str]) -> dict[str, str] | None:
+    nested = nested_block(lines, "permissions")
+    if nested is None:
+        return None
+    block, child_indent = nested
     parsed: dict[str, str] = {}
-    pattern = re.compile(r'^    ("(?:[^"\\]|\\.)*"):\s+(relay|user|admin)$')
+    pattern = re.compile(
+        rf'^{re.escape(" " * child_indent)}("(?:[^"\\]|\\.)*"):\s+(relay|user|admin)$'
+    )
     for line in block:
         match = pattern.fullmatch(line)
         if not match:
@@ -60,11 +94,12 @@ def parse_permissions(lines: list[str]) -> dict[str, str] | None:
 
 
 def parse_relay(lines: list[str]) -> dict[str, str] | None:
-    block = indented_block(lines, "  relay:", 4)
-    if block is None:
+    nested = nested_block(lines, "relay")
+    if nested is None:
         return None
+    block, child_indent = nested
     parsed: dict[str, str] = {}
-    pattern = re.compile(r"^    ([a-z_]+):\s+(.+)$")
+    pattern = re.compile(rf"^{re.escape(' ' * child_indent)}([a-z_]+):\s+(.+)$")
     for line in block:
         match = pattern.fullmatch(line)
         if not match or match.group(1) in parsed:

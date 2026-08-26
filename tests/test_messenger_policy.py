@@ -24,6 +24,21 @@ VALID_CONFIG = '''bridge:
     default_relays: []
 '''
 
+UPSTREAM_NORMALIZED_CONFIG = '''bridge:
+    split_portals: true
+    permissions:
+        "*": relay
+        "@human:communicator.0000.gold": user
+        "@agent:communicator.0000.gold": user
+        "@platform-admin:communicator.0000.gold": admin
+    relay:
+        enabled: false
+        admin_only: true
+        prefer_default: true
+        allow_bridge: false
+        default_relays: []
+'''
+
 
 class MessengerPolicyTests(unittest.TestCase):
     def validate(self, content: str) -> bool:
@@ -34,6 +49,9 @@ class MessengerPolicyTests(unittest.TestCase):
 
     def test_accepts_exact_approved_policy(self):
         self.assertTrue(self.validate(VALID_CONFIG))
+
+    def test_accepts_upstream_normalized_policy(self):
+        self.assertTrue(self.validate(UPSTREAM_NORMALIZED_CONFIG))
 
     def test_rejects_missing_agent(self):
         self.assertFalse(
