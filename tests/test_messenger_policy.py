@@ -37,6 +37,9 @@ UPSTREAM_NORMALIZED_CONFIG = '''bridge:
         prefer_default: true
         allow_bridge: false
         default_relays: []
+        user_distinguishers: []
+        message_formats: {}
+        displayname_format: "{displayname}"
 '''
 
 
@@ -96,6 +99,9 @@ class MessengerPolicyTests(unittest.TestCase):
 
     def test_rejects_duplicate_relay_block(self):
         self.assertFalse(self.validate(VALID_CONFIG + "  relay:\n    enabled: false\n"))
+
+    def test_rejects_unexpected_relay_field(self):
+        self.assertFalse(self.validate(VALID_CONFIG.replace("    default_relays:", "    unexpected_field:")))
 
 
 if __name__ == "__main__":

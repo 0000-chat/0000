@@ -19,6 +19,11 @@ EXPECTED_RELAY = {
     "allow_bridge": "false",
     "default_relays": "[]",
 }
+ALLOWED_RELAY_FIELDS = set(EXPECTED_RELAY) | {
+    "user_distinguishers",
+    "message_formats",
+    "displayname_format",
+}
 
 
 def indented_block(lines: list[str], header: str, child_indent: int) -> list[str] | None:
@@ -115,9 +120,12 @@ def validate(path: pathlib.Path) -> bool:
     bridge = indented_block(lines, "bridge:", 2)
     if bridge is None:
         return False
+    relay = parse_relay(bridge)
     return (
         parse_permissions(bridge) == EXPECTED_PERMISSIONS
-        and parse_relay(bridge) == EXPECTED_RELAY
+        and relay is not None
+        and set(relay) <= ALLOWED_RELAY_FIELDS
+        and all(relay.get(key) == value for key, value in EXPECTED_RELAY.items())
         and exact_scalar(bridge, "split_portals") == "true"
     )
 
