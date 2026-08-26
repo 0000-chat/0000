@@ -21,10 +21,14 @@ class RuntimeInitTests(unittest.TestCase):
 
     def test_official_generation_precedes_project_config_render(self):
         script = (ROOT / "scripts/init-whatsapp-runtime.sh").read_text()
-        generation = 'if [[ ! -f "$config" || ! -f "$registration" ]]; then'
-        self.assertIn(generation, script)
-        self.assertLess(script.index(generation), script.index("python3 scripts/render-whatsapp-config.py"))
-        self.assertEqual(1, script.count("docker compose --env-file deploy/images.lock.env --project-name \"$project\" run --rm --no-deps whatsapp"))
+        config_generation = 'if [[ ! -f "$config" ]]; then'
+        registration_generation = 'if [[ ! -f "$registration" ]]; then'
+        renderer = script.index("python3 scripts/render-whatsapp-config.py")
+        self.assertIn(config_generation, script)
+        self.assertIn(registration_generation, script)
+        self.assertLess(script.index(config_generation), script.index(registration_generation))
+        self.assertLess(script.index(registration_generation), renderer)
+        self.assertEqual(2, script.count("docker compose --env-file deploy/images.lock.env --project-name \"$project\" run --rm --no-deps whatsapp"))
 
     def test_creates_private_secret_files_without_printing_values(self):
         with tempfile.TemporaryDirectory() as directory:

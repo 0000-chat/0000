@@ -37,5 +37,8 @@ python3 scripts/render-synapse-config.py \
   --registration-secret "$runtime_dir/secrets/synapse_registration_shared_secret" \
   --whatsapp-registration "$runtime_dir/synapse/whatsapp-registration.yaml" \
   --output "$runtime_dir/synapse/homeserver.yaml"
-docker compose --env-file deploy/images.lock.env up -d --wait --wait-timeout 180 postgres synapse caddy whatsapp
+docker compose --env-file deploy/images.lock.env up -d --wait --wait-timeout 180 postgres
+docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 synapse
+docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 caddy
+docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 whatsapp
 docker compose --env-file deploy/images.lock.env ps

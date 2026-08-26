@@ -34,7 +34,13 @@ class WhatsAppValidationTests(unittest.TestCase):
         self.assertLess(self.deployer.index("docker compose --env-file deploy/images.lock.env pull"), self.deployer.index("./scripts/init-whatsapp-db.sh"))
         self.assertLess(self.deployer.index("./scripts/init-whatsapp-db.sh"), self.deployer.index("./scripts/init-whatsapp-runtime.sh"))
         self.assertLess(self.deployer.index("./scripts/init-whatsapp-runtime.sh"), self.deployer.index("--whatsapp-registration"))
-        self.assertIn("up -d --wait --wait-timeout 180 postgres synapse caddy whatsapp", self.deployer)
+        synapse_restart = "up -d --no-deps --force-recreate --wait --wait-timeout 180 synapse"
+        caddy_restart = "up -d --no-deps --force-recreate --wait --wait-timeout 180 caddy"
+        whatsapp_restart = "up -d --no-deps --force-recreate --wait --wait-timeout 180 whatsapp"
+        self.assertIn(synapse_restart, self.deployer)
+        self.assertIn(caddy_restart, self.deployer)
+        self.assertIn(whatsapp_restart, self.deployer)
+        self.assertLess(self.deployer.index(synapse_restart), self.deployer.index(whatsapp_restart))
 
     def test_core_validator_requires_the_bridge_service(self):
         self.assertIn('runtime_dir=${COMMUNICATOR_RUNTIME_DIR:-/srv/communicator}', self.core_validator)

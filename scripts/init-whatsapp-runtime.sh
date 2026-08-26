@@ -17,7 +17,10 @@ set +a
 [[ "$WHATSAPP_IMAGE" == dock.mau.dev/mautrix/whatsapp:v26.08@sha256:86237c4d0d33a1e08910b1f820e6c561f9b8e21dc26943caf266e01021087002 ]]
 install -d -m 0700 "$whatsapp_dir"
 
-if [[ ! -f "$config" || ! -f "$registration" ]]; then
+if [[ ! -f "$config" ]]; then
+  docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps whatsapp >/dev/null 2>&1
+fi
+if [[ ! -f "$registration" ]]; then
   docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps whatsapp >/dev/null 2>&1
 fi
 [[ -f "$registration" ]]
