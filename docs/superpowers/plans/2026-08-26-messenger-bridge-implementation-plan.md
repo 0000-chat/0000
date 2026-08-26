@@ -1,12 +1,40 @@
-# Dual-Account Messenger Bridge Implementation Plan
+# Messenger Bridge Implementation Plan — Human-only pilot with deferred Agent onboarding
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add one pinned `mautrix-meta` service to the existing private Communicator deployment, connect separate Human and Agent Messenger accounts with strict encrypted portal isolation, and prove safe deployment, recovery, and restart persistence without modifying upstream code.
+**Goal:** Add one pinned `mautrix-meta` service to the existing private Communicator deployment and prove a safe Human Messenger pilot, while preserving the configuration needed for a future Agent account without modifying upstream code.
 
-**Architecture:** The existing Synapse, PostgreSQL, Caddy, and shared mautrix-whatsapp deployment remains the operational messaging core. One additional `messenger` container uses a dedicated `messenger_bridge` PostgreSQL database and two independent remote logins. Project code supplies only pinned container topology, generated configuration, exact permissions, appservice registration, validation, backup, restore, and runbooks; upstream `mautrix-meta` owns the Messenger protocol and session implementation.
+**Architecture:** The existing Synapse, PostgreSQL, Caddy, and shared mautrix-whatsapp deployment remains the operational messaging core. One additional `messenger` container uses a dedicated `messenger_bridge` PostgreSQL database and preserves configuration for two independent remote logins; this pilot connects only the Human account. Project code supplies only pinned container topology, generated configuration, exact permissions, appservice registration, validation, backup, restore, and runbooks; upstream `mautrix-meta` owns the Messenger protocol and session implementation.
 
 **Tech Stack:** Docker Compose, Synapse v1.159.0, PostgreSQL 16, Caddy, upstream `dock.mau.dev/mautrix/meta:v26.08`, Bash, Python 3 standard library, `unittest`, restic, Cloudflare R2 backup repository, Ubuntu 24.04 LTS on Contabo.
+
+## Approved Human-only pilot variance
+
+The operator approved this variance on 2026-08-27. It supersedes the
+two-account acceptance requirements below where they conflict:
+
+- The implemented pilot has one connected Human Messenger account.
+- Agent Messenger onboarding is deferred by user. Do not pair, authenticate,
+  log in, log out, unlink, or create an Agent Messenger session in this phase.
+- The existing Agent permission/configuration path remains available for a
+  future login, but no Agent behavior is inferred or marked as passed.
+- The already-tested result that the Agent Matrix identity cannot access Human
+  Messenger portals remains valid.
+- The deferred record is:
+
+  ```text
+  agent_messenger_pairing=DEFERRED_BY_USER
+  agent_messenger_inbound_text=NOT_TESTED
+  agent_messenger_outbound_text=NOT_TESTED
+  agent_messenger_e2ee=NOT_TESTED
+  human_cannot_access_agent_messenger=NOT_TESTED
+  ```
+
+- Task 10 is complete from the supplied Human markers. Agent pairing and
+  Agent messaging portions of Task 11 are skipped. Task 12 proves Human
+  session persistence, Human E2EE/isolation, WhatsApp preservation, encrypted
+  backup, and isolated restore. Future Agent onboarding requires its own
+  pairing, isolation, restart, and backup acceptance.
 
 ---
 
@@ -21,8 +49,8 @@ rebuild Synapse, Element, or any mautrix repository. This plan changes only the
 Communicator deployment repository and the protected Contabo runtime.
 
 Continue autonomously through every local implementation and safe remote
-deployment step. Stop only at the two explicit operator login gates, an actual
-Meta account challenge, an unexpected remote identity/release mismatch, a
+deployment step. Stop only at the Human operator login gate, an actual Meta
+account challenge, an unexpected remote identity/release mismatch, a
 destructive action, or a failure that remains after systematic diagnosis.
 
 Never request or expose Facebook passwords, cookies, copied cURL commands, 2FA
@@ -1246,7 +1274,7 @@ Require every marker and public check. Stop here and report
 
 **Files:** No repository changes.
 
-- [ ] **Step 1: Give the operator the exact private action**
+- [x] **Step 1: Give the operator the exact private action**
 
 Ask the user to sign into Element as `@human:communicator.0000.gold`, open a
 private encrypted room with `@messengerbot:communicator.0000.gold`, verify the
@@ -1260,19 +1288,19 @@ The user, not the implementer, enters any credentials or account challenge.
 If Meta requires another action, report `human_messenger_login_challenge=WAIT`
 and stop without repeated attempts.
 
-- [ ] **Step 2: After user confirms login, rerun automated validators**
+- [x] **Step 2: After user confirms login, rerun automated validators**
 
 Run core, WhatsApp, and Messenger validators from the exact active release.
 Require all pass and no new listener.
 
-- [ ] **Step 3: Ask for Human acceptance evidence only as markers**
+- [x] **Step 3: Ask for Human acceptance evidence only as markers**
 
 Using a harmless approved test contact and new messages, collect the Human
 markers from the design/runbook. Then verify from the Agent Element identity
 that Human portals cannot be discovered, joined, or decrypted. Do not request
 room names, IDs, contact names, or message text.
 
-The hard gate before Agent login is:
+The completed Human pilot gate is:
 
 ```text
 human_messenger_pairing=PASS
@@ -1284,37 +1312,35 @@ agent_cannot_access_human_messenger=PASS
 
 Record other supported feature markers or an explicit upstream limitation.
 
-### Task 11: Operator pairs and validates the Agent Messenger account
+### Task 11: Defer Agent Messenger onboarding
 
-**Files:** No repository changes.
+**Files:** No repository changes; Agent onboarding is explicitly deferred.
 
-- [ ] **Step 1: Confirm Human remains connected**
+- [x] **Step 1: Confirm Human remains connected**
 
-Require `human_messenger_session_preserved=PASS` from a harmless new Human
-round trip immediately before Agent login.
+Agent login is not being performed. Human session persistence is verified in
+Task 12 instead.
 
-- [ ] **Step 2: Give the Agent operator action**
+- [x] **Step 2: Skip Agent authentication under the approved variance**
 
-Ask the user to sign into Element as `@agent:communicator.0000.gold`, open a
-separate encrypted private room with the same bridge bot, and send:
+Do not ask for or handle an Agent Facebook/Messenger credential, QR code,
+cookie, challenge, login, logout, or unlink action. Preserve the existing
+configuration for a future Agent login.
 
 ```text
-login messenger-lite
+agent_messenger_pairing=DEFERRED_BY_USER
+agent_messenger_inbound_text=NOT_TESTED
+agent_messenger_outbound_text=NOT_TESTED
+agent_messenger_e2ee=NOT_TESTED
+human_cannot_access_agent_messenger=NOT_TESTED
 ```
 
-Apply the same credential and Meta challenge boundary. Do not use the Human
-room or credentials.
+- [x] **Step 3: Record Agent acceptance as deferred, not passed**
 
-- [ ] **Step 3: Collect Agent and symmetric-isolation markers**
+Do not mark any Agent pairing, messaging, E2EE, symmetric-isolation, restart,
+or backup behavior as `PASS`.
 
-Require bidirectional Agent text and E2EE. Verify Human cannot discover, join,
-or decrypt Agent portals and Agent still cannot access Human portals. Require a
-non-admin bridge administration/relay command to be rejected. Platform Admin
-must not be a portal member.
-
-Collect only the named markers in the validation runbook.
-
-### Task 12: Prove restart persistence and post-pairing recovery
+### Task 12: Prove Human restart persistence and post-pairing recovery
 
 **Files:** No repository changes unless a test-backed correction is required.
 
@@ -1342,14 +1368,14 @@ sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=comm
 REMOTE
 ```
 
-- [ ] **Step 2: Obtain session-persistence markers**
+- [ ] **Step 2: Obtain Human session-persistence markers**
 
-Ask the user to confirm both Messenger identities can read a pre-restart
-encrypted message and complete a harmless new round trip. Also confirm both
-WhatsApp sessions remain working. Require:
+Ask the user to confirm the Human Messenger identity can read a pre-restart
+encrypted message and complete a harmless new inbound and outbound round
+trip. Also confirm both WhatsApp sessions remain working. Require:
 
 ```text
-both_messenger_sessions_restart_persistence=PASS
+human_messenger_session_preserved=PASS
 whatsapp_sessions_preserved=PASS
 ```
 
@@ -1380,8 +1406,9 @@ REMOTE
 
 Require Synapse, WhatsApp, and Messenger database/config markers plus
 `restore_test=PASS`. Confirm no `communicator-restore-test-*` container remains
-and production validators still pass. Preserve the timestamped evidence
-directory; deletion requires separate approval.
+and production validators still pass. Do not start a restored Messenger
+session. Preserve the timestamped evidence directory; deletion requires
+separate approval.
 
 Record only these recovery acceptance markers:
 
@@ -1390,7 +1417,7 @@ post_messenger_pairing_backup=PASS
 post_messenger_pairing_restore_test=PASS
 ```
 
-### Task 13: Final verification, PR, and handoff
+### Task 13: Final verification, Human-only PR, and handoff
 
 **Files:** No new files unless correcting a verified defect.
 
@@ -1420,22 +1447,24 @@ git push origin codex/messenger-bridge
 gh pr create --repo 0000-chat/communicator \
   --base main \
   --head codex/messenger-bridge \
-  --title "Add isolated Human and Agent Messenger bridge" \
+  --title "Add private Human Messenger bridge pilot" \
   --body-file - <<'EOF'
 ## Summary
-- add a pinned private mautrix-meta service for separate Human and Agent Messenger logins
+- add a pinned private mautrix-meta service for one connected Human Messenger login
 - enforce encrypted non-federated split portals, exact permissions, disabled relay/backfill/public APIs, and no public bridge port
 - extend guarded deployment, encrypted backup, isolated restore, validation, and operational runbooks
+- preserve the configured Agent path for a future phase without creating an Agent session
 
 ## Verification
 - [x] complete repository test suite, Bash syntax, Python compile, diff, and secret scans pass
-- [x] Human and Agent bidirectional text, E2EE, and symmetric isolation pass
-- [x] both Messenger sessions and both WhatsApp sessions persist across restart
-- [x] post-pairing encrypted backup and isolated restore pass
+- [x] Human bidirectional text, E2EE, and denial of Agent access to Human portals pass
+- [x] Human Messenger and both WhatsApp sessions persist across restart
+- [x] post-Human-pairing encrypted backup and isolated restore pass
+- [x] Agent Messenger onboarding is deferred by user and remains untested
 
 ## Boundaries
 - no upstream Synapse, Element, or mautrix source was modified
-- no Messenger history backfill, public media, relay, federation, Cloudflare data plane, or Telegram work is included
+- no Agent login, Messenger history backfill, public media, relay, federation, Cloudflare data plane, or Telegram work is included
 EOF
 ```
 
@@ -1469,9 +1498,9 @@ implementer.
 
 ## Plan self-review checklist
 
-- Spec coverage: topology, dual logins, strict split portals, permissions,
-  E2EE, federation, media, backfill, login challenges, recovery, rollback, and
-  acceptance each map to explicit tasks.
+- Spec coverage: topology, preserved future Agent login path, strict split
+  portals, permissions, E2EE, federation, media, backfill, login challenges,
+  Human recovery, rollback, and acceptance each map to explicit tasks.
 - Source boundary: no task modifies upstream code or runs a restored session.
 - Secret boundary: no command prints configs, credentials, tokens, sessions,
   contacts, or messages.

@@ -2,11 +2,11 @@
 
 ## Simple explanation
 
-Messenger is a private, internal bridge for the existing Human and Agent
-Matrix accounts. It uses one pinned upstream `mautrix-meta` service with two
-separate account sessions. The operator authenticates each account from that
-account's encrypted bridge-bot room. The bridge has no public port, no public
-registration, and no history backfill.
+Messenger is a private, internal bridge for one connected Human Messenger
+account through the existing Human Matrix identity. Agent Messenger onboarding
+is deferred by user. The existing configuration remains ready for a future
+separate Agent login, but this phase must not create an Agent session. The
+bridge has no public port, no public registration, and no history backfill.
 
 The implementer prepares files and verifies health. The user alone enters
 Facebook credentials, scans a QR code, answers Meta challenges, or handles
@@ -28,6 +28,8 @@ account-security prompts.
 - Never use `docker compose down`, remove volumes, reset databases, regenerate
   existing registration tokens, log out, unlink accounts, or delete session
   state as routine operations.
+- Do not pair, authenticate, log in, log out, unlink, or create an Agent
+  Messenger session during this Human-only pilot.
 
 ## Release and pre-login checkpoint
 
@@ -51,10 +53,10 @@ protected appservice registrations to be present, and the exact Messenger
 policy to pass. Public Matrix versions and well-known checks must pass;
 federation, signing-key, and public registration endpoints remain disabled.
 
-Take or verify a fresh encrypted restic backup before either login. The
-backup must contain the Messenger custom-format database dump, protected
-config and registrations, Messenger database credentials, and the existing
-Synapse and WhatsApp payload.
+Take or verify a fresh encrypted restic backup before Human login. The backup
+must contain the Messenger custom-format database dump, protected config and
+registrations, Messenger database credentials, and the existing Synapse and
+WhatsApp payload.
 
 ## Human login
 
@@ -78,19 +80,33 @@ must follow the current official upstream instructions. The user supplies any
 cookie through the approved private interaction; the implementer never asks
 for, receives, stores, parses, or handles the returned credential material.
 
-## Agent login
+## Agent onboarding — deferred by user
 
-After Human acceptance is complete, open the separate encrypted private room
-between `@agent:communicator.0000.gold` and the Messenger bridge bot. Run the
-same primary command:
+Agent Messenger onboarding is deferred by user. Preserve the existing
+permission and configuration path for a future phase, but do not create an
+Agent session or perform any Agent account action now. The current record is:
+
+Do not create an Agent session during this phase.
 
 ```text
-login messenger-lite
+agent_messenger_pairing=DEFERRED_BY_USER
+agent_messenger_inbound_text=NOT_TESTED
+agent_messenger_outbound_text=NOT_TESTED
+agent_messenger_e2ee=NOT_TESTED
+human_cannot_access_agent_messenger=NOT_TESTED
 ```
 
-The user authenticates the Agent Facebook account separately and records the
-Agent markers only after the Human session remains intact. Never reuse a
-Human QR, cookie, device session, or account challenge for Agent.
+The already-tested result that the Agent Matrix identity cannot access Human
+Messenger portals remains recorded as:
+
+```text
+agent_cannot_access_human_messenger=PASS
+```
+
+Future Agent onboarding requires separate user authentication, Human/Agent
+portal isolation checks, Agent E2EE and bidirectional text checks, restart
+persistence, and backup/recovery acceptance. Do not infer those results from
+the Human pilot or from service health.
 
 ## Meta challenge handling
 
@@ -102,19 +118,20 @@ weaken security, change account settings, or invent a workaround.
 
 ## Restart and upgrade
 
-For a controlled restart, restart only the required services with bounded
-health waits and verify PostgreSQL first, then Synapse, then WhatsApp and
+For the Human-only controlled restart, restart only the required services with
+bounded health waits and verify PostgreSQL first, then Synapse, WhatsApp, and
 Messenger. Caddy must remain available. Run the core, WhatsApp, and Messenger
-validators and public HTTPS checks after recovery. Do not inspect encrypted
-content.
+validators and public HTTPS checks after recovery. Reopen the Human Element
+profile and verify its own encrypted message and a harmless new inbound and
+outbound round trip. Do not inspect encrypted content.
 
 For an upgrade, prepare and verify a new immutable release, preserve the
 current release and a protected rollback copy, run the remote preflight, and
 take a fresh encrypted backup. Deploy in the plan's order and stop on the
 first failure. A failed pre-login release may be rolled back to the previous
 verified release while preserving Messenger runtime and database files. After
-an account has logged in, rollback must preserve the database, registrations,
-encryption/session state, rooms, and both account sessions.
+Human login, rollback must preserve the database, registrations, encryption
+material, Human session state, rooms, and all existing WhatsApp sessions.
 
 ## Logout, unlink, and rollback
 
@@ -125,6 +142,8 @@ fresh encrypted backup and all non-secret evidence, then obtain explicit
 approval before logout, unlink, session deletion, database reset, or account
 security changes.
 
-Rolling back code does not imply logging out or unlinking either account.
+Rolling back code does not imply logging out or unlinking the Human account.
 Restore the protected pre-change Synapse configuration only when the release
-procedure requires it, and keep Messenger database/runtime data intact.
+procedure requires it, and keep Messenger database/runtime data intact. Do
+not perform any Agent logout, unlink, or session operation while Agent
+onboarding is deferred.

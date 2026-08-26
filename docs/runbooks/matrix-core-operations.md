@@ -41,13 +41,15 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
    `validate-messenger.sh`, then public Matrix and well-known HTTPS checks.
    Require no host listener on 29319 and keep public registration and
    federation/key endpoints disabled/404.
-7. Before either Messenger login, require a fresh encrypted backup and a
-   clean isolated restore. Pair Human and Agent only from their separate
-   encrypted bridge-bot rooms and only through the user checkpoint.
+7. Before the Human Messenger login, require a fresh encrypted backup and a
+   clean isolated restore. The Human account is paired only from its private
+   encrypted bridge-bot room and only through the user checkpoint. Agent
+   onboarding is deferred by user; preserve its configuration without creating
+   an Agent session.
 8. For pre-login rollback, activate the previous verified release and restore
-   only the protected pre-change Synapse configuration. After login, preserve
-   Messenger database/runtime, registrations, encryption/session state, rooms,
-   and both account sessions. Never log out or unlink as rollback.
+   only the protected pre-change Synapse configuration. After Human login,
+   preserve Messenger database/runtime, registrations, encryption/session
+   state, rooms, and the Human session. Never log out or unlink as rollback.
 
 ## Personal WhatsApp bridge release
 

@@ -39,6 +39,7 @@ and a fresh timestamped runtime. It initializes and restores the isolated
 Synapse, WhatsApp, and `messenger_bridge` databases, checks a positive public
 table count, and validates the restored Messenger config with the pinned
 image on `--network none`. It starts isolated PostgreSQL and Synapse only;
-the restored Messenger service is never started and cannot reconnect either
-restored account to Meta. Preserve the successful restore evidence directory
+the restored Messenger service is never started and cannot reconnect the
+restored Human session to Meta. Agent onboarding is deferred by user and no
+Agent session is created. Preserve the successful restore evidence directory
 until separately approved cleanup.
