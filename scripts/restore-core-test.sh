@@ -82,11 +82,12 @@ whatsapp_table_count=$(docker compose --env-file deploy/images.lock.env exec -T 
 echo "whatsapp_restore_tables=PASS"
 
 install -d -o 1337 -g 1337 -m 0700 "$restore_root/validation"
+install -o 1337 -g 1337 -m 0600 \
+  "$restore_root/runtime/whatsapp/config.yaml" "$restore_root/validation/config.yaml"
 docker run --rm --network none \
-  -v "$restore_root/runtime/whatsapp/config.yaml:/data/config.yaml:ro" \
   -v "$restore_root/validation:/validation" \
   "$WHATSAPP_IMAGE" /usr/bin/mautrix-whatsapp \
-  -c /data/config.yaml -n --generate-registration -r /validation/registration.yaml >/dev/null
+  -c /validation/config.yaml --generate-registration -r /validation/registration.yaml >/dev/null
 [[ -s "$restore_root/validation/registration.yaml" ]]
 rm -rf -- "$restore_root/validation"
 echo "whatsapp_config=PASS"

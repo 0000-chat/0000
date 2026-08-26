@@ -38,6 +38,8 @@ class RestoreCoreTests(unittest.TestCase):
         self.assertIn("pg_restore -U synapse -d whatsapp_bridge", source)
         self.assertIn("whatsapp_restore_tables=PASS", source)
         self.assertIn("--generate-registration", source)
+        self.assertNotIn("-n --generate-registration", source)
+        self.assertIn("-c /validation/config.yaml --generate-registration", source)
         self.assertNotIn("up -d whatsapp", source)
         self.assertNotIn("start whatsapp", source)
 
