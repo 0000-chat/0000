@@ -4,6 +4,7 @@ import unittest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "restore-core-test.sh"
 DB_INIT = Path(__file__).parents[1] / "scripts" / "init-whatsapp-db.sh"
+MESSENGER_DB_INIT = Path(__file__).parents[1] / "scripts" / "init-messenger-db.sh"
 
 
 class RestoreCoreTests(unittest.TestCase):
@@ -42,6 +43,30 @@ class RestoreCoreTests(unittest.TestCase):
         self.assertIn("-c /validation/config.yaml --generate-registration", source)
         self.assertNotIn("up -d whatsapp", source)
         self.assertNotIn("start whatsapp", source)
+
+    def test_restores_and_validates_messenger_without_starting_live_session(self):
+        source = SCRIPT.read_text()
+        db_init = MESSENGER_DB_INIT.read_text()
+
+        self.assertIn('[[ -f "$payload/messenger.pgdump" ]]', source)
+        self.assertIn('cp -a "$payload/messenger-data/." "$restore_root/runtime/messenger/"', source)
+        self.assertIn('chown -R 1337:1337 "$restore_root/runtime/messenger"', source)
+        self.assertIn('[[ "$(stat -c \'%a\' "$restore_root/runtime/messenger/config.yaml")" == 600 ]]', source)
+        self.assertIn('[[ "$(stat -c \'%a\' "$restore_root/runtime/messenger/registration.yaml")" == 600 ]]', source)
+        self.assertIn('cp -a "$payload/synapse-data/." "$restore_root/runtime/synapse/"', source)
+        self.assertIn('messenger-registration.yaml', source)
+        self.assertIn('messenger-db.password', source)
+        self.assertIn('messenger-db.env', source)
+        self.assertIn("./scripts/init-messenger-db.sh", source)
+        self.assertIn('"$project" == communicator-restore-test', db_init)
+        self.assertIn("pg_restore -U synapse -d messenger_bridge", source)
+        self.assertIn("messenger_restore_tables=PASS", source)
+        self.assertIn("docker run --rm --network none", source)
+        self.assertIn("/usr/bin/mautrix-meta", source)
+        self.assertIn("-c /validation/config.yaml --generate-registration", source)
+        self.assertIn("messenger_config=PASS", source)
+        self.assertNotIn("up -d messenger", source)
+        self.assertNotIn("start messenger", source)
 
 
 if __name__ == "__main__":
