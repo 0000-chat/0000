@@ -17,6 +17,12 @@ class WhatsAppValidationTests(unittest.TestCase):
         self.assertIn("127.0.0.1:29318/_matrix/mau/live", self.validator)
         self.assertIn("127.0.0.1:29318/_matrix/mau/ready", self.validator)
 
+    def test_live_validator_checks_exact_permission_policy(self):
+        self.assertIn('config="$runtime_dir/whatsapp/config.yaml"', self.validator)
+        self.assertIn('[[ "$(stat -c \'%a\' "$config")" == 600 ]]', self.validator)
+        self.assertIn('python3 scripts/validate_whatsapp_policy.py "$config"', self.validator)
+        self.assertNotIn('echo "whatsapp_permissions=PASS"', self.validator)
+
     def test_validator_has_no_secret_or_destructive_diagnostics(self):
         for forbidden in ("docker logs", ".Config.Env", "compose down", "compose stop", "rm -rf"):
             self.assertNotIn(forbidden, self.validator)

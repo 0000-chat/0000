@@ -34,7 +34,7 @@ key endpoints to remain HTTP 404, and host listeners to remain limited to the
 approved ports. Do not print logs, environment, registrations, tokens, QR
 payloads, session data, or message/contact content.
 
-## Human-only acceptance
+## Human and Agent acceptance
 
 Record only the following markers after pairing the Human account:
 
@@ -57,6 +57,29 @@ Record only the following markers after pairing the Human account:
 Do not infer any marker from server health or a displayed QR code. Do not enable
 public media, direct media, federation, public registration, history sync, or
 bulk backfill to work around a failed check.
+
+Record these additional operator markers after pairing the Agent account:
+
+```text
+human_session_preserved=PASS
+agent_pairing=PASS
+agent_inbound_text=PASS
+agent_outbound_text=PASS
+agent_e2ee=PASS
+human_cannot_access_agent=PASS
+agent_cannot_access_human=PASS
+non_admin_commands_rejected=PASS
+both_sessions_restart_persistence=PASS
+post_pairing_backup=PASS
+post_pairing_restore_test=PASS
+```
+
+The Agent QR is shown only in its encrypted bot chat. The Human and Agent
+isolation check is symmetric: each account must be unable to discover, join, or
+read the other account's portal. `!wa set-relay` in either account's portal
+must be rejected, and relay must remain disabled.
+
+Do not print QR, session, contact, or message data.
 
 ## Recovery observations
 
