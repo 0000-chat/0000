@@ -24,7 +24,7 @@ describe("ConnectionsPage", () => {
 
     expect(await screen.findByText("Action required")).toBeVisible();
     expect(screen.getAllByText("WhatsApp").length).toBeGreaterThan(0);
-    expect(screen.getByText("Ready")).toBeVisible();
+    expect(screen.getByText("Attention Required")).toBeVisible();
     expect(screen.getAllByText("message.send").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: /Simulation only.*Reconnect/i }).every(
       (button) => (button as HTMLButtonElement).disabled,

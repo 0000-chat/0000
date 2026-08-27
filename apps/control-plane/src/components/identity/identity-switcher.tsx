@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useLocation, useRouter } from "@tanstack/react-router";
 import { createContext, useContext, useEffect, type ReactNode } from "react";
 import type { Identity } from "@communicator/contracts";
 import { apiClient } from "@/lib/api/client";
@@ -16,8 +16,8 @@ const IdentityContext = createContext<IdentityContextValue | null>(null);
 
 export function IdentityProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate({ from: "/connections" });
-  const search = useSearch({ strict: false });
+  const router = useRouter();
+  const { search } = useLocation();
   const { data: identities = [], isLoading } = useQuery({
     queryKey: queryKeys.identities,
     queryFn: () => apiClient.getIdentities(),
@@ -26,18 +26,20 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (activeIdentity && search.identity !== activeIdentity.id) {
-      void navigate({
+      void router.navigate({
+        to: router.state.location.pathname as "/",
         search: (previous) => ({ ...previous, identity: activeIdentity.id }),
         replace: true,
       });
     }
-  }, [activeIdentity, navigate, search.identity]);
+  }, [activeIdentity, router, search.identity]);
 
   const switchIdentity = (identityId: string) => {
     if (!identities.some((item) => item.id === identityId)) return;
     void queryClient.invalidateQueries({ queryKey: ["connections"] });
     void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    void navigate({
+    void router.navigate({
+      to: router.state.location.pathname as "/",
       search: (previous) => ({ ...previous, identity: identityId }),
     });
   };
