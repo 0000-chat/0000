@@ -1,3 +1,4 @@
+import json
 import pathlib
 import re
 import unittest
@@ -7,6 +8,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class RepositoryContractTests(unittest.TestCase):
+    def test_typescript_workspace_is_pinned(self):
+        package = json.loads((ROOT / "package.json").read_text())
+        self.assertTrue(package["private"])
+        self.assertEqual("pnpm@10.14.0", package["packageManager"])
+        self.assertEqual(">=24 <27", package["engines"]["node"])
+        self.assertEqual("24", (ROOT / ".nvmrc").read_text().strip())
+        workspace = (ROOT / "pnpm-workspace.yaml").read_text()
+        for member in ("apps/*", "packages/*", "workers/*", "services/*"):
+            self.assertIn(f"- '{member}'", workspace)
+
+    def test_generated_frontend_files_are_ignored(self):
+        ignored = (ROOT / ".gitignore").read_text()
+        for entry in ("playwright-report/", "test-results/", ".wrangler/"):
+            self.assertIn(entry, ignored)
+
     def test_every_image_is_digest_pinned(self):
         compose = (ROOT / "compose.yaml").read_text()
         lock = (ROOT / "deploy/images.lock.env").read_text()

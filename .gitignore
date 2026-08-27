@@ -33,3 +33,7 @@ __pycache__/
 *.py[cod]
 coverage/
 dist/
+.wrangler/
+playwright-report/
+test-results/
+blob-report/
