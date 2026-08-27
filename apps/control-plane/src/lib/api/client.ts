@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  CommunicatorIdSchema,
   CommandSchema,
   ConnectionSchema,
   ConversationSummarySchema,
@@ -13,10 +14,10 @@ import {
 } from "@communicator/contracts";
 
 const MeResponseSchema = z.object({
-  tenant_id: z.literal("tenant_pilot"),
-  principal_id: z.literal("principal_pilot"),
-  display_name: z.literal("Pilot operator"),
-  authorized_identity_ids: z.array(z.string()).length(2),
+  tenant_id: CommunicatorIdSchema,
+  principal_id: CommunicatorIdSchema,
+  display_name: z.string().min(1),
+  authorized_identity_ids: z.array(CommunicatorIdSchema),
 }).strict();
 
 const ResetResponseSchema = z.object({
