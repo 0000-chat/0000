@@ -77,7 +77,7 @@ export class SimulatedStore {
   commands(identityId: string): Command[] {
     return clone([
       ...this.state.commands.filter((item) => item.identity_id === identityId),
-      ...this.idempotency.values(),
+      ...Array.from(this.idempotency.values()).filter((item) => item.identity_id === identityId),
     ]);
   }
 

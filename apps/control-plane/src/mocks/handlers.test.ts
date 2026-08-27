@@ -124,6 +124,39 @@ describe("simulated API handlers", () => {
     expect(firstCommand.id).toBe(secondCommand.id);
   });
 
+  it("keeps dynamically accepted Activity commands scoped to their identity", async () => {
+    const submit = async (identityId: string, conversationId: string, key: string) => {
+      const response = await fetch(
+        `http://example.test/api/v1/conversations/${conversationId}/messages`,
+        {
+          method: "POST",
+          headers: { ...jsonHeaders, "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: identityId,
+            body: `Safe simulated ${identityId} message`,
+            delivery_mode: "direct",
+          }),
+        },
+      );
+      expect(response.status).toBe(202);
+    };
+
+    await submit("identity_human", "conversation_human_one", "test-key-human-activity");
+    await submit("identity_agent", "conversation_agent_one", "test-key-agent-activity");
+
+    const humanActivity = CommandSchema.array().parse(await json(await fetch(
+      "http://example.test/api/v1/commands?identity_id=identity_human",
+    )));
+    const agentActivity = CommandSchema.array().parse(await json(await fetch(
+      "http://example.test/api/v1/commands?identity_id=identity_agent",
+    )));
+
+    expect(humanActivity.every((command) => command.identity_id === "identity_human")).toBe(true);
+    expect(agentActivity.every((command) => command.identity_id === "identity_agent")).toBe(true);
+    expect(humanActivity.some((command) => command.id === "command_human_sim_1")).toBe(true);
+    expect(agentActivity.some((command) => command.id === "command_agent_sim_2")).toBe(true);
+  });
+
   it("does not disclose resources across identities", async () => {
     const response = await fetch(
       "http://example.test/api/v1/conversations/conversation_human_one/messages?identity_id=identity_agent",
