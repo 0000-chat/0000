@@ -61,6 +61,8 @@ The Cloudflare data plane includes:
 - a verified Matrix event consumer and bidirectional Matrix Gateway on the
   Contabo host;
 - an authenticated Cloudflare ingestion endpoint;
+- a small D1 control directory for tenant, principal, membership, identity
+  scope, and non-secret connection-routing authority;
 - Cloudflare Queues for asynchronous ingestion and failure isolation;
 - a batched, compressed ordinary R2 event archive;
 - one `TenantProjectionDO` per customer workspace;
@@ -95,6 +97,7 @@ Synapse                    Operational Matrix history and messaging truth
 mautrix                    Remote-network translation and account sessions
 Matrix Gateway             E2EE-capable Matrix client, normalization, commands
 Connection Gateway         Private normalization of mautrix account provisioning
+D1 Control Directory       Authoritative product tenancy and authorization data
 Cloudflare Queue           Retry, backpressure, and failure isolation
 ordinary R2                Immutable or append-only replay batches and exports
 TenantProjectionDO         Rebuildable tenant query projection and live events
@@ -152,6 +155,13 @@ A remote account may not be silently reassigned between identities.
 Reassignment is an audited workflow that stops pending commands, proves
 authority over both identities, and explicitly chooses how existing projected
 history is handled.
+
+The D1 Control Directory is authoritative for tenants, principals,
+memberships, roles, identity grants, and non-secret connection placement. The
+tenant DO may project the identity and connection fields needed for queries,
+but rebuilding message state from R2 does not create or grant product access.
+This separation lets the API resolve an authenticated issuer/subject before it
+routes to a tenant DO.
 
 ## High-level architecture
 
@@ -561,6 +571,26 @@ identity, exports, replay, retention changes, and break-glass inspection.
 Changing a role or revoking a principal must take effect within a bounded token
 lifetime and must invalidate newly requested WebSocket tickets.
 
+### Control-directory resolution
+
+The API normalizes the validated OIDC issuer and subject to an internal
+principal ID, then queries the D1 Control Directory for active memberships and
+identity grants. A tenant ID supplied as a route, header, or query value is a
+selection hint only; an active matching membership is required before the
+Worker obtains a DO stub or private gateway route.
+
+The minimum authoritative tables are `tenants`, `principals`, `memberships`,
+`identities`, `identity_grants`, `connections`, `connection_routes`, and
+`break_glass_grants`, all with explicit migrations and audit timestamps.
+Membership and identity-grant changes use D1 transactions. Changes that must
+also appear in a tenant projection use an idempotent control-event outbox;
+cross-product writes are never described as one atomic transaction.
+
+The directory contains no message bodies, provider authentication material,
+Matrix access tokens, E2EE keys, or bridge provisioning secrets. It has its own
+backup, restore, migration, and audit procedure because it is authoritative
+control-plane state rather than a rebuildable message projection.
+
 ### Workspace onboarding
 
 The pilot provisions its tenant, initial owner, Human identity, and Agent
@@ -870,6 +900,8 @@ The system must behave safely under partial failure:
   safely presented for operator cleanup rather than duplicated;
 - Connection Gateway unavailability leaves the link or connection in a
   recoverable, visible state;
+- D1 Control Directory unavailability fails closed for new authorization,
+  linking, export, replay, and command decisions;
 - a failed typing or read-receipt phase follows the stored command policy;
 - Matrix or bridge failure leaves a queryable failed or retrying command;
 - WebSocket disconnection does not lose durable data;
@@ -1039,6 +1071,9 @@ demonstrated with WhatsApp:
     bridge, or provider credentials.
 19. Security tests demonstrate that public routes cannot reach mautrix
     provisioning or gateway-administration interfaces.
+20. The D1 Control Directory can be restored without granting stale, deleted,
+    or cross-tenant memberships, and a tenant projection rebuild does not alter
+    directory authority.
 
 Self-service account linking is a separately releasable milestone. A provider
 adapter is complete when:
@@ -1059,6 +1094,49 @@ adapter is complete when:
 Telegram, Messenger, and LinkedIn must later pass the same contract tests with
 capability-specific expectations rather than separate product APIs.
 
+## Implementation technology choices
+
+The initial TypeScript workspace uses Node.js 24 LTS and pnpm. The protected
+backoffice and public API are one same-origin Cloudflare application package:
+
+- React and TypeScript for the backoffice;
+- Vite with `@cloudflare/vite-plugin` for local Workers-compatible development
+  and deployment;
+- TanStack Router and TanStack Query for typed routes and server state;
+- shadcn/ui, Tailwind CSS, React Hook Form, and Zod for accessible, owned UI
+  components and validated forms;
+- Hono with `@hono/zod-openapi` for the Worker HTTP API and OpenAPI contract;
+- generated OpenAPI TypeScript types for the browser client;
+- Mock Service Worker with contract-valid fixtures for early interactive
+  development;
+- Vitest with `@cloudflare/vitest-plugin` for Worker and Durable Object tests;
+  and
+- Playwright for user-visible browser acceptance tests.
+
+The first package is `apps/control-plane`, containing a React client and Hono
+Worker entry built by one Vite configuration. Shared schemas live in
+`packages/contracts`, and deterministic non-secret scenarios live in
+`packages/test-fixtures`. Later Queue consumers and Contabo gateways are
+separate deployable packages that import the same versioned contracts.
+
+D1 is used only for the authoritative control directory. Durable Object SQLite
+remains the per-tenant interactive messaging projection and command scheduler;
+ordinary R2 remains the replayable message archive. These three SQLite/object
+stores are not interchangeable and have separate recovery contracts.
+
+The pilot does not adopt React Admin, Refine, a full-stack SSR framework,
+Redux, Socket.IO, or a general DO SQLite ORM. The messaging timeline,
+link-session wizard, command phases, WebSocket resume behavior, and
+capability-driven mutations are custom product behavior rather than generic
+CRUD. Durable Object persistence uses explicit migrations and focused
+repository functions so transaction and replay behavior remain auditable.
+
+Mock mode is a replaceable adapter, not a second application. It implements the
+same OpenAPI shapes and realtime event types as the live API, is visibly marked
+in the UI, contains no production secrets, and fails closed in production
+builds. Every backend milestone replaces one mock capability through the same
+client boundary and ends with a browser-verifiable checkpoint.
+
 ## Delivery sequence
 
 Implementation planning should divide the work into these milestones:
@@ -1066,25 +1144,28 @@ Implementation planning should divide the work into these milestones:
 1. repository and Cloudflare project foundation;
 2. canonical resource, event, command, connection, link-session,
    authorization, and capability contracts;
-3. product-authentication validation and tenant/identity authorization;
-4. ordinary R2 archive and replay manifest contract;
-5. `TenantProjectionDO` schema, migrations, ingestion RPC, and tests;
-6. authenticated ingestion Worker and Queue consumer;
-7. versioned read API and generated OpenAPI contract;
-8. hibernatable WebSocket tickets, subscriptions, and resume behavior;
-9. Matrix Gateway event-consumer integration;
-10. `IdentityCommandDO`, direct-send path, and command status;
-11. paced-send scheduler, typing/read phases, and cancellation;
-12. remaining mutation capabilities and capability negotiation;
-13. protected backoffice reference client, including the Connections shell;
-14. R2 rebuild, export, deletion, and recovery validation;
-15. observability, security review, deployment, and core pilot acceptance;
-16. `LinkSessionDO` and private Connection Gateway with a deterministic fake
+3. contract-backed UI shell, identity selector, Connections, inbox, command
+   activity, and system-status screens using visible simulated data;
+4. browser acceptance harness and protected staging preview;
+5. D1 Control Directory migrations, product-authentication validation, and
+   tenant/identity authorization;
+6. ordinary R2 archive and replay manifest contract;
+7. `TenantProjectionDO` schema, migrations, ingestion RPC, and tests;
+8. authenticated ingestion Worker and Queue consumer;
+9. versioned live read API replacing the corresponding UI mocks;
+10. hibernatable WebSocket tickets, subscriptions, and resume behavior;
+11. Matrix Gateway event-consumer integration;
+12. `IdentityCommandDO`, direct-send path, and command status;
+13. paced-send scheduler, typing/read phases, and cancellation;
+14. remaining mutation capabilities and capability negotiation;
+15. R2 rebuild, export, deletion, and recovery validation;
+16. observability, security review, deployment, and core pilot acceptance;
+17. `LinkSessionDO` and private Connection Gateway with a deterministic fake
     provider adapter;
-17. WhatsApp self-service linking and lifecycle acceptance;
-18. Telegram, Messenger, and LinkedIn adapters as their bridge deployments
+18. WhatsApp self-service linking and lifecycle acceptance;
+19. Telegram, Messenger, and LinkedIn adapters as their bridge deployments
     become ready; and
-19. a documented but inactive automation extension contract.
+20. a documented but inactive automation extension contract.
 
 The future automation runtime is a separate milestone and requires its own
 approved design before model or tool execution is enabled.
