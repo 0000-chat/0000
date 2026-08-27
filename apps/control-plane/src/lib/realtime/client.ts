@@ -7,4 +7,5 @@ export interface RealtimeClient {
   subscribe(listener: RealtimeListener): () => void;
   readonly lastSequence: number;
   close(): void;
+  reset(): void;
 }

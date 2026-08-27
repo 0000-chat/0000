@@ -1,14 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { SystemPage } from "@/features/system/system-page";
 
 function SystemRoute() {
-  return (
-    <section className="space-y-3">
-      <h1 className="text-3xl font-semibold tracking-tight">System</h1>
-      <p className="max-w-2xl text-muted-foreground">
-        Inspect API, data-mode, realtime, and fixture diagnostics.
-      </p>
-    </section>
-  );
+  return <SystemPage />;
 }
 
 export const Route = createFileRoute("/system")({ component: SystemRoute });

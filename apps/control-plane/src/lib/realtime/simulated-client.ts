@@ -51,4 +51,8 @@ export class SimulatedRealtimeClient implements RealtimeClient {
     this.connected = false;
     this.listeners.clear();
   }
+
+  reset() {
+    this.sequence = 0;
+  }
 }
