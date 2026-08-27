@@ -150,6 +150,10 @@ class RuntimeInitTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
 
+    def test_telegram_runtime_initializer_is_executable(self):
+        runtime = ROOT / "scripts/init-telegram-runtime.sh"
+        self.assertEqual(0o755, stat.S_IMODE(runtime.stat().st_mode))
+
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ | {"COMMUNICATOR_RUNTIME_DIR": directory}
