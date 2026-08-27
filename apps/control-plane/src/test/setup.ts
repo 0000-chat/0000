@@ -1,1 +1,6 @@
-// UI test setup is expanded with shared matchers and adapters in Task 4.
+import "@testing-library/jest-dom/vitest";
+
+Object.defineProperty(window, "scrollTo", {
+  value: () => undefined,
+  writable: true,
+});
