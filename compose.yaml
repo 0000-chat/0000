@@ -68,6 +68,8 @@ services:
 
   telegram:
     image: ${TELEGRAM_IMAGE}
+    user: "1337:1337"
+    command: ["/usr/bin/mautrix-telegram", "--no-update", "--config", "/data/config.yaml"]
     depends_on:
       postgres:
         condition: service_healthy

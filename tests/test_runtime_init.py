@@ -127,7 +127,7 @@ class RuntimeInitTests(unittest.TestCase):
         self.assertEqual(
             2,
             source.count(
-                'docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps telegram'
+                'docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps --entrypoint /docker-run.sh telegram'
             ),
         )
         config_generation = source.index('if [[ ! -f "$config" ]]; then')
@@ -149,6 +149,7 @@ class RuntimeInitTests(unittest.TestCase):
             'install -o 991 -g 991 -m 0600',
         ):
             self.assertIn(required, source)
+        self.assertEqual(2, source.count("--entrypoint /docker-run.sh"))
 
     def test_telegram_runtime_initializer_is_executable(self):
         runtime = ROOT / "scripts/init-telegram-runtime.sh"

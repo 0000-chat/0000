@@ -60,6 +60,11 @@ class TelegramContractTests(unittest.TestCase):
         )
         self.assertEqual({"core": None}, service["networks"])
         self.assertNotIn("ports", service)
+        self.assertEqual("1337:1337", service["user"])
+        self.assertEqual(
+            ["/usr/bin/mautrix-telegram", "--no-update", "--config", "/data/config.yaml"],
+            service["command"],
+        )
         self.assertEqual("service_healthy", service["depends_on"]["postgres"]["condition"])
         self.assertEqual("service_healthy", service["depends_on"]["synapse"]["condition"])
         self.assertIn("127.0.0.1:29317/_matrix/mau/ready", " ".join(service["healthcheck"]["test"]))

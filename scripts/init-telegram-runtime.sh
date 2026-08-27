@@ -33,7 +33,7 @@ require_secret_file "$db_password_file"
 install -d -m 0700 "$telegram_dir"
 
 if [[ ! -f "$config" ]]; then
-  docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps telegram >/dev/null 2>&1
+  docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps --entrypoint /docker-run.sh telegram >/dev/null 2>&1
 fi
 python3 scripts/render-telegram-config.py \
   --db-password-file "$db_password_file" \
@@ -42,7 +42,7 @@ python3 scripts/render-telegram-config.py \
   --output "$config" >/dev/null
 
 if [[ ! -f "$registration" ]]; then
-  docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps telegram >/dev/null 2>&1
+  docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps --entrypoint /docker-run.sh telegram >/dev/null 2>&1
 fi
 require_secret_file "$registration"
 python3 scripts/render-telegram-config.py \
