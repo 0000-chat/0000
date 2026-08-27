@@ -1,5 +1,7 @@
+import { runtimeConfig } from "@/lib/config/runtime";
+
 export function EnvironmentBanner() {
-  const dataMode = import.meta.env.VITE_DATA_MODE ?? "simulated";
+  const dataMode = runtimeConfig.dataMode;
   if (dataMode === "simulated") {
     return (
       <span

@@ -51,5 +51,10 @@
     "vite": "^8.2.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.126.0"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
   }
 }

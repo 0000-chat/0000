@@ -1,0 +1,95 @@
+import { http, HttpResponse, passthrough } from "msw";
+import { z } from "zod";
+import {
+  CommunicatorIdSchema,
+  DeliveryModeSchema,
+} from "@communicator/contracts";
+import { notFound, simulatedStore, type SimulatedScenario } from "./store";
+
+const sendMessageSchema = z.object({
+  identity_id: CommunicatorIdSchema,
+  body: z.string().min(1).max(20_000),
+  delivery_mode: DeliveryModeSchema,
+}).strict();
+
+const errorResponse = (status: 400 | 404, code: "bad_request" | "not_found") =>
+  HttpResponse.json({
+    error: {
+      code,
+      message: code === "not_found"
+        ? "The requested resource is not available."
+        : "The request is invalid.",
+    },
+  }, { status });
+
+export const handlers = [
+  http.get("*/api/v1/health", () => passthrough()),
+
+  http.get("*/api/v1/me", () => HttpResponse.json(simulatedStore.me())),
+
+  http.get("*/api/v1/identities", () =>
+    HttpResponse.json(simulatedStore.identities())),
+
+  http.get("*/api/v1/connections", ({ request }) => {
+    const identityId = new URL(request.url).searchParams.get("identity_id");
+    if (!identityId) return errorResponse(400, "bad_request");
+    return HttpResponse.json(simulatedStore.connections(identityId));
+  }),
+
+  http.get("*/api/v1/conversations", ({ request }) => {
+    const identityId = new URL(request.url).searchParams.get("identity_id");
+    if (!identityId) return errorResponse(400, "bad_request");
+    return HttpResponse.json(simulatedStore.conversations(identityId));
+  }),
+
+  http.get("*/api/v1/conversations/:conversationId/messages", ({ request, params }) => {
+    const identityId = new URL(request.url).searchParams.get("identity_id");
+    const messages = identityId
+      ? simulatedStore.messages(String(params.conversationId), identityId)
+      : null;
+    return messages ? HttpResponse.json(messages) : errorResponse(404, "not_found");
+  }),
+
+  http.get("*/api/v1/commands", ({ request }) => {
+    const identityId = new URL(request.url).searchParams.get("identity_id");
+    if (!identityId) return errorResponse(400, "bad_request");
+    return HttpResponse.json(simulatedStore.commands(identityId));
+  }),
+
+  http.post("*/api/v1/conversations/:conversationId/messages", async ({ request, params }) => {
+    const idempotencyKey = request.headers.get("Idempotency-Key");
+    if (!idempotencyKey) return errorResponse(400, "bad_request");
+
+    const parsed = sendMessageSchema.safeParse(await request.json());
+    if (!parsed.success) return errorResponse(400, "bad_request");
+
+    const command = simulatedStore.commandForMessage({
+      conversationId: String(params.conversationId),
+      identityId: parsed.data.identity_id,
+      body: parsed.data.body,
+      deliveryMode: parsed.data.delivery_mode,
+      idempotencyKey,
+    });
+    return command
+      ? HttpResponse.json(command, { status: 202 })
+      : errorResponse(404, "not_found");
+  }),
+
+  http.post("*/api/v1/testing/reset", async ({ request }) => {
+    let scenario: SimulatedScenario = "ready";
+    const contentType = request.headers.get("Content-Type") ?? "";
+    if (contentType.includes("application/json")) {
+      const parsed = z.object({
+        scenario: z.enum(["ready", "attention_required"]).optional(),
+      }).safeParse(await request.json());
+      if (!parsed.success) return errorResponse(400, "bad_request");
+      scenario = parsed.data.scenario ?? "ready";
+    }
+    simulatedStore.reset(scenario);
+    return HttpResponse.json({
+      status: "reset",
+      scenario,
+      fixture_reset_at: simulatedStore.resetAtTime(),
+    });
+  }),
+];
