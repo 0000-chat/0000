@@ -74,7 +74,7 @@ def parse_key(value: str) -> str:
 def parse_document(content: str):
     rows = []
     for line_number, line in enumerate(content.splitlines(), 1):
-        if not line.strip():
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
         if "\t" in line:
             raise YamlSubsetError(f"tabs are not allowed on line {line_number}")
