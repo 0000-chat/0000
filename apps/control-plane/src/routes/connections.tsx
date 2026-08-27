@@ -1,14 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { ConnectionsPage } from "@/features/connections/connections-page";
 
 function ConnectionsRoute() {
-  return (
-    <section className="space-y-3">
-      <h1 className="text-3xl font-semibold tracking-tight">Connections</h1>
-      <p className="max-w-2xl text-muted-foreground">
-        Review provider connections for the selected identity.
-      </p>
-    </section>
-  );
+  return <ConnectionsPage />;
 }
 
 export const Route = createFileRoute("/connections")({ component: ConnectionsRoute });

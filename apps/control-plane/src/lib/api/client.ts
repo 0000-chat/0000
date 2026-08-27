@@ -44,12 +44,15 @@ export class ApiError extends Error {
 
 export class ApiClient {
   constructor(
-    private readonly fetcher: typeof fetch = fetch,
+    private readonly fetcher?: typeof fetch,
     private readonly baseUrl = "",
   ) {}
 
   private async request<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): Promise<T> {
-    const response = await this.fetcher(`${this.baseUrl}${path}`, init);
+    const url = this.baseUrl
+      ? `${this.baseUrl}${path}`
+      : new URL(path, globalThis.location?.origin ?? "http://example.test").toString();
+    const response = await (this.fetcher ?? globalThis.fetch)(url, init);
     if (!response.ok) {
       throw new ApiError(response.status, `Communicator API request failed with ${response.status}`);
     }

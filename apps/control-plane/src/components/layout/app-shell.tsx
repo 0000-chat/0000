@@ -9,7 +9,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { IdentitySwitcher } from "@/components/identity/identity-switcher";
+import { IdentityProvider, IdentitySwitcher } from "@/components/identity/identity-switcher";
 import { EnvironmentBanner } from "./environment-banner";
 
 const navigation = [
@@ -42,7 +42,8 @@ function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 export function AppShell() {
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <IdentityProvider>
+      <div className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
         <div className="mx-auto flex min-h-16 max-w-screen-2xl items-center gap-4 px-4 sm:px-6">
           <Sheet>
@@ -80,6 +81,7 @@ export function AppShell() {
           <Outlet />
         </main>
       </div>
-    </div>
+      </div>
+    </IdentityProvider>
   );
 }
