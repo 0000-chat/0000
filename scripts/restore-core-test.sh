@@ -20,16 +20,24 @@ restic restore latest --tag communicator-core --target "$restore_root/restic"
 payload=$(find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n' -quit)
 [[ -n "$payload" ]]
 [[ -f "$payload/whatsapp.pgdump" ]]
+[[ -f "$payload/messenger.pgdump" ]]
 
-install -d -m 0700 "$restore_root/runtime/postgres" "$restore_root/runtime/synapse" "$restore_root/runtime/whatsapp" "$restore_root/runtime/secrets"
+install -d -m 0700 "$restore_root/runtime/postgres" "$restore_root/runtime/synapse" "$restore_root/runtime/whatsapp" "$restore_root/runtime/messenger" "$restore_root/runtime/secrets"
 cp -a "$payload/secrets/." "$restore_root/runtime/secrets/"
 cp -a "$payload/synapse-data/." "$restore_root/runtime/synapse/"
 cp -a "$payload/whatsapp-data/." "$restore_root/runtime/whatsapp/"
+cp -a "$payload/messenger-data/." "$restore_root/runtime/messenger/"
 chown -R 991:991 "$restore_root/runtime/synapse"
 chown -R 1337:1337 "$restore_root/runtime/whatsapp"
+chown -R 1337:1337 "$restore_root/runtime/messenger"
+[[ -f "$restore_root/runtime/synapse/messenger-registration.yaml" ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/whatsapp/config.yaml")" == 600 ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/whatsapp/registration.yaml")" == 600 ]]
 [[ "$(stat -c '%a' "$restore_root/runtime/secrets/whatsapp-db.password")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/messenger/config.yaml")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/messenger/registration.yaml")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/messenger-db.password")" == 600 ]]
+[[ "$(stat -c '%a' "$restore_root/runtime/secrets/messenger-db.env")" == 600 ]]
 
 cd "$repo_dir"
 set -a
@@ -40,7 +48,7 @@ export COMPOSE_PROJECT_NAME="$project"
 
 cleanup() {
   cd "$repo_dir"
-  docker compose --env-file deploy/images.lock.env down >/dev/null 2>&1 || true
+  docker compose --env-file deploy/images.lock.env stop synapse postgres >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -80,6 +88,14 @@ whatsapp_table_count=$(docker compose --env-file deploy/images.lock.env exec -T 
   "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public'")
 [[ "$whatsapp_table_count" =~ ^[1-9][0-9]*$ ]]
 echo "whatsapp_restore_tables=PASS"
+./scripts/init-messenger-db.sh
+docker compose --env-file deploy/images.lock.env exec -T postgres \
+  pg_restore -U synapse -d messenger_bridge --clean --if-exists --no-owner < "$payload/messenger.pgdump"
+messenger_table_count=$(docker compose --env-file deploy/images.lock.env exec -T postgres \
+  psql -At -U synapse -d messenger_bridge -c \
+  "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public'")
+[[ "$messenger_table_count" =~ ^[1-9][0-9]*$ ]]
+echo "messenger_restore_tables=PASS"
 
 install -d -o 1337 -g 1337 -m 0700 "$restore_root/validation"
 install -o 1337 -g 1337 -m 0600 \
@@ -92,10 +108,22 @@ docker run --rm --network none \
 rm -rf -- "$restore_root/validation"
 echo "whatsapp_config=PASS"
 
+install -d -o 1337 -g 1337 -m 0700 "$restore_root/validation"
+install -o 1337 -g 1337 -m 0600 \
+  "$restore_root/runtime/messenger/config.yaml" "$restore_root/validation/config.yaml"
+docker run --rm --network none \
+  --workdir /validation \
+  -v "$restore_root/validation:/validation" \
+  "$MESSENGER_IMAGE" /usr/bin/mautrix-meta \
+  -c /validation/config.yaml --generate-registration >/dev/null
+[[ -s "$restore_root/validation/registration.yaml" ]]
+rm -rf -- "$restore_root/validation"
+echo "messenger_config=PASS"
+
 docker compose --env-file deploy/images.lock.env up -d synapse
 wait_for_healthy synapse
 docker compose --env-file deploy/images.lock.env exec -T synapse \
   python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8008/health", timeout=5)'
-docker compose --env-file deploy/images.lock.env down
+docker compose --env-file deploy/images.lock.env stop synapse postgres
 trap - EXIT
 echo "restore_test=PASS path=$restore_root"

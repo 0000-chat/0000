@@ -14,7 +14,9 @@ install -d -m 0700 \
   "$runtime_dir/backups" \
   "$runtime_dir/restore-tests" \
   "$runtime_dir/whatsapp" \
-  "$runtime_dir/whatsapp-backups"
+  "$runtime_dir/whatsapp-backups" \
+  "$runtime_dir/messenger" \
+  "$runtime_dir/messenger-backups"
 
 postgres_env="$runtime_dir/secrets/postgres.env"
 if [[ ! -e "$postgres_env" ]]; then
@@ -47,5 +49,24 @@ if [[ ! -e "$whatsapp_env" ]]; then
   mv "$temporary_env" "$whatsapp_env"
 fi
 chmod 0600 "$whatsapp_env"
+
+messenger_password="$runtime_dir/secrets/messenger-db.password"
+if [[ ! -e "$messenger_password" ]]; then
+  openssl rand -base64 48 | tr -d '\n' > "$messenger_password"
+  printf '\n' >> "$messenger_password"
+fi
+chmod 0600 "$messenger_password"
+
+messenger_env="$runtime_dir/secrets/messenger-db.env"
+if [[ ! -e "$messenger_env" ]]; then
+  temporary_env=$(mktemp "$runtime_dir/secrets/messenger-db.env.XXXXXX")
+  chmod 0600 "$temporary_env"
+  {
+    printf 'MESSENGER_DB_PASSWORD='
+    cat "$messenger_password"
+  } > "$temporary_env"
+  mv "$temporary_env" "$messenger_env"
+fi
+chmod 0600 "$messenger_env"
 
 printf 'runtime initialized at %s\n' "$runtime_dir"

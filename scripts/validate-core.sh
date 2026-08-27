@@ -21,12 +21,12 @@ key_status=$(curl -sS -o /dev/null -w '%{http_code}' "$matrix/_matrix/key/v2/ser
 [[ "$federation_status" == "404" ]]
 [[ "$key_status" == "404" ]]
 
-if ss -H -ltn | awk '{print $4}' | grep -Eq ':(5432|8008|8448|29318|2019)$'; then
+if ss -H -ltn | awk '{print $4}' | grep -Eq ':(5432|8008|8448|29318|29319|2019)$'; then
   echo "private service port is published on the host" >&2
   exit 1
 fi
 
 docker compose --env-file deploy/images.lock.env --project-name "$project" ps --status running --services | sort | diff -u \
-  <(printf 'caddy\npostgres\nsynapse\nwhatsapp\n') -
+  <(printf 'caddy\nmessenger\npostgres\nsynapse\nwhatsapp\n') -
 
 echo "core_validation=PASS"

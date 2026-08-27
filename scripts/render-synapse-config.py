@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--postgres-env", type=pathlib.Path, required=True)
     parser.add_argument("--registration-secret", type=pathlib.Path, required=True)
     parser.add_argument("--whatsapp-registration", type=pathlib.Path, required=True)
+    parser.add_argument("--messenger-registration", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
 
@@ -31,6 +32,10 @@ def main() -> int:
         raise SystemExit("WhatsApp registration must be a regular file")
     if stat.S_IMODE(args.whatsapp_registration.stat().st_mode) & 0o077:
         raise SystemExit("WhatsApp registration permissions are too broad")
+    if not args.messenger_registration.is_file():
+        raise SystemExit("Messenger registration must be a regular file")
+    if stat.S_IMODE(args.messenger_registration.stat().st_mode) & 0o077:
+        raise SystemExit("Messenger registration permissions are too broad")
 
     values = read_env(args.postgres_env)
     substitutions = {
