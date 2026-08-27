@@ -52,6 +52,58 @@ class RepositoryContractTests(unittest.TestCase):
         for forbidden in ("durable", "r2", "queue", "worker"):
             self.assertNotIn(forbidden, compose)
 
+    def test_communicator_staging_configuration_is_explicit_and_secret_free(self):
+        config_text = "\n".join(
+            line for line in (ROOT / "apps/control-plane/wrangler.jsonc").read_text().splitlines()
+            if not line.lstrip().startswith("//")
+        )
+        config = json.loads(config_text)
+        self.assertEqual("communicator-control-plane", config["name"])
+        self.assertEqual(
+            "communicator-control-plane-staging",
+            config["env"]["staging"]["name"],
+        )
+        self.assertEqual(
+            "communicator-control-plane-production",
+            config["env"]["production"]["name"],
+        )
+        self.assertEqual(
+            "simulated",
+            config["env"]["staging"]["vars"]["COMMUNICATOR_DATA_MODE"],
+        )
+        self.assertEqual(
+            "live",
+            config["env"]["production"]["vars"]["COMMUNICATOR_DATA_MODE"],
+        )
+        for environment in config["env"].values():
+            self.assertNotIn("routes", environment)
+            self.assertNotIn("custom_domains", environment)
+
+        serialized = json.dumps(config)
+        self.assertNotIn("matrix.communicator.0000.gold", serialized)
+        self.assertNotRegex(serialized, re.compile(r"(?i)(secret|password|credential|token|cookie|session|phone|provider|account|matrix)"))
+        self.assertNotRegex(serialized, re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"))
+        self.assertNotRegex(serialized, re.compile(r"@[A-Za-z0-9._=-]+:[A-Za-z0-9.-]+"))
+
+    def test_communicator_staging_runbook_has_approval_gate_and_safe_order(self):
+        runbook = (ROOT / "docs/runbooks/backoffice-staging.md").read_text()
+        required_steps = [
+            "1. Verify the intended Cloudflare account",
+            "2. Verify that a Cloudflare Access application",
+            "3. Verify that the Access allowed-identity list",
+            "4. Run the complete local gate",
+            "5. Build the simulated staging bundle",
+            "6. Open the approved staging hostname",
+            "7. Sign in as the pilot operator",
+            "8. Inspect Worker logs",
+            "9. If Access denial or the persistent simulated-data banner fails",
+        ]
+        positions = [runbook.index(step) for step in required_steps]
+        self.assertEqual(sorted(positions), positions)
+        self.assertIn("This implementation session intentionally stops before `wrangler deploy`", runbook)
+        self.assertIn("No custom hostname, DNS record", runbook)
+        self.assertIn("live Matrix or bridge traffic", runbook)
+
 
 if __name__ == "__main__":
     unittest.main()

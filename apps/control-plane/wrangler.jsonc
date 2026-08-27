@@ -12,5 +12,21 @@
   "vars": {
     "COMMUNICATOR_ENV": "development",
     "COMMUNICATOR_DATA_MODE": "simulated"
+  },
+  "env": {
+    "staging": {
+      "name": "communicator-control-plane-staging",
+      "vars": {
+        "COMMUNICATOR_ENV": "staging",
+        "COMMUNICATOR_DATA_MODE": "simulated"
+      }
+    },
+    "production": {
+      "name": "communicator-control-plane-production",
+      "vars": {
+        "COMMUNICATOR_ENV": "production",
+        "COMMUNICATOR_DATA_MODE": "live"
+      }
+    }
   }
 }
