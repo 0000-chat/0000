@@ -33,6 +33,7 @@ report_stats: false
 app_service_config_files:
   - /data/whatsapp-registration.yaml
   - /data/messenger-registration.yaml
+  - /data/telegram-registration.yaml
 
 enable_registration: false
 enable_registration_without_verification: false

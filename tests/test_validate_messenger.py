@@ -63,8 +63,8 @@ class MessengerValidationTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.validator)
 
     def test_core_validator_requires_sorted_messenger_service_set_and_private_port(self):
-        self.assertIn("caddy\\nmessenger\\npostgres\\nsynapse\\nwhatsapp\\n", self.core_validator)
-        self.assertIn(":(5432|8008|8448|29318|29319|2019)$", self.core_validator)
+        self.assertIn("caddy\\nmessenger\\npostgres\\nsynapse\\ntelegram\\nwhatsapp\\n", self.core_validator)
+        self.assertIn(":(5432|8008|8448|29317|29318|29319|2019)$", self.core_validator)
 
 
 if __name__ == "__main__":

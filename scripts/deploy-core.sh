@@ -32,17 +32,25 @@ chown --reference="$runtime_dir/synapse/homeserver.yaml" "$runtime_dir/synapse/l
 docker compose --env-file deploy/images.lock.env up -d --wait --wait-timeout 180 postgres
 ./scripts/init-whatsapp-db.sh
 ./scripts/init-messenger-db.sh
+./scripts/init-telegram-db.sh
 ./scripts/init-whatsapp-runtime.sh
 ./scripts/init-messenger-runtime.sh
+./scripts/init-telegram-runtime.sh
 python3 scripts/render-synapse-config.py \
   --postgres-env "$runtime_dir/secrets/postgres.env" \
   --registration-secret "$runtime_dir/secrets/synapse_registration_shared_secret" \
   --whatsapp-registration "$runtime_dir/synapse/whatsapp-registration.yaml" \
   --messenger-registration "$runtime_dir/synapse/messenger-registration.yaml" \
+  --telegram-registration "$runtime_dir/synapse/telegram-registration.yaml" \
   --output "$runtime_dir/synapse/homeserver.yaml"
 docker compose --env-file deploy/images.lock.env up -d --wait --wait-timeout 180 postgres
 docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 synapse
 docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 caddy
 docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 whatsapp
 docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 messenger
+docker compose --env-file deploy/images.lock.env up -d --no-deps --force-recreate --wait --wait-timeout 180 telegram
+./scripts/validate-core.sh
+./scripts/validate-whatsapp.sh
+./scripts/validate-messenger.sh
+./scripts/validate-telegram.sh
 docker compose --env-file deploy/images.lock.env ps

@@ -63,3 +63,31 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 7. Run `validate-core.sh`, `validate-whatsapp.sh`, and the public Matrix/well-known HTTPS checks. Public registration and federation/key endpoints must remain disabled/404.
 8. For rollback, stop only the WhatsApp service if needed, activate the previous release, restore the protected pre-change Synapse configuration, restart Synapse with health checks, and leave the bridge database/runtime intact. Never delete PostgreSQL volumes, Matrix data, bridge session state, users, rooms, or secrets as part of rollback.
 9. Do not pair a WhatsApp account during release deployment. Pairing is a separate user checkpoint requiring interactive QR or pairing-code entry.
+
+## Telegram bridge release
+
+1. Confirm Messenger is accepted on origin/main before the Telegram
+   integration gate closes. Record the release commit, archive checksum,
+   pinned Telegram image digest, provider snapshot evidence, and a fresh
+   encrypted backup.
+2. Activate the verified release with
+   COMMUNICATOR_RUNTIME_DIR=/srv/communicator and
+   COMPOSE_PROJECT_NAME=communicator. Run deploy-core.sh and require Compose
+   health plus validate-core.sh, validate-whatsapp.sh,
+   validate-messenger.sh, and validate-telegram.sh.
+3. Require the Telegram pre-login gate before any QR or phone login. The
+   service remains on the private Compose network with no published port, no
+   Caddy route, no Matrix federation, and no public bridge endpoint.
+4. Pair only @human:communicator.0000.gold from the Human's encrypted private
+   room. The QR scan, phone number, six-digit code, 2FA, account recovery,
+   logout, and device removal are user-only actions.
+5. After pairing, prove Human E2EE, symmetric portal isolation, Platform Admin
+   non-membership, non-admin command rejection, Telegram message behavior,
+   restart persistence, encrypted backup, and isolated restore. Keep the
+   WhatsApp and Messenger preservation markers green.
+6. For a release upgrade, restart through the approved Compose project and
+   preserve the Telegram database, runtime directory, session state,
+   registrations, Matrix rooms, users, and secrets. A rollback restores the
+   prior release and protected Synapse configuration; it must not log the
+   Telegram account out, remove its device, change split_portals, or delete
+   portal rooms automatically.
