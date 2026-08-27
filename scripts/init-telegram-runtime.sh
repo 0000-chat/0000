@@ -57,4 +57,3 @@ chmod 0700 "$telegram_dir"
 chmod 0600 "$config" "$registration"
 install -o 991 -g 991 -m 0600 "$registration" "$synapse_registration"
 echo "telegram_runtime=PASS"
-
