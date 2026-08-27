@@ -14,15 +14,58 @@ test.beforeEach(async ({ page }) => {
   expect(status).toBe(200);
 });
 
-test("accepts one direct command when the send is retried by the browser", async ({ page }) => {
+test("retries an accepted direct command with the same key after response loss", async ({ page }) => {
   await page.goto("/conversations/conversation_human_one");
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    const idempotencyKeys: string[] = [];
+    (window as Window & { __retryTestKeys?: string[] }).__retryTestKeys = idempotencyKeys;
+    let firstResponse = true;
+
+    window.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (
+        request.method === "POST"
+        && request.url.includes("/api/v1/conversations/conversation_human_one/messages")
+      ) {
+        idempotencyKeys.push(request.headers.get("Idempotency-Key") ?? "");
+        const response = await originalFetch(request);
+        if (firstResponse) {
+          firstResponse = false;
+          if (response.status !== 202) {
+            throw new Error(`Expected simulated acceptance, received ${response.status}`);
+          }
+          return new Response(JSON.stringify({
+            error: {
+              code: "response_lost",
+              message: "The simulated response was lost after acceptance.",
+            },
+          }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return response;
+      }
+      return originalFetch(request);
+    };
+  });
+
   await page.getByRole("textbox", { name: "Message" }).fill("Hello from the simulated Human identity");
   await page.getByRole("combobox", { name: "Delivery mode" }).selectOption("direct");
-  await page.getByRole("button", { name: "Send message" }).dblclick();
+  const sendButton = page.getByRole("button", { name: "Send message" });
+  await sendButton.click();
+  await expect(page.getByRole("status").filter({ hasText: "could not be accepted" })).toBeVisible();
+  await sendButton.click();
 
   await expect(page.getByRole("status").filter({ hasText: "Accepted — awaiting messaging confirmation" })).toBeVisible();
   await page.getByRole("link", { name: "Activity", exact: true }).first().click();
   await expect(page.getByRole("list", { name: "Command activity" }).getByRole("listitem")).toHaveCount(2);
+  const idempotencyKeys = await page.evaluate(
+    () => (window as Window & { __retryTestKeys?: string[] }).__retryTestKeys ?? [],
+  );
+  expect(idempotencyKeys).toHaveLength(2);
+  expect(idempotencyKeys[0]).toBe(idempotencyKeys[1]);
 });
 
 test("previews paced delivery and records its accepted command phase", async ({ page }) => {

@@ -43,6 +43,14 @@ export class ApiError extends Error {
   }
 }
 
+export function isDefinitiveRequestRejection(error: unknown) {
+  if (!(error instanceof ApiError)) return false;
+  return error.status >= 400
+    && error.status < 500
+    && error.status !== 408
+    && error.status !== 429;
+}
+
 export class ApiClient {
   constructor(
     private readonly fetcher?: typeof fetch,

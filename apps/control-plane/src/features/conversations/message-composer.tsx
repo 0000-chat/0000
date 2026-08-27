@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { apiClient } from "@/lib/api/client";
+import { apiClient, isDefinitiveRequestRejection } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 
 function makeIdempotencyKey() {
@@ -32,8 +32,10 @@ export function MessageComposer({ identityId, conversationId }: {
       setResultMessage("Accepted — awaiting messaging confirmation");
       void queryClient.invalidateQueries({ queryKey: queryKeys.commands(identityId) });
     },
-    onError: () => {
-      idempotencyKey.current = null;
+    onError: (error) => {
+      if (isDefinitiveRequestRejection(error)) {
+        idempotencyKey.current = null;
+      }
       setResultMessage("The simulated command could not be accepted.");
     },
   });

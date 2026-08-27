@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiClient } from "./client";
+import { ApiClient, ApiError, isDefinitiveRequestRejection } from "./client";
 
 describe("Communicator API client", () => {
   it("accepts opaque tenant and principal IDs with variable identity counts", async () => {
@@ -32,5 +32,14 @@ describe("Communicator API client", () => {
       principal_id: "principal_shared",
       authorized_identity_ids: ["identity_one", "identity_two", "identity_three"],
     });
+  });
+
+  it("only treats definitive client rejections as safe to forget", () => {
+    expect(isDefinitiveRequestRejection(new ApiError(400, "bad request"))).toBe(true);
+    expect(isDefinitiveRequestRejection(new ApiError(404, "not found"))).toBe(true);
+    expect(isDefinitiveRequestRejection(new ApiError(408, "timeout"))).toBe(false);
+    expect(isDefinitiveRequestRejection(new ApiError(429, "rate limited"))).toBe(false);
+    expect(isDefinitiveRequestRejection(new ApiError(503, "server error"))).toBe(false);
+    expect(isDefinitiveRequestRejection(new TypeError("network failure"))).toBe(false);
   });
 });
