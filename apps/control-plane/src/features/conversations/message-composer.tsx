@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,6 +14,7 @@ export function MessageComposer({ identityId, conversationId }: {
   conversationId: string;
 }) {
   const queryClient = useQueryClient();
+  const idempotencyKey = useRef<string | null>(null);
   const [body, setBody] = useState("");
   const [deliveryMode, setDeliveryMode] = useState<"direct" | "paced">("direct");
   const [resultMessage, setResultMessage] = useState<string | null>(null);
@@ -23,14 +24,18 @@ export function MessageComposer({ identityId, conversationId }: {
       identityId,
       body: body.trim(),
       deliveryMode,
-      idempotencyKey: makeIdempotencyKey(),
+      idempotencyKey: idempotencyKey.current ?? (idempotencyKey.current = makeIdempotencyKey()),
     }),
     onSuccess: () => {
+      idempotencyKey.current = null;
       setBody("");
       setResultMessage("Accepted — awaiting messaging confirmation");
       void queryClient.invalidateQueries({ queryKey: queryKeys.commands(identityId) });
     },
-    onError: () => setResultMessage("The simulated command could not be accepted."),
+    onError: () => {
+      idempotencyKey.current = null;
+      setResultMessage("The simulated command could not be accepted.");
+    },
   });
 
   const isDisabled = mutation.isPending;
