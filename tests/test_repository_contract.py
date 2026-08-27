@@ -15,7 +15,7 @@ class RepositoryContractTests(unittest.TestCase):
             line.split("=", 1) for line in lock.splitlines() if line and not line.startswith("#")
         )
         self.assertEqual(
-            {"POSTGRES_IMAGE", "CADDY_IMAGE", "SYNAPSE_IMAGE", "WHATSAPP_IMAGE"},
+            {"POSTGRES_IMAGE", "CADDY_IMAGE", "SYNAPSE_IMAGE", "WHATSAPP_IMAGE", "MESSENGER_IMAGE"},
             set(image_variables),
         )
         self.assertTrue(all("@sha256:" in locked_images[name] for name in image_variables))
@@ -28,6 +28,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("5432:5432", compose)
         self.assertNotIn("8008:8008", compose)
         self.assertNotIn("29318:29318", compose)
+        self.assertNotIn("29319:29319", compose)
         self.assertNotIn("2019:2019", compose)
 
     def test_cloudflare_products_are_not_services(self):

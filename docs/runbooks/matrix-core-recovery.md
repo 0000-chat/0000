@@ -16,3 +16,30 @@ Backups are valid only after a clean restore test. The restore test uses a diffe
 8. Run the restore script through the same remote root-only environment pattern and require `restore_test=PASS`.
 9. Confirm the restored Synapse health endpoint responds inside the isolated project.
 10. Keep the restored files until the operator records the test evidence, then remove that exact timestamped restore-test directory through a separately approved cleanup action. Never restore over the running PostgreSQL data directory.
+
+## Messenger recovery additions
+
+The encrypted restic payload must retain all existing Matrix and WhatsApp
+content and also include:
+
+- a custom-format `messenger_bridge` PostgreSQL dump;
+- protected `messenger/config.yaml` and `messenger/registration.yaml`;
+- protected `synapse/messenger-registration.yaml`;
+- `messenger-db.password` and `messenger-db.env`;
+- bridge encryption material, persisted connection/session state, and required
+  Messenger media metadata.
+
+The production backup stops only `messenger whatsapp synapse` for the bounded
+dump window, runs restic backup and check, and returns all five services to
+healthy operation with a bounded `up --wait` command. It must not expose
+registration/config contents or account/session data.
+
+The isolated restore uses `COMPOSE_PROJECT_NAME=communicator-restore-test`
+and a fresh timestamped runtime. It initializes and restores the isolated
+Synapse, WhatsApp, and `messenger_bridge` databases, checks a positive public
+table count, and validates the restored Messenger config with the pinned
+image on `--network none`. It starts isolated PostgreSQL and Synapse only;
+the restored Messenger service is never started and cannot reconnect the
+restored Human session to Meta. Agent onboarding is deferred by user and no
+Agent session is created. Preserve the successful restore evidence directory
+until separately approved cleanup.
