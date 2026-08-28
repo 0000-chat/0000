@@ -1,11 +1,61 @@
 import { describe, expect, it } from "vitest";
 import {
+  ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
+  ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
   RealtimeEventSchema,
+  type ChannelSummary,
 } from "../src/index";
+
+describe("ChannelSummarySchema", () => {
+  const channel = {
+    id: "connection_human_telegram",
+    tenant_id: "tenant_pilot",
+    identity_id: "identity_human",
+    provider: "telegram",
+    display_label: "Telegram",
+    status: "ready",
+    capabilities: ["message.send", "typing.send"],
+    unread_count: 3,
+    last_activity_at: "2026-08-28T00:03:00.000Z",
+    sort_position: 20,
+  } satisfies ChannelSummary;
+
+  it("uses the connection id and accepts derived navigation fields", () => {
+    expect(ChannelSummarySchema.parse(channel)).toEqual(channel);
+  });
+
+  it("accepts a channel with no activity and an attention code", () => {
+    expect(ChannelSummarySchema.parse({
+      ...channel,
+      status: "attention_required",
+      last_activity_at: null,
+      unread_count: 0,
+      attention_code: "reauth_required",
+    })).toMatchObject({ status: "attention_required", last_activity_at: null });
+  });
+
+  it("rejects negative unread totals and sort positions", () => {
+    expect(ChannelSummarySchema.safeParse({ ...channel, unread_count: -1 }).success).toBe(false);
+    expect(ChannelSummarySchema.safeParse({ ...channel, sort_position: -1 }).success).toBe(false);
+  });
+});
+
+describe("ConversationPageResultSchema", () => {
+  it("accepts one canonical page shape with an opaque continuation cursor", () => {
+    expect(ConversationPageResultSchema.parse({
+      items: [],
+      next_cursor: "opaque-cursor",
+    })).toEqual({ items: [], next_cursor: "opaque-cursor" });
+    expect(ConversationPageResultSchema.parse({ items: [], next_cursor: null })).toEqual({
+      items: [],
+      next_cursor: null,
+    });
+  });
+});
 
 describe("public schemas", () => {
   it("accepts opaque Communicator IDs and rejects Matrix IDs", () => {
