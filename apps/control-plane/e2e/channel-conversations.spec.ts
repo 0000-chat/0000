@@ -84,7 +84,11 @@ test("message activity updates All without moving channel navigation", async ({ 
 
 test("manual channel order survives ordinary navigation", async ({ page }) => {
   await page.goto("/conversations?identity=identity_human");
-  await page.getByRole("button", { name: "Move Telegram up" }).click();
+  const reorderTelegram = page.getByRole("button", { name: "Reorder Telegram" });
+  await reorderTelegram.focus();
+  await page.keyboard.press("Space");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Space");
   await expect(page.locator("[data-channel-id]").first()).toHaveAttribute(
     "data-channel-id",
     "connection_human_telegram",
@@ -102,6 +106,7 @@ test("manual channel order survives ordinary navigation", async ({ page }) => {
     "connection_human_whatsapp",
     "connection_human_messenger",
   ]);
+  await expect(page.getByRole("button", { name: /Move .* (up|down)/ })).toHaveCount(0);
 });
 
 test("identity switch replaces every scoped surface", async ({ page }) => {
@@ -109,7 +114,7 @@ test("identity switch replaces every scoped surface", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Alex Rivera", level: 1 })).toBeVisible();
   await page.getByLabel("Active identity").selectOption("identity_agent");
   await expect(page).toHaveURL(/\/conversations\?identity=identity_agent$/);
-  await expect(page.getByText("Agent WhatsApp", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select Agent WhatsApp" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Agent Test Chat/ })).toBeVisible();
   await expect(page.getByText("Personal WhatsApp", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Telegram", { exact: true })).toHaveCount(0);
@@ -183,7 +188,7 @@ test("mobile channel selection and back navigation work", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Channel: Telegram" })).toBeVisible();
   await page.getByTestId("conversation-row").first().click();
   await expect(page.getByRole("heading", { name: "Alex Rivera", level: 1 })).toBeVisible();
-  await page.getByRole("link", { name: "Back to conversations" }).click();
+  await page.getByRole("button", { name: "Back to conversations" }).click();
   await expect(page).toHaveURL(/\/conversations\?identity=identity_human&channel=connection_human_telegram/);
   await expect(page.getByTestId("conversation-row")).toHaveCount(2);
 });
@@ -197,12 +202,37 @@ test("tablet and desktop expose the intended panes", async ({ page }) => {
   await expect(page.getByRole("list", { name: "Conversation inbox" })).toBeVisible();
   await expect(page.getByText("Select a conversation to view its messages.")).toBeVisible();
 
+  await expect(page.getByTestId("conversation-workspace")).toHaveClass(/overflow-hidden/);
+  await expect(page.getByRole("heading", { name: "Channels" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "All conversations" })).toBeVisible();
+
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.reload();
   await expect(page.getByRole("navigation", { name: "Primary navigation" }).first()).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Conversation channels" }).filter({ visible: true })).toBeVisible();
   await expect(page.getByRole("list", { name: "Conversation inbox" })).toBeVisible();
   await expect(page.getByText("Select a conversation to view its messages.")).toBeVisible();
+  await expect(page.getByTestId("conversation-workspace")).toHaveClass(/overflow-hidden/);
+  await expect(page.getByTestId("conversation-workspace")).not.toHaveClass(/rounded/);
+});
+
+test("desktop messenger regions scroll independently and keep the thread composer anchored", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
+  await expect(page.getByTestId("message-viewport")).toBeVisible();
+
+  const scrollRegions = page.locator("[data-testid='conversation-workspace'] .overflow-y-auto");
+  await expect(scrollRegions).toHaveCount(3);
+  const overflowValues = await scrollRegions.evaluateAll((elements) => elements.map((element) => getComputedStyle(element).overflowY));
+  expect(overflowValues).toEqual(["auto", "auto", "auto"]);
+  await expect(page.getByTestId("message-viewport")).toHaveCSS("overflow-y", "auto");
+  await expect(page.getByTestId("message-viewport").getByRole("form", { name: "Send a message" })).toHaveCount(0);
+
+  const composer = page.getByRole("form", { name: "Send a message" });
+  const initialComposerBox = await composer.boundingBox();
+  await page.getByTestId("message-viewport").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const finalComposerBox = await composer.boundingBox();
+  expect(finalComposerBox?.y).toBe(initialComposerBox?.y);
 });
 
 test("production plus simulation fails closed", async () => {
@@ -216,6 +246,7 @@ test("production plus simulation fails closed", async () => {
 
 test("simulated browser never contacts a live service", async ({ page }) => {
   const requests: string[] = [];
+  const localOrigin = new URL(page.url()).origin;
   page.on("request", (request) => {
     const url = new URL(request.url());
     const path = url.pathname;
