@@ -1,80 +1,86 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
+import { apiClient } from "@/lib/api/client";
 import { simulatedStore } from "@/mocks/store";
 
 describe("conversation journeys", () => {
-  it("keeps the inbox and timeline scoped to the selected identity", async () => {
-    const user = userEvent.setup();
-    renderApp("/conversations");
+  it("labels the active thread with identity, provider, and account", async () => {
+    renderApp("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
 
-    expect(await screen.findByRole("link", { name: /Example Contact/ })).toBeVisible();
-    expect(screen.getByRole("link", { name: /Example Customer/ })).toBeVisible();
-    expect(screen.queryByRole("link", { name: /Agent Test Chat/ })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("link", { name: /Example Contact/ }));
-
-    expect(await screen.findByRole("heading", { name: "Example Contact" })).toBeVisible();
-    expect(screen.getByText("Hello from the example contact.")).toBeVisible();
-    expect(screen.getByText("Hello from the simulated Human identity.")).toBeVisible();
-    expect(screen.getByText("Thanks, that works for me.")).toBeVisible();
-    expect(screen.getAllByText("Delivered").length).toBeGreaterThan(0);
-    expect(screen.getByText("1 attachment")).toBeVisible();
-    expect(screen.getByRole("list", { name: "Message timeline" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Alex Rivera", level: 1 })).toBeVisible();
+    expect(screen.getByText("Human · telegram · Telegram")).toBeVisible();
+    expect(screen.getByText("I sent the outline")).toBeVisible();
   });
 
-  it("turns a cross-identity conversation into the generic not-found state", async () => {
-    const user = userEvent.setup();
-    renderApp("/conversations/conversation_human_one");
+  it("keeps attention-required history readable and disables sending", async () => {
+    await apiClient.resetSimulation("attention_required");
+    renderApp("/conversations/conversation_human_messenger_studio?identity=identity_human&channel=connection_human_messenger");
 
-    expect(await screen.findByRole("heading", { name: "Example Contact" })).toBeVisible();
+    expect(await screen.findByText("The render is ready")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Delivery mode" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(screen.getByText("Sending is unavailable until this connection is repaired.")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Manage connection" })).toHaveAttribute(
+      "href",
+      "/connections?identity=identity_human",
+    );
+  });
+
+  it("shows one generic unavailable state for a cross-channel URL guess", async () => {
+    renderApp("/conversations/conversation_human_whatsapp_family?identity=identity_human&channel=connection_human_telegram");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("This conversation is unavailable.");
+    expect(screen.queryByText("Family")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Return to All" })).toBeVisible();
+  });
+
+  it("keeps the inbox and timeline scoped to the selected identity", async () => {
+    const user = userEvent.setup();
+    renderApp("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
+
+    expect(await screen.findByText("I sent the outline")).toBeVisible();
     await user.selectOptions(screen.getByLabelText("Active identity"), "identity_agent");
 
-    expect(await screen.findByText("Conversation not found")).toBeVisible();
-    expect(screen.queryByText("Hello from the example contact.")).not.toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: /Agent Test Chat/ })).toBeVisible();
+    expect(screen.queryByText("Alex Rivera")).not.toBeInTheDocument();
   });
 
   it("accepts one simulated direct command and previews Human-paced delivery", async () => {
     const user = userEvent.setup();
-    const randomUUID = vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(
-      "00000000-0000-4000-8000-000000000001",
-    );
     simulatedStore.reset();
-    try {
-      renderApp("/conversations/conversation_human_one");
+    renderApp("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
 
-      expect(await screen.findByRole("heading", { name: "Example Contact" })).toBeVisible();
-      const composer = screen.getByRole("form", { name: "Send a message" });
-      const sendButton = screen.getByRole("button", { name: "Send message" });
-      expect(sendButton).toBeDisabled();
+    expect(await screen.findByRole("heading", { name: "Alex Rivera", level: 1 })).toBeVisible();
+    const composer = screen.getByRole("form", { name: "Send a message" });
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    expect(sendButton).toBeDisabled();
 
-      await user.type(screen.getByRole("textbox", { name: "Message" }), "Hello from the simulated Human identity");
-      await user.selectOptions(screen.getByRole("combobox", { name: "Delivery mode" }), "direct");
-      expect(sendButton).toBeEnabled();
-      await user.click(sendButton);
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "Hello from the simulated Human identity");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Delivery mode" }), "direct");
+    expect(sendButton).toBeEnabled();
+    await user.click(sendButton);
 
-      expect(await screen.findByText("Accepted — awaiting messaging confirmation")).toBeVisible();
-      expect(simulatedStore.commands("identity_human")).toHaveLength(2);
-      expect(composer).toBeVisible();
+    expect(await screen.findByText("Accepted — awaiting messaging confirmation")).toBeVisible();
+    expect(simulatedStore.commands("identity_human")).toHaveLength(2);
+    expect(composer).toBeVisible();
 
-      await user.type(screen.getByRole("textbox", { name: "Message" }), "Hello from the simulated Human identity");
-      await user.click(sendButton);
-      expect(await screen.findByText("Accepted — awaiting messaging confirmation")).toBeVisible();
-      expect(simulatedStore.commands("identity_human")).toHaveLength(2);
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "Hello from the simulated Human identity");
+    await user.click(sendButton);
+    expect(await screen.findByText("Accepted — awaiting messaging confirmation")).toBeVisible();
+    expect(simulatedStore.commands("identity_human")).toHaveLength(3);
 
-      await user.selectOptions(screen.getByRole("combobox", { name: "Delivery mode" }), "paced");
-      expect(screen.getByText("Human-paced preview")).toBeVisible();
-      for (const phase of [
-        "Mark read (when supported)",
-        "Reading delay",
-        "Typing indicator",
-        "Send message",
-      ]) {
-        expect(screen.getAllByText(phase).length).toBeGreaterThan(0);
-      }
-    } finally {
-      randomUUID.mockRestore();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Delivery mode" }), "paced");
+    expect(screen.getByText("Human-paced preview")).toBeVisible();
+    for (const phase of [
+      "Mark read (when supported)",
+      "Reading delay",
+      "Typing indicator",
+      "Send message",
+    ]) {
+      expect(screen.getAllByText(phase).length).toBeGreaterThan(0);
     }
   });
 });

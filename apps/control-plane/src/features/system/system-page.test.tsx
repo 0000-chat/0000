@@ -45,7 +45,7 @@ describe("diagnostic surfaces", () => {
     expect(screen.queryByText(/matrix/i)).not.toBeInTheDocument();
 
     renderApp("/");
-    expect(await screen.findByText("1 connection")).toBeVisible();
+    expect(await screen.findByText("3 connections")).toBeVisible();
     expect(screen.getByText("1 command")).toBeVisible();
     for (const linkName of ["Connections", "Conversations", "Activity", "System"]) {
       expect(screen.getAllByRole("link", { name: linkName }).length).toBeGreaterThan(0);

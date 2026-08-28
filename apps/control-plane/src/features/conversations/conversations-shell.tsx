@@ -14,7 +14,7 @@ import {
 import { ChannelSelector } from "./channel-selector";
 import { ChannelSidebar } from "./channel-sidebar";
 import { ConversationList } from "./conversation-list";
-import { ConversationPage } from "./conversation-page";
+import { ConversationPage, ConversationUnavailable } from "./conversation-page";
 
 export function ConversationsShell({ conversationId }: { conversationId?: string }) {
   const navigate = useNavigate();
@@ -53,10 +53,31 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     selectedChannelId,
     Boolean(identityId && selectedChannelId),
   );
+  const activeConversationQuery = useQuery({
+    queryKey: queryKeys.conversation(identityId, conversationId ?? ""),
+    queryFn: () => apiClient.getConversation(identityId, conversationId ?? ""),
+    enabled: Boolean(identityId && conversationId),
+  });
   const conversationsQuery = selectedChannelId ? selectedConversationsQuery : allConversationsQuery;
   const conversations = conversationsQuery.data?.pages.flatMap((page) => page.items) ?? [];
   const allUnreadCount = channels.reduce((sum, channel) => sum + channel.unread_count, 0);
   const selectedChannel = selectedChannelId ? channelsById.get(selectedChannelId) : undefined;
+  const activeThread = activeConversationQuery.data
+    ? (() => {
+      const channel = channelsById.get(activeConversationQuery.data.connection_id);
+      if (!channel) return null;
+      if (
+        activeConversationQuery.data.identity_id !== activeIdentity?.id
+        || activeConversationQuery.data.connection_id !== channel.id
+        || channel.identity_id !== activeIdentity?.id
+        || activeConversationQuery.data.tenant_id !== channel.tenant_id
+        || (selectedChannelId !== undefined && selectedChannelId !== activeConversationQuery.data.connection_id)
+      ) {
+        return null;
+      }
+      return { channel, conversation: activeConversationQuery.data };
+    })()
+    : null;
 
   const selectChannel = (channelId?: string) => {
     void navigate({
@@ -153,7 +174,21 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
           </div>
         </div>
         <main className="min-w-0">
-          {conversationId ? <ConversationPage /> : (
+          {conversationId && activeConversationQuery.isLoading && (
+            <p role="status" className="p-6 text-sm text-muted-foreground">Loading conversation…</p>
+          )}
+          {conversationId && !activeConversationQuery.isLoading && !activeThread && (
+            <ConversationUnavailable identityId={activeIdentity.id} />
+          )}
+          {conversationId && activeThread && (
+            <ConversationPage
+              identity={activeIdentity}
+              channel={activeThread.channel}
+              conversation={activeThread.conversation}
+              {...(selectedChannelId ? { selectedChannelId } : {})}
+            />
+          )}
+          {!conversationId && (
             <div className="flex min-h-[38rem] items-center justify-center p-6 text-center text-sm text-muted-foreground">
               Select a conversation to view its messages.
             </div>
