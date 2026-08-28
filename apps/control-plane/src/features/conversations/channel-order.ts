@@ -46,6 +46,10 @@ export function moveChannel(ids: string[], id: string, direction: -1 | 1) {
   const to = from + direction;
   if (from < 0 || to < 0 || to >= ids.length) return ids;
   const next = [...ids];
-  [next[from], next[to]] = [next[to], next[from]];
+  const fromId = next[from];
+  const toId = next[to];
+  if (fromId === undefined || toId === undefined) return ids;
+  next[from] = toId;
+  next[to] = fromId;
   return next;
 }

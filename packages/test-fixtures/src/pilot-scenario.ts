@@ -81,10 +81,10 @@ const readyConnections: Connection[] = [
 ];
 
 const attentionConnections: Connection[] = [
-  humanConnections[0],
-  humanConnections[1],
+  humanConnections[0]!,
+  humanConnections[1]!,
   {
-    ...humanConnections[2],
+    ...humanConnections[2]!,
     status: "attention_required",
     attention_code: "reauth_required",
   },

@@ -54,7 +54,10 @@ export const handlers = [
     const limit = rawLimit === null ? 50 : Number(rawLimit);
     const conversations = simulatedStore.conversations(identityId, channelId);
     if (!conversations) return errorResponse(404, "not_found");
-    const result = paginateConversations(conversations, { limit, cursor });
+    const result = paginateConversations(
+      conversations,
+      cursor ? { limit, cursor } : { limit },
+    );
     return result.ok
       ? HttpResponse.json(result.page)
       : errorResponse(400, "bad_request");

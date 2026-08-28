@@ -29,7 +29,7 @@ describe("paginateConversations", () => {
     const first = paginateConversations(items, { limit: 1 });
     const second = paginateConversations(items, {
       limit: 1,
-      cursor: first.ok ? first.page.next_cursor ?? undefined : undefined,
+      ...(first.ok && first.page.next_cursor ? { cursor: first.page.next_cursor } : {}),
     });
 
     expect(first.ok && first.page.items.map((item) => item.id)).toEqual(["conversation_a"]);

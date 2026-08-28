@@ -35,7 +35,7 @@ function decodeCursor(cursor: string) {
 }
 
 export function paginateConversations(
-  source: ConversationSummary[],
+  source: readonly ConversationSummary[],
   options: { limit?: number; cursor?: string },
 ): { ok: true; page: ConversationPageResult } | { ok: false } {
   const limit = options.limit ?? 50;
