@@ -5,3 +5,5 @@ export * from "./channel";
 export * from "./conversation";
 export * from "./command";
 export * from "./realtime";
+export * from "./authorization";
+export * from "./control-directory";
