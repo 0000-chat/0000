@@ -6,6 +6,7 @@ import { apiClient } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { runtimeConfig } from "@/lib/config/runtime";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
+import { clearChannelOrderPreferences } from "@/features/conversations/channel-order";
 
 const simulatedBuild = runtimeRealtimeClient !== null;
 
@@ -40,6 +41,7 @@ export function SystemPage() {
 
   const resetScenario = async () => {
     const resetResponse = await apiClient.resetSimulation();
+    clearChannelOrderPreferences();
     queryClient.clear();
     realtime?.reset();
     setLastSequence(realtime?.lastSequence ?? 0);

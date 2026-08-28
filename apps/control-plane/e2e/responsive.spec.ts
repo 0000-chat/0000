@@ -15,6 +15,12 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("keeps desktop navigation visible and provides mobile navigation", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await page.goto("/conversations?identity=identity_human");
+  await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Primary navigation" }).first()).toBeHidden();
+  await expect(page.getByRole("navigation", { name: "Conversation channels" }).filter({ visible: true })).toBeVisible();
+
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await expect(page.getByRole("navigation", { name: "Primary navigation" }).first()).toBeVisible();

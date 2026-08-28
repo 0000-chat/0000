@@ -15,7 +15,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("retries an accepted direct command with the same key after response loss", async ({ page }) => {
-  await page.goto("/conversations/conversation_human_one");
+  await page.goto("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
   await page.evaluate(() => {
     const originalFetch = window.fetch.bind(window);
     const idempotencyKeys: string[] = [];
@@ -26,7 +26,7 @@ test("retries an accepted direct command with the same key after response loss",
       const request = new Request(input, init);
       if (
         request.method === "POST"
-        && request.url.includes("/api/v1/conversations/conversation_human_one/messages")
+        && request.url.includes("/api/v1/conversations/conversation_human_telegram_alex/messages")
       ) {
         idempotencyKeys.push(request.headers.get("Idempotency-Key") ?? "");
         const response = await originalFetch(request);
@@ -69,7 +69,7 @@ test("retries an accepted direct command with the same key after response loss",
 });
 
 test("previews paced delivery and records its accepted command phase", async ({ page }) => {
-  await page.goto("/conversations/conversation_human_one");
+  await page.goto("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
   await page.getByRole("textbox", { name: "Message" }).fill("Hello from the simulated Human identity");
   await page.getByRole("combobox", { name: "Delivery mode" }).selectOption("paced");
 
@@ -107,7 +107,7 @@ test("shows the attention-required scenario and can reset it from System", async
   await expect(page.getByText("Agent WhatsApp", { exact: true })).toBeVisible();
   await identitySwitcher.selectOption("identity_human");
   await expect(page.getByRole("alert")).toContainText("Action required");
-  await expect(page.getByRole("button", { name: /Simulation only.*Reconnect/ })).toBeDisabled();
+  await expect(page.getByRole("article").filter({ hasText: "Messenger" }).getByRole("button", { name: /Simulation only.*Reconnect/ })).toBeDisabled();
 
   await page.goto("/system");
   await page.getByRole("button", { name: "Reset simulated scenario" }).click();
