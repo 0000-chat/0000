@@ -8,11 +8,12 @@ import { ConversationList } from "@/features/conversations/conversation-list";
 function ConversationsRoute() {
   const { activeIdentity, isLoading: identityLoading } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
-  const { data: conversations = [], isLoading } = useQuery({
-    queryKey: queryKeys.conversations(identityId),
-    queryFn: () => apiClient.getConversations(identityId),
+  const { data: conversationsPage, isLoading } = useQuery({
+    queryKey: queryKeys.conversations(identityId, undefined),
+    queryFn: () => apiClient.getConversations(identityId, undefined),
     enabled: Boolean(identityId),
   });
+  const conversations = conversationsPage?.items ?? [];
 
   return (
     <section className="space-y-6">

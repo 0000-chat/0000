@@ -12,11 +12,11 @@ export function ConversationPage() {
   const { activeIdentity, isLoading: identityLoading } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
   const conversationsQuery = useQuery({
-    queryKey: queryKeys.conversations(identityId),
-    queryFn: () => apiClient.getConversations(identityId),
+    queryKey: queryKeys.conversations(identityId, undefined),
+    queryFn: () => apiClient.getConversations(identityId, undefined),
     enabled: Boolean(identityId),
   });
-  const conversation = conversationsQuery.data?.find((item) => item.id === conversationId);
+  const conversation = conversationsQuery.data?.items.find((item) => item.id === conversationId);
   const messagesQuery = useQuery({
     queryKey: queryKeys.messages(identityId, conversationId),
     queryFn: () => apiClient.getMessages(conversationId, identityId),
