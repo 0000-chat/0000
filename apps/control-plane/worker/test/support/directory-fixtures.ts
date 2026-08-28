@@ -1,0 +1,89 @@
+const fixtureTimestamp = "2026-08-29T00:00:00.000Z";
+
+export async function seedDirectory(db: D1Database): Promise<void> {
+  await db.batch([
+    db.prepare(
+      "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "pilot", "Pilot", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("principal_human", "https://issuer.example/", "human-subject", "human", "Human", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("principal_agent", "https://issuer.example/", "agent-subject", "agent", "Agent", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("principal_operator", "https://issuer.example/", "operator-subject", "operator", "Operator", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("membership_human", "tenant_pilot", "principal_human", "owner", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("membership_agent", "tenant_pilot", "principal_agent", "member", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("membership_operator", "tenant_pilot", "principal_operator", "admin", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("identity_human", "tenant_pilot", "human", "Human", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("identity_agent", "tenant_pilot", "agent", "Agent", "active", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_human", "identity_human", "conversation.read", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_human", "identity_human", "message.send", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_human", "identity_human", "receipt.send", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_human", "identity_human", "connection.read", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_human", "identity_human", "connection.manage", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_agent", "identity_agent", "conversation.read", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_agent", "identity_agent", "message.send", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_agent", "identity_agent", "connection.read", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind("tenant_pilot", "membership_operator", "identity_human", "connection.read", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("connection_human_whatsapp", "tenant_pilot", "identity_human", "whatsapp", "Human WhatsApp", "ready", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("connection_agent_whatsapp", "tenant_pilot", "identity_agent", "whatsapp", "Agent WhatsApp", "ready", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("connection_human_whatsapp", "gateway-human", "bridge-human", "route-user-human", "route-room-human", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind("connection_agent_whatsapp", "gateway-agent", "bridge-agent", "route-user-agent", "route-room-agent", fixtureTimestamp, fixtureTimestamp),
+  ]);
+}
+
+export async function clearDirectory(db: D1Database): Promise<void> {
+  await db.batch([
+    db.prepare("DELETE FROM audit_events"),
+    db.prepare("DELETE FROM control_event_outbox"),
+    db.prepare("DELETE FROM directory_mutations"),
+    db.prepare("DELETE FROM break_glass_grants"),
+    db.prepare("DELETE FROM revoked_tokens"),
+    db.prepare("DELETE FROM connection_routes"),
+    db.prepare("DELETE FROM connections"),
+    db.prepare("DELETE FROM identity_grants"),
+    db.prepare("DELETE FROM identities"),
+    db.prepare("DELETE FROM memberships"),
+    db.prepare("DELETE FROM principals"),
+    db.prepare("DELETE FROM tenants"),
+  ]);
+}

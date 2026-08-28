@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
+import { seedDirectory } from "./support/directory-fixtures";
 
 const applicationTables = [
   "tenants",
@@ -143,5 +144,17 @@ describe("control directory schema", () => {
     await expect(env.CONTROL_DB.prepare(
       "INSERT INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     ).bind("event_one", "tenant_one", "authorization.changed", "membership", "membership_one", "not-json", timestamp).run()).rejects.toThrow();
+  });
+
+  it("seeds Human and Agent grants without crossing identity boundaries", async () => {
+    await seedDirectory(env.CONTROL_DB);
+    const result = await env.CONTROL_DB.prepare(
+      "SELECT membership_id, identity_id FROM identity_grants ORDER BY membership_id, identity_id",
+    ).all<{ membership_id: string; identity_id: string }>();
+
+    expect(result.results.filter((row) => row.membership_id === "membership_human")
+      .every((row) => row.identity_id === "identity_human")).toBe(true);
+    expect(result.results.filter((row) => row.membership_id === "membership_agent")
+      .every((row) => row.identity_id === "identity_agent")).toBe(true);
   });
 });
