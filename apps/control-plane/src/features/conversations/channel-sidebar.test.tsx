@@ -61,6 +61,7 @@ describe("ChannelSidebar", () => {
     );
 
     const navigation = screen.getByRole("navigation", { name: "Conversation channels" });
+    expect(screen.getByText("Channels")).toBeVisible();
     expect(navigation.querySelector("button")).toHaveTextContent("All");
     expect(screen.getByRole("button", { name: /All/ })).toHaveTextContent("10");
     expect(screen.getByRole("button", { name: "Select Telegram" })).toHaveTextContent("telegram");
@@ -74,13 +75,16 @@ describe("ChannelSidebar", () => {
     await user.click(screen.getByRole("button", { name: "Select Telegram" }));
     expect(onSelect).toHaveBeenCalledWith("connection_human_telegram");
 
-    const moveTelegramUp = screen.getByRole("button", { name: "Move Telegram up" });
-    moveTelegramUp.focus();
-    await user.keyboard("{Enter}");
+    const reorderTelegram = screen.getByRole("button", { name: "Reorder Telegram" });
+    reorderTelegram.focus();
+    await user.keyboard("[Space]");
+    await user.keyboard("{ArrowUp}");
+    await user.keyboard("[Space]");
     expect(onReorder).toHaveBeenCalledWith([
       "connection_human_telegram",
       "connection_human_whatsapp",
       "connection_human_messenger",
     ]);
+    expect(screen.queryByRole("button", { name: /Move .* (up|down)/ })).not.toBeInTheDocument();
   });
 });
