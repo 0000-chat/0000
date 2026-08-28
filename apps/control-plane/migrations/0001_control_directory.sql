@@ -56,6 +56,7 @@ CREATE TABLE identity_grants (
     'retention.manage', 'break_glass.inspect'
   )),
   created_at TEXT NOT NULL,
+  -- Composite references prevent a grant from crossing tenant ownership boundaries.
   FOREIGN KEY (tenant_id, membership_id) REFERENCES memberships(tenant_id, id) ON DELETE CASCADE,
   FOREIGN KEY (tenant_id, identity_id) REFERENCES identities(tenant_id, id) ON DELETE CASCADE,
   PRIMARY KEY (tenant_id, membership_id, identity_id, operation_scope)
