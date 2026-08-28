@@ -161,7 +161,7 @@ export function SortableChannelList({
                 "h-auto min-h-11 w-full justify-start rounded-none px-4 py-2.5 text-left",
                 !selectedChannelId && "bg-sidebar-accent text-sidebar-accent-foreground",
               )}
-              aria-label="All"
+              aria-label={`All, ${allUnreadCount} unread`}
               aria-current={!selectedChannelId ? "page" : undefined}
               onClick={() => onSelect(undefined)}
             >

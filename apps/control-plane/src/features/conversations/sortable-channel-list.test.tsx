@@ -54,7 +54,7 @@ describe("SortableChannelList", () => {
     expect(screen.getByRole("button", { name: "Reorder Personal WhatsApp" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reorder Telegram" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Move .* (up|down)/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "All" })).not.toHaveAttribute("aria-roledescription");
+    expect(screen.getByRole("button", { name: /All/ })).not.toHaveAttribute("aria-roledescription");
   });
 
   it("moves a channel through the existing reorder callback with keyboard sorting", async () => {

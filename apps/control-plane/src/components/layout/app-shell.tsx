@@ -49,7 +49,7 @@ export function AppShell() {
     <IdentityProvider>
       <div className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
       <header className="z-10 h-16 shrink-0 border-b bg-background/95 backdrop-blur">
-        <div className="mx-auto flex h-full max-w-screen-2xl items-center gap-4 px-4 sm:px-6">
+        <div className="mx-auto flex h-full max-w-screen-2xl items-center gap-2 px-4 sm:gap-4 sm:px-6">
           <Sheet>
             <SheetTrigger asChild>
               <Button variant="outline" size="icon" className="xl:hidden" aria-label="Open navigation">
@@ -66,7 +66,7 @@ export function AppShell() {
               </div>
             </SheetContent>
           </Sheet>
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
             <Link to="/" className="text-lg font-semibold tracking-tight">
               Communicator
             </Link>

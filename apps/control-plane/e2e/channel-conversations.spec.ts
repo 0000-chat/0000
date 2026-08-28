@@ -130,12 +130,24 @@ test("direct and paced sends stay on the opened connection", async ({ page }) =>
 
   await message.fill("A simulated direct message");
   await mode.selectOption("direct");
+  const directResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/v1/conversations/conversation_human_telegram_alex/messages")
+    && response.request().method() === "POST"
+    && response.status() === 202,
+  );
   await send.click();
+  await directResponse;
   await expect(page.getByRole("status").filter({ hasText: "Accepted — awaiting messaging confirmation" })).toBeVisible();
 
   await message.fill("A simulated paced message");
   await mode.selectOption("paced");
+  const pacedResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/v1/conversations/conversation_human_telegram_alex/messages")
+    && response.request().method() === "POST"
+    && response.status() === 202,
+  );
   await send.click();
+  await pacedResponse;
   await expect(page.getByRole("status").filter({ hasText: "Accepted — awaiting messaging confirmation" })).toBeVisible();
 
   const commands = await page.evaluate(async () => {
