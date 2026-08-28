@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ConversationPage } from "@/features/conversations/conversation-page";
+import { ConversationsShell } from "@/features/conversations/conversations-shell";
 
 function ConversationRoute() {
-  return <ConversationPage />;
+  const { conversationId } = Route.useParams();
+  return <ConversationsShell conversationId={conversationId} />;
 }
 
 export const Route = createFileRoute("/conversations/$conversationId")({ component: ConversationRoute });

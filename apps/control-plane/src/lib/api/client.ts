@@ -1,13 +1,17 @@
 import { z } from "zod";
 import {
+  ChannelSummarySchema,
   CommunicatorIdSchema,
   CommandSchema,
   ConnectionSchema,
+  ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
   MessageSchema,
   type Command,
+  type ChannelSummary,
   type Connection,
+  type ConversationPageResult,
   type ConversationSummary,
   type Identity,
   type Message,
@@ -87,10 +91,31 @@ export class ApiClient {
     );
   }
 
-  getConversations(identityId: string): Promise<ConversationSummary[]> {
+  getChannels(identityId: string): Promise<ChannelSummary[]> {
     return this.request(
-      `/api/v1/conversations?identity_id=${encodeURIComponent(identityId)}`,
-      ConversationSummarySchema.array(),
+      `/api/v1/identities/${encodeURIComponent(identityId)}/channels`,
+      ChannelSummarySchema.array(),
+    );
+  }
+
+  getConversations(
+    identityId: string,
+    channelId?: string,
+    cursor?: string,
+  ): Promise<ConversationPageResult> {
+    const search = new URLSearchParams({ limit: "50" });
+    if (channelId) search.set("channel_id", channelId);
+    if (cursor) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/identities/${encodeURIComponent(identityId)}/conversations?${search}`,
+      ConversationPageResultSchema,
+    );
+  }
+
+  getConversation(identityId: string, conversationId: string): Promise<ConversationSummary> {
+    return this.request(
+      `/api/v1/identities/${encodeURIComponent(identityId)}/conversations/${encodeURIComponent(conversationId)}`,
+      ConversationSummarySchema,
     );
   }
 

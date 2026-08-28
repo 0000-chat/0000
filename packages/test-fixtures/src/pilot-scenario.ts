@@ -6,12 +6,14 @@ import {
   IdentitySchema,
   MessageSchema,
   TimestampSchema,
+  type Connection,
+  type ConversationSummary,
+  type Message,
 } from "@communicator/contracts";
 
 const tenantId = "tenant_pilot" as const;
 const humanIdentityId = "identity_human" as const;
 const agentIdentityId = "identity_agent" as const;
-const humanConnectionId = "connection_human_whatsapp" as const;
 const agentConnectionId = "connection_agent_whatsapp" as const;
 
 const identities = [
@@ -29,66 +31,131 @@ const identities = [
   },
 ];
 
-const readyConnections = [
+const humanConnections: Connection[] = [
   {
-    id: humanConnectionId,
+    id: "connection_human_whatsapp",
     tenant_id: tenantId,
     identity_id: humanIdentityId,
     provider: "whatsapp" as const,
     display_label: "Personal WhatsApp",
     status: "ready" as const,
-    capabilities: [
-      "message.send" as const,
-      "message.edit" as const,
-      "reaction.add" as const,
-      "receipt.read" as const,
-      "typing.send" as const,
-      "attachment.send" as const,
-    ],
-    last_synced_at: "2026-08-27T00:12:00.000Z",
+    capabilities: ["message.send", "reaction.add", "receipt.read", "typing.send"],
+    last_synced_at: "2026-08-28T00:06:00.000Z",
   },
   {
-    id: agentConnectionId,
-    tenant_id: tenantId,
-    identity_id: agentIdentityId,
-    provider: "whatsapp" as const,
-    display_label: "Agent WhatsApp",
-    status: "ready" as const,
-    capabilities: ["message.send" as const, "receipt.read" as const],
-    last_synced_at: "2026-08-27T00:14:00.000Z",
-  },
-];
-
-const attentionConnections = [
-  {
-    ...readyConnections[0],
-    status: "attention_required" as const,
-    attention_code: "provider_attention_required",
-  },
-  readyConnections[1],
-];
-
-const conversations = [
-  {
-    id: "conversation_human_one",
+    id: "connection_human_telegram",
     tenant_id: tenantId,
     identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    title: "Example Contact",
-    last_message_preview: "Thanks, that works for me.",
-    last_activity_at: "2026-08-27T00:10:00.000Z",
+    provider: "telegram",
+    display_label: "Telegram",
+    status: "ready",
+    capabilities: ["message.send", "reaction.add", "receipt.read", "typing.send"],
+    last_synced_at: "2026-08-28T00:05:00.000Z",
+  },
+  {
+    id: "connection_human_messenger",
+    tenant_id: tenantId,
+    identity_id: humanIdentityId,
+    provider: "messenger",
+    display_label: "Messenger",
+    status: "ready",
+    capabilities: ["message.send", "reaction.add", "typing.send"],
+    last_synced_at: "2026-08-28T00:04:00.000Z",
+  },
+];
+
+const agentConnection: Connection = {
+  id: agentConnectionId,
+  tenant_id: tenantId,
+  identity_id: agentIdentityId,
+  provider: "whatsapp",
+  display_label: "Agent WhatsApp",
+  status: "ready",
+  capabilities: ["message.send", "receipt.read"],
+  last_synced_at: "2026-08-27T00:14:00.000Z",
+};
+
+const readyConnections: Connection[] = [
+  ...humanConnections,
+  agentConnection,
+];
+
+const attentionConnections: Connection[] = [
+  humanConnections[0]!,
+  humanConnections[1]!,
+  {
+    ...humanConnections[2]!,
+    status: "attention_required",
+    attention_code: "reauth_required",
+  },
+  agentConnection,
+];
+
+const humanConversations: ConversationSummary[] = [
+  {
+    id: "conversation_human_telegram_alex",
+    tenant_id: tenantId,
+    identity_id: humanIdentityId,
+    connection_id: "connection_human_telegram",
+    title: "Alex Rivera",
+    last_message_preview: "I sent the outline",
+    last_activity_at: "2026-08-28T00:06:00.000Z",
+    unread_count: 3,
+  },
+  {
+    id: "conversation_human_whatsapp_family",
+    tenant_id: tenantId,
+    identity_id: humanIdentityId,
+    connection_id: "connection_human_whatsapp",
+    title: "Family",
+    last_message_preview: "Dinner at seven",
+    last_activity_at: "2026-08-28T00:05:00.000Z",
+    unread_count: 4,
+  },
+  {
+    id: "conversation_human_messenger_studio",
+    tenant_id: tenantId,
+    identity_id: humanIdentityId,
+    connection_id: "connection_human_messenger",
+    title: "Studio Team",
+    last_message_preview: "The render is ready",
+    last_activity_at: "2026-08-28T00:04:00.000Z",
+    unread_count: 2,
+  },
+  {
+    id: "conversation_human_whatsapp_alex",
+    tenant_id: tenantId,
+    identity_id: humanIdentityId,
+    connection_id: "connection_human_whatsapp",
+    title: "Alex Rivera",
+    last_message_preview: "See you tomorrow",
+    last_activity_at: "2026-08-28T00:03:00.000Z",
     unread_count: 1,
   },
   {
-    id: "conversation_human_two",
+    id: "conversation_human_telegram_product",
     tenant_id: tenantId,
     identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    title: "Example Customer",
-    last_message_preview: "I will check and reply shortly.",
-    last_activity_at: "2026-08-27T00:08:00.000Z",
+    connection_id: "connection_human_telegram",
+    title: "Product Group",
+    last_message_preview: "Ship the pilot",
+    last_activity_at: "2026-08-28T00:02:00.000Z",
     unread_count: 0,
   },
+  {
+    id: "conversation_human_messenger_archive",
+    tenant_id: tenantId,
+    identity_id: humanIdentityId,
+    connection_id: "connection_human_messenger",
+    title: "Old Client",
+    last_message_preview: "Thanks again",
+    last_activity_at: "2026-08-28T00:01:00.000Z",
+    unread_count: 0,
+  },
+];
+
+const conversations: ConversationSummary[] = [
+  ...humanConversations,
   {
     id: "conversation_agent_one",
     tenant_id: tenantId,
@@ -101,96 +168,49 @@ const conversations = [
   },
 ];
 
-const messages = [
-  {
-    id: "message_human_one_inbound",
-    tenant_id: tenantId,
-    identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    conversation_id: "conversation_human_one",
-    direction: "inbound" as const,
-    sender_label: "Example Contact",
-    body: "Hello from the example contact.",
-    occurred_at: "2026-08-27T00:04:00.000Z",
+function messagesFor(conversation: ConversationSummary): Message[] {
+  const common = {
+    tenant_id: conversation.tenant_id,
+    identity_id: conversation.identity_id,
+    connection_id: conversation.connection_id,
+    conversation_id: conversation.id,
+    occurred_at: conversation.last_activity_at,
     delivery_status: "delivered" as const,
     attachment_count: 0,
-  },
-  {
-    id: "message_human_one_outbound",
-    tenant_id: tenantId,
-    identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    conversation_id: "conversation_human_one",
-    direction: "outbound" as const,
-    sender_label: "Human",
-    body: "Hello from the simulated Human identity.",
-    occurred_at: "2026-08-27T00:06:00.000Z",
-    delivery_status: "delivered" as const,
-    attachment_count: 0,
-  },
-  {
-    id: "message_human_one_inbound_two",
-    tenant_id: tenantId,
-    identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    conversation_id: "conversation_human_one",
-    direction: "inbound" as const,
-    sender_label: "Example Contact",
-    body: "Thanks, that works for me.",
-    occurred_at: "2026-08-27T00:10:00.000Z",
-    delivery_status: "delivered" as const,
-    attachment_count: 1,
-  },
-  {
-    id: "message_human_two_inbound",
-    tenant_id: tenantId,
-    identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    conversation_id: "conversation_human_two",
-    direction: "inbound" as const,
-    sender_label: "Example Customer",
-    body: "Could you confirm the example request?",
-    occurred_at: "2026-08-27T00:03:00.000Z",
-    delivery_status: "read" as const,
-    attachment_count: 0,
-  },
-  {
-    id: "message_human_two_outbound",
-    tenant_id: tenantId,
-    identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    conversation_id: "conversation_human_two",
-    direction: "outbound" as const,
-    sender_label: "Human",
-    body: "I will check and reply shortly.",
-    occurred_at: "2026-08-27T00:08:00.000Z",
-    delivery_status: "sent" as const,
-    attachment_count: 0,
-  },
-  {
-    id: "message_human_two_inbound_two",
-    tenant_id: tenantId,
-    identity_id: humanIdentityId,
-    connection_id: humanConnectionId,
-    conversation_id: "conversation_human_two",
-    direction: "inbound" as const,
-    sender_label: "Example Customer",
-    body: "No rush; thank you.",
-    occurred_at: "2026-08-27T00:09:00.000Z",
-    delivery_status: "read" as const,
-    attachment_count: 0,
-  },
+  };
+  return [
+    {
+      ...common,
+      id: `message_${conversation.id}_inbound`,
+      direction: "inbound" as const,
+      sender_label: conversation.title,
+      body: conversation.last_message_preview,
+    },
+    {
+      ...common,
+      id: `message_${conversation.id}_outbound`,
+      direction: "outbound" as const,
+      sender_label: "Human",
+      body: "Thanks — noted for the simulated pilot.",
+      delivery_status: "sent" as const,
+    },
+  ];
+}
+
+const humanMessages = humanConversations.flatMap(messagesFor);
+
+const agentMessages: Message[] = [
   {
     id: "message_agent_one_inbound",
     tenant_id: tenantId,
     identity_id: agentIdentityId,
     connection_id: agentConnectionId,
     conversation_id: "conversation_agent_one",
-    direction: "inbound" as const,
+    direction: "inbound",
     sender_label: "Agent Test Chat",
     body: "A simulated Agent conversation is available.",
     occurred_at: "2026-08-27T00:05:00.000Z",
-    delivery_status: "delivered" as const,
+    delivery_status: "delivered",
     attachment_count: 0,
   },
   {
@@ -199,11 +219,11 @@ const messages = [
     identity_id: agentIdentityId,
     connection_id: agentConnectionId,
     conversation_id: "conversation_agent_one",
-    direction: "outbound" as const,
+    direction: "outbound",
     sender_label: "Agent",
     body: "The simulated Agent is ready.",
     occurred_at: "2026-08-27T00:07:00.000Z",
-    delivery_status: "delivered" as const,
+    delivery_status: "delivered",
     attachment_count: 0,
   },
   {
@@ -212,13 +232,18 @@ const messages = [
     identity_id: agentIdentityId,
     connection_id: agentConnectionId,
     conversation_id: "conversation_agent_one",
-    direction: "inbound" as const,
+    direction: "inbound",
     sender_label: "Agent Test Chat",
     body: "This fixture contains no live provider data.",
     occurred_at: "2026-08-27T00:11:00.000Z",
-    delivery_status: "delivered" as const,
+    delivery_status: "delivered",
     attachment_count: 0,
   },
+];
+
+const messages: Message[] = [
+  ...humanMessages,
+  ...agentMessages,
 ];
 
 const commands = [
@@ -226,7 +251,7 @@ const commands = [
     id: "command_human_direct",
     tenant_id: tenantId,
     identity_id: humanIdentityId,
-    conversation_id: "conversation_human_one",
+    conversation_id: "conversation_human_whatsapp_alex",
     operation: "message.send" as const,
     delivery_mode: "direct" as const,
     status: "delivered" as const,

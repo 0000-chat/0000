@@ -48,7 +48,7 @@ export function AppShell() {
         <div className="mx-auto flex min-h-16 max-w-screen-2xl items-center gap-4 px-4 sm:px-6">
           <Sheet>
             <SheetTrigger asChild>
-              <Button variant="outline" size="icon" className="lg:hidden" aria-label="Open navigation">
+              <Button variant="outline" size="icon" className="xl:hidden" aria-label="Open navigation">
                 <Menu />
               </Button>
             </SheetTrigger>
@@ -73,8 +73,8 @@ export function AppShell() {
           </div>
         </div>
       </header>
-      <div className="mx-auto grid max-w-screen-2xl lg:grid-cols-[15rem_1fr]">
-        <aside className="hidden min-h-[calc(100vh-4rem)] border-r bg-sidebar p-4 lg:block">
+      <div className="mx-auto grid max-w-screen-2xl xl:grid-cols-[15rem_1fr]">
+        <aside className="hidden min-h-[calc(100vh-4rem)] border-r bg-sidebar p-4 xl:block">
           <NavigationLinks />
         </aside>
         <main className="min-w-0 p-4 sm:p-6 lg:p-8">

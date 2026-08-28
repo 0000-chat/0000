@@ -12,6 +12,15 @@ export const ConversationSummarySchema = z.object({
   unread_count: z.number().int().nonnegative(),
 }).strict();
 
+export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;
+
+export const ConversationPageResultSchema = z.object({
+  items: z.array(ConversationSummarySchema),
+  next_cursor: z.string().min(1).max(2_048).nullable(),
+}).strict();
+
+export type ConversationPageResult = z.infer<typeof ConversationPageResultSchema>;
+
 export const MessageSchema = z.object({
   id: CommunicatorIdSchema,
   tenant_id: CommunicatorIdSchema,
@@ -33,5 +42,4 @@ export const MessageSchema = z.object({
   attachment_count: z.number().int().nonnegative(),
 }).strict();
 
-export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;
 export type Message = z.infer<typeof MessageSchema>;

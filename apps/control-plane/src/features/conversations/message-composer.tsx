@@ -9,10 +9,19 @@ function makeIdempotencyKey() {
   return `ui-${globalThis.crypto.randomUUID()}`;
 }
 
-export function MessageComposer({ identityId, conversationId }: {
+export type MessageComposerProps = {
   identityId: string;
   conversationId: string;
-}) {
+  canSend: boolean;
+  unavailableReason?: string;
+};
+
+export function MessageComposer({
+  identityId,
+  conversationId,
+  canSend,
+  unavailableReason,
+}: MessageComposerProps) {
   const queryClient = useQueryClient();
   const idempotencyKey = useRef<string | null>(null);
   const [body, setBody] = useState("");
@@ -40,7 +49,7 @@ export function MessageComposer({ identityId, conversationId }: {
     },
   });
 
-  const isDisabled = mutation.isPending;
+  const isDisabled = mutation.isPending || !canSend;
   const canSubmit = body.trim().length > 0 && !isDisabled;
 
   return (
@@ -89,6 +98,9 @@ export function MessageComposer({ identityId, conversationId }: {
             <li>Send message</li>
           </ol>
         </div>
+      )}
+      {!canSend && unavailableReason && (
+        <p className="mt-3 text-sm text-muted-foreground">{unavailableReason}</p>
       )}
       {resultMessage && <p role="status" className="mt-3 text-sm">{resultMessage}</p>}
     </form>

@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/mocks/server";
+import { loadChannelOrder, saveChannelOrder } from "@/features/conversations/channel-order";
 
 beforeEach(() => {
   server.use(http.get("http://localhost:3000/api/v1/health", () => HttpResponse.json({
@@ -35,6 +36,23 @@ describe("diagnostic surfaces", () => {
     expect(await screen.findByRole("status", { name: "Simulation reset complete" })).toBeVisible();
   });
 
+  it("clears channel order preferences when the simulation resets", async () => {
+    saveChannelOrder("principal_pilot", "identity_human", [
+      "connection_human_telegram",
+      "connection_human_whatsapp",
+    ]);
+    expect(loadChannelOrder("principal_pilot", "identity_human")).toEqual([
+      "connection_human_telegram",
+      "connection_human_whatsapp",
+    ]);
+
+    const user = userEvent.setup();
+    renderApp("/system");
+    await user.click(await screen.findByRole("button", { name: "Reset simulated scenario" }));
+    await screen.findByRole("status", { name: "Simulation reset complete" });
+    expect(loadChannelOrder("principal_pilot", "identity_human")).toEqual([]);
+  });
+
   it("shows command phases and an overview summary with links to every screen", async () => {
     renderApp("/activity");
 
@@ -45,7 +63,7 @@ describe("diagnostic surfaces", () => {
     expect(screen.queryByText(/matrix/i)).not.toBeInTheDocument();
 
     renderApp("/");
-    expect(await screen.findByText("1 connection")).toBeVisible();
+    expect(await screen.findByText("3 connections")).toBeVisible();
     expect(screen.getByText("1 command")).toBeVisible();
     for (const linkName of ["Connections", "Conversations", "Activity", "System"]) {
       expect(screen.getAllByRole("link", { name: linkName }).length).toBeGreaterThan(0);

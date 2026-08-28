@@ -23,9 +23,9 @@ test("switches identities symmetrically in Connections and Conversations", async
   await expect(page.getByText("Personal WhatsApp", { exact: true })).toHaveCount(0);
 
   await page.goto("/conversations");
-  await expect(page.getByRole("link", { name: /Example Contact/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Alex Rivera/ })).toHaveCount(2);
   await expect(page.getByRole("link", { name: /Agent Test Chat/ })).toHaveCount(0);
   await page.getByLabel("Active identity").selectOption("identity_agent");
   await expect(page.getByRole("link", { name: /Agent Test Chat/ })).toBeVisible();
-  await expect(page.getByRole("link", { name: /Example Contact/ })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /Alex Rivera/ })).toHaveCount(0);
 });

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
   ConversationSummarySchema,
   IdentitySchema,
   MessageSchema,
+  RealtimeEventSchema,
 } from "@communicator/contracts";
 import { server } from "./server";
+import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -15,6 +18,131 @@ async function json<T>(response: Response): Promise<T> {
 }
 
 describe("simulated API handlers", () => {
+  it("returns derived Human channels with stable order and unread totals", async () => {
+    const response = await fetch("http://example.test/api/v1/identities/identity_human/channels");
+    expect(response.status).toBe(200);
+    const channels = ChannelSummarySchema.array().parse(await json(response));
+    expect(channels.map((item) => [item.id, item.unread_count, item.sort_position])).toEqual([
+      ["connection_human_whatsapp", 5, 10],
+      ["connection_human_telegram", 3, 20],
+      ["connection_human_messenger", 2, 30],
+    ]);
+  });
+
+  it("publishes a valid scoped simulated message event", async () => {
+    if (!runtimeRealtimeClient) throw new Error("simulated realtime is unavailable in UI tests");
+    runtimeRealtimeClient.reset();
+    const events: unknown[] = [];
+    const unsubscribe = runtimeRealtimeClient.subscribe((event) => events.push(event));
+    try {
+      const response = await fetch("http://example.test/api/v1/testing/realtime/message", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          tenant_id: "tenant_pilot",
+          identity_id: "identity_human",
+          connection_id: "connection_human_telegram",
+          conversation_id: "conversation_human_telegram_alex",
+          last_message_preview: "New reply",
+          last_activity_at: "2026-08-28T00:07:00.000Z",
+          unread_delta: 1,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await json(response)).toEqual({ status: "published" });
+      expect(events).toHaveLength(1);
+      expect(RealtimeEventSchema.parse(events[0])).toMatchObject({
+        sequence: 1,
+        type: "message.created",
+        identity_id: "identity_human",
+        connection_id: "connection_human_telegram",
+        conversation_id: "conversation_human_telegram_alex",
+      });
+    } finally {
+      unsubscribe();
+      runtimeRealtimeClient.reset();
+    }
+  });
+
+  it.each([
+    ["cross-identity", { identity_id: "identity_agent" }],
+    ["cross-channel", { connection_id: "connection_human_messenger" }],
+    ["malformed", { unread_delta: "one" }],
+  ])("rejects %s simulated message event input", async (_label, changes) => {
+    const isMalformed = "unread_delta" in changes && changes.unread_delta === "one";
+    const response = await fetch("http://example.test/api/v1/testing/realtime/message", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        tenant_id: "tenant_pilot",
+        identity_id: "identity_human",
+        connection_id: "connection_human_telegram",
+        conversation_id: "conversation_human_telegram_alex",
+        last_message_preview: "New reply",
+        last_activity_at: "2026-08-28T00:07:00.000Z",
+        unread_delta: 1,
+        ...changes,
+      }),
+    });
+    expect(response.status).toBe(isMalformed ? 400 : 404);
+    expect(await json(response)).toEqual({
+      error: {
+        code: isMalformed ? "bad_request" : "not_found",
+        message: isMalformed
+          ? "The request is invalid."
+          : "The requested resource is not available.",
+      },
+    });
+  });
+
+  it("returns All in deterministic recency order and filters one owned channel", async () => {
+    const all = await fetch("http://example.test/api/v1/identities/identity_human/conversations");
+    expect(((await json<{ items: Array<{ id: string }> }>(all)).items).map((item) => item.id)).toEqual([
+      "conversation_human_telegram_alex",
+      "conversation_human_whatsapp_family",
+      "conversation_human_messenger_studio",
+      "conversation_human_whatsapp_alex",
+      "conversation_human_telegram_product",
+      "conversation_human_messenger_archive",
+    ]);
+
+    const telegram = await fetch("http://example.test/api/v1/identities/identity_human/conversations?channel_id=connection_human_telegram");
+    expect(((await json<{ items: Array<{ connection_id: string }> }>(telegram)).items).every(
+      (item) => item.connection_id === "connection_human_telegram",
+    )).toBe(true);
+  });
+
+  it("continues from an opaque stable cursor", async () => {
+    const first = await fetch("http://example.test/api/v1/identities/identity_human/conversations?limit=2");
+    const firstPage = await json<{ items: Array<{ id: string }>; next_cursor: string | null }>(first);
+    expect(firstPage.items).toHaveLength(2);
+    expect(firstPage.next_cursor).toEqual(expect.any(String));
+
+    const second = await fetch(
+      `http://example.test/api/v1/identities/identity_human/conversations?limit=2&cursor=${encodeURIComponent(firstPage.next_cursor!)}`,
+    );
+    const secondPage = await json<{ items: Array<{ id: string }> }>(second);
+    expect(secondPage.items.map((item) => item.id)).toEqual([
+      "conversation_human_messenger_studio",
+      "conversation_human_whatsapp_alex",
+    ]);
+  });
+
+  it.each([
+    "/api/v1/identities/identity_human/conversations?channel_id=connection_agent_whatsapp",
+    "/api/v1/identities/identity_agent/conversations/conversation_human_whatsapp_family",
+    "/api/v1/identities/identity_human/conversations/conversation_agent_one",
+  ])("returns a generic not-found response for an unauthorized resource guess: %s", async (path) => {
+    const response = await fetch(`http://example.test${path}`);
+    expect(response.status).toBe(404);
+    expect(await json(response)).toEqual({
+      error: {
+        code: "not_found",
+        message: "The requested resource is not available.",
+      },
+    });
+  });
+
   it("serves contract-valid identity-scoped resources", async () => {
     const me = await fetch("http://example.test/api/v1/me");
     expect((await json<{ tenant_id: string }>(me)).tenant_id).toBe("tenant_pilot");
@@ -51,7 +179,7 @@ describe("simulated API handlers", () => {
     )).toBe(true);
 
     const accepted = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_one/messages",
+      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
       {
         method: "POST",
         headers: { ...jsonHeaders, "Idempotency-Key": "test-key-direct" },
@@ -73,7 +201,7 @@ describe("simulated API handlers", () => {
 
   it("rejects missing idempotency and unsupported delivery modes", async () => {
     const missingKey = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_one/messages",
+      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
       {
         method: "POST",
         headers: jsonHeaders,
@@ -87,7 +215,7 @@ describe("simulated API handlers", () => {
     expect(missingKey.status).toBe(400);
 
     const unsupportedMode = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_one/messages",
+      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
       {
         method: "POST",
         headers: { ...jsonHeaders, "Idempotency-Key": "test-key-invalid" },
@@ -112,11 +240,11 @@ describe("simulated API handlers", () => {
       }),
     };
     const first = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_one/messages",
+      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
       init,
     );
     const second = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_one/messages",
+      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
       init,
     );
     const firstCommand = CommandSchema.parse(await json(first));
@@ -141,7 +269,7 @@ describe("simulated API handlers", () => {
       expect(response.status).toBe(202);
     };
 
-    await submit("identity_human", "conversation_human_one", "test-key-human-activity");
+    await submit("identity_human", "conversation_human_whatsapp_alex", "test-key-human-activity");
     await submit("identity_agent", "conversation_agent_one", "test-key-agent-activity");
 
     const humanActivity = CommandSchema.array().parse(await json(await fetch(
@@ -159,7 +287,7 @@ describe("simulated API handlers", () => {
 
   it("does not disclose resources across identities", async () => {
     const response = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_one/messages?identity_id=identity_agent",
+      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages?identity_id=identity_agent",
     );
     expect(response.status).toBe(404);
     expect(await json(response)).toEqual({
