@@ -19,6 +19,24 @@ export type MembershipRow = {
   role: "owner" | "admin" | "member";
 };
 
+export type GrantReplacement = {
+  idempotency_key: string;
+  tenant_id: string;
+  actor_principal_id: string;
+  membership_id: string;
+  grants: Array<{ identity_id: string; scopes: OperationScope[] }>;
+  occurred_at: string;
+};
+
+export type MembershipStatusChange = {
+  idempotency_key: string;
+  tenant_id: string;
+  actor_principal_id: string;
+  membership_id: string;
+  status: "active" | "disabled" | "revoked";
+  occurred_at: string;
+};
+
 const operationScopeOrder: OperationScope[] = [
   "conversation.read",
   "message.send",
@@ -31,6 +49,35 @@ const operationScopeOrder: OperationScope[] = [
   "retention.manage",
   "break_glass.inspect",
 ];
+
+function canonicalizeGrants(
+  grants: GrantReplacement["grants"],
+): Array<{ identity_id: string; scopes: OperationScope[] }> {
+  const grouped = new Map<string, Set<OperationScope>>();
+  for (const grant of grants) {
+    const scopes = grouped.get(grant.identity_id) ?? new Set<OperationScope>();
+    for (const scope of grant.scopes) scopes.add(OperationScopeSchema.parse(scope));
+    grouped.set(grant.identity_id, scopes);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([identity_id, scopes]) => ({
+      identity_id,
+      scopes: [...scopes].sort(
+        (left, right) => operationScopeOrder.indexOf(left) - operationScopeOrder.indexOf(right),
+      ),
+    }));
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
 
 export async function findActivePrincipal(
   db: D1DatabaseSession,
@@ -107,4 +154,129 @@ export async function isTokenRevoked(
     "SELECT 1 AS revoked FROM revoked_tokens WHERE issuer = ? AND token_id = ? LIMIT 1",
   ).bind(issuer, tokenId).first<{ revoked: number }>();
   return result !== null;
+}
+
+export async function replaceIdentityGrants(
+  db: D1Database,
+  input: GrantReplacement,
+): Promise<void> {
+  const canonicalGrants = canonicalizeGrants(input.grants);
+  const canonicalRequest = JSON.stringify({
+    tenant_id: input.tenant_id,
+    actor_principal_id: input.actor_principal_id,
+    membership_id: input.membership_id,
+    grants: canonicalGrants,
+    occurred_at: input.occurred_at,
+  });
+  const requestHash = await sha256Hex(canonicalRequest);
+  const payloadJson = JSON.stringify({
+    tenant_id: input.tenant_id,
+    actor_principal_id: input.actor_principal_id,
+    membership_id: input.membership_id,
+    grants: canonicalGrants,
+  });
+
+  const statements = [
+    db.prepare(
+      "INSERT INTO directory_mutations (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET request_hash = excluded.request_hash",
+    ).bind(
+      input.idempotency_key,
+      input.tenant_id,
+      input.actor_principal_id,
+      "authorization.identity_grants.replaced",
+      requestHash,
+      input.occurred_at,
+    ),
+    db.prepare(
+      "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ?",
+    ).bind(input.tenant_id, input.membership_id),
+    ...canonicalGrants.flatMap((grant) => grant.scopes.map((scope) => db.prepare(
+      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(input.tenant_id, input.membership_id, grant.identity_id, scope, input.occurred_at))),
+    db.prepare(
+      "INSERT OR IGNORE INTO audit_events (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      `audit_${input.idempotency_key}`,
+      input.tenant_id,
+      input.actor_principal_id,
+      "authorization.identity_grants.replaced",
+      "membership",
+      input.membership_id,
+      null,
+      payloadJson,
+      input.occurred_at,
+    ),
+    db.prepare(
+      "INSERT OR IGNORE INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      `control_${input.idempotency_key}`,
+      input.tenant_id,
+      "authorization.identity_grants.replaced",
+      "membership",
+      input.membership_id,
+      payloadJson,
+      input.occurred_at,
+    ),
+  ];
+  await db.batch(statements);
+}
+
+export async function setMembershipStatus(
+  db: D1Database,
+  input: MembershipStatusChange,
+): Promise<void> {
+  const canonicalRequest = JSON.stringify({
+    tenant_id: input.tenant_id,
+    actor_principal_id: input.actor_principal_id,
+    membership_id: input.membership_id,
+    status: input.status,
+    occurred_at: input.occurred_at,
+  });
+  const requestHash = await sha256Hex(canonicalRequest);
+  const payloadJson = JSON.stringify({
+    tenant_id: input.tenant_id,
+    membership_id: input.membership_id,
+    status: input.status,
+  });
+  const revokedAt = input.status === "revoked" ? input.occurred_at : null;
+
+  await db.batch([
+    db.prepare(
+      "INSERT INTO directory_mutations (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET request_hash = excluded.request_hash",
+    ).bind(
+      input.idempotency_key,
+      input.tenant_id,
+      input.actor_principal_id,
+      "authorization.membership.updated",
+      requestHash,
+      input.occurred_at,
+    ),
+    db.prepare(
+      "UPDATE memberships SET status = ?, revoked_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+    ).bind(input.status, revokedAt, input.occurred_at, input.tenant_id, input.membership_id),
+    db.prepare(
+      "INSERT OR IGNORE INTO audit_events (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      `audit_${input.idempotency_key}`,
+      input.tenant_id,
+      input.actor_principal_id,
+      "authorization.membership.updated",
+      "membership",
+      input.membership_id,
+      null,
+      payloadJson,
+      input.occurred_at,
+    ),
+    db.prepare(
+      "INSERT OR IGNORE INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      `control_${input.idempotency_key}`,
+      input.tenant_id,
+      "authorization.membership.updated",
+      "membership",
+      input.membership_id,
+      payloadJson,
+      input.occurred_at,
+    ),
+  ]);
 }
