@@ -1,6 +1,6 @@
 # Communicator Channel and Conversation Shell Design
 
-**Status:** Approved concept; pending written-spec review
+**Status:** Approved for implementation planning
 
 **Document type:** Explanation and implementation reference
 
