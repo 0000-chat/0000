@@ -9,7 +9,7 @@ type IdentityContextValue = {
   identities: Identity[];
   activeIdentity: Identity | undefined;
   isLoading: boolean;
-  switchIdentity: (identityId: string) => void;
+  switchIdentity: (identityId: string) => Promise<void>;
 };
 
 const IdentityContext = createContext<IdentityContextValue | null>(null);
@@ -28,19 +28,25 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     if (activeIdentity && search.identity !== activeIdentity.id) {
       void router.navigate({
         to: router.state.location.pathname as "/",
-        search: (previous) => ({ ...previous, identity: activeIdentity.id }),
+        search: { identity: activeIdentity.id },
         replace: true,
       });
     }
   }, [activeIdentity, router, search.identity]);
 
-  const switchIdentity = (identityId: string) => {
+  const switchIdentity = async (identityId: string): Promise<void> => {
     if (!identities.some((item) => item.id === identityId)) return;
-    void queryClient.invalidateQueries({ queryKey: ["connections"] });
-    void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    void router.navigate({
-      to: router.state.location.pathname as "/",
-      search: (previous) => ({ ...previous, identity: identityId }),
+
+    const pathname = router.state.location.pathname;
+    const inConversationThread = pathname.startsWith("/conversations/");
+    await queryClient.cancelQueries({
+      predicate: (query) => ["channels", "conversations", "conversation", "messages", "commands"]
+        .includes(String(query.queryKey[0])),
+    });
+
+    await router.navigate({
+      to: inConversationThread ? "/conversations" : pathname as "/",
+      search: { identity: identityId },
     });
   };
 
@@ -68,7 +74,7 @@ export function IdentitySwitcher() {
       <select
         id="active-identity"
         value={activeIdentity?.id ?? ""}
-        onChange={(event) => switchIdentity(event.target.value)}
+        onChange={(event) => void switchIdentity(event.target.value)}
         disabled={identities.length === 0}
         className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >

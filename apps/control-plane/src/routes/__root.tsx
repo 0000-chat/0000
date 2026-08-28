@@ -5,6 +5,7 @@ import { AppShell } from "@/components/layout/app-shell";
 export const Route = createRootRoute({
   validateSearch: z.object({
     identity: z.string().optional(),
+    channel: z.string().optional(),
   }),
   component: AppShell,
 });
