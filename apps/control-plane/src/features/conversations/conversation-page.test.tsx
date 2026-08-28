@@ -12,6 +12,9 @@ describe("conversation journeys", () => {
     expect(await screen.findByRole("heading", { name: "Alex Rivera", level: 1 })).toBeVisible();
     expect(screen.getByText("Human · telegram · Telegram")).toBeVisible();
     expect(screen.getByText("I sent the outline")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Back to conversations" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back to conversations" })).toHaveClass("md:hidden");
+    expect(screen.getByTestId("message-viewport")).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
   });
 
   it("keeps attention-required history readable and disables sending", async () => {

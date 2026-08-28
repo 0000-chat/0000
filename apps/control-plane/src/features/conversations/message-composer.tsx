@@ -55,14 +55,14 @@ export function MessageComposer({
   return (
     <form
       aria-label="Send a message"
-      className="rounded-xl border bg-card p-4 shadow-sm"
+      className="grid gap-3 px-4 py-3"
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit) mutation.mutate();
       }}
     >
       <div className="grid gap-2">
-        <label htmlFor="message-body" className="text-sm font-medium">Message</label>
+        <label htmlFor="message-body" className="text-xs font-semibold text-muted-foreground">Message</label>
         <Textarea
           id="message-body"
           value={body}
@@ -71,9 +71,9 @@ export function MessageComposer({
           disabled={isDisabled}
         />
       </div>
-      <div className="mt-4 flex flex-wrap items-end gap-3">
-        <div className="grid gap-2">
-          <label htmlFor="delivery-mode" className="text-sm font-medium">Delivery mode</label>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="grid gap-1.5">
+          <label htmlFor="delivery-mode" className="text-xs font-semibold text-muted-foreground">Delivery mode</label>
           <select
             id="delivery-mode"
             aria-label="Delivery mode"
@@ -89,7 +89,7 @@ export function MessageComposer({
         <Button type="submit" disabled={!canSubmit}>Send message</Button>
       </div>
       {deliveryMode === "paced" && (
-        <div className="mt-4 rounded-lg border border-dashed p-3 text-sm">
+        <div className="border-l-2 border-primary/40 pl-3 text-sm">
           <p className="font-semibold">Human-paced preview</p>
           <ol className="mt-2 list-decimal space-y-1 pl-5 text-muted-foreground">
             <li>Mark read (when supported)</li>
@@ -100,9 +100,9 @@ export function MessageComposer({
         </div>
       )}
       {!canSend && unavailableReason && (
-        <p className="mt-3 text-sm text-muted-foreground">{unavailableReason}</p>
+        <p className="text-sm text-muted-foreground">{unavailableReason}</p>
       )}
-      {resultMessage && <p role="status" className="mt-3 text-sm">{resultMessage}</p>}
+      {resultMessage && <p role="status" className="text-sm">{resultMessage}</p>}
     </form>
   );
 }

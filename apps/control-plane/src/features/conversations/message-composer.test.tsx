@@ -26,6 +26,7 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("combobox", { name: "Delivery mode" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     expect(screen.getByText("Sending is unavailable until this connection is repaired.")).toBeVisible();
+    expect(screen.getByRole("form", { name: "Send a message" })).not.toHaveClass("rounded-xl", "shadow-sm");
 
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(sendMessage).not.toHaveBeenCalled();
