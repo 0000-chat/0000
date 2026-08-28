@@ -1,6 +1,8 @@
-import { env } from "cloudflare:workers";
+import { env as runtimeEnv } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { seedDirectory } from "./support/directory-fixtures";
+
+const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 
 const applicationTables = [
   "tenants",

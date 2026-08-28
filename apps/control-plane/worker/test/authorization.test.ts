@@ -1,10 +1,11 @@
-import { env } from "cloudflare:workers";
+import { env as runtimeEnv } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AuthorizationResult } from "../control-directory/authorization";
 import { resolveAuthorization } from "../control-directory/authorization";
 import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
 
 const issuer = "https://issuer.example/";
+const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 
 async function update(sql: string, ...values: string[]) {
   await env.CONTROL_DB.prepare(sql).bind(...values).run();

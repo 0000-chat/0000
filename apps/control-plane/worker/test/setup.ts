@@ -6,6 +6,6 @@ import { beforeEach } from "vitest";
 type TestEnv = Cloudflare.Env & { TEST_MIGRATIONS: D1Migration[] };
 
 beforeEach(async () => {
-  const testEnv = env as TestEnv;
+  const testEnv = env as TestEnv & { CONTROL_DB: D1Database };
   await applyD1Migrations(testEnv.CONTROL_DB, testEnv.TEST_MIGRATIONS);
 });

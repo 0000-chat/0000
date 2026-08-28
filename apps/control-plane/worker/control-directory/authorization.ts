@@ -43,7 +43,8 @@ export async function resolveAuthorization(
       return { ok: false, code: "tenant_selection_required" };
     }
 
-    const membership = memberships[0];
+    const [membership] = memberships;
+    if (!membership) return { ok: false, code: "not_found" };
     const identities = await listAuthorizedIdentities(session, membership.id, membership.tenant_id);
     const context = SessionResponseSchema.parse({
       tenant: {

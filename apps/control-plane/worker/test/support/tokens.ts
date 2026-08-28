@@ -1,4 +1,4 @@
-import { SignJWT, type KeyLike } from "jose";
+import { SignJWT } from "jose";
 
 export const oidcConfig = {
   issuer: "https://issuer.example/",
@@ -17,11 +17,11 @@ export type TestTokenClaims = {
 };
 
 export async function signTestToken(
-  privateKey: KeyLike,
+  privateKey: CryptoKey,
   claims: TestTokenClaims = {},
 ): Promise<string> {
   const token = new SignJWT({
-    ...(claims.subject === undefined ? {} : { sub: claims.subject }),
+    ...(claims.subject == null ? {} : { sub: claims.subject }),
     ...(claims.token_id === undefined ? {} : { jti: claims.token_id }),
   })
     .setProtectedHeader({ alg: "ES256", kid: claims.kid ?? "local-key" })

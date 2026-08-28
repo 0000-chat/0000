@@ -13,7 +13,7 @@ type AuthorizationMiddlewareOptions = {
 };
 
 function logAuthorizationFailure(status: number, requestId: string) {
-  console.error({ event: "authorization_denied", status, request_id: requestId });
+  console.error({ event: "auth_denied", status, request_id: requestId });
 }
 
 export function createAuthorizationMiddleware(

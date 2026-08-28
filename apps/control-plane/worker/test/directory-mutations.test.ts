@@ -1,13 +1,15 @@
-import { env } from "cloudflare:workers";
+import { env as runtimeEnv } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveAuthorization } from "../control-directory/authorization";
 import {
   replaceIdentityGrants,
   setMembershipStatus,
 } from "../control-directory/repository";
+import type { GrantReplacement } from "../control-directory/repository";
 import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
 
 const occurredAt = "2026-08-29T00:00:00.000Z";
+const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 
 beforeEach(async () => {
   await clearDirectory(env.CONTROL_DB);
@@ -37,14 +39,14 @@ describe("directory mutations", () => {
   });
 
   it("retries an identical grant replacement idempotently", async () => {
-    const input = {
+    const input: GrantReplacement = {
       idempotency_key: "replace-human-retry",
       tenant_id: "tenant_pilot",
       actor_principal_id: "principal_human",
       membership_id: "membership_human",
       grants: [{ identity_id: "identity_human", scopes: ["message.send", "conversation.read"] }],
       occurred_at: occurredAt,
-    } as const;
+    };
     await replaceIdentityGrants(env.CONTROL_DB, input);
     await replaceIdentityGrants(env.CONTROL_DB, input);
 
