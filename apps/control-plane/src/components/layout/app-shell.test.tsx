@@ -19,4 +19,13 @@ describe("AppShell", () => {
     expect(screen.getByLabelText("Active identity")).toBeVisible();
     expect(screen.getByRole("heading", { name: "Connections" })).toBeVisible();
   });
+
+  it("gives Conversations the full-bleed content area", async () => {
+    renderApp("/conversations?identity=identity_human");
+
+    expect(await screen.findByRole("heading", { name: "All conversations" })).toBeVisible();
+    const main = screen.getByRole("main");
+    expect(main).toHaveClass("min-h-0", "overflow-hidden", "p-0");
+    expect(main).not.toHaveClass("lg:p-8");
+  });
 });
