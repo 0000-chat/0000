@@ -5,17 +5,14 @@ import { useIdentityContext } from "@/components/identity/identity-switcher";
 import { apiClient } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { runtimeConfig } from "@/lib/config/runtime";
-import { SimulatedRealtimeClient } from "@/lib/realtime/simulated-client";
+import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
-const simulatedBuild = import.meta.env.VITE_DATA_MODE === "simulated"
-  || (!import.meta.env.VITE_DATA_MODE && !import.meta.env.PROD);
+const simulatedBuild = runtimeRealtimeClient !== null;
 
 export function SystemPage() {
   const queryClient = useQueryClient();
   const { activeIdentity } = useIdentityContext();
-  const [realtime] = useState<SimulatedRealtimeClient | null>(() =>
-    simulatedBuild ? new SimulatedRealtimeClient() : null,
-  );
+  const realtime = runtimeRealtimeClient;
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [lastSequence, setLastSequence] = useState(realtime?.lastSequence ?? 0);
   const [fixtureResetTime, setFixtureResetTime] = useState("Fixture loaded");

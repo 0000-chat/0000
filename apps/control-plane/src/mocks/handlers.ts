@@ -6,11 +6,22 @@ import {
 } from "@communicator/contracts";
 import { notFound, simulatedStore, type SimulatedScenario } from "./store";
 import { paginateConversations } from "./conversation-pagination";
+import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
 const sendMessageSchema = z.object({
   identity_id: CommunicatorIdSchema,
   body: z.string().min(1).max(20_000),
   delivery_mode: DeliveryModeSchema,
+}).strict();
+
+const simulatedMessageEventSchema = z.object({
+  tenant_id: CommunicatorIdSchema,
+  identity_id: CommunicatorIdSchema,
+  connection_id: CommunicatorIdSchema,
+  conversation_id: CommunicatorIdSchema,
+  last_message_preview: z.string().max(280),
+  last_activity_at: z.string().datetime({ offset: true }),
+  unread_delta: z.number().int(),
 }).strict();
 
 const errorResponse = (status: 400 | 404, code: "bad_request" | "not_found") =>
@@ -110,6 +121,30 @@ export const handlers = [
     return command
       ? HttpResponse.json(command, { status: 202 })
       : errorResponse(404, "not_found");
+  }),
+
+  http.post("*/api/v1/testing/realtime/message", async ({ request }) => {
+    const parsed = simulatedMessageEventSchema.safeParse(await request.json());
+    if (!parsed.success) return errorResponse(400, "bad_request");
+    const conversation = simulatedStore.conversation(parsed.data.identity_id, parsed.data.conversation_id);
+    if (
+      !conversation
+      || conversation.tenant_id !== parsed.data.tenant_id
+      || conversation.connection_id !== parsed.data.connection_id
+    ) {
+      return errorResponse(404, "not_found");
+    }
+    await runtimeRealtimeClient?.connect();
+    runtimeRealtimeClient?.publishMessage({
+      tenantId: parsed.data.tenant_id,
+      identityId: parsed.data.identity_id,
+      connectionId: parsed.data.connection_id,
+      conversationId: parsed.data.conversation_id,
+      lastMessagePreview: parsed.data.last_message_preview,
+      lastActivityAt: parsed.data.last_activity_at,
+      unreadDelta: parsed.data.unread_delta,
+    });
+    return HttpResponse.json({ status: "published" });
   }),
 
   http.post("*/api/v1/testing/reset", async ({ request }) => {

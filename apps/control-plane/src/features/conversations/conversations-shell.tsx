@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import type { ConversationPageResult } from "@communicator/contracts";
+import type { ChannelSummary, ConversationPageResult } from "@communicator/contracts";
 import { useIdentityContext } from "@/components/identity/identity-switcher";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
@@ -15,9 +15,12 @@ import { ChannelSelector } from "./channel-selector";
 import { ChannelSidebar } from "./channel-sidebar";
 import { ConversationList } from "./conversation-list";
 import { ConversationPage, ConversationUnavailable } from "./conversation-page";
+import { prepareConversationEvent } from "./apply-conversation-event";
+import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
 export function ConversationsShell({ conversationId }: { conversationId?: string }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { search } = useLocation();
   const { activeIdentity, isLoading: identityLoading } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
@@ -78,6 +81,54 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
       return { channel, conversation: activeConversationQuery.data };
     })()
     : null;
+  const acceptedSequenceRef = useRef(0);
+  const activeScopeRef = useRef({ tenantId: activeIdentity?.tenant_id ?? "", identityId });
+  activeScopeRef.current = { tenantId: activeIdentity?.tenant_id ?? "", identityId };
+
+  useEffect(() => {
+    acceptedSequenceRef.current = 0;
+  }, [activeIdentity?.tenant_id, identityId]);
+
+  useEffect(() => {
+    if (!runtimeRealtimeClient || !identityId) return;
+    void runtimeRealtimeClient.connect();
+    const unsubscribe = runtimeRealtimeClient.subscribe((event) => {
+      const currentScope = activeScopeRef.current;
+      if (currentScope.identityId !== identityId || currentScope.tenantId !== (activeIdentity?.tenant_id ?? "")) {
+        return;
+      }
+      const update = prepareConversationEvent({
+        tenantId: currentScope.tenantId,
+        identityId: currentScope.identityId,
+        lastSequence: acceptedSequenceRef.current,
+        channels,
+      }, event);
+      if (!update) return;
+      acceptedSequenceRef.current = update.acceptedSequence;
+
+      const updateConversationCache = (queryKey: ReturnType<typeof queryKeys.conversations>) => {
+        let unsafe = false;
+        queryClient.setQueryData<InfiniteData<ConversationPageResult>>(queryKey, (current) => {
+          if (!current) return current;
+          unsafe = current.pages.length > 1 || current.pages.some((page) => page.next_cursor !== null);
+          if (unsafe) return current;
+          const pages = update.updatePages(current.pages);
+          return pages === current.pages ? current : { ...current, pages: pages ?? current.pages };
+        });
+        if (unsafe) void queryClient.invalidateQueries({ queryKey });
+      };
+
+      updateConversationCache(queryKeys.conversations(identityId, undefined));
+      updateConversationCache(queryKeys.conversations(identityId, update.channelId));
+      queryClient.setQueryData<ChannelSummary[]>(
+        queryKeys.channels(identityId),
+        update.updateChannels,
+      );
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [activeIdentity?.tenant_id, channels, identityId, queryClient]);
 
   const selectChannel = (channelId?: string) => {
     void navigate({

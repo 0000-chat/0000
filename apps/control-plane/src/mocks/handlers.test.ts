@@ -6,8 +6,10 @@ import {
   ConversationSummarySchema,
   IdentitySchema,
   MessageSchema,
+  RealtimeEventSchema,
 } from "@communicator/contracts";
 import { server } from "./server";
+import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -25,6 +27,72 @@ describe("simulated API handlers", () => {
       ["connection_human_telegram", 3, 20],
       ["connection_human_messenger", 2, 30],
     ]);
+  });
+
+  it("publishes a valid scoped simulated message event", async () => {
+    if (!runtimeRealtimeClient) throw new Error("simulated realtime is unavailable in UI tests");
+    runtimeRealtimeClient.reset();
+    const events: unknown[] = [];
+    const unsubscribe = runtimeRealtimeClient.subscribe((event) => events.push(event));
+    try {
+      const response = await fetch("http://example.test/api/v1/testing/realtime/message", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          tenant_id: "tenant_pilot",
+          identity_id: "identity_human",
+          connection_id: "connection_human_telegram",
+          conversation_id: "conversation_human_telegram_alex",
+          last_message_preview: "New reply",
+          last_activity_at: "2026-08-28T00:07:00.000Z",
+          unread_delta: 1,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await json(response)).toEqual({ status: "published" });
+      expect(events).toHaveLength(1);
+      expect(RealtimeEventSchema.parse(events[0])).toMatchObject({
+        sequence: 1,
+        type: "message.created",
+        identity_id: "identity_human",
+        connection_id: "connection_human_telegram",
+        conversation_id: "conversation_human_telegram_alex",
+      });
+    } finally {
+      unsubscribe();
+      runtimeRealtimeClient.reset();
+    }
+  });
+
+  it.each([
+    ["cross-identity", { identity_id: "identity_agent" }],
+    ["cross-channel", { connection_id: "connection_human_messenger" }],
+    ["malformed", { unread_delta: "one" }],
+  ])("rejects %s simulated message event input", async (_label, changes) => {
+    const isMalformed = "unread_delta" in changes && changes.unread_delta === "one";
+    const response = await fetch("http://example.test/api/v1/testing/realtime/message", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        tenant_id: "tenant_pilot",
+        identity_id: "identity_human",
+        connection_id: "connection_human_telegram",
+        conversation_id: "conversation_human_telegram_alex",
+        last_message_preview: "New reply",
+        last_activity_at: "2026-08-28T00:07:00.000Z",
+        unread_delta: 1,
+        ...changes,
+      }),
+    });
+    expect(response.status).toBe(isMalformed ? 400 : 404);
+    expect(await json(response)).toEqual({
+      error: {
+        code: isMalformed ? "bad_request" : "not_found",
+        message: isMalformed
+          ? "The request is invalid."
+          : "The requested resource is not available.",
+      },
+    });
   });
 
   it("returns All in deterministic recency order and filters one owned channel", async () => {

@@ -47,6 +47,33 @@ export class SimulatedRealtimeClient implements RealtimeClient {
     }
   }
 
+  publishMessage(input: {
+    tenantId: string;
+    identityId: string;
+    connectionId: string;
+    conversationId: string;
+    lastMessagePreview: string;
+    lastActivityAt: string;
+    unreadDelta: number;
+  }) {
+    if (!this.connected) return;
+    const event = RealtimeEventSchema.parse({
+      sequence: ++this.sequence,
+      type: "message.created",
+      tenant_id: input.tenantId,
+      identity_id: input.identityId,
+      connection_id: input.connectionId,
+      conversation_id: input.conversationId,
+      occurred_at: input.lastActivityAt,
+      data: {
+        last_message_preview: input.lastMessagePreview,
+        last_activity_at: input.lastActivityAt,
+        unread_delta: input.unreadDelta,
+      },
+    });
+    for (const listener of this.listeners) listener(event);
+  }
+
   close() {
     this.connected = false;
     this.listeners.clear();

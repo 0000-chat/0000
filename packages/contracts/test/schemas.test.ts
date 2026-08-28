@@ -6,6 +6,7 @@ import {
   ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
+  MessageCreatedDataSchema,
   RealtimeEventSchema,
   type ChannelSummary,
 } from "../src/index";
@@ -97,6 +98,29 @@ describe("public schemas", () => {
       id: "conversation_human_one",
       tenant_id: "tenant_pilot",
       title: "Example Contact",
+    }).success).toBe(false);
+  });
+});
+
+describe("MessageCreatedDataSchema", () => {
+  it("accepts the scoped message summary used by the inbox", () => {
+    expect(MessageCreatedDataSchema.parse({
+      last_message_preview: "New reply",
+      last_activity_at: "2026-08-28T00:07:00.000Z",
+      unread_delta: 1,
+    })).toEqual({
+      last_message_preview: "New reply",
+      last_activity_at: "2026-08-28T00:07:00.000Z",
+      unread_delta: 1,
+    });
+  });
+
+  it("rejects unknown fields", () => {
+    expect(MessageCreatedDataSchema.safeParse({
+      last_message_preview: "New reply",
+      last_activity_at: "2026-08-28T00:07:00.000Z",
+      unread_delta: 1,
+      message_body: "not part of the inbox summary",
     }).success).toBe(false);
   });
 });
