@@ -269,7 +269,9 @@ MAX_CHECKPOINT_KIND_CHARS = 64
 MAX_CHECKPOINT_VALUE_CHARS = 512
 DEFAULT_MANIFEST_PAGE_SIZE = 50
 MAX_MANIFEST_PAGE_SIZE = 100
-MAX_REPLAY_PAGE_EVENTS = MAX_MANIFEST_PAGE_SIZE * MAX_ARCHIVE_EVENTS
+DEFAULT_REPLAY_PAGE_SIZE = 1
+MAX_REPLAY_PAGE_EVENTS = 4 * MAX_ARCHIVE_EVENTS // 2,000
+MAX_REPLAY_PAGE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
 ```
 
 Reject an empty batch, more than 500 events, any one canonical envelope larger than 1 MiB, canonical uncompressed JSONL larger than 4 MiB, compressed output larger than 5 MiB, or a manifest larger than 64 KiB before committing R2. Canonicalize rows one at a time while tracking UTF-8 bytes and abort immediately when an individual or cumulative bound is exceeded; do not first construct an unbounded joined string. On reads, reject an oversized compressed object or manifest from its R2 object size before loading its body. The later Queue phase may use smaller operational batches.
@@ -462,7 +464,13 @@ type ArchiveReplayPage = {
 
 `readReplayPage` lists at most the requested number of manifests, validates each committed batch, concatenates their already-deterministic event sequences in manifest-key order, and returns the wrapped continuation cursor. It performs R2 reads only.
 
-The replay-page contract itself enforces at most 100 manifests and 50,000 events. Before passing `manifests` or `events` to Zod arrays, use descriptor-only array snapshotting: require `Array.prototype`, inspect the own `length` data descriptor, reject the value immediately when it exceeds its bound, require one own enumerable data descriptor for every index, reject holes/accessors/extra keys/symbols, catch Proxy inspection failures, and copy into a fresh plain array without invoking getters or `get` traps.
+The replay-page contract itself enforces at most 100 manifests and 2,000 events. `readReplayPage` defaults to one manifest and additionally enforces at most 8 MiB of uncompressed canonical JSONL across the materialized page. The list-only API keeps its default of 50 and maximum of 100 because listing metadata does not materialize event bodies.
+
+The 8 MiB/2,000-event materialization limits preserve the ability to replay every valid single batch while retaining headroom under Cloudflare Workers' current 128 MB per-isolate memory limit, which is shared by concurrent requests. Treat the current platform limit as an externally verified design input, not as the product bound itself: <https://developers.cloudflare.com/workers/platform/limits/>.
+
+Before fetching any data-object body, `readReplayPage` must validate all selected manifests and sum their declared `uncompressed_bytes` and `event_count`. If either total exceeds the replay-page cap, fail with `archive_too_large`, return no partial page, and do not advance the cursor; callers retry the same cursor with a smaller page size. While reading each accepted batch, pass the remaining page-byte budget into bounded decompression and require actual decoded bytes to equal the manifest value, so underreported metadata cannot bypass the cap. A page size of one is guaranteed to accommodate any individually valid archive batch. Do not redesign the cursor to represent a partially consumed R2 listing page.
+
+Before passing `manifests` or `events` to Zod arrays, use descriptor-only array snapshotting: require `Array.prototype`, inspect the own `length` data descriptor, reject the value immediately when it exceeds its bound, require one own enumerable data descriptor for every index, reject holes/accessors/extra keys/symbols, catch Proxy inspection failures, and copy into a fresh plain array without invoking getters or `get` traps.
 
 Applying the same page or complete archive twice is expected to present the same canonical `event_id` sequence to the later idempotent projection. This phase does not implement the projection.
 
@@ -529,7 +537,7 @@ git commit -m "feat: freeze canonical messaging event contract"
 
 - [ ] **Step 1: Write failing tests**
 
-Test exact valid manifest and replay-page examples. Test rejection of unknown fields, wrong versions/mode/compression/content type, malformed IDs/keys/hash, zero or excessive counts, unsafe byte counts, invalid ETags/timestamps, `first_observed_at` after `last_observed_at` as instants (including mixed-offset examples), oversized producer/checkpoint strings, tenant-mixed page contents, 101 manifests, and 50,001 events. Prove the exact 100-manifest and 50,000-event boundaries are accepted. Prove replay arrays reject getters/holes/extra keys and safely snapshot or reject Proxies without invoking `get` traps or leaking inspection errors.
+Test exact valid manifest and replay-page examples. Test rejection of unknown fields, wrong versions/mode/compression/content type, malformed IDs/keys/hash, zero or excessive counts, unsafe byte counts, invalid ETags/timestamps, `first_observed_at` after `last_observed_at` as instants (including mixed-offset examples), oversized producer/checkpoint strings, tenant-mixed page contents, 101 manifests, and 2,001 events. Prove the exact 100-manifest and 2,000-event boundaries are accepted. Lock `DEFAULT_REPLAY_PAGE_SIZE = 1` and `MAX_REPLAY_PAGE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024`. Prove replay arrays reject getters/holes/extra keys and safely snapshot or reject Proxies without invoking `get` traps or leaking inspection errors.
 
 The cursor payload schema is exported for internal tooling tests, but the encoded cursor remains a Worker concern.
 
@@ -746,6 +754,7 @@ Seed committed batches through the real writer wherever possible. Cover:
 - an orphan data object is invisible;
 - page sizes 1, 50, and 100;
 - rejection of 0, 101, noninteger, or nonfinite page sizes;
+- list-only calls default to 50 manifests, while materialized replay calls default to one manifest;
 - wrapped cursor round trip;
 - rejection of malformed/oversized cursor, unsupported version, another tenant/prefix, and empty internal cursor;
 - continuation is based on `truncated`, including a forwarding fake whose returned object count is lower than the requested limit;
@@ -754,6 +763,10 @@ Seed committed batches through the real writer wherever possible. Cover:
 - a missing requested manifest yields `archive_not_found`;
 - missing data, wrong key, tenant, batch, partition, ETag, sizes, metadata, gzip, JSONL, hash, count, event order, duplicate IDs, first/last IDs, or timestamps yields `archive_corrupt`;
 - an R2 manifest object larger than 64 KiB is rejected before its body is read (use a forwarding test object whose body read throws or increments a counter to prove zero consumption);
+- replay preflights selected manifests and accepts the exact 8 MiB/2,000-event aggregate boundaries;
+- replay rejects 8 MiB + 1 or 2,001 aggregate events with `archive_too_large` before any data body is fetched, returns no partial page/cursor, and succeeds when the same input cursor is retried with a smaller page size;
+- actual decompressed bytes are bounded by the remaining page budget and must equal each manifest's declared size, so underreported metadata fails closed;
+- one individually valid 4 MiB/500-event batch always remains replayable with page size one;
 - corrupt fixture bodies never appear in errors/logs.
 
 - [ ] **Step 2: Prove red**
