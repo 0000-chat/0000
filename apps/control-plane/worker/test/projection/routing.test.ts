@@ -137,7 +137,7 @@ describe("tenant projection routing", () => {
     expect(getProjectionErrorCause(wrapped)).toBe(rawError);
   });
 
-  it("rejects temporary getStatus with only the sanitized unavailable error", async () => {
+  it("returns pre-initialize getStatus as a sanitized not-found error", async () => {
     const statusStub = runtimeEnv.TENANT_PROJECTION.getByName("tenant_pilot");
     // The current Vitest Workers RPC bridge reports an unhandled rejection for
     // direct rejected-stub assertions, even with an immediate rejection
@@ -155,8 +155,8 @@ describe("tenant projection routing", () => {
 
     expect(rejection).toBeInstanceOf(ProjectionError);
     expect(rejection).toMatchObject({
-      code: "projection_unavailable",
-      message: "projection_unavailable",
+      code: "projection_not_found",
+      message: "projection_not_found",
     });
     expect(Object.keys(rejection as object)).toEqual(["code"]);
     expect(JSON.stringify(rejection)).not.toContain(JSON.stringify(validStatusInput));
