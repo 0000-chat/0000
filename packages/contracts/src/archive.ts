@@ -18,6 +18,7 @@ export const MAX_CHECKPOINT_KIND_CHARS = 64;
 export const MAX_CHECKPOINT_VALUE_CHARS = 512;
 export const DEFAULT_MANIFEST_PAGE_SIZE = 50;
 export const MAX_MANIFEST_PAGE_SIZE = 100;
+export const MAX_REPLAY_PAGE_EVENTS = MAX_MANIFEST_PAGE_SIZE * MAX_ARCHIVE_EVENTS;
 export const MAX_REPLAY_CURSOR_CHARS = 4096;
 export const MAX_R2_CURSOR_CHARS = 2048;
 export const MAX_MANIFEST_PREFIX_CHARS = 256;
@@ -71,6 +72,66 @@ const snapshotStrictObjectInput = (input: unknown): unknown => {
       });
     }
 
+    return snapshot;
+  } catch {
+    return undefined;
+  }
+};
+
+const isCanonicalArrayIndexKey = (key: string, length: number): boolean => {
+  const index = Number(key);
+  return (
+    Number.isSafeInteger(index) &&
+    index >= 0 &&
+    index < length &&
+    String(index) === key
+  );
+};
+
+const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown => {
+  try {
+    if (input === null || typeof input !== "object" || !Array.isArray(input)) {
+      return undefined;
+    }
+    if (Object.getPrototypeOf(input) !== Array.prototype) return undefined;
+
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(input, "length");
+    if (!lengthDescriptor || !("value" in lengthDescriptor)) return undefined;
+    const length = lengthDescriptor.value;
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > maxLength
+    ) {
+      return undefined;
+    }
+
+    const keys = Reflect.ownKeys(input);
+    if (keys.length !== length + 1) return undefined;
+
+    const snapshot: unknown[] = [];
+    for (const key of keys) {
+      if (typeof key !== "string") return undefined;
+      if (key === "length") continue;
+      if (!isCanonicalArrayIndexKey(key, length)) return undefined;
+
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        return undefined;
+      }
+      Object.defineProperty(snapshot, key, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      });
+    }
+
+    for (let index = 0; index < length; index += 1) {
+      const key = String(index);
+      if (!Object.prototype.hasOwnProperty.call(snapshot, key)) return undefined;
+    }
+    snapshot.length = length;
     return snapshot;
   } catch {
     return undefined;
@@ -247,6 +308,20 @@ const ArchiveBatchManifestObjectSchema = z
         message: "Archive data key partition does not match first observed timestamp",
       });
     }
+
+    const firstObservedAt = Date.parse(manifest.first_observed_at);
+    const lastObservedAt = Date.parse(manifest.last_observed_at);
+    if (
+      !Number.isFinite(firstObservedAt) ||
+      !Number.isFinite(lastObservedAt) ||
+      firstObservedAt > lastObservedAt
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["last_observed_at"],
+        message: "Last observed timestamp must not precede first observed timestamp",
+      });
+    }
   });
 
 export const ArchiveBatchManifestSchema = z.preprocess(
@@ -295,8 +370,14 @@ const ArchiveReplayPageObjectSchema = z
     schema_version: z.literal(1),
     replay_mode: z.literal("projection_only"),
     tenant_id: CanonicalResourceIdSchema,
-    manifests: z.array(ArchiveBatchManifestSchema),
-    events: z.array(CanonicalEventEnvelopeSchema),
+    manifests: z.preprocess(
+      (input) => snapshotStrictArrayInput(input, MAX_MANIFEST_PAGE_SIZE),
+      z.array(ArchiveBatchManifestSchema).max(MAX_MANIFEST_PAGE_SIZE),
+    ),
+    events: z.preprocess(
+      (input) => snapshotStrictArrayInput(input, MAX_REPLAY_PAGE_EVENTS),
+      z.array(CanonicalEventEnvelopeSchema).max(MAX_REPLAY_PAGE_EVENTS),
+    ),
     next_cursor: z.string().min(1).max(MAX_REPLAY_CURSOR_CHARS).nullable(),
   })
   .strict()

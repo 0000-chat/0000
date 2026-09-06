@@ -15,6 +15,7 @@ import {
   MAX_CHECKPOINT_KIND_CHARS,
   MAX_CHECKPOINT_VALUE_CHARS,
   MAX_MANIFEST_PAGE_SIZE,
+  MAX_REPLAY_PAGE_EVENTS,
   MAX_PRODUCER_VERSION_CHARS,
   type ArchiveBatchManifest,
   type ArchiveReplayCursorPayload,
@@ -126,6 +127,7 @@ describe("archive contract bounds", () => {
     expect(MAX_CHECKPOINT_VALUE_CHARS).toBe(512);
     expect(DEFAULT_MANIFEST_PAGE_SIZE).toBe(50);
     expect(MAX_MANIFEST_PAGE_SIZE).toBe(100);
+    expect(MAX_REPLAY_PAGE_EVENTS).toBe(MAX_MANIFEST_PAGE_SIZE * MAX_ARCHIVE_EVENTS);
   });
 
   it("accepts the exact derived data and manifest key shapes", () => {
@@ -300,6 +302,28 @@ describe("ArchiveBatchManifestSchema", () => {
     });
   });
 
+  it("orders observed timestamps by instant, accepting mixed offsets and equality", () => {
+    expect(
+      ArchiveBatchManifestSchema.safeParse({
+        ...validManifest(),
+        first_observed_at: "2026-09-07T01:02:03.000Z",
+        last_observed_at: "2026-09-07T03:02:03.000+01:00",
+      }).success,
+    ).toBe(true);
+    expect(
+      ArchiveBatchManifestSchema.safeParse({
+        ...validManifest(),
+        first_observed_at: "2026-09-07T02:02:03.000+01:00",
+        last_observed_at: "2026-09-07T01:02:03.000Z",
+      }).success,
+    ).toBe(true);
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      first_observed_at: "2026-09-07T01:02:04.000Z",
+      last_observed_at: "2026-09-07T01:02:03.000+00:00",
+    });
+  });
+
   it("bounds producer and optional checkpoint values", () => {
     expectRejected(ArchiveBatchManifestSchema, {
       ...validManifest(),
@@ -408,6 +432,90 @@ describe("ArchiveReplayPageSchema", () => {
     });
     expectRejected(ArchiveReplayPageSchema, { ...validPage(), next_cursor: "" });
   });
+
+  it("bounds manifest and event arrays at their locked replay limits", () => {
+    const manifest = validManifest();
+    const event = validEvent();
+    expect(
+      ArchiveReplayPageSchema.safeParse({
+        ...validPage(),
+        manifests: Array(MAX_MANIFEST_PAGE_SIZE).fill(manifest),
+      }).success,
+    ).toBe(true);
+    expectRejected(ArchiveReplayPageSchema, {
+      ...validPage(),
+      manifests: Array(MAX_MANIFEST_PAGE_SIZE + 1).fill(manifest),
+    });
+
+    expect(
+      ArchiveReplayPageSchema.safeParse({
+        ...validPage(),
+        events: Array(MAX_REPLAY_PAGE_EVENTS).fill(event),
+      }).success,
+    ).toBe(true);
+    expectRejected(ArchiveReplayPageSchema, {
+      ...validPage(),
+      events: Array(MAX_REPLAY_PAGE_EVENTS + 1).fill(event),
+    });
+  });
+
+  it("snapshots replay arrays without invoking getters or Proxy get traps", () => {
+    const getterEvents = [validEvent()];
+    let getterCalls = 0;
+    Object.defineProperty(getterEvents, "0", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error("replay array getter fixture must never be exposed");
+      },
+    });
+    let getterResult: ReturnType<typeof ArchiveReplayPageSchema.safeParse> | undefined;
+    expect(() => {
+      getterResult = ArchiveReplayPageSchema.safeParse({
+        ...validPage(),
+        events: getterEvents,
+      });
+    }).not.toThrow();
+    expect(getterResult?.success).toBe(false);
+    expect(getterCalls).toBe(0);
+
+    let getCalls = 0;
+    const proxyEvents = new Proxy([validEvent()], {
+      get: () => {
+        getCalls += 1;
+        throw new Error("replay array Proxy get fixture must never be exposed");
+      },
+    });
+    let proxyResult: ReturnType<typeof ArchiveReplayPageSchema.safeParse> | undefined;
+    expect(() => {
+      proxyResult = ArchiveReplayPageSchema.safeParse({
+        ...validPage(),
+        events: proxyEvents,
+      });
+    }).not.toThrow();
+    expect(proxyResult?.success).toBe(true);
+    expect(getCalls).toBe(0);
+  });
+
+  it.each(["ownKeys", "getOwnPropertyDescriptor", "getPrototypeOf"] as const)(
+    "rejects replay arrays when the %s inspection trap throws",
+    (trap) => {
+      const proxyEvents = new Proxy([validEvent()], {
+        [trap]: () => {
+          throw new Error(`replay array ${trap} fixture must be redacted`);
+        },
+      });
+      let result: ReturnType<typeof ArchiveReplayPageSchema.safeParse> | undefined;
+      expect(() => {
+        result = ArchiveReplayPageSchema.safeParse({
+          ...validPage(),
+          events: proxyEvents,
+        });
+      }).not.toThrow();
+      expect(result?.success).toBe(false);
+    },
+  );
 
   it("rejects manifests and events belonging to another tenant", () => {
     expectRejected(ArchiveReplayPageSchema, {
