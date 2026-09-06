@@ -53,6 +53,7 @@ This phase builds the internal database and typed RPC boundary only. The existin
 - New Durable Object classes should use declarative `exports` and SQLite: <https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/>
 - Named environments must repeat Durable Object bindings: <https://developers.cloudflare.com/durable-objects/reference/environments/>
 - RPC methods require serializable parameters/results and compatibility date `2024-04-03` or later: <https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/>
+- Enhanced Workers RPC error serialization is enabled by the configured compatibility date and preserves serializable own properties, including non-enumerable `cause`; raw diagnostic causes therefore must not be Error properties: <https://developers.cloudflare.com/workers/runtime-apis/rpc/error-handling/>
 - `transactionSync()` is SQLite-only, synchronous, and rolls back when its callback throws: <https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/>
 - Use constructor `blockConcurrencyWhile()` only for initialization/schema migration: <https://developers.cloudflare.com/durable-objects/api/state/>
 - Current limits include 128 MB Worker memory, 10 GB per SQLite-backed Durable Object, at most 100 bound parameters per SQL query, and at most 2 MB per string/BLOB/row; account-level quotas are separate and plan-dependent: <https://developers.cloudflare.com/durable-objects/platform/limits/>
@@ -678,7 +679,7 @@ type ProjectionErrorCode =
   | "projection_unavailable";
 ```
 
-The public error message is the code. Use `projection_forbidden` for a missing scope or identity grant without disclosing which grant was absent. Keep the original cause non-enumerable for tests/diagnostics, and never put event payloads, message text, cursors, auth material, SQL bindings, or raw Cloudflare exceptions into a `ProjectionError` message/enumerable field or any log. Successful pagination results and authorized internal status may return their explicitly typed cursor/checkpoint fields.
+The public error message is the code. Use `projection_forbidden` for a missing scope or identity grant without disclosing which grant was absent. Never store the original cause as any own property of `ProjectionError`, including a non-enumerable `cause`: enhanced Workers RPC serialization preserves serializable own properties and would cross the boundary. If local tests/diagnostics need the raw cause, retain it only in a module-private `WeakMap<ProjectionError, unknown>` with an internal retrieval helper; the RPC-visible error must contain no reference to it. Never put event payloads, message text, cursors, auth material, SQL bindings, or raw Cloudflare exceptions into a `ProjectionError` message/property or any log. Successful pagination results and authorized internal status may return their explicitly typed cursor/checkpoint fields.
 
 Apply this mapping consistently and test each row:
 
@@ -751,7 +752,7 @@ git commit -m "feat: define tenant projection contracts"
 
 - [ ] **Step 1: Write failing routing/config tests**
 
-Assert valid tenant IDs route through `TENANT_PROJECTION.getByName()` with the exact tenant string; invalid IDs never touch the binding; class and binding names match; base/staging/production each contain the binding; top-level `exports.TenantProjectionDO` is `{ "type": "durable-object", "storage": "sqlite" }`; and no legacy `migrations` key is introduced. Use the existing `worker/test/health.test.ts` and `worker/test/authorization.test.ts` suites as the explicit unchanged-default-route oracle; do not snapshot function source or prose.
+Assert valid tenant IDs route through `TENANT_PROJECTION.getByName()` with the exact tenant string; invalid IDs never touch the binding; class and binding names match; base/staging/production each contain the binding; top-level `exports.TenantProjectionDO` is `{ "type": "durable-object", "storage": "sqlite" }`; and no legacy `migrations` key is introduced. Directly test the stable ProjectionError code/message, absence of any raw-cause own property, private WeakMap diagnostic retrieval, safe wrapping, and the temporary `getStatus` rejection. Exercise an actual stub/RPC error boundary where the local Workers test harness supports it and prove a malicious raw-cause sentinel cannot reach the caller; if the harness cannot cleanly assert a rejected DO RPC, the no-own-property invariant plus the official enhanced-serialization contract is the mandatory deterministic substitute and the limitation must be documented in the test. Use the existing `worker/test/health.test.ts` and `worker/test/authorization.test.ts` suites as the explicit unchanged-default-route oracle; do not snapshot function source or prose.
 
 - [ ] **Step 2: Prove RED**
 
