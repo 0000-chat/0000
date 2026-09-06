@@ -36,6 +36,7 @@ This phase builds the internal database and typed RPC boundary only. The existin
 14. Keep at most 10,000 recent projection change rows per tenant. This is a WebSocket-recovery buffer, not a second raw-event archive.
 15. Canonical `account_id` and Communicator `connection_id` are distinct. Trusted ingestion/replay supplies an exact D1-derived mapping; projection stores both and public channel-facing results use `connection_id` only.
 16. Communicator resource IDs are globally unique within a tenant. A participant ID identifies one conversation-participation resource rather than a cross-conversation contact. Reusing any resource ID under another identity, connection, or conversation is corruption and fails closed; overlapping provider/Matrix aliases do not weaken that invariant.
+17. Only intended RPC methods may be visible on the exported `TenantProjectionDO` prototype. TypeScript `private` is not a runtime RPC boundary; every internal helper on the class must use ECMAScript `#private` syntax, or be a module-private function. Tests must prove no transaction, SQL, authorization, status-reading, binding, checkpoint, trim, or projector helper is reflectively present/callable as an ordinary property on a live DO instance.
 
 ## Explicitly excluded scope
 
@@ -874,7 +875,7 @@ pnpm --filter @communicator/control-plane test:worker -- worker/test/projection/
 
 Parse a descriptor-safe snapshot with `ApplyProjectionBatchInputSchema`. Enforce `projection.write`, require every unique live event identity in the supplied allowed set, resolve the exact D1-derived connection binding for every event, and reject unused/mismatched bindings before SQL. Canonicalize each event with the existing canonical serializer, count newline-inclusive bytes, hash with `sha256Hex`, and group duplicate IDs. Exact duplicate bytes collapse; conflicting bytes fail. Sort unique events by parsed observed milliseconds then opaque `event_id`. Validate a generic live checkpoint's last tuple equals the greatest event tuple when present; `applyBatch` rejects reserved `r2_manifest_cursor`, which only `applyReplayPage` may maintain.
 
-Only after all asynchronous hashes finish, call the private `applyPreparedBatch` helper described above; it is the sole owner of one `transactionSync` and is never an RPC method/export. For live mode, require initialized tenant in `ready` state, check-or-insert every exact persistent `connection_bindings` row, pre-read existing `applied_events`, reject any hash or stored binding conflict, project only new events through a temporary no-op `projectEvent` hook, insert one applied marker/change row per new event, advance a generic live checkpoint under the mutation table above, trim changes/update per-identity floors, and return counts/last sequence. Binding inserts are part of this same transaction and roll back with event failure. Cloudflare permits at most 100 bound parameters per query: split event-ID lookups into deterministic chunks of at most 90 (or query individually), and use the same policy for every dynamic list. Never construct a 500-placeholder `IN` clause. Hash the exact canonical event JSON line including its final newline. A thrown `ProjectionError` rolls back unchanged; unknown SQL/runtime failures become `projection_unavailable` without payload content.
+Only after all asynchronous hashes finish, call the ECMAScript `#applyPreparedBatch` helper (or an equivalent module-private function) described above; it is the sole owner of one `transactionSync` and is never an RPC method/export. Do not use TypeScript-only `private` for this or any other DO helper because emitted prototype methods are RPC-visible. For live mode, require initialized tenant in `ready` state, check-or-insert every exact persistent `connection_bindings` row, pre-read existing `applied_events`, reject any hash or stored binding conflict, project only new events through a temporary no-op `projectEvent` hook, insert one applied marker/change row per new event, advance a generic live checkpoint under the mutation table above, trim changes/update per-identity floors, and return counts/last sequence. Binding inserts are part of this same transaction and roll back with event failure. Cloudflare permits at most 100 bound parameters per query: split event-ID lookups into deterministic chunks of at most 90 (or query individually), and use the same policy for every dynamic list. Never construct a 500-placeholder `IN` clause. Hash the exact canonical event JSON line including its final newline. Map archive errors explicitly: invalid/corrupt/not-found to `projection_invalid`, tenant mismatch to `projection_tenant_mismatch`, too-large to `projection_too_large`, conflict to `projection_conflict`, and unavailable to `projection_unavailable`; every unknown canonicalization/hash/SQL/runtime failure is `projection_unavailable`. A thrown `ProjectionError` rolls back unchanged and no error exposes payload content.
 
 - [ ] **Step 4: Prove GREEN and regression**
 
@@ -1120,18 +1121,19 @@ Record actual totals. Do not compare them with this plan.
 3. all 17 payload schemas are strict and bounded;
 4. trusted account→connection bindings are exact and API results never alias account IDs;
 5. preflight/hash completes before one synchronous transaction;
-6. duplicate same hash/binding is harmless; conflicting hash or binding fails closed;
-7. applied marker, derived rows, change, and checkpoint are atomic;
-8. out-of-order batches converge by tuple and rebuild twice is equivalent;
-9. every RPC checks its narrow authorization scope; queries additionally check allowed identity;
-10. conversation/message queries use generation- and context-bound seek cursors;
-11. cross-tenant, reused resource ID across owners, and cursor substitution fail closed;
-12. partial rebuild data cannot be queried; R2 cursor/digest continuity and same-page retry are idempotent; an invalid immutable page can be atomically aborted into `rebuild_failed`, all partial content is removed, and a fresh never-used rebuild can succeed;
-13. tombstones prevent all later content resurrection and cascade every specified redaction;
-14. attachment R2 keys are null or exactly tenant/hash-derived; no bytes/secrets/content-bearing logs or error leakage;
-15. replay performs no R2/Queue/Matrix/provider/HTTP/WebSocket/alarm/automation action;
-16. schema migration is restart-safe and does not use `PRAGMA user_version`;
-17. no public API/UI/ingestion/deployment/Data Catalog/Pipeline/Brain scope creep.
+6. no internal DO helper is RPC-addressable (runtime `#private` or module-private only);
+7. duplicate same hash/binding is harmless; conflicting hash or binding fails closed;
+8. applied marker, derived rows, change, and checkpoint are atomic;
+9. out-of-order batches converge by tuple and rebuild twice is equivalent;
+10. every RPC checks its narrow authorization scope; queries additionally check allowed identity;
+11. conversation/message queries use generation- and context-bound seek cursors;
+12. cross-tenant, reused resource ID across owners, and cursor substitution fail closed;
+13. partial rebuild data cannot be queried; R2 cursor/digest continuity and same-page retry are idempotent; an invalid immutable page can be atomically aborted into `rebuild_failed`, all partial content is removed, and a fresh never-used rebuild can succeed;
+14. tombstones prevent all later content resurrection and cascade every specified redaction;
+15. attachment R2 keys are null or exactly tenant/hash-derived; no bytes/secrets/content-bearing logs or error leakage;
+16. replay performs no R2/Queue/Matrix/provider/HTTP/WebSocket/alarm/automation action;
+17. schema migration is restart-safe and does not use `PRAGMA user_version`;
+18. no public API/UI/ingestion/deployment/Data Catalog/Pipeline/Brain scope creep.
 
 Any failure returns to the responsible task with a focused red regression before a fix.
 
@@ -1180,6 +1182,7 @@ git rev-parse origin/main
 - [ ] canonical accounts resolve through exact trusted bindings and public results expose real connection IDs;
 - [ ] Communicator resource IDs are tenant-unique and owner reuse fails closed;
 - [ ] batches are bounded, copied, canonical-hashed, deterministically ordered, and preflighted before SQL;
+- [ ] only intended RPC methods are runtime-visible; every internal DO helper uses ECMAScript `#private` or module-private scope;
 - [ ] one transaction atomically applies event markers, derived rows, summaries, changes, and checkpoint;
 - [ ] exact duplicates are no-ops and conflicting duplicates fail closed;
 - [ ] out-of-order event grouping converges deterministically;
