@@ -66,6 +66,7 @@ describe("ChannelSidebar", () => {
     expect(screen.getByRole("button", { name: /All/ })).toHaveTextContent("10");
     expect(screen.getByRole("button", { name: "Select Telegram" })).toHaveTextContent("telegram");
     expect(screen.getByRole("button", { name: "Select Telegram" })).toHaveTextContent("Telegram");
+    expect(screen.getAllByText("Ready")).toHaveLength(2);
     expect(screen.getByText("Attention required")).toBeVisible();
     expect(screen.getByRole("link", { name: "Manage connection" })).toHaveAttribute(
       "href",

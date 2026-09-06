@@ -45,6 +45,13 @@ function renderList(onReorder = vi.fn()) {
   return onReorder;
 }
 
+function channelRowIds() {
+  return screen
+    .getAllByRole("listitem")
+    .map((row) => row.getAttribute("data-channel-id"))
+    .filter((id): id is string => Boolean(id));
+}
+
 describe("SortableChannelList", () => {
   it("keeps All first and excludes it from sortable handles", () => {
     renderList();
@@ -80,6 +87,10 @@ describe("SortableChannelList", () => {
     await user.keyboard("[Space]");
     await user.keyboard("{ArrowUp}");
     expect(onReorder).not.toHaveBeenCalled();
+    expect(channelRowIds()).toEqual([
+      "connection_human_telegram",
+      "connection_human_whatsapp",
+    ]);
     await user.keyboard("[Space]");
 
     expect(onReorder).toHaveBeenCalledTimes(1);
@@ -115,5 +126,25 @@ describe("SortableChannelList", () => {
     await user.keyboard("{Escape}");
 
     expect(onReorder).not.toHaveBeenCalled();
+    expect(channelRowIds()).toEqual([
+      "connection_human_whatsapp",
+      "connection_human_telegram",
+    ]);
+  });
+
+  it("does not persist an unchanged keyboard drop", async () => {
+    const user = userEvent.setup();
+    const onReorder = renderList();
+    const handle = screen.getByRole("button", { name: "Reorder Telegram" });
+
+    handle.focus();
+    await user.keyboard("[Space]");
+    await user.keyboard("[Space]");
+
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(channelRowIds()).toEqual([
+      "connection_human_whatsapp",
+      "connection_human_telegram",
+    ]);
   });
 });
