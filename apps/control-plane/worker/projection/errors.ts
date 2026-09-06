@@ -6,10 +6,12 @@ export type ProjectionErrorOptions = {
   cause?: unknown;
 };
 
+const projectionErrorCauses = new WeakMap<ProjectionError, unknown>();
+
 /**
  * Internal projection failures intentionally expose only a stable code and
- * message. Causes remain available for local diagnostics without becoming
- * enumerable or serialized error data.
+ * message. Causes remain available through the module-private diagnostic map
+ * without becoming own properties or serialized error data.
  */
 export class ProjectionError extends Error {
   readonly code!: ProjectionErrorCode;
@@ -28,17 +30,15 @@ export class ProjectionError extends Error {
       value: code,
       writable: false,
     });
-    if (options.cause !== undefined) {
-      Object.defineProperty(this, "cause", {
-        configurable: true,
-        enumerable: false,
-        value: options.cause,
-        writable: false,
-      });
-    }
+    if (options.cause !== undefined) projectionErrorCauses.set(this, options.cause);
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
+
+/** @internal Diagnostic-only access; never expose this through RPC. */
+export const getProjectionErrorCause = (
+  error: ProjectionError,
+): unknown => projectionErrorCauses.get(error);
 
 export const isProjectionError = (
   error: unknown,

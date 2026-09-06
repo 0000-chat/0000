@@ -5,6 +5,7 @@ import { runInDurableObject } from "cloudflare:test";
 import configText from "../../../wrangler.jsonc?raw";
 import {
   ProjectionError,
+  getProjectionErrorCause,
   projectionError,
   safeProjectionError,
 } from "../../projection/errors";
@@ -99,19 +100,27 @@ describe("tenant projection routing", () => {
     expect(config.durable_objects).toEqual({ bindings: [expectedBinding] });
   });
 
-  it("sanitizes ProjectionError public data while preserving a non-enumerable cause", () => {
+  it("sanitizes ProjectionError public data without an own cause property", () => {
     const sensitive = "payload=secret auth=Bearer-token cursor=opaque SQL=SELECT-secret";
     const error = new ProjectionError("projection_invalid", { cause: sensitive });
 
     expect(error).toBeInstanceOf(ProjectionError);
+    expect(error.name).toBe("ProjectionError");
     expect(error.code).toBe("projection_invalid");
     expect(error.message).toBe("projection_invalid");
     expect(Object.keys(error)).toEqual(["code"]);
     expect({ ...error }).toEqual({ code: "projection_invalid" });
     expect(JSON.stringify(error)).not.toContain(sensitive);
     expect(Object.values(error)).not.toContain(sensitive);
-    expect(Object.getOwnPropertyDescriptor(error, "cause")?.enumerable).toBe(false);
-    expect((error as Error & { cause?: unknown }).cause).toBe(sensitive);
+    expect(Object.getOwnPropertyNames(error)).not.toContain("cause");
+    expect(Reflect.ownKeys(error)).not.toContain("cause");
+    for (const key of Reflect.ownKeys(error)) {
+      const descriptor = Object.getOwnPropertyDescriptor(error, key);
+      if (descriptor && "value" in descriptor) {
+        expect(String(descriptor.value)).not.toContain(sensitive);
+      }
+    }
+    expect(getProjectionErrorCause(error)).toBe(sensitive);
 
     const existing = projectionError("projection_conflict", sensitive);
     expect(safeProjectionError(existing, "projection_unavailable")).toBe(existing);
@@ -123,12 +132,18 @@ describe("tenant projection routing", () => {
     expect(wrapped.message).toBe("projection_unavailable");
     expect(Object.keys(wrapped)).toEqual(["code"]);
     expect(JSON.stringify(wrapped)).not.toContain(sensitive);
-    expect(Object.getOwnPropertyDescriptor(wrapped, "cause")?.enumerable).toBe(false);
-    expect((wrapped as Error & { cause?: unknown }).cause).toBe(rawError);
+    expect(Object.getOwnPropertyNames(wrapped)).not.toContain("cause");
+    expect(Reflect.ownKeys(wrapped)).not.toContain("cause");
+    expect(getProjectionErrorCause(wrapped)).toBe(rawError);
   });
 
   it("rejects temporary getStatus with only the sanitized unavailable error", async () => {
     const statusStub = runtimeEnv.TENANT_PROJECTION.getByName("tenant_pilot");
+    // The current Vitest Workers RPC bridge reports an unhandled rejection for
+    // direct rejected-stub assertions, even with an immediate rejection
+    // handler, and adds bridge metadata to the caller error. runInDurableObject
+    // is the strongest deterministic boundary this harness supports without
+    // adding an RPC solely for this test.
     const rejection = await runInDurableObject(statusStub, async (instance) => {
       try {
         await instance.getStatus(validStatusInput);
