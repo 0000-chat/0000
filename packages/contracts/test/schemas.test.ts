@@ -1,15 +1,54 @@
 import { describe, expect, it } from "vitest";
 import {
+  AuthorizedIdentitySchema,
   ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
   ConversationPageResultSchema,
   ConversationSummarySchema,
+  DirectoryPrincipalSchema,
   IdentitySchema,
   MessageCreatedDataSchema,
   RealtimeEventSchema,
+  SessionResponseSchema,
   type ChannelSummary,
 } from "../src/index";
+
+describe("directory authorization schemas", () => {
+  it("accepts a strict authenticated session response", () => {
+    expect(SessionResponseSchema.parse({
+      tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },
+      principal: { id: "principal_human", type: "human", display_name: "Human" },
+      membership: { id: "membership_human", role: "owner" },
+      identities: [{
+        identity_id: "identity_human",
+        kind: "human",
+        display_name: "Human",
+        scopes: ["conversation.read", "message.send"],
+      }],
+    })).toMatchObject({ identities: [{ identity_id: "identity_human" }] });
+  });
+
+  it("rejects scopes outside the public operation enum", () => {
+    expect(AuthorizedIdentitySchema.safeParse({
+      identity_id: "identity_human",
+      kind: "human",
+      display_name: "Human",
+      scopes: ["root"],
+    }).success).toBe(false);
+  });
+
+  it("does not expose normalized OIDC subjects in directory principals", () => {
+    expect(DirectoryPrincipalSchema.safeParse({
+      id: "principal_human",
+      issuer: "https://issuer.example/",
+      subject: "secret-subject-must-not-be-public",
+      type: "human",
+      display_name: "Human",
+      status: "active",
+    }).success).toBe(false);
+  });
+});
 
 describe("ChannelSummarySchema", () => {
   const channel = {
