@@ -181,29 +181,46 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     : "No conversations are available.";
 
   return (
-    <section aria-labelledby="conversations-heading" className="min-h-[calc(100vh-8rem)]">
+    <section aria-labelledby="conversations-heading" className="flex h-full min-h-0 flex-col overflow-hidden">
       <h1 id="conversations-heading" className="sr-only">Conversations</h1>
-      <div className="mb-3 md:hidden">
-        <ChannelSelector label={selectedChannel?.display_label ?? "All"}>{channelNavigation}</ChannelSelector>
-      </div>
-      <div className="grid min-h-[38rem] overflow-hidden rounded-xl border bg-card md:grid-cols-[14rem_minmax(18rem,22rem)_minmax(0,1fr)]">
-        <aside className="hidden border-r bg-muted/30 md:block">{channelNavigation}</aside>
-        <div className={conversationId ? "hidden border-r md:block" : "border-r"}>
-          <div className="border-b p-4">
-            <p className="text-sm font-medium text-muted-foreground">{activeIdentity.display_name}</p>
-            <h2 className="text-lg font-semibold">{selectedChannel?.display_label ?? "All conversations"}</h2>
-          </div>
-          {conversationError && (
-            <div role="alert" className="m-3 space-y-2 rounded-lg border border-destructive/40 p-3 text-sm">
-              <p>Unable to load conversations.</p>
-              <Button type="button" size="sm" onClick={() => void conversationsQuery.refetch()}>Retry</Button>
+      {!conversationId && (
+        <div className="shrink-0 border-b p-3 md:hidden">
+          <ChannelSelector label={selectedChannel?.display_label ?? "All"}>{channelNavigation}</ChannelSelector>
+        </div>
+      )}
+      <div
+        data-testid="conversation-workspace"
+        className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[15rem_minmax(18rem,22rem)_minmax(0,1fr)]"
+      >
+        <aside className="hidden min-h-0 overflow-hidden border-r bg-muted/20 md:block">{channelNavigation}</aside>
+        <section
+          aria-labelledby="conversation-list-heading"
+          className={conversationId
+            ? "hidden min-h-0 border-r md:flex md:flex-col"
+            : "flex min-h-0 flex-col border-r"}
+        >
+          <header className="flex min-h-14 shrink-0 items-center justify-between border-b px-4">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                {activeIdentity.display_name}
+              </p>
+              <h2 id="conversation-list-heading" className="truncate text-base font-semibold">
+                {selectedChannel?.display_label ?? "All conversations"}
+              </h2>
             </div>
-          )}
-          {conversationsQuery.isLoading && <p role="status" className="p-4 text-sm">Loading conversations…</p>}
-          {!conversationsQuery.isLoading && conversations.length === 0 && !conversationError && (
-            <p role="status" className="p-4 text-sm text-muted-foreground">{emptyMessage}</p>
-          )}
-          <div className="p-3">
+            <span className="text-xs text-muted-foreground">{conversations.length}</span>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {conversationError && (
+              <div role="alert" className="m-3 space-y-2 border border-destructive/40 p-3 text-sm">
+                <p>Unable to load conversations.</p>
+                <Button type="button" size="sm" onClick={() => void conversationsQuery.refetch()}>Retry</Button>
+              </div>
+            )}
+            {conversationsQuery.isLoading && <p role="status" className="p-4 text-sm">Loading conversations…</p>}
+            {!conversationsQuery.isLoading && conversations.length === 0 && !conversationError && (
+              <p role="status" className="p-4 text-sm text-muted-foreground">{emptyMessage}</p>
+            )}
             <ConversationList
               conversations={conversations}
               channelsById={channelsById}
@@ -215,7 +232,7 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
               <Button
                 type="button"
                 variant="outline"
-                className="mt-3 w-full"
+                className="m-3 w-[calc(100%-1.5rem)]"
                 disabled={conversationsQuery.isFetchingNextPage}
                 onClick={() => void conversationsQuery.fetchNextPage()}
               >
@@ -223,8 +240,11 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
               </Button>
             )}
           </div>
-        </div>
-        <main className="min-w-0">
+        </section>
+        <section
+          aria-label="Active conversation"
+          className={conversationId ? "flex min-h-0 min-w-0" : "hidden min-h-0 min-w-0 md:flex"}
+        >
           {conversationId && activeConversationQuery.isLoading && (
             <p role="status" className="p-6 text-sm text-muted-foreground">Loading conversation…</p>
           )}
@@ -240,11 +260,11 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
             />
           )}
           {!conversationId && (
-            <div className="flex min-h-[38rem] items-center justify-center p-6 text-center text-sm text-muted-foreground">
+            <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
               Select a conversation to view its messages.
             </div>
           )}
-        </main>
+        </section>
       </div>
     </section>
   );

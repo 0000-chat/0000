@@ -10,6 +10,8 @@ describe("ConversationsShell", () => {
   it("defaults to All and renders every Human conversation in global recency order", async () => {
     renderApp("/conversations?identity=identity_human");
 
+    expect(await screen.findByRole("heading", { name: "Channels" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "All conversations" })).toBeVisible();
     const allButtons = await screen.findAllByRole("button", { name: /All/ });
     expect(allButtons.find((button) => button.getAttribute("aria-current") === "page")).toBeVisible();
     const rows = await screen.findAllByTestId("conversation-row");

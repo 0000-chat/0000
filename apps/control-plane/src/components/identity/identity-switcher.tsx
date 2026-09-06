@@ -67,8 +67,8 @@ export function IdentitySwitcher() {
   const { identities, activeIdentity, switchIdentity } = useIdentityContext();
 
   return (
-    <div className="flex items-center gap-2">
-      <label htmlFor="active-identity" className="text-sm font-medium">
+    <div className="flex items-center gap-1.5 sm:gap-2">
+      <label htmlFor="active-identity" className="sr-only text-sm font-medium sm:not-sr-only">
         Active identity
       </label>
       <select
@@ -76,7 +76,7 @@ export function IdentitySwitcher() {
         value={activeIdentity?.id ?? ""}
         onChange={(event) => void switchIdentity(event.target.value)}
         disabled={identities.length === 0}
-        className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="h-8 rounded-md border border-input bg-background px-2 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-9 sm:px-3"
       >
         {identities.map((identity) => (
           <option key={identity.id} value={identity.id}>{identity.display_name}</option>

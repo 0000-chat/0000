@@ -1,5 +1,5 @@
 import { Menu } from "lucide-react";
-import { Link, Outlet } from "@tanstack/react-router";
+import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -10,6 +10,7 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { IdentityProvider, IdentitySwitcher } from "@/components/identity/identity-switcher";
+import { cn } from "@/lib/utils";
 import { EnvironmentBanner } from "./environment-banner";
 
 const navigation = [
@@ -41,11 +42,14 @@ function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function AppShell() {
+  const { pathname } = useLocation();
+  const isConversationRoute = pathname.startsWith("/conversations");
+
   return (
     <IdentityProvider>
-      <div className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
-        <div className="mx-auto flex min-h-16 max-w-screen-2xl items-center gap-4 px-4 sm:px-6">
+      <div className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
+      <header className="sticky top-0 z-10 h-16 shrink-0 border-b bg-background/95 backdrop-blur">
+        <div className="mx-auto flex h-full max-w-screen-2xl items-center gap-2 px-4 sm:gap-4 sm:px-6">
           <Sheet>
             <SheetTrigger asChild>
               <Button variant="outline" size="icon" className="xl:hidden" aria-label="Open navigation">
@@ -62,7 +66,7 @@ export function AppShell() {
               </div>
             </SheetContent>
           </Sheet>
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
             <Link to="/" className="text-lg font-semibold tracking-tight">
               Communicator
             </Link>
@@ -73,11 +77,20 @@ export function AppShell() {
           </div>
         </div>
       </header>
-      <div className="mx-auto grid max-w-screen-2xl xl:grid-cols-[15rem_1fr]">
-        <aside className="hidden min-h-[calc(100vh-4rem)] border-r bg-sidebar p-4 xl:block">
+      <div className={cn(
+        "grid min-h-0 w-full flex-1",
+        isConversationRoute ? "xl:grid-cols-[15rem_minmax(0,1fr)]" : "mx-auto max-w-screen-2xl xl:grid-cols-[15rem_1fr]",
+      )}>
+        <aside className={cn(
+          "hidden border-r bg-sidebar xl:block",
+          isConversationRoute ? "min-h-0 overflow-y-auto p-4" : "min-h-[calc(100vh-4rem)] p-4",
+        )}>
           <NavigationLinks />
         </aside>
-        <main className="min-w-0 p-4 sm:p-6 lg:p-8">
+        <main className={cn(
+          "min-w-0",
+          isConversationRoute ? "min-h-0 overflow-hidden p-0" : "p-4 sm:p-6 lg:p-8",
+        )}>
           <Outlet />
         </main>
       </div>
