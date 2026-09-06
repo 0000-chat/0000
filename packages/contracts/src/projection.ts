@@ -611,7 +611,17 @@ const ApplyReplayPageInputObjectSchema = strictObject({
 });
 
 export const ApplyReplayPageInputSchema = ApplyReplayPageInputObjectSchema.transform(
-  (value) => structuredClone(value),
+  (value, context) => {
+    try {
+      return structuredClone(value);
+    } catch {
+      context.addIssue({
+        code: "custom",
+        message: "Invalid replay projection input",
+      });
+      return z.NEVER;
+    }
+  },
 );
 
 export type ApplyReplayPageInput = z.infer<typeof ApplyReplayPageInputSchema>;

@@ -457,6 +457,33 @@ describe("projection RPC contracts and exact bounds", () => {
     expect(ListProjectionChangesInputSchema.safeParse({ ...common, identity_id: identity, generation: 1, after_sequence: -1 }).success).toBe(false);
   });
 
+  it("sanitizes replay payload Proxies instead of leaking DataCloneError", () => {
+    const hostilePayload = new Proxy(validPayloads["message.created"]!, {
+      get: () => {
+        throw new Error("payload get trap must not run");
+      },
+    });
+    const input = {
+      ...common,
+      rebuild_id: "rebuild_one",
+      source_cursor: null,
+      connections: [],
+      page: {
+        ...replayPage,
+        events: [validProjectionEvent("message.created", hostilePayload)],
+      },
+    };
+
+    let result: ReturnType<typeof ApplyReplayPageInputSchema.safeParse> | undefined;
+    expect(() => {
+      result = ApplyReplayPageInputSchema.safeParse(input);
+    }).not.toThrow();
+    expect(result?.success).toBe(false);
+    if (result && !result.success) {
+      expect(result.error.issues.some((issue) => issue.message.includes("DataCloneError"))).toBe(false);
+    }
+  });
+
   it("validates the two exact generation-bound cursor payloads", () => {
     expect(ConversationCursorSchema.safeParse({
       schema_version: 1,
