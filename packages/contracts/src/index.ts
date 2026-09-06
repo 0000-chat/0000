@@ -8,3 +8,4 @@ export * from "./realtime";
 export * from "./authorization";
 export * from "./control-directory";
 export * from "./canonical-event";
+export * from "./archive";
