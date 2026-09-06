@@ -153,9 +153,7 @@ class RuntimeInitTests(unittest.TestCase):
 
     def test_telegram_runtime_initializer_is_executable(self):
         runtime = ROOT / "scripts/init-telegram-runtime.sh"
-        mode = stat.S_IMODE(runtime.stat().st_mode)
-        self.assertTrue(mode & stat.S_IXUSR)
-        self.assertFalse(mode & stat.S_IWOTH)
+        self.assertEqual(0o755, stat.S_IMODE(runtime.stat().st_mode))
 
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
