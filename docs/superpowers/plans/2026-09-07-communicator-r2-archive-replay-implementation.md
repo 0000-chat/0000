@@ -269,6 +269,7 @@ MAX_CHECKPOINT_KIND_CHARS = 64
 MAX_CHECKPOINT_VALUE_CHARS = 512
 DEFAULT_MANIFEST_PAGE_SIZE = 50
 MAX_MANIFEST_PAGE_SIZE = 100
+MAX_REPLAY_PAGE_EVENTS = MAX_MANIFEST_PAGE_SIZE * MAX_ARCHIVE_EVENTS
 ```
 
 Reject an empty batch, more than 500 events, any one canonical envelope larger than 1 MiB, canonical uncompressed JSONL larger than 4 MiB, compressed output larger than 5 MiB, or a manifest larger than 64 KiB before committing R2. Canonicalize rows one at a time while tracking UTF-8 bytes and abort immediately when an individual or cumulative bound is exceeded; do not first construct an unbounded joined string. On reads, reject an oversized compressed object or manifest from its R2 object size before loading its body. The later Queue phase may use smaller operational batches.
@@ -332,6 +333,7 @@ Additional validation:
 - checkpoint kind is trimmed, nonempty, and capped at 64 characters; checkpoint value is trimmed, nonempty, and capped at 512 characters.
 - A checkpoint must not contain tokens or credentials; code treats it as opaque non-secret provenance.
 - `archived_at` is supplied by an injected clock in tests; never hide nondeterminism behind `Date.now()` in core logic.
+- Compare `first_observed_at` and `last_observed_at` as parsed instants and require first <= last; never compare their offset-bearing strings lexicographically.
 - Manifest JSON itself is deterministic canonical JSON with a final newline.
 
 R2 data-object metadata:
@@ -460,6 +462,8 @@ type ArchiveReplayPage = {
 
 `readReplayPage` lists at most the requested number of manifests, validates each committed batch, concatenates their already-deterministic event sequences in manifest-key order, and returns the wrapped continuation cursor. It performs R2 reads only.
 
+The replay-page contract itself enforces at most 100 manifests and 50,000 events. Before passing `manifests` or `events` to Zod arrays, use descriptor-only array snapshotting: require `Array.prototype`, inspect the own `length` data descriptor, reject the value immediately when it exceeds its bound, require one own enumerable data descriptor for every index, reject holes/accessors/extra keys/symbols, catch Proxy inspection failures, and copy into a fresh plain array without invoking getters or `get` traps.
+
 Applying the same page or complete archive twice is expected to present the same canonical `event_id` sequence to the later idempotent projection. This phase does not implement the projection.
 
 ---
@@ -525,7 +529,7 @@ git commit -m "feat: freeze canonical messaging event contract"
 
 - [ ] **Step 1: Write failing tests**
 
-Test exact valid manifest and replay-page examples. Test rejection of unknown fields, wrong versions/mode/compression/content type, malformed IDs/keys/hash, zero or excessive counts, unsafe byte counts, invalid ETags/timestamps, oversized producer/checkpoint strings, and tenant-mixed page contents.
+Test exact valid manifest and replay-page examples. Test rejection of unknown fields, wrong versions/mode/compression/content type, malformed IDs/keys/hash, zero or excessive counts, unsafe byte counts, invalid ETags/timestamps, `first_observed_at` after `last_observed_at` as instants (including mixed-offset examples), oversized producer/checkpoint strings, tenant-mixed page contents, 101 manifests, and 50,001 events. Prove the exact 100-manifest and 50,000-event boundaries are accepted. Prove replay arrays reject getters/holes/extra keys and safely snapshot or reject Proxies without invoking `get` traps or leaking inspection errors.
 
 The cursor payload schema is exported for internal tooling tests, but the encoded cursor remains a Worker concern.
 
