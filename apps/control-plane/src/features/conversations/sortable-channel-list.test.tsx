@@ -79,12 +79,41 @@ describe("SortableChannelList", () => {
     handle.focus();
     await user.keyboard("[Space]");
     await user.keyboard("{ArrowUp}");
+    expect(onReorder).not.toHaveBeenCalled();
     await user.keyboard("[Space]");
 
+    expect(onReorder).toHaveBeenCalledTimes(1);
     expect(onReorder).toHaveBeenCalledWith([
       "connection_human_telegram",
       "connection_human_whatsapp",
     ]);
     expect(screen.getByText(/Use Space to pick up/)).toBeInTheDocument();
+  });
+
+  it("does not persist a keyboard reorder when sorting is cancelled", async () => {
+    const user = userEvent.setup();
+    const onReorder = renderList();
+    const handle = screen.getByRole("button", { name: "Reorder Telegram" });
+    const rows = screen.getAllByRole("listitem");
+    rows.forEach((row, index) => {
+      vi.spyOn(row, "getBoundingClientRect").mockReturnValue({
+        bottom: 56 + index * 56,
+        height: 56,
+        left: 0,
+        right: 280,
+        top: index * 56,
+        width: 280,
+        x: 0,
+        y: index * 56,
+        toJSON: () => ({}),
+      });
+    });
+
+    handle.focus();
+    await user.keyboard("[Space]");
+    await user.keyboard("{ArrowUp}");
+    await user.keyboard("{Escape}");
+
+    expect(onReorder).not.toHaveBeenCalled();
   });
 });

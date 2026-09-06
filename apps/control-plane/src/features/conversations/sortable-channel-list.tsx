@@ -3,7 +3,6 @@ import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import type { ChannelSummary } from "@communicator/contracts";
 import { GripVertical, Inbox } from "lucide-react";
-import { useRef, useState, type KeyboardEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -45,13 +44,6 @@ export function SortableChannelList({
   manageConnectionHref,
 }: SortableChannelListProps) {
   const connectedIds = channels.map((channel) => channel.id);
-  const [keyboardDrag, setKeyboardDrag] = useState<{
-    activeId: string;
-    originalIds: string[];
-    orderedIds: string[];
-  } | null>(null);
-  const keyboardDragRef = useRef(keyboardDrag);
-  const [keyboardAnnouncement, setKeyboardAnnouncement] = useState("");
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
@@ -92,60 +84,11 @@ export function SortableChannelList({
     onReorder(arrayMove(connectedIds, oldIndex, newIndex));
   }
 
-  function updateKeyboardDrag(next: typeof keyboardDrag) {
-    keyboardDragRef.current = next;
-    setKeyboardDrag(next);
-  }
-
-  function handleKeyboardStart(id: string) {
-    const next = { activeId: id, originalIds: connectedIds, orderedIds: connectedIds };
-    updateKeyboardDrag(next);
-    const channel = channels.find((item) => item.id === id);
-    setKeyboardAnnouncement(channel
-      ? `Picked up ${channel.display_label}. Use the arrow keys to move it, then press Space to drop it.`
-      : "Picked up channel.");
-  }
-
-  function handleKeyboardMove(id: string, direction: -1 | 1) {
-    const current = keyboardDragRef.current;
-    if (!current || current.activeId !== id) return;
-    const currentIndex = current.orderedIds.indexOf(id);
-    const nextIndex = currentIndex + direction;
-    if (currentIndex === -1 || nextIndex < 0 || nextIndex >= current.orderedIds.length) return;
-    const orderedIds = arrayMove(current.orderedIds, currentIndex, nextIndex);
-    updateKeyboardDrag({ ...current, orderedIds });
-    onReorder(orderedIds);
-    const channel = channels.find((item) => item.id === id);
-    setKeyboardAnnouncement(channel
-      ? `${channel.display_label} moved to position ${nextIndex + 1} of ${connectedIds.length}.`
-      : "Channel moved.");
-  }
-
-  function handleKeyboardDrop(id: string) {
-    if (keyboardDragRef.current?.activeId !== id) return;
-    const channel = channels.find((item) => item.id === id);
-    setKeyboardAnnouncement(channel ? `Dropped ${channel.display_label}.` : "Dropped channel.");
-    updateKeyboardDrag(null);
-  }
-
-  function handleKeyboardCancel(id: string) {
-    const current = keyboardDragRef.current;
-    if (!current || current.activeId !== id) return;
-    onReorder(current.originalIds);
-    setKeyboardAnnouncement("Channel sorting cancelled.");
-    updateKeyboardDrag(null);
-  }
-
-  const visibleChannels = (keyboardDrag?.orderedIds ?? connectedIds)
-    .map((id) => channels.find((channel) => channel.id === id))
-    .filter((channel): channel is ChannelSummary => Boolean(channel));
-
   return (
     <>
       <p className="sr-only">
         Use Space to pick up a channel, arrow keys to move it, Space to drop it, and Escape to cancel.
       </p>
-      <p role="status" aria-live="polite" className="sr-only">{keyboardAnnouncement}</p>
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -175,18 +118,13 @@ export function SortableChannelList({
             </Button>
           </li>
           <SortableContext items={connectedIds} strategy={verticalListSortingStrategy}>
-            {visibleChannels.map((channel) => (
+            {channels.map((channel) => (
               <SortableChannelRow
                 key={channel.id}
                 channel={channel}
                 selected={selectedChannelId === channel.id}
                 onSelect={onSelect}
                 manageConnectionHref={manageConnectionHref}
-                keyboardActive={keyboardDrag?.activeId === channel.id}
-                onKeyboardStart={handleKeyboardStart}
-                onKeyboardMove={handleKeyboardMove}
-                onKeyboardDrop={handleKeyboardDrop}
-                onKeyboardCancel={handleKeyboardCancel}
               />
             ))}
           </SortableContext>
@@ -201,44 +139,16 @@ function SortableChannelRow({
   selected,
   onSelect,
   manageConnectionHref,
-  keyboardActive,
-  onKeyboardStart,
-  onKeyboardMove,
-  onKeyboardDrop,
-  onKeyboardCancel,
 }: {
   channel: ChannelSummary;
   selected: boolean;
   onSelect: (channelId?: string) => void;
   manageConnectionHref: string;
-  keyboardActive: boolean;
-  onKeyboardStart: (id: string) => void;
-  onKeyboardMove: (id: string, direction: -1 | 1) => void;
-  onKeyboardDrop: (id: string) => void;
-  onKeyboardCancel: (id: string) => void;
 }) {
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging } = useSortable({
     id: channel.id,
   });
   const warning = statusLabel(channel);
-
-  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    if (event.key === " " || event.code === "Space" || event.key === "Enter") {
-      event.preventDefault();
-      if (keyboardActive) onKeyboardDrop(channel.id);
-      else onKeyboardStart(channel.id);
-      return;
-    }
-    if (event.key === "Escape" && keyboardActive) {
-      event.preventDefault();
-      onKeyboardCancel(channel.id);
-      return;
-    }
-    if (keyboardActive && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-      event.preventDefault();
-      onKeyboardMove(channel.id, event.key === "ArrowUp" ? -1 : 1);
-    }
-  }
 
   return (
     <li
@@ -277,8 +187,6 @@ function SortableChannelRow({
           data-testid={`channel-drag-handle-${channel.id}`}
           {...attributes}
           {...listeners}
-          aria-pressed={keyboardActive}
-          onKeyDown={handleKeyDown}
         >
           <GripVertical className="size-4" aria-hidden="true" />
         </button>
