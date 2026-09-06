@@ -18,6 +18,12 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "EVENT_ARCHIVE",
+      "bucket_name": "communicator-event-archive-local"
+    }
+  ],
   "vars": {
     "COMMUNICATOR_ENV": "development",
     "COMMUNICATOR_DATA_MODE": "simulated",
@@ -34,7 +40,13 @@
         "COMMUNICATOR_OIDC_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
         "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
-      }
+      },
+      "r2_buckets": [
+        {
+          "binding": "EVENT_ARCHIVE",
+          "bucket_name": "communicator-event-archive-staging"
+        }
+      ]
     },
     "production": {
       "name": "communicator-control-plane-production",
@@ -44,7 +56,13 @@
         "COMMUNICATOR_OIDC_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
         "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
-      }
+      },
+      "r2_buckets": [
+        {
+          "binding": "EVENT_ARCHIVE",
+          "bucket_name": "communicator-event-archive-production"
+        }
+      ]
     }
   }
 }
