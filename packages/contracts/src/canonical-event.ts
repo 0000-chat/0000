@@ -204,7 +204,48 @@ const MatrixRoomIdSchema = z.string().min(1).max(1024).startsWith("!");
 const MatrixEventIdSchema = z.string().min(1).max(1024).startsWith("$");
 const BoundedTimestampSchema = TimestampSchema.max(64);
 
-export const CanonicalEventEnvelopeSchema = z
+/**
+ * Snapshot the envelope boundary before handing it to Zod. In particular,
+ * descriptor values avoid invoking getters or Proxy `get` traps, while the
+ * copied null-prototype object prevents special-key behavior in Zod's object
+ * parser. Any failed inspection is represented as undefined so safeParse()
+ * returns a normal validation failure instead of leaking the trap error.
+ */
+const snapshotCanonicalEventInput = (input: unknown): unknown => {
+  try {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      return undefined;
+    }
+
+    const prototype = Object.getPrototypeOf(input);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+
+    const snapshot = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(input)) {
+      if (typeof key !== "string" || PROTOTYPE_SENSITIVE_KEYS.has(key)) {
+        return undefined;
+      }
+
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        return undefined;
+      }
+
+      Object.defineProperty(snapshot, key, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      });
+    }
+
+    return snapshot;
+  } catch {
+    return undefined;
+  }
+};
+
+const CanonicalEventEnvelopeObjectSchema = z
   .object({
     schema_version: z.literal(1),
     event_id: OpaqueIdSchema,
@@ -223,6 +264,11 @@ export const CanonicalEventEnvelopeSchema = z
     payload: CanonicalJsonObjectSchema,
   })
   .strict();
+
+export const CanonicalEventEnvelopeSchema = z.preprocess(
+  snapshotCanonicalEventInput,
+  CanonicalEventEnvelopeObjectSchema,
+);
 
 export type CanonicalEventType = z.infer<typeof CanonicalEventTypeSchema>;
 export type CanonicalEventSource = z.infer<typeof CanonicalEventSourceSchema>;

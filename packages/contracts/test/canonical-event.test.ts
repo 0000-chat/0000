@@ -159,6 +159,69 @@ describe("CanonicalEventEnvelopeSchema", () => {
     expectRejected(validEvent({ conversation_id: "conversation" }));
   });
 
+  it("rejects prototype-sensitive own keys on the envelope itself", () => {
+    for (const key of ["__proto__", "prototype", "constructor"]) {
+      const input = validEvent();
+      defineOwnKey(input, key, "blocked");
+      expectRejected(input);
+    }
+  });
+
+  it("rejects enumerable accessors without executing their getters", () => {
+    const input = validEvent();
+    let getterCalls = 0;
+    Object.defineProperty(input, "event_id", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error("getter fixture must never be exposed");
+      },
+    });
+
+    let result: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+    expect(() => {
+      result = CanonicalEventEnvelopeSchema.safeParse(input);
+    }).not.toThrow();
+    expect(result?.success).toBe(false);
+    expect(getterCalls).toBe(0);
+  });
+
+  it("snapshots a Proxy without invoking its get trap", () => {
+    let getCalls = 0;
+    const input = new Proxy(validEvent(), {
+      get: () => {
+        getCalls += 1;
+        throw new Error("proxy get fixture must never be exposed");
+      },
+    });
+
+    let result: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+    expect(() => {
+      result = CanonicalEventEnvelopeSchema.safeParse(input);
+    }).not.toThrow();
+    expect(result?.success).toBe(true);
+    expect(getCalls).toBe(0);
+  });
+
+  it.each(["ownKeys", "getOwnPropertyDescriptor", "getPrototypeOf"] as const)(
+    "rejects a Proxy whose %s inspection trap throws without leaking the raw error",
+    (trap) => {
+      const input = new Proxy(validEvent(), {
+        [trap]: () => {
+          throw new Error(`proxy ${trap} fixture must be redacted`);
+        },
+      });
+
+      let result: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+      expect(() => {
+        result = CanonicalEventEnvelopeSchema.safeParse(input);
+      }).not.toThrow();
+      expect(result?.success).toBe(false);
+      expect(result?.error?.issues.some((issue) => issue.code === "custom")).toBe(false);
+    },
+  );
+
   it("trims and bounds opaque IDs while preserving distinct Matrix sigils", () => {
     const trimmed = CanonicalEventEnvelopeSchema.parse(
       validEvent({ event_id: "  opaque-id  ", remote_message_id: "  remote-id  " }),
