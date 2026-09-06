@@ -50,3 +50,31 @@ export const nestedPayload = (depth: number): CanonicalJsonObject => {
   }
   return root as CanonicalJsonObject;
 };
+
+let archiveScopeCounter = 0;
+
+export const makeArchiveScope = (): { tenantId: string; batchId: string } => {
+  archiveScopeCounter += 1;
+  return {
+    tenantId: `tenant_writer_${archiveScopeCounter}`,
+    batchId: `batch_writer_${archiveScopeCounter}`,
+  };
+};
+
+export const cleanupArchiveTenant = async (
+  bucket: R2Bucket,
+  tenantId: string,
+): Promise<void> => {
+  for (const prefix of [`events/${tenantId}/`, `manifests/${tenantId}/`]) {
+    let cursor: string | undefined;
+    do {
+      const page = await bucket.list({ prefix, ...(cursor ? { cursor } : {}) });
+      const keys = page.objects.map((object) => object.key);
+      if (keys.length > 0) await bucket.delete(keys);
+      cursor = page.truncated ? page.cursor : undefined;
+      if (page.truncated && !cursor) {
+        throw new Error("archive cleanup returned truncated page without cursor");
+      }
+    } while (cursor !== undefined);
+  }
+};
