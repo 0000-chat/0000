@@ -281,6 +281,44 @@ describe("tenant projection applyBatch", () => {
     await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toHaveLength(1);
   });
 
+  it("rejects an exact event retry when its resolved connection binding changes", async () => {
+    const tenant = "tenant_apply_same_hash_binding_conflict";
+    const stub = env.TENANT_PROJECTION.getByName(tenant);
+    await initialize(stub, tenant);
+    const original = event("event_same_hash_binding", { tenant_id: tenant });
+
+    await expect(
+      stub.applyBatch(
+        applyInput(tenant, [original], {
+          connections: [binding("account_a", "connection_original")],
+        }),
+      ),
+    ).resolves.toMatchObject({ applied_count: 1, duplicate_count: 0 });
+
+    await expectCode(
+      stub,
+      applyInput(tenant, [structuredClone(original)], {
+        connections: [binding("account_a", "connection_changed")],
+      }),
+      "projection_conflict",
+    );
+
+    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([
+      {
+        account_id: "account_a",
+        connection_id: "connection_original",
+        identity_id: "identity_a",
+        platform: "whatsapp",
+      },
+    ]);
+    await expect(rows(stub, "SELECT event_id FROM applied_events")).resolves.toEqual([
+      { event_id: original.event_id },
+    ]);
+    await expect(rows(stub, "SELECT event_id FROM projection_changes")).resolves.toEqual([
+      { event_id: original.event_id },
+    ]);
+  });
+
   it("detaches prepared events before asynchronous hashing can observe caller mutation", async () => {
     const tenant = "tenant_apply_detached";
     const input = applyInput(tenant, [event("event_detached", { tenant_id: tenant })]);

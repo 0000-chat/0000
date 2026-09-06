@@ -325,8 +325,3 @@ export const projectEvent = (
 ): void => {
   // Audit markers are written by the caller after this no-op hook.
 };
-
-export { compareOpaqueEventIds } from "@communicator/contracts";
-
-/** Internal helper used by the RPC layer to map schema failures consistently. */
-export const parseProjectionBatchInput = parseAndSnapshotBatch;
