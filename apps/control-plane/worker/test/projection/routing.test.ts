@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { env as runtimeEnv } from "cloudflare:workers";
+import type { ProjectionStatusInput } from "@communicator/contracts";
+import { runInDurableObject } from "cloudflare:test";
 import configText from "../../../wrangler.jsonc?raw";
+import {
+  ProjectionError,
+  projectionError,
+  safeProjectionError,
+} from "../../projection/errors";
 import { getTenantProjection } from "../../projection/routing";
 import { TenantProjectionDO } from "../../projection/tenant-projection";
 
@@ -17,6 +25,18 @@ const config = JSON.parse(configText) as WranglerConfig;
 const bindingName = "TENANT_PROJECTION";
 const className = "TenantProjectionDO";
 const expectedBinding = { name: bindingName, class_name: className };
+
+const validStatusInput: ProjectionStatusInput = {
+  schema_version: 1,
+  tenant_id: "tenant_pilot",
+  authorization: {
+    schema_version: 1,
+    tenant_id: "tenant_pilot",
+    principal_id: "principal_pilot",
+    allowed_identity_ids: [],
+    scopes: ["projection.status"],
+  },
+};
 
 const stub = { marker: "tenant-projection-stub" } as unknown as DurableObjectStub<
   TenantProjectionDO
@@ -77,6 +97,54 @@ describe("tenant projection routing", () => {
   it("keeps the durable object class and binding names exact", () => {
     expect(TenantProjectionDO.name).toBe(className);
     expect(config.durable_objects).toEqual({ bindings: [expectedBinding] });
+  });
+
+  it("sanitizes ProjectionError public data while preserving a non-enumerable cause", () => {
+    const sensitive = "payload=secret auth=Bearer-token cursor=opaque SQL=SELECT-secret";
+    const error = new ProjectionError("projection_invalid", { cause: sensitive });
+
+    expect(error).toBeInstanceOf(ProjectionError);
+    expect(error.code).toBe("projection_invalid");
+    expect(error.message).toBe("projection_invalid");
+    expect(Object.keys(error)).toEqual(["code"]);
+    expect({ ...error }).toEqual({ code: "projection_invalid" });
+    expect(JSON.stringify(error)).not.toContain(sensitive);
+    expect(Object.values(error)).not.toContain(sensitive);
+    expect(Object.getOwnPropertyDescriptor(error, "cause")?.enumerable).toBe(false);
+    expect((error as Error & { cause?: unknown }).cause).toBe(sensitive);
+
+    const existing = projectionError("projection_conflict", sensitive);
+    expect(safeProjectionError(existing, "projection_unavailable")).toBe(existing);
+
+    const rawError = new Error(sensitive);
+    const wrapped = safeProjectionError(rawError, "projection_unavailable");
+    expect(wrapped).toBeInstanceOf(ProjectionError);
+    expect(wrapped.code).toBe("projection_unavailable");
+    expect(wrapped.message).toBe("projection_unavailable");
+    expect(Object.keys(wrapped)).toEqual(["code"]);
+    expect(JSON.stringify(wrapped)).not.toContain(sensitive);
+    expect(Object.getOwnPropertyDescriptor(wrapped, "cause")?.enumerable).toBe(false);
+    expect((wrapped as Error & { cause?: unknown }).cause).toBe(rawError);
+  });
+
+  it("rejects temporary getStatus with only the sanitized unavailable error", async () => {
+    const statusStub = runtimeEnv.TENANT_PROJECTION.getByName("tenant_pilot");
+    const rejection = await runInDurableObject(statusStub, async (instance) => {
+      try {
+        await instance.getStatus(validStatusInput);
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    });
+
+    expect(rejection).toBeInstanceOf(ProjectionError);
+    expect(rejection).toMatchObject({
+      code: "projection_unavailable",
+      message: "projection_unavailable",
+    });
+    expect(Object.keys(rejection as object)).toEqual(["code"]);
+    expect(JSON.stringify(rejection)).not.toContain(JSON.stringify(validStatusInput));
   });
 });
 
