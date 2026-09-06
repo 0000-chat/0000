@@ -15,6 +15,8 @@ describe("conversation journeys", () => {
     expect(screen.queryByRole("link", { name: "Back to conversations" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Back to conversations" })).toHaveClass("md:hidden");
     expect(screen.getByTestId("message-viewport")).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(screen.getByRole("heading", { name: "Alex Rivera", level: 1 }).closest("header"))
+      .toHaveClass("sticky", "top-0", "z-[1]");
   });
 
   it("keeps attention-required history readable and disables sending", async () => {

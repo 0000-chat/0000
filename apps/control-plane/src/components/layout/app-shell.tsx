@@ -48,7 +48,7 @@ export function AppShell() {
   return (
     <IdentityProvider>
       <div className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
-      <header className="z-10 h-16 shrink-0 border-b bg-background/95 backdrop-blur">
+      <header className="sticky top-0 z-10 h-16 shrink-0 border-b bg-background/95 backdrop-blur">
         <div className="mx-auto flex h-full max-w-screen-2xl items-center gap-2 px-4 sm:gap-4 sm:px-6">
           <Sheet>
             <SheetTrigger asChild>

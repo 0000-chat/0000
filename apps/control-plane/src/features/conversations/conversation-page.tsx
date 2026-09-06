@@ -56,7 +56,7 @@ export function ConversationPage({
 
   return (
     <section className="flex h-full min-h-0 flex-col" aria-labelledby="conversation-title">
-      <header className="flex min-h-16 shrink-0 items-center gap-3 border-b px-4">
+      <header className="sticky top-0 z-[1] flex min-h-16 shrink-0 items-center gap-3 border-b px-4">
         <button
           type="button"
           className="-ml-2 flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
