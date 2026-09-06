@@ -109,6 +109,36 @@ test("manual channel order survives ordinary navigation", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Move .* (up|down)/ })).toHaveCount(0);
 });
 
+test("pointer channel drag persists after ordinary navigation", async ({ page }) => {
+  await page.goto("/conversations?identity=identity_human");
+  const channelNavigation = page.getByRole("navigation", { name: "Conversation channels" }).filter({ visible: true });
+  const source = channelNavigation.getByTestId("channel-drag-handle-connection_human_telegram");
+  const target = channelNavigation.locator('[data-channel-id="connection_human_whatsapp"]').first();
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(targetBox).not.toBeNull();
+
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2 + 8, sourceBox!.y + sourceBox!.height / 2, { steps: 2 });
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  await expect(channelNavigation.locator("[data-channel-id]").first()).toHaveAttribute(
+    "data-channel-id",
+    "connection_human_telegram",
+  );
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Activity", exact: true }).click();
+  await expect(page).toHaveURL(/\/activity\?identity=identity_human/);
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Conversations", exact: true }).click();
+  await expect(page).toHaveURL(/\/conversations\?identity=identity_human/);
+  await expect(page.getByRole("navigation", { name: "Conversation channels" }).filter({ visible: true }).locator("[data-channel-id]").first()).toHaveAttribute(
+    "data-channel-id",
+    "connection_human_telegram",
+  );
+});
+
 test("identity switch replaces every scoped surface", async ({ page }) => {
   await page.goto("/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram");
   await expect(page.getByRole("heading", { name: "Alex Rivera", level: 1 })).toBeVisible();
