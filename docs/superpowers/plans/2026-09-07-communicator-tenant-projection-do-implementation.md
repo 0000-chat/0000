@@ -896,6 +896,7 @@ git commit -m "feat: apply projection batches idempotently"
 
 **Files:**
 - Modify: `apps/control-plane/worker/projection/projector.ts`
+- Modify: `apps/control-plane/worker/projection/tenant-projection.ts`
 - Create: `apps/control-plane/worker/test/projection/projector.test.ts`
 
 - [ ] **Step 1: Write failing table-driven projection tests**
@@ -912,7 +913,7 @@ pnpm --filter @communicator/control-plane test:worker -- worker/test/projection/
 
 - [ ] **Step 3: Implement the full projector switch**
 
-Use exhaustive `switch (prepared.event.event_type)` with a `never` assertion. Each handler accepts only the SQL handle, one `PreparedProjectionEvent` (parsed envelope/payload, exact resolved connection, hash/bytes, parsed tuples), and a `Set` of touched conversation IDs. It is synchronous and contains no binding access, network call, clock call, random value, log, or promise. Use parameterized SQL only. Split helpers by responsibility if `projector.ts` would exceed roughly 700 lines; acceptable names are `project-message.ts`, `project-social.ts`, and `project-control.ts` under the same folder, with no circular imports.
+Use exhaustive `switch (prepared.event.event_type)` with a `never` assertion. Each handler accepts only the SQL handle, one `PreparedProjectionEvent` (parsed envelope/payload, exact resolved connection, hash/bytes, parsed tuples), and a `Set` of touched conversation IDs. The existing DO transaction creates one set before its event loop, passes it to each projector call, and after all new events are projected invokes the projector's summary-recomputation helper once; that helper processes sorted conversation IDs individually. All of this remains inside the existing single transaction. It is synchronous and contains no binding access, network call, clock call, random value, log, or promise. Use parameterized SQL only. Split helpers by responsibility if `projector.ts` would exceed roughly 700 lines; acceptable names are `project-message.ts`, `project-social.ts`, and `project-control.ts` under the same folder, with no circular imports.
 
 Implement scoped pending rows, centralized tombstone gating/redaction, delivery/read/attachment reconciliation, deterministic timestamp mapping, and one-at-a-time sorted summary recomputation exactly. Use event/lifecycle timestamps only; never `Date.now()` inside deterministic projection. A replay of the same event set in any batch grouping must converge to identical domain rows (excluding applied/change/source-progress ordering rows and local SQLite row IDs, which must not appear in results).
 
