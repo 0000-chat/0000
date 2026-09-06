@@ -5,6 +5,8 @@
  * schema truth.
  */
 
+import { safeProjectionError } from "./errors";
+
 export type ProjectionMigration = {
   readonly version: number;
   readonly name: string;
@@ -338,46 +340,50 @@ type AppliedMigrationRow = {
  * statements have succeeded in the same SQLite transaction.
  */
 export function runProjectionMigrations(storage: DurableObjectStorage): void {
-  storage.sql.exec(migrationTableStatement);
+  try {
+    storage.sql.exec(migrationTableStatement);
 
-  const applied = storage.sql
-    .exec<AppliedMigrationRow>(
-      "SELECT version, name FROM _sql_schema_migrations ORDER BY version",
-    )
-    .toArray();
-  const knownByVersion = new Map(
-    PROJECTION_MIGRATIONS.map((migration) => [migration.version, migration]),
-  );
-  const latestVersion =
-    PROJECTION_MIGRATIONS[PROJECTION_MIGRATIONS.length - 1]?.version ?? 0;
+    const applied = storage.sql
+      .exec<AppliedMigrationRow>(
+        "SELECT version, name FROM _sql_schema_migrations ORDER BY version",
+      )
+      .toArray();
+    const knownByVersion = new Map(
+      PROJECTION_MIGRATIONS.map((migration) => [migration.version, migration]),
+    );
+    const latestVersion =
+      PROJECTION_MIGRATIONS[PROJECTION_MIGRATIONS.length - 1]?.version ?? 0;
 
-  for (const row of applied) {
-    const migration = knownByVersion.get(row.version);
-    if (migration === undefined) {
-      if (row.version > latestVersion) {
-        throw new Error("projection schema has an unknown newer version");
+    for (const row of applied) {
+      const migration = knownByVersion.get(row.version);
+      if (migration === undefined) {
+        if (row.version > latestVersion) {
+          throw new Error("projection schema has an unknown newer version");
+        }
+        throw new Error("projection schema migration version mismatch");
       }
-      throw new Error("projection schema migration version mismatch");
-    }
-    if (row.name !== migration.name) {
-      throw new Error("projection schema migration name mismatch");
-    }
-  }
-
-  const appliedVersions = new Set(applied.map((row) => row.version));
-  for (const migration of PROJECTION_MIGRATIONS) {
-    if (appliedVersions.has(migration.version)) continue;
-
-    storage.transactionSync(() => {
-      for (const statement of migration.statements) {
-        storage.sql.exec(statement);
+      if (row.name !== migration.name) {
+        throw new Error("projection schema migration name mismatch");
       }
-      storage.sql.exec(
-        "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        migration.version,
-        migration.name,
-        migration.appliedAt,
-      );
-    });
+    }
+
+    const appliedVersions = new Set(applied.map((row) => row.version));
+    for (const migration of PROJECTION_MIGRATIONS) {
+      if (appliedVersions.has(migration.version)) continue;
+
+      storage.transactionSync(() => {
+        for (const statement of migration.statements) {
+          storage.sql.exec(statement);
+        }
+        storage.sql.exec(
+          "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+          migration.version,
+          migration.name,
+          migration.appliedAt,
+        );
+      });
+    }
+  } catch (error) {
+    throw safeProjectionError(error, "projection_unavailable");
   }
 }

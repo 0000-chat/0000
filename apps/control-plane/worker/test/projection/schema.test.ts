@@ -6,10 +6,33 @@ import type {
 } from "@communicator/contracts";
 import { describe, expect, it } from "vitest";
 import { getProjectionErrorCause, ProjectionError } from "../../projection/errors";
+import { runProjectionMigrations } from "../../projection/schema";
 import type { TenantProjectionDO } from "../../projection/tenant-projection";
 
 const migrationName = "initial_tenant_projection";
 const migrationAppliedAt = "2026-09-07T00:00:00.000Z";
+const applicationTableNames = [
+  "projection_meta",
+  "connection_bindings",
+  "completed_rebuilds",
+  "failed_rebuilds",
+  "applied_events",
+  "conversations",
+  "participants",
+  "messages",
+  "message_versions",
+  "reactions",
+  "receipts",
+  "typing_states",
+  "attachments",
+  "commands",
+  "message_delivery_updates",
+  "event_tombstones",
+  "resource_tombstones",
+  "projection_changes",
+  "projection_change_floors",
+  "projection_checkpoints",
+] as const;
 
 const authorization = (
   tenantId: string,
@@ -570,6 +593,173 @@ describe("tenant projection SQLite schema", () => {
         .toArray(),
     );
     expect(second).toEqual(first);
+  });
+
+  it("fails closed on an unknown newer migration without changing stored schema", async () => {
+    const stub = env.TENANT_PROJECTION.getByName("tenant_schema_unknown_version");
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const schemaSnapshot = () =>
+        state.storage.sql
+          .exec<{ type: string; name: string; sql: string }>(
+            "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+          )
+          .toArray();
+      const migrationSnapshot = () =>
+        state.storage.sql
+          .exec<{ version: number; name: string; applied_at: string }>(
+            "SELECT version, name, applied_at FROM _sql_schema_migrations ORDER BY version",
+          )
+          .toArray();
+
+      const schemaBefore = schemaSnapshot();
+      state.storage.sql.exec(
+        "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        2,
+        "future_projection_schema",
+        migrationAppliedAt,
+      );
+      const migrationsBeforeFailure = migrationSnapshot();
+
+      let failure: unknown;
+      try {
+        runProjectionMigrations(state.storage);
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(ProjectionError);
+      expect(failure).toMatchObject({
+        code: "projection_unavailable",
+        message: "projection_unavailable",
+      });
+      expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+      expect(getProjectionErrorCause(failure as ProjectionError)).toBeDefined();
+
+      return {
+        schemaBefore,
+        schemaAfter: schemaSnapshot(),
+        migrationsBeforeFailure,
+        migrationsAfter: migrationSnapshot(),
+      };
+    });
+
+    expect(result.schemaAfter).toEqual(result.schemaBefore);
+    expect(result.migrationsAfter).toEqual(result.migrationsBeforeFailure);
+  });
+
+  it("fails closed on a version-name mismatch without changing stored schema", async () => {
+    const stub = env.TENANT_PROJECTION.getByName("tenant_schema_name_mismatch");
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const schemaSnapshot = () =>
+        state.storage.sql
+          .exec<{ type: string; name: string; sql: string }>(
+            "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+          )
+          .toArray();
+      const migrationSnapshot = () =>
+        state.storage.sql
+          .exec<{ version: number; name: string; applied_at: string }>(
+            "SELECT version, name, applied_at FROM _sql_schema_migrations ORDER BY version",
+          )
+          .toArray();
+
+      const schemaBefore = schemaSnapshot();
+      state.storage.sql.exec("DELETE FROM _sql_schema_migrations WHERE version = 1");
+      state.storage.sql.exec(
+        "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        1,
+        "renamed_projection_schema",
+        migrationAppliedAt,
+      );
+      const migrationsBeforeFailure = migrationSnapshot();
+
+      let failure: unknown;
+      try {
+        runProjectionMigrations(state.storage);
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(ProjectionError);
+      expect(failure).toMatchObject({
+        code: "projection_unavailable",
+        message: "projection_unavailable",
+      });
+      expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+      expect(getProjectionErrorCause(failure as ProjectionError)).toBeDefined();
+
+      return {
+        schemaBefore,
+        schemaAfter: schemaSnapshot(),
+        migrationsBeforeFailure,
+        migrationsAfter: migrationSnapshot(),
+      };
+    });
+
+    expect(result.schemaAfter).toEqual(result.schemaBefore);
+    expect(result.migrationsAfter).toEqual(result.migrationsBeforeFailure);
+  });
+
+  it("rolls back every DDL effect when migration metadata insertion fails", async () => {
+    const stub = env.TENANT_PROJECTION.getByName("tenant_schema_transaction_rollback");
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const schemaSnapshot = () =>
+        state.storage.sql
+          .exec<{ type: string; name: string; sql: string }>(
+            "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+          )
+          .toArray();
+      const migrationSnapshot = () =>
+        state.storage.sql
+          .exec<{ version: number; name: string; applied_at: string }>(
+            "SELECT version, name, applied_at FROM _sql_schema_migrations ORDER BY version",
+          )
+          .toArray();
+
+      state.storage.sql.exec("DELETE FROM _sql_schema_migrations");
+      // The version-one DDL intentionally uses CREATE TABLE (without
+      // IF NOT EXISTS) for application tables. Remove the complete
+      // application schema so the normal runner reaches its final metadata
+      // insert, where the trigger forces the transaction to abort.
+      for (const table of applicationTableNames) {
+        state.storage.sql.exec(`DROP TABLE ${table}`);
+      }
+      const schemaBeforeFailure = schemaSnapshot();
+      state.storage.sql.exec(
+        "CREATE TRIGGER projection_test_abort_migration BEFORE INSERT ON _sql_schema_migrations BEGIN SELECT RAISE(ABORT, 'migration metadata write blocked'); END",
+      );
+
+      let failure: unknown;
+      try {
+        runProjectionMigrations(state.storage);
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(ProjectionError);
+      expect(failure).toMatchObject({
+        code: "projection_unavailable",
+        message: "projection_unavailable",
+      });
+      expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+      expect(getProjectionErrorCause(failure as ProjectionError)).toBeDefined();
+
+      state.storage.sql.exec("DROP TRIGGER projection_test_abort_migration");
+      return {
+        schemaBeforeFailure,
+        schemaAfterFailure: schemaSnapshot(),
+        migrationsAfterFailure: migrationSnapshot(),
+        checkpointsAfterFailure: state.storage.sql
+          .exec<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projection_checkpoints'",
+          )
+          .toArray(),
+      };
+    });
+
+    expect(result.schemaAfterFailure).toEqual(result.schemaBeforeFailure);
+    expect(result.migrationsAfterFailure).toEqual([]);
+    expect(result.checkpointsAfterFailure).toEqual([]);
   });
 });
 
