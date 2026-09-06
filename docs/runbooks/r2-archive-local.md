@@ -230,16 +230,25 @@ buffers, decoded rows, validation, framework state, and other concurrent
 requests; keep the reader bounded/streaming and do not turn a page into an
 unbounded accumulator.
 
-The same page currently lists 50 subrequests per invocation on Free and
-10,000 on Workers Paid (with a configured Paid limit that may be increased).
-R2 `list`, `get`, `put`, `delete`, and `head` calls count as subrequests. A
-100-manifest diagnostic or replay operation can therefore consume many R2
-subrequests even though its application page bounds are respected. If an
-operational job relies on high subrequest counts, use the appropriate Workers
-Paid plan and verify the Worker's configured limit; do not assume the Free
-50-request allowance. The platform also limits an invocation to six outbound
-connections waiting for response headers, so avoid issuing unbounded parallel
-R2 operations.
+The same page distinguishes general/external and internal-service subrequests.
+Workers Free allows 50 general/external subrequests per invocation and 1,000
+subrequests to internal services; R2 is an internal Cloudflare service, so its
+`list`, `get`, `put`, `delete`, and `head` calls use the internal-service limit,
+not the 50 general/external allowance. Workers Paid has a default 10,000
+subrequest limit, and its internal-service limit matches the Worker's
+configured subrequest limit, up to 10 million when configured.
+
+For the current reader, listing and validating 100 manifests costs at least
+101 R2 calls: one `list` plus one manifest `get` per item. Materializing those
+manifests into a replay page costs at least 201 R2 calls: the same list and
+manifest gets plus one data `get` per item, subject to the actual
+implementation and any other calls. These are minimum call counts, not a
+promise that a page will fit every operational load. Verify the selected plan,
+configured internal-service/subrequest limits, request load, and concurrency
+for the intended workload; do not mandate Workers Paid solely because the
+application page size is 100. The platform also limits an invocation to six
+outbound connections waiting for response headers, so avoid issuing unbounded
+parallel R2 operations.
 
 ## Redaction and handling rules
 
@@ -294,8 +303,11 @@ Only after an explicit infrastructure approval and deletion/privacy review:
 - [ ] Attach only the `EVENT_ARCHIVE` binding to the matching Worker
       environment; keep credentials out of source control and use least
       privilege and rotation procedures.
-- [ ] Confirm the selected Workers plan and configured subrequest limit are
-      compatible with the intended diagnostic/replay workload.
+- [ ] Measure the intended R2 calls and concurrency (100-manifest listing is
+      at least 101 calls; materialization is at least 201), then verify the
+      selected plan's internal-service/subrequest limits and expected load.
+      Do not require Workers Paid unless the measured workload needs a higher
+      limit than the selected plan/configuration provides.
 - [ ] Run an approved synthetic write/read/retry/repair probe and verify that
       a data object is never considered committed without its manifest.
 - [ ] Add redacted monitoring for unavailable, conflict, corrupt, orphan, and
