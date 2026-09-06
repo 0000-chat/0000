@@ -6,6 +6,7 @@ import {
   ArchiveReplayCursorPayloadSchema,
   ArchiveReplayPageSchema,
   CanonicalEventEnvelopeSchema,
+  DEFAULT_REPLAY_PAGE_SIZE,
   DEFAULT_MANIFEST_PAGE_SIZE,
   MAX_ARCHIVE_COMPRESSED_BYTES,
   MAX_ARCHIVE_EVENTS,
@@ -15,6 +16,7 @@ import {
   MAX_CHECKPOINT_KIND_CHARS,
   MAX_CHECKPOINT_VALUE_CHARS,
   MAX_MANIFEST_PAGE_SIZE,
+  MAX_REPLAY_PAGE_UNCOMPRESSED_BYTES,
   MAX_REPLAY_PAGE_EVENTS,
   MAX_PRODUCER_VERSION_CHARS,
   type ArchiveBatchManifest,
@@ -127,7 +129,10 @@ describe("archive contract bounds", () => {
     expect(MAX_CHECKPOINT_VALUE_CHARS).toBe(512);
     expect(DEFAULT_MANIFEST_PAGE_SIZE).toBe(50);
     expect(MAX_MANIFEST_PAGE_SIZE).toBe(100);
-    expect(MAX_REPLAY_PAGE_EVENTS).toBe(MAX_MANIFEST_PAGE_SIZE * MAX_ARCHIVE_EVENTS);
+    expect(DEFAULT_REPLAY_PAGE_SIZE).toBe(1);
+    expect(MAX_REPLAY_PAGE_EVENTS).toBe(2_000);
+    expect(MAX_REPLAY_PAGE_EVENTS).toBe(4 * MAX_ARCHIVE_EVENTS);
+    expect(MAX_REPLAY_PAGE_UNCOMPRESSED_BYTES).toBe(8 * 1024 * 1024);
   });
 
   it("accepts the exact derived data and manifest key shapes", () => {
@@ -450,12 +455,12 @@ describe("ArchiveReplayPageSchema", () => {
     expect(
       ArchiveReplayPageSchema.safeParse({
         ...validPage(),
-        events: Array(MAX_REPLAY_PAGE_EVENTS).fill(event),
+        events: Array(2_000).fill(event),
       }).success,
     ).toBe(true);
     expectRejected(ArchiveReplayPageSchema, {
       ...validPage(),
-      events: Array(MAX_REPLAY_PAGE_EVENTS + 1).fill(event),
+      events: Array(2_001).fill(event),
     });
   });
 
