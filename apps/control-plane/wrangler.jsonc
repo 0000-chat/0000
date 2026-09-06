@@ -8,6 +8,14 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
+  "exports": {
+    "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+    ]
+  },
   "observability": { "enabled": true },
   "d1_databases": [
     {
@@ -41,6 +49,11 @@
         "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
         "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
       },
+      "durable_objects": {
+        "bindings": [
+          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+        ]
+      },
       "r2_buckets": [
         {
           "binding": "EVENT_ARCHIVE",
@@ -56,6 +69,11 @@
         "COMMUNICATOR_OIDC_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
         "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+        ]
       },
       "r2_buckets": [
         {
