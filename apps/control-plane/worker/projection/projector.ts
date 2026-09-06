@@ -68,21 +68,25 @@ const parseInstant = (timestamp: string): number => {
   return parsed;
 };
 
-const mapArchiveFailure = (error: unknown): ProjectionError => {
+export const mapArchiveFailure = (error: unknown): ProjectionError => {
   if (isProjectionError(error)) return error;
   if (isArchiveError(error)) {
     switch (error.code) {
-      case "archive_too_large":
-        return projectionError("projection_too_large", error);
-      case "archive_unavailable":
-        return projectionError("projection_unavailable", error);
+      case "archive_invalid":
+      case "archive_corrupt":
+      case "archive_not_found":
+        return projectionError("projection_invalid", error);
       case "archive_tenant_mismatch":
         return projectionError("projection_tenant_mismatch", error);
-      default:
-        return projectionError("projection_invalid", error);
+      case "archive_too_large":
+        return projectionError("projection_too_large", error);
+      case "archive_conflict":
+        return projectionError("projection_conflict", error);
+      case "archive_unavailable":
+        return projectionError("projection_unavailable", error);
     }
   }
-  return projectionError("projection_invalid", error);
+  return projectionError("projection_unavailable", error);
 };
 
 const parseAttachmentCrossFields = (event: ProjectionEventEnvelope): void => {

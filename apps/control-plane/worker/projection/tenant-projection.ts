@@ -107,6 +107,91 @@ type ProjectionCountRow = {
 
 type ProjectionSchemaGenerationRow = { schema_generation: number | null };
 
+const readProjectionMeta = (
+  storage: DurableObjectStorage,
+): ProjectionMetaRow | undefined =>
+  storage.sql
+    .exec<ProjectionMetaRow>(
+      "SELECT singleton, tenant_id, state, generation, rebuild_id, rebuild_started_at, last_completed_rebuild_id, last_failed_rebuild_id, last_rebuild_failure_code, initialized_at, updated_at FROM projection_meta WHERE singleton = 1",
+    )
+    .toArray()[0];
+
+const requireAuthorization = (
+  inputTenantId: string,
+  authorization: ProjectionAuthorizationContext,
+  requiredScope: ProjectionScope,
+): void => {
+  if (authorization.tenant_id !== inputTenantId) {
+    throw projectionError("projection_tenant_mismatch");
+  }
+  if (!authorization.scopes.includes(requiredScope)) {
+    throw projectionError("projection_forbidden");
+  }
+};
+
+const requireStoredTenant = (
+  meta: ProjectionMetaRow,
+  inputTenantId: string,
+): void => {
+  if (meta.tenant_id !== inputTenantId) {
+    throw projectionError("projection_tenant_mismatch");
+  }
+};
+
+const readStatusForMeta = (
+  storage: DurableObjectStorage,
+  meta: ProjectionMetaRow,
+): ProjectionStatus => {
+  const schemaGeneration = storage.sql
+    .exec<ProjectionSchemaGenerationRow>(
+      "SELECT MAX(version) AS schema_generation FROM _sql_schema_migrations",
+    )
+    .toArray()[0]?.schema_generation;
+  if (schemaGeneration === null || schemaGeneration === undefined) {
+    throw new Error("projection schema generation is missing");
+  }
+
+  const counts = storage.sql
+    .exec<ProjectionCountRow>(
+      "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(sequence) FROM projection_changes), 0) AS latest_change_sequence",
+    )
+    .toArray()[0];
+  if (counts === undefined) throw new Error("projection status counts are missing");
+
+  const checkpoints = storage.sql
+    .exec<ProjectionCheckpointRow>(
+      "SELECT kind, value, generation, updated_at, last_observed_at, last_event_id, source_cursor, page_digest FROM projection_checkpoints ORDER BY kind ASC",
+    )
+    .toArray()
+    .map<ProjectionStatusCheckpoint>((checkpoint) => ({
+      kind: checkpoint.kind,
+      value: checkpoint.value,
+      generation: checkpoint.generation,
+      updated_at: checkpoint.updated_at,
+      last_observed_at: checkpoint.last_observed_at,
+      last_event_id: checkpoint.last_event_id,
+      source_cursor: checkpoint.source_cursor,
+      page_digest: checkpoint.page_digest,
+    }));
+
+  return {
+    schema_version: 1,
+    tenant_id: meta.tenant_id,
+    schema_generation: schemaGeneration,
+    state: meta.state,
+    generation: meta.generation,
+    rebuild_id: meta.rebuild_id,
+    last_completed_rebuild_id: meta.last_completed_rebuild_id,
+    last_failed_rebuild_id: meta.last_failed_rebuild_id,
+    last_rebuild_failure_code: meta.last_rebuild_failure_code,
+    applied_event_count: counts.applied_event_count,
+    conversation_count: counts.conversation_count,
+    message_count: counts.message_count,
+    latest_change_sequence: counts.latest_change_sequence,
+    checkpoints,
+  };
+};
+
 const parseProjectionInput = <T>(
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
   input: unknown,
@@ -177,16 +262,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         InitializeProjectionInputSchema,
         input,
       );
-      this.requireAuthorization(
+      requireAuthorization(
         parsed.tenant_id,
         parsed.authorization,
         "projection.initialize",
       );
 
-      const existing = this.readProjectionMeta();
+      const existing = readProjectionMeta(this.ctx.storage);
       if (existing !== undefined) {
-        this.requireStoredTenant(existing, parsed.tenant_id);
-        return this.readStatusForMeta(existing);
+        requireStoredTenant(existing, parsed.tenant_id);
+        return readStatusForMeta(this.ctx.storage, existing);
       }
 
       this.ctx.storage.transactionSync(() => {
@@ -199,10 +284,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         );
       });
 
-      const created = this.readProjectionMeta();
+      const created = readProjectionMeta(this.ctx.storage);
       if (created === undefined) throw new Error("projection metadata was not created");
-      this.requireStoredTenant(created, parsed.tenant_id);
-      return this.readStatusForMeta(created);
+      requireStoredTenant(created, parsed.tenant_id);
+      return readStatusForMeta(this.ctx.storage, created);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -211,16 +296,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   async getStatus(input: ProjectionStatusInput): Promise<ProjectionStatus> {
     try {
       const parsed = parseProjectionInput(ProjectionStatusInputSchema, input);
-      this.requireAuthorization(
+      requireAuthorization(
         parsed.tenant_id,
         parsed.authorization,
         "projection.status",
       );
 
-      const meta = this.readProjectionMeta();
+      const meta = readProjectionMeta(this.ctx.storage);
       if (meta === undefined) throw projectionError("projection_not_found");
-      this.requireStoredTenant(meta, parsed.tenant_id);
-      return this.readStatusForMeta(meta);
+      requireStoredTenant(meta, parsed.tenant_id);
+      return readStatusForMeta(this.ctx.storage, meta);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -236,19 +321,19 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   ): Promise<ApplyProjectionBatchResult> {
     try {
       const parsed = parseApplyProjectionBatchInput(input);
-      this.requireAuthorization(
+      requireAuthorization(
         parsed.tenant_id,
         parsed.authorization,
         "projection.write",
       );
 
-      const meta = this.readProjectionMeta();
+      const meta = readProjectionMeta(this.ctx.storage);
       if (meta === undefined) throw projectionError("projection_not_found");
-      this.requireStoredTenant(meta, parsed.tenant_id);
-      this.requireReadyState(meta);
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
 
       const prepared = await prepareProjectionBatch(parsed);
-      return this.applyPreparedBatch({
+      return this.#applyPreparedBatch({
         tenantId: prepared.tenantId,
         mode: "live",
         rebuildId: null,
@@ -267,7 +352,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
    * this private path in a later task; the public applyBatch schema remains
    * deliberately live-only in this phase.
    */
-  private applyPreparedBatch(
+  #applyPreparedBatch(
     input: ApplyPreparedBatchInput,
   ): ApplyProjectionBatchResult {
     try {
@@ -276,21 +361,21 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           throw projectionError("projection_invalid");
         }
 
-        const meta = this.readProjectionMeta();
+        const meta = readProjectionMeta(this.ctx.storage);
         if (meta === undefined) throw projectionError("projection_not_found");
-        this.requireStoredTenant(meta, input.tenantId);
-        this.requireReadyState(meta);
+        requireStoredTenant(meta, input.tenantId);
+        this.#requireReadyState(meta);
 
-        this.ensurePersistentBindings(input.connections);
+        this.#ensurePersistentBindings(input.connections);
 
-        const storedEvents = this.readAppliedEvents(
+        const storedEvents = this.#readAppliedEvents(
           input.preparedEvents,
         );
         let appliedCount = 0;
         for (const prepared of input.preparedEvents) {
           const stored = storedEvents.get(prepared.event.event_id);
           if (stored !== undefined) {
-            this.assertStoredEventMatches(stored, prepared);
+            this.#assertStoredEventMatches(stored, prepared);
             continue;
           }
 
@@ -325,9 +410,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           appliedCount += 1;
         }
 
-        this.trimProjectionChanges();
-        const lastSequence = this.readLastSequence();
-        this.applyLiveCheckpoint(input.checkpointMutation, meta, lastSequence);
+        this.#trimProjectionChanges();
+        const lastSequence = this.#readLastSequence();
+        this.#applyLiveCheckpoint(input.checkpointMutation, meta, lastSequence);
 
         return {
           schema_version: 1,
@@ -344,7 +429,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  private requireReadyState(meta: ProjectionMetaRow): void {
+  #requireReadyState(meta: ProjectionMetaRow): void {
     if (meta.state === "rebuilding") {
       throw projectionError("projection_rebuilding");
     }
@@ -356,7 +441,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  private ensurePersistentBindings(
+  #ensurePersistentBindings(
     bindings: readonly ProjectionConnectionBinding[],
   ): void {
     for (const binding of bindings) {
@@ -403,7 +488,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  private readAppliedEvents(
+  #readAppliedEvents(
     events: readonly PreparedProjectionEvent[],
   ): Map<string, AppliedEventRow> {
     const result = new Map<string, AppliedEventRow>();
@@ -423,7 +508,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  private assertStoredEventMatches(
+  #assertStoredEventMatches(
     stored: AppliedEventRow,
     prepared: PreparedProjectionEvent,
   ): void {
@@ -444,7 +529,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  private readLastSequence(): number {
+  #readLastSequence(): number {
     const row = this.ctx.storage.sql
       .exec<{ last_sequence: number }>(
         "SELECT COALESCE(MAX(sequence), 0) AS last_sequence FROM projection_changes",
@@ -454,7 +539,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     return row.last_sequence;
   }
 
-  private trimProjectionChanges(): void {
+  #trimProjectionChanges(): void {
     const boundary = this.ctx.storage.sql
       .exec<{ sequence: number }>(
         `SELECT sequence FROM projection_changes ORDER BY sequence DESC LIMIT 1 OFFSET ${MAX_PROJECTION_CHANGES}`,
@@ -497,7 +582,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  private applyLiveCheckpoint(
+  #applyLiveCheckpoint(
     checkpoint: PreparedCheckpointMutation | null,
     meta: ProjectionMetaRow,
     lastSequence: number,
@@ -566,86 +651,4 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  /** Synchronous guard used by every RPC entry point as it is added. */
-  private requireAuthorization(
-    inputTenantId: string,
-    authorization: ProjectionAuthorizationContext,
-    requiredScope: ProjectionScope,
-  ): void {
-    if (authorization.tenant_id !== inputTenantId) {
-      throw projectionError("projection_tenant_mismatch");
-    }
-    if (!authorization.scopes.includes(requiredScope)) {
-      throw projectionError("projection_forbidden");
-    }
-  }
-
-  /** Synchronous guard for the durable tenant binding. */
-  private requireStoredTenant(
-    meta: ProjectionMetaRow,
-    inputTenantId: string,
-  ): void {
-    if (meta.tenant_id !== inputTenantId) {
-      throw projectionError("projection_tenant_mismatch");
-    }
-  }
-
-  private readProjectionMeta(): ProjectionMetaRow | undefined {
-    return this.ctx.storage.sql
-      .exec<ProjectionMetaRow>(
-        "SELECT singleton, tenant_id, state, generation, rebuild_id, rebuild_started_at, last_completed_rebuild_id, last_failed_rebuild_id, last_rebuild_failure_code, initialized_at, updated_at FROM projection_meta WHERE singleton = 1",
-      )
-      .toArray()[0];
-  }
-
-  private readStatusForMeta(meta: ProjectionMetaRow): ProjectionStatus {
-    const schemaGeneration = this.ctx.storage.sql
-      .exec<ProjectionSchemaGenerationRow>(
-        "SELECT MAX(version) AS schema_generation FROM _sql_schema_migrations",
-      )
-      .toArray()[0]?.schema_generation;
-    if (schemaGeneration === null || schemaGeneration === undefined) {
-      throw new Error("projection schema generation is missing");
-    }
-
-    const counts = this.ctx.storage.sql
-      .exec<ProjectionCountRow>(
-        "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(sequence) FROM projection_changes), 0) AS latest_change_sequence",
-      )
-      .toArray()[0];
-    if (counts === undefined) throw new Error("projection status counts are missing");
-
-    const checkpoints = this.ctx.storage.sql
-      .exec<ProjectionCheckpointRow>(
-        "SELECT kind, value, generation, updated_at, last_observed_at, last_event_id, source_cursor, page_digest FROM projection_checkpoints ORDER BY kind ASC",
-      )
-      .toArray()
-      .map<ProjectionStatusCheckpoint>((checkpoint) => ({
-        kind: checkpoint.kind,
-        value: checkpoint.value,
-        generation: checkpoint.generation,
-        updated_at: checkpoint.updated_at,
-        last_observed_at: checkpoint.last_observed_at,
-        last_event_id: checkpoint.last_event_id,
-        source_cursor: checkpoint.source_cursor,
-        page_digest: checkpoint.page_digest,
-      }));
-
-    return {
-      schema_version: 1,
-      tenant_id: meta.tenant_id,
-      schema_generation: schemaGeneration,
-      state: meta.state,
-      generation: meta.generation,
-      rebuild_id: meta.rebuild_id,
-      last_completed_rebuild_id: meta.last_completed_rebuild_id,
-      last_failed_rebuild_id: meta.last_failed_rebuild_id,
-      last_rebuild_failure_code: meta.last_rebuild_failure_code,
-      applied_event_count: counts.applied_event_count,
-      conversation_count: counts.conversation_count,
-      message_count: counts.message_count,
-      latest_change_sequence: counts.latest_change_sequence,
-      checkpoints,
-    };
-  }
 }

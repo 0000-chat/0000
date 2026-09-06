@@ -5,10 +5,14 @@ import type {
   ProjectionConnectionBinding,
   ProjectionEventEnvelope,
 } from "@communicator/contracts";
+import { archiveError } from "../../archive/errors";
 import { describe, expect, it } from "vitest";
 import type { TenantProjectionDO } from "../../projection/tenant-projection";
 import { canonicalJsonLineBytes } from "../../archive/canonical-json";
-import { prepareProjectionBatch } from "../../projection/projector";
+import {
+  mapArchiveFailure,
+  prepareProjectionBatch,
+} from "../../projection/projector";
 
 const tenantId = "tenant_apply_batch";
 
@@ -115,6 +119,21 @@ const rows = async <T extends Record<string, SqlStorageValue>>(
   runInDurableObject(stub, async (_instance, state) =>
     state.storage.sql.exec<T>(sql).toArray(),
   );
+
+const INTERNAL_HELPER_NAMES = [
+  "applyPreparedBatch",
+  "requireReadyState",
+  "ensurePersistentBindings",
+  "readAppliedEvents",
+  "assertStoredEventMatches",
+  "readLastSequence",
+  "trimProjectionChanges",
+  "applyLiveCheckpoint",
+  "requireAuthorization",
+  "requireStoredTenant",
+  "readProjectionMeta",
+  "readStatusForMeta",
+] as const;
 
 describe("tenant projection applyBatch", () => {
   it("accepts one event and returns one newly applied audit marker", async () => {
@@ -269,6 +288,83 @@ describe("tenant projection applyBatch", () => {
     (input.events[0]!.payload as { body: string }).body = "mutated after snapshot";
     const prepared = await preparedPromise;
     expect((prepared.events[0]!.event.payload as { body: string }).body).toBe("hello");
+  });
+
+  it("keeps every projection helper runtime-private and blocks forged prepared application", async () => {
+    const tenant = "tenant_apply_private_helpers";
+    const stub = env.TENANT_PROJECTION.getByName(tenant);
+    await initialize(stub, tenant);
+    const forgedPreparedEvent = {
+      event: event("event_forged", { tenant_id: tenant }),
+      connection: binding(),
+      eventHash: "0".repeat(64),
+      canonicalLineBytes: 1,
+      observedMs: Date.parse("2026-09-07T01:00:01.000Z"),
+      occurredMs: Date.parse("2026-09-07T01:00:00.000Z"),
+    };
+
+    const reflection = await runInDurableObject(stub, async (instance) => {
+      const prototype = Object.getPrototypeOf(instance);
+      const visibleHelpers = INTERNAL_HELPER_NAMES.filter(
+        (name) => Reflect.get(prototype, name) !== undefined || Reflect.get(instance, name) !== undefined,
+      );
+      const forged = Reflect.get(instance, "applyPreparedBatch");
+      if (typeof forged === "function") {
+        try {
+          await forged.call(instance, {
+            tenantId: tenant,
+            mode: "live",
+            rebuildId: null,
+            preparedEvents: [forgedPreparedEvent],
+            checkpointMutation: null,
+            inputEventCount: 1,
+            connections: [binding()],
+          });
+        } catch {
+          // The visibility assertion below is the security boundary. Any
+          // legacy reflective invocation is intentionally not trusted.
+        }
+      }
+      return { visibleHelpers, forgedCallable: typeof forged === "function" };
+    });
+
+    expect(reflection.visibleHelpers).toEqual([]);
+    expect(reflection.forgedCallable).toBe(false);
+    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
+  });
+
+  it.each([
+    ["archive_invalid", "projection_invalid"],
+    ["archive_corrupt", "projection_invalid"],
+    ["archive_not_found", "projection_invalid"],
+    ["archive_tenant_mismatch", "projection_tenant_mismatch"],
+    ["archive_too_large", "projection_too_large"],
+    ["archive_conflict", "projection_conflict"],
+    ["archive_unavailable", "projection_unavailable"],
+  ] as const)("maps %s to %s without leaking a malicious sentinel", (archiveCode, projectionCode) => {
+    const sentinel = "payload=malicious sentinel SQL=secret";
+    const mapped = mapArchiveFailure(archiveError(archiveCode, sentinel));
+
+    expect(mapped.code).toBe(projectionCode);
+    expect(mapped.message).toBe(projectionCode);
+    expect(Object.keys(mapped)).toEqual(["code"]);
+    expect(JSON.stringify(mapped)).not.toContain(sentinel);
+    expect(Object.values(mapped)).not.toContain(sentinel);
+    expect(Object.getOwnPropertyNames(mapped)).not.toContain("cause");
+  });
+
+  it("maps unknown canonicalization failures to unavailable without leaking the cause", () => {
+    const sentinel = "payload=unknown canonicalization sentinel";
+    const mapped = mapArchiveFailure(new Error(sentinel));
+
+    expect(mapped.code).toBe("projection_unavailable");
+    expect(mapped.message).toBe("projection_unavailable");
+    expect(Object.keys(mapped)).toEqual(["code"]);
+    expect(JSON.stringify(mapped)).not.toContain(sentinel);
+    expect(Object.values(mapped)).not.toContain(sentinel);
+    expect(Object.getOwnPropertyNames(mapped)).not.toContain("cause");
   });
 
   it("rejects same event ID with a different canonical hash and rolls back the batch", async () => {
