@@ -103,4 +103,19 @@ describe("canonical JSON", () => {
   it("keeps the canonical JSON depth bound explicit", () => {
     expect(MAX_CANONICAL_JSON_DEPTH).toBe(32);
   });
+
+  it("rejects arrays whose indexed values are non-enumerable", () => {
+    const value = ["hidden"];
+    Object.defineProperty(value, "0", {
+      configurable: true,
+      enumerable: false,
+      value: "hidden",
+      writable: true,
+    });
+
+    expect(() => canonicalJsonStringify(value)).toThrowError(ArchiveError);
+    expect(() => canonicalJsonStringify(value)).toThrowError(
+      expect.objectContaining({ code: "archive_invalid" }),
+    );
+  });
 });

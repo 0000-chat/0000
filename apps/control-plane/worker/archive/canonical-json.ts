@@ -113,7 +113,7 @@ const snapshotJsonValue = (
       try {
         for (let index = 0; index < length; index += 1) {
           const descriptor = descriptors.get(String(index));
-          if (!descriptor || !("value" in descriptor)) {
+          if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
             throw archiveError("archive_invalid");
           }
           snapshot[index] = snapshotJsonValue(descriptor.value, depth + 1, context);
