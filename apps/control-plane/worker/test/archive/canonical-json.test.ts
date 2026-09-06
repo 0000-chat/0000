@@ -5,6 +5,7 @@ import {
   canonicalJsonStringify,
   utf8ByteLength,
 } from "../../archive/canonical-json";
+import { MAX_CANONICAL_JSON_DEPTH } from "@communicator/contracts";
 
 describe("canonical JSON", () => {
   it("sorts nested object keys by UTF-16 code units and preserves array order", () => {
@@ -75,4 +76,31 @@ describe("canonical JSON", () => {
       expect((caught as Error).message).not.toContain("RangeError");
     },
   );
+
+  it("snapshots a stateful Proxy once instead of serializing a second inconsistent view", () => {
+    const target = { z: 1, a: 2 };
+    let ownKeysCalls = 0;
+    const value = new Proxy(target, {
+      ownKeys: () => {
+        ownKeysCalls += 1;
+        return ownKeysCalls === 1 ? ["z", "a"] : ["z"];
+      },
+    });
+
+    let result: string | undefined;
+    let caught: unknown;
+    try {
+      result = canonicalJsonStringify(value);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(ownKeysCalls).toBe(1);
+    expect(caught).toBeUndefined();
+    expect(result).toBe('{"a":2,"z":1}');
+  });
+
+  it("keeps the canonical JSON depth bound explicit", () => {
+    expect(MAX_CANONICAL_JSON_DEPTH).toBe(32);
+  });
 });

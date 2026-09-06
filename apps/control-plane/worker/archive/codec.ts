@@ -9,7 +9,8 @@ import {
 } from "@communicator/contracts";
 import {
   bytesEqual,
-  canonicalJsonBytes,
+  canonicalEventJsonBytes,
+  snapshotCanonicalEventInput,
 } from "./canonical-json";
 import { ArchiveError, archiveError } from "./errors";
 
@@ -82,7 +83,9 @@ const inputArraySnapshot = (input: unknown): unknown[] => {
 
 const parseEvent = (input: unknown): CanonicalEventEnvelope => {
   try {
-    const result = CanonicalEventEnvelopeSchema.safeParse(input);
+    const result = CanonicalEventEnvelopeSchema.safeParse(
+      snapshotCanonicalEventInput(input),
+    );
     if (!result.success) throw archiveError("archive_invalid", result.error);
     return result.data;
   } catch (error) {
@@ -125,10 +128,11 @@ const readStreamBounded = async (
   maxBytes: number,
   tooLargeCode: "archive_too_large" | "archive_corrupt" = "archive_too_large",
 ): Promise<Uint8Array> => {
-  const reader = stream.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
+    reader = stream.getReader();
     while (true) {
       const item = await reader.read();
       if (item.done) break;
@@ -141,14 +145,14 @@ const readStreamBounded = async (
     }
   } catch (error) {
     try {
-      await reader.cancel();
+      await reader?.cancel();
     } catch {
       // Preserve the original bounded-read/decompression failure.
     }
     if (error instanceof ArchiveError) throw error;
     throw archiveError("archive_corrupt", error);
   } finally {
-    reader.releaseLock();
+    reader?.releaseLock();
   }
   return concatChunks(chunks, total);
 };
@@ -186,6 +190,9 @@ export const gzipBytes = async (
   maxCompressedBytes = MAX_ARCHIVE_COMPRESSED_BYTES,
 ): Promise<Uint8Array> => {
   try {
+    if (bytes.byteLength > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+      throw archiveError("archive_too_large");
+    }
     validateBound(maxCompressedBytes, MAX_ARCHIVE_COMPRESSED_BYTES);
     if (typeof CompressionStream === "undefined") {
       throw archiveError("archive_unavailable");
@@ -327,7 +334,7 @@ const buildCanonicalJsonl = (
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (const event of events) {
-    const eventBytes = canonicalJsonBytes(event);
+    const eventBytes = canonicalEventJsonBytes(event);
     if (eventBytes.byteLength > MAX_EVENT_CANONICAL_BYTES) {
       throw archiveError("archive_too_large");
     }

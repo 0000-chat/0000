@@ -1,4 +1,4 @@
-import type { CanonicalEventEnvelope } from "@communicator/contracts";
+import type { CanonicalEventEnvelope, CanonicalJsonObject } from "@communicator/contracts";
 
 export const TENANT_ID = "tenant_pilot";
 export const OTHER_TENANT_ID = "tenant_other";
@@ -39,3 +39,14 @@ export const makeEvents = (count: number): CanonicalEventEnvelope[] =>
 export const cloneEvents = (
   events: readonly CanonicalEventEnvelope[],
 ): CanonicalEventEnvelope[] => structuredClone(events) as CanonicalEventEnvelope[];
+
+export const nestedPayload = (depth: number): CanonicalJsonObject => {
+  const root: Record<string, unknown> = {};
+  let cursor = root;
+  for (let index = 0; index < depth; index += 1) {
+    const child: Record<string, unknown> = {};
+    cursor.child = child;
+    cursor = child;
+  }
+  return root as CanonicalJsonObject;
+};

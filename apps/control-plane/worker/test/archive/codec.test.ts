@@ -7,7 +7,19 @@ import {
   gzipBytes,
   sha256Hex,
 } from "../../archive/codec";
-import { cloneEvents, makeEvent, makeEvents, OTHER_TENANT_ID, TENANT_ID } from "./support";
+import {
+  cloneEvents,
+  makeEvent,
+  makeEvents,
+  nestedPayload,
+  OTHER_TENANT_ID,
+  TENANT_ID,
+} from "./support";
+import {
+  CanonicalEventEnvelopeSchema,
+  MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+  MAX_CANONICAL_JSON_DEPTH,
+} from "@communicator/contracts";
 
 const getError = async (operation: Promise<unknown>): Promise<ArchiveError> => {
   try {
@@ -20,6 +32,22 @@ const getError = async (operation: Promise<unknown>): Promise<ArchiveError> => {
 };
 
 describe("archive codec", () => {
+  it("serializes and decodes an event at the exact payload depth boundary", async () => {
+    const event = makeEvent({ payload: nestedPayload(MAX_CANONICAL_JSON_DEPTH) });
+    expect(CanonicalEventEnvelopeSchema.safeParse(event).success).toBe(true);
+
+    const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [event] });
+    await expect(
+      decodeCanonicalJsonl(encoded.canonicalJsonl, { tenantId: TENANT_ID }),
+    ).resolves.toHaveLength(1);
+
+    const tooDeep = makeEvent({ payload: nestedPayload(MAX_CANONICAL_JSON_DEPTH + 1) });
+    expect(CanonicalEventEnvelopeSchema.safeParse(tooDeep).success).toBe(false);
+    await expect(encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [tooDeep] })).rejects.toMatchObject({
+      code: "archive_invalid",
+    });
+  });
+
   it("sorts by observed instant, occurred instant, then event ID and terminates JSONL with one newline", async () => {
     const events = [
       makeEvent({
@@ -128,6 +156,15 @@ describe("archive codec", () => {
     expect((await getError(gunzipBytes(corrupted))).code).toBe("archive_corrupt");
   });
 
+  it("enforces the uncompressed gzip bound before creating a stream", async () => {
+    await expect(gzipBytes(new Uint8Array(MAX_ARCHIVE_UNCOMPRESSED_BYTES))).resolves.toBeInstanceOf(
+      Uint8Array,
+    );
+    await expect(gzipBytes(new Uint8Array(MAX_ARCHIVE_UNCOMPRESSED_BYTES + 1))).rejects.toMatchObject({
+      code: "archive_too_large",
+    });
+  });
+
   it("rejects malformed gzip and invalid UTF-8 as archive_corrupt", async () => {
     const gzipError = await getError(gunzipBytes(new Uint8Array([0x1f, 0x8b, 0x00])));
     expect(gzipError.code).toBe("archive_corrupt");
@@ -185,6 +222,30 @@ describe("archive codec", () => {
       decodeCanonicalJsonl(stream, { tenantId: TENANT_ID, maxDecodedBytes: encoded.canonicalJsonl.byteLength }),
     );
     expect(error.code).toBe("archive_too_large");
+  });
+
+  it("maps locked input streams to safe archive errors", async () => {
+    const decodeStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x0a]));
+        controller.close();
+      },
+    });
+    decodeStream.getReader();
+    await expect(decodeCanonicalJsonl(decodeStream)).rejects.toMatchObject({
+      code: "archive_corrupt",
+    });
+
+    const gzipStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x1f, 0x8b]));
+        controller.close();
+      },
+    });
+    gzipStream.getReader();
+    await expect(gunzipBytes(gzipStream)).rejects.toMatchObject({
+      code: "archive_corrupt",
+    });
   });
 
   it("maps cyclic/prototype-sensitive event inputs to safe archive_invalid errors", async () => {
