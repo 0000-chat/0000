@@ -13,37 +13,17 @@ import { canonicalJsonLineBytes, bytesEqual } from "../archive/canonical-json";
 import { sha256Hex } from "../archive/codec";
 import { isArchiveError } from "../archive/errors";
 import { isProjectionError, projectionError, type ProjectionError } from "./errors";
+import type {
+  PreparedCheckpointMutation,
+  PreparedProjectionBatch,
+  PreparedProjectionEvent,
+} from "./projector-types";
 
-/**
- * The value passed from asynchronous preflight into the synchronous projection
- * transaction. Canonical bytes are retained in a module-private WeakMap so
- * duplicate grouping compares exact bytes without widening this internal
- * value's shape or exposing transport data.
- */
-export type PreparedProjectionEvent = {
-  readonly event: ProjectionEventEnvelope;
-  readonly connection: ProjectionConnectionBinding;
-  readonly eventHash: string;
-  readonly canonicalLineBytes: number;
-  readonly observedMs: number;
-  readonly occurredMs: number;
-};
-
-export type PreparedCheckpointMutation = {
-  readonly kind: string;
-  readonly value: string;
-  readonly lastObservedAt: string;
-  readonly lastObservedMs: number;
-  readonly lastEventId: string;
-};
-
-export type PreparedProjectionBatch = {
-  readonly tenantId: string;
-  readonly inputEventCount: number;
-  readonly events: readonly PreparedProjectionEvent[];
-  readonly connections: readonly ProjectionConnectionBinding[];
-  readonly checkpointMutation: PreparedCheckpointMutation | null;
-};
+export type {
+  PreparedCheckpointMutation,
+  PreparedProjectionBatch,
+  PreparedProjectionEvent,
+} from "./projector-types";
 
 const RESERVED_REPLAY_CHECKPOINT_KIND = "r2_manifest_cursor";
 const canonicalLinesByPreparedEvent = new WeakMap<
@@ -318,10 +298,4 @@ export const prepareProjectionBatch = async (
   };
 };
 
-/** Task 4 intentionally has no domain state yet; Task 5 supplies handlers. */
-export const projectEvent = (
-  _event: PreparedProjectionEvent,
-  _sql: SqlStorage,
-): void => {
-  // Audit markers are written by the caller after this no-op hook.
-};
+export { projectEvent, recomputeConversationSummaries } from "./projector-domains";

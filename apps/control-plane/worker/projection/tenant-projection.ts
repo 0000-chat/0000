@@ -24,6 +24,7 @@ import {
 import {
   prepareProjectionBatch,
   projectEvent,
+  recomputeConversationSummaries,
   type PreparedCheckpointMutation,
   type PreparedProjectionEvent,
 } from "./projector";
@@ -372,6 +373,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           input.preparedEvents,
         );
         let appliedCount = 0;
+        const touchedConversations = new Set<string>();
         for (const prepared of input.preparedEvents) {
           const stored = storedEvents.get(prepared.event.event_id);
           if (stored !== undefined) {
@@ -379,7 +381,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             continue;
           }
 
-          projectEvent(prepared, this.ctx.storage.sql);
+          projectEvent(
+            prepared,
+            this.ctx.storage.sql,
+            touchedConversations,
+          );
           this.ctx.storage.sql.exec(
             "INSERT INTO applied_events (event_id, event_hash, event_type, event_source, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, observed_ms, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             prepared.event.event_id,
@@ -409,6 +415,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           );
           appliedCount += 1;
         }
+
+        recomputeConversationSummaries(
+          this.ctx.storage.sql,
+          touchedConversations,
+        );
 
         this.#trimProjectionChanges();
         const lastSequence = this.#readLastSequence();

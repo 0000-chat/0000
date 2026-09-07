@@ -443,15 +443,31 @@ const expectedIndexes = [
   "idx_messages_identity_conversation_occurred",
   "idx_messages_matrix_event",
   "idx_messages_remote_message",
+  "idx_messages_reply_target",
+  "idx_messages_sender_participant",
+  "idx_messages_conversation_owner",
   "idx_message_versions_message_order",
+  "idx_message_versions_editor_participant",
+  "idx_message_versions_conversation_owner",
   "idx_participants_conversation_name",
   "idx_reactions_message_state",
+  "idx_reactions_participant",
+  "idx_reactions_conversation_owner",
   "idx_receipts_message_type_time",
+  "idx_receipts_participant",
+  "idx_receipts_conversation_owner",
+  "idx_typing_participant",
   "idx_attachments_message_state",
+  "idx_attachments_conversation_owner",
   "idx_delivery_message_order",
+  "idx_delivery_conversation_owner",
+  "idx_commands_conversation_owner",
+  "idx_event_tombstones_conversation_owner",
   "idx_applied_events_order",
   "idx_projection_changes_identity_sequence",
   "idx_resource_tombstones_resource_order",
+  "idx_resource_tombstones_id",
+  "idx_resource_tombstones_conversation_owner",
 ];
 
 const expectedIndexSql: Record<string, string> = {
@@ -465,24 +481,56 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_messages_matrix_event ON messages(matrix_event_id) WHERE matrix_event_id IS NOT NULL",
   idx_messages_remote_message:
     "CREATE INDEX idx_messages_remote_message ON messages(remote_message_id) WHERE remote_message_id IS NOT NULL",
+  idx_messages_reply_target:
+    "CREATE INDEX idx_messages_reply_target ON messages(reply_to_message_id) WHERE reply_to_message_id IS NOT NULL",
+  idx_messages_sender_participant:
+    "CREATE INDEX idx_messages_sender_participant ON messages(sender_participant_id) WHERE sender_participant_id IS NOT NULL",
+  idx_messages_conversation_owner:
+    "CREATE INDEX idx_messages_conversation_owner ON messages(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_message_versions_message_order:
     "CREATE INDEX idx_message_versions_message_order ON message_versions(message_id,observed_ms DESC,event_id DESC)",
+  idx_message_versions_editor_participant:
+    "CREATE INDEX idx_message_versions_editor_participant ON message_versions(editor_participant_id) WHERE editor_participant_id IS NOT NULL",
+  idx_message_versions_conversation_owner:
+    "CREATE INDEX idx_message_versions_conversation_owner ON message_versions(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_participants_conversation_name:
     "CREATE INDEX idx_participants_conversation_name ON participants(conversation_id,display_name,id)",
   idx_reactions_message_state:
     "CREATE INDEX idx_reactions_message_state ON reactions(message_id,removed_at,occurred_at)",
+  idx_reactions_participant:
+    "CREATE INDEX idx_reactions_participant ON reactions(participant_id) WHERE participant_id IS NOT NULL",
+  idx_reactions_conversation_owner:
+    "CREATE INDEX idx_reactions_conversation_owner ON reactions(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_receipts_message_type_time:
     "CREATE INDEX idx_receipts_message_type_time ON receipts(message_id,receipt_type,occurred_at)",
+  idx_receipts_participant:
+    "CREATE INDEX idx_receipts_participant ON receipts(participant_id)",
+  idx_receipts_conversation_owner:
+    "CREATE INDEX idx_receipts_conversation_owner ON receipts(conversation_id,identity_id,account_id,connection_id,platform)",
+  idx_typing_participant:
+    "CREATE INDEX idx_typing_participant ON typing_states(participant_id)",
   idx_attachments_message_state:
     "CREATE INDEX idx_attachments_message_state ON attachments(message_id,deleted_at,id)",
+  idx_attachments_conversation_owner:
+    "CREATE INDEX idx_attachments_conversation_owner ON attachments(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_delivery_message_order:
     "CREATE INDEX idx_delivery_message_order ON message_delivery_updates(message_id,last_observed_ms,last_event_id)",
+  idx_delivery_conversation_owner:
+    "CREATE INDEX idx_delivery_conversation_owner ON message_delivery_updates(conversation_id,identity_id,account_id,connection_id,platform)",
+  idx_commands_conversation_owner:
+    "CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)",
+  idx_event_tombstones_conversation_owner:
+    "CREATE INDEX idx_event_tombstones_conversation_owner ON event_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_applied_events_order:
     "CREATE INDEX idx_applied_events_order ON applied_events(observed_ms,event_id)",
   idx_projection_changes_identity_sequence:
     "CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,sequence)",
   idx_resource_tombstones_resource_order:
     "CREATE INDEX idx_resource_tombstones_resource_order ON resource_tombstones(resource_type,resource_id,observed_ms)",
+  idx_resource_tombstones_id:
+    "CREATE INDEX idx_resource_tombstones_id ON resource_tombstones(resource_id,resource_type)",
+  idx_resource_tombstones_conversation_owner:
+    "CREATE INDEX idx_resource_tombstones_conversation_owner ON resource_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
 };
 
 describe("tenant projection SQLite schema", () => {
@@ -543,7 +591,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(14);
+    expect(indexNames).toHaveLength(30);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -593,6 +641,191 @@ describe("tenant projection SQLite schema", () => {
         .toArray(),
     );
     expect(second).toEqual(first);
+  });
+
+  it("uses the required access-path indexes for summary and reverse ownership lookups", async () => {
+    const stub = env.TENANT_PROJECTION.getByName("tenant_schema_query_plans");
+    const plans = await runInDurableObject(stub, async (_instance, state) => {
+      type QueryPlanRow = { detail: string };
+      const explain = (query: string, ...params: unknown[]): string[] =>
+        state.storage.sql
+          .exec<QueryPlanRow>(`EXPLAIN QUERY PLAN ${query}`, ...params)
+          .toArray()
+          .map((row) => row.detail.toLowerCase());
+
+      const summaryUpdate = explain(
+        "UPDATE messages SET attachment_count = (SELECT COUNT(*) FROM attachments WHERE attachments.message_id = messages.id AND attachments.deleted_at IS NULL) WHERE identity_id = ? AND conversation_id = ? AND deleted_at IS NULL",
+        "identity_query",
+        "conversation_query",
+      );
+      const summaryCount = explain(
+        "SELECT COUNT(*) FROM messages WHERE identity_id = ? AND conversation_id = ? AND deleted_at IS NULL",
+        "identity_query",
+        "conversation_query",
+      );
+      const latestMessage = explain(
+        "SELECT id, body, occurred_at, occurred_ms FROM messages WHERE identity_id = ? AND conversation_id = ? AND deleted_at IS NULL ORDER BY occurred_ms DESC, id ASC LIMIT 1",
+        "identity_query",
+        "conversation_query",
+      );
+      const replyTarget = explain(
+        "SELECT 1 AS found FROM messages WHERE reply_to_message_id = ? AND (identity_id <> ? OR account_id <> ? OR connection_id <> ? OR conversation_id <> ? OR platform <> ?) LIMIT 1",
+        "reply_query",
+        "identity_query",
+        "account_query",
+        "connection_query",
+        "conversation_query",
+        "platform_query",
+      );
+      const resourceTombstoneId = explain(
+        "SELECT resource_type, identity_id, account_id, connection_id, conversation_id, platform FROM resource_tombstones WHERE resource_id = ?",
+        "resource_query",
+      );
+      const conversationAttachmentTombstones = explain(
+        "SELECT attachments.id, attachment_tombstone.occurred_at, message_tombstone.occurred_at FROM attachments LEFT JOIN resource_tombstones AS attachment_tombstone ON attachment_tombstone.resource_type = 'attachment' AND attachment_tombstone.resource_id = attachments.id LEFT JOIN resource_tombstones AS message_tombstone ON message_tombstone.resource_type = 'message' AND message_tombstone.resource_id = attachments.message_id WHERE attachments.conversation_id = ?",
+        "conversation_query",
+      );
+
+      const reverseLookups = Object.fromEntries(
+        [
+          ["message_versions", "message_id", "idx_message_versions_message_order"],
+          ["messages", "sender_participant_id", "idx_messages_sender_participant"],
+          ["message_versions", "editor_participant_id", "idx_message_versions_editor_participant"],
+          ["reactions", "message_id", "idx_reactions_message_state"],
+          ["reactions", "participant_id", "idx_reactions_participant"],
+          ["receipts", "message_id", "idx_receipts_message_type_time"],
+          ["receipts", "participant_id", "idx_receipts_participant"],
+          ["typing_states", "participant_id", "idx_typing_participant"],
+          ["attachments", "message_id", "idx_attachments_message_state"],
+          ["message_delivery_updates", "message_id", "idx_delivery_message_order"],
+        ].map(([table, column, index]) => [
+          index,
+          explain(`SELECT 1 FROM ${table} WHERE ${column} = ? LIMIT 1`, "participant_query"),
+        ]),
+      );
+      const ownerMismatchParams = [
+        "conversation_query",
+        "identity_query",
+        "account_query",
+        "connection_query",
+        "conversation_query",
+        "platform_query",
+      ];
+      const conversationOwnerPreflight = Object.fromEntries(
+        [
+          "participants",
+          "messages",
+          "message_versions",
+          "reactions",
+          "receipts",
+          "typing_states",
+          "attachments",
+          "commands",
+          "message_delivery_updates",
+          "event_tombstones",
+          "resource_tombstones",
+        ].map((table) => [
+          table,
+          explain(
+            `SELECT 1 AS found FROM ${table} WHERE conversation_id = ? AND (identity_id <> ? OR account_id <> ? OR connection_id <> ? OR conversation_id <> ? OR platform <> ?) LIMIT 1`,
+            ...ownerMismatchParams,
+          ),
+        ]),
+      );
+      const conversationCascadeQueries = [
+        ["participants", "UPDATE participants SET display_name = 'Deleted participant' WHERE conversation_id = ?"],
+        ["messages", "UPDATE messages SET body = '', delivery_failure_code = NULL WHERE conversation_id = ?"],
+        ["message_versions", "UPDATE message_versions SET body = '', editor_participant_id = NULL WHERE conversation_id = ?"],
+        ["reactions", "DELETE FROM reactions WHERE conversation_id = ?"],
+        ["receipts", "DELETE FROM receipts WHERE conversation_id = ?"],
+        ["typing_states", "DELETE FROM typing_states WHERE conversation_id = ?"],
+        ["attachments", "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, deleted_at = NULL WHERE conversation_id = ?"],
+        ["commands", "UPDATE commands SET failure_code = NULL WHERE conversation_id = ?"],
+        ["message_delivery_updates", "UPDATE message_delivery_updates SET failure_code = NULL WHERE conversation_id = ?"],
+      ] as const;
+      const conversationCascadePredicates = conversationCascadeQueries.map(([table, query]) => [table, explain(query, "conversation_query")] as const);
+      return {
+        summaryUpdate,
+        summaryCount,
+        latestMessage,
+        replyTarget,
+        resourceTombstoneId,
+        conversationAttachmentTombstones,
+        conversationOwnerPreflight,
+        conversationCascadePredicates: Object.fromEntries(conversationCascadePredicates),
+        reverseLookups,
+      };
+    });
+
+    for (const summaryPlan of [plans.summaryUpdate, plans.summaryCount, plans.latestMessage]) {
+      expect(summaryPlan.some((detail) => detail.includes("idx_messages_identity_conversation_occurred") || detail.includes("idx_messages_conversation_owner"))).toBe(true);
+    }
+    expect(plans.latestMessage.some((detail) => detail.includes("use temp b-tree"))).toBe(false);
+    expect(plans.replyTarget.some((detail) => detail.includes("idx_messages_reply_target"))).toBe(true);
+    expect(plans.resourceTombstoneId).toEqual(
+      expect.arrayContaining([expect.stringContaining("idx_resource_tombstones_id")]),
+    );
+    expect(plans.conversationAttachmentTombstones).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /idx_resource_tombstones_(id|resource_order)|sqlite_autoindex_resource_tombstones_2/,
+        ),
+      ]),
+    );
+    const conversationIndexes = {
+      participants: "idx_participants_conversation_name",
+      messages: "idx_messages_conversation_owner",
+      message_versions: "idx_message_versions_conversation_owner",
+      reactions: "idx_reactions_conversation_owner",
+      receipts: "idx_receipts_conversation_owner",
+      typing_states: "sqlite_autoindex_typing_states_1",
+      attachments: "idx_attachments_conversation_owner",
+      commands: "idx_commands_conversation_owner",
+      message_delivery_updates: "idx_delivery_conversation_owner",
+      event_tombstones: "idx_event_tombstones_conversation_owner",
+      resource_tombstones: "idx_resource_tombstones_conversation_owner",
+    } as const;
+    for (const [table, index] of Object.entries(conversationIndexes)) {
+      expect(plans.conversationOwnerPreflight[table]).toEqual(
+        expect.arrayContaining([expect.stringContaining(index)]),
+      );
+    }
+    const cascadeIndexes = {
+      participants: "idx_participants_conversation_name",
+      messages: "idx_messages_conversation_owner",
+      message_versions: "idx_message_versions_conversation_owner",
+      reactions: "idx_reactions_conversation_owner",
+      receipts: "idx_receipts_conversation_owner",
+      typing_states: "sqlite_autoindex_typing_states_1",
+      attachments: "idx_attachments_conversation_owner",
+      commands: "idx_commands_conversation_owner",
+      message_delivery_updates: "idx_delivery_conversation_owner",
+    } as const;
+    for (const [table, index] of Object.entries(cascadeIndexes)) {
+      expect(plans.conversationCascadePredicates[table]).toEqual(
+        expect.arrayContaining([expect.stringContaining(index)]),
+      );
+    }
+    for (const index of [
+      "idx_message_versions_message_order",
+      "idx_messages_sender_participant",
+      "idx_message_versions_editor_participant",
+      "idx_reactions_message_state",
+      "idx_reactions_participant",
+      "idx_receipts_message_type_time",
+      "idx_receipts_participant",
+      "idx_typing_participant",
+      "idx_attachments_message_state",
+    ]) {
+      expect(plans.reverseLookups[index]).toEqual(
+        expect.arrayContaining([expect.stringContaining(index)]),
+      );
+    }
+    expect(plans.reverseLookups.idx_delivery_message_order).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/idx_delivery_message_order|sqlite_autoindex_message_delivery_updates_1/),
+      ]),
+    );
   });
 
   it("fails closed on an unknown newer migration without changing stored schema", async () => {

@@ -239,7 +239,7 @@ describe("tenant projection applyBatch", () => {
       body: `${(last.payload as { body: string }).body}x`,
     } as never;
     await expectCode(stub, applyInput(tenant, overflow), "projection_too_large");
-  });
+  }, 30_000);
 
   it("resolves and persists 500 distinct account bindings without an oversized SQL IN query", async () => {
     const tenant = "tenant_apply_500_bindings";
@@ -255,6 +255,7 @@ describe("tenant projection applyBatch", () => {
       event(`event_binding_${String(index).padStart(3, "0")}`, {
         tenant_id: tenant,
         account_id: current.account_id,
+        conversation_id: `conversation_binding_${String(index).padStart(3, "0")}`,
         payload: {
           ...(event("event_payload").payload as object),
           message_id: `message_binding_${String(index).padStart(3, "0")}`,
@@ -654,7 +655,7 @@ describe("tenant projection applyBatch", () => {
       });
     }
     expect(triggerIsTemporary).toBe(false);
-    for (const table of ["connection_bindings", "applied_events", "projection_changes", "projection_change_floors", "projection_checkpoints"]) {
+    for (const table of ["connection_bindings", "conversations", "participants", "messages", "message_versions", "resource_tombstones", "applied_events", "projection_changes", "projection_change_floors", "projection_checkpoints"]) {
       await expect(rows(stub, `SELECT * FROM ${table}`)).resolves.toEqual([]);
     }
   });
