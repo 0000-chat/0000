@@ -628,10 +628,16 @@ CREATE INDEX idx_conversations_identity_connection_activity ON conversations(ide
 CREATE INDEX idx_messages_identity_conversation_occurred ON messages(identity_id,conversation_id,occurred_ms DESC,id ASC);
 CREATE INDEX idx_messages_matrix_event ON messages(matrix_event_id) WHERE matrix_event_id IS NOT NULL;
 CREATE INDEX idx_messages_remote_message ON messages(remote_message_id) WHERE remote_message_id IS NOT NULL;
+CREATE INDEX idx_messages_reply_target ON messages(reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
+CREATE INDEX idx_messages_sender_participant ON messages(sender_participant_id) WHERE sender_participant_id IS NOT NULL;
 CREATE INDEX idx_message_versions_message_order ON message_versions(message_id,observed_ms DESC,event_id DESC);
+CREATE INDEX idx_message_versions_editor_participant ON message_versions(editor_participant_id) WHERE editor_participant_id IS NOT NULL;
 CREATE INDEX idx_participants_conversation_name ON participants(conversation_id,display_name,id);
 CREATE INDEX idx_reactions_message_state ON reactions(message_id,removed_at,occurred_at);
+CREATE INDEX idx_reactions_participant ON reactions(participant_id) WHERE participant_id IS NOT NULL;
 CREATE INDEX idx_receipts_message_type_time ON receipts(message_id,receipt_type,occurred_at);
+CREATE INDEX idx_receipts_participant ON receipts(participant_id);
+CREATE INDEX idx_typing_participant ON typing_states(participant_id);
 CREATE INDEX idx_attachments_message_state ON attachments(message_id,deleted_at,id);
 CREATE INDEX idx_delivery_message_order ON message_delivery_updates(message_id,last_observed_ms,last_event_id);
 CREATE INDEX idx_applied_events_order ON applied_events(observed_ms,event_id);
