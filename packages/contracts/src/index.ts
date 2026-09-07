@@ -9,3 +9,4 @@ export * from "./authorization";
 export * from "./control-directory";
 export * from "./canonical-event";
 export * from "./archive";
+export * from "./projection";

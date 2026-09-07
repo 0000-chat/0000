@@ -199,7 +199,8 @@ export const CanonicalEventSourceSchema = z.enum([
   "deletion",
 ]);
 
-const OpaqueIdSchema = z.string().trim().min(1).max(1024);
+export const OpaqueEventIdSchema = z.string().trim().min(1).max(1024);
+export type OpaqueEventId = z.infer<typeof OpaqueEventIdSchema>;
 const MatrixRoomIdSchema = z.string().min(1).max(1024).startsWith("!");
 const MatrixEventIdSchema = z.string().min(1).max(1024).startsWith("$");
 const BoundedTimestampSchema = TimestampSchema.max(64);
@@ -248,7 +249,7 @@ const snapshotCanonicalEventInput = (input: unknown): unknown => {
 const CanonicalEventEnvelopeObjectSchema = z
   .object({
     schema_version: z.literal(1),
-    event_id: OpaqueIdSchema,
+    event_id: OpaqueEventIdSchema,
     event_type: CanonicalEventTypeSchema,
     event_source: CanonicalEventSourceSchema,
     tenant_id: CanonicalResourceIdSchema,
@@ -258,7 +259,7 @@ const CanonicalEventEnvelopeObjectSchema = z
     conversation_id: CanonicalResourceIdSchema,
     matrix_room_id: MatrixRoomIdSchema.nullable(),
     matrix_event_id: MatrixEventIdSchema.nullable(),
-    remote_message_id: OpaqueIdSchema.nullable(),
+    remote_message_id: OpaqueEventIdSchema.nullable(),
     occurred_at: BoundedTimestampSchema,
     observed_at: BoundedTimestampSchema,
     payload: CanonicalJsonObjectSchema,
