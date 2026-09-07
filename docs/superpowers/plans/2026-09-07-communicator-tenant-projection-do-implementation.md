@@ -630,20 +630,32 @@ CREATE INDEX idx_messages_matrix_event ON messages(matrix_event_id) WHERE matrix
 CREATE INDEX idx_messages_remote_message ON messages(remote_message_id) WHERE remote_message_id IS NOT NULL;
 CREATE INDEX idx_messages_reply_target ON messages(reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
 CREATE INDEX idx_messages_sender_participant ON messages(sender_participant_id) WHERE sender_participant_id IS NOT NULL;
+CREATE INDEX idx_messages_conversation_owner ON messages(conversation_id,identity_id,account_id,connection_id,platform);
 CREATE INDEX idx_message_versions_message_order ON message_versions(message_id,observed_ms DESC,event_id DESC);
 CREATE INDEX idx_message_versions_editor_participant ON message_versions(editor_participant_id) WHERE editor_participant_id IS NOT NULL;
+CREATE INDEX idx_message_versions_conversation_owner ON message_versions(conversation_id,identity_id,account_id,connection_id,platform);
 CREATE INDEX idx_participants_conversation_name ON participants(conversation_id,display_name,id);
 CREATE INDEX idx_reactions_message_state ON reactions(message_id,removed_at,occurred_at);
 CREATE INDEX idx_reactions_participant ON reactions(participant_id) WHERE participant_id IS NOT NULL;
+CREATE INDEX idx_reactions_conversation_owner ON reactions(conversation_id,identity_id,account_id,connection_id,platform);
 CREATE INDEX idx_receipts_message_type_time ON receipts(message_id,receipt_type,occurred_at);
 CREATE INDEX idx_receipts_participant ON receipts(participant_id);
+CREATE INDEX idx_receipts_conversation_owner ON receipts(conversation_id,identity_id,account_id,connection_id,platform);
 CREATE INDEX idx_typing_participant ON typing_states(participant_id);
 CREATE INDEX idx_attachments_message_state ON attachments(message_id,deleted_at,id);
+CREATE INDEX idx_attachments_conversation_owner ON attachments(conversation_id,identity_id,account_id,connection_id,platform);
 CREATE INDEX idx_delivery_message_order ON message_delivery_updates(message_id,last_observed_ms,last_event_id);
+CREATE INDEX idx_delivery_conversation_owner ON message_delivery_updates(conversation_id,identity_id,account_id,connection_id,platform);
+CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform);
+CREATE INDEX idx_event_tombstones_conversation_owner ON event_tombstones(conversation_id,identity_id,account_id,connection_id,platform);
 CREATE INDEX idx_applied_events_order ON applied_events(observed_ms,event_id);
 CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,sequence);
 CREATE INDEX idx_resource_tombstones_resource_order ON resource_tombstones(resource_type,resource_id,observed_ms);
+CREATE INDEX idx_resource_tombstones_id ON resource_tombstones(resource_id,resource_type);
+CREATE INDEX idx_resource_tombstones_conversation_owner ON resource_tombstones(conversation_id,identity_id,account_id,connection_id,platform);
 ```
+
+The reverse-reference indexes reserve unresolved message and participant IDs without scanning a tenant database. The `*_conversation_owner` indexes are required by the exact owner-preflight and set-based redaction predicates used for conversation deletion; `participants(conversation_id,...)` and the `typing_states(conversation_id,participant_id)` primary key already cover those two families. Keep `EXPLAIN QUERY PLAN` regressions for every ownership and cascade predicate so future schema changes cannot silently reintroduce tenant-wide scans.
 
 ## Event projection semantics
 
