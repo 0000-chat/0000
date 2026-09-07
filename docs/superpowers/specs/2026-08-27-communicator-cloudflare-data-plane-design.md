@@ -173,20 +173,41 @@ Remote network
     -> encrypted Matrix room event
     -> verified Matrix Gateway
     -> authenticated ingestion Worker
-    -> ingestion Queue
-    -> ordinary R2 batch + TenantProjectionDO
+    -> ordinary R2 data + committed manifest
+    -> ingestion Queue (committed-archive pointer only)
+    -> Queue consumer
+    -> TenantProjectionDO
     -> REST queries + WebSocket events
 ```
 
 The Matrix Gateway incrementally consumes authorized Matrix rooms, decrypts
-events, maps them to tenant and identity ownership, normalizes them, and
-submits idempotent batches. It advances its Matrix checkpoint only according to
-the durable-delivery contract defined by the implementation plan.
+events, maps them to tenant and identity ownership, normalizes one-tenant
+projection-valid batches, and submits them to the private ingestion Worker. It
+persists the stable archive timestamp, deterministic batch identity, and raw
+Matrix checkpoint in a protected local outbox. The raw checkpoint advances only
+after every batch for the sync response has received HTTP `202`; it is never
+sent to Cloudflare.
 
-The Queue consumer validates each envelope, groups events by tenant, writes
-compressed tenant batches to R2, and applies each group to the deterministic
-tenant DO. The Queue batch is acknowledged only after all required durable
-writes succeed.
+The ingestion Worker validates the complete request before external writes,
+commits canonical compressed event data to ordinary R2, and writes the
+manifest as the immutable archive commit marker. Only after verifying that R2
+pair does it send a strict small pointer to the ingestion Queue. Queue messages
+carry no event body, Matrix ID, source token, or credential. This archive-first
+ordering is required because the approved event batch can be up to 4 MiB while
+Cloudflare Queue message bodies are limited to 128 KiB. The consumer reads and
+verifies the exact R2 data/manifest pair, resolves trusted control-directory
+ownership, and applies the tenant batch atomically. It acknowledges only after
+that projection transaction commits. A `202` proves R2 commitment plus a
+completed Queue send; a Queue acknowledgement proves verified R2 evidence plus
+the committed tenant projection. Duplicate requests, lost responses, and lost
+acknowledgements therefore produce safe retries rather than event loss.
+
+The R2 source checkpoint is a one-way
+`matrix_sync_token_sha256` digest. The tenant projection stores a separate
+derived live-event watermark; neither Cloudflare record contains the raw Matrix
+`/sync` token. The later Gateway owns E2EE devices, decryption keys, raw source
+progress, and the fsynced local outbox. This design freezes that boundary and
+does not add a Synapse client, gateway implementation, or bridge changes.
 
 ### Outbound command path
 
