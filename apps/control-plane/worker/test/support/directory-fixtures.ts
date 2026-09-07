@@ -64,26 +64,44 @@ export async function seedDirectory(db: D1Database): Promise<void> {
     ).bind("connection_agent_whatsapp", "tenant_pilot", "identity_agent", "whatsapp", "Agent WhatsApp", "ready", fixtureTimestamp, fixtureTimestamp),
     db.prepare(
       "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind("connection_human_whatsapp", "gateway-human", "bridge-human", "route-user-human", "route-room-human", fixtureTimestamp, fixtureTimestamp),
+    ).bind("connection_human_whatsapp", "gateway_route_human", "bridge-human", "route-user-human", "route-room-human", fixtureTimestamp, fixtureTimestamp),
     db.prepare(
       "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind("connection_agent_whatsapp", "gateway-agent", "bridge-agent", "route-user-agent", "route-room-agent", fixtureTimestamp, fixtureTimestamp),
+    ).bind("connection_agent_whatsapp", "gateway_route_agent", "bridge-agent", "route-user-agent", "route-room-agent", fixtureTimestamp, fixtureTimestamp),
   ]);
 }
 
 export async function clearDirectory(db: D1Database): Promise<void> {
+  // Ingestion history is intentionally append-only in production. Tests need
+  // an isolated database between cases, so temporarily remove only the
+  // ingestion triggers, clear fixture rows in FK order, and restore the exact
+  // trigger definitions from sqlite_schema before returning.
+  const triggerRows = await db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'ingestion_%' ORDER BY name",
+  ).all<{ name: string; sql: string }>();
+  for (const trigger of triggerRows.results) {
+    if (!/^[A-Za-z0-9_]+$/.test(trigger.name)) throw new Error("unexpected trigger name");
+    await db.prepare(`DROP TRIGGER IF EXISTS "${trigger.name}"`).run();
+  }
+
   await db.batch([
     db.prepare("DELETE FROM audit_events"),
     db.prepare("DELETE FROM control_event_outbox"),
     db.prepare("DELETE FROM directory_mutations"),
     db.prepare("DELETE FROM break_glass_grants"),
     db.prepare("DELETE FROM revoked_tokens"),
+    db.prepare("DELETE FROM connection_accounts"),
     db.prepare("DELETE FROM connection_routes"),
     db.prepare("DELETE FROM connections"),
     db.prepare("DELETE FROM identity_grants"),
     db.prepare("DELETE FROM identities"),
     db.prepare("DELETE FROM memberships"),
+    db.prepare("DELETE FROM gateway_routes"),
     db.prepare("DELETE FROM principals"),
     db.prepare("DELETE FROM tenants"),
   ]);
+
+  for (const trigger of triggerRows.results) {
+    await db.prepare(trigger.sql).run();
+  }
 }
