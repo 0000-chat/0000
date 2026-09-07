@@ -1,11 +1,26 @@
 import {
   ApplyProjectionBatchInputSchema,
   compareOpaqueEventIds,
+  ConversationPageResultSchema,
+  DEFAULT_PROJECTION_PAGE_SIZE,
   MAX_PROJECTION_CHANGES,
   MAX_PROJECTION_BATCH_EVENTS,
+  ListProjectionChangesInputSchema,
+  ListProjectionConversationsInputSchema,
+  ListProjectionMessagesInputSchema,
+  MessagePageResultSchema,
+  MAX_PROJECTION_PAGE_SIZE,
+  ProjectionChangePageSchema,
   type ApplyProjectionBatchInput,
   type ApplyProjectionBatchResult,
+  type ConversationPageResult,
   InitializeProjectionInputSchema,
+  type ListProjectionChangesInput,
+  type ListProjectionConversationsInput,
+  type ListProjectionMessagesInput,
+  type MessagePageResult,
+  type ProjectionChange,
+  type ProjectionChangePage,
   ProjectionStatusInputSchema,
   type InitializeProjectionInput,
   type ProjectionAuthorizationContext,
@@ -29,6 +44,12 @@ import {
   type PreparedProjectionEvent,
 } from "./projector";
 import { runProjectionMigrations } from "./schema";
+import {
+  decodeConversationCursor,
+  decodeMessageCursor,
+  encodeConversationCursor,
+  encodeMessageCursor,
+} from "./cursor";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -108,6 +129,56 @@ type ProjectionCountRow = {
 
 type ProjectionSchemaGenerationRow = { schema_generation: number | null };
 
+type ConversationQueryRow = {
+  id: string;
+  identity_id: string;
+  connection_id: string;
+  title: string;
+  last_message_preview: string;
+  last_activity_at: string;
+  last_activity_ms: number;
+  unread_count: number;
+};
+
+type MessageQueryRow = {
+  id: string;
+  identity_id: string;
+  connection_id: string;
+  conversation_id: string;
+  direction: "inbound" | "outbound";
+  sender_label: string;
+  body: string;
+  occurred_at: string;
+  occurred_ms: number;
+  delivery_status:
+    | "unknown"
+    | "accepted"
+    | "sent"
+    | "delivered"
+    | "read"
+    | "failed";
+  attachment_count: number;
+  deleted_at: string | null;
+};
+
+type ConversationExistsRow = { id: string };
+
+type ProjectionChangeQueryRow = {
+  sequence: number;
+  event_id: string;
+  event_type: ProjectionChange["event_type"];
+  identity_id: string;
+  connection_id: string;
+  conversation_id: string;
+  occurred_at: string;
+  observed_at: string;
+  generation: number;
+};
+
+type LatestSequenceRow = { latest_sequence: number };
+
+type ChangeFloorQueryRow = { discarded_through_sequence: number };
+
 const readProjectionMeta = (
   storage: DurableObjectStorage,
 ): ProjectionMetaRow | undefined =>
@@ -126,6 +197,15 @@ const requireAuthorization = (
     throw projectionError("projection_tenant_mismatch");
   }
   if (!authorization.scopes.includes(requiredScope)) {
+    throw projectionError("projection_forbidden");
+  }
+};
+
+const requireIdentityAuthorization = (
+  authorization: ProjectionAuthorizationContext,
+  identityId: string,
+): void => {
+  if (!authorization.allowed_identity_ids.includes(identityId)) {
     throw projectionError("projection_forbidden");
   }
 };
@@ -249,6 +329,257 @@ const parseApplyProjectionBatchInput = (
   return parseProjectionInput(ApplyProjectionBatchInputSchema, input);
 };
 
+const parseStoredMilliseconds = (timestamp: string): number => {
+  const milliseconds = Date.parse(timestamp);
+  if (!Number.isSafeInteger(milliseconds)) {
+    throw new Error("projection timestamp is not a safe integer");
+  }
+  return milliseconds;
+};
+
+const readConversationRows = (
+  storage: DurableObjectStorage,
+  input: ListProjectionConversationsInput,
+  generation: number,
+): ConversationQueryRow[] => {
+  const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
+  const cursor = input.cursor === undefined
+    ? undefined
+    : decodeConversationCursor(input.cursor, {
+        tenant_id: input.tenant_id,
+        identity_id: input.identity_id,
+        connection_id: input.connection_id,
+        generation,
+      });
+  const limit = pageSize + 1;
+
+  if (input.connection_id === null) {
+    if (cursor === undefined) {
+      return storage.sql
+        .exec<ConversationQueryRow>(
+          "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND deleted_at IS NULL ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+          input.identity_id,
+          limit,
+        )
+        .toArray();
+    }
+    return storage.sql
+      .exec<ConversationQueryRow>(
+        "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND deleted_at IS NULL AND (last_activity_ms < ? OR (last_activity_ms = ? AND id > ?)) ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+        input.identity_id,
+        cursor.last_activity_ms,
+        cursor.last_activity_ms,
+        cursor.last_id,
+        limit,
+      )
+      .toArray();
+  }
+
+  if (cursor === undefined) {
+    return storage.sql
+      .exec<ConversationQueryRow>(
+        "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND connection_id = ? AND deleted_at IS NULL ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+        input.identity_id,
+        input.connection_id,
+        limit,
+      )
+      .toArray();
+  }
+  return storage.sql
+    .exec<ConversationQueryRow>(
+      "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND connection_id = ? AND deleted_at IS NULL AND (last_activity_ms < ? OR (last_activity_ms = ? AND id > ?)) ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+      input.identity_id,
+      input.connection_id,
+      cursor.last_activity_ms,
+      cursor.last_activity_ms,
+      cursor.last_id,
+      limit,
+    )
+    .toArray();
+};
+
+const mapConversationPage = (
+  tenantId: string,
+  generation: number,
+  input: ListProjectionConversationsInput,
+  rows: readonly ConversationQueryRow[],
+): ConversationPageResult => {
+  const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
+  const hasNext = rows.length > pageSize;
+  const visibleRows = rows.slice(0, pageSize);
+  const items = visibleRows.map((row) => {
+    const lastActivityMs = parseStoredMilliseconds(row.last_activity_at);
+    if (lastActivityMs !== row.last_activity_ms) {
+      throw new Error("projection conversation activity tuple is inconsistent");
+    }
+    return {
+      id: row.id,
+      tenant_id: tenantId,
+      identity_id: row.identity_id,
+      connection_id: row.connection_id,
+      title: row.title,
+      last_message_preview: row.last_message_preview,
+      last_activity_at: row.last_activity_at,
+      unread_count: row.unread_count,
+    };
+  });
+  const last = visibleRows.at(-1);
+  const nextCursor = hasNext && last !== undefined
+    ? encodeConversationCursor({
+        schema_version: 1,
+        query_kind: "projection.conversations",
+        tenant_id: tenantId,
+        identity_id: input.identity_id,
+        connection_id: input.connection_id,
+        generation,
+        last_activity_ms: parseStoredMilliseconds(last.last_activity_at),
+        last_id: last.id,
+      })
+    : null;
+  return ConversationPageResultSchema.parse({ items, next_cursor: nextCursor });
+};
+
+const readMessageRows = (
+  storage: DurableObjectStorage,
+  input: ListProjectionMessagesInput,
+  generation: number,
+): MessageQueryRow[] => {
+  const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
+  const cursor = input.cursor === undefined
+    ? undefined
+    : decodeMessageCursor(input.cursor, {
+        tenant_id: input.tenant_id,
+        identity_id: input.identity_id,
+        conversation_id: input.conversation_id,
+        generation,
+      });
+  const limit = pageSize + 1;
+  if (cursor === undefined) {
+    return storage.sql
+      .exec<MessageQueryRow>(
+        "SELECT id, identity_id, connection_id, conversation_id, direction, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at FROM messages WHERE identity_id = ? AND conversation_id = ? ORDER BY occurred_ms DESC, id ASC LIMIT ?",
+        input.identity_id,
+        input.conversation_id,
+        limit,
+      )
+      .toArray();
+  }
+  return storage.sql
+    .exec<MessageQueryRow>(
+      "SELECT id, identity_id, connection_id, conversation_id, direction, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at FROM messages WHERE identity_id = ? AND conversation_id = ? AND (occurred_ms < ? OR (occurred_ms = ? AND id > ?)) ORDER BY occurred_ms DESC, id ASC LIMIT ?",
+      input.identity_id,
+      input.conversation_id,
+      cursor.last_occurred_ms,
+      cursor.last_occurred_ms,
+      cursor.last_id,
+      limit,
+    )
+    .toArray();
+};
+
+const mapMessagePage = (
+  tenantId: string,
+  generation: number,
+  input: ListProjectionMessagesInput,
+  rows: readonly MessageQueryRow[],
+): MessagePageResult => {
+  const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
+  const hasNext = rows.length > pageSize;
+  const visibleRows = rows.slice(0, pageSize);
+  const items = visibleRows.map((row) => {
+    const occurredMs = parseStoredMilliseconds(row.occurred_at);
+    if (occurredMs !== row.occurred_ms) {
+      throw new Error("projection message occurrence tuple is inconsistent");
+    }
+    const redacted = row.deleted_at !== null;
+    return {
+      id: row.id,
+      tenant_id: tenantId,
+      identity_id: row.identity_id,
+      connection_id: row.connection_id,
+      conversation_id: row.conversation_id,
+      direction: row.direction,
+      sender_label: redacted ? "Deleted sender" : row.sender_label,
+      body: redacted ? "" : row.body,
+      occurred_at: row.occurred_at,
+      delivery_status: row.delivery_status,
+      attachment_count: redacted ? 0 : row.attachment_count,
+    };
+  });
+  const last = visibleRows.at(-1);
+  const nextCursor = hasNext && last !== undefined
+    ? encodeMessageCursor({
+        schema_version: 1,
+        query_kind: "projection.messages",
+        tenant_id: tenantId,
+        identity_id: input.identity_id,
+        conversation_id: input.conversation_id,
+        generation,
+        last_occurred_ms: parseStoredMilliseconds(last.occurred_at),
+        last_id: last.id,
+      })
+    : null;
+  return MessagePageResultSchema.parse({ items, next_cursor: nextCursor });
+};
+
+const readChangePage = (
+  storage: DurableObjectStorage,
+  input: ListProjectionChangesInput,
+  meta: ProjectionMetaRow,
+): ProjectionChangePage => {
+  if (input.generation !== meta.generation) {
+    throw projectionError("projection_conflict");
+  }
+
+  const latestRow = storage.sql
+    .exec<LatestSequenceRow>(
+      "SELECT COALESCE(MAX(sequence), 0) AS latest_sequence FROM projection_changes",
+    )
+    .toArray()[0];
+  if (latestRow === undefined) throw new Error("projection sequence is missing");
+
+  const floorRow = storage.sql
+    .exec<ChangeFloorQueryRow>(
+      "SELECT discarded_through_sequence FROM projection_change_floors WHERE identity_id = ?",
+      input.identity_id,
+    )
+    .toArray()[0];
+  const floor = floorRow?.discarded_through_sequence ?? 0;
+  const resetRequired = input.after_sequence < floor;
+  const limit = input.limit ?? MAX_PROJECTION_PAGE_SIZE;
+  const rows = resetRequired
+    ? []
+    : storage.sql
+        .exec<ProjectionChangeQueryRow>(
+          "SELECT sequence, event_id, event_type, identity_id, connection_id, conversation_id, occurred_at, observed_at, generation FROM projection_changes WHERE identity_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+          input.identity_id,
+          input.after_sequence,
+          limit,
+        )
+        .toArray();
+
+  const page: ProjectionChangePage = {
+    schema_version: 1,
+    tenant_id: input.tenant_id,
+    identity_id: input.identity_id,
+    generation: meta.generation,
+    items: rows.map((row) => ({
+      sequence: row.sequence,
+      event_id: row.event_id,
+      event_type: row.event_type,
+      identity_id: row.identity_id,
+      connection_id: row.connection_id,
+      conversation_id: row.conversation_id,
+      occurred_at: row.occurred_at,
+      observed_at: row.observed_at,
+      generation: row.generation,
+    })),
+    latest_sequence: latestRow.latest_sequence,
+    reset_required: resetRequired,
+  };
+  return ProjectionChangePageSchema.parse(page);
+};
+
 export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -343,6 +674,104 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         inputEventCount: prepared.inputEventCount,
         connections: prepared.connections,
       });
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listConversations(
+    input: ListProjectionConversationsInput,
+  ): Promise<ConversationPageResult> {
+    try {
+      const parsed = parseProjectionInput(
+        ListProjectionConversationsInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const rows = readConversationRows(this.ctx.storage, parsed, meta.generation);
+      return structuredClone(
+        mapConversationPage(parsed.tenant_id, meta.generation, parsed, rows),
+      );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listMessages(
+    input: ListProjectionMessagesInput,
+  ): Promise<MessagePageResult> {
+    try {
+      const parsed = parseProjectionInput(
+        ListProjectionMessagesInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      // A message query is only valid for an active conversation owned by the
+      // requested identity. Returning one generic denial for all misses avoids
+      // revealing whether another identity owns the conversation ID.
+      const conversation = this.ctx.storage.sql
+        .exec<ConversationExistsRow>(
+          "SELECT id FROM conversations WHERE id = ? AND identity_id = ? AND deleted_at IS NULL",
+          parsed.conversation_id,
+          parsed.identity_id,
+        )
+        .toArray()[0];
+      if (conversation === undefined) {
+        throw projectionError("projection_forbidden");
+      }
+
+      const rows = readMessageRows(this.ctx.storage, parsed, meta.generation);
+      return structuredClone(
+        mapMessagePage(parsed.tenant_id, meta.generation, parsed, rows),
+      );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listChanges(
+    input: ListProjectionChangesInput,
+  ): Promise<ProjectionChangePage> {
+    try {
+      const parsed = parseProjectionInput(
+        ListProjectionChangesInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      return structuredClone(readChangePage(this.ctx.storage, parsed, meta));
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
