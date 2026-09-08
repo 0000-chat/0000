@@ -1,0 +1,44 @@
+{
+  "request": {
+    "schema_version": 1,
+    "gateway_route_id": "gateway_route_test",
+    "tenant_id": "tenant_ingestion_test",
+    "archived_at": "2026-09-07T02:03:04.000+00:00",
+    "producer_version": "gateway-test-1",
+    "source_checkpoint": {
+      "kind": "matrix_sync_token_sha256",
+      "value": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "events": [
+      {
+        "schema_version": 1,
+        "event_id": "$event-1:server",
+        "event_type": "message.created",
+        "event_source": "live",
+        "tenant_id": "tenant_ingestion_test",
+        "identity_id": "identity_ingestion",
+        "platform": "whatsapp",
+        "account_id": "account_ingestion_whatsapp",
+        "conversation_id": "conversation_ingestion_0001",
+        "matrix_room_id": "!room:server",
+        "matrix_event_id": "$matrix-1:server",
+        "remote_message_id": "remote-1",
+        "occurred_at": "2026-09-07T01:00:01.000Z",
+        "observed_at": "2026-09-07T01:00:01.500Z",
+        "payload": {
+          "message_id": "message_ingestion_0001",
+          "direction": "inbound",
+          "sender_participant_id": null,
+          "sender_label": "Ingestion fixture",
+          "body": "",
+          "reply_to_message_id": null,
+          "delivery_status": "unknown",
+          "unread": true
+        }
+      }
+    ],
+    "batch_id": "batch_44041dc8a8de63c3e343eb72a6f381b739bee93e41ec6c24720b4beded3d220a"
+  },
+  "canonical_jsonl": "{\"account_id\":\"account_ingestion_whatsapp\",\"conversation_id\":\"conversation_ingestion_0001\",\"event_id\":\"$event-1:server\",\"event_source\":\"live\",\"event_type\":\"message.created\",\"identity_id\":\"identity_ingestion\",\"matrix_event_id\":\"$matrix-1:server\",\"matrix_room_id\":\"!room:server\",\"observed_at\":\"2026-09-07T01:00:01.500Z\",\"occurred_at\":\"2026-09-07T01:00:01.000Z\",\"payload\":{\"body\":\"\",\"delivery_status\":\"unknown\",\"direction\":\"inbound\",\"message_id\":\"message_ingestion_0001\",\"reply_to_message_id\":null,\"sender_label\":\"Ingestion fixture\",\"sender_participant_id\":null,\"unread\":true},\"platform\":\"whatsapp\",\"remote_message_id\":\"remote-1\",\"schema_version\":1,\"tenant_id\":\"tenant_ingestion_test\"}\n",
+  "canonical_sha256": "717310de1e6dab7600b0a6cd2a96965c6cbffd27b0c294ed0ef99323a78f8d64"
+}
