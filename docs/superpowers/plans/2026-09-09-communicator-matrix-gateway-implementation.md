@@ -616,7 +616,7 @@ pub fn retry_quarantined_window(&mut self, window_id: &str, retry_at: DateTime<U
     -> Result<(), SafeError>;
 pub fn append_room_binding(&mut self, binding: NewRoomBinding)
     -> Result<(), SafeError>;
-pub fn retire_room_binding(&mut self, room_lookup: &[u8], retired_at: DateTime<Utc>)
+pub fn retire_room_binding(&mut self, binding_id: &str, retired_at: DateTime<Utc>)
     -> Result<(), SafeError>;
 pub fn active_room_binding(&self, room_lookup: &[u8])
     -> Result<Option<RoomBinding>, SafeError>;
@@ -639,6 +639,21 @@ pub fn purge_committed_prefix(&mut self, cutoff: DateTime<Utc>,
                               sdk_token_digest: &[u8])
     -> Result<PurgeOutcome, SafeError>;
 ```
+
+For registry rows, derive `room_lookup` as the keyed lookup digest over
+`room-binding-room-v1, matrix_room_id`. Derive `account_lookup` over
+`room-binding-account-v1, platform, account_id`; it deliberately excludes the
+claimed tenant authority so an attempt to attach the same provider account to
+a different tenant can be detected. The encrypted `payload` contains exactly
+the full protected mapping from the design: `matrix_room_id`, `tenant_id`,
+`identity_id`, `connection_id`, `account_id`, `platform`, `gateway_route_id`,
+`conversation_id`, and `owner_matrix_user_id`, plus `schema_version: 1`.
+Before appending a row, decrypt and verify every existing row with the same
+`account_lookup`; its immutable `(tenant_id, identity_id, connection_id,
+account_id, platform)` authority tuple must match. `binding_id` is a synthetic
+`binding_`-prefixed lowercase hexadecimal ID supplied by the administrative
+layer. Retirement addresses that exact `binding_id`, changes only an active row
+to `retired`, and never deletes or rewrites its protected payload.
 
 `append_fetched_sync` is the first state mutation after an HTTP response. It
 verifies that the request token equals the current fetch token, freezes one
