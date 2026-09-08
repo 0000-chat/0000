@@ -7,51 +7,340 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def _interface_bodies(source, interface_name):
-    declaration = re.compile(rf"\binterface\s+{re.escape(interface_name)}\b[^{{]*{{")
-    bodies = []
-    for match in declaration.finditer(source):
-        opening_brace = match.end() - 1
-        depth = 1
-        closing_brace = None
-        for index in range(opening_brace + 1, len(source)):
-            if source[index] == "{":
-                depth += 1
-            elif source[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    closing_brace = index
+def _scan_typescript(source):
+    """Yield ``(index, character, state, masked_character)`` for TypeScript."""
+
+    state = "code"
+    quote = None
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if state == "code":
+            if source.startswith("//", index):
+                yield index, character, "line_comment", " "
+                yield index + 1, source[index + 1], "line_comment", " "
+                state = "line_comment"
+                index += 2
+            elif source.startswith("/*", index):
+                yield index, character, "block_comment", " "
+                yield index + 1, source[index + 1], "block_comment", " "
+                state = "block_comment"
+                index += 2
+            elif character in "'\"`":
+                quote = character
+                state = {"'": "single_string", '"': "double_string", "`": "template"}[quote]
+                yield index, character, state, " "
+                index += 1
+            else:
+                yield index, character, state, character
+                index += 1
+            continue
+
+        if state == "line_comment":
+            yield index, character, state, "\n" if character in "\r\n" else " "
+            index += 1
+            if character in "\r\n":
+                state = "code"
+            continue
+
+        if state == "block_comment":
+            if source.startswith("*/", index):
+                yield index, character, state, " "
+                yield index + 1, source[index + 1], state, " "
+                state = "code"
+                index += 2
+            else:
+                yield index, character, state, "\n" if character in "\r\n" else " "
+                index += 1
+            continue
+
+        # String and template contents are opaque to declaration and delimiter
+        # scanning.  A backslash consumes the following character, including a
+        # quote or delimiter, so escaped characters cannot end the literal.
+        yield index, character, state, "\n" if character in "\r\n" else " "
+        if character == "\\":
+            index += 1
+            if index >= len(source):
+                raise AssertionError("unterminated generated TypeScript string")
+            escaped = source[index]
+            yield index, escaped, state, "\n" if escaped in "\r\n" else " "
+            index += 1
+        elif character == quote:
+            state = "code"
+            quote = None
+            index += 1
+        else:
+            index += 1
+
+    if state == "block_comment":
+        raise AssertionError("unterminated generated TypeScript comment")
+    if state not in {"code", "line_comment"}:
+        raise AssertionError("unterminated generated TypeScript string")
+
+
+def _typescript_tokens(source):
+    """Return significant TypeScript tokens while validating lexical trivia."""
+
+    scanned = list(_scan_typescript(source))
+    masked = "".join(record[3] for record in scanned)
+    tokens = []
+    index = 0
+    while index < len(source):
+        state = scanned[index][2]
+        if state != "code":
+            if state in {"single_string", "double_string", "template"}:
+                start = index
+                while index < len(source) and scanned[index][2] == state:
+                    index += 1
+                tokens.append(("string", source[start:index], start, index))
+            else:
+                index += 1
+            continue
+
+        character = masked[index]
+        if character.isspace():
+            index += 1
+            continue
+        if character.isalpha() or character in "_$":
+            start = index
+            index += 1
+            while index < len(source) and scanned[index][2] == "code":
+                character = masked[index]
+                if not (character.isalnum() or character in "_$"):
                     break
-        if closing_brace is None:
-            raise AssertionError(f"unterminated generated interface: {interface_name}")
-        bodies.append(source[opening_brace + 1 : closing_brace])
+                index += 1
+            tokens.append(("identifier", source[start:index], start, index))
+            continue
+        tokens.append(("punctuation", character, index, index + 1))
+        index += 1
+
+    return tokens
+
+
+def _consume_delimiter(tokens, index, stack):
+    """Update a delimiter stack and return whether ``>`` was an arrow token."""
+
+    token = tokens[index]
+    if token[0] != "punctuation":
+        return False
+    value = token[1]
+    previous = tokens[index - 1][1] if index else None
+
+    if value in "{[(<":
+        stack.append(value)
+    elif value in "}])":
+        expected = {"}": "{", "]": "[", ")": "("}[value]
+        if not stack or stack[-1] != expected:
+            raise AssertionError(f"unexpected generated TypeScript delimiter: {value}")
+        stack.pop()
+    elif value == ">":
+        if previous == "=":
+            return True
+        if stack and stack[-1] == "<":
+            stack.pop()
+    return False
+
+
+def _interface_body_opening(tokens, name_index):
+    stack = []
+    for index in range(name_index + 1, len(tokens)):
+        token = tokens[index]
+        if token[0] == "punctuation" and token[1] == "{" and not stack:
+            return index
+        if token[0] == "punctuation" and token[1] == ";" and not stack:
+            break
+        _consume_delimiter(tokens, index, stack)
+    raise AssertionError("unterminated generated interface declaration")
+
+
+def _interface_body_end(tokens, opening_index, interface_name):
+    stack = ["{"]
+    for index in range(opening_index + 1, len(tokens)):
+        token = tokens[index]
+        _consume_delimiter(tokens, index, stack)
+        if token[0] == "punctuation" and token[1] == "}" and not stack:
+            return token[2]
+    raise AssertionError(f"unterminated generated interface: {interface_name}")
+
+
+def _interface_bodies(source, interface_name):
+    tokens = _typescript_tokens(source)
+    bodies = []
+    for index, token in enumerate(tokens[:-1]):
+        if token[0] != "identifier" or token[1] != "interface":
+            continue
+        name_index = index + 1
+        if tokens[name_index][0] != "identifier" or tokens[name_index][1] != interface_name:
+            continue
+        opening_index = _interface_body_opening(tokens, name_index)
+        opening = tokens[opening_index]
+        closing_start = _interface_body_end(tokens, opening_index, interface_name)
+        bodies.append(source[opening[3] : closing_start])
     return bodies
 
 
+def _decode_typescript_string(value):
+    result = []
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character != "\\":
+            result.append(character)
+            index += 1
+            continue
+
+        index += 1
+        if index >= len(value) - 1:
+            raise AssertionError("unterminated generated TypeScript string")
+        escaped = value[index]
+        simple_escapes = {
+            "0": "\0",
+            "b": "\b",
+            "f": "\f",
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+            "v": "\v",
+        }
+        if escaped in simple_escapes:
+            result.append(simple_escapes[escaped])
+            index += 1
+        elif escaped in "\\'\"`/":
+            result.append(escaped)
+            index += 1
+        elif escaped == "x" and index + 2 < len(value) - 1:
+            try:
+                result.append(chr(int(value[index + 1 : index + 3], 16)))
+            except ValueError:
+                result.append(escaped)
+                index += 1
+            else:
+                index += 3
+        elif escaped == "u":
+            if index + 1 < len(value) - 1 and value[index + 1] == "{":
+                closing = value.find("}", index + 2, len(value) - 1)
+                if closing == -1:
+                    raise AssertionError("unterminated generated TypeScript string escape")
+                try:
+                    result.append(chr(int(value[index + 2 : closing], 16)))
+                except ValueError as error:
+                    raise AssertionError("invalid generated TypeScript string escape") from error
+                index = closing + 1
+            elif index + 4 < len(value) - 1:
+                try:
+                    result.append(chr(int(value[index + 1 : index + 5], 16)))
+                except ValueError:
+                    result.append(escaped)
+                    index += 1
+                else:
+                    index += 5
+            else:
+                result.append(escaped)
+                index += 1
+        elif escaped in "\r\n":
+            if escaped == "\r" and index + 1 < len(value) - 1 and value[index + 1] == "\n":
+                index += 1
+            index += 1
+        else:
+            result.append(escaped)
+            index += 1
+    return "".join(result)
+
+
+def _normalize_typescript_type(type_text):
+    output = []
+    pending_space = False
+    for _index, character, state, _masked_character in _scan_typescript(type_text):
+        in_comment = state in {"line_comment", "block_comment"}
+        in_string = state in {"single_string", "double_string", "template"}
+        if state == "code":
+            if character == ";":
+                continue
+            if character.isspace():
+                pending_space = True
+                continue
+            if pending_space and output:
+                output.append(" ")
+            output.append(character)
+            pending_space = False
+        elif in_comment or in_string:
+            if pending_space and output:
+                output.append(" ")
+            output.append(character)
+            pending_space = False
+        else:
+            output.append(character)
+            pending_space = False
+    return "".join(output).strip()
+
+
 def _generated_binding_members(interface_body):
-    member_pattern = re.compile(
-        r"\b(?P<name>[A-Z][A-Z0-9_]*)\s*(?P<optional>\?)?\s*"
-        r":\s*(?P<type>[^;{}]+);",
-        flags=re.DOTALL,
-    )
+    tokens = _typescript_tokens(interface_body)
     members = []
-    for match in member_pattern.finditer(interface_body):
-        type_name = " ".join(match.group("type").split())
-        if type_name == "D1Database" or type_name == "R2Bucket" or type_name.startswith(
-            "DurableObjectNamespace<"
+    stack = []
+    segment_start = 0
+    segments = []
+    for index, token in enumerate(tokens):
+        if token[0] == "punctuation" and token[1] == ";" and not stack:
+            segments.append((segment_start, token[2]))
+            segment_start = token[3]
+            continue
+        _consume_delimiter(tokens, index, stack)
+    if stack:
+        raise AssertionError("unterminated generated TypeScript type delimiter")
+
+    trailing_tokens = [token for token in tokens if token[2] >= segment_start]
+    if trailing_tokens:
+        raise AssertionError("unterminated generated TypeScript member")
+
+    for segment_start, segment_end in segments:
+        segment = interface_body[segment_start:segment_end]
+        segment_tokens = _typescript_tokens(segment)
+        if not segment_tokens:
+            continue
+
+        key_index = 0
+        if (
+            segment_tokens[0][0] == "identifier"
+            and segment_tokens[0][1] in {"readonly", "declare"}
+            and len(segment_tokens) > 1
         ):
-            members.append(
-                (
-                    match.group("name"),
-                    match.group("optional") is not None,
-                    type_name,
-                )
-            )
+            key_index = 1
+        key_token = segment_tokens[key_index]
+        if key_token[0] == "identifier":
+            name = key_token[1]
+        elif key_token[0] == "string":
+            name = _decode_typescript_string(key_token[1])
+        else:
+            continue
+
+        optional_index = key_index + 1
+        optional = (
+            optional_index < len(segment_tokens)
+            and segment_tokens[optional_index][0] == "punctuation"
+            and segment_tokens[optional_index][1] == "?"
+        )
+        colon_index = optional_index + (1 if optional else 0)
+        if (
+            colon_index >= len(segment_tokens)
+            or segment_tokens[colon_index][0] != "punctuation"
+            or segment_tokens[colon_index][1] != ":"
+        ):
+            continue
+
+        type_start = segment_tokens[colon_index][3]
+        type_text = interface_body[segment_start + type_start : segment_end]
+        if not _typescript_tokens(type_text):
+            raise AssertionError("unterminated generated TypeScript member type")
+        type_name = _normalize_typescript_type(type_text)
+        if not type_name:
+            raise AssertionError("unterminated generated TypeScript member type")
+        members.append((name, optional, type_name))
     return members
 
 
 def _generated_member_names(interface_body):
-    return re.findall(r"\b([A-Z][A-Z0-9_]*)\s*\??\s*:", interface_body)
+    return [name for name, _optional, _type_name in _generated_binding_members(interface_body)]
 
 
 def _config_key_paths(value, key, path=()):
@@ -67,6 +356,71 @@ def _config_key_paths(value, key, path=()):
 
 
 class RepositoryContractTests(unittest.TestCase):
+    def test_generated_member_parser_handles_all_property_key_forms_and_nested_types(self):
+        interface_body = r'''
+            // A lowercase key and a dollar-prefixed key are valid declarations.
+            lowercase: {
+                nested: [string, { "quoted;": "brace } and {" }];
+            };
+            $binding?: Array<{ value: "semicolon; {braces}" }>;
+            "quoted-key": "escaped \"quote\"; and { braces }";
+        '''
+
+        self.assertEqual(
+            [
+                (
+                    "lowercase",
+                    False,
+                    '{ nested: [string, { "quoted;": "brace } and {" }] }',
+                ),
+                ("$binding", True, 'Array<{ value: "semicolon; {braces}" }>'),
+                ("quoted-key", False, '"escaped \\\"quote\\\"; and { braces }"'),
+            ],
+            _generated_binding_members(interface_body),
+        )
+
+    def test_generated_member_parser_preserves_literal_escape_sequences(self):
+        interface_body = r'''literal: "backslash \\\"quote";'''
+        self.assertEqual(
+            [("literal", False, r'"backslash \\\"quote"')],
+            _generated_binding_members(interface_body),
+        )
+
+    def test_interface_body_scanner_ignores_comments_strings_and_templates(self):
+        source = r'''
+            /* interface Example { ignored: "}"; } */
+            interface Example {
+                first: "closing brace } and opening brace {";
+                /* nested comment with { and } */
+                second: { value: `template } {`; };
+                third: "escaped \\\"brace }\\\"";
+            }
+        '''
+
+        bodies = _interface_bodies(source, "Example")
+        self.assertEqual(1, len(bodies))
+        self.assertIn('second: { value: `template } {`; };', bodies[0])
+
+    def test_generated_member_parser_preserves_duplicate_and_unexpected_members(self):
+        self.assertEqual(
+            [
+                ("KNOWN", False, "R2Bucket"),
+                ("KNOWN", False, "Queue"),
+                ("unexpected", False, "string"),
+            ],
+            _generated_binding_members(
+                "KNOWN: R2Bucket; KNOWN: Queue; unexpected: string;"
+            ),
+        )
+
+    def test_generated_declaration_scanners_reject_unterminated_input(self):
+        with self.assertRaises(AssertionError):
+            _interface_bodies("interface Example { value: string;", "Example")
+        with self.assertRaises(AssertionError):
+            _generated_binding_members("value: { nested: string;")
+        with self.assertRaises(AssertionError):
+            _generated_binding_members('value: "unterminated;')
+
     def test_typescript_workspace_is_pinned(self):
         package = json.loads((ROOT / "package.json").read_text())
         self.assertTrue(package["private"])
@@ -200,19 +554,53 @@ class RepositoryContractTests(unittest.TestCase):
         projection_namespace_type = (
             'DurableObjectNamespace<import("./worker/index").TenantProjectionDO>'
         )
+        common_environment_bindings = [
+            ("EVENT_ARCHIVE", False, "R2Bucket"),
+            ("CONTROL_DB", False, "D1Database"),
+            ("INGESTION_QUEUE", False, "Queue"),
+            ("COMMUNICATOR_OIDC_ISSUER", False, '"https://auth.local.invalid/"'),
+            ("COMMUNICATOR_OIDC_AUDIENCE", False, '"communicator-api"'),
+            (
+                "COMMUNICATOR_OIDC_JWKS_URL",
+                False,
+                '"https://auth.local.invalid/.well-known/jwks.json"',
+            ),
+            ("COMMUNICATOR_INGRESS_ENABLED", False, '"false"'),
+            (
+                "COMMUNICATOR_INGESTION_OIDC_ISSUER",
+                False,
+                '"https://ingestion-auth.local.invalid/"',
+            ),
+            (
+                "COMMUNICATOR_INGESTION_OIDC_AUDIENCE",
+                False,
+                '"communicator-ingestion"',
+            ),
+            (
+                "COMMUNICATOR_INGESTION_OIDC_JWKS_URL",
+                False,
+                '"https://ingestion-auth.local.invalid/.well-known/jwks.json"',
+            ),
+            ("TENANT_PROJECTION", False, projection_namespace_type),
+        ]
         expected_bindings = {
             "__BaseEnv_Env": [
-                ("CONTROL_DB", True, "D1Database"),
-                ("EVENT_ARCHIVE", False, "R2Bucket"),
-                ("TENANT_PROJECTION", False, projection_namespace_type),
+                *common_environment_bindings[:3],
+                ("COMMUNICATOR_ENV", False, '"staging" | "production" | "development"'),
+                ("COMMUNICATOR_DATA_MODE", False, '"simulated" | "live"'),
+                *common_environment_bindings[3:],
             ],
             "StagingEnv": [
-                ("EVENT_ARCHIVE", False, "R2Bucket"),
-                ("TENANT_PROJECTION", False, projection_namespace_type),
+                *common_environment_bindings[:3],
+                ("COMMUNICATOR_ENV", False, '"staging"'),
+                ("COMMUNICATOR_DATA_MODE", False, '"simulated"'),
+                *common_environment_bindings[3:],
             ],
             "ProductionEnv": [
-                ("EVENT_ARCHIVE", False, "R2Bucket"),
-                ("TENANT_PROJECTION", False, projection_namespace_type),
+                *common_environment_bindings[:3],
+                ("COMMUNICATOR_ENV", False, '"production"'),
+                ("COMMUNICATOR_DATA_MODE", False, '"live"'),
+                *common_environment_bindings[3:],
             ],
         }
         for interface_name, expected in expected_bindings.items():
