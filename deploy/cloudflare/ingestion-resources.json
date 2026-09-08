@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "cloudflare_account_id": "d8f2eee5aab20d72439aabdfbb221bb7",
+  "verified_at": "2026-09-07T21:33:55Z",
+  "environments": {
+    "staging": {
+      "d1": {
+        "name": "communicator-control-directory-staging",
+        "id": "bbf24536-eb91-4425-a4ee-c8f8c90e1ade"
+      },
+      "r2": {
+        "name": "communicator-event-archive-staging"
+      },
+      "queue": {
+        "name": "communicator-ingestion-staging",
+        "id": "a3d226d6bb304affa33657ea12899c04",
+        "retention_seconds": 1209600
+      },
+      "dlq": {
+        "name": "communicator-ingestion-dlq-staging",
+        "id": "7317aaf05cd848c58dc53a04ab0e5701",
+        "retention_seconds": 1209600
+      }
+    },
+    "production": {
+      "d1": {
+        "name": "communicator-control-directory-production",
+        "id": "78815235-c67b-4409-bb0d-832f66ec21d7"
+      },
+      "r2": {
+        "name": "communicator-event-archive-production"
+      },
+      "queue": {
+        "name": "communicator-ingestion-production",
+        "id": "0fb07ceed2dc43dfb9a2e1867d6bdf23",
+        "retention_seconds": 1209600
+      },
+      "dlq": {
+        "name": "communicator-ingestion-dlq-production",
+        "id": "5183f088b24b40029555210c225ce2de",
+        "retention_seconds": 1209600
+      }
+    }
+  }
+}

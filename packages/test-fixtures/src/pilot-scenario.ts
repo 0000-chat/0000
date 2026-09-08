@@ -285,6 +285,28 @@ export const PilotScenarioSchema = z.object({
   fixture_reset_at: TimestampSchema,
 }).strict();
 
+const PilotIngestionRouteSchema = z.object({
+  gateway_route_id: z.string().min(1),
+  service_principal_id: z.string().min(1),
+  status: z.enum(["active", "disabled", "revoked"]),
+}).strict();
+
+const PilotIngestionBindingSchema = z.object({
+  tenant_id: z.string().min(1),
+  gateway_route_id: z.string().min(1),
+  account_id: z.string().min(1),
+  connection_id: z.string().min(1),
+  identity_id: z.string().min(1),
+  platform: z.enum(["whatsapp", "telegram", "messenger"]),
+  account_status: z.enum(["active", "retired"]),
+}).strict();
+
+export const PilotIngestionDirectorySchema = z.object({
+  tenant_ids: z.array(z.string().min(1)).min(2),
+  routes: z.array(PilotIngestionRouteSchema).min(2),
+  bindings: z.array(PilotIngestionBindingSchema).min(1),
+}).strict();
+
 const deepFreeze = <T>(value: T): Readonly<T> => {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -306,5 +328,71 @@ export const pilotScenario = deepFreeze({
   commands,
   fixture_reset_at: "2026-08-27T00:00:00.000Z",
 });
+
+/** Non-secret D1 routing fixtures used by ingestion and replay tests. */
+export const pilotIngestionDirectory = deepFreeze({
+  tenant_ids: ["tenant_pilot", "tenant_secondary"],
+  routes: [
+    {
+      gateway_route_id: "gateway_route_human",
+      service_principal_id: "principal_service_human",
+      status: "active" as const,
+    },
+    {
+      gateway_route_id: "gateway_route_agent",
+      service_principal_id: "principal_service_agent",
+      status: "active" as const,
+    },
+  ],
+  bindings: [
+    {
+      tenant_id: "tenant_pilot",
+      gateway_route_id: "gateway_route_agent",
+      account_id: "account_agent_whatsapp",
+      connection_id: "connection_agent_whatsapp",
+      identity_id: "identity_agent",
+      platform: "whatsapp" as const,
+      account_status: "active" as const,
+    },
+    {
+      tenant_id: "tenant_pilot",
+      gateway_route_id: "gateway_route_human",
+      account_id: "account_human_messenger",
+      connection_id: "connection_human_messenger",
+      identity_id: "identity_human",
+      platform: "messenger" as const,
+      account_status: "active" as const,
+    },
+    {
+      tenant_id: "tenant_pilot",
+      gateway_route_id: "gateway_route_human",
+      account_id: "account_human_telegram",
+      connection_id: "connection_human_telegram",
+      identity_id: "identity_human",
+      platform: "telegram" as const,
+      account_status: "active" as const,
+    },
+    {
+      tenant_id: "tenant_pilot",
+      gateway_route_id: "gateway_route_human",
+      account_id: "account_human_whatsapp",
+      connection_id: "connection_human_whatsapp",
+      identity_id: "identity_human",
+      platform: "whatsapp" as const,
+      account_status: "active" as const,
+    },
+    {
+      tenant_id: "tenant_secondary",
+      gateway_route_id: "gateway_route_human",
+      account_id: "account_secondary_telegram",
+      connection_id: "connection_secondary_telegram",
+      identity_id: "identity_secondary_human",
+      platform: "telegram" as const,
+      account_status: "active" as const,
+    },
+  ],
+});
+
+export type PilotIngestionDirectory = z.infer<typeof PilotIngestionDirectorySchema>;
 
 export type PilotScenario = z.infer<typeof PilotScenarioSchema>;

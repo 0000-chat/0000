@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/internal/*"]
   },
   "exports": {
     "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" }
@@ -32,22 +32,57 @@
       "bucket_name": "communicator-event-archive-local"
     }
   ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "INGESTION_QUEUE",
+        "queue": "communicator-ingestion-local"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "communicator-ingestion-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 10,
+        "retry_delay": 60,
+        "max_concurrency": 5,
+        "dead_letter_queue": "communicator-ingestion-dlq-local"
+      }
+    ]
+  },
   "vars": {
     "COMMUNICATOR_ENV": "development",
     "COMMUNICATOR_DATA_MODE": "simulated",
     "COMMUNICATOR_OIDC_ISSUER": "https://auth.local.invalid/",
     "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
-    "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+    "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json",
+    "COMMUNICATOR_INGRESS_ENABLED": "false",
+    "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
+    "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
+    "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
   },
   "env": {
     "staging": {
       "name": "communicator-control-plane-staging",
+      "d1_databases": [
+        {
+          "binding": "CONTROL_DB",
+          "database_name": "communicator-control-directory-staging",
+          "database_id": "bbf24536-eb91-4425-a4ee-c8f8c90e1ade",
+          "migrations_dir": "migrations"
+        }
+      ],
       "vars": {
         "COMMUNICATOR_ENV": "staging",
         "COMMUNICATOR_DATA_MODE": "simulated",
         "COMMUNICATOR_OIDC_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
-        "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json",
+        "COMMUNICATOR_INGRESS_ENABLED": "false",
+        "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
+        "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
+        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
       },
       "durable_objects": {
         "bindings": [
@@ -59,16 +94,47 @@
           "binding": "EVENT_ARCHIVE",
           "bucket_name": "communicator-event-archive-staging"
         }
-      ]
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "INGESTION_QUEUE",
+            "queue": "communicator-ingestion-staging"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "communicator-ingestion-staging",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 10,
+            "retry_delay": 60,
+            "max_concurrency": 5,
+            "dead_letter_queue": "communicator-ingestion-dlq-staging"
+          }
+        ]
+      }
     },
     "production": {
       "name": "communicator-control-plane-production",
+      "d1_databases": [
+        {
+          "binding": "CONTROL_DB",
+          "database_name": "communicator-control-directory-production",
+          "database_id": "78815235-c67b-4409-bb0d-832f66ec21d7",
+          "migrations_dir": "migrations"
+        }
+      ],
       "vars": {
         "COMMUNICATOR_ENV": "production",
         "COMMUNICATOR_DATA_MODE": "live",
         "COMMUNICATOR_OIDC_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OIDC_AUDIENCE": "communicator-api",
-        "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_OIDC_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json",
+        "COMMUNICATOR_INGRESS_ENABLED": "false",
+        "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
+        "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
+        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
       },
       "durable_objects": {
         "bindings": [
@@ -80,7 +146,26 @@
           "binding": "EVENT_ARCHIVE",
           "bucket_name": "communicator-event-archive-production"
         }
-      ]
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "INGESTION_QUEUE",
+            "queue": "communicator-ingestion-production"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "communicator-ingestion-production",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 10,
+            "retry_delay": 60,
+            "max_concurrency": 5,
+            "dead_letter_queue": "communicator-ingestion-dlq-production"
+          }
+        ]
+      }
     }
   }
 }

@@ -21,13 +21,15 @@ The normal data relationships are:
 | Synapse | Operational messaging record and live Matrix history. It is not replaced by the projection. |
 | Ordinary R2 archive | Immutable, committed canonical event batches and the source for a rebuild. A manifest is the replay listing/commit view. |
 | `TenantProjectionDO` SQLite | Disposable tenant-scoped derived rows, query state, audit/change metadata, and replay checkpoints. It is not raw-event or authorization authority. |
-| Authenticated Worker (future path) | Authenticates the principal, chooses the tenant, derives grants and connection bindings from D1, and routes to the exact tenant object. |
+| Authenticated ingestion Worker | Authenticates the service principal, resolves the tenant's route and immutable connection bindings from D1, and routes the committed batch to the exact tenant object. |
 
-The existing browser UI remains on its current path in this phase. There is
-no public projection route, and the projection modules do not read R2, write
-R2, publish Queue work, call Matrix or a provider, send commands, open
-WebSockets, or run alarms/automation. A `command.updated` event records an
-observed command status; it never executes the command.
+The existing browser UI remains on its current path in this phase. There is no
+public projection route. The projection modules remain free of external I/O:
+they do not read or write R2, publish Queue work, call Matrix or a provider,
+send commands, open WebSockets, or run alarms/automation. The authenticated
+ingestion Worker and Queue consumer perform archive and delivery work outside
+the Durable Object transaction. A `command.updated` event records an observed
+command status; it never executes the command.
 
 ## Authority boundaries and deterministic routing
 
@@ -159,12 +161,13 @@ The five projection scopes are:
 | `applyReplayPage` | `projection.rebuild` | Tenant-wide replay, but callable only by the trusted R2-reader orchestration path. It deliberately does not use the identity allow-list. |
 | `getStatus` | `projection.status` | Tenant-wide status read. |
 
-The future authenticated Worker derives this context and the exact
-account-to-connection bindings from trusted D1 directory rows. HTTP input
-must never be forwarded as authority. The DO re-checks the context tenant,
-input tenant, and stored tenant, defaults to deny, and never treats a selected
-identity as proof of access. Missing scopes or identity grants return the
-content-free `projection_forbidden` code.
+The authenticated ingestion Worker derives this context and the exact
+account-to-connection bindings from trusted D1 directory rows; see the
+[Matrix ingestion local runbook](matrix-ingestion-local.md) for the end-to-end
+path. HTTP input must never be forwarded as authority. The DO re-checks the
+context tenant, input tenant, and stored tenant, defaults to deny, and never
+treats a selected identity as proof of access. Missing scopes or identity
+grants return the content-free `projection_forbidden` code.
 
 ## Account and resource identity invariants
 
@@ -418,10 +421,10 @@ is not event/LWW ordering.
 
 ## Replay continuity and its deliberate limitation
 
-`applyReplayPage` is an internal-only RPC for the future trusted reader that
-lists committed R2 manifests. It accepts a page; it never reads R2 itself.
-Only that orchestration path may call it. The future Worker must not expose it
-as a public route or arbitrary service binding.
+`applyReplayPage` is an internal-only RPC for the trusted reader that lists
+committed R2 manifests. It accepts a page; it never reads R2 itself. Only that
+orchestration path may call it. The ingestion Worker does not expose it as a
+public route or arbitrary service binding.
 
 Replay rules are:
 
@@ -603,8 +606,10 @@ This local projection phase does not include:
 
 - HTTP/API routes, WebSocket endpoints, UI data-source changes, or public
   exposure of projection RPCs;
-- Queue producers/consumers, Matrix event consumers, provider integrations,
-  outbound command execution, paced delivery, alarms, or automation;
+- public Queue management, Matrix event consumers, provider integrations,
+  outbound command execution, paced delivery, alarms, or automation. The
+  authenticated ingestion Worker and Queue consumer live outside this
+  projection module and are documented in the Matrix ingestion runbook;
 - live R2 replay orchestration, R2 writes, bucket creation, object deletion,
   export generation, or deployment;
 - D1 schema changes or copying authorization state into the DO;
@@ -615,8 +620,8 @@ This local projection phase does not include:
 
 The durable boundaries are therefore explicit: R2 remains the rebuild
 archive, Synapse remains the operational messaging record, D1 remains the
-future source for authentication-derived grants and connection mappings, and
-DO SQLite remains disposable derived state.
+source for authentication-derived grants and connection mappings, and DO
+SQLite remains disposable derived state.
 
 ## Official Cloudflare references
 

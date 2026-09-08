@@ -19,7 +19,8 @@ The recommended pilot is:
 
 - Synapse and PostgreSQL on a Contabo VPS.
 - `mautrix-whatsapp`, `mautrix-telegram`, and `mautrix-meta` on the same VPS.
-- A Matrix event consumer forwarding normalized batches to Cloudflare Queues.
+- A Matrix event consumer submitting authenticated, one-tenant normalized
+  batches to an archive-first Cloudflare ingestion Worker.
 - One SQLite-backed Durable Object per tenant.
 - R2 as a replayable archive and media/export store.
 - Cloudflare Workers as the authenticated application and reporting API.
@@ -126,17 +127,55 @@ WhatsApp        Telegram        Messenger
                    |
              Synapse / Matrix
                    |
-          Matrix event consumer
+       Future verified Matrix Gateway
                    |
-            Cloudflare Queue
-              /           \
-             /             \
- Tenant Durable Object     R2 archive
-      SQLite               raw events/media
-             \             /
+     authenticated ingestion Worker
+                   |
+             R2 archive first
+          data + committed manifest
+                   |
+           Cloudflare Queue pointer
+                   |
+          Queue consumer / projector
+              /                \
+             /                  \
+ Tenant Durable Object        R2 archive
+      SQLite projection       replay evidence
+             \                  /
               Cloudflare Worker
                API and reports
 ```
+
+### Archive-first ingestion boundary
+
+The future Matrix Gateway submits one tenant-scoped, projection-valid batch to
+the private ingestion Worker over authenticated HTTPS. The Worker validates the
+entire request and commits the canonical event data to R2 first, followed by an
+R2 manifest that acts as the immutable commit marker. Only after the data and
+manifest pair has been verified does it enqueue a small committed-archive
+pointer. The Queue body contains no event body, Matrix identifier, source
+token, or credential.
+
+This ordering avoids forcing a 4 MiB archive/projection batch through the
+Cloudflare Queue message-body limit of 128 KiB. The Queue carries only the
+tenant, batch, manifest key, canonical digest, and gateway-route reference.
+The consumer reads and verifies that exact R2 pair, resolves trusted account
+ownership, and applies the complete batch atomically to the tenant Durable
+Object. A successful HTTP `202` therefore proves that R2 is committed and a
+Queue send completed; a Queue acknowledgement is returned only after the
+verified archive has been applied to the tenant projection. Retries are safe
+for both windows, and R2 remains the replayable evidence if projection work is
+temporarily unavailable.
+
+Synapse remains the operational Matrix record, R2 remains the immutable
+ingestion archive, and Durable Object SQLite remains a disposable,
+rebuildable query projection. The archive stores only a one-way digest of the
+Matrix source checkpoint. The later Gateway keeps the raw Matrix `/sync`
+token, E2EE state, and its durable outbox on the protected host; it persists a
+stable `archived_at` and deterministic batch ID, retries the exact batch until
+the Worker returns `202`, advances the raw checkpoint only after all tenant
+batches are accepted, and compacts its outbox afterward. This phase freezes
+that boundary but does not connect to Synapse or enable live ingestion.
 
 ### Responsibility boundaries
 
@@ -146,10 +185,10 @@ WhatsApp        Telegram        Messenger
 | Mautrix | Network translation and account sessions |
 | Synapse | Operational Matrix history and messaging system of record |
 | Matrix event consumer | Incremental ingestion, decryption, normalization, and checkpointing |
-| Cloudflare Queue | Failure isolation, retries, and asynchronous delivery |
+| Cloudflare Queue | Failure isolation, retries, and asynchronous delivery of committed-archive pointers |
 | Tenant Durable Object | Hot, tenant-isolated query model and aggregates |
-| R2 | Replayable raw archive, exports, and optional archived attachments |
-| Worker | Authentication, tenant routing, APIs, dashboards, and reports |
+| R2 | Immutable, replayable raw archive, commit manifests, exports, and optional archived attachments |
+| Worker | Ingestion authentication, archive commit, pointer enqueueing, tenant routing, APIs, dashboards, and reports |
 
 ### Durable Object storage clarification
 
@@ -422,10 +461,13 @@ The platform should distinguish between operational retention, customer-visible 
 ### Phase 3: Cloudflare projection
 
 1. Implement a verified Matrix event-consumer device.
-2. Publish idempotent message batches to Cloudflare Queues.
-3. Create a SQLite-backed Durable Object per tenant.
-4. Write compressed raw-event batches to R2.
-5. Add reconciliation and replay tooling.
+2. Submit idempotent, projection-valid batches to the authenticated ingestion
+   Worker.
+3. Commit each compressed batch and its manifest to R2 before enqueueing a
+   small committed-archive pointer.
+4. Consume the pointer and apply the verified batch to a SQLite-backed Durable
+   Object per tenant.
+5. Add reconciliation and replay tooling from the immutable R2 archive.
 
 ### Phase 4: Reports and product validation
 

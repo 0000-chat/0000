@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { PilotScenarioSchema } from "../src/pilot-scenario";
-import { pilotScenario } from "../src/pilot-scenario";
+import {
+  PilotIngestionDirectorySchema,
+  PilotScenarioSchema,
+  pilotIngestionDirectory,
+  pilotScenario,
+} from "../src/pilot-scenario";
 
 describe("pilotScenario", () => {
   it("is contract-valid and identity-isolated", () => {
@@ -75,5 +79,34 @@ describe("pilotScenario", () => {
       "conversation_human_messenger_archive",
     ]);
     expect(ordered.reduce((sum, item) => sum + item.unread_count, 0)).toBe(10);
+  });
+
+  it("contains two tenants, two service routes, and isolated Human/Agent channel bindings", () => {
+    const directory = PilotIngestionDirectorySchema.parse(pilotIngestionDirectory);
+    expect(directory.tenant_ids).toEqual(["tenant_pilot", "tenant_secondary"]);
+    expect(directory.routes.map((route) => route.gateway_route_id)).toEqual([
+      "gateway_route_human",
+      "gateway_route_agent",
+    ]);
+    expect(new Set(directory.bindings.map((binding) => binding.tenant_id))).toEqual(
+      new Set(directory.tenant_ids),
+    );
+    expect(new Set(directory.bindings.map((binding) => binding.platform))).toEqual(
+      new Set(["whatsapp", "telegram", "messenger"]),
+    );
+    expect(directory.bindings.filter((binding) => binding.identity_id === "identity_human")
+      .map((binding) => binding.platform)).toEqual(["messenger", "telegram", "whatsapp"]);
+    expect(directory.bindings.filter((binding) => binding.identity_id === "identity_agent")
+      .map((binding) => binding.platform)).toEqual(["whatsapp"]);
+    expect(directory.bindings.every((binding) =>
+      binding.account_status === "active" && binding.account_id.startsWith("account_"),
+    )).toBe(true);
+  });
+
+  it("keeps routing fixtures non-secret and immutable to callers", () => {
+    expect(Object.isFrozen(pilotIngestionDirectory)).toBe(true);
+    expect(JSON.stringify(pilotIngestionDirectory).toLowerCase()).not.toMatch(
+      /access_token|cookie|secret|password|matrix_.*token/,
+    );
   });
 });
