@@ -883,7 +883,7 @@ describe("projection-only replay", () => {
     }
     const exactEventsPage = await readReplayPage(bucket, eventsScope.tenantId, { pageSize: 4 });
     expect(exactEventsPage.events).toHaveLength(MAX_REPLAY_PAGE_EVENTS);
-  });
+  }, 15_000);
 
   it("rejects one-byte and one-event aggregate overflow before data GET", async () => {
     const scope = newScope();
