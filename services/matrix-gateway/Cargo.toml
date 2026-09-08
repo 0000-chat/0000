@@ -12,17 +12,19 @@ path = "src/main.rs"
 
 [dependencies]
 base64 = "=0.22.1"
+chacha20poly1305 = "=0.10.1"
 http.workspace = true
 matrix-sdk = { workspace = true, features = ["e2e-encryption", "sqlite", "bundled-sqlite"] }
 matrix-sdk-base = { workspace = true, features = ["e2e-encryption"] }
 matrix-sdk-common.workspace = true
 matrix-sdk-crypto = { workspace = true }
 matrix-sdk-sqlite = { workspace = true, features = ["bundled", "crypto-store", "state-store"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
 ruma.workspace = true
 rustix = { version = "=1.1.4", features = ["fs", "process"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, features = ["compress"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 zeroize = "=1.9.0"
 
