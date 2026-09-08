@@ -19,8 +19,8 @@ use ruma::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The largest response body accepted by the raw transport seam.
-pub const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// Re-export the central gateway response-size limit for transport callers.
+pub use crate::config::MAX_SYNC_RESPONSE_BYTES;
 
 /// An untouched bounded response body paired with its typed Ruma response.
 ///
@@ -35,16 +35,28 @@ pub struct PreservedSyncResponse {
 }
 
 /// Errors returned while preserving and parsing a bounded sync response.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreserveSyncResponseError {
     /// The homeserver returned an empty response body.
     Empty,
     /// The homeserver returned a response body larger than the configured limit.
     TooLarge,
     /// Ruma could not parse the response body.
-    RumaParse(
-        ruma::api::error::FromHttpResponseError<<SyncResponse as IncomingResponse>::EndpointError>,
-    ),
+    ///
+    /// The upstream parse error is intentionally discarded because it may
+    /// retain response bytes or server-provided exception text.
+    RumaParse,
+}
+
+impl PreserveSyncResponseError {
+    /// Return the stable, content-free classification for this error.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Empty => "sync_response_empty",
+            Self::TooLarge => "sync_response_too_large",
+            Self::RumaParse => "sync_response_parse_failed",
+        }
+    }
 }
 
 impl std::fmt::Display for PreserveSyncResponseError {
@@ -52,19 +64,12 @@ impl std::fmt::Display for PreserveSyncResponseError {
         match self {
             Self::Empty => formatter.write_str("sync response body is empty"),
             Self::TooLarge => formatter.write_str("sync response body is too large"),
-            Self::RumaParse(error) => write!(formatter, "failed to parse sync response: {error}"),
+            Self::RumaParse => formatter.write_str("failed to parse sync response"),
         }
     }
 }
 
-impl Error for PreserveSyncResponseError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::RumaParse(error) => Some(error),
-            Self::Empty | Self::TooLarge => None,
-        }
-    }
-}
+impl Error for PreserveSyncResponseError {}
 
 /// A serializable session envelope used by the application state store.
 ///
@@ -133,15 +138,24 @@ pub fn sync_request_to_http(
 pub fn preserve_sync_response(
     response: HttpResponse<Vec<u8>>,
 ) -> Result<PreservedSyncResponse, PreserveSyncResponseError> {
-    let body = response.body().clone();
-    if body.is_empty() {
+    let body_len = response.body().len();
+    if body_len == 0 {
         return Err(PreserveSyncResponseError::Empty);
     }
-    if body.len() > MAX_SYNC_RESPONSE_BYTES {
+    if body_len > MAX_SYNC_RESPONSE_BYTES {
         return Err(PreserveSyncResponseError::TooLarge);
     }
-    let typed = SyncResponse::try_from_http_response(response)
-        .map_err(PreserveSyncResponseError::RumaParse)?;
+
+    let status = response.status();
+    let version = response.version();
+    let headers = response.headers().clone();
+    let body = response.into_body();
+    let mut parse_response = HttpResponse::new(body.as_slice());
+    *parse_response.status_mut() = status;
+    *parse_response.version_mut() = version;
+    *parse_response.headers_mut() = headers;
+    let typed = SyncResponse::try_from_http_response(parse_response)
+        .map_err(|_| PreserveSyncResponseError::RumaParse)?;
     Ok(PreservedSyncResponse { body, typed })
 }
 
@@ -235,7 +249,10 @@ pub fn keys_query_body_digest(request: &KeysQueryRequest) -> [u8; 32] {
         device_keys: &request.device_keys,
         timeout_ms: request.timeout.map(|timeout| timeout.as_millis() as u64),
     };
-    let encoded = serde_json::to_vec(&body).expect("KeysQuery canonical body is serializable");
+    let encoded = match serde_json::to_vec(&body) {
+        Ok(encoded) => encoded,
+        Err(_) => b"matrix-crypto-request-invalid".to_vec(),
+    };
     Sha256::digest(encoded).into()
 }
 

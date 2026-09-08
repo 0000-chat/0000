@@ -456,6 +456,7 @@ dependencies = [
 name = "communicator-matrix-gateway"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "http",
  "matrix-sdk",
  "matrix-sdk-base",
@@ -464,6 +465,7 @@ dependencies = [
  "matrix-sdk-sqlite",
  "matrix-sdk-test",
  "ruma",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -471,6 +473,7 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
