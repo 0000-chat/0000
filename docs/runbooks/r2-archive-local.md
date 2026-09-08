@@ -36,12 +36,12 @@ their buckets and operational ownership remain distinct.
 
 ## Current scope
 
-The archive contract and local Worker archive library are testable, but there
-is no public archive route and no live invocation path in this phase. The
-`EVENT_ARCHIVE` binding is isolated in each checked-in Wrangler environment;
-local tests may use an in-memory R2-compatible fixture. No production write,
-replay, provisioning, or deployment is implied by the binding declaration.
-No application route imports the archive writer or reader yet.
+The archive contract and local Worker archive library are testable. There is no
+public archive route or live provider invocation in this phase. The private
+authenticated ingestion route imports the archive writer, and its Queue
+consumer imports the archive reader. Local ingestion tests use an in-memory
+R2-compatible fixture. No production write, replay, provisioning, or
+deployment is implied by the binding declaration.
 
 ## Object layout and metadata
 
@@ -287,8 +287,8 @@ rg -n 'EVENT_ARCHIVE|communicator-event-archive-' \
 
 The expected binding is `EVENT_ARCHIVE` in the base, staging, and production
 Wrangler configurations, with the three reserved names listed above. The
-local Worker runtime may expose an empty isolated binding. No application
-route is expected to read or write it yet. Do not replace these checks with
+local Worker test runtime supplies an isolated R2-compatible binding to the
+archive writer, reader, and ingestion tests. Do not replace these checks with
 `wrangler dev --remote`, a remote R2 listing, a bucket creation command, or an
 object mutation.
 
@@ -320,8 +320,10 @@ Only after an explicit infrastructure approval and deletion/privacy review:
 
 ## Explicitly excluded scope
 
-This phase includes no public routes or API, Durable Objects, Queues, Matrix or
-provider integration, media handling, export handling, deletion or erasure,
-R2 Data Catalog, Pipelines, Brain, deployment, bucket creation, secret
-configuration, or live Cloudflare mutation. Retention policy, object locks,
-and all destructive cleanup remain deferred to the deletion/privacy milestone.
+This archive runbook does not cover public archive routes, Durable Object
+projection RPCs, media handling, export handling, deletion or erasure, R2 Data
+Catalog, Pipelines, Brain, deployment, bucket creation, secret configuration,
+or live Cloudflare mutation. The private ingestion route and Queue consumer are
+covered by [the Matrix ingestion runbook](matrix-ingestion-local.md).
+Retention policy, object locks, and destructive cleanup remain deferred to the
+deletion/privacy milestone.
