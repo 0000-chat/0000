@@ -8,12 +8,17 @@ import {
 } from "./auth/ingestion-middleware";
 import { createOidcVerifier, type TokenVerifier } from "./auth/oidc";
 import { getIngestionOidcConfig } from "./ingestion/config";
+import {
+  createIngestionBatchHandler,
+  type IngestionQueueSender,
+} from "./ingestion/route";
 import { healthRoute } from "./routes/health";
 import { sessionRoute } from "./routes/session";
 
 export type AppServices = {
   createTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createIngestionTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
+  sendIngestionQueue?: IngestionQueueSender;
 };
 
 export function createApp(services: AppServices = {}) {
@@ -62,6 +67,14 @@ export function createApp(services: AppServices = {}) {
   app.use(
     "/internal/v1/ingestion/batches",
     createIngestionAuthorizationMiddleware({ getVerifier: getIngestionVerifier }),
+  );
+  app.post(
+    "/internal/v1/ingestion/batches",
+    createIngestionBatchHandler({
+      ...(services.sendIngestionQueue === undefined
+        ? {}
+        : { sendIngestionQueue: services.sendIngestionQueue }),
+    }),
   );
 
   return app;
