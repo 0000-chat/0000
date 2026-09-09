@@ -74,6 +74,7 @@ services/matrix-gateway/src/crypto.rs       XChaCha/HMAC/key-version operations
 services/matrix-gateway/src/model.rs        canonical and Matrix-neutral structs
 services/matrix-gateway/src/canonical.rs    canonical JSON, IDs, batch identity
 services/matrix-gateway/src/store.rs        SQLite transactions and migrations
+services/matrix-gateway/src/store_types.rs  validated ledger DTOs and lifecycle enums
 services/matrix-gateway/src/registry.rs     append-only room ownership registry
 services/matrix-gateway/src/normalize.rs    Matrix-neutral event normalization
 services/matrix-gateway/src/ingestion.rs    OAuth and exact HTTP delivery
@@ -567,6 +568,11 @@ Expected: FAIL because the store is absent.
 Expose only domain operations; no caller receives a raw connection:
 
 ```rust
+pub fn initialize_bootstrap_state(&mut self, state: NewBootstrapState)
+    -> Result<(), SafeError>;
+pub fn matrix_session(&self) -> Result<Option<SecretBytes>, SafeError>;
+pub fn room_anchor(&self, room_lookup: &[u8])
+    -> Result<Option<SecretBytes>, SafeError>;
 pub fn append_fetched_sync(&mut self, response: NewRawSyncInbox)
     -> Result<InboxId, SafeError>;
 pub fn reconcile_sdk_position(&self, sdk_token_digest: &[u8])
@@ -639,6 +645,14 @@ pub fn purge_committed_prefix(&mut self, cutoff: DateTime<Utc>,
                               sdk_token_digest: &[u8])
     -> Result<PurgeOutcome, SafeError>;
 ```
+
+`initialize_bootstrap_state` is the one-shot bridge between Task 9 bootstrap
+and the version-1 ledger. It atomically stores the encrypted Matrix session,
+the same initial token in both committed and fetch positions, and every
+encrypted joined-room anchor. It rejects any existing singleton or anchor and
+has no replace, reset, or force path. The detailed DTO, encryption-context,
+idempotency, and chain contracts for this operation and `append_fetched_sync`
+are frozen in `2026-09-09-communicator-matrix-gateway-sync-inbox.md`.
 
 For registry rows, derive `room_lookup` as the keyed lookup digest over
 `room-binding-room-v1, matrix_room_id`. Derive `account_lookup` over
@@ -1133,7 +1147,8 @@ Bootstrap alone builds a high-level `Client` with
 `.sqlite_store(path, Some(passphrase))`. It logs in with one fixed display name,
 stores the encrypted `MatrixSession`, performs one bounded initial sync, writes
 the same `next_batch` to the committed and fetch token fields, stores encrypted
-last-event room anchors, and closes the client. Normal daemon startup never
+last-event room anchors through `Store::initialize_bootstrap_state`, and closes
+the client. Normal daemon startup never
 constructs a high-level sync loop. It opens `SqliteStateStore` and
 `SqliteCryptoStore`, activates a public `BaseClient` with the saved session
 metadata, and maps restoration errors to stable codes without falling back to
