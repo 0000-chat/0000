@@ -14,13 +14,20 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::ValueRef};
+use rusqlite::{
+    Connection, OptionalExtension, Row, TransactionBehavior, ffi, params, types::ValueRef,
+};
 use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
 
 use crate::{
     config::{GATEWAY_SCHEMA_VERSION, MAX_PENDING_REQUEST_ROWS, MAX_RECOVERY_BYTES},
     crypto::{AEAD_TAG_BYTES, Keyring, Sealed},
+    crypto_outbox::{
+        CryptoRowId, ExactMatrixRequest, MATRIX_CRYPTO_REQUEST_KIND,
+        MAX_MATRIX_CRYPTO_REQUEST_BYTES, MAX_SDK_REQUEST_ID_BYTES,
+        validate_canonical_request_bytes,
+    },
     model,
     registry::{
         NewRoomBinding, RoomBinding, RoomBindingPayload, RoomBindingStatus,
@@ -120,6 +127,18 @@ pub const STORE_SYNC_CONFLICT: &str = "store_sync_conflict";
 pub const STORE_SYNC_CORRUPT: &str = "store_sync_corrupt";
 /// Stable error returned when the SDK position is not durably journaled.
 pub const STORE_SDK_POSITION_UNJOURNALED: &str = "matrix_sdk_position_unjournaled";
+/// Stable error returned when a crypto request is malformed.
+pub const STORE_CRYPTO_INVALID: &str = "store_crypto_invalid";
+/// Stable error returned when a crypto request exceeds a frozen bound.
+pub const STORE_CRYPTO_TOO_LARGE: &str = "store_crypto_too_large";
+/// Stable error returned when crypto processing cannot advance yet.
+pub const STORE_CRYPTO_NOT_READY: &str = "store_crypto_not_ready";
+/// Stable error returned when another unresolved crypto request exists.
+pub const STORE_CRYPTO_UNRESOLVED: &str = "store_crypto_unresolved";
+/// Stable error returned for an exact crypto request conflict.
+pub const STORE_CRYPTO_CONFLICT: &str = "store_crypto_conflict";
+/// Stable error returned for corrupt crypto or linked inbox state.
+pub const STORE_CRYPTO_CORRUPT: &str = "store_crypto_corrupt";
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE schema_meta(version INTEGER NOT NULL CHECK(version = 1));
@@ -380,6 +399,50 @@ struct StoredSyncInboxRow {
     terminal_code: Option<String>,
 }
 
+struct StoredCryptoRow {
+    crypto_row_id: String,
+    inbox_id: String,
+    request_lookup: Vec<u8>,
+    request_kind: String,
+    sdk_request_id_cipher: Vec<u8>,
+    sdk_request_id_nonce: Vec<u8>,
+    sdk_request_id_key_version: i64,
+    request_cipher: Vec<u8>,
+    request_nonce: Vec<u8>,
+    request_key_version: i64,
+    request_sha256: Vec<u8>,
+    byte_count: i64,
+    response_cipher: Option<Vec<u8>>,
+    response_nonce: Option<Vec<u8>>,
+    response_key_version: Option<i64>,
+    response_sha256: Option<Vec<u8>>,
+    state: String,
+    attempt_count: i64,
+    next_attempt_at: String,
+    accepted_at: Option<String>,
+    terminal_code: Option<String>,
+}
+
+#[allow(dead_code)]
+struct VerifiedPendingCryptoRow {
+    crypto_row_id: CryptoRowId,
+    inbox_id: InboxId,
+    request_lookup: [u8; 32],
+    sdk_request_id: SecretBytes,
+    request: SecretBytes,
+    request_sha256: [u8; 32],
+    byte_count: usize,
+    next_attempt_at: DateTime<Utc>,
+}
+
+struct PreparedCryptoRequest<'a> {
+    request: &'a ExactMatrixRequest,
+    request_lookup: [u8; 32],
+    crypto_row_id: CryptoRowId,
+    sdk_request_id: Sealed,
+    request_cipher: Sealed,
+}
+
 #[derive(Clone, Copy)]
 enum GatewayTokenField {
     Committed,
@@ -412,6 +475,10 @@ const SYNC_INBOX_STATE_MAX_BYTES: usize = "sdk_processed".len();
 const SYNC_TIMESTAMP_MAX_BYTES: usize = 64;
 const SYNC_TERMINAL_CODE_MAX_BYTES: usize = 64;
 const SYNC_NONCE_BYTES: usize = 24;
+const CRYPTO_ROW_ID_BYTES: usize = "crypto_".len() + 64;
+const CRYPTO_REQUEST_KIND_MAX_BYTES: usize = MATRIX_CRYPTO_REQUEST_KIND.len();
+const CRYPTO_STATE_MAX_BYTES: usize = "response_received".len();
+const CRYPTO_ATTEMPT_COUNT_MAX: i64 = 1_000_000;
 
 struct StoredValue<'a> {
     table: &'a str,
@@ -744,6 +811,202 @@ impl Store {
         }
         transaction.commit().map_err(|_| store_sync_corrupt())?;
         Ok(inbox_id)
+    }
+
+    /// Atomically mark one fetched response as SDK-processed and persist its
+    /// single allowlisted Matrix crypto request, if any.
+    pub fn record_sdk_processing(
+        &mut self,
+        inbox_id: &str,
+        requests: &[ExactMatrixRequest],
+    ) -> Result<(), SafeError> {
+        if !valid_stored_inbox_id(inbox_id) {
+            return Err(store_crypto_invalid());
+        }
+        let target_id = InboxId::new(inbox_id.to_owned()).map_err(|_| store_crypto_invalid())?;
+        if requests.len() > 1 {
+            return Err(store_crypto_invalid());
+        }
+        for request in requests {
+            request.validate()?;
+        }
+
+        let prepared_request = requests
+            .first()
+            .map(|request| {
+                let request_lookup =
+                    matrix_request_lookup(&self.keyring, request.request().as_bytes())
+                        .map_err(|_| store_crypto_invalid())?;
+                let crypto_row_id = derive_crypto_row_id(&target_id, &request_lookup)?;
+                let sdk_request_id = self
+                    .keyring
+                    .seal(
+                        "matrix_crypto_outbox",
+                        crypto_row_id.as_str(),
+                        "sdk_request_id",
+                        request.sdk_request_id().as_bytes(),
+                    )
+                    .map_err(|_| store_crypto_invalid())?;
+                let request_cipher = self
+                    .keyring
+                    .seal(
+                        "matrix_crypto_outbox",
+                        crypto_row_id.as_str(),
+                        "request",
+                        request.request().as_bytes(),
+                    )
+                    .map_err(|_| store_crypto_invalid())?;
+                Ok(PreparedCryptoRequest {
+                    request,
+                    request_lookup,
+                    crypto_row_id,
+                    sdk_request_id,
+                    request_cipher,
+                })
+            })
+            .transpose()?;
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_crypto_corrupt())?;
+        let gateway = require_bootstrap_singleton(&transaction, keyring, true)
+            .map_err(map_crypto_storage_error)?;
+        if gateway.is_none() {
+            return Err(store_crypto_not_ready());
+        }
+        let committed_token =
+            load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Committed)
+                .map_err(map_crypto_storage_error)?;
+        let fetch_token =
+            load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Fetch)
+                .map_err(map_crypto_storage_error)?;
+        let chain = verify_inbox_chain(&transaction, keyring, &committed_token, &fetch_token)
+            .map_err(map_crypto_storage_error)?;
+        let target_index = chain
+            .rows
+            .iter()
+            .position(|row| row.inbox_id() == &target_id)
+            .ok_or_else(store_crypto_invalid)?;
+        let target = &chain.rows[target_index];
+
+        if target.state() == SyncInboxState::Quarantined
+            || chain.rows[..target_index]
+                .iter()
+                .any(|row| row.state() == SyncInboxState::Quarantined)
+        {
+            return Err(store_crypto_not_ready());
+        }
+
+        if target.state() == SyncInboxState::SdkProcessed {
+            if target.crypto_drained() {
+                return Err(store_crypto_corrupt());
+            }
+            let existing = load_verified_crypto_rows_for_inbox(&transaction, keyring, &target_id)
+                .map_err(map_crypto_storage_error)?;
+            for row in &existing {
+                verify_crypto_parent(&transaction, keyring, row)
+                    .map_err(map_crypto_storage_error)?;
+            }
+            if existing.len() > 1 {
+                return Err(store_crypto_corrupt());
+            }
+            let exact_retry = match (requests.first(), existing.first()) {
+                (None, None) => true,
+                (Some(request), Some(stored)) => {
+                    stored.sdk_request_id.as_bytes() == request.sdk_request_id().as_bytes()
+                        && stored.request.as_bytes() == request.request().as_bytes()
+                }
+                _ => false,
+            };
+            drop(transaction);
+            return if exact_retry {
+                Ok(())
+            } else {
+                Err(store_crypto_conflict())
+            };
+        }
+
+        if target.state() != SyncInboxState::Fetched {
+            return Err(store_crypto_not_ready());
+        }
+        if target.crypto_drained()
+            || target.sdk_processed_at().is_some()
+            || target.prepared_at().is_some()
+            || target.committed_at().is_some()
+            || target.terminal_code().is_some()
+        {
+            return Err(store_crypto_corrupt());
+        }
+        if chain
+            .rows
+            .iter()
+            .position(|row| row.state() == SyncInboxState::Fetched)
+            != Some(target_index)
+        {
+            return Err(store_crypto_not_ready());
+        }
+        if chain.rows[..target_index].iter().any(|row| {
+            !matches!(
+                row.state(),
+                SyncInboxState::SdkProcessed | SyncInboxState::Prepared | SyncInboxState::Committed
+            )
+        }) {
+            return Err(store_crypto_not_ready());
+        }
+
+        reject_invalid_or_unresolved_crypto_rows(&transaction, keyring)
+            .map_err(map_crypto_storage_error)?;
+
+        if let Some(prepared) = prepared_request.as_ref() {
+            let observed_at = target.observed_at().to_rfc3339();
+            transaction
+                .execute(
+                    "INSERT INTO matrix_crypto_outbox
+                     (crypto_row_id, inbox_id, request_lookup, request_kind,
+                      sdk_request_id_cipher, sdk_request_id_nonce, sdk_request_id_key_version,
+                      request_cipher, request_nonce, request_key_version, request_sha256,
+                      byte_count, response_cipher, response_nonce, response_key_version,
+                      response_sha256, state, attempt_count, next_attempt_at,
+                      accepted_at, terminal_code)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                             NULL, NULL, NULL, NULL, 'pending', 0, ?13, NULL, NULL)",
+                    params![
+                        prepared.crypto_row_id.as_str(),
+                        target_id.as_str(),
+                        prepared.request_lookup.as_slice(),
+                        MATRIX_CRYPTO_REQUEST_KIND,
+                        prepared.sdk_request_id.ciphertext.as_slice(),
+                        prepared.sdk_request_id.nonce.as_slice(),
+                        i64::from(prepared.sdk_request_id.key_version),
+                        prepared.request_cipher.ciphertext.as_slice(),
+                        prepared.request_cipher.nonce.as_slice(),
+                        i64::from(prepared.request_cipher.key_version),
+                        prepared.request.request_sha256().as_slice(),
+                        i64::try_from(prepared.request.request().len())
+                            .map_err(|_| store_crypto_too_large())?,
+                        observed_at,
+                    ],
+                )
+                .map_err(map_crypto_insert_error)?;
+        }
+
+        let updated = transaction
+            .execute(
+                "UPDATE sync_inbox
+                 SET state = 'sdk_processed', sdk_processed_at = observed_at
+                 WHERE inbox_id = ?1 AND state = 'fetched' AND crypto_drained = 0
+                   AND sdk_processed_at IS NULL AND prepared_at IS NULL
+                   AND committed_at IS NULL AND terminal_code IS NULL",
+                params![target_id.as_str()],
+            )
+            .map_err(|_| store_crypto_corrupt())?;
+        if updated != 1 {
+            return Err(store_crypto_corrupt());
+        }
+        transaction.commit().map_err(|_| store_crypto_corrupt())?;
+        Ok(())
     }
 
     /// Reconcile an SDK token digest with the committed or journaled chain.
@@ -1130,6 +1393,53 @@ fn store_sdk_position_unjournaled() -> SafeError {
     SafeError::new(STORE_SDK_POSITION_UNJOURNALED)
 }
 
+fn store_crypto_invalid() -> SafeError {
+    SafeError::new(STORE_CRYPTO_INVALID)
+}
+
+fn store_crypto_too_large() -> SafeError {
+    SafeError::new(STORE_CRYPTO_TOO_LARGE)
+}
+
+fn store_crypto_not_ready() -> SafeError {
+    SafeError::new(STORE_CRYPTO_NOT_READY)
+}
+
+fn store_crypto_unresolved() -> SafeError {
+    SafeError::new(STORE_CRYPTO_UNRESOLVED)
+}
+
+fn store_crypto_conflict() -> SafeError {
+    SafeError::new(STORE_CRYPTO_CONFLICT)
+}
+
+fn store_crypto_corrupt() -> SafeError {
+    SafeError::new(STORE_CRYPTO_CORRUPT)
+}
+
+fn map_crypto_storage_error(error: SafeError) -> SafeError {
+    match error.code() {
+        STORE_NOT_BOOTSTRAPPED => store_crypto_not_ready(),
+        STORE_CRYPTO_NOT_READY
+        | STORE_CRYPTO_UNRESOLVED
+        | STORE_CRYPTO_CONFLICT
+        | STORE_CRYPTO_CORRUPT => error,
+        _ => store_crypto_corrupt(),
+    }
+}
+
+fn map_crypto_insert_error(error: rusqlite::Error) -> SafeError {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == ffi::SQLITE_CONSTRAINT_UNIQUE
+                || failure.extended_code == ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+        {
+            store_crypto_conflict()
+        }
+        _ => store_crypto_corrupt(),
+    }
+}
+
 fn room_binding_duplicate_room() -> SafeError {
     SafeError::new(STORE_ROOM_BINDING_DUPLICATE_ROOM)
 }
@@ -1293,6 +1603,42 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     output
 }
 
+fn matrix_request_lookup(
+    keyring: &Keyring,
+    canonical_request: &[u8],
+) -> Result<[u8; 32], SafeError> {
+    let canonical_request_utf8 =
+        std::str::from_utf8(canonical_request).map_err(|_| store_crypto_invalid())?;
+    keyring
+        .lookup_digest(
+            "matrix-crypto-request-v1",
+            &[MATRIX_CRYPTO_REQUEST_KIND, canonical_request_utf8],
+        )
+        .map_err(|_| store_crypto_invalid())
+}
+
+fn derive_crypto_row_id(
+    inbox_id: &InboxId,
+    request_lookup: &[u8; 32],
+) -> Result<CryptoRowId, SafeError> {
+    let prefix = b"matrix-crypto-row-v1";
+    let inbox_bytes = inbox_id.as_str().as_bytes();
+    let capacity = 4_usize
+        .checked_add(prefix.len())
+        .and_then(|value| value.checked_add(4 + inbox_bytes.len()))
+        .and_then(|value| value.checked_add(4 + request_lookup.len()))
+        .ok_or_else(store_crypto_invalid)?;
+    let mut framed = Vec::with_capacity(capacity);
+    for value in [prefix.as_slice(), inbox_bytes, request_lookup.as_slice()] {
+        let length = u32::try_from(value.len()).map_err(|_| store_crypto_invalid())?;
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(value);
+    }
+    let digest = sha256(&framed);
+    CryptoRowId::new(format!("crypto_{}", lowercase_hex(&digest)))
+        .map_err(|_| store_crypto_invalid())
+}
+
 fn derive_inbox_id(
     request_token_digest: &[u8; 32],
     next_token_digest: &[u8; 32],
@@ -1393,6 +1739,283 @@ fn read_stored_sync_inbox_row(row: &Row<'_>) -> Result<StoredSyncInboxRow, SafeE
             valid_stored_reason_code,
         )?,
     })
+}
+
+fn read_stored_crypto_row(row: &Row<'_>) -> Result<StoredCryptoRow, SafeError> {
+    let max_key_version = i64::from(u32::MAX);
+    let max_sdk_ciphertext = MAX_SDK_REQUEST_ID_BYTES
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_crypto_corrupt)?;
+    let max_request_ciphertext = MAX_MATRIX_CRYPTO_REQUEST_BYTES
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_crypto_corrupt)?;
+    let byte_count = read_crypto_integer(row, 11, 1, MAX_MATRIX_CRYPTO_REQUEST_BYTES as i64)?;
+    let max_request_ciphertext_for_row = usize::try_from(byte_count)
+        .ok()
+        .and_then(|count| count.checked_add(AEAD_TAG_BYTES))
+        .filter(|count| *count <= max_request_ciphertext)
+        .ok_or_else(store_crypto_corrupt)?;
+
+    Ok(StoredCryptoRow {
+        crypto_row_id: read_sync_text(row, 0, CRYPTO_ROW_ID_BYTES, valid_stored_crypto_row_id)?,
+        inbox_id: read_sync_text(row, 1, SYNC_INBOX_ID_BYTES, valid_stored_inbox_id)?,
+        request_lookup: read_sync_blob(row, 2, 32, 32)?,
+        request_kind: read_sync_text(
+            row,
+            3,
+            CRYPTO_REQUEST_KIND_MAX_BYTES,
+            valid_stored_crypto_request_kind,
+        )?,
+        sdk_request_id_cipher: read_sync_blob(row, 4, AEAD_TAG_BYTES, max_sdk_ciphertext)?,
+        sdk_request_id_nonce: read_sync_blob(row, 5, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        sdk_request_id_key_version: read_sync_integer(row, 6, 1, max_key_version)?,
+        request_cipher: read_sync_blob(row, 7, AEAD_TAG_BYTES, max_request_ciphertext_for_row)?,
+        request_nonce: read_sync_blob(row, 8, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        request_key_version: read_sync_integer(row, 9, 1, max_key_version)?,
+        request_sha256: read_sync_blob(row, 10, 32, 32)?,
+        byte_count,
+        response_cipher: read_optional_sync_blob(row, 12, AEAD_TAG_BYTES, max_request_ciphertext)?,
+        response_nonce: read_optional_sync_blob(row, 13, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        response_key_version: read_optional_sync_integer(row, 14, 1, max_key_version)?,
+        response_sha256: read_optional_sync_blob(row, 15, 32, 32)?,
+        state: read_sync_text(row, 16, CRYPTO_STATE_MAX_BYTES, valid_stored_crypto_state)?,
+        attempt_count: read_crypto_integer(row, 17, 0, CRYPTO_ATTEMPT_COUNT_MAX)?,
+        next_attempt_at: read_sync_text(
+            row,
+            18,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        accepted_at: read_optional_sync_text(
+            row,
+            19,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        terminal_code: read_optional_sync_text(
+            row,
+            20,
+            SYNC_TERMINAL_CODE_MAX_BYTES,
+            valid_stored_reason_code,
+        )?,
+    })
+}
+
+fn read_crypto_integer(
+    row: &Row<'_>,
+    index: usize,
+    min_value: i64,
+    max_value: i64,
+) -> Result<i64, SafeError> {
+    match row.get_ref(index).map_err(|_| store_crypto_corrupt())? {
+        ValueRef::Integer(value) if (min_value..=max_value).contains(&value) => Ok(value),
+        _ => Err(store_crypto_corrupt()),
+    }
+}
+
+fn read_and_verify_pending_crypto_row(
+    stored: StoredCryptoRow,
+    keyring: &Keyring,
+) -> Result<VerifiedPendingCryptoRow, SafeError> {
+    let crypto_row_id =
+        CryptoRowId::new(stored.crypto_row_id).map_err(|_| store_crypto_corrupt())?;
+    let inbox_id = InboxId::new(stored.inbox_id).map_err(|_| store_crypto_corrupt())?;
+    let request_lookup = digest_from_blob(&stored.request_lookup)?;
+    let request_sha256 = digest_from_blob(&stored.request_sha256)?;
+    let byte_count = usize::try_from(stored.byte_count).map_err(|_| store_crypto_corrupt())?;
+    if stored.request_kind != MATRIX_CRYPTO_REQUEST_KIND
+        || stored.state != "pending"
+        || stored.attempt_count != 0
+        || stored.response_cipher.is_some()
+        || stored.response_nonce.is_some()
+        || stored.response_key_version.is_some()
+        || stored.response_sha256.is_some()
+        || stored.accepted_at.is_some()
+        || stored.terminal_code.is_some()
+    {
+        return Err(store_crypto_corrupt());
+    }
+    let next_attempt_at = parse_stored_timestamp(&stored.next_attempt_at)?;
+
+    let sdk_request_id_plaintext = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "matrix_crypto_outbox",
+            row_id: crypto_row_id.as_str(),
+            column: "sdk_request_id",
+            ciphertext: Some(stored.sdk_request_id_cipher.as_slice()),
+            nonce: Some(stored.sdk_request_id_nonce.as_slice()),
+            key_version: Some(stored.sdk_request_id_key_version),
+            max_plaintext_bytes: MAX_SDK_REQUEST_ID_BYTES,
+        },
+    )?;
+    let request_plaintext = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "matrix_crypto_outbox",
+            row_id: crypto_row_id.as_str(),
+            column: "request",
+            ciphertext: Some(stored.request_cipher.as_slice()),
+            nonce: Some(stored.request_nonce.as_slice()),
+            key_version: Some(stored.request_key_version),
+            max_plaintext_bytes: MAX_MATRIX_CRYPTO_REQUEST_BYTES,
+        },
+    )?;
+    if sdk_request_id_plaintext.is_empty()
+        || sdk_request_id_plaintext.len() > MAX_SDK_REQUEST_ID_BYTES
+        || request_plaintext.len() != byte_count
+        || request_plaintext.is_empty()
+        || request_plaintext.len() > MAX_MATRIX_CRYPTO_REQUEST_BYTES
+    {
+        return Err(store_crypto_corrupt());
+    }
+    validate_canonical_request_bytes(request_plaintext.as_bytes())
+        .map_err(|_| store_crypto_corrupt())?;
+    if sha256(request_plaintext.as_bytes()) != request_sha256 {
+        return Err(store_crypto_corrupt());
+    }
+    let expected_lookup = matrix_request_lookup(keyring, request_plaintext.as_bytes())
+        .map_err(|_| store_crypto_corrupt())?;
+    if expected_lookup != request_lookup
+        || derive_crypto_row_id(&inbox_id, &request_lookup)? != crypto_row_id
+    {
+        return Err(store_crypto_corrupt());
+    }
+
+    Ok(VerifiedPendingCryptoRow {
+        crypto_row_id,
+        inbox_id,
+        request_lookup,
+        sdk_request_id: SecretBytes::new(sdk_request_id_plaintext.as_bytes().to_vec()),
+        request: SecretBytes::new(request_plaintext.as_bytes().to_vec()),
+        request_sha256,
+        byte_count,
+        next_attempt_at,
+    })
+}
+
+const CRYPTO_ROW_COLUMNS: &str = "crypto_row_id, inbox_id, request_lookup, request_kind,
+     sdk_request_id_cipher, sdk_request_id_nonce, sdk_request_id_key_version,
+     request_cipher, request_nonce, request_key_version, request_sha256,
+     byte_count, response_cipher, response_nonce, response_key_version,
+     response_sha256, state, attempt_count, next_attempt_at,
+     accepted_at, terminal_code";
+
+fn load_verified_crypto_rows_for_inbox(
+    connection: &Connection,
+    keyring: &Keyring,
+    inbox_id: &InboxId,
+) -> Result<Vec<VerifiedPendingCryptoRow>, SafeError> {
+    let query = format!(
+        "SELECT {CRYPTO_ROW_COLUMNS}
+         FROM matrix_crypto_outbox WHERE inbox_id = ?1 ORDER BY rowid LIMIT 2"
+    );
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|_| store_crypto_corrupt())?;
+    let mut rows = statement
+        .query(params![inbox_id.as_str()])
+        .map_err(|_| store_crypto_corrupt())?;
+    let mut verified = Vec::with_capacity(2);
+    while let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? {
+        let stored = read_stored_crypto_row(row)?;
+        verified.push(read_and_verify_pending_crypto_row(stored, keyring)?);
+    }
+    Ok(verified)
+}
+
+fn load_verified_inbox_for_crypto(
+    connection: &Connection,
+    keyring: &Keyring,
+    inbox_id: &InboxId,
+) -> Result<RawSyncInbox, SafeError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT inbox_id, predecessor_id,
+                    request_token_cipher, request_token_nonce, request_token_key_version,
+                    request_token_digest,
+                    next_token_cipher, next_token_nonce, next_token_key_version,
+                    next_token_digest,
+                    response_cipher, response_nonce, response_key_version, response_sha256,
+                    byte_count, state, crypto_drained, observed_at, created_at,
+                    sdk_processed_at, prepared_at, committed_at, terminal_code
+             FROM sync_inbox WHERE inbox_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| store_crypto_corrupt())?;
+    let mut rows = statement
+        .query(params![inbox_id.as_str()])
+        .map_err(|_| store_crypto_corrupt())?;
+    let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? else {
+        return Err(store_crypto_corrupt());
+    };
+    let stored = read_stored_sync_inbox_row(row).map_err(|_| store_crypto_corrupt())?;
+    if rows.next().map_err(|_| store_crypto_corrupt())?.is_some() {
+        return Err(store_crypto_corrupt());
+    }
+    read_and_verify_inbox_row(stored, keyring).map_err(|_| store_crypto_corrupt())
+}
+
+fn verify_crypto_parent(
+    connection: &Connection,
+    keyring: &Keyring,
+    row: &VerifiedPendingCryptoRow,
+) -> Result<(), SafeError> {
+    let parent = load_verified_inbox_for_crypto(connection, keyring, &row.inbox_id)?;
+    if parent.state() != SyncInboxState::SdkProcessed
+        || parent.crypto_drained()
+        || parent.sdk_processed_at() != Some(parent.observed_at())
+        || row.next_attempt_at != *parent.observed_at()
+    {
+        return Err(store_crypto_corrupt());
+    }
+    Ok(())
+}
+
+fn reject_invalid_or_unresolved_crypto_rows(
+    connection: &Connection,
+    keyring: &Keyring,
+) -> Result<(), SafeError> {
+    let query = format!(
+        "SELECT {CRYPTO_ROW_COLUMNS}
+         FROM matrix_crypto_outbox
+         WHERE state IS NULL OR state <> 'pending'
+         ORDER BY rowid LIMIT 2"
+    );
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|_| store_crypto_corrupt())?;
+    let mut rows = statement.query([]).map_err(|_| store_crypto_corrupt())?;
+    if let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? {
+        let stored = read_stored_crypto_row(row)?;
+        let _ = read_and_verify_pending_crypto_row(stored, keyring)?;
+        return Err(store_crypto_corrupt());
+    }
+    drop(rows);
+    drop(statement);
+
+    let query = format!(
+        "SELECT {CRYPTO_ROW_COLUMNS}
+         FROM matrix_crypto_outbox WHERE state = 'pending' ORDER BY rowid LIMIT 2"
+    );
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|_| store_crypto_corrupt())?;
+    let mut rows = statement.query([]).map_err(|_| store_crypto_corrupt())?;
+    let mut unresolved = Vec::with_capacity(2);
+    while let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? {
+        let stored = read_stored_crypto_row(row)?;
+        let verified = read_and_verify_pending_crypto_row(stored, keyring)?;
+        verify_crypto_parent(connection, keyring, &verified)?;
+        unresolved.push(verified);
+    }
+    if unresolved.len() > 1 {
+        return Err(store_crypto_corrupt());
+    }
+    if unresolved.is_empty() {
+        Ok(())
+    } else {
+        Err(store_crypto_unresolved())
+    }
 }
 
 fn read_sync_blob(
@@ -1497,6 +2120,25 @@ fn valid_stored_sync_state(value: &str) -> bool {
     matches!(
         value,
         "fetched" | "sdk_processed" | "prepared" | "committed" | "quarantined"
+    )
+}
+
+fn valid_stored_crypto_row_id(value: &str) -> bool {
+    value.len() == CRYPTO_ROW_ID_BYTES
+        && value.starts_with("crypto_")
+        && value.as_bytes()["crypto_".len()..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn valid_stored_crypto_request_kind(value: &str) -> bool {
+    value == MATRIX_CRYPTO_REQUEST_KIND
+}
+
+fn valid_stored_crypto_state(value: &str) -> bool {
+    matches!(
+        value,
+        "pending" | "response_received" | "accepted" | "quarantined"
     )
 }
 

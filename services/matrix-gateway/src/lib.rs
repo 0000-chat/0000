@@ -3,6 +3,7 @@
 pub mod canonical;
 pub mod config;
 pub mod crypto;
+pub mod crypto_outbox;
 pub mod matrix_spike;
 pub mod model;
 pub mod protected;
