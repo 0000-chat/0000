@@ -305,7 +305,22 @@ impl NewRawSyncInbox {
         Ok(value)
     }
 
-    fn validate(&self) -> Result<(), SafeError> {
+    #[cfg(test)]
+    pub(crate) fn new_unchecked_for_test(
+        request_token: Vec<u8>,
+        next_token: Vec<u8>,
+        response: Vec<u8>,
+        observed_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            request_token: SecretBytes::new(request_token),
+            next_token: SecretBytes::new(next_token),
+            response: SecretBytes::new(response),
+            observed_at,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), SafeError> {
         if self.request_token.is_empty() || self.next_token.is_empty() {
             return Err(sync_invalid());
         }

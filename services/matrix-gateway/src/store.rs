@@ -5,6 +5,7 @@
 //! domain transactions here rather than passing a raw connection around.
 
 use std::{
+    collections::{HashMap, HashSet},
     fmt,
     fs::{File, OpenOptions, symlink_metadata},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -13,11 +14,12 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::ValueRef};
 use rustix::fs::{FlockOperation, OFlags, flock};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    config::GATEWAY_SCHEMA_VERSION,
+    config::{GATEWAY_SCHEMA_VERSION, MAX_PENDING_REQUEST_ROWS, MAX_RECOVERY_BYTES},
     crypto::{AEAD_TAG_BYTES, Keyring, Sealed},
     model,
     registry::{
@@ -27,8 +29,9 @@ use crate::{
     },
     secret::{SafeError, SecretBytes},
     store_types::{
-        MAX_BOOTSTRAP_ROOM_ANCHORS, MAX_BOOTSTRAP_SESSION_BYTES, MAX_ROOM_ANCHOR_BYTES,
-        MAX_SYNC_TOKEN_BYTES, NewBootstrapState,
+        InboxId, MAX_BOOTSTRAP_ROOM_ANCHORS, MAX_BOOTSTRAP_SESSION_BYTES, MAX_ROOM_ANCHOR_BYTES,
+        MAX_SYNC_RESPONSE_BYTES, MAX_SYNC_TOKEN_BYTES, NewBootstrapState, NewRawSyncInbox,
+        RawSyncInbox, ReasonCode, SdkInboxPosition, SyncInboxState,
     },
 };
 
@@ -351,6 +354,65 @@ struct StoredRoomProgressRow {
     updated_at: Option<String>,
 }
 
+struct StoredSyncInboxRow {
+    inbox_id: String,
+    predecessor_id: Option<String>,
+    request_token_cipher: Vec<u8>,
+    request_token_nonce: Vec<u8>,
+    request_token_key_version: i64,
+    request_token_digest: Vec<u8>,
+    next_token_cipher: Vec<u8>,
+    next_token_nonce: Vec<u8>,
+    next_token_key_version: i64,
+    next_token_digest: Vec<u8>,
+    response_cipher: Vec<u8>,
+    response_nonce: Vec<u8>,
+    response_key_version: i64,
+    response_sha256: Vec<u8>,
+    byte_count: i64,
+    state: String,
+    crypto_drained: i64,
+    observed_at: String,
+    created_at: String,
+    sdk_processed_at: Option<String>,
+    prepared_at: Option<String>,
+    committed_at: Option<String>,
+    terminal_code: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum GatewayTokenField {
+    Committed,
+    Fetch,
+}
+
+impl GatewayTokenField {
+    const fn column(self) -> &'static str {
+        match self {
+            Self::Committed => "committed_token",
+            Self::Fetch => "fetch_token",
+        }
+    }
+}
+
+struct RetainedInboxBounds {
+    row_count: usize,
+    total_bytes: u64,
+}
+
+struct VerifiedInboxChain {
+    rows: Vec<RawSyncInbox>,
+    next_digest_index: HashMap<[u8; 32], usize>,
+    tail_index: Option<usize>,
+    first_uncommitted_index: Option<usize>,
+}
+
+const SYNC_INBOX_ID_BYTES: usize = "inbox_".len() + 64;
+const SYNC_INBOX_STATE_MAX_BYTES: usize = "sdk_processed".len();
+const SYNC_TIMESTAMP_MAX_BYTES: usize = 64;
+const SYNC_TERMINAL_CODE_MAX_BYTES: usize = 64;
+const SYNC_NONCE_BYTES: usize = 24;
+
 struct StoredValue<'a> {
     table: &'a str,
     row_id: &'a str,
@@ -505,8 +567,274 @@ impl Store {
         Ok(())
     }
 
+    /// Append one fetched response and advance only the fetch position.
+    pub fn append_fetched_sync(&mut self, response: NewRawSyncInbox) -> Result<InboxId, SafeError> {
+        response.validate()?;
+        let request_token = response.request_token().as_bytes();
+        let next_token = response.next_token().as_bytes();
+        let response_bytes = response.response().as_bytes();
+        let request_token_digest = sha256(request_token);
+        let next_token_digest = sha256(next_token);
+        let response_sha256 = sha256(response_bytes);
+        let inbox_id =
+            derive_inbox_id(&request_token_digest, &next_token_digest, &response_sha256)?;
+        let request_token_sealed = self
+            .keyring
+            .seal(
+                "sync_inbox",
+                inbox_id.as_str(),
+                "request_token",
+                request_token,
+            )
+            .map_err(|_| store_sync_invalid())?;
+        let next_token_sealed = self
+            .keyring
+            .seal("sync_inbox", inbox_id.as_str(), "next_token", next_token)
+            .map_err(|_| store_sync_invalid())?;
+        let response_sealed = self
+            .keyring
+            .seal("sync_inbox", inbox_id.as_str(), "response", response_bytes)
+            .map_err(|_| store_sync_invalid())?;
+        let fetch_token_sealed = self
+            .keyring
+            .seal("gateway_state", "1", "fetch_token", next_token)
+            .map_err(|_| store_sync_invalid())?;
+        let observed_at = response.observed_at().to_rfc3339();
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_sync_invalid())?;
+        let _gateway = require_bootstrap_singleton(&transaction, keyring, true)?
+            .ok_or_else(store_not_bootstrapped)?;
+        let row_scan_limit = sync_inbox_scan_limit()?;
+
+        let mut statement = transaction
+            .prepare(
+                "SELECT inbox_id, predecessor_id,
+                        request_token_cipher, request_token_nonce, request_token_key_version,
+                        request_token_digest,
+                        next_token_cipher, next_token_nonce, next_token_key_version,
+                        next_token_digest,
+                        response_cipher, response_nonce, response_key_version, response_sha256,
+                        byte_count, state, crypto_drained, observed_at, created_at,
+                        sdk_processed_at, prepared_at, committed_at, terminal_code
+                 FROM sync_inbox
+                 WHERE inbox_id = ?1
+                    OR request_token_digest = ?2
+                    OR next_token_digest = ?3
+                 LIMIT ?4",
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        let mut rows = statement
+            .query(params![
+                inbox_id.as_str(),
+                request_token_digest.as_slice(),
+                next_token_digest.as_slice(),
+                row_scan_limit,
+            ])
+            .map_err(|_| store_sync_corrupt())?;
+        let mut exact_id = None;
+        let mut conflict = false;
+        while let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? {
+            let stored = read_stored_sync_inbox_row(row).map_err(|_| store_sync_corrupt())?;
+            let verified = read_and_verify_inbox_row(stored, keyring)?;
+            let exact = verified.request_token().as_bytes() == request_token
+                && verified.next_token().as_bytes() == next_token
+                && verified.response().as_bytes() == response_bytes;
+            if exact {
+                if exact_id.replace(verified.inbox_id().clone()).is_some() {
+                    conflict = true;
+                }
+            } else {
+                conflict = true;
+            }
+        }
+        drop(rows);
+        drop(statement);
+        if conflict {
+            return Err(store_sync_conflict());
+        }
+        if let Some(existing_id) = exact_id {
+            let current_fetch =
+                load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Fetch)?;
+            let committed_token =
+                load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Committed)?;
+            verify_inbox_chain(&transaction, keyring, &committed_token, &current_fetch)?;
+            drop(transaction);
+            return Ok(existing_id);
+        }
+
+        let current_fetch =
+            load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Fetch)?;
+        if current_fetch.as_bytes() != request_token {
+            return Err(store_sync_token_mismatch());
+        }
+        let committed_token =
+            load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Committed)?;
+        let chain = verify_inbox_chain(&transaction, keyring, &committed_token, &current_fetch)?;
+        if let Some(tail) = chain.tail()
+            && response.observed_at() < tail.observed_at()
+        {
+            return Err(store_sync_invalid());
+        }
+
+        let retained_bounds = retained_inbox_bounds(&transaction)?;
+        let new_response_bytes =
+            u64::try_from(response_bytes.len()).map_err(|_| store_sync_too_large())?;
+        if u64::try_from(retained_bounds.row_count)
+            .ok()
+            .is_none_or(|count| count >= MAX_PENDING_REQUEST_ROWS)
+            || checked_sync_inbox_bytes(retained_bounds.total_bytes, new_response_bytes).is_err()
+        {
+            return Err(store_sync_too_large());
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO sync_inbox
+                 (inbox_id, predecessor_id,
+                  request_token_cipher, request_token_nonce, request_token_key_version,
+                  request_token_digest,
+                  next_token_cipher, next_token_nonce, next_token_key_version,
+                  next_token_digest,
+                  response_cipher, response_nonce, response_key_version, response_sha256,
+                  byte_count, state, crypto_drained, observed_at, created_at,
+                  sdk_processed_at, prepared_at, committed_at, terminal_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                         ?11, ?12, ?13, ?14, ?15, 'fetched', 0, ?16, ?16,
+                         NULL, NULL, NULL, NULL)",
+                params![
+                    inbox_id.as_str(),
+                    chain.tail().map(|row| row.inbox_id().as_str()),
+                    request_token_sealed.ciphertext.as_slice(),
+                    request_token_sealed.nonce.as_slice(),
+                    i64::from(request_token_sealed.key_version),
+                    request_token_digest.as_slice(),
+                    next_token_sealed.ciphertext.as_slice(),
+                    next_token_sealed.nonce.as_slice(),
+                    i64::from(next_token_sealed.key_version),
+                    next_token_digest.as_slice(),
+                    response_sealed.ciphertext.as_slice(),
+                    response_sealed.nonce.as_slice(),
+                    i64::from(response_sealed.key_version),
+                    response_sha256.as_slice(),
+                    i64::try_from(response_bytes.len()).map_err(|_| store_sync_too_large())?,
+                    observed_at,
+                ],
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        let updated = transaction
+            .execute(
+                "UPDATE gateway_state
+                 SET fetch_token_cipher = ?1, fetch_token_nonce = ?2,
+                     fetch_token_key_version = ?3, updated_at = ?4
+                 WHERE singleton = 1",
+                params![
+                    fetch_token_sealed.ciphertext.as_slice(),
+                    fetch_token_sealed.nonce.as_slice(),
+                    i64::from(fetch_token_sealed.key_version),
+                    observed_at,
+                ],
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        if updated != 1 {
+            return Err(store_sync_corrupt());
+        }
+        transaction.commit().map_err(|_| store_sync_corrupt())?;
+        Ok(inbox_id)
+    }
+
+    /// Reconcile an SDK token digest with the committed or journaled chain.
+    pub fn reconcile_sdk_position(
+        &self,
+        sdk_token_digest: &[u8],
+    ) -> Result<SdkInboxPosition, SafeError> {
+        if sdk_token_digest.len() != 32 {
+            return Err(store_sync_invalid());
+        }
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Err(store_not_bootstrapped());
+        };
+        let committed_token = load_verified_gateway_token(
+            &self.connection,
+            &self.keyring,
+            GatewayTokenField::Committed,
+        )?;
+        let fetch_token =
+            load_verified_gateway_token(&self.connection, &self.keyring, GatewayTokenField::Fetch)?;
+        let sdk_token_digest: [u8; 32] = sdk_token_digest
+            .try_into()
+            .map_err(|_| store_sync_invalid())?;
+        let chain = verify_inbox_chain(
+            &self.connection,
+            &self.keyring,
+            &committed_token,
+            &fetch_token,
+        )?;
+        if sha256(committed_token.as_bytes()) == sdk_token_digest {
+            return Ok(SdkInboxPosition::Committed);
+        }
+        chain
+            .next_digest_index
+            .get(&sdk_token_digest)
+            .map(|index| SdkInboxPosition::Journaled {
+                inbox_id: chain.rows[*index].inbox_id().clone(),
+            })
+            .ok_or_else(store_sdk_position_unjournaled)
+    }
+
+    /// Return the committed sync token as a newly owned protected value.
+    pub fn committed_sync_token(&self) -> Result<Option<SecretBytes>, SafeError> {
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Ok(None);
+        };
+        load_verified_gateway_token(
+            &self.connection,
+            &self.keyring,
+            GatewayTokenField::Committed,
+        )
+        .map(Some)
+    }
+
+    /// Return the latest fetched sync token as a newly owned protected value.
+    pub fn fetch_sync_token(&self) -> Result<Option<SecretBytes>, SafeError> {
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Ok(None);
+        };
+        load_verified_gateway_token(&self.connection, &self.keyring, GatewayTokenField::Fetch)
+            .map(Some)
+    }
+
+    /// Return the first row after the contiguous committed prefix.
+    pub fn oldest_uncommitted_inbox(&self) -> Result<Option<RawSyncInbox>, SafeError> {
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Err(store_not_bootstrapped());
+        };
+        let committed_token = load_verified_gateway_token(
+            &self.connection,
+            &self.keyring,
+            GatewayTokenField::Committed,
+        )?;
+        let fetch_token =
+            load_verified_gateway_token(&self.connection, &self.keyring, GatewayTokenField::Fetch)?;
+        let chain = verify_inbox_chain(
+            &self.connection,
+            &self.keyring,
+            &committed_token,
+            &fetch_token,
+        )?;
+        Ok(chain.into_first_uncommitted())
+    }
+
     /// Return the authenticated Matrix session after validating store state.
     pub fn matrix_session(&self) -> Result<Option<SecretBytes>, SafeError> {
+        let retained_bounds = retained_inbox_bounds(&self.connection)?;
         let gateway_count = self
             .connection
             .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| {
@@ -514,7 +842,7 @@ impl Store {
             })
             .map_err(|_| store_sync_corrupt())?;
         let room_progress_count = bounded_room_progress_count(&self.connection)?;
-        if gateway_count == 0 && room_progress_count == 0 {
+        if gateway_count == 0 && room_progress_count == 0 && retained_bounds.row_count == 0 {
             return Ok(None);
         }
         if gateway_count != 1 {
@@ -534,6 +862,7 @@ impl Store {
             return Err(store_bootstrap_invalid());
         }
 
+        let retained_bounds = retained_inbox_bounds(&self.connection)?;
         let gateway_count = self
             .connection
             .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| {
@@ -541,7 +870,7 @@ impl Store {
             })
             .map_err(|_| store_sync_corrupt())?;
         let room_progress_count = bounded_room_progress_count(&self.connection)?;
-        if gateway_count == 0 && room_progress_count == 0 {
+        if gateway_count == 0 && room_progress_count == 0 && retained_bounds.row_count == 0 {
             return Ok(None);
         }
         if gateway_count != 1 {
@@ -773,8 +1102,32 @@ fn store_bootstrap_invalid() -> SafeError {
     SafeError::new(STORE_BOOTSTRAP_INVALID)
 }
 
+fn store_not_bootstrapped() -> SafeError {
+    SafeError::new(STORE_NOT_BOOTSTRAPPED)
+}
+
+fn store_sync_invalid() -> SafeError {
+    SafeError::new(STORE_SYNC_INVALID)
+}
+
+fn store_sync_too_large() -> SafeError {
+    SafeError::new(STORE_SYNC_TOO_LARGE)
+}
+
+fn store_sync_token_mismatch() -> SafeError {
+    SafeError::new(STORE_SYNC_TOKEN_MISMATCH)
+}
+
+fn store_sync_conflict() -> SafeError {
+    SafeError::new(STORE_SYNC_CONFLICT)
+}
+
 fn store_sync_corrupt() -> SafeError {
     SafeError::new(STORE_SYNC_CORRUPT)
+}
+
+fn store_sdk_position_unjournaled() -> SafeError {
+    SafeError::new(STORE_SDK_POSITION_UNJOURNALED)
 }
 
 fn room_binding_duplicate_room() -> SafeError {
@@ -793,35 +1146,729 @@ fn valid_utc_millisecond(value: DateTime<Utc>) -> bool {
 fn read_stored_gateway_state(
     connection: &Connection,
 ) -> Result<Option<StoredGatewayStateRow>, SafeError> {
-    connection
-        .query_row(
+    let max_token_ciphertext = MAX_SYNC_TOKEN_BYTES
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_sync_corrupt)?;
+    let max_session_ciphertext = MAX_BOOTSTRAP_SESSION_BYTES
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_sync_corrupt)?;
+    let max_key_version = i64::from(u32::MAX);
+    let mut statement = connection
+        .prepare(
             "SELECT singleton, session_cipher, session_nonce, session_key_version,
                     committed_token_cipher, committed_token_nonce, committed_token_key_version,
                     fetch_token_cipher, fetch_token_nonce, fetch_token_key_version,
                     maintenance_code, maintenance_since, bootstrapped_at, updated_at
-             FROM gateway_state",
-            [],
-            |row| {
-                Ok(StoredGatewayStateRow {
-                    singleton: row.get(0)?,
-                    session_cipher: row.get(1)?,
-                    session_nonce: row.get(2)?,
-                    session_key_version: row.get(3)?,
-                    committed_token_cipher: row.get(4)?,
-                    committed_token_nonce: row.get(5)?,
-                    committed_token_key_version: row.get(6)?,
-                    fetch_token_cipher: row.get(7)?,
-                    fetch_token_nonce: row.get(8)?,
-                    fetch_token_key_version: row.get(9)?,
-                    maintenance_code: row.get(10)?,
-                    maintenance_since: row.get(11)?,
-                    bootstrapped_at: row.get(12)?,
-                    updated_at: row.get(13)?,
-                })
-            },
+             FROM gateway_state LIMIT 2",
         )
-        .optional()
+        .map_err(|_| store_sync_corrupt())?;
+    let mut rows = statement.query([]).map_err(|_| store_sync_corrupt())?;
+    let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? else {
+        return Ok(None);
+    };
+    let gateway = StoredGatewayStateRow {
+        singleton: read_sync_integer(row, 0, 1, 1)?,
+        session_cipher: read_optional_sync_blob(row, 1, AEAD_TAG_BYTES, max_session_ciphertext)?,
+        session_nonce: read_optional_sync_blob(row, 2, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        session_key_version: read_optional_sync_integer(row, 3, 1, max_key_version)?,
+        committed_token_cipher: read_optional_sync_blob(
+            row,
+            4,
+            AEAD_TAG_BYTES,
+            max_token_ciphertext,
+        )?,
+        committed_token_nonce: read_optional_sync_blob(row, 5, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        committed_token_key_version: read_optional_sync_integer(row, 6, 1, max_key_version)?,
+        fetch_token_cipher: read_optional_sync_blob(row, 7, AEAD_TAG_BYTES, max_token_ciphertext)?,
+        fetch_token_nonce: read_optional_sync_blob(row, 8, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        fetch_token_key_version: read_optional_sync_integer(row, 9, 1, max_key_version)?,
+        maintenance_code: read_optional_sync_text(
+            row,
+            10,
+            SYNC_TERMINAL_CODE_MAX_BYTES,
+            valid_maintenance_code,
+        )?,
+        maintenance_since: read_optional_sync_text(
+            row,
+            11,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        bootstrapped_at: read_optional_sync_text(
+            row,
+            12,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        updated_at: read_optional_sync_text(
+            row,
+            13,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+    };
+    if rows.next().map_err(|_| store_sync_corrupt())?.is_some() {
+        return Err(store_sync_corrupt());
+    }
+    Ok(Some(gateway))
+}
+
+fn require_bootstrap_singleton(
+    connection: &Connection,
+    keyring: &Keyring,
+    validate_rooms: bool,
+) -> Result<Option<StoredGatewayStateRow>, SafeError> {
+    let gateway_count = connection
+        .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|_| store_sync_corrupt())?;
+    let room_progress_count = bounded_room_progress_count(connection)?;
+    let retained_bounds = retained_inbox_bounds(connection)?;
+    if gateway_count == 0 {
+        if room_progress_count != 0 || retained_bounds.row_count != 0 {
+            return Err(store_sync_corrupt());
+        }
+        return Ok(None);
+    }
+    if gateway_count != 1 {
+        return Err(store_sync_corrupt());
+    }
+    let gateway = read_stored_gateway_state(connection)?.ok_or_else(store_sync_corrupt)?;
+    validate_stored_gateway_state(keyring, &gateway)?;
+    if validate_rooms {
+        validate_stored_room_progress(connection, keyring, room_progress_count, None)?;
+    }
+    Ok(Some(gateway))
+}
+
+fn load_verified_gateway_token(
+    connection: &Connection,
+    keyring: &Keyring,
+    field: GatewayTokenField,
+) -> Result<SecretBytes, SafeError> {
+    let gateway = read_stored_gateway_state(connection)?.ok_or_else(store_not_bootstrapped)?;
+    if gateway.singleton != 1 {
+        return Err(store_sync_corrupt());
+    }
+    validate_stored_gateway_state(keyring, &gateway)?;
+    let (ciphertext, nonce, key_version) = match field {
+        GatewayTokenField::Committed => (
+            gateway.committed_token_cipher.as_deref(),
+            gateway.committed_token_nonce.as_deref(),
+            gateway.committed_token_key_version,
+        ),
+        GatewayTokenField::Fetch => (
+            gateway.fetch_token_cipher.as_deref(),
+            gateway.fetch_token_nonce.as_deref(),
+            gateway.fetch_token_key_version,
+        ),
+    };
+    let plaintext = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "gateway_state",
+            row_id: "1",
+            column: field.column(),
+            ciphertext,
+            nonce,
+            key_version,
+            max_plaintext_bytes: MAX_SYNC_TOKEN_BYTES,
+        },
+    )?;
+    Ok(SecretBytes::new(plaintext.as_bytes().to_vec()))
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(DIGITS[(byte >> 4) as usize]));
+        output.push(char::from(DIGITS[(byte & 0x0f) as usize]));
+    }
+    output
+}
+
+fn derive_inbox_id(
+    request_token_digest: &[u8; 32],
+    next_token_digest: &[u8; 32],
+    response_sha256: &[u8; 32],
+) -> Result<InboxId, SafeError> {
+    let prefix = b"matrix-sync-inbox-v1";
+    let framed_capacity = 4_usize
+        .checked_add(prefix.len())
+        .and_then(|capacity| capacity.checked_add(4 + 32))
+        .and_then(|capacity| capacity.checked_add(4 + 32))
+        .and_then(|capacity| capacity.checked_add(4 + 32))
+        .ok_or_else(store_sync_invalid)?;
+    let mut framed = Vec::with_capacity(framed_capacity);
+    for value in [
+        prefix.as_slice(),
+        request_token_digest.as_slice(),
+        next_token_digest.as_slice(),
+        response_sha256.as_slice(),
+    ] {
+        let length = u32::try_from(value.len()).map_err(|_| store_sync_invalid())?;
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(value);
+    }
+    let digest = sha256(&framed);
+    InboxId::new(format!("inbox_{}", lowercase_hex(&digest))).map_err(|_| store_sync_invalid())
+}
+
+fn read_stored_sync_inbox_row(row: &Row<'_>) -> Result<StoredSyncInboxRow, SafeError> {
+    let max_token_ciphertext = MAX_SYNC_TOKEN_BYTES
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_sync_corrupt)?;
+    let max_key_version = i64::from(u32::MAX);
+    let max_byte_count =
+        i64::try_from(MAX_SYNC_RESPONSE_BYTES).map_err(|_| store_sync_corrupt())?;
+    let byte_count = read_sync_integer(row, 14, 1, max_byte_count)?;
+    let max_response_ciphertext = usize::try_from(byte_count)
+        .ok()
+        .and_then(|count| count.checked_add(AEAD_TAG_BYTES))
+        .ok_or_else(store_sync_corrupt)?;
+
+    Ok(StoredSyncInboxRow {
+        inbox_id: read_sync_text(row, 0, SYNC_INBOX_ID_BYTES, valid_stored_inbox_id)?,
+        predecessor_id: read_optional_sync_text(
+            row,
+            1,
+            SYNC_INBOX_ID_BYTES,
+            valid_stored_inbox_id,
+        )?,
+        request_token_cipher: read_sync_blob(row, 2, AEAD_TAG_BYTES, max_token_ciphertext)?,
+        request_token_nonce: read_sync_blob(row, 3, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        request_token_key_version: read_sync_integer(row, 4, 1, max_key_version)?,
+        request_token_digest: read_sync_blob(row, 5, 32, 32)?,
+        next_token_cipher: read_sync_blob(row, 6, AEAD_TAG_BYTES, max_token_ciphertext)?,
+        next_token_nonce: read_sync_blob(row, 7, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        next_token_key_version: read_sync_integer(row, 8, 1, max_key_version)?,
+        next_token_digest: read_sync_blob(row, 9, 32, 32)?,
+        response_cipher: read_sync_blob(row, 10, AEAD_TAG_BYTES, max_response_ciphertext)?,
+        response_nonce: read_sync_blob(row, 11, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+        response_key_version: read_sync_integer(row, 12, 1, max_key_version)?,
+        response_sha256: read_sync_blob(row, 13, 32, 32)?,
+        byte_count,
+        state: read_sync_text(row, 15, SYNC_INBOX_STATE_MAX_BYTES, valid_stored_sync_state)?,
+        crypto_drained: read_sync_integer(row, 16, 0, 1)?,
+        observed_at: read_sync_text(
+            row,
+            17,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        created_at: read_sync_text(
+            row,
+            18,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        sdk_processed_at: read_optional_sync_text(
+            row,
+            19,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        prepared_at: read_optional_sync_text(
+            row,
+            20,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        committed_at: read_optional_sync_text(
+            row,
+            21,
+            SYNC_TIMESTAMP_MAX_BYTES,
+            valid_stored_utc_millisecond,
+        )?,
+        terminal_code: read_optional_sync_text(
+            row,
+            22,
+            SYNC_TERMINAL_CODE_MAX_BYTES,
+            valid_stored_reason_code,
+        )?,
+    })
+}
+
+fn read_sync_blob(
+    row: &Row<'_>,
+    index: usize,
+    min_bytes: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SafeError> {
+    match row.get_ref(index).map_err(|_| store_sync_corrupt())? {
+        ValueRef::Blob(bytes) if (min_bytes..=max_bytes).contains(&bytes.len()) => {
+            Ok(bytes.to_vec())
+        }
+        _ => Err(store_sync_corrupt()),
+    }
+}
+
+fn read_optional_sync_blob(
+    row: &Row<'_>,
+    index: usize,
+    min_bytes: usize,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, SafeError> {
+    match row.get_ref(index).map_err(|_| store_sync_corrupt())? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Blob(bytes) if (min_bytes..=max_bytes).contains(&bytes.len()) => {
+            Ok(Some(bytes.to_vec()))
+        }
+        _ => Err(store_sync_corrupt()),
+    }
+}
+
+fn read_sync_text(
+    row: &Row<'_>,
+    index: usize,
+    max_bytes: usize,
+    validator: fn(&str) -> bool,
+) -> Result<String, SafeError> {
+    let bytes = match row.get_ref(index).map_err(|_| store_sync_corrupt())? {
+        ValueRef::Text(bytes) if bytes.len() <= max_bytes => bytes,
+        _ => return Err(store_sync_corrupt()),
+    };
+    let value = std::str::from_utf8(bytes).map_err(|_| store_sync_corrupt())?;
+    if !validator(value) {
+        return Err(store_sync_corrupt());
+    }
+    Ok(value.to_owned())
+}
+
+fn read_optional_sync_text(
+    row: &Row<'_>,
+    index: usize,
+    max_bytes: usize,
+    validator: fn(&str) -> bool,
+) -> Result<Option<String>, SafeError> {
+    let value = match row.get_ref(index).map_err(|_| store_sync_corrupt())? {
+        ValueRef::Null => return Ok(None),
+        ValueRef::Text(bytes) if bytes.len() <= max_bytes => {
+            std::str::from_utf8(bytes).map_err(|_| store_sync_corrupt())?
+        }
+        _ => return Err(store_sync_corrupt()),
+    };
+    if !validator(value) {
+        return Err(store_sync_corrupt());
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn read_sync_integer(
+    row: &Row<'_>,
+    index: usize,
+    min_value: i64,
+    max_value: i64,
+) -> Result<i64, SafeError> {
+    match row.get_ref(index).map_err(|_| store_sync_corrupt())? {
+        ValueRef::Integer(value) if (min_value..=max_value).contains(&value) => Ok(value),
+        _ => Err(store_sync_corrupt()),
+    }
+}
+
+fn read_optional_sync_integer(
+    row: &Row<'_>,
+    index: usize,
+    min_value: i64,
+    max_value: i64,
+) -> Result<Option<i64>, SafeError> {
+    match row.get_ref(index).map_err(|_| store_sync_corrupt())? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Integer(value) if (min_value..=max_value).contains(&value) => Ok(Some(value)),
+        _ => Err(store_sync_corrupt()),
+    }
+}
+
+fn valid_stored_inbox_id(value: &str) -> bool {
+    value.len() == SYNC_INBOX_ID_BYTES
+        && value.starts_with("inbox_")
+        && value.as_bytes()["inbox_".len()..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn valid_stored_sync_state(value: &str) -> bool {
+    matches!(
+        value,
+        "fetched" | "sdk_processed" | "prepared" | "committed" | "quarantined"
+    )
+}
+
+fn valid_stored_reason_code(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if !(3..=SYNC_TERMINAL_CODE_MAX_BYTES).contains(&bytes.len()) {
+        return false;
+    }
+    if !matches!(bytes.first(), Some(b'a'..=b'z'))
+        || !matches!(bytes.last(), Some(b'a'..=b'z' | b'0'..=b'9'))
+    {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(index, byte)| {
+        matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_')
+            && (index == 0 || *byte != b'_' || bytes[index - 1] != b'_')
+    })
+}
+
+impl VerifiedInboxChain {
+    fn tail(&self) -> Option<&RawSyncInbox> {
+        self.tail_index.map(|index| &self.rows[index])
+    }
+
+    fn into_first_uncommitted(self) -> Option<RawSyncInbox> {
+        let index = self.first_uncommitted_index?;
+        self.rows.into_iter().nth(index)
+    }
+}
+
+fn sync_inbox_scan_limit() -> Result<i64, SafeError> {
+    MAX_PENDING_REQUEST_ROWS
+        .checked_add(1)
+        .and_then(|limit| i64::try_from(limit).ok())
+        .ok_or_else(store_sync_corrupt)
+}
+
+fn checked_sync_inbox_bytes(current_total: u64, new_bytes: u64) -> Result<u64, ()> {
+    current_total
+        .checked_add(new_bytes)
+        .filter(|total| *total <= MAX_RECOVERY_BYTES)
+        .ok_or(())
+}
+
+fn retained_inbox_bounds(connection: &Connection) -> Result<RetainedInboxBounds, SafeError> {
+    let row_scan_limit = sync_inbox_scan_limit()?;
+    let max_byte_count =
+        u64::try_from(MAX_SYNC_RESPONSE_BYTES).map_err(|_| store_sync_corrupt())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT byte_count FROM sync_inbox
+             ORDER BY rowid LIMIT ?1",
+        )
+        .map_err(|_| store_sync_corrupt())?;
+    let mut rows = statement
+        .query(params![row_scan_limit])
+        .map_err(|_| store_sync_corrupt())?;
+    let mut row_count = 0_u64;
+    let mut total_bytes = 0_u64;
+    while let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? {
+        row_count = row_count.checked_add(1).ok_or_else(store_sync_corrupt)?;
+        if row_count > MAX_PENDING_REQUEST_ROWS {
+            return Err(store_sync_corrupt());
+        }
+        let byte_count = u64::try_from(read_sync_integer(
+            row,
+            0,
+            1,
+            i64::try_from(MAX_SYNC_RESPONSE_BYTES).map_err(|_| store_sync_corrupt())?,
+        )?)
+        .map_err(|_| store_sync_corrupt())?;
+        if byte_count > max_byte_count {
+            return Err(store_sync_corrupt());
+        }
+        total_bytes =
+            checked_sync_inbox_bytes(total_bytes, byte_count).map_err(|_| store_sync_corrupt())?;
+    }
+    Ok(RetainedInboxBounds {
+        row_count: usize::try_from(row_count).map_err(|_| store_sync_corrupt())?,
+        total_bytes,
+    })
+}
+
+fn parse_stored_timestamp(value: &str) -> Result<DateTime<Utc>, SafeError> {
+    if !valid_stored_utc_millisecond(value) {
+        return Err(store_sync_corrupt());
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(|_| store_sync_corrupt())
+}
+
+fn digest_from_blob(value: &[u8]) -> Result<[u8; 32], SafeError> {
+    value.try_into().map_err(|_| store_sync_corrupt())
+}
+
+fn read_and_verify_inbox_row(
+    row: StoredSyncInboxRow,
+    keyring: &Keyring,
+) -> Result<RawSyncInbox, SafeError> {
+    let inbox_id = InboxId::new(row.inbox_id).map_err(|_| store_sync_corrupt())?;
+    let predecessor_id = row
+        .predecessor_id
+        .map(|value| InboxId::new(value).map_err(|_| store_sync_corrupt()))
+        .transpose()?;
+    if predecessor_id.as_ref().is_some_and(|id| id == &inbox_id) {
+        return Err(store_sync_corrupt());
+    }
+    let request_token_digest = digest_from_blob(&row.request_token_digest)?;
+    let next_token_digest = digest_from_blob(&row.next_token_digest)?;
+    let response_sha256 = digest_from_blob(&row.response_sha256)?;
+    let byte_count = usize::try_from(row.byte_count).map_err(|_| store_sync_corrupt())?;
+    if byte_count == 0 || byte_count > MAX_SYNC_RESPONSE_BYTES {
+        return Err(store_sync_corrupt());
+    }
+    let state = SyncInboxState::from_str(&row.state).map_err(|_| store_sync_corrupt())?;
+    let crypto_drained = match row.crypto_drained {
+        0 => false,
+        1 => true,
+        _ => return Err(store_sync_corrupt()),
+    };
+    let observed_at = parse_stored_timestamp(&row.observed_at)?;
+    let created_at = parse_stored_timestamp(&row.created_at)?;
+    if observed_at != created_at {
+        return Err(store_sync_corrupt());
+    }
+    let sdk_processed_at = row
+        .sdk_processed_at
+        .as_deref()
+        .map(parse_stored_timestamp)
+        .transpose()?;
+    let prepared_at = row
+        .prepared_at
+        .as_deref()
+        .map(parse_stored_timestamp)
+        .transpose()?;
+    let committed_at = row
+        .committed_at
+        .as_deref()
+        .map(parse_stored_timestamp)
+        .transpose()?;
+    let terminal_code = row
+        .terminal_code
+        .map(ReasonCode::new)
+        .transpose()
+        .map_err(|_| store_sync_corrupt())?;
+
+    let request_token = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "sync_inbox",
+            row_id: inbox_id.as_str(),
+            column: "request_token",
+            ciphertext: Some(row.request_token_cipher.as_slice()),
+            nonce: Some(row.request_token_nonce.as_slice()),
+            key_version: Some(row.request_token_key_version),
+            max_plaintext_bytes: MAX_SYNC_TOKEN_BYTES,
+        },
+    )?;
+    let next_token = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "sync_inbox",
+            row_id: inbox_id.as_str(),
+            column: "next_token",
+            ciphertext: Some(row.next_token_cipher.as_slice()),
+            nonce: Some(row.next_token_nonce.as_slice()),
+            key_version: Some(row.next_token_key_version),
+            max_plaintext_bytes: MAX_SYNC_TOKEN_BYTES,
+        },
+    )?;
+    let response = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "sync_inbox",
+            row_id: inbox_id.as_str(),
+            column: "response",
+            ciphertext: Some(row.response_cipher.as_slice()),
+            nonce: Some(row.response_nonce.as_slice()),
+            key_version: Some(row.response_key_version),
+            max_plaintext_bytes: MAX_SYNC_RESPONSE_BYTES,
+        },
+    )?;
+    if sha256(request_token.as_bytes()) != request_token_digest
+        || sha256(next_token.as_bytes()) != next_token_digest
+        || sha256(response.as_bytes()) != response_sha256
+        || response.len() != byte_count
+    {
+        return Err(store_sync_corrupt());
+    }
+    if derive_inbox_id(&request_token_digest, &next_token_digest, &response_sha256)? != inbox_id {
+        return Err(store_sync_corrupt());
+    }
+
+    RawSyncInbox::from_verified_parts(
+        inbox_id,
+        predecessor_id,
+        request_token.as_bytes().to_vec(),
+        request_token_digest,
+        next_token.as_bytes().to_vec(),
+        next_token_digest,
+        response.as_bytes().to_vec(),
+        response_sha256,
+        byte_count,
+        state,
+        crypto_drained,
+        observed_at,
+        created_at,
+        sdk_processed_at,
+        prepared_at,
+        committed_at,
+        terminal_code,
+    )
+    .map_err(|_| store_sync_corrupt())
+}
+
+fn verify_inbox_chain(
+    connection: &Connection,
+    keyring: &Keyring,
+    committed_token: &SecretBytes,
+    fetch_token: &SecretBytes,
+) -> Result<VerifiedInboxChain, SafeError> {
+    let bounds = retained_inbox_bounds(connection)?;
+    let row_scan_limit = sync_inbox_scan_limit()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT inbox_id, predecessor_id,
+                    request_token_cipher, request_token_nonce, request_token_key_version,
+                    request_token_digest,
+                    next_token_cipher, next_token_nonce, next_token_key_version,
+                    next_token_digest,
+                    response_cipher, response_nonce, response_key_version, response_sha256,
+                    byte_count, state, crypto_drained, observed_at, created_at,
+                    sdk_processed_at, prepared_at, committed_at, terminal_code
+             FROM sync_inbox ORDER BY rowid LIMIT ?1",
+        )
+        .map_err(|_| store_sync_corrupt())?;
+    let mut rows = statement
+        .query(params![row_scan_limit])
+        .map_err(|_| store_sync_corrupt())?;
+    let mut verified_rows = Vec::with_capacity(bounds.row_count);
+    while let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? {
+        if verified_rows.len() >= bounds.row_count {
+            return Err(store_sync_corrupt());
+        }
+        let stored = read_stored_sync_inbox_row(row)?;
+        verified_rows.push(read_and_verify_inbox_row(stored, keyring)?);
+    }
+    drop(rows);
+    drop(statement);
+    if verified_rows.len() != bounds.row_count {
+        return Err(store_sync_corrupt());
+    }
+    let mut total_bytes = 0_u64;
+    for row in &verified_rows {
+        total_bytes = checked_sync_inbox_bytes(
+            total_bytes,
+            u64::try_from(row.byte_count()).map_err(|_| store_sync_corrupt())?,
+        )
+        .map_err(|_| store_sync_corrupt())?;
+    }
+    if total_bytes != bounds.total_bytes {
+        return Err(store_sync_corrupt());
+    }
+
+    if verified_rows.is_empty() {
+        if committed_token.as_bytes() != fetch_token.as_bytes() {
+            return Err(store_sync_corrupt());
+        }
+        return Ok(VerifiedInboxChain {
+            rows: verified_rows,
+            next_digest_index: HashMap::new(),
+            tail_index: None,
+            first_uncommitted_index: None,
+        });
+    }
+
+    let row_capacity = verified_rows.len();
+    let mut id_index = HashMap::with_capacity(row_capacity);
+    let mut successor_index = HashMap::with_capacity(row_capacity);
+    let mut request_digest_index = HashMap::with_capacity(row_capacity);
+    let mut next_digest_index = HashMap::with_capacity(row_capacity);
+    let mut root_index = None;
+    for (index, row) in verified_rows.iter().enumerate() {
+        if id_index
+            .insert(row.inbox_id().as_str().to_owned(), index)
+            .is_some()
+            || next_digest_index
+                .insert(*row.next_token_digest(), index)
+                .is_some()
+            || request_digest_index
+                .insert(*row.request_token_digest(), index)
+                .is_some()
+        {
+            return Err(store_sync_corrupt());
+        }
+        match row.predecessor_id() {
+            Some(predecessor_id) => {
+                if successor_index
+                    .insert(predecessor_id.as_str().to_owned(), index)
+                    .is_some()
+                {
+                    return Err(store_sync_corrupt());
+                }
+            }
+            None => {
+                if root_index.replace(index).is_some() {
+                    return Err(store_sync_corrupt());
+                }
+            }
+        }
+    }
+    let root_index = root_index.ok_or_else(store_sync_corrupt)?;
+    let mut visited = vec![false; row_capacity];
+    let mut current = Some(root_index);
+    let mut previous_index: Option<usize> = None;
+    let mut tail_index = None;
+    let mut first_uncommitted_index = None;
+    let mut committed_tail_index = None;
+    while let Some(index) = current {
+        if visited[index] {
+            return Err(store_sync_corrupt());
+        }
+        visited[index] = true;
+        let row = &verified_rows[index];
+        if let Some(previous_index) = previous_index {
+            let previous = &verified_rows[previous_index];
+            if row
+                .predecessor_id()
+                .is_none_or(|id| id != previous.inbox_id())
+                || row.request_token().as_bytes() != previous.next_token().as_bytes()
+                || row.request_token_digest() != previous.next_token_digest()
+                || row.observed_at() < previous.observed_at()
+            {
+                return Err(store_sync_corrupt());
+            }
+        } else if row.predecessor_id().is_some() {
+            return Err(store_sync_corrupt());
+        }
+        if row.state() == SyncInboxState::Committed {
+            if first_uncommitted_index.is_some() {
+                return Err(store_sync_corrupt());
+            }
+            committed_tail_index = Some(index);
+        } else if first_uncommitted_index.is_none() {
+            first_uncommitted_index = Some(index);
+        }
+        tail_index = Some(index);
+        previous_index = Some(index);
+        current = successor_index.get(row.inbox_id().as_str()).copied();
+    }
+    if visited.iter().any(|was_visited| !was_visited) {
+        return Err(store_sync_corrupt());
+    }
+    let tail_index = tail_index.ok_or_else(store_sync_corrupt)?;
+    if verified_rows[tail_index].next_token().as_bytes() != fetch_token.as_bytes() {
+        return Err(store_sync_corrupt());
+    }
+    if let Some(committed_tail_index) = committed_tail_index {
+        if verified_rows[committed_tail_index].next_token().as_bytes() != committed_token.as_bytes()
+        {
+            return Err(store_sync_corrupt());
+        }
+    } else if verified_rows[root_index].request_token().as_bytes() != committed_token.as_bytes() {
+        return Err(store_sync_corrupt());
+    }
+    Ok(VerifiedInboxChain {
+        rows: verified_rows,
+        next_digest_index,
+        tail_index: Some(tail_index),
+        first_uncommitted_index,
+    })
 }
 
 fn bounded_room_progress_count(connection: &Connection) -> Result<i64, SafeError> {
@@ -953,15 +2000,22 @@ fn validate_stored_room_progress(
     expected_count: i64,
     selected_room_lookup: Option<&[u8]>,
 ) -> Result<Option<SecretBytes>, SafeError> {
+    let scan_limit = expected_count
+        .checked_add(1)
+        .ok_or_else(store_sync_corrupt)?;
     let mut statement = connection
         .prepare(
             "SELECT room_lookup, anchor_event_cipher, anchor_event_nonce,
                     key_version, updated_at
-             FROM room_progress ORDER BY room_lookup",
+             FROM room_progress ORDER BY room_lookup LIMIT ?1",
         )
         .map_err(|_| store_sync_corrupt())?;
-    let mut rows = statement.query([]).map_err(|_| store_sync_corrupt())?;
+    let mut rows = statement
+        .query(params![scan_limit])
+        .map_err(|_| store_sync_corrupt())?;
     let mut seen_count = 0_i64;
+    let mut seen_lookups =
+        HashSet::with_capacity(usize::try_from(expected_count).map_err(|_| store_sync_corrupt())?);
     let mut selected = None;
     while let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? {
         seen_count = seen_count.checked_add(1).ok_or_else(store_sync_corrupt)?;
@@ -969,12 +2023,27 @@ fn validate_stored_room_progress(
             return Err(store_sync_corrupt());
         }
         let stored = StoredRoomProgressRow {
-            room_lookup: row.get(0).map_err(|_| store_sync_corrupt())?,
-            anchor_event_cipher: row.get(1).map_err(|_| store_sync_corrupt())?,
-            anchor_event_nonce: row.get(2).map_err(|_| store_sync_corrupt())?,
-            key_version: row.get(3).map_err(|_| store_sync_corrupt())?,
-            updated_at: row.get(4).map_err(|_| store_sync_corrupt())?,
+            room_lookup: read_sync_blob(row, 0, 32, 32)?,
+            anchor_event_cipher: read_sync_blob(
+                row,
+                1,
+                AEAD_TAG_BYTES,
+                MAX_ROOM_ANCHOR_BYTES
+                    .checked_add(AEAD_TAG_BYTES)
+                    .ok_or_else(store_sync_corrupt)?,
+            )?,
+            anchor_event_nonce: read_sync_blob(row, 2, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
+            key_version: read_sync_integer(row, 3, 1, i64::from(u32::MAX))?,
+            updated_at: Some(read_sync_text(
+                row,
+                4,
+                SYNC_TIMESTAMP_MAX_BYTES,
+                valid_stored_utc_millisecond,
+            )?),
         };
+        if !seen_lookups.insert(stored.room_lookup.clone()) {
+            return Err(store_sync_corrupt());
+        }
         let event = open_stored_room_progress(keyring, &stored)?;
         if selected_room_lookup.is_some_and(|lookup| stored.room_lookup.as_slice() == lookup) {
             if selected.is_some() {
@@ -1366,6 +2435,20 @@ fn normalize_sql(sql: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use rusqlite::types::Value;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn checked_sync_inbox_bytes_accepts_exact_total_and_rejects_one_over() {
+        assert_eq!(
+            checked_sync_inbox_bytes(MAX_RECOVERY_BYTES - 1, 1),
+            Ok(MAX_RECOVERY_BYTES)
+        );
+        assert_eq!(checked_sync_inbox_bytes(MAX_RECOVERY_BYTES, 1), Err(()));
+        assert_eq!(checked_sync_inbox_bytes(u64::MAX, 1), Err(()));
+    }
 
     #[test]
     fn room_progress_count_is_bounded_before_rows_are_read() {
@@ -1413,6 +2496,113 @@ mod tests {
                 validate_stored_ciphertext_length(&too_long, max_plaintext_bytes),
                 Err(store_sync_corrupt())
             );
+        }
+    }
+
+    fn sqlite_values(connection: &Connection, query: &str, columns: usize) -> Vec<Vec<Value>> {
+        let mut statement = connection
+            .prepare(query)
+            .expect("prepare test snapshot query");
+        statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|index| row.get(index))
+                    .collect::<Result<Vec<Value>, _>>()
+            })
+            .expect("query test snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read test snapshot")
+    }
+
+    fn store_snapshot(store: &Store) -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
+        (
+            sqlite_values(
+                &store.connection,
+                "SELECT * FROM sync_inbox ORDER BY rowid",
+                23,
+            ),
+            sqlite_values(
+                &store.connection,
+                "SELECT * FROM gateway_state ORDER BY singleton",
+                14,
+            ),
+        )
+    }
+
+    #[test]
+    fn append_revalidates_unchecked_test_dtos_without_mutation() {
+        let directory = tempdir().expect("create append validation test directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure append validation test directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let mut store = Store::open(&path, Keyring::new([0x11; 32], 1).expect("test keyring"))
+            .expect("open append validation test store");
+        store
+            .initialize_bootstrap_state(
+                NewBootstrapState::new(
+                    b"session".to_vec(),
+                    b"initial".to_vec(),
+                    Vec::new(),
+                    Utc.timestamp_millis_opt(1_700_000_000_000)
+                        .single()
+                        .expect("test timestamp"),
+                )
+                .expect("construct bootstrap test state"),
+            )
+            .expect("initialize append validation test store");
+
+        let cases = vec![
+            (
+                b"initial".to_vec(),
+                b"next-1".to_vec(),
+                Vec::new(),
+                STORE_SYNC_INVALID,
+            ),
+            (
+                b"initial".to_vec(),
+                b"next-1".to_vec(),
+                vec![0xE1; MAX_SYNC_RESPONSE_BYTES + 1],
+                STORE_SYNC_TOO_LARGE,
+            ),
+            (
+                Vec::new(),
+                b"next-1".to_vec(),
+                b"response".to_vec(),
+                STORE_SYNC_INVALID,
+            ),
+            (
+                b"initial".to_vec(),
+                Vec::new(),
+                b"response".to_vec(),
+                STORE_SYNC_INVALID,
+            ),
+            (
+                vec![0xE2; MAX_SYNC_TOKEN_BYTES + 1],
+                b"next-1".to_vec(),
+                b"response".to_vec(),
+                STORE_SYNC_TOO_LARGE,
+            ),
+            (
+                b"initial".to_vec(),
+                vec![0xE3; MAX_SYNC_TOKEN_BYTES + 1],
+                b"response".to_vec(),
+                STORE_SYNC_TOO_LARGE,
+            ),
+        ];
+        for (request_token, next_token, response, expected_code) in cases {
+            let before = store_snapshot(&store);
+            let error = store
+                .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                    request_token,
+                    next_token,
+                    response,
+                    Utc.timestamp_millis_opt(1_700_000_001_000)
+                        .single()
+                        .expect("test timestamp"),
+                ))
+                .expect_err("unchecked invalid DTO must be rejected by append");
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(store_snapshot(&store), before);
         }
     }
 }

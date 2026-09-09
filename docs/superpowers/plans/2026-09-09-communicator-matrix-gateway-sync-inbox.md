@@ -324,6 +324,66 @@ git commit -m "feat: initialize encrypted gateway state"
 - Modify: `services/matrix-gateway/src/store_types.rs`
 - Modify: `services/matrix-gateway/tests/sync_inbox_transactions.rs`
 
+### Frozen retained-journal limits
+
+Task 2 reuses `config::MAX_PENDING_REQUEST_ROWS == 2_000` as the maximum
+retained `sync_inbox` row count and `config::MAX_RECOVERY_BYTES == 256 * 1024 *
+1024` as the maximum aggregate retained `sync_inbox.byte_count`. No competing
+numeric constants may be introduced. Every query or scan used to load or
+validate the retained chain is bounded to `MAX_PENDING_REQUEST_ROWS + 1` rows
+and uses checked aggregate-byte arithmetic. Exact byte-identical retry and
+conflict matching runs before capacity rejection. An exact retry at either cap
+returns the existing ID without mutation; a matching but different candidate
+returns `STORE_SYNC_CONFLICT`.
+
+For a valid store at the exact row cap, or when
+`current_total + new_response_bytes` exceeds the aggregate cap, a new row is
+rejected with `STORE_SYNC_TOO_LARGE` and the database is unchanged. If
+persisted state already exceeds either cap, or persisted counts or byte counts
+have an invalid type, range, or overflow, every read, recovery, and append
+operation fails closed with `STORE_SYNC_CORRUPT`. Avoid unbounded `Vec`,
+`HashSet`, or plaintext allocation: bounds are checked before row materialization
+and before decrypting response bodies. Retained allocations are bounded, and the
+exact 64 MiB per-response bound remains in force.
+
+### Second review wave clarifications
+
+The candidate lookup and exact-byte comparison run before a new-row capacity
+decision. An exact retry then loads and verifies the complete retained chain,
+including every row's authenticated ciphertext, lifecycle fields, predecessor
+links, digest uniqueness, timestamp ordering, aggregate row and byte totals, and
+the committed and fetch token boundaries. Only after that verification may it
+return the existing inbox ID. A matching candidate with different request,
+next-token, or response bytes returns `STORE_SYNC_CONFLICT` without mutation.
+
+For a genuinely new candidate, the transaction checks the current fetch token
+before chain verification, then verifies the full chain and predecessor and
+checks timestamp monotonicity. It rejects a valid candidate for row or aggregate
+byte capacity only after those checks. Therefore a wrong request token at a valid
+cap returns `STORE_SYNC_TOKEN_MISMATCH`, a corrupt retained state returns
+`STORE_SYNC_CORRUPT`, and a valid new row returns `STORE_SYNC_TOO_LARGE`.
+
+Gateway singleton columns and room-progress columns are decoded from SQLite
+`ValueRef` values with type and encoded-size limits before any owned allocation.
+Room progress is scanned with a bounded row limit and a set of every lookup is
+checked for uniqueness, even when no lookup was requested or the duplicate is for
+another room. All sync reads and append validation perform this room scan.
+
+The token getters alone return `Ok(None)` for a wholly fresh store. The oldest
+uncommitted read returns `STORE_NOT_BOOTSTRAPPED` in that state. Any orphan
+`sync_inbox` or room-progress row without a valid gateway singleton is
+`STORE_SYNC_CORRUPT` through session, room, token, reconcile, oldest, and append
+entry points.
+
+The retained-corruption tests exercise both reconcile and oldest reads for cycles,
+forks, gaps and disconnected roots, duplicate and mismatched digests,
+ciphertext/AAD/authentication failures, byte-count and encoded-length failures,
+invalid states and lifecycle/timestamp combinations, committed-after-uncommitted
+ordering, committed/fetch boundary mismatches, valid purge roots, empty and
+all-committed chains, persisted row-count overflow, and aggregate-byte overflow.
+Capacity tests also cover exact row-cap retries, row-cap precedence, and a valid
+store at the frozen 256 MiB aggregate cap built from four 64 MiB responses.
+
 - [ ] **Step 1: Write failing transaction and recovery tests**
 
 Add these tests before production changes:
