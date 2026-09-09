@@ -881,7 +881,7 @@ fn valid_text(value: &str, min_chars: usize, max_chars: usize) -> bool {
     length >= min_chars && length <= max_chars
 }
 
-fn valid_resource_id(value: &str) -> bool {
+pub(crate) fn valid_resource_id(value: &str) -> bool {
     if value.len() > 128 {
         return false;
     }
@@ -926,7 +926,7 @@ fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_trim_character)
 }
 
-fn valid_matrix_room_id(value: &str) -> bool {
+pub(crate) fn valid_matrix_room_id(value: &str) -> bool {
     value.starts_with('!') && valid_text(value, 1, 1024)
 }
 

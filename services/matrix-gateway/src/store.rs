@@ -12,10 +12,21 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::{Connection, OptionalExtension};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use rustix::fs::{FlockOperation, OFlags, flock};
 
-use crate::config::GATEWAY_SCHEMA_VERSION;
+use crate::{
+    config::GATEWAY_SCHEMA_VERSION,
+    crypto::{Keyring, Sealed},
+    model,
+    registry::{
+        NewRoomBinding, RoomBinding, RoomBindingPayload, RoomBindingStatus,
+        account_lookup as registry_account_lookup, room_lookup as registry_room_lookup,
+        valid_binding_id as registry_valid_binding_id,
+    },
+    secret::SafeError,
+};
 
 /// The database lock is kept beside the database and has this extension.
 pub const STORE_LOCK_EXTENSION: &str = "lock";
@@ -76,6 +87,13 @@ pub const STORE_SCHEMA_INVALID: &str = "store_schema_invalid";
 pub const STORE_PRAGMA_INVALID: &str = "store_pragma_invalid";
 /// Error code for an unsafe state-store path or filesystem identity.
 pub const STORE_PATH_INVALID: &str = "store_path_invalid";
+
+/// Stable error returned for an active room-binding conflict.
+pub const STORE_ROOM_BINDING_DUPLICATE_ROOM: &str = "store_room_binding_duplicate_room";
+/// Stable error returned for a duplicate room-binding identifier.
+pub const STORE_ROOM_BINDING_DUPLICATE_ID: &str = "store_room_binding_duplicate_id";
+/// Stable error returned for invalid or corrupt room-binding state.
+pub const STORE_ROOM_BINDING_INVALID: &str = "store_room_binding_invalid";
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE schema_meta(version INTEGER NOT NULL CHECK(version = 1));
@@ -265,10 +283,24 @@ impl StorePragmas {
 /// An exclusively owned gateway state database.
 pub struct Store {
     // Rust drops struct fields in declaration order. Keep Connection first so
-    // SQLite closes before the advisory lock is released.
-    _connection: Connection,
-    _lock: File,
+    // SQLite and key material are dropped before the advisory lock is released.
+    connection: Connection,
+    keyring: Keyring,
+    #[allow(dead_code)]
+    lock: File,
     pragmas: StorePragmas,
+}
+
+struct StoredRoomBindingRow {
+    binding_id: String,
+    room_lookup: Vec<u8>,
+    account_lookup: Vec<u8>,
+    payload_cipher: Vec<u8>,
+    payload_nonce: Vec<u8>,
+    key_version: i64,
+    status: String,
+    created_at: String,
+    retired_at: Option<String>,
 }
 
 impl fmt::Debug for Store {
@@ -283,7 +315,7 @@ impl Store {
     /// The process lock is acquired before SQLite is opened. A second process
     /// (or a second open in this process) receives a stable lock error without
     /// touching the database connection.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+    pub fn open(path: impl AsRef<Path>, keyring: Keyring) -> Result<Self, StoreError> {
         let path = path.as_ref();
         validate_parent(path)?;
         let before = existing_identity(path)?;
@@ -296,8 +328,9 @@ impl Store {
         initialize_or_validate_schema(&mut connection)?;
 
         Ok(Self {
-            _connection: connection,
-            _lock: lock,
+            connection,
+            keyring,
+            lock,
             pragmas,
         })
     }
@@ -306,6 +339,308 @@ impl Store {
     pub fn pragmas(&self) -> &StorePragmas {
         &self.pragmas
     }
+
+    /// Append one active protected room binding in a single durable
+    /// transaction.
+    pub fn append_room_binding(&mut self, binding: NewRoomBinding) -> Result<(), SafeError> {
+        binding.validate()?;
+        if !valid_utc_millisecond(*binding.created_at()) {
+            return Err(room_binding_invalid());
+        }
+        let room_lookup = registry_room_lookup(&self.keyring, binding.matrix_room_id())?;
+        let account_lookup =
+            registry_account_lookup(&self.keyring, binding.platform(), binding.account_id())?;
+        let candidate_payload = binding.payload();
+        let payload = binding.payload_json()?;
+        let sealed = self
+            .keyring
+            .seal("room_bindings", binding.binding_id(), "payload", &payload)
+            .map_err(|_| room_binding_invalid())?;
+        let created_at = binding.created_at().to_rfc3339();
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| room_binding_invalid())?;
+
+        let duplicate_id = transaction
+            .query_row(
+                "SELECT 1 FROM room_bindings WHERE binding_id = ?1 LIMIT 1",
+                params![binding.binding_id()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| room_binding_invalid())?
+            .is_some();
+        if duplicate_id {
+            return Err(room_binding_duplicate_id());
+        }
+
+        let duplicate_room = transaction
+            .query_row(
+                "SELECT 1 FROM room_bindings
+                 WHERE room_lookup = ?1 AND status = 'active' LIMIT 1",
+                params![room_lookup.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| room_binding_invalid())?
+            .is_some();
+        if duplicate_room {
+            return Err(room_binding_duplicate_room());
+        }
+
+        let mut statement = transaction
+            .prepare(
+                "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
+                        payload_nonce, key_version, status, created_at, retired_at
+                 FROM room_bindings WHERE account_lookup = ?1
+                 ORDER BY binding_id",
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let rows = statement
+            .query_map(
+                params![account_lookup.as_slice()],
+                read_stored_room_binding_row,
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let mut existing = Vec::new();
+        for row in rows {
+            existing.push(row.map_err(|_| room_binding_invalid())?);
+        }
+        drop(statement);
+
+        for row in existing {
+            if row.account_lookup.as_slice() != account_lookup.as_slice() {
+                return Err(room_binding_invalid());
+            }
+            let stored = decode_stored_room_binding(keyring, &row)?;
+            let expected_room_lookup = registry_room_lookup(keyring, stored.matrix_room_id())?;
+            if expected_room_lookup.as_slice() != row.room_lookup.as_slice() {
+                return Err(room_binding_invalid());
+            }
+            let expected_account_lookup =
+                registry_account_lookup(keyring, stored.platform(), stored.account_id())?;
+            if expected_account_lookup.as_slice() != row.account_lookup.as_slice() {
+                return Err(room_binding_invalid());
+            }
+            if stored.authority_tuple() != binding.authority_tuple()
+                || !stored.payload().same_authority(&candidate_payload)
+            {
+                return Err(room_binding_invalid());
+            }
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO room_bindings
+                 (binding_id, room_lookup, account_lookup, payload_cipher,
+                  payload_nonce, key_version, status, created_at, retired_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, NULL)",
+                params![
+                    binding.binding_id(),
+                    room_lookup.as_slice(),
+                    account_lookup.as_slice(),
+                    sealed.ciphertext.as_slice(),
+                    sealed.nonce.as_slice(),
+                    i64::from(sealed.key_version),
+                    created_at,
+                ],
+            )
+            .map_err(|_| room_binding_invalid())?;
+        transaction.commit().map_err(|_| room_binding_invalid())?;
+        Ok(())
+    }
+
+    /// Retire one active protected room binding without rewriting its payload.
+    pub fn retire_room_binding(
+        &mut self,
+        binding_id: &str,
+        retired_at: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        if !registry_valid_binding_id(binding_id) || !valid_utc_millisecond(retired_at) {
+            return Err(room_binding_invalid());
+        }
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| room_binding_invalid())?;
+        let row = transaction
+            .query_row(
+                "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
+                        payload_nonce, key_version, status, created_at, retired_at
+                 FROM room_bindings WHERE binding_id = ?1",
+                params![binding_id],
+                read_stored_room_binding_row,
+            )
+            .optional()
+            .map_err(|_| room_binding_invalid())?
+            .ok_or_else(room_binding_invalid)?;
+
+        let binding = verify_active_room_binding(keyring, &row)?;
+        if binding.binding_id() != binding_id || retired_at < *binding.created_at() {
+            return Err(room_binding_invalid());
+        }
+        let retired_at = retired_at.to_rfc3339();
+        let updated = transaction
+            .execute(
+                "UPDATE room_bindings
+                 SET status = 'retired', retired_at = ?2
+                 WHERE binding_id = ?1 AND status = 'active'",
+                params![binding_id, retired_at],
+            )
+            .map_err(|_| room_binding_invalid())?;
+        if updated != 1 {
+            return Err(room_binding_invalid());
+        }
+        transaction.commit().map_err(|_| room_binding_invalid())?;
+        Ok(())
+    }
+
+    /// Return the verified active room binding for a deterministic room lookup.
+    pub fn active_room_binding(
+        &self,
+        room_lookup: &[u8],
+    ) -> Result<Option<RoomBinding>, SafeError> {
+        if room_lookup.len() != 32 {
+            return Err(room_binding_invalid());
+        }
+
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
+                        payload_nonce, key_version, status, created_at, retired_at
+                 FROM room_bindings
+                 WHERE room_lookup = ?1 AND status = 'active'
+                 ORDER BY binding_id",
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let rows = statement
+            .query_map(params![room_lookup], read_stored_room_binding_row)
+            .map_err(|_| room_binding_invalid())?;
+        let mut matches = Vec::new();
+        for row in rows {
+            matches.push(row.map_err(|_| room_binding_invalid())?);
+        }
+        drop(statement);
+
+        let Some(row) = matches.pop() else {
+            return Ok(None);
+        };
+        if !matches.is_empty() {
+            return Err(room_binding_invalid());
+        }
+        if row.room_lookup.as_slice() != room_lookup {
+            return Err(room_binding_invalid());
+        }
+
+        let binding = verify_active_room_binding(&self.keyring, &row)?;
+        Ok(Some(binding))
+    }
+}
+
+fn room_binding_invalid() -> SafeError {
+    SafeError::new(STORE_ROOM_BINDING_INVALID)
+}
+
+fn room_binding_duplicate_room() -> SafeError {
+    SafeError::new(STORE_ROOM_BINDING_DUPLICATE_ROOM)
+}
+
+fn room_binding_duplicate_id() -> SafeError {
+    SafeError::new(STORE_ROOM_BINDING_DUPLICATE_ID)
+}
+
+fn valid_utc_millisecond(value: DateTime<Utc>) -> bool {
+    value.timestamp_subsec_nanos().is_multiple_of(1_000_000)
+        && model::valid_timestamp(&value.to_rfc3339())
+}
+
+fn read_stored_room_binding_row(row: &Row<'_>) -> rusqlite::Result<StoredRoomBindingRow> {
+    Ok(StoredRoomBindingRow {
+        binding_id: row.get(0)?,
+        room_lookup: row.get(1)?,
+        account_lookup: row.get(2)?,
+        payload_cipher: row.get(3)?,
+        payload_nonce: row.get(4)?,
+        key_version: row.get(5)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        retired_at: row.get(8)?,
+    })
+}
+
+fn decode_stored_room_binding(
+    keyring: &Keyring,
+    row: &StoredRoomBindingRow,
+) -> Result<RoomBinding, SafeError> {
+    let nonce: [u8; 24] = row
+        .payload_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| room_binding_invalid())?;
+    let key_version = u32::try_from(row.key_version).map_err(|_| room_binding_invalid())?;
+    let sealed = Sealed {
+        nonce,
+        ciphertext: row.payload_cipher.clone(),
+        key_version,
+    };
+    let plaintext = keyring
+        .open("room_bindings", &row.binding_id, "payload", &sealed)
+        .map_err(|_| room_binding_invalid())?;
+    let payload =
+        RoomBindingPayload::from_json(plaintext.as_slice()).map_err(|_| room_binding_invalid())?;
+    let status = RoomBindingStatus::from_str(&row.status).map_err(|_| room_binding_invalid())?;
+    let created_at = parse_utc_timestamp(&row.created_at)?;
+    let retired_at = row
+        .retired_at
+        .as_deref()
+        .map(parse_utc_timestamp)
+        .transpose()?;
+    RoomBinding::from_verified_parts(
+        row.binding_id.clone(),
+        payload,
+        status,
+        created_at,
+        retired_at,
+    )
+    .map_err(|_| room_binding_invalid())
+}
+
+fn verify_active_room_binding(
+    keyring: &Keyring,
+    row: &StoredRoomBindingRow,
+) -> Result<RoomBinding, SafeError> {
+    let binding = decode_stored_room_binding(keyring, row)?;
+    if binding.status() != RoomBindingStatus::Active {
+        return Err(room_binding_invalid());
+    }
+    let expected_room_lookup = registry_room_lookup(keyring, binding.matrix_room_id())?;
+    if expected_room_lookup.as_slice() != row.room_lookup.as_slice() {
+        return Err(room_binding_invalid());
+    }
+    let expected_account_lookup =
+        registry_account_lookup(keyring, binding.platform(), binding.account_id())?;
+    if expected_account_lookup.as_slice() != row.account_lookup.as_slice() {
+        return Err(room_binding_invalid());
+    }
+    Ok(binding)
+}
+
+fn parse_utc_timestamp(value: &str) -> Result<DateTime<Utc>, SafeError> {
+    if !model::valid_timestamp(value) {
+        return Err(room_binding_invalid());
+    }
+    let timestamp = DateTime::parse_from_rfc3339(value).map_err(|_| room_binding_invalid())?;
+    if timestamp.offset().local_minus_utc() != 0
+        || !timestamp.timestamp_subsec_nanos().is_multiple_of(1_000_000)
+    {
+        return Err(room_binding_invalid());
+    }
+    Ok(timestamp.with_timezone(&Utc))
 }
 
 fn acquire_lock(path: &Path) -> Result<File, StoreError> {
