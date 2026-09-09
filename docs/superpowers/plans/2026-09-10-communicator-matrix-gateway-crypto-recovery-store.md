@@ -141,13 +141,13 @@ The verified context must establish, in this order:
 1. The database contains exactly one valid `gateway_state` singleton, or no singleton only where the operation returns `store_crypto_not_ready`.
 2. Every stored singleton field has the correct SQLite type, bound, timestamp format, and encryption authentication.
 3. The complete inbox chain is contiguous, bounded, authenticated, and consistent with committed and fetch tokens.
-4. Every crypto row in the bounded ledger has valid SQLite types and bounds, authenticates under its row/column AAD, has a unique row ID and request lookup, references exactly one verified parent, and satisfies its lifecycle invariant.
+4. Every crypto row in the bounded ledger has valid SQLite types and bounds, authenticates under its row/column AAD, has a unique row ID and a unique `(inbox_id, request_lookup)` pair, references exactly one verified parent, and satisfies its lifecycle invariant. The same canonical request digest may appear in different inboxes.
 5. At most one global crypto row is unresolved. `pending`, `response_received`, and `quarantined` are unresolved; `accepted` is resolved.
 6. Only after corruption and cardinality checks may the operation apply its maintenance, state, source-order, idempotency, or conflict rule.
 
 Corruption always maps to `store_crypto_corrupt`, even when maintenance is set or the addressed row is missing. Invalid caller input is checked before opening a transaction and maps to `store_crypto_invalid`. A valid request that cannot advance because of lifecycle or source order maps to `store_crypto_not_ready`. A valid retry that disagrees with an already recorded value maps to `store_crypto_conflict`.
 
-Do not load unbounded rows. Use the existing inbox bound and a `LIMIT bound + 1` cardinality check. The crypto schema permits at most one row per inbox, so the verified crypto scan must cap at `inbox_count + 1`. Reject excess rows before allocating another full decrypted request or response. Continue using borrowed `ValueRef` validation for large response columns before copying them.
+Do not load unbounded rows. Use the existing inbox bound and a `LIMIT bound + 1` cardinality check. The crypto schema permits at most one row per inbox, so the verified crypto scan must cap at `inbox_count + 1`. Before copying or decrypting each row, use borrowed `ValueRef` values to validate and add its SDK-request-ID, request, and optional response ciphertext lengths to a checked aggregate. Reject the row before copying it if the aggregate would exceed the existing `MAX_RECOVERY_BYTES` bound. Continue using borrowed `ValueRef` validation for large response columns before copying them. This keeps the complete-ledger verifier bounded even when many accepted rows contain large responses.
 
 ## Task 1: Add the two closed recovery DTOs
 

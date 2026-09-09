@@ -361,6 +361,154 @@ impl fmt::Display for RawMatrixResponse {
     }
 }
 
+/// One authenticated response saved for restart-time Matrix crypto recovery.
+///
+/// The response bytes remain private to this crate. The DTO is intentionally
+/// not cloneable or serializable so a caller must handle the one verified
+/// recovery value directly.
+///
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::SavedMatrixResponse;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<SavedMatrixResponse>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::SavedMatrixResponse;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<SavedMatrixResponse>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::SavedMatrixResponse;
+/// fn requires_as_ref<T: AsRef<[u8]>>() {}
+/// requires_as_ref::<SavedMatrixResponse>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::SavedMatrixResponse;
+/// fn requires_deref<T: std::ops::Deref>() {}
+/// requires_deref::<SavedMatrixResponse>();
+/// ```
+#[allow(dead_code)]
+pub struct SavedMatrixResponse {
+    row_id: String,
+    request_sha256: [u8; 32],
+    response: SecretBytes,
+    response_sha256: [u8; 32],
+}
+
+#[allow(dead_code)]
+impl SavedMatrixResponse {
+    /// Borrow the synthetic crypto-row identifier.
+    pub fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
+    /// Borrow the digest of the original canonical request.
+    pub fn request_sha256(&self) -> &[u8; 32] {
+        &self.request_sha256
+    }
+
+    /// Borrow the digest of the exact saved response.
+    pub fn response_sha256(&self) -> &[u8; 32] {
+        &self.response_sha256
+    }
+
+    /// Borrow the exact saved response bytes inside this crate.
+    pub(crate) fn response(&self) -> &SecretBytes {
+        &self.response
+    }
+
+    /// Construct a DTO from values authenticated by the store.
+    pub(crate) fn from_verified_parts(
+        row_id: String,
+        request_sha256: [u8; 32],
+        response: SecretBytes,
+        response_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            row_id,
+            request_sha256,
+            response,
+            response_sha256,
+        }
+    }
+}
+
+impl fmt::Debug for SavedMatrixResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SavedMatrixResponse([REDACTED])")
+    }
+}
+
+impl fmt::Display for SavedMatrixResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SavedMatrixResponse([REDACTED])")
+    }
+}
+
+/// The persisted global crypto-maintenance marker.
+///
+/// The type is closed so callers can inspect only the validated reason and
+/// timestamp exposed by this API.
+///
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::CryptoMaintenanceStatus;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<CryptoMaintenanceStatus>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::CryptoMaintenanceStatus;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<CryptoMaintenanceStatus>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::CryptoMaintenanceStatus;
+/// fn requires_as_ref<T: AsRef<[u8]>>() {}
+/// requires_as_ref::<CryptoMaintenanceStatus>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::CryptoMaintenanceStatus;
+/// fn requires_deref<T: std::ops::Deref>() {}
+/// requires_deref::<CryptoMaintenanceStatus>();
+/// ```
+#[allow(dead_code)]
+pub struct CryptoMaintenanceStatus {
+    code: crate::store_types::ReasonCode,
+    since: chrono::DateTime<chrono::Utc>,
+}
+
+#[allow(dead_code)]
+impl CryptoMaintenanceStatus {
+    /// Borrow the validated maintenance reason code.
+    pub fn code(&self) -> &crate::store_types::ReasonCode {
+        &self.code
+    }
+
+    /// Borrow the validated maintenance start timestamp.
+    pub fn since(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.since
+    }
+
+    /// Construct a DTO from values authenticated by the store.
+    pub(crate) fn from_verified_parts(
+        code: crate::store_types::ReasonCode,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self { code, since }
+    }
+}
+
+impl fmt::Debug for CryptoMaintenanceStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CryptoMaintenanceStatus([REDACTED])")
+    }
+}
+
+impl fmt::Display for CryptoMaintenanceStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CryptoMaintenanceStatus([REDACTED])")
+    }
+}
+
 /// A deterministic synthetic identifier for one crypto outbox row.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CryptoRowId(String);
