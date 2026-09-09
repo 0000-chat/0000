@@ -9,3 +9,4 @@ pub mod protected;
 pub mod registry;
 pub mod secret;
 pub mod store;
+pub mod store_types;

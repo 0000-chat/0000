@@ -18,14 +18,18 @@ use rustix::fs::{FlockOperation, OFlags, flock};
 
 use crate::{
     config::GATEWAY_SCHEMA_VERSION,
-    crypto::{Keyring, Sealed},
+    crypto::{AEAD_TAG_BYTES, Keyring, Sealed},
     model,
     registry::{
         NewRoomBinding, RoomBinding, RoomBindingPayload, RoomBindingStatus,
         account_lookup as registry_account_lookup, room_lookup as registry_room_lookup,
         valid_binding_id as registry_valid_binding_id,
     },
-    secret::SafeError,
+    secret::{SafeError, SecretBytes},
+    store_types::{
+        MAX_BOOTSTRAP_ROOM_ANCHORS, MAX_BOOTSTRAP_SESSION_BYTES, MAX_ROOM_ANCHOR_BYTES,
+        MAX_SYNC_TOKEN_BYTES, NewBootstrapState,
+    },
 };
 
 /// The database lock is kept beside the database and has this extension.
@@ -94,6 +98,25 @@ pub const STORE_ROOM_BINDING_DUPLICATE_ROOM: &str = "store_room_binding_duplicat
 pub const STORE_ROOM_BINDING_DUPLICATE_ID: &str = "store_room_binding_duplicate_id";
 /// Stable error returned for invalid or corrupt room-binding state.
 pub const STORE_ROOM_BINDING_INVALID: &str = "store_room_binding_invalid";
+
+/// Stable error returned when bootstrap state does not exist yet.
+pub const STORE_NOT_BOOTSTRAPPED: &str = "store_not_bootstrapped";
+/// Stable error returned when bootstrap has already populated the store.
+pub const STORE_ALREADY_BOOTSTRAPPED: &str = "store_already_bootstrapped";
+/// Stable error returned when bootstrap input or its transaction is invalid.
+pub const STORE_BOOTSTRAP_INVALID: &str = "store_bootstrap_invalid";
+/// Stable error returned when sync-ledger input is malformed.
+pub const STORE_SYNC_INVALID: &str = "store_sync_invalid";
+/// Stable error returned when sync-ledger input exceeds a fixed bound.
+pub const STORE_SYNC_TOO_LARGE: &str = "store_sync_too_large";
+/// Stable error returned when a sync response does not continue the fetch token.
+pub const STORE_SYNC_TOKEN_MISMATCH: &str = "store_sync_token_mismatch";
+/// Stable error returned when a sync inbox identity conflicts with existing bytes.
+pub const STORE_SYNC_CONFLICT: &str = "store_sync_conflict";
+/// Stable error returned when persisted sync state fails closed validation.
+pub const STORE_SYNC_CORRUPT: &str = "store_sync_corrupt";
+/// Stable error returned when the SDK position is not durably journaled.
+pub const STORE_SDK_POSITION_UNJOURNALED: &str = "matrix_sdk_position_unjournaled";
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE schema_meta(version INTEGER NOT NULL CHECK(version = 1));
@@ -303,6 +326,41 @@ struct StoredRoomBindingRow {
     retired_at: Option<String>,
 }
 
+struct StoredGatewayStateRow {
+    singleton: i64,
+    session_cipher: Option<Vec<u8>>,
+    session_nonce: Option<Vec<u8>>,
+    session_key_version: Option<i64>,
+    committed_token_cipher: Option<Vec<u8>>,
+    committed_token_nonce: Option<Vec<u8>>,
+    committed_token_key_version: Option<i64>,
+    fetch_token_cipher: Option<Vec<u8>>,
+    fetch_token_nonce: Option<Vec<u8>>,
+    fetch_token_key_version: Option<i64>,
+    maintenance_code: Option<String>,
+    maintenance_since: Option<String>,
+    bootstrapped_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+struct StoredRoomProgressRow {
+    room_lookup: Vec<u8>,
+    anchor_event_cipher: Vec<u8>,
+    anchor_event_nonce: Vec<u8>,
+    key_version: i64,
+    updated_at: Option<String>,
+}
+
+struct StoredValue<'a> {
+    table: &'a str,
+    row_id: &'a str,
+    column: &'a str,
+    ciphertext: Option<&'a [u8]>,
+    nonce: Option<&'a [u8]>,
+    key_version: Option<i64>,
+    max_plaintext_bytes: usize,
+}
+
 impl fmt::Debug for Store {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Store")
@@ -338,6 +396,167 @@ impl Store {
     /// Read-only view of the required connection settings.
     pub fn pragmas(&self) -> &StorePragmas {
         &self.pragmas
+    }
+
+    /// Persist the one-shot Matrix session, initial token, and room anchors.
+    pub fn initialize_bootstrap_state(
+        &mut self,
+        state: NewBootstrapState,
+    ) -> Result<(), SafeError> {
+        state.validate().map_err(|_| store_bootstrap_invalid())?;
+
+        let session = self
+            .keyring
+            .seal("gateway_state", "1", "session", state.session().as_bytes())
+            .map_err(|_| store_bootstrap_invalid())?;
+        let committed_token = self
+            .keyring
+            .seal(
+                "gateway_state",
+                "1",
+                "committed_token",
+                state.initial_token().as_bytes(),
+            )
+            .map_err(|_| store_bootstrap_invalid())?;
+        let fetch_token = self
+            .keyring
+            .seal(
+                "gateway_state",
+                "1",
+                "fetch_token",
+                state.initial_token().as_bytes(),
+            )
+            .map_err(|_| store_bootstrap_invalid())?;
+
+        let mut anchors = Vec::with_capacity(state.anchors().len());
+        for anchor in state.anchors() {
+            let room_id = room_progress_row_id(anchor.room_lookup());
+            let sealed = self
+                .keyring
+                .seal(
+                    "room_progress",
+                    &room_id,
+                    "anchor_event",
+                    anchor.anchor_event().as_bytes(),
+                )
+                .map_err(|_| store_bootstrap_invalid())?;
+            anchors.push((anchor.room_lookup().to_vec(), sealed));
+        }
+
+        let timestamp = state.bootstrapped_at().to_rfc3339();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_bootstrap_invalid())?;
+
+        let gateway_count: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| row.get(0))
+            .map_err(|_| store_bootstrap_invalid())?;
+        let room_progress_count: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM room_progress", [], |row| row.get(0))
+            .map_err(|_| store_bootstrap_invalid())?;
+        if gateway_count != 0 || room_progress_count != 0 {
+            return Err(store_already_bootstrapped());
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO gateway_state
+                 (singleton, session_cipher, session_nonce, session_key_version,
+                  committed_token_cipher, committed_token_nonce, committed_token_key_version,
+                  fetch_token_cipher, fetch_token_nonce, fetch_token_key_version,
+                  maintenance_code, maintenance_since, bootstrapped_at, updated_at)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10, ?10)",
+                params![
+                    session.ciphertext.as_slice(),
+                    session.nonce.as_slice(),
+                    i64::from(session.key_version),
+                    committed_token.ciphertext.as_slice(),
+                    committed_token.nonce.as_slice(),
+                    i64::from(committed_token.key_version),
+                    fetch_token.ciphertext.as_slice(),
+                    fetch_token.nonce.as_slice(),
+                    i64::from(fetch_token.key_version),
+                    timestamp,
+                ],
+            )
+            .map_err(|_| store_bootstrap_invalid())?;
+
+        for (room_lookup, sealed) in anchors {
+            transaction
+                .execute(
+                    "INSERT INTO room_progress
+                     (room_lookup, anchor_event_cipher, anchor_event_nonce, key_version, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        room_lookup.as_slice(),
+                        sealed.ciphertext.as_slice(),
+                        sealed.nonce.as_slice(),
+                        i64::from(sealed.key_version),
+                        timestamp,
+                    ],
+                )
+                .map_err(|_| store_bootstrap_invalid())?;
+        }
+
+        transaction
+            .commit()
+            .map_err(|_| store_bootstrap_invalid())?;
+        Ok(())
+    }
+
+    /// Return the authenticated Matrix session after validating store state.
+    pub fn matrix_session(&self) -> Result<Option<SecretBytes>, SafeError> {
+        let gateway_count = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|_| store_sync_corrupt())?;
+        let room_progress_count = bounded_room_progress_count(&self.connection)?;
+        if gateway_count == 0 && room_progress_count == 0 {
+            return Ok(None);
+        }
+        if gateway_count != 1 {
+            return Err(store_sync_corrupt());
+        }
+
+        let gateway = read_stored_gateway_state(&self.connection)?;
+        let gateway = gateway.ok_or_else(store_sync_corrupt)?;
+        let session = validate_stored_gateway_state(&self.keyring, &gateway)?;
+        validate_stored_room_progress(&self.connection, &self.keyring, room_progress_count, None)?;
+        Ok(Some(session))
+    }
+
+    /// Return the authenticated anchor for one exact 32-byte room lookup.
+    pub fn room_anchor(&self, room_lookup: &[u8]) -> Result<Option<SecretBytes>, SafeError> {
+        if room_lookup.len() != 32 {
+            return Err(store_bootstrap_invalid());
+        }
+
+        let gateway_count = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|_| store_sync_corrupt())?;
+        let room_progress_count = bounded_room_progress_count(&self.connection)?;
+        if gateway_count == 0 && room_progress_count == 0 {
+            return Ok(None);
+        }
+        if gateway_count != 1 {
+            return Err(store_sync_corrupt());
+        }
+
+        let gateway = read_stored_gateway_state(&self.connection)?;
+        let gateway = gateway.ok_or_else(store_sync_corrupt)?;
+        let _session = validate_stored_gateway_state(&self.keyring, &gateway)?;
+        validate_stored_room_progress(
+            &self.connection,
+            &self.keyring,
+            room_progress_count,
+            Some(room_lookup),
+        )
     }
 
     /// Append one active protected room binding in a single durable
@@ -546,6 +765,18 @@ fn room_binding_invalid() -> SafeError {
     SafeError::new(STORE_ROOM_BINDING_INVALID)
 }
 
+fn store_already_bootstrapped() -> SafeError {
+    SafeError::new(STORE_ALREADY_BOOTSTRAPPED)
+}
+
+fn store_bootstrap_invalid() -> SafeError {
+    SafeError::new(STORE_BOOTSTRAP_INVALID)
+}
+
+fn store_sync_corrupt() -> SafeError {
+    SafeError::new(STORE_SYNC_CORRUPT)
+}
+
 fn room_binding_duplicate_room() -> SafeError {
     SafeError::new(STORE_ROOM_BINDING_DUPLICATE_ROOM)
 }
@@ -557,6 +788,263 @@ fn room_binding_duplicate_id() -> SafeError {
 fn valid_utc_millisecond(value: DateTime<Utc>) -> bool {
     value.timestamp_subsec_nanos().is_multiple_of(1_000_000)
         && model::valid_timestamp(&value.to_rfc3339())
+}
+
+fn read_stored_gateway_state(
+    connection: &Connection,
+) -> Result<Option<StoredGatewayStateRow>, SafeError> {
+    connection
+        .query_row(
+            "SELECT singleton, session_cipher, session_nonce, session_key_version,
+                    committed_token_cipher, committed_token_nonce, committed_token_key_version,
+                    fetch_token_cipher, fetch_token_nonce, fetch_token_key_version,
+                    maintenance_code, maintenance_since, bootstrapped_at, updated_at
+             FROM gateway_state",
+            [],
+            |row| {
+                Ok(StoredGatewayStateRow {
+                    singleton: row.get(0)?,
+                    session_cipher: row.get(1)?,
+                    session_nonce: row.get(2)?,
+                    session_key_version: row.get(3)?,
+                    committed_token_cipher: row.get(4)?,
+                    committed_token_nonce: row.get(5)?,
+                    committed_token_key_version: row.get(6)?,
+                    fetch_token_cipher: row.get(7)?,
+                    fetch_token_nonce: row.get(8)?,
+                    fetch_token_key_version: row.get(9)?,
+                    maintenance_code: row.get(10)?,
+                    maintenance_since: row.get(11)?,
+                    bootstrapped_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| store_sync_corrupt())
+}
+
+fn bounded_room_progress_count(connection: &Connection) -> Result<i64, SafeError> {
+    let count = connection
+        .query_row("SELECT COUNT(*) FROM room_progress", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|_| store_sync_corrupt())?;
+    if count < 0
+        || usize::try_from(count)
+            .ok()
+            .is_none_or(|count| count > MAX_BOOTSTRAP_ROOM_ANCHORS)
+    {
+        return Err(store_sync_corrupt());
+    }
+    Ok(count)
+}
+
+fn validate_stored_gateway_state(
+    keyring: &Keyring,
+    row: &StoredGatewayStateRow,
+) -> Result<SecretBytes, SafeError> {
+    if row.singleton != 1
+        || !row
+            .bootstrapped_at
+            .as_deref()
+            .is_some_and(valid_stored_utc_millisecond)
+        || !row
+            .updated_at
+            .as_deref()
+            .is_some_and(valid_stored_utc_millisecond)
+    {
+        return Err(store_sync_corrupt());
+    }
+
+    match (&row.maintenance_code, &row.maintenance_since) {
+        (None, None) => {}
+        (Some(code), Some(since))
+            if valid_maintenance_code(code) && valid_stored_utc_millisecond(since) => {}
+        _ => return Err(store_sync_corrupt()),
+    }
+
+    let session = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "gateway_state",
+            row_id: "1",
+            column: "session",
+            ciphertext: row.session_cipher.as_deref(),
+            nonce: row.session_nonce.as_deref(),
+            key_version: row.session_key_version,
+            max_plaintext_bytes: MAX_BOOTSTRAP_SESSION_BYTES,
+        },
+    )?;
+    let _committed_token = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "gateway_state",
+            row_id: "1",
+            column: "committed_token",
+            ciphertext: row.committed_token_cipher.as_deref(),
+            nonce: row.committed_token_nonce.as_deref(),
+            key_version: row.committed_token_key_version,
+            max_plaintext_bytes: MAX_SYNC_TOKEN_BYTES,
+        },
+    )?;
+    let _fetch_token = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "gateway_state",
+            row_id: "1",
+            column: "fetch_token",
+            ciphertext: row.fetch_token_cipher.as_deref(),
+            nonce: row.fetch_token_nonce.as_deref(),
+            key_version: row.fetch_token_key_version,
+            max_plaintext_bytes: MAX_SYNC_TOKEN_BYTES,
+        },
+    )?;
+
+    Ok(SecretBytes::new(session.as_bytes().to_vec()))
+}
+
+fn validate_stored_ciphertext_length(
+    ciphertext: &[u8],
+    max_plaintext_bytes: usize,
+) -> Result<(), SafeError> {
+    let max_ciphertext_bytes = max_plaintext_bytes
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_sync_corrupt)?;
+    if ciphertext.len() < AEAD_TAG_BYTES || ciphertext.len() > max_ciphertext_bytes {
+        return Err(store_sync_corrupt());
+    }
+    Ok(())
+}
+
+fn open_stored_value(
+    keyring: &Keyring,
+    value: StoredValue<'_>,
+) -> Result<crate::crypto::Plaintext, SafeError> {
+    let ciphertext = value.ciphertext.ok_or_else(store_sync_corrupt)?;
+    let nonce = value.nonce.ok_or_else(store_sync_corrupt)?;
+    validate_stored_ciphertext_length(ciphertext, value.max_plaintext_bytes)?;
+    if nonce.len() != 24 {
+        return Err(store_sync_corrupt());
+    }
+    let nonce: [u8; 24] = nonce.try_into().map_err(|_| store_sync_corrupt())?;
+    let key_version = value
+        .key_version
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or_else(store_sync_corrupt)?;
+    let sealed = Sealed {
+        nonce,
+        ciphertext: ciphertext.to_vec(),
+        key_version,
+    };
+    let plaintext = keyring
+        .open(value.table, value.row_id, value.column, &sealed)
+        .map_err(|_| store_sync_corrupt())?;
+    if plaintext.is_empty() || plaintext.len() > value.max_plaintext_bytes {
+        return Err(store_sync_corrupt());
+    }
+    Ok(plaintext)
+}
+
+fn validate_stored_room_progress(
+    connection: &Connection,
+    keyring: &Keyring,
+    expected_count: i64,
+    selected_room_lookup: Option<&[u8]>,
+) -> Result<Option<SecretBytes>, SafeError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT room_lookup, anchor_event_cipher, anchor_event_nonce,
+                    key_version, updated_at
+             FROM room_progress ORDER BY room_lookup",
+        )
+        .map_err(|_| store_sync_corrupt())?;
+    let mut rows = statement.query([]).map_err(|_| store_sync_corrupt())?;
+    let mut seen_count = 0_i64;
+    let mut selected = None;
+    while let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? {
+        seen_count = seen_count.checked_add(1).ok_or_else(store_sync_corrupt)?;
+        if seen_count > expected_count || seen_count as usize > MAX_BOOTSTRAP_ROOM_ANCHORS {
+            return Err(store_sync_corrupt());
+        }
+        let stored = StoredRoomProgressRow {
+            room_lookup: row.get(0).map_err(|_| store_sync_corrupt())?,
+            anchor_event_cipher: row.get(1).map_err(|_| store_sync_corrupt())?,
+            anchor_event_nonce: row.get(2).map_err(|_| store_sync_corrupt())?,
+            key_version: row.get(3).map_err(|_| store_sync_corrupt())?,
+            updated_at: row.get(4).map_err(|_| store_sync_corrupt())?,
+        };
+        let event = open_stored_room_progress(keyring, &stored)?;
+        if selected_room_lookup.is_some_and(|lookup| stored.room_lookup.as_slice() == lookup) {
+            if selected.is_some() {
+                return Err(store_sync_corrupt());
+            }
+            selected = Some(event);
+        }
+    }
+    if seen_count != expected_count {
+        return Err(store_sync_corrupt());
+    }
+    Ok(selected)
+}
+
+fn open_stored_room_progress(
+    keyring: &Keyring,
+    row: &StoredRoomProgressRow,
+) -> Result<SecretBytes, SafeError> {
+    if row.room_lookup.len() != 32
+        || !row
+            .updated_at
+            .as_deref()
+            .is_some_and(valid_stored_utc_millisecond)
+    {
+        return Err(store_sync_corrupt());
+    }
+    let room_id = room_progress_row_id(&row.room_lookup);
+    let plaintext = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "room_progress",
+            row_id: &room_id,
+            column: "anchor_event",
+            ciphertext: Some(row.anchor_event_cipher.as_slice()),
+            nonce: Some(row.anchor_event_nonce.as_slice()),
+            key_version: Some(row.key_version),
+            max_plaintext_bytes: MAX_ROOM_ANCHOR_BYTES,
+        },
+    )?;
+    Ok(SecretBytes::new(plaintext.as_bytes().to_vec()))
+}
+
+fn valid_maintenance_code(value: &str) -> bool {
+    matches!(
+        value,
+        "crypto_maintenance_required"
+            | "matrix_crypto_kind_not_allowed"
+            | "matrix_crypto_ack_unrecoverable"
+    )
+}
+
+fn valid_stored_utc_millisecond(value: &str) -> bool {
+    if !model::valid_timestamp(value) {
+        return false;
+    }
+    let Ok(timestamp) = DateTime::parse_from_rfc3339(value) else {
+        return false;
+    };
+    timestamp.offset().local_minus_utc() == 0
+        && timestamp.timestamp_subsec_nanos().is_multiple_of(1_000_000)
+}
+
+fn room_progress_row_id(room_lookup: &[u8]) -> String {
+    let mut hex = String::with_capacity(room_lookup.len() * 2);
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for byte in room_lookup {
+        hex.push(char::from(DIGITS[(byte >> 4) as usize]));
+        hex.push(char::from(DIGITS[(byte & 0x0f) as usize]));
+    }
+    format!("room_{hex}")
 }
 
 fn read_stored_room_binding_row(row: &Row<'_>) -> rusqlite::Result<StoredRoomBindingRow> {
@@ -873,4 +1361,58 @@ fn validate_schema_objects(connection: &Connection) -> Result<(), StoreError> {
 
 fn normalize_sql(sql: &str) -> &str {
     sql.trim_end_matches(';').trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_progress_count_is_bounded_before_rows_are_read() {
+        let connection = Connection::open_in_memory().expect("open in-memory database");
+        connection.execute_batch(SCHEMA_SQL).expect("create schema");
+        let row_limit = i64::try_from(MAX_BOOTSTRAP_ROOM_ANCHORS + 1).expect("row limit");
+        connection
+            .execute(
+                "WITH RECURSIVE numbers(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM numbers WHERE value < ?1
+                 )
+                 INSERT INTO room_progress
+                     (room_lookup, anchor_event_cipher, anchor_event_nonce,
+                      key_version, updated_at)
+                 SELECT CAST(printf('%032d', value) AS BLOB), zeroblob(1), zeroblob(24),
+                        1, '2023-11-14T22:13:20+00:00'
+                 FROM numbers",
+                [row_limit],
+            )
+            .expect("insert bounded fixture rows");
+
+        assert_eq!(
+            bounded_room_progress_count(&connection),
+            Err(store_sync_corrupt())
+        );
+    }
+
+    #[test]
+    fn stored_ciphertext_length_rejects_out_of_bound_values_before_open() {
+        for max_plaintext_bytes in [
+            MAX_BOOTSTRAP_SESSION_BYTES,
+            MAX_SYNC_TOKEN_BYTES,
+            MAX_ROOM_ANCHOR_BYTES,
+        ] {
+            let too_short = vec![0_u8; AEAD_TAG_BYTES - 1];
+            assert_eq!(
+                validate_stored_ciphertext_length(&too_short, max_plaintext_bytes),
+                Err(store_sync_corrupt())
+            );
+
+            let too_long = vec![0_u8; max_plaintext_bytes + AEAD_TAG_BYTES + 1];
+            assert_eq!(
+                validate_stored_ciphertext_length(&too_long, max_plaintext_bytes),
+                Err(store_sync_corrupt())
+            );
+        }
+    }
 }
