@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -16,8 +17,135 @@ use crate::{
 pub const MAX_SDK_REQUEST_ID_BYTES: usize = 64 * 1024;
 /// Maximum bytes accepted for a canonical Matrix crypto request body.
 pub const MAX_MATRIX_CRYPTO_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum bytes accepted for one exact Matrix `/keys/query` response body.
+pub const MAX_MATRIX_CRYPTO_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// The only Matrix crypto request kind accepted by this gateway phase.
 pub const MATRIX_CRYPTO_REQUEST_KIND: &str = "keys_query";
+
+struct JsonObjectVisitor;
+
+impl<'de> Visitor<'de> for JsonObjectVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        while map.next_key::<IgnoredAny>()?.is_some() {
+            map.next_value::<IgnoredAny>()?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate one UTF-8 JSON object without materialising its values.
+pub(crate) fn validate_json_object(bytes: &[u8]) -> Result<(), ()> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    deserializer
+        .deserialize_map(JsonObjectVisitor)
+        .map_err(|_| ())?;
+    deserializer.end().map_err(|_| ())
+}
+
+/// One verified pending Matrix crypto request selected for a caller to send.
+///
+/// The store is the only constructor. Secret request values remain owned by
+/// this non-cloneable DTO until the caller finishes its one send attempt.
+///
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::PendingMatrixRequest;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<PendingMatrixRequest>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::PendingMatrixRequest;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<PendingMatrixRequest>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::PendingMatrixRequest;
+/// fn requires_as_ref<T: AsRef<[u8]>>() {}
+/// requires_as_ref::<PendingMatrixRequest>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::PendingMatrixRequest;
+/// fn requires_deref<T: std::ops::Deref>() {}
+/// requires_deref::<PendingMatrixRequest>();
+/// ```
+#[allow(dead_code)]
+pub struct PendingMatrixRequest {
+    row_id: String,
+    sdk_request_id: SecretBytes,
+    request: SecretBytes,
+    request_sha256: [u8; 32],
+    attempt_count: u32,
+    next_attempt_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[allow(dead_code)]
+impl PendingMatrixRequest {
+    pub(crate) fn from_verified_parts(
+        row_id: String,
+        sdk_request_id: SecretBytes,
+        request: SecretBytes,
+        request_sha256: [u8; 32],
+        attempt_count: u32,
+        next_attempt_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            row_id,
+            sdk_request_id,
+            request,
+            request_sha256,
+            attempt_count,
+            next_attempt_at,
+        }
+    }
+
+    pub fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
+    pub fn request_kind(&self) -> &'static str {
+        MATRIX_CRYPTO_REQUEST_KIND
+    }
+
+    pub fn sdk_request_id(&self) -> &SecretBytes {
+        &self.sdk_request_id
+    }
+
+    pub fn request(&self) -> &SecretBytes {
+        &self.request
+    }
+
+    pub fn request_sha256(&self) -> &[u8; 32] {
+        &self.request_sha256
+    }
+
+    pub fn attempt_count(&self) -> u32 {
+        self.attempt_count
+    }
+
+    pub fn next_attempt_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.next_attempt_at
+    }
+}
+
+impl fmt::Debug for PendingMatrixRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PendingMatrixRequest([REDACTED])")
+    }
+}
+
+impl fmt::Display for PendingMatrixRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PendingMatrixRequest([REDACTED])")
+    }
+}
 
 /// A closed, protected, exact Matrix `/keys/query` request.
 ///
@@ -133,6 +261,103 @@ impl fmt::Debug for ExactMatrixRequest {
 impl fmt::Display for ExactMatrixRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ExactMatrixRequest([REDACTED])")
+    }
+}
+
+/// A closed, protected, exact Matrix `/keys/query` response body.
+///
+/// The body is retained byte-for-byte after bounded JSON-object validation.
+/// It is deliberately not exposed as a general byte container.
+///
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::RawMatrixResponse;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<RawMatrixResponse>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::RawMatrixResponse;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<RawMatrixResponse>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::RawMatrixResponse;
+/// fn requires_as_ref<T: AsRef<[u8]>>() {}
+/// requires_as_ref::<RawMatrixResponse>();
+/// ```
+/// ```compile_fail
+/// use communicator_matrix_gateway::crypto_outbox::RawMatrixResponse;
+/// fn requires_deref<T: std::ops::Deref>() {}
+/// requires_deref::<RawMatrixResponse>();
+/// ```
+#[allow(dead_code)]
+pub struct RawMatrixResponse {
+    body: SecretBytes,
+    sha256: [u8; 32],
+}
+
+#[allow(dead_code)]
+impl RawMatrixResponse {
+    /// Construct an exact, bounded, valid JSON-object response body.
+    pub fn keys_query(mut exact_body: Vec<u8>) -> Result<Self, SafeError> {
+        if exact_body.is_empty() {
+            exact_body.zeroize();
+            return Err(crypto_invalid());
+        }
+        if exact_body.len() > MAX_MATRIX_CRYPTO_RESPONSE_BYTES {
+            exact_body.zeroize();
+            return Err(crypto_too_large());
+        }
+        if std::str::from_utf8(&exact_body).is_err() {
+            exact_body.zeroize();
+            return Err(crypto_invalid());
+        }
+        if validate_json_object(&exact_body).is_err() {
+            exact_body.zeroize();
+            return Err(crypto_invalid());
+        }
+
+        let sha256 = Sha256::digest(&exact_body).into();
+        Ok(Self {
+            body: SecretBytes::new(exact_body),
+            sha256,
+        })
+    }
+
+    /// Borrow the SHA-256 digest of the exact response bytes.
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    /// Borrow the exact response bytes for store encryption.
+    pub(crate) fn body(&self) -> &SecretBytes {
+        &self.body
+    }
+
+    /// Revalidate the closed value before it crosses into a transaction.
+    pub(crate) fn validate(&self) -> Result<(), SafeError> {
+        if self.body.is_empty() {
+            return Err(crypto_invalid());
+        }
+        if self.body.len() > MAX_MATRIX_CRYPTO_RESPONSE_BYTES {
+            return Err(crypto_too_large());
+        }
+        if Sha256::digest(self.body.as_bytes()).as_slice() != self.sha256 {
+            return Err(crypto_invalid());
+        }
+        std::str::from_utf8(self.body.as_bytes()).map_err(|_| crypto_invalid())?;
+        validate_json_object(self.body.as_bytes()).map_err(|_| crypto_invalid())
+    }
+}
+
+impl fmt::Debug for RawMatrixResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RawMatrixResponse([REDACTED])")
+    }
+}
+
+impl fmt::Display for RawMatrixResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RawMatrixResponse([REDACTED])")
     }
 }
 

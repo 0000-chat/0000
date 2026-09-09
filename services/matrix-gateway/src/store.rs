@@ -25,8 +25,9 @@ use crate::{
     crypto::{AEAD_TAG_BYTES, Keyring, Sealed},
     crypto_outbox::{
         CryptoRowId, ExactMatrixRequest, MATRIX_CRYPTO_REQUEST_KIND,
-        MAX_MATRIX_CRYPTO_REQUEST_BYTES, MAX_SDK_REQUEST_ID_BYTES,
-        validate_canonical_request_bytes,
+        MAX_MATRIX_CRYPTO_REQUEST_BYTES, MAX_MATRIX_CRYPTO_RESPONSE_BYTES,
+        MAX_SDK_REQUEST_ID_BYTES, PendingMatrixRequest, RawMatrixResponse,
+        validate_canonical_request_bytes, validate_json_object,
     },
     model,
     registry::{
@@ -423,8 +424,35 @@ struct StoredCryptoRow {
     terminal_code: Option<String>,
 }
 
+struct StoredCryptoResponseFields {
+    cipher: Option<Vec<u8>>,
+    nonce: Option<Vec<u8>>,
+    key_version: Option<i64>,
+    sha256: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CryptoLifecycle {
+    Pending,
+    ResponseReceived,
+    Accepted,
+    Quarantined,
+}
+
+impl CryptoLifecycle {
+    fn from_str(value: &str) -> Result<Self, SafeError> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "response_received" => Ok(Self::ResponseReceived),
+            "accepted" => Ok(Self::Accepted),
+            "quarantined" => Ok(Self::Quarantined),
+            _ => Err(store_crypto_corrupt()),
+        }
+    }
+}
+
 #[allow(dead_code)]
-struct VerifiedPendingCryptoRow {
+struct VerifiedCryptoRow {
     crypto_row_id: CryptoRowId,
     inbox_id: InboxId,
     request_lookup: [u8; 32],
@@ -432,15 +460,20 @@ struct VerifiedPendingCryptoRow {
     request: SecretBytes,
     request_sha256: [u8; 32],
     byte_count: usize,
+    request_nonce: [u8; 24],
+    response: Option<SecretBytes>,
+    response_sha256: Option<[u8; 32]>,
+    state: CryptoLifecycle,
+    attempt_count: u32,
     next_attempt_at: DateTime<Utc>,
+    accepted_at: Option<DateTime<Utc>>,
+    terminal_code: Option<ReasonCode>,
 }
 
 struct PreparedCryptoRequest<'a> {
     request: &'a ExactMatrixRequest,
     request_lookup: [u8; 32],
     crypto_row_id: CryptoRowId,
-    sdk_request_id: Sealed,
-    request_cipher: Sealed,
 }
 
 #[derive(Clone, Copy)]
@@ -838,30 +871,10 @@ impl Store {
                     matrix_request_lookup(&self.keyring, request.request().as_bytes())
                         .map_err(|_| store_crypto_invalid())?;
                 let crypto_row_id = derive_crypto_row_id(&target_id, &request_lookup)?;
-                let sdk_request_id = self
-                    .keyring
-                    .seal(
-                        "matrix_crypto_outbox",
-                        crypto_row_id.as_str(),
-                        "sdk_request_id",
-                        request.sdk_request_id().as_bytes(),
-                    )
-                    .map_err(|_| store_crypto_invalid())?;
-                let request_cipher = self
-                    .keyring
-                    .seal(
-                        "matrix_crypto_outbox",
-                        crypto_row_id.as_str(),
-                        "request",
-                        request.request().as_bytes(),
-                    )
-                    .map_err(|_| store_crypto_invalid())?;
                 Ok(PreparedCryptoRequest {
                     request,
                     request_lookup,
                     crypto_row_id,
-                    sdk_request_id,
-                    request_cipher,
                 })
             })
             .transpose()?;
@@ -873,9 +886,9 @@ impl Store {
             .map_err(|_| store_crypto_corrupt())?;
         let gateway = require_bootstrap_singleton(&transaction, keyring, true)
             .map_err(map_crypto_storage_error)?;
-        if gateway.is_none() {
+        let Some(gateway) = gateway else {
             return Err(store_crypto_not_ready());
-        }
+        };
         let committed_token =
             load_verified_gateway_token(&transaction, keyring, GatewayTokenField::Committed)
                 .map_err(map_crypto_storage_error)?;
@@ -884,6 +897,8 @@ impl Store {
                 .map_err(map_crypto_storage_error)?;
         let chain = verify_inbox_chain(&transaction, keyring, &committed_token, &fetch_token)
             .map_err(map_crypto_storage_error)?;
+        let unresolved = load_verified_unresolved_crypto_rows(&transaction, keyring)
+            .map_err(map_crypto_storage_error)?;
         let target_index = chain
             .rows
             .iter()
@@ -891,15 +906,7 @@ impl Store {
             .ok_or_else(store_crypto_invalid)?;
         let target = &chain.rows[target_index];
 
-        if target.state() == SyncInboxState::Quarantined
-            || chain.rows[..target_index]
-                .iter()
-                .any(|row| row.state() == SyncInboxState::Quarantined)
-        {
-            return Err(store_crypto_not_ready());
-        }
-
-        if target.state() == SyncInboxState::SdkProcessed {
+        let existing = if target.state() == SyncInboxState::SdkProcessed {
             if target.crypto_drained() {
                 return Err(store_crypto_corrupt());
             }
@@ -910,6 +917,41 @@ impl Store {
                     .map_err(map_crypto_storage_error)?;
             }
             if existing.len() > 1 {
+                return Err(store_crypto_corrupt());
+            }
+            Some(existing)
+        } else {
+            let existing = load_verified_crypto_rows_for_inbox(&transaction, keyring, &target_id)
+                .map_err(map_crypto_storage_error)?;
+            for row in &existing {
+                verify_crypto_parent(&transaction, keyring, row)
+                    .map_err(map_crypto_storage_error)?;
+            }
+            if !existing.is_empty() {
+                return Err(store_crypto_corrupt());
+            }
+            None
+        };
+
+        if gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+
+        if target.state() == SyncInboxState::Quarantined
+            || chain.rows[..target_index]
+                .iter()
+                .any(|row| row.state() == SyncInboxState::Quarantined)
+        {
+            return Err(store_crypto_not_ready());
+        }
+
+        if target.state() == SyncInboxState::SdkProcessed {
+            let existing = existing.as_deref().unwrap_or_default();
+            if existing.first().is_some_and(|stored| {
+                stored.state == CryptoLifecycle::Pending
+                    && stored.attempt_count == 0
+                    && stored.next_attempt_at != *target.observed_at()
+            }) {
                 return Err(store_crypto_corrupt());
             }
             let exact_retry = match (requests.first(), existing.first()) {
@@ -956,10 +998,35 @@ impl Store {
             return Err(store_crypto_not_ready());
         }
 
-        reject_invalid_or_unresolved_crypto_rows(&transaction, keyring)
-            .map_err(map_crypto_storage_error)?;
+        match unresolved.as_slice() {
+            [] => {}
+            [row] => match row.state {
+                CryptoLifecycle::Quarantined => return Err(store_crypto_not_ready()),
+                CryptoLifecycle::Pending | CryptoLifecycle::ResponseReceived => {
+                    return Err(store_crypto_unresolved());
+                }
+                CryptoLifecycle::Accepted => return Err(store_crypto_corrupt()),
+            },
+            _ => return Err(store_crypto_corrupt()),
+        }
 
         if let Some(prepared) = prepared_request.as_ref() {
+            let sdk_request_id = keyring
+                .seal(
+                    "matrix_crypto_outbox",
+                    prepared.crypto_row_id.as_str(),
+                    "sdk_request_id",
+                    prepared.request.sdk_request_id().as_bytes(),
+                )
+                .map_err(|_| store_crypto_invalid())?;
+            let request_cipher = keyring
+                .seal(
+                    "matrix_crypto_outbox",
+                    prepared.crypto_row_id.as_str(),
+                    "request",
+                    prepared.request.request().as_bytes(),
+                )
+                .map_err(|_| store_crypto_invalid())?;
             let observed_at = target.observed_at().to_rfc3339();
             transaction
                 .execute(
@@ -977,12 +1044,12 @@ impl Store {
                         target_id.as_str(),
                         prepared.request_lookup.as_slice(),
                         MATRIX_CRYPTO_REQUEST_KIND,
-                        prepared.sdk_request_id.ciphertext.as_slice(),
-                        prepared.sdk_request_id.nonce.as_slice(),
-                        i64::from(prepared.sdk_request_id.key_version),
-                        prepared.request_cipher.ciphertext.as_slice(),
-                        prepared.request_cipher.nonce.as_slice(),
-                        i64::from(prepared.request_cipher.key_version),
+                        sdk_request_id.ciphertext.as_slice(),
+                        sdk_request_id.nonce.as_slice(),
+                        i64::from(sdk_request_id.key_version),
+                        request_cipher.ciphertext.as_slice(),
+                        request_cipher.nonce.as_slice(),
+                        i64::from(request_cipher.key_version),
                         prepared.request.request_sha256().as_slice(),
                         i64::try_from(prepared.request.request().len())
                             .map_err(|_| store_crypto_too_large())?,
@@ -1004,6 +1071,359 @@ impl Store {
             .map_err(|_| store_crypto_corrupt())?;
         if updated != 1 {
             return Err(store_crypto_corrupt());
+        }
+        transaction.commit().map_err(|_| store_crypto_corrupt())?;
+        Ok(())
+    }
+
+    /// Return one authenticated pending crypto request whose retry time is due.
+    pub fn next_pending_crypto_request(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<PendingMatrixRequest>, SafeError> {
+        if !valid_utc_millisecond(now) {
+            return Err(store_crypto_invalid());
+        }
+        let (gateway, _chain, unresolved) = load_crypto_context(&self.connection, &self.keyring)?;
+        if gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        match unresolved.as_slice() {
+            [] => Ok(None),
+            [row] => match row.state {
+                CryptoLifecycle::Pending => {
+                    if row.next_attempt_at > now {
+                        return Ok(None);
+                    }
+                    let row_id = row.crypto_row_id.as_str().to_owned();
+                    let sdk_request_id = SecretBytes::new(row.sdk_request_id.as_bytes().to_vec());
+                    let request = SecretBytes::new(row.request.as_bytes().to_vec());
+                    Ok(Some(PendingMatrixRequest::from_verified_parts(
+                        row_id,
+                        sdk_request_id,
+                        request,
+                        row.request_sha256,
+                        row.attempt_count,
+                        row.next_attempt_at,
+                    )))
+                }
+                CryptoLifecycle::ResponseReceived | CryptoLifecycle::Quarantined => {
+                    Err(store_crypto_not_ready())
+                }
+                CryptoLifecycle::Accepted => Err(store_crypto_corrupt()),
+            },
+            _ => Err(store_crypto_corrupt()),
+        }
+    }
+
+    /// Durably lease one pending request before its caller performs HTTP.
+    pub fn record_attempt(
+        &mut self,
+        row: &str,
+        expected_attempt_count: u32,
+        expected_next_attempt_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+        next: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        let row_id = CryptoRowId::new(row.to_owned()).map_err(|_| store_crypto_invalid())?;
+        if expected_attempt_count > CRYPTO_ATTEMPT_COUNT_MAX as u32
+            || !valid_utc_millisecond(expected_next_attempt_at)
+            || !valid_utc_millisecond(now)
+            || !valid_utc_millisecond(next)
+            || next <= now
+        {
+            return Err(store_crypto_invalid());
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_crypto_corrupt())?;
+        let (gateway, _chain, unresolved) = load_crypto_context(&transaction, &self.keyring)?;
+        let addressed = if unresolved
+            .first()
+            .is_some_and(|candidate| candidate.crypto_row_id == row_id)
+        {
+            Some(unresolved.into_iter().next().expect("one unresolved row"))
+        } else {
+            load_verified_crypto_row_by_id(&transaction, &self.keyring, &row_id)?
+        };
+        let Some(addressed) = addressed else {
+            if gateway.maintenance_code.is_some() {
+                return Err(store_crypto_not_ready());
+            }
+            return Err(store_crypto_not_ready());
+        };
+        verify_crypto_parent(&transaction, &self.keyring, &addressed)?;
+        if gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        if addressed.state != CryptoLifecycle::Pending {
+            return Err(store_crypto_not_ready());
+        }
+        if addressed.attempt_count >= CRYPTO_ATTEMPT_COUNT_MAX as u32 {
+            return Err(store_crypto_not_ready());
+        }
+        if addressed.attempt_count != expected_attempt_count
+            || addressed.next_attempt_at != expected_next_attempt_at
+        {
+            return Err(store_crypto_conflict());
+        }
+        if addressed.next_attempt_at > now {
+            return Err(store_crypto_not_ready());
+        }
+
+        let updated = transaction
+            .execute(
+                "UPDATE matrix_crypto_outbox
+                 SET attempt_count = attempt_count + 1, next_attempt_at = ?1
+                 WHERE crypto_row_id = ?2 AND state = 'pending'
+                   AND attempt_count = ?3 AND next_attempt_at = ?4
+                   AND next_attempt_at <= ?5 AND attempt_count < ?6",
+                params![
+                    next.to_rfc3339(),
+                    row_id.as_str(),
+                    i64::from(expected_attempt_count),
+                    expected_next_attempt_at.to_rfc3339(),
+                    now.to_rfc3339(),
+                    CRYPTO_ATTEMPT_COUNT_MAX,
+                ],
+            )
+            .map_err(|_| store_crypto_corrupt())?;
+        if updated != 1 {
+            return Err(store_crypto_conflict());
+        }
+        transaction.commit().map_err(|_| store_crypto_corrupt())?;
+        Ok(())
+    }
+
+    /// Persist one exact verified response for a leased pending request.
+    pub fn record_crypto_response(
+        &mut self,
+        row: &str,
+        response: &RawMatrixResponse,
+    ) -> Result<(), SafeError> {
+        let row_id = CryptoRowId::new(row.to_owned()).map_err(|_| store_crypto_invalid())?;
+        response.validate()?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_crypto_corrupt())?;
+        let (gateway, _chain, unresolved) = load_crypto_context(&transaction, &self.keyring)?;
+        if unresolved.len() > 1 {
+            return Err(store_crypto_corrupt());
+        }
+        let addressed = if unresolved
+            .first()
+            .is_some_and(|candidate| candidate.crypto_row_id == row_id)
+        {
+            Some(unresolved.into_iter().next().expect("one unresolved row"))
+        } else {
+            load_verified_crypto_row_by_id(&transaction, &self.keyring, &row_id)?
+        };
+        let Some(addressed) = addressed else {
+            return Err(store_crypto_not_ready());
+        };
+        verify_crypto_parent(&transaction, &self.keyring, &addressed)?;
+        if gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        match addressed.state {
+            CryptoLifecycle::Pending => {
+                if addressed.attempt_count == 0 {
+                    return Err(store_crypto_not_ready());
+                }
+                let response_sealed = self
+                    .keyring
+                    .seal(
+                        "matrix_crypto_outbox",
+                        row_id.as_str(),
+                        "response",
+                        response.body().as_bytes(),
+                    )
+                    .map_err(|_| store_crypto_invalid())?;
+                if response_sealed.nonce == addressed.request_nonce {
+                    return Err(store_crypto_invalid());
+                }
+                let updated = transaction
+                    .execute(
+                        "UPDATE matrix_crypto_outbox
+                         SET response_cipher = ?1, response_nonce = ?2,
+                             response_key_version = ?3, response_sha256 = ?4,
+                             state = 'response_received'
+                         WHERE crypto_row_id = ?5 AND state = 'pending'
+                           AND response_cipher IS NULL AND response_nonce IS NULL
+                           AND response_key_version IS NULL AND response_sha256 IS NULL",
+                        params![
+                            response_sealed.ciphertext.as_slice(),
+                            response_sealed.nonce.as_slice(),
+                            i64::from(response_sealed.key_version),
+                            response.sha256().as_slice(),
+                            row_id.as_str(),
+                        ],
+                    )
+                    .map_err(|_| store_crypto_corrupt())?;
+                if updated != 1 {
+                    return Err(store_crypto_conflict());
+                }
+            }
+            CryptoLifecycle::ResponseReceived => {
+                if addressed
+                    .response
+                    .as_ref()
+                    .is_some_and(|stored| stored.as_bytes() == response.body().as_bytes())
+                {
+                    drop(transaction);
+                    return Ok(());
+                }
+                return Err(store_crypto_conflict());
+            }
+            CryptoLifecycle::Accepted | CryptoLifecycle::Quarantined => {
+                return Err(store_crypto_not_ready());
+            }
+        }
+        transaction.commit().map_err(|_| store_crypto_corrupt())?;
+        Ok(())
+    }
+
+    /// Mark a verified response accepted after the SDK acknowledgement.
+    pub fn complete_crypto_request(
+        &mut self,
+        row: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        let row_id = CryptoRowId::new(row.to_owned()).map_err(|_| store_crypto_invalid())?;
+        if !valid_utc_millisecond(accepted_at) {
+            return Err(store_crypto_invalid());
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_crypto_corrupt())?;
+        let (gateway, chain, unresolved) = load_crypto_context(&transaction, &self.keyring)?;
+        if unresolved.len() > 1 {
+            return Err(store_crypto_corrupt());
+        }
+        let addressed = if unresolved
+            .first()
+            .is_some_and(|candidate| candidate.crypto_row_id == row_id)
+        {
+            Some(unresolved.into_iter().next().expect("one unresolved row"))
+        } else {
+            load_verified_crypto_row_by_id(&transaction, &self.keyring, &row_id)?
+        };
+        let Some(addressed) = addressed else {
+            return Err(store_crypto_not_ready());
+        };
+        verify_crypto_parent(&transaction, &self.keyring, &addressed)?;
+        if gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        let parent = chain
+            .rows
+            .iter()
+            .find(|candidate| candidate.inbox_id() == &addressed.inbox_id)
+            .ok_or_else(store_crypto_corrupt)?;
+        match addressed.state {
+            CryptoLifecycle::ResponseReceived => {
+                if accepted_at < *parent.observed_at() {
+                    return Err(store_crypto_invalid());
+                }
+                let updated = transaction
+                    .execute(
+                        "UPDATE matrix_crypto_outbox
+                         SET state = 'accepted', accepted_at = ?1
+                         WHERE crypto_row_id = ?2 AND state = 'response_received'
+                           AND accepted_at IS NULL",
+                        params![accepted_at.to_rfc3339(), row_id.as_str()],
+                    )
+                    .map_err(|_| store_crypto_corrupt())?;
+                if updated != 1 {
+                    return Err(store_crypto_conflict());
+                }
+            }
+            CryptoLifecycle::Accepted => {
+                if accepted_at < *parent.observed_at() {
+                    return Err(store_crypto_invalid());
+                }
+                if addressed.accepted_at == Some(accepted_at) {
+                    drop(transaction);
+                    return Ok(());
+                }
+                return Err(store_crypto_conflict());
+            }
+            CryptoLifecycle::Pending | CryptoLifecycle::Quarantined => {
+                return Err(store_crypto_not_ready());
+            }
+        }
+        transaction.commit().map_err(|_| store_crypto_corrupt())?;
+        Ok(())
+    }
+
+    /// Terminally quarantine one pending or response-bearing crypto request.
+    pub fn quarantine_crypto_request(
+        &mut self,
+        row: &str,
+        code: ReasonCode,
+    ) -> Result<(), SafeError> {
+        let row_id = CryptoRowId::new(row.to_owned()).map_err(|_| store_crypto_invalid())?;
+        if !valid_stored_reason_code(code.as_str()) {
+            return Err(store_crypto_invalid());
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| store_crypto_corrupt())?;
+        let (gateway, _chain, unresolved) = load_crypto_context(&transaction, &self.keyring)?;
+        if unresolved.len() > 1 {
+            return Err(store_crypto_corrupt());
+        }
+        let addressed = if unresolved
+            .first()
+            .is_some_and(|candidate| candidate.crypto_row_id == row_id)
+        {
+            Some(unresolved.into_iter().next().expect("one unresolved row"))
+        } else {
+            load_verified_crypto_row_by_id(&transaction, &self.keyring, &row_id)?
+        };
+        let Some(addressed) = addressed else {
+            return Err(store_crypto_not_ready());
+        };
+        verify_crypto_parent(&transaction, &self.keyring, &addressed)?;
+        if gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        match addressed.state {
+            CryptoLifecycle::Pending | CryptoLifecycle::ResponseReceived => {
+                let updated = transaction
+                    .execute(
+                        "UPDATE matrix_crypto_outbox
+                         SET state = 'quarantined', terminal_code = ?1
+                         WHERE crypto_row_id = ?2
+                           AND state IN ('pending', 'response_received')
+                           AND accepted_at IS NULL AND terminal_code IS NULL",
+                        params![code.as_str(), row_id.as_str()],
+                    )
+                    .map_err(|_| store_crypto_corrupt())?;
+                if updated != 1 {
+                    return Err(store_crypto_conflict());
+                }
+            }
+            CryptoLifecycle::Quarantined => {
+                if addressed
+                    .terminal_code
+                    .as_ref()
+                    .is_some_and(|stored| stored.as_str() == code.as_str())
+                {
+                    drop(transaction);
+                    return Ok(());
+                }
+                return Err(store_crypto_conflict());
+            }
+            CryptoLifecycle::Accepted => return Err(store_crypto_not_ready()),
         }
         transaction.commit().map_err(|_| store_crypto_corrupt())?;
         Ok(())
@@ -1607,10 +2027,19 @@ fn matrix_request_lookup(
     keyring: &Keyring,
     canonical_request: &[u8],
 ) -> Result<[u8; 32], SafeError> {
+    matrix_request_lookup_at(keyring, keyring.active_key_version(), canonical_request)
+}
+
+fn matrix_request_lookup_at(
+    keyring: &Keyring,
+    key_version: u32,
+    canonical_request: &[u8],
+) -> Result<[u8; 32], SafeError> {
     let canonical_request_utf8 =
         std::str::from_utf8(canonical_request).map_err(|_| store_crypto_invalid())?;
     keyring
-        .lookup_digest(
+        .lookup_digest_at(
+            key_version,
             "matrix-crypto-request-v1",
             &[MATRIX_CRYPTO_REQUEST_KIND, canonical_request_utf8],
         )
@@ -1749,6 +2178,10 @@ fn read_stored_crypto_row(row: &Row<'_>) -> Result<StoredCryptoRow, SafeError> {
     let max_request_ciphertext = MAX_MATRIX_CRYPTO_REQUEST_BYTES
         .checked_add(AEAD_TAG_BYTES)
         .ok_or_else(store_crypto_corrupt)?;
+    let max_response_ciphertext = MAX_MATRIX_CRYPTO_RESPONSE_BYTES
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(store_crypto_corrupt)?;
+    let response = read_stored_crypto_response_fields(row, max_response_ciphertext)?;
     let byte_count = read_crypto_integer(row, 11, 1, MAX_MATRIX_CRYPTO_REQUEST_BYTES as i64)?;
     let max_request_ciphertext_for_row = usize::try_from(byte_count)
         .ok()
@@ -1774,10 +2207,10 @@ fn read_stored_crypto_row(row: &Row<'_>) -> Result<StoredCryptoRow, SafeError> {
         request_key_version: read_sync_integer(row, 9, 1, max_key_version)?,
         request_sha256: read_sync_blob(row, 10, 32, 32)?,
         byte_count,
-        response_cipher: read_optional_sync_blob(row, 12, AEAD_TAG_BYTES, max_request_ciphertext)?,
-        response_nonce: read_optional_sync_blob(row, 13, SYNC_NONCE_BYTES, SYNC_NONCE_BYTES)?,
-        response_key_version: read_optional_sync_integer(row, 14, 1, max_key_version)?,
-        response_sha256: read_optional_sync_blob(row, 15, 32, 32)?,
+        response_cipher: response.cipher,
+        response_nonce: response.nonce,
+        response_key_version: response.key_version,
+        response_sha256: response.sha256,
         state: read_sync_text(row, 16, CRYPTO_STATE_MAX_BYTES, valid_stored_crypto_state)?,
         attempt_count: read_crypto_integer(row, 17, 0, CRYPTO_ATTEMPT_COUNT_MAX)?,
         next_attempt_at: read_sync_text(
@@ -1801,6 +2234,68 @@ fn read_stored_crypto_row(row: &Row<'_>) -> Result<StoredCryptoRow, SafeError> {
     })
 }
 
+fn read_stored_crypto_response_fields(
+    row: &Row<'_>,
+    max_response_ciphertext: usize,
+) -> Result<StoredCryptoResponseFields, SafeError> {
+    let response_cipher_ref = row.get_ref(12).map_err(|_| store_crypto_corrupt())?;
+    let response_nonce_ref = row.get_ref(13).map_err(|_| store_crypto_corrupt())?;
+    let response_key_version_ref = row.get_ref(14).map_err(|_| store_crypto_corrupt())?;
+    let response_sha256_ref = row.get_ref(15).map_err(|_| store_crypto_corrupt())?;
+
+    let response_refs = [
+        response_cipher_ref,
+        response_nonce_ref,
+        response_key_version_ref,
+        response_sha256_ref,
+    ];
+    let all_null = response_refs
+        .iter()
+        .all(|value| matches!(value, ValueRef::Null));
+    let any_null = response_refs
+        .iter()
+        .any(|value| matches!(value, ValueRef::Null));
+    if all_null {
+        return Ok(StoredCryptoResponseFields {
+            cipher: None,
+            nonce: None,
+            key_version: None,
+            sha256: None,
+        });
+    }
+    if any_null {
+        return Err(store_crypto_corrupt());
+    }
+
+    let response_cipher = match response_cipher_ref {
+        ValueRef::Blob(bytes)
+            if (AEAD_TAG_BYTES + 1..=max_response_ciphertext).contains(&bytes.len()) =>
+        {
+            bytes
+        }
+        _ => return Err(store_crypto_corrupt()),
+    };
+    let response_nonce = match response_nonce_ref {
+        ValueRef::Blob(bytes) if bytes.len() == SYNC_NONCE_BYTES => bytes,
+        _ => return Err(store_crypto_corrupt()),
+    };
+    let response_key_version = match response_key_version_ref {
+        ValueRef::Integer(value) if (1..=i64::from(u32::MAX)).contains(&value) => value,
+        _ => return Err(store_crypto_corrupt()),
+    };
+    let response_sha256 = match response_sha256_ref {
+        ValueRef::Blob(bytes) if bytes.len() == 32 => bytes,
+        _ => return Err(store_crypto_corrupt()),
+    };
+
+    Ok(StoredCryptoResponseFields {
+        cipher: Some(response_cipher.to_vec()),
+        nonce: Some(response_nonce.to_vec()),
+        key_version: Some(response_key_version),
+        sha256: Some(response_sha256.to_vec()),
+    })
+}
+
 fn read_crypto_integer(
     row: &Row<'_>,
     index: usize,
@@ -1813,29 +2308,32 @@ fn read_crypto_integer(
     }
 }
 
-fn read_and_verify_pending_crypto_row(
+fn read_and_verify_crypto_row(
     stored: StoredCryptoRow,
     keyring: &Keyring,
-) -> Result<VerifiedPendingCryptoRow, SafeError> {
+) -> Result<VerifiedCryptoRow, SafeError> {
     let crypto_row_id =
         CryptoRowId::new(stored.crypto_row_id).map_err(|_| store_crypto_corrupt())?;
     let inbox_id = InboxId::new(stored.inbox_id).map_err(|_| store_crypto_corrupt())?;
     let request_lookup = digest_from_blob(&stored.request_lookup)?;
     let request_sha256 = digest_from_blob(&stored.request_sha256)?;
     let byte_count = usize::try_from(stored.byte_count).map_err(|_| store_crypto_corrupt())?;
-    if stored.request_kind != MATRIX_CRYPTO_REQUEST_KIND
-        || stored.state != "pending"
-        || stored.attempt_count != 0
-        || stored.response_cipher.is_some()
-        || stored.response_nonce.is_some()
-        || stored.response_key_version.is_some()
-        || stored.response_sha256.is_some()
-        || stored.accepted_at.is_some()
-        || stored.terminal_code.is_some()
-    {
+    if stored.request_kind != MATRIX_CRYPTO_REQUEST_KIND {
         return Err(store_crypto_corrupt());
     }
+    let state = CryptoLifecycle::from_str(&stored.state)?;
+    let attempt_count = u32::try_from(stored.attempt_count).map_err(|_| store_crypto_corrupt())?;
     let next_attempt_at = parse_stored_timestamp(&stored.next_attempt_at)?;
+    let accepted_at = stored
+        .accepted_at
+        .as_deref()
+        .map(parse_stored_timestamp)
+        .transpose()?;
+    let terminal_code = stored
+        .terminal_code
+        .map(ReasonCode::new)
+        .transpose()
+        .map_err(|_| store_crypto_corrupt())?;
 
     let sdk_request_id_plaintext = open_stored_value(
         keyring,
@@ -1874,15 +2372,81 @@ fn read_and_verify_pending_crypto_row(
     if sha256(request_plaintext.as_bytes()) != request_sha256 {
         return Err(store_crypto_corrupt());
     }
-    let expected_lookup = matrix_request_lookup(keyring, request_plaintext.as_bytes())
-        .map_err(|_| store_crypto_corrupt())?;
+    let request_key_version =
+        u32::try_from(stored.request_key_version).map_err(|_| store_crypto_corrupt())?;
+    let expected_lookup =
+        matrix_request_lookup_at(keyring, request_key_version, request_plaintext.as_bytes())
+            .map_err(|_| store_crypto_corrupt())?;
     if expected_lookup != request_lookup
         || derive_crypto_row_id(&inbox_id, &request_lookup)? != crypto_row_id
     {
         return Err(store_crypto_corrupt());
     }
 
-    Ok(VerifiedPendingCryptoRow {
+    let response = match (
+        stored.response_cipher,
+        stored.response_nonce,
+        stored.response_key_version,
+        stored.response_sha256,
+    ) {
+        (None, None, None, None) => None,
+        (Some(ciphertext), Some(nonce), Some(key_version), Some(response_sha256)) => {
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| store_crypto_corrupt())?;
+            if nonce == stored.request_nonce.as_slice() {
+                return Err(store_crypto_corrupt());
+            }
+            let response_sha256 = digest_from_blob(&response_sha256)?;
+            let plaintext = open_stored_value(
+                keyring,
+                StoredValue {
+                    table: "matrix_crypto_outbox",
+                    row_id: crypto_row_id.as_str(),
+                    column: "response",
+                    ciphertext: Some(ciphertext.as_slice()),
+                    nonce: Some(&nonce),
+                    key_version: Some(key_version),
+                    max_plaintext_bytes: MAX_MATRIX_CRYPTO_RESPONSE_BYTES,
+                },
+            )?;
+            validate_stored_crypto_response(plaintext.as_bytes())?;
+            if sha256(plaintext.as_bytes()) != response_sha256 {
+                return Err(store_crypto_corrupt());
+            }
+            Some((
+                SecretBytes::new(plaintext.as_bytes().to_vec()),
+                response_sha256,
+            ))
+        }
+        _ => return Err(store_crypto_corrupt()),
+    };
+    let (response, response_sha256) = response
+        .map_or((None, None), |(response, response_sha256)| {
+            (Some(response), Some(response_sha256))
+        });
+
+    match state {
+        CryptoLifecycle::Pending
+            if response.is_none() && accepted_at.is_none() && terminal_code.is_none() => {}
+        CryptoLifecycle::ResponseReceived
+            if response.is_some()
+                && accepted_at.is_none()
+                && terminal_code.is_none()
+                && attempt_count >= 1 => {}
+        CryptoLifecycle::Accepted
+            if response.is_some()
+                && accepted_at.is_some()
+                && terminal_code.is_none()
+                && attempt_count >= 1 => {}
+        CryptoLifecycle::Quarantined if accepted_at.is_none() && terminal_code.is_some() => {}
+        _ => return Err(store_crypto_corrupt()),
+    }
+
+    let request_nonce: [u8; 24] = stored
+        .request_nonce
+        .try_into()
+        .map_err(|_| store_crypto_corrupt())?;
+
+    Ok(VerifiedCryptoRow {
         crypto_row_id,
         inbox_id,
         request_lookup,
@@ -1890,8 +2454,23 @@ fn read_and_verify_pending_crypto_row(
         request: SecretBytes::new(request_plaintext.as_bytes().to_vec()),
         request_sha256,
         byte_count,
+        request_nonce,
+        response,
+        response_sha256,
+        state,
+        attempt_count,
         next_attempt_at,
+        accepted_at,
+        terminal_code,
     })
+}
+
+fn validate_stored_crypto_response(bytes: &[u8]) -> Result<(), SafeError> {
+    if bytes.is_empty() || bytes.len() > MAX_MATRIX_CRYPTO_RESPONSE_BYTES {
+        return Err(store_crypto_corrupt());
+    }
+    std::str::from_utf8(bytes).map_err(|_| store_crypto_corrupt())?;
+    validate_json_object(bytes).map_err(|_| store_crypto_corrupt())
 }
 
 const CRYPTO_ROW_COLUMNS: &str = "crypto_row_id, inbox_id, request_lookup, request_kind,
@@ -1905,7 +2484,7 @@ fn load_verified_crypto_rows_for_inbox(
     connection: &Connection,
     keyring: &Keyring,
     inbox_id: &InboxId,
-) -> Result<Vec<VerifiedPendingCryptoRow>, SafeError> {
+) -> Result<Vec<VerifiedCryptoRow>, SafeError> {
     let query = format!(
         "SELECT {CRYPTO_ROW_COLUMNS}
          FROM matrix_crypto_outbox WHERE inbox_id = ?1 ORDER BY rowid LIMIT 2"
@@ -1918,10 +2497,37 @@ fn load_verified_crypto_rows_for_inbox(
         .map_err(|_| store_crypto_corrupt())?;
     let mut verified = Vec::with_capacity(2);
     while let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? {
-        let stored = read_stored_crypto_row(row)?;
-        verified.push(read_and_verify_pending_crypto_row(stored, keyring)?);
+        let stored = read_stored_crypto_row(row).map_err(|_| store_crypto_corrupt())?;
+        verified.push(read_and_verify_crypto_row(stored, keyring)?);
     }
     Ok(verified)
+}
+
+fn load_verified_crypto_row_by_id(
+    connection: &Connection,
+    keyring: &Keyring,
+    row_id: &CryptoRowId,
+) -> Result<Option<VerifiedCryptoRow>, SafeError> {
+    let query = format!(
+        "SELECT {CRYPTO_ROW_COLUMNS}
+         FROM matrix_crypto_outbox WHERE crypto_row_id = ?1 LIMIT 2"
+    );
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|_| store_crypto_corrupt())?;
+    let mut rows = statement
+        .query(params![row_id.as_str()])
+        .map_err(|_| store_crypto_corrupt())?;
+    let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? else {
+        return Ok(None);
+    };
+    let stored = read_stored_crypto_row(row).map_err(|_| store_crypto_corrupt())?;
+    let verified =
+        read_and_verify_crypto_row(stored, keyring).map_err(|_| store_crypto_corrupt())?;
+    if rows.next().map_err(|_| store_crypto_corrupt())?.is_some() {
+        return Err(store_crypto_corrupt());
+    }
+    Ok(Some(verified))
 }
 
 fn load_verified_inbox_for_crypto(
@@ -1958,27 +2564,50 @@ fn load_verified_inbox_for_crypto(
 fn verify_crypto_parent(
     connection: &Connection,
     keyring: &Keyring,
-    row: &VerifiedPendingCryptoRow,
+    row: &VerifiedCryptoRow,
 ) -> Result<(), SafeError> {
     let parent = load_verified_inbox_for_crypto(connection, keyring, &row.inbox_id)?;
-    if parent.state() != SyncInboxState::SdkProcessed
-        || parent.crypto_drained()
-        || parent.sdk_processed_at() != Some(parent.observed_at())
-        || row.next_attempt_at != *parent.observed_at()
-    {
-        return Err(store_crypto_corrupt());
+    match row.state {
+        CryptoLifecycle::Pending | CryptoLifecycle::ResponseReceived => {
+            if parent.state() != SyncInboxState::SdkProcessed
+                || parent.crypto_drained()
+                || parent.sdk_processed_at() != Some(parent.observed_at())
+            {
+                return Err(store_crypto_corrupt());
+            }
+        }
+        CryptoLifecycle::Accepted => {
+            if !matches!(
+                parent.state(),
+                SyncInboxState::SdkProcessed | SyncInboxState::Prepared | SyncInboxState::Committed
+            ) || row
+                .accepted_at
+                .is_none_or(|accepted| accepted < *parent.observed_at())
+            {
+                return Err(store_crypto_corrupt());
+            }
+        }
+        CryptoLifecycle::Quarantined => {
+            if !matches!(
+                parent.state(),
+                SyncInboxState::SdkProcessed | SyncInboxState::Quarantined
+            ) {
+                return Err(store_crypto_corrupt());
+            }
+        }
     }
     Ok(())
 }
 
-fn reject_invalid_or_unresolved_crypto_rows(
+fn load_verified_unresolved_crypto_rows(
     connection: &Connection,
     keyring: &Keyring,
-) -> Result<(), SafeError> {
+) -> Result<Vec<VerifiedCryptoRow>, SafeError> {
     let query = format!(
         "SELECT {CRYPTO_ROW_COLUMNS}
          FROM matrix_crypto_outbox
-         WHERE state IS NULL OR state <> 'pending'
+         WHERE state IS NULL OR state NOT IN
+             ('pending', 'response_received', 'accepted', 'quarantined')
          ORDER BY rowid LIMIT 2"
     );
     let mut statement = connection
@@ -1986,8 +2615,8 @@ fn reject_invalid_or_unresolved_crypto_rows(
         .map_err(|_| store_crypto_corrupt())?;
     let mut rows = statement.query([]).map_err(|_| store_crypto_corrupt())?;
     if let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? {
-        let stored = read_stored_crypto_row(row)?;
-        let _ = read_and_verify_pending_crypto_row(stored, keyring)?;
+        let stored = read_stored_crypto_row(row).map_err(|_| store_crypto_corrupt())?;
+        let _ = read_and_verify_crypto_row(stored, keyring);
         return Err(store_crypto_corrupt());
     }
     drop(rows);
@@ -1995,7 +2624,9 @@ fn reject_invalid_or_unresolved_crypto_rows(
 
     let query = format!(
         "SELECT {CRYPTO_ROW_COLUMNS}
-         FROM matrix_crypto_outbox WHERE state = 'pending' ORDER BY rowid LIMIT 2"
+         FROM matrix_crypto_outbox
+         WHERE state IN ('pending', 'response_received', 'quarantined')
+         ORDER BY rowid LIMIT 2"
     );
     let mut statement = connection
         .prepare(&query)
@@ -2003,19 +2634,12 @@ fn reject_invalid_or_unresolved_crypto_rows(
     let mut rows = statement.query([]).map_err(|_| store_crypto_corrupt())?;
     let mut unresolved = Vec::with_capacity(2);
     while let Some(row) = rows.next().map_err(|_| store_crypto_corrupt())? {
-        let stored = read_stored_crypto_row(row)?;
-        let verified = read_and_verify_pending_crypto_row(stored, keyring)?;
+        let stored = read_stored_crypto_row(row).map_err(|_| store_crypto_corrupt())?;
+        let verified = read_and_verify_crypto_row(stored, keyring)?;
         verify_crypto_parent(connection, keyring, &verified)?;
         unresolved.push(verified);
     }
-    if unresolved.len() > 1 {
-        return Err(store_crypto_corrupt());
-    }
-    if unresolved.is_empty() {
-        Ok(())
-    } else {
-        Err(store_crypto_unresolved())
-    }
+    Ok(unresolved)
 }
 
 fn read_sync_blob(
@@ -2233,6 +2857,37 @@ fn parse_stored_timestamp(value: &str) -> Result<DateTime<Utc>, SafeError> {
 
 fn digest_from_blob(value: &[u8]) -> Result<[u8; 32], SafeError> {
     value.try_into().map_err(|_| store_sync_corrupt())
+}
+
+fn load_crypto_context(
+    connection: &Connection,
+    keyring: &Keyring,
+) -> Result<
+    (
+        StoredGatewayStateRow,
+        VerifiedInboxChain,
+        Vec<VerifiedCryptoRow>,
+    ),
+    SafeError,
+> {
+    let gateway =
+        require_bootstrap_singleton(connection, keyring, true).map_err(map_crypto_storage_error)?;
+    let Some(gateway) = gateway else {
+        return Err(store_crypto_not_ready());
+    };
+    let committed_token =
+        load_verified_gateway_token(connection, keyring, GatewayTokenField::Committed)
+            .map_err(map_crypto_storage_error)?;
+    let fetch_token = load_verified_gateway_token(connection, keyring, GatewayTokenField::Fetch)
+        .map_err(map_crypto_storage_error)?;
+    let chain = verify_inbox_chain(connection, keyring, &committed_token, &fetch_token)
+        .map_err(map_crypto_storage_error)?;
+    let unresolved = load_verified_unresolved_crypto_rows(connection, keyring)
+        .map_err(map_crypto_storage_error)?;
+    if unresolved.len() > 1 {
+        return Err(store_crypto_corrupt());
+    }
+    Ok((gateway, chain, unresolved))
 }
 
 fn read_and_verify_inbox_row(
