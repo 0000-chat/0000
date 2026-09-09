@@ -609,7 +609,9 @@ pub fn commit_empty_live_window(&mut self, inbox_id: &str, window_id: &str,
     -> Result<(), SafeError>;
 pub fn next_pending_batch(&self, now: DateTime<Utc>)
     -> Result<Option<PendingBatch>, SafeError>;
-pub fn record_attempt(&mut self, row: &str, next: DateTime<Utc>) -> Result<(), SafeError>;
+pub fn record_attempt(&mut self, row: &str, expected_attempt_count: u32,
+                      expected_next_attempt_at: DateTime<Utc>, now: DateTime<Utc>,
+                      next: DateTime<Utc>) -> Result<(), SafeError>;
 pub fn accept_live_batch_and_maybe_commit_window(
     &mut self, row: &str, accepted_at: DateTime<Utc>
 ) -> Result<CommitOutcome, SafeError>;
