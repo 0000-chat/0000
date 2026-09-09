@@ -6,7 +6,7 @@
 
 use std::{
     error::Error,
-    fmt,
+    fmt, mem,
     path::{Component, Path},
     str,
 };
@@ -104,6 +104,11 @@ impl SecretBytes {
     /// Return whether the secret contains no bytes.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
+    }
+
+    /// Move the protected bytes to one narrowly scoped crate consumer.
+    pub(crate) fn into_vec(mut self) -> Vec<u8> {
+        mem::take(&mut self.bytes)
     }
 
     /// Parse a text secret, removing one optional final LF and nothing else.

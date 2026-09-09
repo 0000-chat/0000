@@ -3,6 +3,8 @@ members = ["services/matrix-gateway"]
 resolver = "2"
 
 [workspace.dependencies]
+async-trait = "=0.1.92"
+futures-util = "=0.3.34"
 http = "=1.5.0"
 matrix-sdk = { version = "=0.18.0", default-features = false }
 matrix-sdk-base = "=0.18.0"
@@ -10,6 +12,7 @@ matrix-sdk-common = "=0.18.0"
 matrix-sdk-crypto = { version = "=0.18.0", default-features = false }
 matrix-sdk-sqlite = { version = "=0.18.0", default-features = false }
 matrix-sdk-test = "=0.18.0"
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
 ruma = "=0.16.0"
 serde = "=1.0.229"
 serde_json = "=1.0.151"

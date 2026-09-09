@@ -1,7 +1,10 @@
-use communicator_matrix_gateway::matrix_spike::{
-    MAX_SYNC_RESPONSE_BYTES, PreserveSyncResponseError, open_base_client, preserve_sync_response,
-    sync_request_to_http,
+use communicator_matrix_gateway::matrix::{
+    MAX_SYNC_RESPONSE_BYTES, PreserveSyncResponseError, RestartCryptoAck, open_base_client,
+    preserve_sync_response, sync_request_to_http,
 };
+use communicator_matrix_gateway::matrix_http::ReqwestMatrixTransport;
+use communicator_matrix_gateway::secret::SecretBytes;
+use communicator_matrix_gateway::store_types::ReasonCode;
 use http::Response as HttpResponse;
 use matrix_sdk::{Client, SessionMeta, SessionTokens, authentication::matrix::MatrixSession};
 use matrix_sdk::{config::SyncSettings, test_utils::mocks::MatrixMockServer};
@@ -22,6 +25,31 @@ use ruma::{
 use serde_json::Value;
 use tempfile::tempdir;
 use url::Url;
+
+#[test]
+fn public_transport_constructor_rejects_non_https_origins_and_secret_details() {
+    const CANARY: &str = "matrix-adapter-transport-canary";
+    let error = ReqwestMatrixTransport::new(
+        "http://127.0.0.1:8080",
+        SecretBytes::from_text(CANARY.as_bytes(), 1024).expect("token"),
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(1),
+    )
+    .expect_err("production transport must reject loopback HTTP");
+    assert_eq!(error.code(), "matrix_transport_invalid");
+    assert!(!format!("{error:?}").contains(CANARY));
+    assert!(!error.to_string().contains(CANARY));
+    assert!(std::error::Error::source(&error).is_none());
+}
+
+#[test]
+fn restart_ack_and_secret_bearing_adapter_values_are_redacted() {
+    let reason = ReasonCode::new("matrix_crypto_ack_unrecoverable").expect("reason code");
+    let value = RestartCryptoAck::Unrecoverable(reason);
+    assert_eq!(value.discriminant(), "unrecoverable");
+    assert_eq!(format!("{value:?}"), "RestartCryptoAck([REDACTED])");
+    assert_eq!(value.to_string(), "RestartCryptoAck([REDACTED])");
+}
 
 #[test]
 fn sync_request_conversion_uses_v3_since_and_bearer_auth() {

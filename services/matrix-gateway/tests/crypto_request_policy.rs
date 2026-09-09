@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
-use communicator_matrix_gateway::matrix_spike::{
+use communicator_matrix_gateway::matrix::{
     MATRIX_CRYPTO_KIND_NOT_ALLOWED, MatrixCryptoRequestKind, MatrixCryptoRequestPolicy,
     classify_crypto_request, enforce_crypto_request_policy, keys_query_body_digest,
     keys_query_rebinds_to_digest, policy_for_crypto_kind,

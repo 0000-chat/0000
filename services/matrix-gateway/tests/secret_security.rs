@@ -51,6 +51,20 @@ fn secret_construction_bypasses_are_not_public() {
 }
 
 #[test]
+fn secret_ownership_transfer_is_crate_private_and_uses_mem_take() {
+    let source = include_str!("../src/secret.rs");
+
+    assert!(
+        source.contains("pub(crate) fn into_vec(mut self) -> Vec<u8>"),
+        "SecretBytes ownership transfer must remain crate-private"
+    );
+    assert!(
+        source.contains("mem::take(&mut self.bytes)"),
+        "SecretBytes ownership transfer must leave Drop a zeroized remainder"
+    );
+}
+
+#[test]
 fn text_secret_rejects_ascii_and_unicode_controls_anywhere() {
     for text in [
         "before\u{0000}after",
