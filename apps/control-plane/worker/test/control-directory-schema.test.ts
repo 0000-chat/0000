@@ -25,6 +25,7 @@ const applicationTables = [
   "directory_mutations",
   "control_event_outbox",
   "audit_events",
+  "realtime_tickets",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -75,6 +76,7 @@ async function dropControlDirectorySchema(db: D1Database) {
     "connection_capabilities",
     "connection_routes",
     "connection_accounts",
+    "realtime_tickets",
     "connections",
     "identity_grants",
     "identities",
@@ -107,11 +109,14 @@ describe("control directory schema", () => {
       "0001_control_directory.sql",
       "0002_ingestion_routing.sql",
       "0003_connection_read_metadata.sql",
+      "0004_realtime_tickets.sql",
     ]));
     expect(migrations.results.findIndex((row) => row.name === "0002_ingestion_routing.sql"))
       .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0001_control_directory.sql"));
     expect(migrations.results.findIndex((row) => row.name === "0003_connection_read_metadata.sql"))
       .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0002_ingestion_routing.sql"));
+    expect(migrations.results.findIndex((row) => row.name === "0004_realtime_tickets.sql"))
+      .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0003_connection_read_metadata.sql"));
     const legacyTables = await env.CONTROL_DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connection_routes'",
     ).all<{ name: string }>();
@@ -162,6 +167,10 @@ describe("control directory schema", () => {
       "provider_cookie",
       "provider_password",
       "qr_payload",
+      "ticket",
+      "raw_ticket",
+      "ticket_url",
+      "token",
     ];
     const columns: string[] = [];
 
@@ -171,6 +180,30 @@ describe("control directory schema", () => {
     }
 
     expect(columns.filter((column) => forbiddenColumns.includes(column))).toEqual([]);
+  });
+
+  it("stores realtime ticket digests and no raw ticket column", async () => {
+    const columns = await env.CONTROL_DB.prepare(
+      "SELECT name FROM pragma_table_info('realtime_tickets') ORDER BY cid",
+    ).all<{ name: string }>();
+    expect(columns.results.map((column) => column.name)).toEqual([
+      "ticket_digest",
+      "tenant_id",
+      "principal_id",
+      "membership_id",
+      "subscriptions_json",
+      "resume_json",
+      "created_at",
+      "expires_at",
+      "expires_at_ms",
+    ]);
+    expect(columns.results.map((column) => column.name)).not.toContain("ticket");
+    expect(columns.results.map((column) => column.name)).not.toContain("raw_ticket");
+    const definition = await env.CONTROL_DB.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'realtime_tickets'",
+    ).first<{ sql: string }>();
+    expect(definition?.sql).toContain("ticket_digest TEXT PRIMARY KEY");
+    expect(definition?.sql).not.toMatch(/\b(?:raw_ticket|ticket_url|token|url)\b/i);
   });
 
   it("rejects duplicate issuer and subject principals", async () => {

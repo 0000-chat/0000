@@ -190,4 +190,61 @@ describe("Communicator API client", () => {
     expect(isDefinitiveRequestRejection(new ApiError(503, "server error"))).toBe(false);
     expect(isDefinitiveRequestRejection(new TypeError("network failure"))).toBe(false);
   });
+
+  it("posts the strict realtime ticket request and validates its response", async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const response = {
+      schema_version: 1,
+      ticket: `rt1_${"x".repeat(43)}`,
+      expires_at: "2026-09-10T00:00:30.000Z",
+      websocket_url: "wss://communicator.test/api/v1/realtime?ticket=opaque",
+    };
+    const client = new ApiClient(async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, "https://communicator.test");
+
+    await expect(client.createRealtimeTicket({
+      schema_version: 1,
+      subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
+      resume: [{ identity_id: "identity_human", generation: 1, after_sequence: 42 }],
+    })).resolves.toEqual(response);
+
+    expect(calls).toEqual([{
+      url: "https://communicator.test/api/v1/realtime/tickets",
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schema_version: 1,
+          subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
+          resume: [{ identity_id: "identity_human", generation: 1, after_sequence: 42 }],
+        }),
+      },
+    }]);
+  });
+
+  it("turns a malformed realtime ticket response into a generic bad gateway error", async () => {
+    const privateTicket = `rt1_${"x".repeat(43)}`;
+    const client = new ApiClient(async () => new Response(JSON.stringify({
+      schema_version: 1,
+      ticket: privateTicket,
+      expires_at: "not-a-timestamp",
+      websocket_url: "wss://communicator.test/api/v1/realtime?ticket=opaque",
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(client.createRealtimeTicket({
+      schema_version: 1,
+      subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
+    })).rejects.toSatisfy((error: unknown) =>
+      error instanceof ApiError
+      && error.status === 502
+      && !error.message.includes(privateTicket));
+  });
 });

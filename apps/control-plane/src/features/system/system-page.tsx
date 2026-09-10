@@ -6,15 +6,16 @@ import { apiClient } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { runtimeConfig } from "@/lib/config/runtime";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
+import type { RealtimeStatus } from "@/lib/realtime/client";
 import { clearChannelOrderPreferences } from "@/features/conversations/channel-order";
 
 const simulatedBuild = runtimeRealtimeClient !== null;
 
 export function SystemPage() {
   const queryClient = useQueryClient();
-  const { activeIdentity } = useIdentityContext();
+  const { session, activeIdentity } = useIdentityContext();
   const realtime = runtimeRealtimeClient;
-  const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>(realtime?.status ?? "idle");
   const [lastSequence, setLastSequence] = useState(realtime?.lastSequence ?? 0);
   const [fixtureResetTime, setFixtureResetTime] = useState("Fixture loaded");
   const [resetMessage, setResetMessage] = useState<string | null>(null);
@@ -30,14 +31,26 @@ export function SystemPage() {
   });
 
   useEffect(() => {
-    if (!realtime) return;
+    if (!realtime || !session || !activeIdentity) {
+      realtime?.close();
+      setRealtimeStatus("idle");
+      return;
+    }
+    setRealtimeStatus(realtime.status);
     const unsubscribe = realtime.subscribe(() => setLastSequence(realtime.lastSequence));
-    void realtime.connect().then(() => setRealtimeConnected(true));
+    const unsubscribeStatus = realtime.subscribeStatus(setRealtimeStatus);
+    void realtime.connect({
+      tenantId: session.tenant.id,
+      principalId: session.principal.id,
+      identityIds: [activeIdentity.id],
+      families: ["projection"],
+    }).catch(() => undefined);
     return () => {
       unsubscribe();
+      unsubscribeStatus();
       realtime.close();
     };
-  }, [realtime]);
+  }, [activeIdentity?.id, realtime, session?.principal.id, session?.tenant.id]);
 
   const resetScenario = async () => {
     const resetResponse = await apiClient.resetSimulation();
@@ -62,7 +75,7 @@ export function SystemPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <DiagnosticCard label="API health" value={healthQuery.data?.status ?? (healthQuery.isLoading ? "Loading" : "Unavailable")} />
         <DiagnosticCard label="Data mode" value={runtimeConfig.dataMode} />
-        <DiagnosticCard label="Realtime connection" value={realtime ? (realtimeConnected ? "Connected" : "Connecting") : "Not configured"} />
+        <DiagnosticCard label="Realtime connection" value={realtime ? realtimeStatusLabel(realtimeStatus) : "Not configured"} />
         <DiagnosticCard label="Last sequence" value={realtime ? String(lastSequence) : "—"} />
         <DiagnosticCard label="Fixture reset time" value={fixtureResetTime} />
         <DiagnosticCard label="Active connection count" value={String(connectionsQuery.data?.length ?? 0)} />
@@ -94,4 +107,17 @@ function DiagnosticCard({ label, value }: { label: string; value: string }) {
       <dd className="mt-1 text-lg font-semibold">{value}</dd>
     </dl>
   );
+}
+
+function realtimeStatusLabel(status: RealtimeStatus) {
+  switch (status) {
+    case "connected":
+      return "Connected";
+    case "connecting":
+      return "Connecting";
+    case "reconnecting":
+      return "Reconnecting";
+    default:
+      return "Idle";
+  }
 }

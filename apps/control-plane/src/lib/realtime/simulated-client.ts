@@ -3,14 +3,25 @@ import {
   type Command,
   type CommandStatus,
 } from "@communicator/contracts";
-import type { RealtimeClient, RealtimeListener } from "./client";
+import type {
+  RealtimeClient,
+  RealtimeConnectOptions,
+  RealtimeLegacyListener,
+  RealtimeListener,
+  RealtimeStatus,
+  RealtimeStatusListener,
+} from "./client";
 
 export type SimulatedClock = () => Date;
 
 export class SimulatedRealtimeClient implements RealtimeClient {
   private listeners = new Set<RealtimeListener>();
+  private statusListeners = new Set<RealtimeStatusListener>();
   private sequence = 0;
   private connected = false;
+  private statusValue: RealtimeStatus = "idle";
+  private requestedTenantId: string | undefined;
+  private requestedIdentityIds: Set<string> | undefined;
 
   constructor(private readonly clock: SimulatedClock = () => new Date()) {}
 
@@ -18,17 +29,37 @@ export class SimulatedRealtimeClient implements RealtimeClient {
     return this.sequence;
   }
 
-  async connect() {
-    this.connected = true;
+  get status() {
+    return this.statusValue;
   }
 
-  subscribe(listener: RealtimeListener) {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+  async connect(options?: RealtimeConnectOptions) {
+    if (options) {
+      this.requestedTenantId = options.tenantId;
+      this.requestedIdentityIds = new Set(options.identityIds);
+    } else {
+      this.requestedTenantId = undefined;
+      this.requestedIdentityIds = undefined;
+    }
+    this.setStatus("connecting");
+    this.connected = true;
+    this.setStatus("connected");
+  }
+
+  subscribe(listener: RealtimeLegacyListener): () => void;
+  subscribe(listener: RealtimeListener): () => void;
+  subscribe(listener: RealtimeListener | RealtimeLegacyListener) {
+    this.listeners.add(listener as RealtimeListener);
+    return () => this.listeners.delete(listener as RealtimeListener);
+  }
+
+  subscribeStatus(listener: RealtimeStatusListener) {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
   }
 
   publishCommand(command: Command, statuses: CommandStatus[] = ["accepted"]) {
-    if (!this.connected) return;
+    if (!this.connected || !this.isRequested(command.tenant_id, command.identity_id)) return;
     for (const status of statuses) {
       const event = RealtimeEventSchema.parse({
         sequence: ++this.sequence,
@@ -56,7 +87,7 @@ export class SimulatedRealtimeClient implements RealtimeClient {
     lastActivityAt: string;
     unreadDelta: number;
   }) {
-    if (!this.connected) return;
+    if (!this.connected || !this.isRequested(input.tenantId, input.identityId)) return;
     const event = RealtimeEventSchema.parse({
       sequence: ++this.sequence,
       type: "message.created",
@@ -76,10 +107,24 @@ export class SimulatedRealtimeClient implements RealtimeClient {
 
   close() {
     this.connected = false;
+    this.requestedTenantId = undefined;
+    this.requestedIdentityIds = undefined;
+    this.setStatus("idle");
     this.listeners.clear();
   }
 
   reset() {
     this.sequence = 0;
+  }
+
+  private isRequested(tenantId: string, identityId: string) {
+    return (!this.requestedTenantId || this.requestedTenantId === tenantId)
+      && (!this.requestedIdentityIds || this.requestedIdentityIds.has(identityId));
+  }
+
+  private setStatus(status: RealtimeStatus) {
+    if (this.statusValue === status) return;
+    this.statusValue = status;
+    for (const listener of this.statusListeners) listener(status);
   }
 }

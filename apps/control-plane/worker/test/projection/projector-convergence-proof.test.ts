@@ -14,6 +14,7 @@ import projectorTypesSource from "../../projection/projector-types.ts?raw";
 import tenantProjectionSource from "../../projection/tenant-projection.ts?raw";
 import { describe, expect, it } from "vitest";
 import {
+  auth,
   bindingFor,
   created,
   edited,
@@ -253,6 +254,7 @@ const projectionTableNames = [
   "projection_meta",
   "projection_checkpoints",
   "projection_change_floors",
+  "projection_identity_sequences",
   "applied_events",
   "projection_changes",
 ] as const;
@@ -284,6 +286,7 @@ const snapshot = async (
       projection_meta: "singleton",
       projection_checkpoints: "kind",
       projection_change_floors: "identity_id",
+      projection_identity_sequences: "identity_id",
       applied_events: "event_id",
       projection_changes: "event_id",
     };
@@ -307,7 +310,10 @@ const normalize = (
     normalized[table] = source[table].map((row) => {
       const copy = { ...row };
       if (table === "projection_meta") delete copy.tenant_id;
-      if (table === "projection_changes") delete copy.sequence;
+      if (table === "projection_changes") {
+        delete copy.sequence;
+        delete copy.identity_sequence;
+      }
       if (table === "attachments" && typeof copy.r2_key === "string") {
         const mediaKey = /^media\/[^/]+\/([0-9a-f]{64})$/.exec(copy.r2_key);
         if (mediaKey !== null) copy.r2_key = "media/" + TENANT_PLACEHOLDER + "/" + mediaKey[1];
@@ -515,6 +521,10 @@ describe("tenant projection full-domain convergence proof", () => {
       version: 1,
       name: "initial_tenant_projection",
       applied_at: "2026-09-07T00:00:00.000Z",
+    }, {
+      version: 2,
+      name: "identity_local_projection_sequences",
+      applied_at: "2026-09-10T00:00:00.000Z",
     }]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);
@@ -538,6 +548,136 @@ describe("tenant projection full-domain convergence proof", () => {
     expect(appliedIds).toHaveLength(events.length);
     expect(changedIds).toHaveLength(events.length);
   }, 60_000);
+
+  it("keeps interleaved identity sequences gap-free and deterministic across batch partitions", async () => {
+    const events: ProjectionEventEnvelope[] = [
+      created("event_convergence_human_one", {
+        tenant_id: "tenant_convergence_local_a",
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        payload: {
+          message_id: "message_human_one",
+          direction: "inbound",
+          sender_participant_id: null,
+          sender_label: "Human sender",
+          body: "human one",
+          reply_to_message_id: null,
+          delivery_status: "unknown",
+          unread: false,
+        },
+      }),
+      created("event_convergence_agent_one", {
+        tenant_id: "tenant_convergence_local_a",
+        identity_id: "identity_agent",
+        account_id: "account_agent",
+        conversation_id: "conversation_agent_one",
+        payload: {
+          message_id: "message_agent_one",
+          direction: "inbound",
+          sender_participant_id: null,
+          sender_label: "Agent sender",
+          body: "agent one",
+          reply_to_message_id: null,
+          delivery_status: "unknown",
+          unread: false,
+        },
+      }),
+      created("event_convergence_human_two", {
+        tenant_id: "tenant_convergence_local_a",
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_two",
+        payload: {
+          message_id: "message_human_two",
+          direction: "inbound",
+          sender_participant_id: null,
+          sender_label: "Human sender",
+          body: "human two",
+          reply_to_message_id: null,
+          delivery_status: "unknown",
+          unread: false,
+        },
+      }),
+      created("event_convergence_agent_two", {
+        tenant_id: "tenant_convergence_local_a",
+        identity_id: "identity_agent",
+        account_id: "account_agent",
+        conversation_id: "conversation_agent_two",
+        payload: {
+          message_id: "message_agent_two",
+          direction: "inbound",
+          sender_participant_id: null,
+          sender_label: "Agent sender",
+          body: "agent two",
+          reply_to_message_id: null,
+          delivery_status: "unknown",
+          unread: false,
+        },
+      }),
+    ];
+    const connections = [
+      bindingFor("account_agent", "connection_agent", "identity_agent"),
+      bindingFor("account_human", "connection_human", "identity_human"),
+    ];
+    const write = (
+      tenant: string,
+      batch: ProjectionEventEnvelope[],
+    ) => input(batch.map((nextEvent) => ({ ...nextEvent, tenant_id: tenant })), {
+      tenant_id: tenant,
+      authorization: auth(["projection.write"], ["identity_agent", "identity_human"], tenant),
+      connections,
+    });
+
+    const wholeTenant = "tenant_convergence_local_a";
+    const partitionedTenant = "tenant_convergence_local_b";
+    const wholeStub = await initialize(wholeTenant);
+    const partitionedStub = await initialize(partitionedTenant);
+    await wholeStub.applyBatch(write(wholeTenant, events));
+    await partitionedStub.applyBatch(write(partitionedTenant, events.slice(0, 2)));
+    await partitionedStub.applyBatch(write(partitionedTenant, events.slice(2)));
+
+    const sequenceRows = async (stub: DurableObjectStub<import("../../projection/tenant-projection").TenantProjectionDO>) =>
+      rows(stub, "SELECT event_id, identity_id, identity_sequence FROM projection_changes ORDER BY identity_id, identity_sequence");
+    const expected = [
+      { event_id: "event_convergence_agent_one", identity_id: "identity_agent", identity_sequence: 1 },
+      { event_id: "event_convergence_agent_two", identity_id: "identity_agent", identity_sequence: 2 },
+      { event_id: "event_convergence_human_one", identity_id: "identity_human", identity_sequence: 1 },
+      { event_id: "event_convergence_human_two", identity_id: "identity_human", identity_sequence: 2 },
+    ];
+    await expect(sequenceRows(wholeStub)).resolves.toEqual(expected);
+    await expect(sequenceRows(partitionedStub)).resolves.toEqual(expected);
+
+    await expect(wholeStub.applyBatch(write(wholeTenant, [events[1]!, events[0]!]))).resolves.toMatchObject({
+      applied_count: 0,
+      duplicate_count: 2,
+      last_sequence: 4,
+    });
+    await expect(sequenceRows(wholeStub)).resolves.toEqual(expected);
+    await expect(rows(wholeStub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+      { identity_id: "identity_agent", latest_sequence: 2 },
+      { identity_id: "identity_human", latest_sequence: 2 },
+    ]);
+
+    for (const [tenant, stub] of [[wholeTenant, wholeStub], [partitionedTenant, partitionedStub]] as const) {
+      await expect(stub.listChanges({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_human",
+        generation: 1,
+        after_sequence: 0,
+        authorization: auth(["projection.read"], ["identity_human"], tenant),
+      })).resolves.toMatchObject({ latest_sequence: 2, items: [{ sequence: 1 }, { sequence: 2 }] });
+      await expect(stub.listChanges({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_agent",
+        generation: 1,
+        after_sequence: 0,
+        authorization: auth(["projection.read"], ["identity_agent"], tenant),
+      })).resolves.toMatchObject({ latest_sequence: 2, items: [{ sequence: 1 }, { sequence: 2 }] });
+    }
+  });
 
   it("keeps duplicate batches domain-idempotent while retaining an older LWW loser in audit", async () => {
     const tenant = "tenant_full_domain_duplicates";
@@ -999,7 +1139,11 @@ describe("tenant projection full-domain convergence proof", () => {
     expect(dispatch).toContain("assertNeverEventType");
 
     const domainsSource = projectorDomainsSource;
-    expect(tenantProjectionSource.match(/new Set<string>\(\)/g) ?? []).toHaveLength(1);
+    const applyPreparedBatchSource = tenantProjectionSource.slice(
+      tenantProjectionSource.indexOf("  #applyPreparedBatch("),
+      tenantProjectionSource.indexOf("  #writeReplayCheckpoint("),
+    );
+    expect(applyPreparedBatchSource.match(/new Set<string>\(\)/g) ?? []).toHaveLength(1);
     expect(tenantProjectionSource).toContain("const touchedConversations = new Set<string>();");
     expect(domainsSource).toContain("const conversationIds = [...touchedConversations].sort();");
     expect(domainsSource.match(/\[\.\.\.touchedConversations\]\.sort\(\)/g) ?? []).toHaveLength(1);

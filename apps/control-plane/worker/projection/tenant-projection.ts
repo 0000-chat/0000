@@ -16,6 +16,19 @@ import {
   MessagePageResultSchema,
   MAX_IDENTITY_CONNECTIONS,
   MAX_PROJECTION_PAGE_SIZE,
+  MAX_REALTIME_ATTACHMENT_JSON_BYTES,
+  MAX_REALTIME_REPLAY_CHANGES,
+  MAX_REALTIME_SOCKETS_PER_PRINCIPAL,
+  MAX_REALTIME_SOCKETS_PER_TENANT,
+  REALTIME_CONNECTION_TTL_MS,
+  REALTIME_SUBPROTOCOL,
+  REALTIME_TICKET_TTL_MS,
+  RealtimeConnectedFrameSchema,
+  RealtimePositionSchema,
+  RealtimeResetRequiredFrameSchema,
+  type RealtimePosition,
+  type RealtimeProjectionChange,
+  type RealtimeResetRequiredFrame,
   ProjectionChangePageSchema,
   ProjectionChannelStatsSchema,
   type ApplyProjectionBatchInput,
@@ -74,6 +87,34 @@ import {
   encodeConversationCursor,
   encodeMessageCursor,
 } from "./cursor";
+import {
+  REALTIME_CONTEXT_HEADER,
+  REALTIME_INTERNAL_HOST,
+  REALTIME_INTERNAL_PATH,
+  REALTIME_SOCKET_TAG,
+  batchRealtimeChanges,
+  broadcastRealtimeChanges,
+  countPrincipalSockets,
+  nextSocketExpiry,
+  readRealtimeReplay,
+  realtimeConnectionExpiry,
+  resetRealtimeSocketsForRebuild,
+  serializeSafeRealtimeAttachment,
+  sendRealtimeFrame,
+  type RealtimeBroadcastChange,
+  type RealtimeReplayRow,
+  tryParseRealtimeAttachment,
+} from "../realtime/tenant-sockets";
+import {
+  logRealtimeSocketOutcome,
+  realtimeSocketLoggerFromEnv,
+  type RealtimeSocketOutcome,
+} from "../realtime/telemetry";
+import {
+  parseRealtimeUpgradeContext,
+  type RealtimeSocketAttachment,
+  type RealtimeUpgradeContext,
+} from "../realtime/contracts";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -147,6 +188,11 @@ type ApplyPreparedBatchInput = {
   readonly connections: readonly ProjectionConnectionBinding[];
 };
 
+type AppliedPreparedBatch = {
+  readonly result: ApplyProjectionBatchResult;
+  readonly changes: readonly RealtimeBroadcastChange[];
+};
+
 type PreparedReplayCheckpointMutation = {
   readonly kind: "r2_manifest_cursor";
   readonly value: string;
@@ -208,7 +254,7 @@ type MessageQueryRow = {
 type ConversationExistsRow = { id: string };
 
 type ProjectionChangeQueryRow = {
-  sequence: number;
+  identity_sequence: number;
   event_id: string;
   event_type: ProjectionChange["event_type"];
   identity_id: string;
@@ -246,6 +292,7 @@ const DERIVED_PROJECTION_TABLES = [
   "applied_events",
   "projection_changes",
   "projection_change_floors",
+  "projection_identity_sequences",
   "projection_checkpoints",
 ] as const;
 
@@ -350,7 +397,7 @@ const readStatusForMeta = (
 
   const counts = storage.sql
     .exec<ProjectionCountRow>(
-      "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(sequence) FROM projection_changes), 0) AS latest_change_sequence",
+      "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(latest_sequence) FROM projection_identity_sequences), 0) AS latest_change_sequence",
     )
     .toArray()[0];
   if (counts === undefined) throw new Error("projection status counts are missing");
@@ -746,7 +793,8 @@ const readChangePage = (
 
   const latestRow = storage.sql
     .exec<LatestSequenceRow>(
-      "SELECT COALESCE(MAX(sequence), 0) AS latest_sequence FROM projection_changes",
+      "SELECT COALESCE((SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = ?), 0) AS latest_sequence",
+      input.identity_id,
     )
     .toArray()[0];
   if (latestRow === undefined) throw new Error("projection sequence is missing");
@@ -764,7 +812,7 @@ const readChangePage = (
     ? []
     : storage.sql
         .exec<ProjectionChangeQueryRow>(
-          "SELECT sequence, event_id, event_type, identity_id, connection_id, conversation_id, occurred_at, observed_at, generation FROM projection_changes WHERE identity_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+          "SELECT identity_sequence, event_id, event_type, identity_id, connection_id, conversation_id, occurred_at, observed_at, generation FROM projection_changes WHERE identity_id = ? AND identity_sequence > ? ORDER BY identity_sequence ASC LIMIT ?",
           input.identity_id,
           input.after_sequence,
           limit,
@@ -777,7 +825,7 @@ const readChangePage = (
     identity_id: input.identity_id,
     generation: meta.generation,
     items: rows.map((row) => ({
-      sequence: row.sequence,
+      sequence: row.identity_sequence,
       event_id: row.event_id,
       event_type: row.event_type,
       identity_id: row.identity_id,
@@ -793,12 +841,557 @@ const readChangePage = (
   return ProjectionChangePageSchema.parse(page);
 };
 
+type RealtimeLatestSequenceRow = { latest_sequence: number };
+type RealtimeFloorRow = { discarded_through_sequence: number };
+
+type RealtimeReplayAction = {
+  readonly identityId: string;
+  readonly latestSequence: number;
+  readonly resetReason:
+    | RealtimeResetRequiredFrame["reason"]
+    | null;
+  readonly changes: readonly RealtimeProjectionChange[];
+};
+
+const REALTIME_ERROR_MESSAGES = {
+  invalid_request: "Invalid realtime request",
+  service_unavailable: "Realtime service unavailable",
+} as const;
+
+const realtimeResponse = (
+  code: keyof typeof REALTIME_ERROR_MESSAGES,
+): Response => new Response(
+  JSON.stringify({
+    error: {
+      code,
+      message: REALTIME_ERROR_MESSAGES[code],
+    },
+  }),
+  {
+    status: code === "invalid_request" ? 400 : 503,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+    },
+  },
+);
+
+const REALTIME_INTERNAL_HEADER_NAMES = new Set([
+  "connection",
+  "upgrade",
+  "sec-websocket-protocol",
+  REALTIME_CONTEXT_HEADER.toLowerCase(),
+]);
+const realtimeTextEncoder = new TextEncoder();
+
+const isInternalRealtimeUpgrade = (request: Request): boolean => {
+  try {
+    const url = new URL(request.url);
+    if (
+      request.method !== "GET" ||
+      url.protocol !== "https:" ||
+      url.hostname !== REALTIME_INTERNAL_HOST ||
+      url.port !== "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.pathname !== REALTIME_INTERNAL_PATH ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      return false;
+    }
+
+    const headerNames = new Set<string>();
+    for (const [name] of request.headers) {
+      const normalizedName = name.toLowerCase();
+      if (
+        !REALTIME_INTERNAL_HEADER_NAMES.has(normalizedName) ||
+        headerNames.has(normalizedName)
+      ) {
+        return false;
+      }
+      headerNames.add(normalizedName);
+    }
+    return (
+      headerNames.size === REALTIME_INTERNAL_HEADER_NAMES.size &&
+      request.headers.get("Upgrade") === "websocket" &&
+      request.headers.get("Connection") === "Upgrade" &&
+      request.headers.get("Sec-WebSocket-Protocol") === REALTIME_SUBPROTOCOL &&
+      request.headers.get(REALTIME_CONTEXT_HEADER) !== null
+    );
+  } catch {
+    return false;
+  }
+};
+
+const parseInternalRealtimeContext = (
+  request: Request,
+): RealtimeUpgradeContext | null => {
+  if (!isInternalRealtimeUpgrade(request)) return null;
+  const serialized = request.headers.get(REALTIME_CONTEXT_HEADER);
+  if (serialized === null) return null;
+  if (
+    realtimeTextEncoder.encode(serialized).byteLength >
+    MAX_REALTIME_ATTACHMENT_JSON_BYTES
+  ) {
+    return null;
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized) as unknown;
+  } catch {
+    return null;
+  }
+
+  try {
+    const context = parseRealtimeUpgradeContext(value);
+    const issuedAt = Date.parse(context.issued_at);
+    const expiresAt = Date.parse(context.expires_at);
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(issuedAt) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt - issuedAt !== REALTIME_TICKET_TTL_MS ||
+      issuedAt > now ||
+      expiresAt <= now
+    ) {
+      return null;
+    }
+    return context;
+  } catch {
+    return null;
+  }
+};
+
+const readRealtimeLatestSequence = (
+  storage: DurableObjectStorage,
+  identityId: string,
+): number => {
+  const row = storage.sql
+    .exec<RealtimeLatestSequenceRow>(
+      "SELECT COALESCE((SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = ?), 0) AS latest_sequence",
+      identityId,
+    )
+    .toArray()[0];
+  if (row === undefined || !isSafeNonnegativeInteger(row.latest_sequence)) {
+    throw new Error("realtime sequence is invalid");
+  }
+  return row.latest_sequence;
+};
+
+const readRealtimeFloor = (
+  storage: DurableObjectStorage,
+  identityId: string,
+): number => {
+  const row = storage.sql
+    .exec<RealtimeFloorRow>(
+      "SELECT discarded_through_sequence FROM projection_change_floors WHERE identity_id = ?",
+      identityId,
+    )
+    .toArray()[0];
+  if (row === undefined) return 0;
+  if (!isSafeNonnegativeInteger(row.discarded_through_sequence)) {
+    throw new Error("realtime change floor is invalid");
+  }
+  return row.discarded_through_sequence;
+};
+
+const changesFromReplayRows = (
+  rows: readonly RealtimeReplayRow[],
+): RealtimeProjectionChange[] => rows.map((row) => ({
+  sequence: row.sequence,
+  event_type: row.event_type,
+  connection_id: row.connection_id,
+  conversation_id: row.conversation_id,
+  occurred_at: row.occurred_at,
+}));
+
 export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair("ping", "pong"),
+    );
     this.ctx.blockConcurrencyWhile(async () => {
       runProjectionMigrations(this.ctx.storage);
     });
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const context = parseInternalRealtimeContext(request);
+    if (context === null) return realtimeResponse("invalid_request");
+
+    try {
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined || meta.tenant_id !== context.tenant_id) {
+        return realtimeResponse("service_unavailable");
+      }
+      this.#requireReadyState(meta);
+
+      const resumeByIdentity = new Map(
+        context.resume.map((position) => [position.identity_id, position]),
+      );
+      const positions: RealtimePosition[] = [];
+      const replayActions: RealtimeReplayAction[] = [];
+
+      for (const subscription of context.subscriptions) {
+        const latestSequence = readRealtimeLatestSequence(
+          this.ctx.storage,
+          subscription.identity_id,
+        );
+        const resume = resumeByIdentity.get(subscription.identity_id);
+        const position = RealtimePositionSchema.parse({
+          identity_id: subscription.identity_id,
+          generation: resume?.generation ?? meta.generation,
+          sequence: resume?.after_sequence ?? latestSequence,
+        });
+        positions.push(position);
+
+        if (resume === undefined) {
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: null,
+            changes: [],
+          });
+          continue;
+        }
+
+        if (resume.generation !== meta.generation) {
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: "generation_changed",
+            changes: [],
+          });
+          continue;
+        }
+
+        const floor = readRealtimeFloor(this.ctx.storage, subscription.identity_id);
+        if (resume.after_sequence < floor || resume.after_sequence > latestSequence) {
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: "history_unavailable",
+            changes: [],
+          });
+          continue;
+        }
+
+        const replayRows = readRealtimeReplay(
+          this.ctx.storage.sql,
+          subscription.identity_id,
+          meta.generation,
+          resume.after_sequence,
+          MAX_REALTIME_REPLAY_CHANGES + 1,
+        );
+        if (replayRows.length > MAX_REALTIME_REPLAY_CHANGES) {
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: "replay_too_large",
+            changes: [],
+          });
+          continue;
+        }
+
+        const contiguous = replayRows.every(
+          (row, index) => row.sequence === resume.after_sequence + index + 1,
+        );
+        if (
+          replayRows.length !== latestSequence - resume.after_sequence ||
+          !contiguous ||
+          replayRows.some((row) => row.generation !== meta.generation)
+        ) {
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: "history_unavailable",
+            changes: [],
+          });
+          continue;
+        }
+
+        replayActions.push({
+          identityId: subscription.identity_id,
+          latestSequence,
+          resetReason: null,
+          changes: changesFromReplayRows(replayRows),
+        });
+      }
+
+      const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
+      const validSockets: WebSocket[] = [];
+      for (const socket of sockets) {
+        if (tryParseRealtimeAttachment(socket) === null) {
+          this.#closeSocket(socket, 1008, "invalid realtime attachment");
+          continue;
+        }
+        validSockets.push(socket);
+      }
+      const activeTenantSocketCount = validSockets.length;
+      if (
+        activeTenantSocketCount >= MAX_REALTIME_SOCKETS_PER_TENANT ||
+        countPrincipalSockets(validSockets, context.principal_id) >=
+          MAX_REALTIME_SOCKETS_PER_PRINCIPAL
+      ) {
+        this.#emitSocketOutcome(
+          {
+            tenant_id: context.tenant_id,
+            subscriptions: context.subscriptions,
+            resumed: context.resume.length > 0,
+          },
+          "capacity_rejected",
+          activeTenantSocketCount,
+        );
+        return realtimeResponse("service_unavailable");
+      }
+
+      const connectionExpiresAt = realtimeConnectionExpiry();
+      let attachment = serializeSafeRealtimeAttachment({
+        schema_version: 1,
+        tenant_id: context.tenant_id,
+        principal_id: context.principal_id,
+        subscriptions: context.subscriptions,
+        positions,
+        lease_expires_at: connectionExpiresAt,
+        resumed: context.resume.length > 0,
+      });
+      const connectedFrame = RealtimeConnectedFrameSchema.parse({
+        schema_version: 1,
+        type: "connected",
+        tenant_id: context.tenant_id,
+        positions,
+        connection_expires_at: connectionExpiresAt,
+      });
+
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.ctx.acceptWebSocket(server, [REALTIME_SOCKET_TAG]);
+      try {
+        server.serializeAttachment(attachment);
+        await this.#scheduleRealtimeSocketAlarm();
+        sendRealtimeFrame(server, connectedFrame);
+
+        for (const action of replayActions) {
+          if (action.resetReason !== null) {
+            const resetFrame: RealtimeResetRequiredFrame =
+              RealtimeResetRequiredFrameSchema.parse({
+                schema_version: 1,
+                type: "reset_required",
+                tenant_id: context.tenant_id,
+                identity_id: action.identityId,
+                generation: meta.generation,
+                latest_sequence: action.latestSequence,
+                reason: action.resetReason,
+              });
+            sendRealtimeFrame(server, resetFrame);
+            attachment = this.#persistSocketPosition(
+              server,
+              attachment,
+              action.identityId,
+              meta.generation,
+              action.latestSequence,
+            );
+            continue;
+          }
+
+          for (const changes of batchRealtimeChanges(action.changes)) {
+            const first = changes[0];
+            const last = changes.at(-1);
+            if (first === undefined || last === undefined) continue;
+            sendRealtimeFrame(server, {
+              schema_version: 1,
+              type: "projection.changes",
+              tenant_id: context.tenant_id,
+              identity_id: action.identityId,
+              generation: meta.generation,
+              from_sequence: first.sequence,
+              to_sequence: last.sequence + 1,
+              changes,
+            });
+            attachment = this.#persistSocketPosition(
+              server,
+              attachment,
+              action.identityId,
+              meta.generation,
+              last.sequence,
+            );
+          }
+        }
+
+        this.#emitSocketOutcome(
+          {
+            tenant_id: attachment.tenant_id,
+            subscriptions: attachment.subscriptions,
+            resumed: attachment.resumed,
+          },
+          attachment.resumed ? "resumed" : "accepted",
+          this.#activeTenantSocketCount(),
+        );
+      } catch {
+        this.#closeSocket(server, 1011, "realtime socket unavailable");
+        return realtimeResponse("service_unavailable");
+      }
+
+      return new Response(null, {
+        status: 101,
+        headers: { "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL },
+        webSocket: client,
+      });
+    } catch {
+      return realtimeResponse("service_unavailable");
+    }
+  }
+
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+    const attachment = tryParseRealtimeAttachment(socket);
+    if (attachment === null) {
+      this.#closeSocket(socket, 1008, "invalid realtime attachment");
+      return;
+    }
+    if (message === "ping") return;
+    this.#closeSocket(socket, 1008, "unsupported realtime message");
+  }
+
+  webSocketClose(
+    socket: WebSocket,
+    _code: number,
+    _reason: string,
+    _wasClean: boolean,
+  ): void {
+    const attachment = tryParseRealtimeAttachment(socket);
+    if (attachment === null) return;
+    this.#emitSocketOutcome(
+      {
+        tenant_id: attachment.tenant_id,
+        subscriptions: attachment.subscriptions,
+        resumed: attachment.resumed,
+      },
+      "closed",
+      this.#activeTenantSocketCount(),
+    );
+  }
+
+  webSocketError(socket: WebSocket, _error: unknown): void {
+    this.#closeSocket(socket, 1011, "realtime socket error");
+  }
+
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const remaining: WebSocket[] = [];
+    const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
+    const activeTenantSocketCount = Math.min(
+      MAX_REALTIME_SOCKETS_PER_TENANT,
+      sockets.length,
+    );
+
+    for (const socket of sockets) {
+      const attachment = tryParseRealtimeAttachment(socket);
+      if (attachment === null) {
+        this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      const expiry = Date.parse(attachment.lease_expires_at);
+      if (!Number.isSafeInteger(expiry)) {
+        this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      if (expiry <= now) {
+        this.#emitSocketOutcome(
+          {
+            tenant_id: attachment.tenant_id,
+            subscriptions: attachment.subscriptions,
+            resumed: attachment.resumed,
+          },
+          "lease_expired",
+          activeTenantSocketCount,
+        );
+        this.#closeSocket(socket, 1000, "realtime lease expired");
+        continue;
+      }
+      remaining.push(socket);
+    }
+
+    const nextExpiry = nextSocketExpiry(remaining);
+    if (nextExpiry === null) {
+      await this.ctx.storage.deleteAlarm();
+    } else {
+      await this.ctx.storage.setAlarm(nextExpiry);
+    }
+  }
+
+  #activeTenantSocketCount(): number {
+    return Math.min(
+      MAX_REALTIME_SOCKETS_PER_TENANT,
+      this.ctx.getWebSockets(REALTIME_SOCKET_TAG).length,
+    );
+  }
+
+  #emitSocketOutcome(
+    subject: {
+      readonly tenant_id: string;
+      readonly subscriptions: RealtimeSocketAttachment["subscriptions"];
+      readonly resumed: boolean;
+    },
+    outcome: RealtimeSocketOutcome,
+    activeTenantSocketCount: number,
+  ): void {
+    try {
+      logRealtimeSocketOutcome(
+        realtimeSocketLoggerFromEnv(this.env),
+        subject,
+        outcome,
+        Math.max(0, Math.min(MAX_REALTIME_SOCKETS_PER_TENANT, activeTenantSocketCount)),
+      );
+    } catch {
+      // Telemetry must never change socket or projection behavior.
+    }
+  }
+
+  #closeSocket(socket: WebSocket, code: number, reason: string): void {
+    try {
+      socket.close(code, reason);
+    } catch {
+      // A socket may already be closed when an hibernated callback runs.
+    }
+  }
+
+  async #scheduleRealtimeSocketAlarm(): Promise<void> {
+    const nextExpiry = nextSocketExpiry(
+      this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+    );
+    if (nextExpiry === null) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(nextExpiry);
+  }
+
+  #persistSocketPosition(
+    socket: WebSocket,
+    attachment: RealtimeSocketAttachment,
+    identityId: string,
+    generation: number,
+    sequence: number,
+  ): RealtimeSocketAttachment {
+    const positions = attachment.positions.map((position) =>
+      position.identity_id === identityId
+        ? RealtimePositionSchema.parse({
+            identity_id: identityId,
+            generation,
+            sequence,
+          })
+        : position,
+    );
+    const nextAttachment = serializeSafeRealtimeAttachment({
+      ...attachment,
+      positions,
+    });
+    socket.serializeAttachment(nextAttachment);
+    return nextAttachment;
   }
 
   async initialize(input: InitializeProjectionInput): Promise<ProjectionStatus> {
@@ -973,6 +1566,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           parsed.started_at,
         );
       });
+
+      try {
+        resetRealtimeSocketsForRebuild(
+          this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+          parsed.tenant_id,
+          nextGeneration,
+        );
+      } catch {
+        // Rebuild lifecycle state remains authoritative if socket cleanup fails.
+      }
 
       const started = readProjectionMeta(this.ctx.storage);
       if (started === undefined) throw new Error("projection metadata disappeared");
@@ -1472,7 +2075,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     input: ApplyPreparedBatchInput,
   ): ApplyProjectionBatchResult {
     try {
-      return this.ctx.storage.transactionSync(() => {
+      const applied = this.ctx.storage.transactionSync<AppliedPreparedBatch>(() => {
         const meta = readProjectionMeta(this.ctx.storage);
         if (meta === undefined) throw projectionError("projection_not_found");
         requireStoredTenant(meta, input.tenantId);
@@ -1520,12 +2123,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             if (sameNullableString(existing.source_cursor, replayCheckpoint.sourceCursor)) {
               if (existing.page_digest === replayCheckpoint.pageDigest) {
                 return {
-                  schema_version: 1,
-                  tenant_id: input.tenantId,
-                  generation: meta.generation,
-                  applied_count: existing.last_applied_count ?? 0,
-                  duplicate_count: existing.last_duplicate_count ?? 0,
-                  last_sequence: existing.last_sequence ?? this.#readLastSequence(),
+                  result: {
+                    schema_version: 1,
+                    tenant_id: input.tenantId,
+                    generation: meta.generation,
+                    applied_count: existing.last_applied_count ?? 0,
+                    duplicate_count: existing.last_duplicate_count ?? 0,
+                    last_sequence: existing.last_sequence ?? this.#readLastSequence(),
+                  },
+                  changes: [],
                 };
               }
               throw projectionError("projection_conflict");
@@ -1554,12 +2160,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             meta,
           );
           return {
-            schema_version: 1,
-            tenant_id: input.tenantId,
-            generation: meta.generation,
-            applied_count: result.appliedCount,
-            duplicate_count: result.duplicateCount,
-            last_sequence: result.lastSequence,
+            result: {
+              schema_version: 1,
+              tenant_id: input.tenantId,
+              generation: meta.generation,
+              applied_count: result.appliedCount,
+              duplicate_count: result.duplicateCount,
+              last_sequence: result.lastSequence,
+            },
+            changes: [],
           };
         }
 
@@ -1576,14 +2185,29 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         this.#applyLiveCheckpoint(liveCheckpoint, meta, lastSequence);
 
         return {
-          schema_version: 1,
-          tenant_id: input.tenantId,
-          generation: meta.generation,
-          applied_count: result.appliedCount,
-          duplicate_count: result.duplicateCount,
-          last_sequence: lastSequence,
+          result: {
+            schema_version: 1,
+            tenant_id: input.tenantId,
+            generation: meta.generation,
+            applied_count: result.appliedCount,
+            duplicate_count: result.duplicateCount,
+            last_sequence: lastSequence,
+          },
+          changes: result.changes,
         };
       });
+      if (input.mode === "live" && applied.changes.length > 0) {
+        try {
+          broadcastRealtimeChanges(
+            this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+            input.tenantId,
+            applied.changes,
+          );
+        } catch {
+          // A live notification failure must never change the durable result.
+        }
+      }
+      return applied.result;
     } catch (error) {
       if (error instanceof ProjectionError) throw error;
       throw projectionError("projection_unavailable", error);
@@ -1598,9 +2222,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     appliedCount: number;
     duplicateCount: number;
     lastSequence: number;
+    changes: RealtimeBroadcastChange[];
   } {
     const storedEvents = this.#readAppliedEvents(preparedEvents);
     let appliedCount = 0;
+    const changes: RealtimeBroadcastChange[] = [];
     const touchedConversations = new Set<string>();
     for (const prepared of preparedEvents) {
       const stored = storedEvents.get(prepared.event.event_id);
@@ -1630,7 +2256,20 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         meta.generation,
       );
       this.ctx.storage.sql.exec(
-        "INSERT INTO projection_changes (event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projection_identity_sequences (identity_id, latest_sequence) VALUES (?, 1) ON CONFLICT(identity_id) DO UPDATE SET latest_sequence = latest_sequence + 1",
+        prepared.event.identity_id,
+      );
+      const identitySequenceRow = this.ctx.storage.sql
+        .exec<{ identity_sequence: number }>(
+          "SELECT latest_sequence AS identity_sequence FROM projection_identity_sequences WHERE identity_id = ?",
+          prepared.event.identity_id,
+        )
+        .toArray()[0];
+      if (identitySequenceRow === undefined) {
+        throw new Error("projection identity sequence is missing");
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO projection_changes (event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation, identity_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         prepared.event.event_id,
         prepared.event.event_type,
         prepared.event.identity_id,
@@ -1640,7 +2279,17 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         prepared.event.occurred_at,
         prepared.event.observed_at,
         meta.generation,
+        identitySequenceRow.identity_sequence,
       );
+      changes.push({
+        identity_id: prepared.event.identity_id,
+        generation: meta.generation,
+        sequence: identitySequenceRow.identity_sequence,
+        event_type: prepared.event.event_type,
+        connection_id: prepared.connection.connection_id,
+        conversation_id: prepared.event.conversation_id,
+        occurred_at: prepared.event.occurred_at,
+      });
       appliedCount += 1;
     }
 
@@ -1655,6 +2304,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       appliedCount,
       duplicateCount: inputEventCount - appliedCount,
       lastSequence,
+      changes,
     };
   }
 
@@ -1868,7 +2518,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
 
     const affectedIdentities = this.ctx.storage.sql
       .exec<ProjectionChangeFloorRow>(
-        "SELECT identity_id, MAX(sequence) AS discarded_through_sequence FROM projection_changes WHERE sequence <= ? GROUP BY identity_id",
+        "SELECT identity_id, MAX(identity_sequence) AS discarded_through_sequence FROM projection_changes WHERE sequence <= ? GROUP BY identity_id",
         boundary.sequence,
       )
       .toArray();

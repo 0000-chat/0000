@@ -1,10 +1,17 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/mocks/server";
 import { loadChannelOrder, saveChannelOrder } from "@/features/conversations/channel-order";
+import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
+
+afterEach(() => {
+  runtimeRealtimeClient?.close();
+  runtimeRealtimeClient?.reset();
+  vi.restoreAllMocks();
+});
 
 beforeEach(() => {
   server.use(http.get("http://localhost:3000/api/v1/health", () => HttpResponse.json({
@@ -19,12 +26,26 @@ describe("diagnostic surfaces", () => {
     renderApp("/system");
 
     expect(await screen.findByText("API health")).toBeVisible();
-    expect(screen.getByText("ok")).toBeVisible();
+    expect(await screen.findByText("ok")).toBeVisible();
     expect(screen.getByText("simulated")).toBeVisible();
     expect(await screen.findByText("Connected")).toBeVisible();
     expect(screen.getByText("Last sequence")).toBeVisible();
     expect(screen.getByText("Fixture reset time")).toBeVisible();
     expect(screen.getByRole("button", { name: "Reset simulated scenario" })).toBeVisible();
+  });
+
+  it("shows a bounded status and connects with the authenticated active identity", async () => {
+    const connect = vi.spyOn(runtimeRealtimeClient!, "connect");
+    renderApp("/system");
+
+    expect(await screen.findByText("Connected")).toBeVisible();
+    expect(connect).toHaveBeenCalledWith({
+      tenantId: "tenant_pilot",
+      principalId: "principal_pilot",
+      identityIds: ["identity_human"],
+      families: ["projection"],
+    });
+    expect(document.body.textContent).not.toMatch(/ticket|wss?:|bearer|access/i);
   });
 
   it("resets the simulated scenario through a labelled diagnostic control", async () => {

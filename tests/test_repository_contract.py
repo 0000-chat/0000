@@ -669,10 +669,10 @@ class RepositoryContractTests(unittest.TestCase):
             )
         )
         side_effect_patterns = (
-            r"\b(?:fetch|globalThis\s*\.\s*fetch|this\s*\??\.\s*fetch|"
+            r"(?<!async )\b(?:fetch|globalThis\s*\.\s*fetch|this\s*\??\.\s*fetch|"
             r"(?:ctx|context|env)\s*\??\.\s*fetch)\s*\(",
             r"\b(?:new\s+)?(?:WebSocket|EventSource)\s*\(",
-            r"\b(?:setTimeout|setInterval|queueMicrotask|enqueue|schedule|alarm|waitUntil)\s*\(",
+            r"(?<!async )\b(?:setTimeout|setInterval|queueMicrotask|enqueue|schedule|alarm|waitUntil)\s*\(",
             r"\b(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$]*(?:queue|queues)[A-Za-z0-9_$]*\s*"
             r"(?:\?\.\s*|\.\s*)(?:send|sendBatch)\s*\(",
             r"\b(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$]*(?:queue|queues)[A-Za-z0-9_$]*\s*"
@@ -704,6 +704,138 @@ class RepositoryContractTests(unittest.TestCase):
             r"e2ee_key",
         ):
             self.assertIsNone(re.search(pattern, projection_text, flags=re.IGNORECASE))
+
+    def test_realtime_ticket_storage_is_digest_only_and_single_use(self):
+        migration = (ROOT / "apps/control-plane/migrations/0004_realtime_tickets.sql").read_text()
+        self.assertIn("CREATE TABLE realtime_tickets", migration)
+        self.assertIn(
+            "ticket_digest TEXT PRIMARY KEY CHECK(length(ticket_digest) = 64)",
+            migration,
+        )
+        self.assertIn(
+            "CREATE INDEX realtime_tickets_expiry_idx",
+            migration,
+        )
+        self.assertNotRegex(
+            migration,
+            re.compile(r"(?im)^\s*(?:ticket|raw_ticket|ticket_url|token|url)\s+", re.MULTILINE),
+        )
+
+        token_source = (ROOT / "apps/control-plane/worker/realtime/token.ts").read_text()
+        self.assertRegex(token_source, re.compile(r"new Uint8Array\(32\)"))
+        self.assertIn("crypto.getRandomValues", token_source)
+        self.assertIn('"SHA-256"', token_source)
+        self.assertNotIn("Math.random", token_source)
+
+        repository_source = (ROOT / "apps/control-plane/worker/realtime/ticket-repository.ts").read_text()
+        self.assertIn('withSession("first-primary")', repository_source)
+        self.assertRegex(
+            repository_source,
+            re.compile(
+                r"DELETE\s+FROM\s+realtime_tickets[\s\S]+"
+                r"WHERE\s+ticket_digest\s*=\s*\?\s+"
+                r"AND\s+expires_at_ms\s*>\s*\?[\s\S]+RETURNING",
+                re.IGNORECASE,
+            ),
+        )
+        self.assertIn("LIMIT ?", repository_source)
+        self.assertNotIn("console.", repository_source)
+
+    def test_realtime_runbook_and_runtime_contract_are_present(self):
+        migration_path = ROOT / "apps/control-plane/migrations/0004_realtime_tickets.sql"
+        self.assertTrue(migration_path.is_file(), "realtime ticket migration is missing")
+        migration_sources = "\n".join(
+            path.read_text()
+            for path in sorted((ROOT / "apps/control-plane/migrations").glob("*.sql"))
+        )
+        self.assertNotRegex(
+            migration_sources,
+            re.compile(
+                r"(?im)^\s*(?:raw_ticket|ticket_url|token|url)\s+"
+            ),
+        )
+
+        route_source = (ROOT / "apps/control-plane/worker/routes/realtime.ts").read_text()
+        app_source = (ROOT / "apps/control-plane/worker/app.ts").read_text()
+        self.assertIn('path: "/api/v1/realtime/tickets"', route_source)
+        self.assertIn('app.get("/api/v1/realtime", realtimeUpgradeHandler)', app_source)
+
+        projection_source = (
+            ROOT / "apps/control-plane/worker/projection/tenant-projection.ts"
+        ).read_text()
+        for call in (
+            "this.ctx.setWebSocketAutoResponse(",
+            "this.ctx.acceptWebSocket(",
+            "this.ctx.getWebSockets(",
+            "serializeAttachment(",
+            "webSocketMessage(",
+            "webSocketClose(",
+            "webSocketError(",
+        ):
+            self.assertIn(call, projection_source)
+        self.assertNotRegex(projection_source, re.compile(r"\bserver\.accept\s*\("))
+
+        design_spec = (
+            ROOT
+            / "docs/superpowers/specs/2026-08-27-communicator-cloudflare-data-plane-design.md"
+        ).read_text()
+        self.assertRegex(
+            design_spec,
+            re.compile(
+                r"storage DO may retain a tenant-global sequence for internal ordering[\s\S]+"
+                r"must never expose that sequence or its gaps to an identity-scoped client[\s\S]+"
+                r"last identity-local sequence"
+            ),
+        )
+
+        runbook_path = ROOT / "docs/runbooks/realtime-websocket-local.md"
+        self.assertTrue(runbook_path.is_file(), "Task 9 realtime runbook is missing")
+        runbook = runbook_path.read_text()
+        required_runbook_text = (
+            "local prerequisites",
+            "Apply the checked-in D1 migrations in this order",
+            "simulated mode",
+            "live mode",
+            '"ticket": "rt1_<base64url-ticket-body>"',
+            "Sec-WebSocket-Protocol: communicator.realtime.v1",
+            '"type": "connected"',
+            '"type": "projection.changes"',
+            '"type": "reset_required"',
+            "literal text `ping`",
+            "literal text `pong`",
+            "Error response example",
+            "resume position",
+            "reset_required",
+            "acceptWebSocket",
+            "15-minute lease",
+            "500 matching changes",
+            "realtime.socket",
+            "active_tenant_socket_count",
+            "OpenAPI intentionally excludes `GET /api/v1/realtime`",
+            "Worker-level Cloudflare Access policies currently reject WebSocket upgrades",
+            "hostname-based Cloudflare Access application",
+            "no real domain, token, Access audience, Cloudflare account ID, D1 database ID, or realtime ticket",
+            "no production resource or credential was created in this phase",
+            "empty until milestone 11 enables live ingestion",
+            "Internal tenant ordering may coexist with identity-local external resume positions.",
+        )
+        runbook_contract = re.sub(r"\s+", " ", runbook)
+        for required in required_runbook_text:
+            self.assertIn(required, runbook_contract, required)
+
+        self.assertRegex(runbook, re.compile(r'"type": "error"'))
+        self.assertNotRegex(runbook, re.compile(r"(?:https?|wss?)://(?!<)"))
+        self.assertNotRegex(
+            runbook,
+            re.compile(r"\brt1_[A-Za-z0-9_-]{43}\b"),
+        )
+        self.assertNotRegex(
+            runbook,
+            re.compile(
+                r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+                re.IGNORECASE,
+            ),
+        )
 
 
 if __name__ == "__main__":

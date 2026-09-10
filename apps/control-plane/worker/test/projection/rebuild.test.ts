@@ -10,6 +10,7 @@ import type {
   ProjectionEventEnvelope,
   ProjectionStatus,
 } from "@communicator/contracts";
+import { REALTIME_SUBPROTOCOL } from "@communicator/contracts";
 import { describe, expect, it } from "vitest";
 import { TenantProjectionDO } from "../../projection/tenant-projection";
 import { deriveManifestPrefix } from "../../archive/keys";
@@ -34,6 +35,7 @@ const DERIVED_TABLES = [
   "projection_changes",
   "projection_change_floors",
   "projection_checkpoints",
+  "projection_identity_sequences",
 ] as const;
 
 type RebuildRpc = {
@@ -287,7 +289,173 @@ const replay = async (
     authorization: auth(tenant, ["projection.rebuild"]),
   });
 
+const nextSocketFrame = (
+  socket: WebSocket,
+  predicate: (frame: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
+  const onMessage = (event: MessageEvent) => {
+    const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+    if (!predicate(frame)) return;
+    cleanup();
+    resolve(frame);
+  };
+  const cleanup = () => {
+    socket.removeEventListener("message", onMessage);
+    clearTimeout(timeout);
+  };
+  const timeout = setTimeout(() => {
+    cleanup();
+    reject(new Error("Timed out waiting for realtime frame"));
+  }, 1_000);
+  socket.addEventListener("message", onMessage);
+});
+
+const nextSocketClose = (socket: WebSocket): Promise<number> => new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => {
+    reject(new Error("Timed out waiting for realtime socket close"));
+  }, 1_000);
+  socket.addEventListener("close", (event) => {
+    clearTimeout(timeout);
+    resolve((event as CloseEvent).code);
+  }, { once: true });
+});
+
 describe("TenantProjectionDO resumable rebuilds", () => {
+  it("sends the next-generation reset before closing sockets and never broadcasts replay pages", async () => {
+    const tenant = newTenant();
+    const stub = await initialize(tenant);
+    const issuedAt = new Date(Date.now() - 1_000);
+    const realtimeContext = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      principal_id: "principal_rebuild",
+      membership_id: "membership_rebuild",
+      subscriptions: [{ identity_id: "identity_a", families: ["projection"] as const }],
+      resume: [],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
+    };
+    const response = await stub.fetch(new Request(
+      "https://tenant-projection.internal/realtime",
+      {
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+          "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
+        },
+      },
+    ));
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (socket === null) throw new Error("missing realtime socket");
+    const frames: Record<string, unknown>[] = [];
+    socket.addEventListener("message", (event) => {
+      frames.push(JSON.parse(String(event.data)) as Record<string, unknown>);
+    });
+    const connected = nextSocketFrame(socket, (frame) => frame.type === "connected");
+    socket.accept();
+    await connected;
+    const reset = nextSocketFrame(socket, (frame) => frame.type === "reset_required");
+    const closed = new Promise<number>((resolve) => {
+      socket.addEventListener("close", (event) => resolve((event as CloseEvent).code), { once: true });
+    });
+
+    try {
+      await expect(begin(stub, tenant, "rebuild_socket_reset", 1)).resolves.toMatchObject({
+        state: "rebuilding",
+        generation: 2,
+      });
+      await expect(reset).resolves.toEqual({
+        schema_version: 1,
+        type: "reset_required",
+        tenant_id: tenant,
+        identity_id: "identity_a",
+        generation: 2,
+        latest_sequence: 0,
+        reason: "generation_changed",
+      });
+      await expect(closed).resolves.toBe(1012);
+
+      await replay(
+        stub,
+        tenant,
+        "rebuild_socket_reset",
+        pageFor(tenant, [eventFor({
+          tenant,
+          eventId: "historical_replay_should_not_broadcast",
+        })]),
+        null,
+        [binding("account_a", "connection_a", "identity_a")],
+      );
+
+      expect(frames.map((frame) => frame.type)).toEqual([
+        "connected",
+        "reset_required",
+      ]);
+    } finally {
+      if (socket.readyState !== 3) socket.close(1000, "test complete");
+    }
+  });
+
+  it("does not reset or close sockets when the rebuild transaction fails", async () => {
+    const tenant = newTenant();
+    const stub = await initialize(tenant);
+    const issuedAt = new Date(Date.now() - 1_000);
+    const realtimeContext = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      principal_id: "principal_rebuild",
+      membership_id: "membership_rebuild",
+      subscriptions: [{ identity_id: "identity_a", families: ["projection"] as const }],
+      resume: [],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
+    };
+    const response = await stub.fetch(new Request(
+      "https://tenant-projection.internal/realtime",
+      {
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+          "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
+        },
+      },
+    ));
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (socket === null) throw new Error("missing realtime socket");
+    const connected = nextSocketFrame(socket, (frame) => frame.type === "connected");
+    socket.accept();
+    await connected;
+    const reset = nextSocketFrame(socket, (frame) => frame.type === "reset_required");
+    const closed = nextSocketClose(socket);
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "CREATE TRIGGER fail_rebuild_socket_reset BEFORE UPDATE OF state ON projection_meta BEGIN SELECT RAISE(ABORT, 'synthetic begin failure'); END",
+      );
+    });
+    try {
+      await expectCode(
+        stub,
+        (instance) => begin(instance, tenant, "rebuild_socket_reset_failed", 1),
+        "projection_unavailable",
+      );
+      await expect(reset).rejects.toThrow("Timed out waiting for realtime frame");
+      await expect(closed).rejects.toThrow("Timed out waiting for realtime socket close");
+      expect(socket.readyState).not.toBe(3);
+    } finally {
+      await runInDurableObject(stub, async (_instance, state) => {
+        state.storage.sql.exec("DROP TRIGGER fail_rebuild_socket_reset");
+      });
+      if (socket.readyState !== 3) socket.close(1000, "test complete");
+    }
+  });
+
   it("begins a generation, clears only derived state, and makes the same begin retry idempotent", async () => {
     const tenant = newTenant();
     const stub = await initialize(tenant);
@@ -366,7 +534,7 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       ]);
     }
     await expect(rows(stub, "SELECT COUNT(*) AS count FROM _sql_schema_migrations")).resolves.toEqual([
-      { count: 1 },
+      { count: 2 },
     ]);
     await expect(rows(stub, "SELECT tenant_id, state, generation, rebuild_id, rebuild_started_at FROM projection_meta")).resolves.toEqual([
       {
@@ -394,6 +562,106 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       (instance) => begin(instance, tenant, "rebuild_other", 1),
       "projection_rebuild_mismatch",
     );
+  });
+
+  it("restarts identity-local sequences in the new rebuild generation", async () => {
+    const tenant = newTenant();
+    const stub = await initialize(tenant);
+    const liveEvents = [
+      eventFor({
+        tenant,
+        eventId: "event_local_sequence_human",
+        identityId: "identity_human",
+        accountId: "account_human",
+        conversationId: "conversation_human",
+        messageId: "message_human",
+        eventSource: "live",
+      }),
+      eventFor({
+        tenant,
+        eventId: "event_local_sequence_agent",
+        identityId: "identity_agent",
+        accountId: "account_agent",
+        conversationId: "conversation_agent",
+        messageId: "message_agent",
+        eventSource: "live",
+      }),
+    ];
+    await stub.applyBatch({
+      schema_version: 1,
+      tenant_id: tenant,
+      authorization: auth(tenant, ["projection.write"], ["identity_agent", "identity_human"]),
+      mode: "live",
+      rebuild_id: null,
+      connections: [
+        binding("account_agent", "connection_agent", "identity_agent"),
+        binding("account_human", "connection_human", "identity_human"),
+      ],
+      events: liveEvents,
+      checkpoint: null,
+    });
+    await expect(rows(stub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+      { identity_id: "identity_agent", latest_sequence: 1 },
+      { identity_id: "identity_human", latest_sequence: 1 },
+    ]);
+
+    await begin(stub, tenant, "rebuild_local_sequences", 1);
+    await expect(rows(stub, "SELECT * FROM projection_identity_sequences")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM projection_change_floors")).resolves.toEqual([]);
+
+    const replayEvents = liveEvents.map((nextEvent) => ({
+      ...nextEvent,
+      event_source: "replay" as const,
+    }));
+    await replay(
+      stub,
+      tenant,
+      "rebuild_local_sequences",
+      pageFor(tenant, replayEvents),
+      null,
+      [
+        binding("account_agent", "connection_agent", "identity_agent"),
+        binding("account_human", "connection_human", "identity_human"),
+      ],
+    );
+    await stub.completeRebuild({
+      schema_version: 1,
+      tenant_id: tenant,
+      rebuild_id: "rebuild_local_sequences",
+      terminal_cursor: null,
+      completed_at: "2026-09-07T03:30:00.000Z",
+      authorization: auth(tenant, ["projection.rebuild"]),
+    });
+
+    await expect(rows(stub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+      { identity_id: "identity_agent", latest_sequence: 1 },
+      { identity_id: "identity_human", latest_sequence: 1 },
+    ]);
+    await expect(rows(stub, "SELECT identity_id, sequence, identity_sequence FROM projection_changes ORDER BY sequence")).resolves.toEqual([
+      { identity_id: "identity_agent", sequence: 1, identity_sequence: 1 },
+      { identity_id: "identity_human", sequence: 2, identity_sequence: 1 },
+    ]);
+    await expect(
+      stub.listChanges({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_human",
+        generation: 2,
+        after_sequence: 0,
+        authorization: auth(tenant, ["projection.read"], ["identity_human"]),
+      }),
+    ).resolves.toMatchObject({ latest_sequence: 1, items: [{ sequence: 1 }] });
+    await expect(
+      stub.listChanges({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_agent",
+        generation: 2,
+        after_sequence: 0,
+        authorization: auth(tenant, ["projection.read"], ["identity_agent"]),
+      }),
+    ).resolves.toMatchObject({ latest_sequence: 1, items: [{ sequence: 1 }] });
   });
 
   it("requires rebuild scope and the exact tenant on every rebuild RPC", async () => {

@@ -113,3 +113,9 @@ test("shows bounded retry UI for a failed message read without rendering the pay
   await expect(alert).not.toContainText("private backend detail");
   await expect(alert.getByRole("button", { name: "Retry" })).toBeVisible();
 });
+
+test("shows only bounded realtime diagnostics", async ({ page }) => {
+  await page.goto("/system");
+  await expect(page.getByText("Connected")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(/rt1_|wss?:\/\/|bearer|Access/);
+});
