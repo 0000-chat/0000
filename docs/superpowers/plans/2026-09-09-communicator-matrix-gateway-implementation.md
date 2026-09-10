@@ -1,8 +1,8 @@
 # Communicator Matrix Gateway Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement the assigned task through ephemeral `codex exec`. Do not create native subagents. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a crash-safe, E2EE-capable Matrix Gateway on the Contabo VPS that turns explicitly mapped Synapse events into the existing one-tenant archive-first Cloudflare ingestion batches.
+**Goal:** Build a crash-safe, E2EE-capable Matrix Gateway on the Contabo VPS that turns explicitly mapped Synapse events into tenant-isolated, archive-first Cloudflare ingestion batches.
 
 **Architecture:** A single Rust process owns persistent Matrix SDK SQLite stores and an application SQLite database. Bootstrap uses the high-level SDK client. The daemon uses a bounded raw Ruma HTTP transport and a public `BaseClient`; it never calls high-level `sync_once`. It encrypts and fsyncs each exact `/sync` response before SDK processing, reconstructs interrupted processing from that inbox, normalizes supported events, and retries exact Matrix-crypto and Cloudflare requests. The service never reads Synapse or mautrix databases, never exposes a host port, and never advances the application checkpoint past an unaccepted batch.
 
@@ -10,26 +10,93 @@
 
 ---
 
+## Milestone 11 resume point
+
+This plan is the executable plan for delivery-sequence milestone 11, Matrix
+Gateway event-consumer integration. The implementation branch starts from
+`0541524`, the merge of realtime WebSocket PR #14. Treat the checked-in source
+at that commit as authoritative when an earlier step describes a file as new.
+
+The repository already contains and tests these foundations:
+
+- the Rust workspace, pinned Matrix SDK, cross-language ingestion vector,
+  strict configuration, protected values, encryption, canonical JSON, and
+  deterministic identifier helpers from Tasks 1 through 3;
+- the encrypted application SQLite store, room-registry storage, raw sync
+  inbox, fetch and committed checkpoints, persistent Matrix SDK adapter,
+  encrypted Matrix crypto-request journal, recovery store, and request
+  recording from Task 4, Task 9, and their later focused plans; and
+- the authenticated Cloudflare ingestion Worker, immutable R2 archive, Queue
+  pointer consumer, tenant projection, live read API, and resumable realtime
+  notifications from delivery-sequence milestones 6 through 10.
+
+Do not recreate `matrix_spike.rs`, replace the persistent Matrix adapter, or
+change public ingestion, archive, projection, read, or realtime contracts.
+Modify completed foundations only when a failing milestone-11 test proves a
+defect. The remaining implementation scope is:
+
+1. Task 5, protected room-mapping administration;
+2. Task 6, Matrix-neutral event normalization;
+3. Task 7, deterministic tenant batches plus the remaining application-outbox
+   store transitions described by Task 4;
+4. Task 8, OAuth client-credentials and byte-exact ingestion delivery;
+5. Task 10, the crash-safe service loop, retry policy, health, checkpoint
+   advancement, and backpressure;
+6. Task 11, explicit resumable 90-day backfill;
+7. Task 12, private container and runtime integration;
+8. Task 13, backup, isolated restore, and operating documentation; and
+9. Task 14, deterministic end-to-end acceptance and merge evidence.
+
+Task 9 is complete. Reopen it only for a defect demonstrated by a focused test.
+Task 4's remaining application batch-outbox methods belong to Task 7 so one
+worker owns `store.rs` and `store_types.rs` during that change.
+
+This milestone creates no production Cloudflare resource, DNS record,
+credential, Matrix session, room mapping, or Contabo deployment. External
+activation remains a separate, explicit plan after local acceptance. Tests use
+synthetic Matrix responses, fake OAuth and ingestion servers, temporary
+encrypted stores, and the existing local Worker runtime.
+
 ## Mandatory worker protocol
 
-Every task below is implemented by a fresh `gpt-5.6-luna` worker with
-`reasoning_effort=max` and `fork_turns=none`. The worker must:
+The Sol parent plans, assigns, inspects, integrates, and decides completion. It
+never writes implementation code. Every implementation and test run uses a
+fresh ephemeral `codex exec` session with model `gpt-5.6-luna`, reasoning effort
+`max`, and service tier `fast`. Prompts are self-contained and assume no
+conversation history.
 
-1. Work only in `/home/ubuntu/communicator/.worktrees/matrix-gateway`.
-2. Read `/home/ubuntu/communicator/AGENTS.md`, the gateway design, the task text
-   supplied by the orchestrator, and the exact repository source/tests/package
-   manifests named in that task. Do not perform an unrelated repository audit.
-3. Use test-driven development: red test, minimal implementation, green test.
-4. Run the exact task checks and inspect `git diff --check`.
-5. Commit only the task files with the specified commit message.
-6. Report `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, or `BLOCKED`, the
-   commit SHA, checks run, and files changed.
+Implementation writers must:
 
-After each implementation commit, the orchestrator dispatches a fresh Luna/max
-spec reviewer and then a fresh Luna/max code-quality reviewer. Open findings go
-back to the same implementer and are re-reviewed before the next task starts.
-No worker deploys, changes DNS, accesses live Matrix credentials, or mutates
-Cloudflare unless an operational task explicitly authorizes it.
+1. work in a task-specific Git worktree based on the current integration head;
+2. receive an exact, non-overlapping file allowlist and never edit outside it;
+3. read only this resume section, the assigned task, its named source/tests,
+   and directly referenced contracts;
+4. use test-driven development and report the failing test before changing
+   production code;
+5. run only focused tests during the task, then `cargo fmt --all --check`, the
+   applicable Clippy command, and `git diff --check`;
+6. commit only the assigned files after every focused gate passes and report
+   the commit SHA plus exact evidence;
+7. finish within 15 minutes or report the precise blocker; and
+8. never deploy, change DNS, access live Matrix credentials, create external
+   resources, or mutate Cloudflare or Contabo.
+
+Test-running workers use `workspace-write` but do not modify source. Every
+static review also uses a fresh ephemeral `codex exec` session with model
+`gpt-5.6-luna`, reasoning effort `max`, and service tier `fast`. Reviewers run
+with `read-only` in the applicable task or integration worktree, inspect a
+streamed or explicitly bounded diff, never review their own work, and return
+`PASS` or only actionable P1/P2 findings.
+Stop a reviewer at ten minutes and relaunch once with a smaller production-file
+scope. The parent validates every finding against current source and official
+platform documentation before assigning a correction.
+
+Implementation is sequential when tasks share `lib.rs`, `main.rs`, `store.rs`,
+or another source file. Independent tests and disjoint reviews run in parallel.
+Run focused tests per task, the matrix-gateway package tests once per integrated
+wave, and the full repository gate once before the PR. After a conflict-free
+merge, run only the documented short smoke tests. Verify `git diff --check`,
+the exact changed-file list, and clean worktree status after every worker wave.
 
 ## Fixed cross-task contracts
 
