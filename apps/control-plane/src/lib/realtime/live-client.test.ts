@@ -9,7 +9,11 @@ import {
   type RealtimeTicketResponse,
 } from "@communicator/contracts";
 import { SimulatedRealtimeClient } from "./simulated-client";
-import { LiveRealtimeClient, type LiveRealtimeClientOptions } from "./live-client";
+import {
+  LiveRealtimeClient,
+  realtimePositionStorageKey,
+  type LiveRealtimeClientOptions,
+} from "./live-client";
 
 const NOW = Date.parse("2026-09-10T00:00:00.000Z");
 
@@ -299,6 +303,54 @@ describe("live realtime client", () => {
     expect(JSON.stringify(events)).not.toMatch(/rt1_|wss:\/\//);
   });
 
+  it("does not skip a sequence gap and reconnects from the unchanged stored baseline", async () => {
+    FakeWebSocket.instances = [];
+    const api = new FakeTicketApi();
+    const timers = new FakeTimers();
+    const storage = new MemoryStorage();
+    const storageKey = realtimePositionStorageKey(
+      "tenant_pilot",
+      "principal_pilot",
+      "identity_human",
+    );
+    storage.setItem(storageKey, JSON.stringify({
+      identity_id: "identity_human",
+      generation: 1,
+      sequence: 3,
+    }));
+    const client = makeClient(api, timers, storage);
+    const events: RealtimeServerFrame[] = [];
+    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+
+    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    await Promise.resolve();
+    const socket = FakeWebSocket.instances[0]!;
+    socket.open();
+    sendFrame(socket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 3 }]));
+    await connected;
+
+    sendFrame(socket, changesFrame("identity_human", 5, 2));
+
+    expect(events).toHaveLength(1);
+    expect(socket.closeCalls).toContainEqual({ code: 1008, reason: "realtime sequence gap" });
+    expect(timers.nextDelay).toBe(250);
+    expect(JSON.parse(storage.getItem(storageKey)!)).toMatchObject({
+      identity_id: "identity_human",
+      generation: 1,
+      sequence: 3,
+    });
+
+    timers.advanceBy(250);
+    await Promise.resolve();
+
+    expect(api.requests).toHaveLength(2);
+    expect(api.requests[1]?.resume).toEqual([
+      { identity_id: "identity_human", generation: 1, after_sequence: 3 },
+    ]);
+    expect(JSON.parse(storage.getItem(storageKey)!)).toMatchObject({ sequence: 3 });
+    client.close();
+  });
+
   it("rejects malformed frames without delivering them", async () => {
     FakeWebSocket.instances = [];
     const api = new FakeTicketApi();
@@ -320,6 +372,34 @@ describe("live realtime client", () => {
 
     expect(events).toHaveLength(1);
     expect(socket.closeCalls).toContainEqual({ code: 1008, reason: "invalid realtime frame" });
+  });
+
+  it("rejects a connected frame that omits a requested identity", async () => {
+    FakeWebSocket.instances = [];
+    const api = new FakeTicketApi();
+    const timers = new FakeTimers();
+    const storage = new MemoryStorage();
+    const client = makeClient(api, timers, storage);
+    const events: RealtimeServerFrame[] = [];
+    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+
+    const connected = client.connect(options);
+    try {
+      await Promise.resolve();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      sendFrame(socket, connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]));
+
+      expect(socket.closeCalls).toContainEqual({ code: 1008, reason: "invalid realtime frame" });
+      expect(events).toHaveLength(0);
+      expect(storage.entries()).toHaveLength(0);
+      expect(client.status).toBe("reconnecting");
+    } finally {
+      client.close();
+    }
+    await expect(connected).rejects.toThrow("Realtime client closed");
   });
 
   it("stores identity-local positions under tenant, principal, and identity keys", async () => {
@@ -410,6 +490,47 @@ describe("live realtime client", () => {
     sendFrame(finalSocket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 0 }]));
     finalSocket.serverClose();
     expect(timers.nextDelay).toBe(250);
+  });
+
+  it("reconnects after a remote clean close before connected so the initial connect can resolve", async () => {
+    FakeWebSocket.instances = [];
+    const api = new FakeTicketApi();
+    const timers = new FakeTimers();
+    const storage = new MemoryStorage();
+    const client = makeClient(api, timers, storage);
+    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+
+    try {
+      await Promise.resolve();
+      const firstSocket = FakeWebSocket.instances[0]!;
+      firstSocket.open();
+      firstSocket.serverClose(1000, "server restart");
+
+      let settled = false;
+      void connected.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+      await Promise.resolve();
+
+      expect(settled).toBe(false);
+      expect(timers.nextDelay).toBe(250);
+      timers.advanceBy(250);
+      await Promise.resolve();
+
+      expect(api.requests).toHaveLength(2);
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(FakeWebSocket.instances[1]?.url).not.toBe(FakeWebSocket.instances[0]?.url);
+
+      const secondSocket = FakeWebSocket.instances[1]!;
+      secondSocket.open();
+      sendFrame(secondSocket, connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]));
+      await expect(connected).resolves.toBeUndefined();
+    } finally {
+      client.close();
+    }
   });
 
   it("reconnects with a fresh ticket when the server lease expires", async () => {

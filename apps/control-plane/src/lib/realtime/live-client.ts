@@ -282,7 +282,7 @@ export class LiveRealtimeClient implements RealtimeClient {
       return;
     }
     if (frame.type === "projection.changes") {
-      this.handleChanges(frame);
+      this.handleChanges(socket, frame);
       return;
     }
     this.handleReset(frame);
@@ -312,7 +312,10 @@ export class LiveRealtimeClient implements RealtimeClient {
 
     const positions = frame.positions.filter((position) =>
       desiredOptions.identityIds.includes(position.identity_id));
-    if (positions.length === 0) {
+    const positionIdentityIds = new Set(positions.map((position) => position.identity_id));
+    if (positions.length !== desiredOptions.identityIds.length
+      || positionIdentityIds.size !== positions.length
+      || !desiredOptions.identityIds.every((identityId) => positionIdentityIds.has(identityId))) {
       socket.close(1008, "invalid realtime frame");
       return;
     }
@@ -336,6 +339,7 @@ export class LiveRealtimeClient implements RealtimeClient {
   }
 
   private handleChanges(
+    socket: RealtimeWebSocketLike,
     frame: Extract<RealtimeServerFrame, { type: "projection.changes" }>,
   ) {
     const desiredOptions = this.desiredOptions;
@@ -347,6 +351,10 @@ export class LiveRealtimeClient implements RealtimeClient {
     const baseline = position?.sequence ?? 0;
     const changes = frame.changes.filter((change) => change.sequence > baseline);
     if (changes.length === 0) return;
+    if (changes[0]!.sequence !== baseline + 1) {
+      socket.close(1008, "realtime sequence gap");
+      return;
+    }
 
     const safeFrame = RealtimeProjectionChangesFrameSchema.safeParse({
       ...frame,
@@ -392,17 +400,12 @@ export class LiveRealtimeClient implements RealtimeClient {
   private handleClose(
     socket: RealtimeWebSocketLike,
     socketToken: number,
-    event: { code: number; reason: string; wasClean: boolean },
+    _event: { code: number; reason: string; wasClean: boolean },
   ) {
     if (this.socket !== socket || socketToken !== this.connectionToken) return;
     this.socket = undefined;
     this.clearLeaseTimer();
     if (this.closed) return;
-    if (event.code === 1000) {
-      this.hasConnected = false;
-      this.setStatus("idle");
-      return;
-    }
     this.scheduleReconnect();
   }
 
