@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "0000-cloud",
+  "visibility": "private",
+  "status": "scaffold-only",
+  "purpose": "Future hosted deployment coordination for the independent 0000 repositories.",
+  "dependencies": [],
+  "standalone_authentication": "not-required",
+  "hosting_class": "private-docker-host-coordinator",
+  "deployment_implementation": false,
+  "application_code": false,
+  "license_selected": false
+}
