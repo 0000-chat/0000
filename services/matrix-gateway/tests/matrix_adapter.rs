@@ -1,30 +1,965 @@
+use chrono::{TimeZone, Utc};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+
+use communicator_matrix_gateway::crypto::Keyring;
 use communicator_matrix_gateway::matrix::{
-    MAX_SYNC_RESPONSE_BYTES, PreserveSyncResponseError, RestartCryptoAck, open_base_client,
-    preserve_sync_response, sync_request_to_http,
+    MatrixProcessor, MatrixSdkProcessor, RestartCryptoAck, bootstrap_matrix,
+    restore_matrix_processor,
 };
 use communicator_matrix_gateway::matrix_http::ReqwestMatrixTransport;
 use communicator_matrix_gateway::secret::SecretBytes;
-use communicator_matrix_gateway::store_types::ReasonCode;
+use communicator_matrix_gateway::store::Store;
+use communicator_matrix_gateway::store_types::{NewBootstrapState, NewRawSyncInbox, ReasonCode};
 use http::Response as HttpResponse;
 use matrix_sdk::{Client, SessionMeta, SessionTokens, authentication::matrix::MatrixSession};
 use matrix_sdk::{config::SyncSettings, test_utils::mocks::MatrixMockServer};
+use matrix_sdk_base::{BaseClient, DmRoomDefinition, ThreadingSupport, store::RoomLoadSettings};
+use matrix_sdk_common::cross_process_lock::CrossProcessLockConfig;
 use matrix_sdk_crypto::{
-    DecryptionSettings, EncryptionSettings, OlmMachine, TrustRequirement,
-    types::events::{ToDeviceEvent, room::encrypted::ToDeviceEncryptedEventContent},
+    DecryptionSettings, DeviceData, EncryptionSettings, OlmMachine, TrustRequirement,
+    UserIdentityData,
+    store::CryptoStore,
+    types::{
+        SelfSigningPubkey,
+        events::{ToDeviceEvent, room::encrypted::ToDeviceEncryptedEventContent},
+    },
 };
+use matrix_sdk_sqlite::{SqliteCryptoStore, SqliteStateStore};
 use matrix_sdk_test::{JoinedRoomBuilder, SyncResponseBuilder, event_factory::EventFactory};
 use ruma::{
     MilliSecondsSinceUnixEpoch,
-    api::OutgoingResponse,
+    api::client::sync::sync_events::v3::Response as RumaSyncResponse,
+    api::{IncomingResponse, OutgoingResponse},
     event_id,
     events::{AnySyncTimelineEvent, AnyToDeviceEvent},
     owned_device_id, owned_user_id, room_id,
     serde::Raw,
     to_device::DeviceIdOrAllDevices,
 };
+use rusqlite::{Connection, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use url::Url;
+
+async fn open_test_base_client(
+    state_path: &Path,
+    crypto_path: &Path,
+    passphrase: &str,
+    session_meta: SessionMeta,
+) -> Result<BaseClient, Box<dyn std::error::Error + Send + Sync>> {
+    let state = SqliteStateStore::open(state_path, Some(passphrase)).await?;
+    let crypto = SqliteCryptoStore::open(crypto_path, Some(passphrase)).await?;
+    let base = BaseClient::new(
+        matrix_sdk_base::store::StoreConfig::new(CrossProcessLockConfig::SingleProcess)
+            .state_store(state)
+            .crypto_store(crypto),
+        ThreadingSupport::Disabled,
+        DmRoomDefinition::default(),
+    );
+    base.activate(session_meta, RoomLoadSettings::default(), None)
+        .await?;
+    Ok(base)
+}
+
+#[test]
+fn task3_public_bootstrap_and_restore_entrypoints_exist() {
+    let _ = bootstrap_matrix;
+    let _ = restore_matrix_processor;
+}
+
+#[test]
+fn task4_and_task5_processor_implements_the_frozen_boundary() {
+    fn assert_processor<T: MatrixProcessor>() {}
+    assert_processor::<MatrixSdkProcessor>();
+}
+
+#[test]
+fn public_sdk_crypto_api_proves_device_and_cross_signing_entries() {
+    fn inspect_device(device: &DeviceData) {
+        let _ = device.user_id();
+        let _ = device.device_id();
+        let _ = device.keys();
+        let _ = device.signatures();
+    }
+
+    fn inspect_identity(identity: &UserIdentityData) {
+        let _ = identity.user_id();
+        let _ = identity.master_key().as_ref();
+        let _ = identity.self_signing_key().as_ref();
+        let _ = identity.user_signing_key().map(|key| key.as_ref());
+    }
+
+    let _ = inspect_device as fn(&DeviceData);
+    let _ = inspect_identity as fn(&UserIdentityData);
+    let verify = SelfSigningPubkey::verify_device_keys;
+    let _ = verify
+        as fn(
+            &SelfSigningPubkey,
+            &matrix_sdk_crypto::types::DeviceKeys,
+        ) -> Result<(), matrix_sdk_crypto::SignatureError>;
+
+    fn verify_cross_signing_signature(
+        signer: &matrix_sdk_crypto::types::CrossSigningKey,
+        signed: &matrix_sdk_crypto::types::CrossSigningKey,
+    ) -> bool {
+        let Some((key_id, signing_key)) = signer.get_first_key_and_id() else {
+            return false;
+        };
+        let Ok(value) = serde_json::to_value(signed) else {
+            return false;
+        };
+        let Ok(mut canonical) = ruma::canonical_json::to_canonical_value(value) else {
+            return false;
+        };
+        let Some(object) = canonical.as_object_mut() else {
+            return false;
+        };
+        object.remove("signatures");
+        object.remove("unsigned");
+        let Some(signature) = signed.signatures.get_signature(&signed.user_id, key_id) else {
+            return false;
+        };
+        signing_key
+            .verify(canonical.to_string().as_bytes(), &signature)
+            .is_ok()
+    }
+
+    let _ = verify_cross_signing_signature
+        as fn(
+            &matrix_sdk_crypto::types::CrossSigningKey,
+            &matrix_sdk_crypto::types::CrossSigningKey,
+        ) -> bool;
+}
+
+#[tokio::test]
+async fn restored_processor_applies_a_journaled_sync_without_network() {
+    let offline_server = MatrixMockServer::new().await;
+    let app_directory = tempdir().unwrap();
+    let sdk_directory = tempdir().unwrap();
+    fs::set_permissions(app_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(sdk_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let app_path = app_directory.path().join("gateway.sqlite3");
+    let sdk_path = sdk_directory.path().join("matrix-sdk");
+    let user_id = owned_user_id!("@adapter:example.org");
+    let device_id = owned_device_id!("ADAPTERDEVICE");
+    let session = MatrixSession {
+        meta: SessionMeta {
+            user_id: user_id.clone(),
+            device_id: device_id.clone(),
+        },
+        tokens: SessionTokens {
+            access_token: "offline-access".to_owned(),
+            refresh_token: None,
+        },
+    };
+    let passphrase = "adapter-sdk-passphrase";
+    let mut state_store = Store::open(
+        &app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    let base = open_test_base_client(&sdk_path, &sdk_path, passphrase, session.meta.clone())
+        .await
+        .unwrap();
+    let mut initial = SyncResponseBuilder::new().build_sync_response();
+    initial.next_batch = "s0".to_owned();
+    base.receive_sync_response(initial).await.unwrap();
+    base.close_stores().await.unwrap();
+    state_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&session).unwrap(),
+                b"s0".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_000_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let room_id = room_id!("!adapter-room:example.org");
+    let event = EventFactory::new()
+        .room(room_id)
+        .sender(&user_id)
+        .text_msg("journaled")
+        .event_id(event_id!("$adapter-event:example.org"));
+    let mut followup = SyncResponseBuilder::new()
+        .add_joined_room(JoinedRoomBuilder::new(room_id).add_timeline_event(event))
+        .build_sync_response();
+    followup.next_batch = "s1".to_owned();
+    let body = followup.try_into_http_response().unwrap().into_body();
+    state_store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"s0".to_vec(),
+                b"s1".to_vec(),
+                body,
+                Utc.timestamp_millis_opt(1_700_000_001_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let saved = state_store.oldest_uncommitted_inbox().unwrap().unwrap();
+
+    let mut processor = restore_matrix_processor(
+        &offline_server.uri(),
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        processor.sdk_token_digest().await.unwrap(),
+        Some(Sha256::digest(b"s0").into())
+    );
+    assert_eq!(
+        processor
+            .pending_crypto_requests()
+            .await
+            .expect_err("a fresh account has more than one pending crypto request")
+            .code(),
+        "matrix_crypto_kind_not_allowed"
+    );
+    let recovery_error = match processor.recover_saved_sync(&saved).await {
+        Ok(_) => panic!("recovery must not run before the SDK applies the row"),
+        Err(error) => error,
+    };
+    assert_eq!(recovery_error.code(), "matrix_sdk_position_unjournaled");
+    let processed = processor.apply_saved_sync(&saved).await.unwrap();
+    assert_eq!(processed.event_count(), 1);
+    assert_eq!(processed.gap_count(), 0);
+    drop(processor);
+
+    let mut reopened = restore_matrix_processor(
+        &offline_server.uri(),
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+    let recovered = reopened.recover_saved_sync(&saved).await.unwrap();
+    assert_eq!(recovered.event_count(), 1);
+    assert_eq!(recovered.gap_count(), 0);
+    drop(reopened);
+
+    let wrong_passphrase = match restore_matrix_processor(
+        &offline_server.uri(),
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(b"wrong-passphrase", 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("wrong SDK passphrase must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(wrong_passphrase.code(), "matrix_session_invalid");
+
+    let configured_user_mismatch = match restore_matrix_processor(
+        &offline_server.uri(),
+        "@different-user:example.org",
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("configured/session user mismatch must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(configured_user_mismatch.code(), "matrix_session_invalid");
+
+    let mismatch_app_directory = tempdir().unwrap();
+    fs::set_permissions(
+        mismatch_app_directory.path(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let mismatch_app_path = mismatch_app_directory.path().join("gateway.sqlite3");
+    let mut mismatch_store = Store::open(
+        &mismatch_app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    let mismatched_session = MatrixSession {
+        meta: SessionMeta {
+            user_id: user_id.clone(),
+            device_id: owned_device_id!("DIFFERENTDEVICE"),
+        },
+        tokens: SessionTokens {
+            access_token: "offline-access".to_owned(),
+            refresh_token: None,
+        },
+    };
+    mismatch_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&mismatched_session).unwrap(),
+                b"s0".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_002_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let device_mismatch = match restore_matrix_processor(
+        &offline_server.uri(),
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &mismatch_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("SDK account/device mismatch must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(device_mismatch.code(), "matrix_session_invalid");
+
+    let checkpoint_mismatch_app_directory = tempdir().unwrap();
+    fs::set_permissions(
+        checkpoint_mismatch_app_directory.path(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let checkpoint_mismatch_app_path = checkpoint_mismatch_app_directory
+        .path()
+        .join("gateway.sqlite3");
+    let mut checkpoint_mismatch_store = Store::open(
+        &checkpoint_mismatch_app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    checkpoint_mismatch_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&session).unwrap(),
+                b"unrelated-checkpoint".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_003_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let checkpoint_mismatch = match restore_matrix_processor(
+        &offline_server.uri(),
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &checkpoint_mismatch_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("SDK/application checkpoint mismatch must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(checkpoint_mismatch.code(), "matrix_session_invalid");
+    assert!(
+        offline_server
+            .server()
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn restore_rejects_an_unknown_sdk_token_with_the_position_error() {
+    let app_directory = tempdir().unwrap();
+    let sdk_directory = tempdir().unwrap();
+    fs::set_permissions(app_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(sdk_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let app_path = app_directory.path().join("gateway.sqlite3");
+    let sdk_path = sdk_directory.path().join("matrix-sdk");
+    let user_id = owned_user_id!("@unknown-position:example.org");
+    let device_id = owned_device_id!("UNKNOWNPOSITION");
+    let session = MatrixSession {
+        meta: SessionMeta {
+            user_id: user_id.clone(),
+            device_id,
+        },
+        tokens: SessionTokens {
+            access_token: "unknown-position-token".to_owned(),
+            refresh_token: None,
+        },
+    };
+    let passphrase = "unknown-position-passphrase";
+    let mut state_store = Store::open(
+        &app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    state_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&session).unwrap(),
+                b"committed-position".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_020_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let base = open_test_base_client(&sdk_path, &sdk_path, passphrase, session.meta.clone())
+        .await
+        .unwrap();
+    let mut unknown = SyncResponseBuilder::new().build_sync_response();
+    unknown.next_batch = "unknown-sdk-position".to_owned();
+    base.receive_sync_response(unknown).await.unwrap();
+    base.close_stores().await.unwrap();
+
+    let error = match restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("an unknown SDK token must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "matrix_session_invalid");
+}
+
+fn empty_sync_body(next_batch: &str) -> Vec<u8> {
+    let mut response = SyncResponseBuilder::new().build_sync_response();
+    response.next_batch = next_batch.to_owned();
+    response
+        .try_into_http_response()
+        .expect("serialize empty sync response")
+        .into_body()
+}
+
+async fn create_sdk_store_at(
+    sdk_path: &std::path::Path,
+    passphrase: &str,
+    session_meta: &SessionMeta,
+    tokens: &[&str],
+) {
+    let base = open_test_base_client(sdk_path, sdk_path, passphrase, session_meta.clone())
+        .await
+        .expect("open SDK fixture store");
+    for token in tokens {
+        let mut response = SyncResponseBuilder::new().build_sync_response();
+        response.next_batch = (*token).to_owned();
+        base.receive_sync_response(response)
+            .await
+            .expect("advance SDK fixture token");
+    }
+    base.close_stores().await.expect("close SDK fixture store");
+}
+
+fn commit_sync_row_for_recovery(path: &std::path::Path, inbox_id: &str, token: &[u8]) {
+    let at = Utc
+        .timestamp_millis_opt(1_700_000_010_000)
+        .single()
+        .expect("construct recovery commit timestamp")
+        .to_rfc3339();
+    let connection = Connection::open(path).expect("open recovery commit fixture");
+    connection
+        .execute(
+            "UPDATE sync_inbox
+             SET state = 'committed', sdk_processed_at = ?2,
+                 prepared_at = ?2, committed_at = ?2
+             WHERE inbox_id = ?1",
+            params![inbox_id, at],
+        )
+        .expect("mark recovery row committed");
+    let sealed = Keyring::new([0x11; 32], 1)
+        .expect("construct recovery keyring")
+        .seal("gateway_state", "1", "committed_token", token)
+        .expect("seal recovery committed token");
+    connection
+        .execute(
+            "UPDATE gateway_state
+             SET committed_token_cipher = ?1, committed_token_nonce = ?2,
+                 committed_token_key_version = ?3",
+            params![
+                sealed.ciphertext,
+                sealed.nonce.as_slice(),
+                i64::from(sealed.key_version),
+            ],
+        )
+        .expect("advance recovery committed token");
+}
+
+#[tokio::test]
+async fn recovery_requires_the_verified_frontier_not_token_inequality() {
+    let app_directory = tempdir().unwrap();
+    let sdk_first_directory = tempdir().unwrap();
+    let sdk_second_directory = tempdir().unwrap();
+    let sdk_third_directory = tempdir().unwrap();
+    fs::set_permissions(app_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(
+        sdk_first_directory.path(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(
+        sdk_second_directory.path(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(
+        sdk_third_directory.path(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let app_path = app_directory.path().join("gateway.sqlite3");
+    let sdk_first_path = sdk_first_directory.path().join("matrix-sdk");
+    let sdk_second_path = sdk_second_directory.path().join("matrix-sdk");
+    let sdk_third_path = sdk_third_directory.path().join("matrix-sdk");
+    let user_id = owned_user_id!("@recovery-frontier:example.org");
+    let session = MatrixSession {
+        meta: SessionMeta {
+            user_id: user_id.clone(),
+            device_id: owned_device_id!("RECOVERYFRONTIER"),
+        },
+        tokens: SessionTokens {
+            access_token: "recovery-frontier-token".to_owned(),
+            refresh_token: None,
+        },
+    };
+    let passphrase = "recovery-frontier-passphrase";
+    let mut state_store = Store::open(
+        &app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    state_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&session).unwrap(),
+                b"s0".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_000_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    state_store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"s0".to_vec(),
+                b"s1".to_vec(),
+                empty_sync_body("s1"),
+                Utc.timestamp_millis_opt(1_700_000_001_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    state_store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+                empty_sync_body("s2"),
+                Utc.timestamp_millis_opt(1_700_000_002_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    state_store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"s2".to_vec(),
+                b"s3".to_vec(),
+                empty_sync_body("s3"),
+                Utc.timestamp_millis_opt(1_700_000_003_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let row_one = state_store.oldest_uncommitted_inbox().unwrap().unwrap();
+
+    create_sdk_store_at(&sdk_first_path, passphrase, &session.meta, &["s0", "s1"]).await;
+    create_sdk_store_at(
+        &sdk_second_path,
+        passphrase,
+        &session.meta,
+        &["s0", "s1", "s2"],
+    )
+    .await;
+    create_sdk_store_at(
+        &sdk_third_path,
+        passphrase,
+        &session.meta,
+        &["s0", "s1", "s2", "s3"],
+    )
+    .await;
+
+    let mut at_first = restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_first_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+
+    commit_sync_row_for_recovery(&app_path, row_one.inbox_id().as_str(), b"s1");
+    let row_two = state_store.oldest_uncommitted_inbox().unwrap().unwrap();
+
+    let mut at_second = restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_second_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+    commit_sync_row_for_recovery(&app_path, row_two.inbox_id().as_str(), b"s2");
+    let row_three = state_store.oldest_uncommitted_inbox().unwrap().unwrap();
+
+    assert!(at_first.recover_saved_sync(&row_one).await.is_ok());
+    assert_eq!(
+        at_first
+            .recover_saved_sync(&row_two)
+            .await
+            .expect_err("row immediately after the SDK position must fail")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
+    assert_eq!(
+        at_first
+            .recover_saved_sync(&row_three)
+            .await
+            .expect_err("a later row must not pass token inequality")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
+    drop(at_first);
+
+    assert!(at_second.recover_saved_sync(&row_one).await.is_ok());
+    assert!(at_second.recover_saved_sync(&row_two).await.is_ok());
+    assert_eq!(
+        at_second
+            .recover_saved_sync(&row_three)
+            .await
+            .expect_err("row after the second SDK position must fail")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
+    drop(at_second);
+
+    let mut at_committed = restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_second_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        at_committed
+            .recover_saved_sync(&row_one)
+            .await
+            .expect_err("committed position must not recover a journal row")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
+    drop(at_committed);
+
+    let mut at_third = restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_third_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+    assert!(at_third.recover_saved_sync(&row_one).await.is_ok());
+    assert!(at_third.recover_saved_sync(&row_two).await.is_ok());
+    assert!(at_third.recover_saved_sync(&row_three).await.is_ok());
+}
+
+#[tokio::test]
+async fn apply_saved_sync_rejects_when_sdk_is_at_a_later_journaled_position() {
+    let app_directory = tempdir().unwrap();
+    let sdk_directory = tempdir().unwrap();
+    fs::set_permissions(app_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(sdk_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let app_path = app_directory.path().join("gateway.sqlite3");
+    let sdk_path = sdk_directory.path().join("matrix-sdk");
+    let user_id = owned_user_id!("@later-position:example.org");
+    let session = MatrixSession {
+        meta: SessionMeta {
+            user_id: user_id.clone(),
+            device_id: owned_device_id!("LATERPOSITION"),
+        },
+        tokens: SessionTokens {
+            access_token: "later-position-token".to_owned(),
+            refresh_token: None,
+        },
+    };
+    let passphrase = "later-position-passphrase";
+    let mut state_store = Store::open(
+        &app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    state_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&session).unwrap(),
+                b"s0".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_021_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let base = open_test_base_client(&sdk_path, &sdk_path, passphrase, session.meta.clone())
+        .await
+        .unwrap();
+    let mut first = SyncResponseBuilder::new().build_sync_response();
+    first.next_batch = "s1".to_owned();
+    let first_body: Vec<u8> = first.try_into_http_response().unwrap().into_body();
+    let first_typed = RumaSyncResponse::try_from_http_response(
+        HttpResponse::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(first_body.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    let mut second = SyncResponseBuilder::new().build_sync_response();
+    second.next_batch = "s2".to_owned();
+    let second_body: Vec<u8> = second.try_into_http_response().unwrap().into_body();
+    let second_typed = RumaSyncResponse::try_from_http_response(
+        HttpResponse::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(second_body.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    base.receive_sync_response(first_typed).await.unwrap();
+    base.receive_sync_response(second_typed).await.unwrap();
+    base.close_stores().await.unwrap();
+
+    state_store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"s0".to_vec(),
+                b"s1".to_vec(),
+                first_body,
+                Utc.timestamp_millis_opt(1_700_000_021_100)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    state_store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+                second_body,
+                Utc.timestamp_millis_opt(1_700_000_021_200)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let saved = state_store.oldest_uncommitted_inbox().unwrap().unwrap();
+    let mut processor = restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    .unwrap();
+    let error = match processor.apply_saved_sync(&saved).await {
+        Ok(_) => panic!("apply must not move the SDK backwards"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "matrix_sdk_position_unjournaled");
+}
+
+#[tokio::test]
+async fn restore_missing_crypto_account_does_not_create_a_device() {
+    let app_directory = tempdir().unwrap();
+    let sdk_directory = tempdir().unwrap();
+    fs::set_permissions(app_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(sdk_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let app_path = app_directory.path().join("gateway.sqlite3");
+    let sdk_path = sdk_directory.path().join("matrix-sdk");
+    fs::create_dir(&sdk_path).unwrap();
+    fs::write(sdk_path.join("partial-state"), b"operator-diagnosis").unwrap();
+
+    let user_id = owned_user_id!("@restore-no-account:example.org");
+    let device_id = owned_device_id!("RESTORENOACCOUNT");
+    let session = MatrixSession {
+        meta: SessionMeta {
+            user_id: user_id.clone(),
+            device_id: device_id.clone(),
+        },
+        tokens: SessionTokens {
+            access_token: "restore-no-account-token".to_owned(),
+            refresh_token: None,
+        },
+    };
+    let passphrase = "restore-no-account-passphrase";
+    let mut state_store = Store::open(
+        &app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    state_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                serde_json::to_vec(&session).unwrap(),
+                b"restore-no-account-next".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_010_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let error = match restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("an account-less SDK store must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "matrix_session_invalid");
+    assert!(
+        !sdk_path
+            .join(matrix_sdk_sqlite::STATE_STORE_DATABASE_NAME)
+            .exists()
+    );
+    assert!(!sdk_path.join("matrix-sdk-crypto.sqlite3").exists());
+
+    let crypto = matrix_sdk_sqlite::SqliteCryptoStore::open(&sdk_path, Some(passphrase))
+        .await
+        .unwrap();
+    assert!(crypto.load_account().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn restore_missing_bootstrap_and_corrupt_session_fail_closed_without_network() {
+    let offline_server = MatrixMockServer::new().await;
+    let app_directory = tempdir().unwrap();
+    let sdk_directory = tempdir().unwrap();
+    fs::set_permissions(app_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(sdk_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let app_path = app_directory.path().join("gateway.sqlite3");
+    let sdk_path = sdk_directory.path().join("matrix-sdk");
+    let mut empty_store = Store::open(
+        &app_path,
+        Keyring::new([0x11; 32], 1).expect("test keyring"),
+    )
+    .unwrap();
+    let missing = match restore_matrix_processor(
+        &offline_server.uri(),
+        "@missing-bootstrap:example.org",
+        &sdk_path,
+        &SecretBytes::from_text(b"passphrase", 1024).unwrap(),
+        &empty_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("missing bootstrap must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(missing.code(), "matrix_session_invalid");
+    assert!(!sdk_path.exists());
+
+    let session = MatrixSession {
+        meta: SessionMeta {
+            user_id: owned_user_id!("@corrupt-session:example.org"),
+            device_id: owned_device_id!("CORRUPTSESSION"),
+        },
+        tokens: SessionTokens {
+            access_token: "corrupt-session-token".to_owned(),
+            refresh_token: None,
+        },
+    };
+    empty_store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                b"not-json".to_vec(),
+                b"corrupt-session-next".to_vec(),
+                Vec::new(),
+                Utc.timestamp_millis_opt(1_700_000_014_000)
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let corrupt = match restore_matrix_processor(
+        &offline_server.uri(),
+        session.meta.user_id.as_str(),
+        &sdk_path,
+        &SecretBytes::from_text(b"passphrase", 1024).unwrap(),
+        &empty_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("corrupt session must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(corrupt.code(), "matrix_session_invalid");
+    assert!(
+        offline_server
+            .server()
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
 
 #[test]
 fn public_transport_constructor_rejects_non_https_origins_and_secret_details() {
@@ -49,69 +984,6 @@ fn restart_ack_and_secret_bearing_adapter_values_are_redacted() {
     assert_eq!(value.discriminant(), "unrecoverable");
     assert_eq!(format!("{value:?}"), "RestartCryptoAck([REDACTED])");
     assert_eq!(value.to_string(), "RestartCryptoAck([REDACTED])");
-}
-
-#[test]
-fn sync_request_conversion_uses_v3_since_and_bearer_auth() {
-    let request = sync_request_to_http(
-        "https://matrix.example",
-        "access-token",
-        Some("since-token".to_owned()),
-    )
-    .unwrap();
-
-    assert_eq!(request.uri().path(), "/_matrix/client/v3/sync");
-    assert_eq!(
-        request
-            .uri()
-            .query()
-            .and_then(|query| query.strip_prefix("since=")),
-        Some("since-token")
-    );
-    assert_eq!(
-        request.headers().get("authorization").unwrap(),
-        "Bearer access-token"
-    );
-}
-
-#[test]
-fn preserve_sync_response_keeps_body_and_parses_next_batch() {
-    let expected_next_batch = "next-batch-token";
-    let mut typed_response = SyncResponseBuilder::new().build_sync_response();
-    typed_response.next_batch = expected_next_batch.to_owned();
-    let response: HttpResponse<Vec<u8>> = typed_response.try_into_http_response().unwrap();
-    let expected_body = response.body().clone();
-
-    let preserved = preserve_sync_response(response).unwrap();
-
-    assert_eq!(preserved.body, expected_body);
-    assert_eq!(preserved.typed.next_batch, expected_next_batch);
-}
-
-#[test]
-fn preserve_sync_response_rejects_empty_body_as_empty() {
-    let response = HttpResponse::builder()
-        .status(200)
-        .body(Vec::new())
-        .unwrap();
-
-    assert!(matches!(
-        preserve_sync_response(response),
-        Err(PreserveSyncResponseError::Empty)
-    ));
-}
-
-#[test]
-fn preserve_sync_response_rejects_64_mib_plus_one_as_too_large() {
-    let response = HttpResponse::builder()
-        .status(200)
-        .body(vec![b'x'; MAX_SYNC_RESPONSE_BYTES + 1])
-        .unwrap();
-
-    assert!(matches!(
-        preserve_sync_response(response),
-        Err(PreserveSyncResponseError::TooLarge)
-    ));
 }
 
 #[tokio::test]
@@ -366,7 +1238,7 @@ async fn encrypted_raw_event_can_be_decrypted_after_persistent_client_reopen() {
         .add_to_device_event(serde_json::from_str(room_key_event.json().get()).unwrap());
     let typed_response = response_builder.build_sync_response();
 
-    let base = open_base_client(&store_path, &store_path, passphrase, session.meta.clone())
+    let base = open_test_base_client(&store_path, &store_path, passphrase, session.meta.clone())
         .await
         .unwrap();
     let processed = base.receive_sync_response(typed_response).await.unwrap();
@@ -388,9 +1260,10 @@ async fn encrypted_raw_event_can_be_decrypted_after_persistent_client_reopen() {
     base.close_stores().await.unwrap();
     drop(base);
 
-    let reopened = open_base_client(&store_path, &store_path, passphrase, session.meta.clone())
-        .await
-        .unwrap();
+    let reopened =
+        open_test_base_client(&store_path, &store_path, passphrase, session.meta.clone())
+            .await
+            .unwrap();
     let receiver_guard = reopened.olm_machine().await;
     let receiver = receiver_guard.as_ref().unwrap();
     let decrypted = receiver
@@ -501,10 +1374,12 @@ async fn partial_crypto_commit_reapplies_saved_response_idempotently() {
     let expected_token = "partial-replay-token";
     let mut typed_response = response_builder.build_sync_response();
     typed_response.next_batch = expected_token.to_owned();
-    let saved_response =
-        preserve_sync_response(typed_response.try_into_http_response().unwrap()).unwrap();
-    let saved_response_body = saved_response.body.clone();
-    let saved_response = saved_response.typed;
+    let saved_response: HttpResponse<Vec<u8>> = typed_response
+        .try_into_http_response()
+        .expect("sync fixture should serialize");
+    let saved_response_body = saved_response.body().clone();
+    let saved_response = RumaSyncResponse::try_from_http_response(saved_response)
+        .expect("sync fixture should parse");
     assert!(!saved_response_body.is_empty());
 
     receiver.pause().await.unwrap();
@@ -514,7 +1389,7 @@ async fn partial_crypto_commit_reapplies_saved_response_idempotently() {
         user_id: receiver_user_id.clone(),
         device_id: receiver_device_id.clone(),
     };
-    let base = open_base_client(&store_path, &store_path, passphrase, session_meta.clone())
+    let base = open_test_base_client(&store_path, &store_path, passphrase, session_meta.clone())
         .await
         .unwrap();
     let old_token = base.sync_token().await;
@@ -551,7 +1426,7 @@ async fn partial_crypto_commit_reapplies_saved_response_idempotently() {
     base.close_stores().await.unwrap();
     drop(base);
 
-    let reopened = open_base_client(&store_path, &store_path, passphrase, session_meta)
+    let reopened = open_test_base_client(&store_path, &store_path, passphrase, session_meta)
         .await
         .unwrap();
     assert_eq!(reopened.sync_token().await, old_token);

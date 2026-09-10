@@ -499,6 +499,7 @@ struct RetainedInboxBounds {
 struct VerifiedInboxChain {
     rows: Vec<RawSyncInbox>,
     next_digest_index: HashMap<[u8; 32], usize>,
+    ordered_indices: Vec<usize>,
     tail_index: Option<usize>,
     first_uncommitted_index: Option<usize>,
 }
@@ -1718,6 +1719,51 @@ impl Store {
             .ok_or_else(store_sdk_position_unjournaled)
     }
 
+    /// Return the verified journal rows at or before the SDK position.
+    ///
+    /// The returned IDs are derived from the authenticated predecessor chain,
+    /// never from synthetic ID ordering. An empty frontier represents the
+    /// committed application position.
+    pub(crate) fn recoverable_inbox_ids(
+        &self,
+        sdk_token_digest: &[u8; 32],
+    ) -> Result<Vec<InboxId>, SafeError> {
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Err(store_not_bootstrapped());
+        };
+        let committed_token = load_verified_gateway_token(
+            &self.connection,
+            &self.keyring,
+            GatewayTokenField::Committed,
+        )?;
+        let fetch_token =
+            load_verified_gateway_token(&self.connection, &self.keyring, GatewayTokenField::Fetch)?;
+        let chain = verify_inbox_chain(
+            &self.connection,
+            &self.keyring,
+            &committed_token,
+            &fetch_token,
+        )?;
+        if sha256(committed_token.as_bytes()) == *sdk_token_digest {
+            return Ok(Vec::new());
+        }
+        let sdk_row_index = chain
+            .next_digest_index
+            .get(sdk_token_digest)
+            .copied()
+            .ok_or_else(store_sdk_position_unjournaled)?;
+        let frontier_end = chain
+            .ordered_indices
+            .iter()
+            .position(|index| *index == sdk_row_index)
+            .ok_or_else(store_sync_corrupt)?;
+        Ok(chain.ordered_indices[..=frontier_end]
+            .iter()
+            .map(|index| chain.rows[*index].inbox_id().clone())
+            .collect())
+    }
+
     /// Return the committed sync token as a newly owned protected value.
     pub fn committed_sync_token(&self) -> Result<Option<SecretBytes>, SafeError> {
         let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
@@ -1786,6 +1832,11 @@ impl Store {
         let session = validate_stored_gateway_state(&self.keyring, &gateway)?;
         validate_stored_room_progress(&self.connection, &self.keyring, room_progress_count, None)?;
         Ok(Some(session))
+    }
+
+    /// Resolve a Matrix room ID through this store's keyed registry.
+    pub(crate) fn matrix_room_lookup(&self, matrix_room_id: &str) -> Result<[u8; 32], SafeError> {
+        registry_room_lookup(&self.keyring, matrix_room_id)
     }
 
     /// Return the authenticated anchor for one exact 32-byte room lookup.
@@ -3363,6 +3414,7 @@ fn verify_inbox_chain(
         return Ok(VerifiedInboxChain {
             rows: verified_rows,
             next_digest_index: HashMap::new(),
+            ordered_indices: Vec::new(),
             tail_index: None,
             first_uncommitted_index: None,
         });
@@ -3410,11 +3462,13 @@ fn verify_inbox_chain(
     let mut tail_index = None;
     let mut first_uncommitted_index = None;
     let mut committed_tail_index = None;
+    let mut ordered_indices = Vec::with_capacity(row_capacity);
     while let Some(index) = current {
         if visited[index] {
             return Err(store_sync_corrupt());
         }
         visited[index] = true;
+        ordered_indices.push(index);
         let row = &verified_rows[index];
         if let Some(previous_index) = previous_index {
             let previous = &verified_rows[previous_index];
@@ -3460,6 +3514,7 @@ fn verify_inbox_chain(
     Ok(VerifiedInboxChain {
         rows: verified_rows,
         next_digest_index,
+        ordered_indices,
         tail_index: Some(tail_index),
         first_uncommitted_index,
     })

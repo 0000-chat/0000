@@ -119,15 +119,19 @@ impl ReqwestMatrixTransport {
         })
     }
 
-    fn sync_request(&self, since: &SecretBytes) -> Result<RequestBuilder, SafeError> {
-        validate_sync_token(since)?;
-        let since = str::from_utf8(since.as_bytes())
-            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
+    fn sync_request(&self, since: Option<&SecretBytes>) -> Result<RequestBuilder, SafeError> {
+        let since = since
+            .map(|since| {
+                validate_sync_token(since)?;
+                str::from_utf8(since.as_bytes())
+                    .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))
+            })
+            .transpose()?;
         let access_token = str::from_utf8(self.access_token.as_bytes())
             .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
 
         let mut request = SyncRequest::new();
-        request.since = Some(since.to_owned());
+        request.since = since.map(str::to_owned);
         request.timeout = Some(self.sync_timeout);
         let supported = SupportedVersions::from_parts(&["v1.1".to_owned()], &Default::default());
         let request: http::Request<Vec<u8>> = request
@@ -148,6 +152,32 @@ impl ReqwestMatrixTransport {
             .request(request.method().clone(), url)
             .headers(headers)
             .timeout(self.sync_deadline))
+    }
+
+    /// Fetch one bounded raw sync response, optionally with an application
+    /// checkpoint. Bootstrap passes `None` so the request has no `since`
+    /// parameter; runtime passes `Some` through the public transport port.
+    pub(crate) async fn fetch_sync_bytes(
+        &self,
+        since: Option<&SecretBytes>,
+    ) -> Result<(Vec<u8>, SyncResponse), SafeError> {
+        let response = self
+            .sync_request(since)?
+            .send()
+            .await
+            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_FAILED))?;
+        if !response.status().is_success() {
+            return Err(SafeError::new(MATRIX_TRANSPORT_FAILED));
+        }
+        let mut body = read_bounded_body(response, crate::matrix::MAX_SYNC_RESPONSE_BYTES).await?;
+        let typed = match parse_sync_response(&body) {
+            Ok(typed) => typed,
+            Err(error) => {
+                body.zeroize();
+                return Err(error);
+            }
+        };
+        Ok((body, typed))
     }
 
     fn crypto_request(&self, request: &PendingMatrixRequest) -> Result<RequestBuilder, SafeError> {
@@ -188,22 +218,8 @@ impl fmt::Display for ReqwestMatrixTransport {
 impl MatrixTransport for ReqwestMatrixTransport {
     async fn fetch_sync(&self, since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError> {
         validate_sync_token(since)?;
-        let response = self
-            .sync_request(since)?
-            .send()
-            .await
-            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_FAILED))?;
-        if !response.status().is_success() {
-            return Err(SafeError::new(MATRIX_TRANSPORT_FAILED));
-        }
-        let mut body = read_bounded_body(response, crate::matrix::MAX_SYNC_RESPONSE_BYTES).await?;
-        let next_token = match parse_sync_next_token(&body) {
-            Ok(next_token) => next_token,
-            Err(error) => {
-                body.zeroize();
-                return Err(error);
-            }
-        };
+        let (body, typed) = self.fetch_sync_bytes(Some(since)).await?;
+        let next_token = typed.next_batch.as_bytes().to_vec();
         FetchedMatrixSync::from_parts(
             SecretBytes::from_slice(since.as_bytes()),
             SecretBytes::new(next_token),
@@ -259,6 +275,13 @@ fn parse_homeserver_url(value: &str, allow_loopback_http: bool) -> Result<Url, S
         url.set_path("/");
     }
     Ok(url)
+}
+
+/// Validate the origin used by bootstrap with the same parser as the concrete
+/// transport. Unit tests may use a loopback HTTP fixture; production builds
+/// retain the HTTPS-only policy.
+pub(crate) fn validate_bootstrap_homeserver_url(value: &str) -> Result<(), SafeError> {
+    parse_homeserver_url(value, cfg!(test)).map(|_| ())
 }
 
 fn validate_sync_token(token: &SecretBytes) -> Result<(), SafeError> {
@@ -362,7 +385,7 @@ fn append_bounded_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Resul
     Ok(())
 }
 
-fn parse_sync_next_token(body: &[u8]) -> Result<Vec<u8>, SafeError> {
+fn parse_sync_response(body: &[u8]) -> Result<SyncResponse, SafeError> {
     let response = http::Response::builder()
         .status(http::StatusCode::OK)
         .header(CONTENT_TYPE, "application/json")
@@ -376,7 +399,7 @@ fn parse_sync_next_token(body: &[u8]) -> Result<Vec<u8>, SafeError> {
     if typed.next_batch.len() > crate::store_types::MAX_SYNC_TOKEN_BYTES {
         return Err(SafeError::new(MATRIX_RESPONSE_TOO_LARGE));
     }
-    Ok(typed.next_batch.into_bytes())
+    Ok(typed)
 }
 
 fn validate_keys_query_response(body: &[u8]) -> Result<(), SafeError> {
@@ -512,6 +535,46 @@ mod transport_tests {
         assert!(requests[0].headers.get("accept-encoding").is_none());
         assert!(requests[0].headers.get("referer").is_none());
         assert!(requests[0].headers.get("cookie").is_none());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sync_bytes_omits_since_query_and_returns_exact_typed_response() {
+        let server = MockServer::start().await;
+        let mut typed = SyncResponseBuilder::new().build_sync_response();
+        typed.next_batch = "bootstrap-next-token".to_owned();
+        let response: http::Response<Vec<u8>> = typed
+            .try_into_http_response()
+            .expect("fixture response should serialize");
+        let expected_body = response.body().clone();
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/_matrix/client/v3/sync"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(expected_body.clone()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"bootstrap-application-token", 1024).expect("token"),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("loopback transport");
+        let (body, parsed) = transport
+            .fetch_sync_bytes(None)
+            .await
+            .expect("bootstrap sync response");
+
+        assert_eq!(body, expected_body);
+        assert_eq!(parsed.next_batch, "bootstrap-next-token");
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.query_pairs().count(), 1);
+        assert!(requests[0].url.query_pairs().all(|(key, _)| key != "since"));
     }
 
     #[tokio::test]
