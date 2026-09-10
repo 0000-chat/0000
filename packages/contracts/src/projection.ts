@@ -12,7 +12,10 @@ import {
 import { CommandStatusSchema } from "./command";
 import { DeliveryModeSchema } from "./command";
 import { ProviderSchema } from "./connection";
-import { DeliveryStatusSchema } from "./conversation";
+import {
+  ConversationSummarySchema,
+  DeliveryStatusSchema,
+} from "./conversation";
 import { TimestampSchema } from "./ids";
 
 export const MAX_PROJECTION_BATCH_EVENTS = 500;
@@ -22,6 +25,7 @@ export const MAX_PROJECTION_PAGE_SIZE = 100;
 export const MAX_PROJECTION_CURSOR_CHARS = 2_048;
 export const MAX_PROJECTION_CHECKPOINT_VALUE_CHARS = 4_096;
 export const MAX_PROJECTION_CHANGES = 10_000;
+export const MAX_IDENTITY_CONNECTIONS = 64;
 
 const PROTOTYPE_SENSITIVE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
@@ -150,6 +154,21 @@ const CheckpointCursorSchema = z
 
 const ResourceIdOrNullSchema = CanonicalResourceIdSchema.nullable();
 
+export const ProjectionChannelStatSchema = strictObject({
+  connection_id: CanonicalResourceIdSchema,
+  unread_count: NonnegativeSafeIntegerSchema,
+  last_activity_at: TimestampSchema.nullable(),
+});
+
+export type ProjectionChannelStat = z.infer<typeof ProjectionChannelStatSchema>;
+
+export const ProjectionChannelStatsSchema = strictArray(
+  ProjectionChannelStatSchema,
+  MAX_IDENTITY_CONNECTIONS,
+);
+
+export type ProjectionChannelStats = z.infer<typeof ProjectionChannelStatsSchema>;
+
 export const ProjectionScopeSchema = z.enum([
   "projection.initialize",
   "projection.write",
@@ -203,6 +222,32 @@ export const ProjectionAuthorizationContextSchema =
 export type ProjectionAuthorizationContext = z.infer<
   typeof ProjectionAuthorizationContextSchema
 >;
+
+export const ListProjectionChannelStatsInputSchema = strictObject({
+  schema_version: z.literal(1),
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  authorization: ProjectionAuthorizationContextSchema,
+});
+
+export type ListProjectionChannelStatsInput = z.infer<
+  typeof ListProjectionChannelStatsInputSchema
+>;
+
+export const GetProjectionConversationInputSchema = strictObject({
+  schema_version: z.literal(1),
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  conversation_id: CanonicalResourceIdSchema,
+  authorization: ProjectionAuthorizationContextSchema,
+});
+
+export type GetProjectionConversationInput = z.infer<
+  typeof GetProjectionConversationInputSchema
+>;
+
+export const GetProjectionConversationResultSchema =
+  ConversationSummarySchema.nullable();
 
 const ProjectionConnectionBindingObjectSchema = strictObject({
   account_id: CanonicalResourceIdSchema,

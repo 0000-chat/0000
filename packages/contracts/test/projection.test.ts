@@ -8,11 +8,13 @@ import {
   CompleteRebuildInputSchema,
   ConversationCursorSchema,
   DEFAULT_PROJECTION_PAGE_SIZE,
+  GetProjectionConversationInputSchema,
   MAX_PROJECTION_BATCH_BYTES,
   MAX_PROJECTION_BATCH_EVENTS,
   MAX_PROJECTION_CHANGES,
   MAX_PROJECTION_CHECKPOINT_VALUE_CHARS,
   MAX_PROJECTION_CURSOR_CHARS,
+  MAX_IDENTITY_CONNECTIONS,
   MAX_PROJECTION_PAGE_SIZE,
   InitializeProjectionInputSchema,
   ListProjectionChangesInputSchema,
@@ -22,6 +24,8 @@ import {
   MessagePageResultSchema,
   OpaqueEventIdSchema,
   ProjectionAuthorizationContextSchema,
+  ProjectionChannelStatSchema,
+  ProjectionChannelStatsSchema,
   ProjectionChangePageSchema,
   ProjectionConnectionBindingSchema,
   ProjectionConnectionBindingsSchema,
@@ -36,6 +40,7 @@ import {
   ProjectionCheckpointInputSchema,
   ProjectionEventEnvelope,
   RebuildFailureCodeSchema,
+  ListProjectionChannelStatsInputSchema,
   compareOpaqueEventIds,
   parseProjectionEvent,
   type ProjectionAuthorizationContext,
@@ -353,6 +358,126 @@ describe("projection RPC contracts and exact bounds", () => {
     expect(MAX_PROJECTION_CURSOR_CHARS).toBe(2_048);
     expect(MAX_PROJECTION_CHECKPOINT_VALUE_CHARS).toBe(4_096);
     expect(MAX_PROJECTION_CHANGES).toBe(10_000);
+    expect(MAX_IDENTITY_CONNECTIONS).toBe(64);
+  });
+
+  it("accepts only bounded, strict channel statistics", () => {
+    const stat = {
+      connection_id: connection,
+      unread_count: 3,
+      last_activity_at: timestamp,
+    };
+
+    expect(ProjectionChannelStatSchema.parse(stat)).toEqual(stat);
+    expect(ProjectionChannelStatsSchema.parse([stat])).toEqual([stat]);
+    expect(ProjectionChannelStatsSchema.parse([])).toEqual([]);
+
+    for (const invalid of [
+      { ...stat, connection_id: "not-an-id" },
+      { ...stat, unread_count: -1 },
+      { ...stat, unread_count: 1.5 },
+      { ...stat, unread_count: Number.MAX_SAFE_INTEGER + 1 },
+      { ...stat, last_activity_at: "not-a-timestamp" },
+      { ...stat, extra: true },
+    ]) {
+      expect(ProjectionChannelStatSchema.safeParse(invalid).success).toBe(false);
+    }
+
+    let getterCalls = 0;
+    const getterInput = { ...stat };
+    Object.defineProperty(getterInput, "unread_count", {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error("must not run");
+      },
+    });
+    expect(ProjectionChannelStatSchema.safeParse(getterInput).success).toBe(false);
+    expect(getterCalls).toBe(0);
+
+    const proxied = new Proxy(stat, {
+      ownKeys: () => {
+        throw new Error("proxy ownKeys trap must not run");
+      },
+    });
+    expect(() => ProjectionChannelStatSchema.safeParse(proxied)).not.toThrow();
+    expect(ProjectionChannelStatSchema.safeParse(proxied).success).toBe(false);
+
+    const symbolInput = { ...stat };
+    Object.defineProperty(symbolInput, Symbol("hidden"), {
+      enumerable: true,
+      value: true,
+    });
+    expect(ProjectionChannelStatSchema.safeParse(symbolInput).success).toBe(false);
+
+    const oversized = Array.from({ length: MAX_IDENTITY_CONNECTIONS + 1 }, (_, index) => ({
+      ...stat,
+      connection_id: `connection_${String(index).padStart(2, "0")}`,
+    }));
+    expect(ProjectionChannelStatsSchema.safeParse(oversized).success).toBe(false);
+
+    const arrayWithSymbol = [stat];
+    Object.defineProperty(arrayWithSymbol, Symbol("hidden"), {
+      enumerable: true,
+      value: true,
+    });
+    expect(ProjectionChannelStatsSchema.safeParse(arrayWithSymbol).success).toBe(false);
+  });
+
+  it("requires the shared authorization context for read RPC inputs", () => {
+    const conversationInput = {
+      schema_version: 1,
+      tenant_id: tenant,
+      identity_id: identity,
+      conversation_id: conversation,
+      authorization: authorization(),
+    };
+    const channelInput = {
+      schema_version: 1,
+      tenant_id: tenant,
+      identity_id: identity,
+      authorization: authorization(),
+    };
+
+    expect(GetProjectionConversationInputSchema.safeParse(conversationInput).success).toBe(true);
+    expect(ListProjectionChannelStatsInputSchema.safeParse(channelInput).success).toBe(true);
+
+    expect(GetProjectionConversationInputSchema.safeParse({
+      ...conversationInput,
+      conversation_id: undefined,
+    }).success).toBe(false);
+    expect(ListProjectionChannelStatsInputSchema.safeParse({
+      ...channelInput,
+      authorization: undefined,
+    }).success).toBe(false);
+  });
+
+  it("keeps read RPC inputs and outputs structured-clone-safe", () => {
+    const stat = {
+      connection_id: connection,
+      unread_count: 0,
+      last_activity_at: null,
+    };
+    const conversationInput = GetProjectionConversationInputSchema.parse({
+      schema_version: 1,
+      tenant_id: tenant,
+      identity_id: identity,
+      conversation_id: conversation,
+      authorization: authorization(),
+    });
+    const channelInput = ListProjectionChannelStatsInputSchema.parse({
+      schema_version: 1,
+      tenant_id: tenant,
+      identity_id: identity,
+      authorization: authorization(),
+    });
+    const stats = ProjectionChannelStatsSchema.parse([stat]);
+
+    expect(() => structuredClone(conversationInput)).not.toThrow();
+    expect(() => structuredClone(channelInput)).not.toThrow();
+    expect(() => structuredClone(stats)).not.toThrow();
+    expect(Object.getPrototypeOf(stats)).toBe(Array.prototype);
   });
 
   it("accepts strict lifecycle/status and batch inputs/results", () => {

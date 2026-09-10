@@ -3,7 +3,10 @@ import {
   ApplyReplayPageInputSchema,
   compareOpaqueEventIds,
   ConversationPageResultSchema,
+  GetProjectionConversationInputSchema,
+  GetProjectionConversationResultSchema,
   DEFAULT_PROJECTION_PAGE_SIZE,
+  ListProjectionChannelStatsInputSchema,
   MAX_PROJECTION_CHANGES,
   MAX_PROJECTION_BATCH_BYTES,
   MAX_PROJECTION_BATCH_EVENTS,
@@ -11,13 +14,18 @@ import {
   ListProjectionConversationsInputSchema,
   ListProjectionMessagesInputSchema,
   MessagePageResultSchema,
+  MAX_IDENTITY_CONNECTIONS,
   MAX_PROJECTION_PAGE_SIZE,
   ProjectionChangePageSchema,
+  ProjectionChannelStatsSchema,
   type ApplyProjectionBatchInput,
   type ApplyProjectionBatchResult,
   type ApplyReplayPageInput,
   type ArchiveReplayPage,
+  type ConversationSummary,
   type ConversationPageResult,
+  type GetProjectionConversationInput,
+  type ListProjectionChannelStatsInput,
   AbortRebuildInputSchema,
   BeginRebuildInputSchema,
   CompleteRebuildInputSchema,
@@ -29,6 +37,7 @@ import {
   type ListProjectionConversationsInput,
   type ListProjectionMessagesInput,
   type MessagePageResult,
+  type ProjectionChannelStat,
   type ProjectionChange,
   type ProjectionChangePage,
   ProjectionStatusInputSchema,
@@ -167,6 +176,12 @@ type ConversationQueryRow = {
   last_activity_at: string;
   last_activity_ms: number;
   unread_count: number;
+};
+
+type ChannelStatQueryRow = {
+  connection_id: string;
+  unread_count: number;
+  last_activity_at: string | null;
 };
 
 type MessageQueryRow = {
@@ -487,6 +502,52 @@ const parseStoredMilliseconds = (timestamp: string): number => {
     throw new Error("projection timestamp is not a safe integer");
   }
   return milliseconds;
+};
+
+const isSafeNonnegativeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const mapConversationSummary = (
+  tenantId: string,
+  row: ConversationQueryRow,
+) => {
+  const lastActivityMs = parseStoredMilliseconds(row.last_activity_at);
+  if (lastActivityMs !== row.last_activity_ms) {
+    throw new Error("projection conversation activity tuple is inconsistent");
+  }
+  if (!isSafeNonnegativeInteger(row.unread_count)) {
+    throw new Error("projection conversation unread count is invalid");
+  }
+
+  return {
+    id: row.id,
+    tenant_id: tenantId,
+    identity_id: row.identity_id,
+    connection_id: row.connection_id,
+    title: row.title,
+    last_message_preview: row.last_message_preview,
+    last_activity_at: row.last_activity_at,
+    unread_count: row.unread_count,
+  } satisfies ConversationSummary;
+};
+
+const mapChannelStats = (
+  rows: readonly ChannelStatQueryRow[],
+): ProjectionChannelStat[] => {
+  if (rows.length > MAX_IDENTITY_CONNECTIONS) {
+    throw projectionError("projection_too_large");
+  }
+
+  return ProjectionChannelStatsSchema.parse(rows.map((row) => {
+    if (!isSafeNonnegativeInteger(row.unread_count)) {
+      throw new Error("projection channel unread count is invalid");
+    }
+    return {
+      connection_id: row.connection_id,
+      unread_count: row.unread_count,
+      last_activity_at: row.last_activity_at,
+    };
+  }));
 };
 
 const readConversationRows = (
@@ -1263,6 +1324,74 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       return structuredClone(
         mapConversationPage(parsed.tenant_id, meta.generation, parsed, rows),
       );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async getConversation(
+    input: GetProjectionConversationInput,
+  ): Promise<ConversationSummary | null> {
+    try {
+      const parsed = parseProjectionInput(
+        GetProjectionConversationInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const row = this.ctx.storage.sql
+        .exec<ConversationQueryRow>(
+          "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE id = ? AND identity_id = ? AND deleted_at IS NULL LIMIT 1",
+          parsed.conversation_id,
+          parsed.identity_id,
+        )
+        .toArray()[0];
+      const result = row === undefined
+        ? null
+        : mapConversationSummary(parsed.tenant_id, row);
+      return structuredClone(GetProjectionConversationResultSchema.parse(result));
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listChannelStats(
+    input: ListProjectionChannelStatsInput,
+  ): Promise<ProjectionChannelStat[]> {
+    try {
+      const parsed = parseProjectionInput(
+        ListProjectionChannelStatsInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const rows = this.ctx.storage.sql
+        .exec<ChannelStatQueryRow>(
+          "SELECT connection_id, SUM(unread_count) AS unread_count, MAX(last_activity_at) AS last_activity_at FROM conversations WHERE identity_id = ? AND deleted_at IS NULL GROUP BY connection_id ORDER BY connection_id ASC LIMIT 65",
+          parsed.identity_id,
+        )
+        .toArray();
+      return structuredClone(mapChannelStats(rows));
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }

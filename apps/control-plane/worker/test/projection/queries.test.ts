@@ -958,6 +958,8 @@ describe("tenant projection query RPCs", () => {
       "abortRebuild",
       "applyReplayPage",
       "listConversations",
+      "getConversation",
+      "listChannelStats",
       "listMessages",
       "listChanges",
     ]);
