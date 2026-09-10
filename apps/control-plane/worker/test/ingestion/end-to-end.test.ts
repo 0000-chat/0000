@@ -253,7 +253,7 @@ describe("Matrix ingestion end to end", () => {
       applied_event_count: 2,
       conversation_count: 2,
       message_count: 2,
-      latest_change_sequence: 2,
+      latest_change_sequence: 1,
     });
 
     const humanAuthorization = authorizationFor(
