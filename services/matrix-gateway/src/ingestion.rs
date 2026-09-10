@@ -17,11 +17,11 @@ use futures_util::StreamExt;
 use rand_core::{OsRng, RngCore};
 use reqwest::{
     StatusCode, Url,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE},
+    header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE},
     redirect::Policy,
 };
-use serde::Deserialize;
-use zeroize::Zeroize;
+use serde::{Deserialize, Deserializer};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{config::OAuthClientAuthMethod, secret::SafeError};
 
@@ -390,7 +390,10 @@ impl OAuthTokenProvider {
             return Err(SafeError::new(OAUTH_TOKEN_INVALID));
         }
         let lifetime = Duration::from_secs(parsed.expires_in);
-        Ok((SecretString::new(parsed.access_token), lifetime))
+        Ok((
+            SecretString::new(parsed.access_token.as_str().to_owned()),
+            lifetime,
+        ))
     }
 }
 
@@ -597,19 +600,28 @@ impl IngestionClient {
         batch: &PendingBatch,
         token: &SecretString,
     ) -> Result<reqwest::Response, ()> {
-        self.client
-            .post(self.endpoint.clone())
-            .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", token.as_str()))
-            .header(CONTENT_TYPE, "application/json")
-            .header(CONTENT_ENCODING, "identity")
-            .header("x-tenant-id", batch.tenant_id())
-            .header("x-batch-id", batch.batch_id())
-            .body(batch.exact_request_bytes().to_vec())
+        build_ingestion_request(&self.client, &self.endpoint, batch, token)
             .send()
             .await
             .map_err(|_| ())
     }
+}
+
+fn build_ingestion_request(
+    client: &reqwest::Client,
+    endpoint: &Url,
+    batch: &PendingBatch,
+    token: &SecretString,
+) -> reqwest::RequestBuilder {
+    client
+        .post(endpoint.clone())
+        .header(ACCEPT, "application/json")
+        .bearer_auth(token.as_str())
+        .header(CONTENT_TYPE, "application/json")
+        .header(CONTENT_ENCODING, "identity")
+        .header("x-tenant-id", batch.tenant_id())
+        .header("x-batch-id", batch.batch_id())
+        .body(batch.exact_request_bytes().to_vec())
 }
 
 impl fmt::Debug for IngestionClient {
@@ -628,9 +640,17 @@ impl BatchSink for IngestionClient {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OAuthResponse {
-    access_token: String,
+    #[serde(deserialize_with = "deserialize_zeroizing_string")]
+    access_token: Zeroizing<String>,
     token_type: String,
     expires_in: u64,
+}
+
+fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Zeroizing::new)
 }
 
 #[derive(Deserialize)]
@@ -685,13 +705,15 @@ async fn parse_accepted_response(
     Ok(Delivery::Accepted)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum BodyReadError {
     TooLarge,
     Failed,
 }
 
-async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, BodyReadError> {
+async fn read_response_body(
+    response: reqwest::Response,
+) -> Result<Zeroizing<Vec<u8>>, BodyReadError> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -700,7 +722,7 @@ async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, Body
     }
 
     let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
+    let mut body = Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES));
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| BodyReadError::Failed)?;
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
@@ -843,5 +865,84 @@ fn bounded_retry_after(
 async fn sleep_for(delay: Option<Duration>) {
     if let Some(delay) = delay.filter(|delay| !delay.is_zero()) {
         tokio::time::sleep(delay).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::AUTHORIZATION;
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn ingestion_request_marks_bearer_authorization_sensitive() {
+        let client = reqwest::Client::new();
+        let endpoint = Url::parse("http://127.0.0.1:8080/internal/v1/ingestion/batches")
+            .expect("test endpoint");
+        let batch = PendingBatch::new("tenant", "batch", b"{}".to_vec());
+        let token = SecretString::new("token");
+
+        let request = build_ingestion_request(&client, &endpoint, &batch, &token)
+            .build()
+            .expect("build ingestion request");
+        let authorization = request
+            .headers()
+            .get(AUTHORIZATION)
+            .expect("authorization header");
+
+        assert_eq!(authorization, "Bearer token");
+        assert!(authorization.is_sensitive());
+    }
+
+    #[test]
+    fn oauth_response_stores_access_token_in_zeroizing_storage() {
+        let parsed: OAuthResponse = serde_json::from_str(
+            r#"{"access_token":"temporary-token","token_type":"Bearer","expires_in":60}"#,
+        )
+        .expect("OAuth response");
+
+        fn require_zeroizing_string(_: &Zeroizing<String>) {}
+
+        require_zeroizing_string(&parsed.access_token);
+    }
+
+    #[tokio::test]
+    async fn bounded_response_body_uses_zeroizing_storage() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw("response-body", "application/octet-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("response");
+        let body: Zeroizing<Vec<u8>> = read_response_body(response).await.expect("body");
+
+        assert_eq!(body.as_slice(), b"response-body");
+    }
+
+    #[tokio::test]
+    async fn response_body_starts_with_capacity_for_full_bound() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(Vec::new()))
+            .mount(&server)
+            .await;
+
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("response");
+        let body = read_response_body(response).await.expect("body");
+
+        assert!(body.is_empty());
+        assert!(body.capacity() >= MAX_RESPONSE_BYTES);
     }
 }
