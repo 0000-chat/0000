@@ -1100,6 +1100,11 @@ describe("tenant projection query RPCs", () => {
   it("does not expose query helpers on the Durable Object prototype and does not mutate tables", async () => {
     expect(Object.getOwnPropertyNames(TenantProjectionDO.prototype)).toEqual([
       "constructor",
+      "fetch",
+      "webSocketMessage",
+      "webSocketClose",
+      "webSocketError",
+      "alarm",
       "initialize",
       "getStatus",
       "applyBatch",

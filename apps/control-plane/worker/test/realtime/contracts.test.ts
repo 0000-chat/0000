@@ -122,6 +122,27 @@ describe("internal realtime contracts", () => {
     }).success).toBe(false);
   });
 
+  it("requires one position for every subscribed identity", () => {
+    const subscriptions = [
+      ...baseAttachment.subscriptions,
+      { identity_id: "identity_agent", families: ["projection"] },
+    ];
+
+    expect(RealtimeSocketAttachmentSchema.safeParse({
+      ...baseAttachment,
+      subscriptions,
+      positions: [baseAttachment.positions[0]],
+    }).success).toBe(false);
+    expect(RealtimeSocketAttachmentSchema.safeParse({
+      ...baseAttachment,
+      subscriptions,
+      positions: [
+        baseAttachment.positions[0],
+        { identity_id: "identity_agent", generation: 1, sequence: 42 },
+      ],
+    }).success).toBe(true);
+  });
+
   it("accepts a largest schema-valid attachment below the JSON guard", () => {
     const parsed = RealtimeSocketAttachmentSchema.parse(largestAttachment);
     expect(realtimeAttachmentJsonBytes(parsed)).toBeLessThan(MAX_REALTIME_ATTACHMENT_JSON_BYTES);

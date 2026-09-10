@@ -1139,7 +1139,11 @@ describe("tenant projection full-domain convergence proof", () => {
     expect(dispatch).toContain("assertNeverEventType");
 
     const domainsSource = projectorDomainsSource;
-    expect(tenantProjectionSource.match(/new Set<string>\(\)/g) ?? []).toHaveLength(1);
+    const applyPreparedBatchSource = tenantProjectionSource.slice(
+      tenantProjectionSource.indexOf("  #applyPreparedBatch("),
+      tenantProjectionSource.indexOf("  #writeReplayCheckpoint("),
+    );
+    expect(applyPreparedBatchSource.match(/new Set<string>\(\)/g) ?? []).toHaveLength(1);
     expect(tenantProjectionSource).toContain("const touchedConversations = new Set<string>();");
     expect(domainsSource).toContain("const conversationIds = [...touchedConversations].sort();");
     expect(domainsSource.match(/\[\.\.\.touchedConversations\]\.sort\(\)/g) ?? []).toHaveLength(1);

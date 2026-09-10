@@ -229,6 +229,13 @@ const RealtimeSocketAttachmentObjectSchema = z
         });
       }
     });
+    if (identities.size !== subscribedIdentities.size) {
+      context.addIssue({
+        code: "custom",
+        path: ["positions"],
+        message: "Every subscribed identity must have a position",
+      });
+    }
   });
 
 export const RealtimeSocketAttachmentSchema = z.preprocess(
