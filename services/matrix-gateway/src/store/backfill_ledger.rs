@@ -1,18 +1,22 @@
 //! Explicit backfill job creation and ownership transactions.
 
-use std::str;
+use std::{collections::HashSet, str};
 
 use chrono::DateTime;
 use rusqlite::{Row, TransactionBehavior, params, types::ValueRef};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
-    batch::BackfillJob,
+    batch::{self, BackfillJob, BatchWindow, WindowSource},
+    canonical::{self, CanonicalBatchInput, SourceCheckpoint},
+    config::{MAX_BATCH_CANONICAL_BYTES, MAX_EVENT_CANONICAL_BYTES},
     crypto::{AEAD_TAG_BYTES, Sealed},
     ledger::{
-        BackfillState, MAX_BACKFILL_PAGINATION_BYTES, MAX_BACKFILL_PARAMETERS_BYTES,
-        MAX_LEDGER_ID_BYTES, NewBackfillJob, STORE_BACKFILL_CONFLICT, STORE_BACKFILL_CORRUPT,
-        STORE_BACKFILL_INVALID, STORE_BACKFILL_NOT_READY, StoredBackfillJob,
+        BackfillState, MAX_BACKFILL_PAGE_BATCHES, MAX_BACKFILL_PAGINATION_BYTES,
+        MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES, NewBackfillJob,
+        STORE_BACKFILL_CONFLICT, STORE_BACKFILL_CORRUPT, STORE_BACKFILL_INVALID,
+        STORE_BACKFILL_NOT_READY, StoredBackfillJob,
     },
     model,
     secret::SafeError,
@@ -22,6 +26,7 @@ use super::Store;
 
 const BACKFILL_KIND_EXPLICIT: &str = "explicit";
 const BACKFILL_KIND_LIVE_GAP: &str = "live_gap";
+const BACKFILL_KIND_OUTBOX: &str = "backfill";
 const BACKFILL_PARAMETERS_COLUMN: &str = "parameters";
 const BACKFILL_PAGINATION_COLUMN: &str = "pagination";
 const BACKFILL_NONCE_BYTES: usize = 24;
@@ -41,6 +46,14 @@ const MAX_BACKFILL_JOB_ENVELOPE_BYTES: usize = MAX_BACKFILL_PARAMETERS_BYTES
     + MAX_LEDGER_ID_BYTES
     + BACKFILL_ROOM_ID_MAX_BYTES
     + (2 * BACKFILL_TIMESTAMP_MAX_BYTES);
+const BACKFILL_EXHAUSTED_SENTINEL: &[u8] = b"{\"schema_version\":1,\"state\":\"exhausted\"}";
+const BACKFILL_OUTBOX_SOURCE_KIND_MAX_BYTES: usize = "backfill".len();
+const BACKFILL_OUTBOX_STATE_MAX_BYTES: usize = "quarantined".len();
+const BACKFILL_OUTBOX_TIMESTAMP_MAX_BYTES: usize = 64;
+const BACKFILL_OUTBOX_TERMINAL_CODE_MAX_BYTES: usize = 64;
+const BACKFILL_OUTBOX_BATCH_ID_PREFIX: &str = "batch_";
+const BACKFILL_OUTBOX_REQUEST_MAX_CIPHERTEXT_BYTES: usize =
+    MAX_BATCH_CANONICAL_BYTES + AEAD_TAG_BYTES;
 
 struct StoredBackfillRow {
     job_id: String,
@@ -65,6 +78,30 @@ struct VerifiedBackfillRow {
     pagination: Option<Zeroizing<Vec<u8>>>,
     accepted_events: u64,
     created_at: String,
+}
+
+struct StoredBackfillOutboxRow {
+    batch_row_id: String,
+    source_kind: String,
+    window_id: Option<String>,
+    backfill_job_id: Option<String>,
+    ordinal: i64,
+    state: String,
+    request_cipher: Vec<u8>,
+    request_nonce: Vec<u8>,
+    request_key_version: i64,
+    request_sha256: Vec<u8>,
+    byte_count: i64,
+    attempt_count: i64,
+    next_attempt_at: String,
+    accepted_at: Option<String>,
+    terminal_code: Option<String>,
+}
+
+struct VerifiedBackfillOutboxRow {
+    batch_row_id: String,
+    ordinal: u64,
+    request: Zeroizing<Vec<u8>>,
 }
 
 impl Store {
@@ -188,6 +225,370 @@ impl Store {
         transaction.commit().map_err(|_| backfill_corrupt())?;
         Ok(stored)
     }
+
+    /// Persist one exact page for a running explicit backfill job.
+    pub fn checkpoint_backfill_page(
+        &mut self,
+        job_id: &str,
+        pagination: Option<&crate::secret::SecretBytes>,
+        window: &BatchWindow,
+        accepted_events: u64,
+    ) -> Result<(), SafeError> {
+        validate_checkpoint_input(job_id, pagination, window, accepted_events)?;
+        let pagination_bytes =
+            pagination.map_or(BACKFILL_EXHAUSTED_SENTINEL, |value| value.as_bytes());
+        let accepted_events_sql = i64::try_from(accepted_events).map_err(|_| backfill_invalid())?;
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let Some(row) = load_backfill_row(&transaction, job_id)? else {
+            return Err(backfill_not_ready());
+        };
+        match (row.kind.as_str(), row.live_window_id.as_deref()) {
+            (BACKFILL_KIND_EXPLICIT, None) => {}
+            (BACKFILL_KIND_LIVE_GAP, Some(_)) => return Err(backfill_not_ready()),
+            _ => return Err(backfill_corrupt()),
+        }
+        let state = BackfillState::from_str(&row.state).map_err(|_| backfill_corrupt())?;
+        let verified = verify_backfill_row(keyring, &row)?;
+        if state != BackfillState::Running {
+            return Err(backfill_not_ready());
+        }
+        if accepted_events < verified.accepted_events || accepted_events > verified.job.max_events()
+        {
+            return Err(backfill_invalid());
+        }
+
+        let existing_count = load_backfill_outbox_rows(&transaction, keyring, &verified.job)?;
+        if existing_count != 0 && verified.pagination.is_none() {
+            return Err(backfill_corrupt());
+        }
+
+        let page_start = find_page_start(&verified.job, &window.source_checkpoint, existing_count)?;
+        validate_page_sources(&verified.job, window, page_start)?;
+        let page_length = u64::try_from(window.batches.len()).map_err(|_| backfill_corrupt())?;
+        let page_end = page_start
+            .checked_add(page_length)
+            .ok_or_else(backfill_invalid)?;
+        if page_end > verified.job.max_events() {
+            return Err(backfill_invalid());
+        }
+
+        if page_start > existing_count {
+            return Err(backfill_invalid());
+        }
+        if page_start < existing_count {
+            if page_end > existing_count {
+                return Err(backfill_conflict());
+            }
+            validate_existing_page(
+                &transaction,
+                keyring,
+                &verified.job,
+                page_start,
+                page_end,
+                window,
+            )?;
+            if verified.accepted_events != accepted_events
+                || verified
+                    .pagination
+                    .as_ref()
+                    .is_none_or(|value| value.as_slice() != pagination_bytes)
+            {
+                return Err(backfill_conflict());
+            }
+            persist_backfill_checkpoint(
+                &transaction,
+                keyring,
+                &row,
+                &verified,
+                pagination_bytes,
+                accepted_events_sql,
+            )?;
+            transaction.commit().map_err(|_| backfill_corrupt())?;
+            return Ok(());
+        } else if page_length == 0
+            && verified.accepted_events == accepted_events
+            && verified
+                .pagination
+                .as_ref()
+                .is_some_and(|value| value.as_slice() == pagination_bytes)
+        {
+            persist_backfill_checkpoint(
+                &transaction,
+                keyring,
+                &row,
+                &verified,
+                pagination_bytes,
+                accepted_events_sql,
+            )?;
+            transaction.commit().map_err(|_| backfill_corrupt())?;
+            return Ok(());
+        }
+
+        let mut sealed_requests = Vec::with_capacity(window.batches.len());
+        for (offset, batch) in window.batches.iter().enumerate() {
+            let ordinal = page_start
+                .checked_add(u64::try_from(offset).map_err(|_| backfill_corrupt())?)
+                .ok_or_else(backfill_corrupt)?;
+            let collision: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM outbox_batches WHERE batch_row_id = ?1",
+                    [batch.batch_id.as_str()],
+                    |value| value.get(0),
+                )
+                .map_err(|_| backfill_corrupt())?;
+            if collision != 0 {
+                return Err(backfill_conflict());
+            }
+            let request = batch.exact_request_bytes();
+            let sealed = keyring
+                .seal(
+                    "outbox_batches",
+                    batch.batch_id.as_str(),
+                    "request",
+                    request,
+                )
+                .map_err(|_| backfill_invalid())?;
+            let request_sha256: [u8; 32] = Sha256::digest(request).into();
+            sealed_requests.push((
+                batch.batch_id.as_str(),
+                i64::try_from(ordinal).map_err(|_| backfill_invalid())?,
+                sealed,
+                request_sha256,
+                i64::try_from(request.len()).map_err(|_| backfill_invalid())?,
+            ));
+        }
+
+        for (batch_row_id, ordinal, sealed, request_sha256, byte_count) in sealed_requests {
+            transaction
+                .execute(
+                    "INSERT INTO outbox_batches
+                     (batch_row_id, source_kind, window_id, backfill_job_id,
+                      ordinal, state, request_cipher, request_nonce, request_key_version,
+                      request_sha256, byte_count, attempt_count, next_attempt_at,
+                      accepted_at, terminal_code)
+                     VALUES (?1, 'backfill', NULL, ?2, ?3, 'pending', ?4, ?5, ?6,
+                             ?7, ?8, 0, ?9, NULL, NULL)",
+                    params![
+                        batch_row_id,
+                        job_id,
+                        ordinal,
+                        sealed.ciphertext.as_slice(),
+                        sealed.nonce.as_slice(),
+                        i64::from(sealed.key_version),
+                        request_sha256.as_slice(),
+                        byte_count,
+                        window.archived_at.as_str(),
+                    ],
+                )
+                .map_err(|_| backfill_conflict())?;
+        }
+
+        persist_backfill_checkpoint(
+            &transaction,
+            keyring,
+            &row,
+            &verified,
+            pagination_bytes,
+            accepted_events_sql,
+        )?;
+        transaction.commit().map_err(|_| backfill_corrupt())?;
+        Ok(())
+    }
+}
+
+fn validate_checkpoint_input(
+    job_id: &str,
+    pagination: Option<&crate::secret::SecretBytes>,
+    window: &BatchWindow,
+    accepted_events: u64,
+) -> Result<(), SafeError> {
+    validate_job_id(job_id)?;
+    if window.batches.len() > MAX_BACKFILL_PAGE_BATCHES {
+        return Err(backfill_too_large());
+    }
+    if accepted_events > batch::MAX_BACKFILL_EVENTS || i64::try_from(accepted_events).is_err() {
+        return Err(backfill_invalid());
+    }
+    validate_input_timestamp(&window.archived_at)?;
+    validate_input_source_checkpoint(&window.source_checkpoint)?;
+    if let Some(pagination) = pagination {
+        if pagination.is_empty() {
+            return Err(backfill_invalid());
+        }
+        if pagination.len() > MAX_BACKFILL_PAGINATION_BYTES {
+            return Err(backfill_invalid());
+        }
+    }
+
+    let mut batch_ids = HashSet::with_capacity(window.batches.len());
+    for built in &window.batches {
+        validate_input_batch(window, built)?;
+        if !batch_ids.insert(built.batch_id.as_str()) {
+            return Err(backfill_invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_input_batch(window: &BatchWindow, built: &batch::BuiltBatch) -> Result<(), SafeError> {
+    let request_bytes = built.exact_request_bytes();
+    if request_bytes.is_empty() || request_bytes.len() > MAX_BATCH_CANONICAL_BYTES {
+        return Err(backfill_invalid());
+    }
+    let request =
+        batch::reparse_and_verify_request(request_bytes).map_err(|_| backfill_invalid())?;
+    if request != built.request
+        || request.events != built.events
+        || built.batch_id != request.batch_id
+        || request.archived_at != window.archived_at
+    {
+        return Err(backfill_invalid());
+    }
+    validate_input_source_checkpoint(&request.source_checkpoint)?;
+
+    let mut canonical_jsonl = Vec::new();
+    for event in &request.events {
+        let line =
+            canonical::canonical_event_json_line_bytes(event).map_err(|_| backfill_invalid())?;
+        let event_bytes = line.len().checked_sub(1).ok_or_else(backfill_invalid)?;
+        if event_bytes > MAX_EVENT_CANONICAL_BYTES {
+            return Err(backfill_invalid());
+        }
+        let next_len = canonical_jsonl
+            .len()
+            .checked_add(line.len())
+            .ok_or_else(backfill_invalid)?;
+        if next_len > MAX_BATCH_CANONICAL_BYTES {
+            return Err(backfill_invalid());
+        }
+        canonical_jsonl.extend_from_slice(&line);
+    }
+    let canonical_sha256 = canonical::sha256_hex(&canonical_jsonl);
+    let request_input = CanonicalBatchInput {
+        gateway_route_id: request.gateway_route_id.clone(),
+        tenant_id: request.tenant_id.clone(),
+        archived_at: request.archived_at.clone(),
+        producer_version: request.producer_version.clone(),
+        source_checkpoint: request.source_checkpoint.clone(),
+        events: request.events.clone(),
+    };
+    let identity_json = canonical::batch_identity_json(&request_input, &canonical_sha256)
+        .map_err(|_| backfill_invalid())?;
+    let expected_batch_id = format!("batch_{}", canonical::sha256_hex(&identity_json));
+    if built.canonical_jsonl != canonical_jsonl
+        || built.uncompressed_bytes != canonical_jsonl.len()
+        || built.canonical_sha256 != canonical_sha256
+        || built.identity_json != identity_json
+        || built.batch_id != expected_batch_id
+    {
+        return Err(backfill_invalid());
+    }
+    Ok(())
+}
+
+fn validate_input_timestamp(value: &str) -> Result<(), SafeError> {
+    if !model::valid_timestamp(value)
+        || DateTime::parse_from_rfc3339(value).is_err()
+        || !value.is_ascii()
+    {
+        return Err(backfill_invalid());
+    }
+    Ok(())
+}
+
+fn validate_input_source_checkpoint(checkpoint: &SourceCheckpoint) -> Result<(), SafeError> {
+    if checkpoint.kind != "matrix_backfill_run_sha256" || !valid_sha256_value(&checkpoint.value) {
+        return Err(backfill_invalid());
+    }
+    Ok(())
+}
+
+fn find_page_start(
+    job: &BackfillJob,
+    source_checkpoint: &SourceCheckpoint,
+    existing_count: u64,
+) -> Result<u64, SafeError> {
+    for ordinal in 0..=existing_count {
+        if expected_source_checkpoint(job, ordinal)? == *source_checkpoint {
+            return Ok(ordinal);
+        }
+    }
+    Err(backfill_not_ready())
+}
+
+fn validate_page_sources(
+    job: &BackfillJob,
+    window: &BatchWindow,
+    page_start: u64,
+) -> Result<(), SafeError> {
+    if expected_source_checkpoint(job, page_start)? != window.source_checkpoint {
+        return Err(backfill_invalid());
+    }
+    for (offset, built) in window.batches.iter().enumerate() {
+        let ordinal = page_start
+            .checked_add(u64::try_from(offset).map_err(|_| backfill_invalid())?)
+            .ok_or_else(backfill_invalid)?;
+        let request = batch::reparse_and_verify_request(built.exact_request_bytes())
+            .map_err(|_| backfill_invalid())?;
+        validate_request_job_scope(job, &request).map_err(|_| backfill_invalid())?;
+        if request.source_checkpoint != expected_source_checkpoint(job, ordinal)? {
+            return Err(backfill_invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_job_scope(
+    job: &BackfillJob,
+    request: &canonical::CanonicalBatchRequest,
+) -> Result<(), SafeError> {
+    if request.events.iter().any(|event| {
+        event.event_source != model::CanonicalEventSource::Backfill
+            || event.matrix_room_id.as_deref() != Some(job.room_id())
+    }) {
+        return Err(backfill_invalid());
+    }
+    Ok(())
+}
+
+fn expected_source_checkpoint(
+    job: &BackfillJob,
+    ordinal: u64,
+) -> Result<SourceCheckpoint, SafeError> {
+    let WindowSource::Backfill(checkpoint) = job.checkpoint(ordinal) else {
+        return Err(backfill_corrupt());
+    };
+    let max_events = checkpoint.max_events().to_string();
+    let batch_ordinal = checkpoint.batch_ordinal().to_string();
+    let digest = model::framed_hash_id(
+        "matrix-backfill-checkpoint-v1",
+        &[
+            checkpoint.job_id(),
+            checkpoint.room_id(),
+            checkpoint.start_at(),
+            checkpoint.end_at(),
+            &max_events,
+            &batch_ordinal,
+        ],
+    )
+    .map_err(|_| backfill_corrupt())?;
+    Ok(SourceCheckpoint {
+        kind: "matrix_backfill_run_sha256".to_owned(),
+        value: format!("sha256:{digest}"),
+    })
+}
+
+fn valid_sha256_value(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn load_backfill_row(
@@ -245,6 +646,278 @@ fn read_backfill_row(row: &Row<'_>) -> Result<StoredBackfillRow, SafeError> {
         cancelled_at: read_optional_text(row, 12, BACKFILL_TIMESTAMP_MAX_BYTES)?,
         terminal_code: read_optional_text(row, 13, BACKFILL_TERMINAL_CODE_MAX_BYTES)?,
     })
+}
+
+fn load_backfill_outbox_rows(
+    connection: &rusqlite::Connection,
+    keyring: &crate::crypto::Keyring,
+    job: &BackfillJob,
+) -> Result<u64, SafeError> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1",
+            [job.job_id()],
+            |row| row.get(0),
+        )
+        .map_err(|_| backfill_corrupt())?;
+    let count = u64::try_from(count).map_err(|_| backfill_corrupt())?;
+    if count > job.max_events() {
+        return Err(backfill_corrupt());
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT batch_row_id, source_kind, window_id, backfill_job_id,
+                    ordinal, state, request_cipher, request_nonce, request_key_version,
+                    request_sha256, byte_count, attempt_count, next_attempt_at,
+                    accepted_at, terminal_code
+             FROM outbox_batches
+             WHERE backfill_job_id = ?1
+             ORDER BY ordinal ASC",
+        )
+        .map_err(|_| backfill_corrupt())?;
+    let mut rows = statement
+        .query([job.job_id()])
+        .map_err(|_| backfill_corrupt())?;
+    let mut expected_ordinal = 0_u64;
+    while let Some(row) = rows.next().map_err(|_| backfill_corrupt())? {
+        let stored = read_backfill_outbox_row(row)?;
+        let checked = verify_backfill_outbox_row(keyring, job, stored)?;
+        if checked.ordinal != expected_ordinal {
+            return Err(backfill_corrupt());
+        }
+        expected_ordinal = expected_ordinal
+            .checked_add(1)
+            .ok_or_else(backfill_corrupt)?;
+    }
+    if expected_ordinal != count {
+        return Err(backfill_corrupt());
+    }
+    Ok(count)
+}
+
+fn validate_existing_page(
+    connection: &rusqlite::Connection,
+    keyring: &crate::crypto::Keyring,
+    job: &BackfillJob,
+    page_start: u64,
+    page_end: u64,
+    window: &BatchWindow,
+) -> Result<(), SafeError> {
+    let page_length = page_end
+        .checked_sub(page_start)
+        .ok_or_else(backfill_corrupt)?;
+    let limit = page_length
+        .checked_add(1)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(backfill_corrupt)?;
+    let page_start_sql = i64::try_from(page_start).map_err(|_| backfill_corrupt())?;
+    let page_end_sql = i64::try_from(page_end).map_err(|_| backfill_corrupt())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT batch_row_id, source_kind, window_id, backfill_job_id,
+                    ordinal, state, request_cipher, request_nonce, request_key_version,
+                    request_sha256, byte_count, attempt_count, next_attempt_at,
+                    accepted_at, terminal_code
+             FROM outbox_batches
+             WHERE backfill_job_id = ?1 AND ordinal >= ?2 AND ordinal < ?3
+             ORDER BY ordinal ASC LIMIT ?4",
+        )
+        .map_err(|_| backfill_corrupt())?;
+    let mut rows = statement
+        .query(params![job.job_id(), page_start_sql, page_end_sql, limit])
+        .map_err(|_| backfill_corrupt())?;
+    let mut offset = 0_usize;
+    while let Some(row) = rows.next().map_err(|_| backfill_corrupt())? {
+        if offset >= window.batches.len() {
+            return Err(backfill_corrupt());
+        }
+        let stored = verify_backfill_outbox_row(keyring, job, read_backfill_outbox_row(row)?)?;
+        let expected_ordinal = page_start
+            .checked_add(u64::try_from(offset).map_err(|_| backfill_corrupt())?)
+            .ok_or_else(backfill_corrupt)?;
+        let expected = &window.batches[offset];
+        if stored.ordinal != expected_ordinal
+            || stored.batch_row_id != expected.batch_id
+            || stored.request.as_slice() != expected.exact_request_bytes()
+        {
+            return Err(backfill_conflict());
+        }
+        offset = offset.checked_add(1).ok_or_else(backfill_corrupt)?;
+    }
+    if offset != window.batches.len() {
+        return Err(backfill_corrupt());
+    }
+    Ok(())
+}
+
+fn read_backfill_outbox_row(row: &Row<'_>) -> Result<StoredBackfillOutboxRow, SafeError> {
+    Ok(StoredBackfillOutboxRow {
+        batch_row_id: read_text(row, 0, MAX_LEDGER_ID_BYTES)?,
+        source_kind: read_text(row, 1, BACKFILL_OUTBOX_SOURCE_KIND_MAX_BYTES)?,
+        window_id: read_optional_text(row, 2, MAX_LEDGER_ID_BYTES)?,
+        backfill_job_id: read_optional_text(row, 3, MAX_LEDGER_ID_BYTES)?,
+        ordinal: read_integer(row, 4, 0, i64::from(u32::MAX))?,
+        state: read_text(row, 5, BACKFILL_OUTBOX_STATE_MAX_BYTES)?,
+        request_cipher: read_blob(
+            row,
+            6,
+            AEAD_TAG_BYTES,
+            BACKFILL_OUTBOX_REQUEST_MAX_CIPHERTEXT_BYTES,
+        )?,
+        request_nonce: read_blob(row, 7, BACKFILL_NONCE_BYTES, BACKFILL_NONCE_BYTES)?,
+        request_key_version: read_integer(row, 8, 1, i64::from(u32::MAX))?,
+        request_sha256: read_blob(row, 9, 32, 32)?,
+        byte_count: read_integer(row, 10, 1, MAX_BATCH_CANONICAL_BYTES as i64)?,
+        attempt_count: read_integer(row, 11, 0, i64::from(u32::MAX))?,
+        next_attempt_at: read_text(row, 12, BACKFILL_OUTBOX_TIMESTAMP_MAX_BYTES)?,
+        accepted_at: read_optional_text(row, 13, BACKFILL_OUTBOX_TIMESTAMP_MAX_BYTES)?,
+        terminal_code: read_optional_text(row, 14, BACKFILL_OUTBOX_TERMINAL_CODE_MAX_BYTES)?,
+    })
+}
+
+fn verify_backfill_outbox_row(
+    keyring: &crate::crypto::Keyring,
+    job: &BackfillJob,
+    row: StoredBackfillOutboxRow,
+) -> Result<VerifiedBackfillOutboxRow, SafeError> {
+    validate_batch_row_id(&row.batch_row_id)?;
+    if row.source_kind != BACKFILL_KIND_OUTBOX
+        || row.window_id.is_some()
+        || row.backfill_job_id.as_deref() != Some(job.job_id())
+    {
+        return Err(backfill_corrupt());
+    }
+    let ordinal = u64::try_from(row.ordinal).map_err(|_| backfill_corrupt())?;
+    if ordinal >= job.max_events() {
+        return Err(backfill_corrupt());
+    }
+    let state = row.state.as_str();
+    match state {
+        "pending" if row.accepted_at.is_none() && row.terminal_code.is_none() => {}
+        "accepted" if row.accepted_at.is_some() && row.terminal_code.is_none() => {
+            if row.attempt_count == 0 {
+                return Err(backfill_corrupt());
+            }
+        }
+        "quarantined" if row.accepted_at.is_none() && row.terminal_code.is_some() => {}
+        _ => return Err(backfill_corrupt()),
+    }
+    validate_timestamp(&row.next_attempt_at)?;
+    validate_optional_timestamp(row.accepted_at.as_deref())?;
+    validate_terminal_code(row.terminal_code.as_deref())?;
+
+    let byte_count = usize::try_from(row.byte_count).map_err(|_| backfill_corrupt())?;
+    let plaintext = open_outbox_value(
+        keyring,
+        row.batch_row_id.as_str(),
+        &row.request_cipher,
+        &row.request_nonce,
+        row.request_key_version,
+        byte_count,
+    )?;
+    if plaintext.len() != byte_count {
+        return Err(backfill_corrupt());
+    }
+    let request =
+        batch::reparse_and_verify_request(plaintext.as_bytes()).map_err(|_| backfill_corrupt())?;
+    let request_sha256: [u8; 32] = row
+        .request_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| backfill_corrupt())?;
+    if Sha256::digest(plaintext.as_bytes()).as_slice() != request_sha256
+        || request.batch_id != row.batch_row_id
+        || request.source_checkpoint != expected_source_checkpoint(job, ordinal)?
+    {
+        return Err(backfill_corrupt());
+    }
+    validate_request_job_scope(job, &request).map_err(|_| backfill_corrupt())?;
+
+    Ok(VerifiedBackfillOutboxRow {
+        batch_row_id: row.batch_row_id,
+        ordinal,
+        request: Zeroizing::new(plaintext.as_bytes().to_vec()),
+    })
+}
+
+fn validate_batch_row_id(value: &str) -> Result<(), SafeError> {
+    if value.len() != BACKFILL_OUTBOX_BATCH_ID_PREFIX.len() + 64
+        || !value.starts_with(BACKFILL_OUTBOX_BATCH_ID_PREFIX)
+        || !value[BACKFILL_OUTBOX_BATCH_ID_PREFIX.len()..]
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(backfill_corrupt());
+    }
+    Ok(())
+}
+
+fn persist_backfill_checkpoint(
+    transaction: &rusqlite::Transaction<'_>,
+    keyring: &crate::crypto::Keyring,
+    row: &StoredBackfillRow,
+    verified: &VerifiedBackfillRow,
+    pagination: &[u8],
+    accepted_events: i64,
+) -> Result<(), SafeError> {
+    let rotated_parameters = if row.key_version != i64::from(keyring.active_key_version()) {
+        let encoded = encode_job_parameters(&verified.job, verified.parameters.as_slice())?;
+        Some(
+            keyring
+                .seal(
+                    "backfill_jobs",
+                    row.job_id.as_str(),
+                    BACKFILL_PARAMETERS_COLUMN,
+                    encoded.as_slice(),
+                )
+                .map_err(|_| backfill_invalid())?,
+        )
+    } else {
+        None
+    };
+    let sealed_pagination = keyring
+        .seal(
+            "backfill_jobs",
+            row.job_id.as_str(),
+            BACKFILL_PAGINATION_COLUMN,
+            pagination,
+        )
+        .map_err(|_| backfill_invalid())?;
+    let parameters_cipher = rotated_parameters
+        .as_ref()
+        .map_or(row.parameters_cipher.as_slice(), |value| {
+            value.ciphertext.as_slice()
+        });
+    let parameters_nonce = rotated_parameters
+        .as_ref()
+        .map_or(row.parameters_nonce.as_slice(), |value| {
+            value.nonce.as_slice()
+        });
+    let key_version = i64::from(keyring.active_key_version());
+    let updated = transaction
+        .execute(
+            "UPDATE backfill_jobs
+             SET parameters_cipher = ?1, parameters_nonce = ?2,
+                 pagination_cipher = ?3, pagination_nonce = ?4,
+                 key_version = ?5, accepted_events = ?6
+             WHERE job_id = ?7 AND kind = 'explicit' AND live_window_id IS NULL
+               AND state = 'running'",
+            params![
+                parameters_cipher,
+                parameters_nonce,
+                sealed_pagination.ciphertext.as_slice(),
+                sealed_pagination.nonce.as_slice(),
+                key_version,
+                accepted_events,
+                row.job_id.as_str(),
+            ],
+        )
+        .map_err(|_| backfill_corrupt())?;
+    if updated != 1 {
+        return Err(backfill_corrupt());
+    }
+    Ok(())
 }
 
 fn verify_backfill_row(
@@ -461,6 +1134,45 @@ fn open_backfill_value(
             "backfill_jobs",
             job_id,
             column,
+            &Sealed {
+                nonce,
+                ciphertext: ciphertext.to_vec(),
+                key_version,
+            },
+        )
+        .map_err(|_| backfill_corrupt())?;
+    if plaintext.is_empty() || plaintext.len() > max_plaintext_bytes {
+        return Err(backfill_corrupt());
+    }
+    Ok(plaintext)
+}
+
+fn open_outbox_value(
+    keyring: &crate::crypto::Keyring,
+    batch_row_id: &str,
+    ciphertext: &[u8],
+    nonce: &[u8],
+    key_version: i64,
+    max_plaintext_bytes: usize,
+) -> Result<crate::crypto::Plaintext, SafeError> {
+    let max_ciphertext_bytes = max_plaintext_bytes
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(backfill_corrupt)?;
+    if !(AEAD_TAG_BYTES..=max_ciphertext_bytes).contains(&ciphertext.len())
+        || nonce.len() != BACKFILL_NONCE_BYTES
+    {
+        return Err(backfill_corrupt());
+    }
+    let nonce: [u8; BACKFILL_NONCE_BYTES] = nonce.try_into().map_err(|_| backfill_corrupt())?;
+    let key_version = u32::try_from(key_version)
+        .ok()
+        .filter(|version| *version != 0)
+        .ok_or_else(backfill_corrupt)?;
+    let plaintext = keyring
+        .open(
+            "outbox_batches",
+            batch_row_id,
+            "request",
             &Sealed {
                 nonce,
                 ciphertext: ciphertext.to_vec(),

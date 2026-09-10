@@ -6,12 +6,18 @@ use std::{
 
 use chrono::{DateTime, TimeZone, Utc};
 use communicator_matrix_gateway::{
-    batch::BackfillJob,
+    batch::{BackfillJob, BatchWindow, RoutedEvent, build_window},
+    canonical::canonical_event_json_line_bytes,
     crypto::Keyring,
     ledger::{
         BackfillState, NewBackfillJob, STORE_BACKFILL_CONFLICT, STORE_BACKFILL_CORRUPT,
         STORE_BACKFILL_INVALID, STORE_BACKFILL_NOT_READY,
     },
+    model::{
+        CanonicalEvent, CanonicalEventSource, CanonicalPayload, DeliveryStatus, Direction,
+        MessageCreatedPayload, Provider,
+    },
+    secret::SecretBytes,
     store::Store,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -72,6 +78,56 @@ fn new_job(job: &BackfillJob, parameters: &[u8]) -> NewBackfillJob {
     .expect("construct valid new backfill job")
 }
 
+fn checkpoint_event(event_id: &str) -> CanonicalEvent {
+    CanonicalEvent::new(
+        event_id,
+        CanonicalEventSource::Backfill,
+        "tenant_demo",
+        "identity_demo",
+        Provider::Whatsapp,
+        "account_demo",
+        "conversation_demo",
+        Some(ROOM_ID.to_owned()),
+        Some(format!("${event_id}:example.test")),
+        None,
+        "2023-11-14T22:13:21.000Z",
+        "2023-11-14T22:13:22.000Z",
+        CanonicalPayload::MessageCreated(MessageCreatedPayload {
+            message_id: "message_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            direction: Direction::Inbound,
+            sender_participant_id: Some(
+                "participant_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_owned(),
+            ),
+            sender_label: "Alice".to_owned(),
+            body: "checkpoint".to_owned(),
+            reply_to_message_id: None,
+            delivery_status: DeliveryStatus::Unknown,
+            unread: true,
+        }),
+    )
+    .expect("construct valid checkpoint event")
+}
+
+fn checkpoint_window(job: &BackfillJob, ordinal: u64, event_id: &str) -> BatchWindow {
+    build_window(
+        job.checkpoint(ordinal),
+        timestamp(1_700_000_000_001 + i64::try_from(ordinal).expect("test ordinal fits")),
+        &[RoutedEvent::new("route_demo", checkpoint_event(event_id))],
+    )
+    .expect("construct checkpoint window")
+}
+
+fn empty_checkpoint_window(job: &BackfillJob, ordinal: u64) -> BatchWindow {
+    build_window(
+        job.checkpoint(ordinal),
+        timestamp(1_700_000_000_001 + i64::try_from(ordinal).expect("test ordinal fits")),
+        &[],
+    )
+    .expect("construct empty checkpoint window")
+}
+
 fn sqlite_storage_bytes(path: &Path) -> Vec<u8> {
     let mut bytes = fs::read(path).expect("read sqlite database bytes");
     for suffix in ["-wal", "-shm"] {
@@ -126,6 +182,354 @@ fn creates_and_begins_explicit_job_with_exact_job_and_parameters() {
     assert_eq!(stored.parameters().as_bytes(), PARAMETERS);
     assert!(stored.pagination().is_none());
     assert_eq!(stored.accepted_events(), 0);
+}
+
+#[test]
+fn checkpoints_one_running_page_and_reopens_the_exact_state() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let window = build_window(
+        job.checkpoint(0),
+        timestamp(1_700_000_000_001),
+        &[RoutedEvent::new(
+            "route_demo",
+            checkpoint_event("evt_checkpoint"),
+        )],
+    )
+    .expect("construct checkpoint window");
+    let request = window.batches[0].exact_request_bytes().to_vec();
+    let canonical_line = canonical_event_json_line_bytes(&window.batches[0].events[0])
+        .expect("construct canonical event line");
+
+    {
+        let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+        store
+            .create_backfill_job(new_job(&job, PARAMETERS))
+            .expect("create explicit backfill job");
+        store
+            .begin_or_resume_backfill_job(JOB_ID)
+            .expect("begin explicit backfill job");
+        store
+            .checkpoint_backfill_page(
+                JOB_ID,
+                Some(
+                    &SecretBytes::from_text(b"next-page", 64 * 1024)
+                        .expect("construct pagination token"),
+                ),
+                &window,
+                1,
+            )
+            .expect("checkpoint explicit backfill page");
+    }
+
+    let connection = Connection::open(&path).expect("open sqlite database for inspection");
+    let (state, accepted_events, pagination_cipher, outbox_count, byte_count): (
+        String,
+        i64,
+        Vec<u8>,
+        i64,
+        i64,
+    ) = connection
+        .query_row(
+            "SELECT j.state, j.accepted_events, j.pagination_cipher,
+                    (SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = j.job_id),
+                    (SELECT byte_count FROM outbox_batches WHERE backfill_job_id = j.job_id)
+             FROM backfill_jobs AS j WHERE j.job_id = ?1",
+            [JOB_ID],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read checkpoint state");
+    assert_eq!(state, "running");
+    assert_eq!(accepted_events, 1);
+    assert!(!pagination_cipher.is_empty());
+    assert_eq!(outbox_count, 1);
+    assert_eq!(byte_count as usize, request.len());
+    assert_storage_excludes(&sqlite_storage_bytes(&path), &canonical_line);
+
+    let mut store = Store::open(&path, test_keyring()).expect("reopen gateway store");
+    let stored = store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("resume checkpointed job");
+    assert_eq!(
+        stored.pagination().expect("stored pagination").as_bytes(),
+        b"next-page"
+    );
+    assert_eq!(stored.accepted_events(), 1);
+}
+
+#[test]
+fn checkpoints_contiguous_pages_and_replays_exact_page_bytes() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let page_zero = checkpoint_window(&job, 0, "evt_page_zero");
+    let page_one = checkpoint_window(&job, 1, "evt_page_one");
+    let gap = checkpoint_window(&job, 3, "evt_gap");
+    let token_zero = SecretBytes::from_text(b"page-zero", 64 * 1024).expect("page token");
+    let token_one = SecretBytes::from_text(b"page-one", 64 * 1024).expect("page token");
+
+    let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+    store
+        .create_backfill_job(new_job(&job, PARAMETERS))
+        .expect("create explicit backfill job");
+    store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("begin explicit backfill job");
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&token_zero), &page_zero, 1)
+        .expect("checkpoint first page");
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&token_zero), &page_zero, 1)
+        .expect("replay first page");
+
+    let error = store
+        .checkpoint_backfill_page(JOB_ID, Some(&token_one), &gap, 2)
+        .expect_err("a page with a gap must be rejected");
+    assert_eq!(error.code(), STORE_BACKFILL_NOT_READY);
+
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&token_one), &page_one, 2)
+        .expect("checkpoint second page");
+
+    let connection = Connection::open(&path).expect("open sqlite database for inspection");
+    let ordinals: Vec<i64> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT ordinal FROM outbox_batches
+                 WHERE backfill_job_id = ?1 ORDER BY ordinal",
+            )
+            .expect("prepare ordinal query");
+        statement
+            .query_map([JOB_ID], |row| row.get(0))
+            .expect("query ordinals")
+            .collect::<Result<_, _>>()
+            .expect("collect ordinals")
+    };
+    assert_eq!(ordinals, vec![0, 1]);
+}
+
+#[test]
+fn checkpoint_none_persists_encrypted_exhaustion_distinct_from_sql_null() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let empty = empty_checkpoint_window(&job, 0);
+
+    let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+    store
+        .create_backfill_job(new_job(&job, PARAMETERS))
+        .expect("create explicit backfill job");
+    store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("begin explicit backfill job");
+    let null_before: Option<Vec<u8>> = Connection::open(&path)
+        .expect("open sqlite database")
+        .query_row(
+            "SELECT pagination_cipher FROM backfill_jobs WHERE job_id = ?1",
+            [JOB_ID],
+            |row| row.get(0),
+        )
+        .expect("read initial pagination");
+    assert!(null_before.is_none());
+
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &empty, 0)
+        .expect("checkpoint exhausted empty page");
+    drop(store);
+
+    let keyring = test_keyring();
+    let connection = Connection::open(&path).expect("open sqlite database for inspection");
+    let (cipher, nonce, key_version): (Vec<u8>, Vec<u8>, i64) = connection
+        .query_row(
+            "SELECT pagination_cipher, pagination_nonce, key_version
+             FROM backfill_jobs WHERE job_id = ?1",
+            [JOB_ID],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read encrypted exhaustion");
+    let plaintext = keyring
+        .open(
+            "backfill_jobs",
+            JOB_ID,
+            "pagination",
+            &communicator_matrix_gateway::crypto::Sealed {
+                nonce: nonce.try_into().expect("pagination nonce length"),
+                ciphertext: cipher,
+                key_version: u32::try_from(key_version).expect("key version fits"),
+            },
+        )
+        .expect("open exhaustion sentinel");
+    assert_eq!(
+        plaintext.as_bytes(),
+        br#"{"schema_version":1,"state":"exhausted"}"#
+    );
+
+    let mut reopened = Store::open(&path, test_keyring()).expect("reopen gateway store");
+    let stored = reopened
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("resume exhausted running job");
+    assert_eq!(
+        stored
+            .pagination()
+            .expect("exhaustion checkpoint")
+            .as_bytes(),
+        br#"{"schema_version":1,"state":"exhausted"}"#
+    );
+    assert_eq!(stored.accepted_events(), 0);
+}
+
+#[test]
+fn rotated_checkpoint_reseals_parameters_and_pagination_together() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let page_zero = checkpoint_window(&job, 0, "evt_rotation_zero");
+    let page_one = checkpoint_window(&job, 1, "evt_rotation_one");
+    let token_zero = SecretBytes::from_text(b"rotation-zero", 64 * 1024).expect("page token");
+
+    {
+        let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+        store
+            .create_backfill_job(new_job(&job, PARAMETERS))
+            .expect("create explicit backfill job");
+        store
+            .begin_or_resume_backfill_job(JOB_ID)
+            .expect("begin explicit backfill job");
+        store
+            .checkpoint_backfill_page(JOB_ID, Some(&token_zero), &page_zero, 1)
+            .expect("checkpoint first page");
+    }
+
+    let rotated = Keyring::new([0x22; 32], 2)
+        .expect("construct rotated keyring")
+        .with_decryption_key(1, [0x11; 32])
+        .expect("retain old key");
+    let mut store = Store::open(&path, rotated).expect("open rotated gateway store");
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &page_one, 2)
+        .expect("checkpoint under rotated key");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open sqlite database for inspection");
+    let versions: (i64, Vec<u8>, i64) = connection
+        .query_row(
+            "SELECT key_version, pagination_cipher,
+                    (SELECT request_key_version FROM outbox_batches
+                     WHERE backfill_job_id = ?1 AND ordinal = 0)
+             FROM backfill_jobs WHERE job_id = ?1",
+            [JOB_ID],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read rotated versions");
+    assert_eq!(versions.0, 2);
+    assert!(!versions.1.is_empty());
+    assert_eq!(versions.2, 1);
+}
+
+#[test]
+fn exact_page_replay_after_key_rotation_does_not_duplicate_outbox_rows() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let page = checkpoint_window(&job, 0, "evt_rotation_replay");
+    let token = SecretBytes::from_text(b"rotation-replay", 64 * 1024).expect("page token");
+
+    {
+        let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+        store
+            .create_backfill_job(new_job(&job, PARAMETERS))
+            .expect("create explicit backfill job");
+        store
+            .begin_or_resume_backfill_job(JOB_ID)
+            .expect("begin explicit backfill job");
+        store
+            .checkpoint_backfill_page(JOB_ID, Some(&token), &page, 1)
+            .expect("checkpoint first page");
+    }
+
+    let rotated = Keyring::new([0x22; 32], 2)
+        .expect("construct rotated keyring")
+        .with_decryption_key(1, [0x11; 32])
+        .expect("retain old key");
+    let mut store = Store::open(&path, rotated).expect("open rotated gateway store");
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&token), &page, 1)
+        .expect("replay page under rotated key");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open sqlite database for inspection");
+    let (count, key_version): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1),
+                    key_version
+             FROM backfill_jobs WHERE job_id = ?1",
+            [JOB_ID],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read replay state");
+    assert_eq!(count, 1);
+    assert_eq!(key_version, 2);
+}
+
+#[test]
+fn checkpoint_rejects_backfill_events_from_another_room_or_source() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let mut wrong_room_event = checkpoint_event("evt_wrong_room");
+    wrong_room_event.matrix_room_id = Some("!other:example.test".to_owned());
+    let wrong_room = build_window(
+        job.checkpoint(0),
+        timestamp(1_700_000_000_001),
+        &[RoutedEvent::new("route_demo", wrong_room_event)],
+    )
+    .expect("construct wrong-room window");
+    let mut wrong_source_event = checkpoint_event("evt_wrong_source");
+    wrong_source_event.event_source = CanonicalEventSource::Live;
+    let wrong_source = build_window(
+        job.checkpoint(0),
+        timestamp(1_700_000_000_001),
+        &[RoutedEvent::new("route_demo", wrong_source_event)],
+    )
+    .expect("construct wrong-source window");
+    let token = SecretBytes::from_text(b"next-page", 64 * 1024).expect("page token");
+
+    let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+    store
+        .create_backfill_job(new_job(&job, PARAMETERS))
+        .expect("create explicit backfill job");
+    store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("begin explicit backfill job");
+
+    for window in [&wrong_room, &wrong_source] {
+        let error = store
+            .checkpoint_backfill_page(JOB_ID, Some(&token), window, 1)
+            .expect_err("foreign event metadata must be rejected");
+        assert_eq!(error.code(), STORE_BACKFILL_INVALID);
+    }
+
+    let connection = Connection::open(&path).expect("open sqlite database for inspection");
+    let (accepted_events, outbox_count): (i64, i64) = connection
+        .query_row(
+            "SELECT accepted_events,
+                    (SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1)
+             FROM backfill_jobs WHERE job_id = ?1",
+            [JOB_ID],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read unchanged state");
+    assert_eq!(accepted_events, 0);
+    assert_eq!(outbox_count, 0);
 }
 
 #[test]
