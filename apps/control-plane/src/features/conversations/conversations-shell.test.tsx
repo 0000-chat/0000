@@ -7,7 +7,12 @@ import { pilotScenario } from "@communicator/test-fixtures";
 import { renderApp } from "@/test/render-app";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 import { queryKeys } from "@/lib/api/query-keys";
-import type { RealtimeProjectionChangesFrame, RealtimeResetRequiredFrame } from "@communicator/contracts";
+import type { SimulatedRealtimeClient } from "@/lib/realtime/simulated-client";
+import type {
+  RealtimeProjectionChangesFrame,
+  RealtimeResetRequiredFrame,
+  SessionResponse,
+} from "@communicator/contracts";
 
 afterEach(() => {
   runtimeRealtimeClient?.close();
@@ -152,6 +157,65 @@ describe("ConversationsShell", () => {
       identityIds: ["identity_agent"],
       families: ["projection"],
     });
+  });
+
+  it("resets the sequence gate when the principal changes without changing identity", async () => {
+    const connect = vi.spyOn(runtimeRealtimeClient!, "connect");
+    const { queryClient } = renderApp("/conversations?identity=identity_human");
+
+    await screen.findByRole("heading", { name: "All conversations" });
+    await screen.findAllByTestId("conversation-row");
+    await waitFor(() => expect(connect).toHaveBeenCalledWith({
+      tenantId: "tenant_pilot",
+      principalId: "principal_pilot",
+      identityIds: ["identity_human"],
+      families: ["projection"],
+    }));
+
+    const simulatedClient = runtimeRealtimeClient as SimulatedRealtimeClient;
+    const familyRow = () => screen.getAllByTestId("conversation-row").find(
+      (row) => row.getAttribute("data-conversation-id") === "conversation_human_whatsapp_family",
+    )!;
+    const publishMessage = (lastMessagePreview: string) => simulatedClient.publishMessage({
+      tenantId: "tenant_pilot",
+      identityId: "identity_human",
+      connectionId: "connection_human_whatsapp",
+      conversationId: "conversation_human_whatsapp_family",
+      lastMessagePreview,
+      lastActivityAt: "2026-09-11T00:00:00.000Z",
+      unreadDelta: 0,
+    });
+
+    queryClient.setQueryData(queryKeys.channels("identity_agent"), ["agent cache"]);
+    publishMessage("High sequence update");
+    publishMessage("Higher sequence update");
+    expect(simulatedClient.lastSequence).toBe(2);
+    await waitFor(() => expect(familyRow()).toHaveTextContent("Higher sequence update"));
+
+    const session = queryClient.getQueryData<SessionResponse>(queryKeys.session);
+    expect(session).toBeDefined();
+    queryClient.setQueryData<SessionResponse>(queryKeys.session, {
+      ...session!,
+      principal: {
+        ...session!.principal,
+        id: "principal_reconnected",
+        display_name: "Reconnected operator",
+      },
+    });
+
+    await waitFor(() => expect(connect).toHaveBeenLastCalledWith({
+      tenantId: "tenant_pilot",
+      principalId: "principal_reconnected",
+      identityIds: ["identity_human"],
+      families: ["projection"],
+    }));
+    expect(connect).toHaveBeenCalledTimes(2);
+
+    simulatedClient.reset();
+    publishMessage("Lower sequence after reconnect");
+
+    await waitFor(() => expect(familyRow()).toHaveTextContent("Lower sequence after reconnect"));
+    expect(queryClient.getQueryData(queryKeys.channels("identity_agent"))).toEqual(["agent cache"]);
   });
 
   it("does not connect when the authenticated session has no identity", async () => {

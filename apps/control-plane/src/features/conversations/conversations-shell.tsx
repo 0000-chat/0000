@@ -83,12 +83,20 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
   const acceptedSequenceRef = useRef(0);
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
-  const activeScopeRef = useRef({ tenantId: session?.tenant.id ?? "", identityId });
-  activeScopeRef.current = { tenantId: session?.tenant.id ?? "", identityId };
+  const activeScopeRef = useRef({
+    tenantId: session?.tenant.id ?? "",
+    principalId: session?.principal.id ?? "",
+    identityId,
+  });
+  activeScopeRef.current = {
+    tenantId: session?.tenant.id ?? "",
+    principalId: session?.principal.id ?? "",
+    identityId,
+  };
 
   useEffect(() => {
     acceptedSequenceRef.current = 0;
-  }, [activeIdentity?.tenant_id, identityId]);
+  }, [activeIdentity?.tenant_id, identityId, session?.principal.id]);
 
   useEffect(() => {
     if (!runtimeRealtimeClient || !session || !identityId) return;
@@ -97,7 +105,11 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     const principalId = session.principal.id;
     const unsubscribe = runtimeRealtimeClient.subscribe((event) => {
       const currentScope = activeScopeRef.current;
-      if (currentScope.identityId !== subscribedIdentityId || currentScope.tenantId !== tenantId) {
+      if (
+        currentScope.identityId !== subscribedIdentityId
+        || currentScope.tenantId !== tenantId
+        || currentScope.principalId !== principalId
+      ) {
         return;
       }
       const update = prepareConversationEvent({
