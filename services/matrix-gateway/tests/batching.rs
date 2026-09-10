@@ -582,6 +582,62 @@ fn backfill_checkpoint_digest_uses_only_the_frozen_length_prefixed_tuple() {
 }
 
 #[test]
+fn backfill_ingestion_contract_vector_matches_rust_batching() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../testdata/ingestion-contract-backfill-v1.json"
+    ))
+    .expect("backfill ingestion contract fixture is valid JSON");
+    let mut event = message_event(
+        "tenant_demo",
+        "evt_backfill_contract",
+        OBSERVED_AT,
+        OCCURRED_AT,
+        "backfill",
+    );
+    event.event_source = CanonicalEventSource::Backfill;
+    let job = BackfillJob::new(
+        BACKFILL_JOB_ID,
+        ROOM_ID,
+        BACKFILL_START,
+        BACKFILL_END,
+        100_000,
+    )
+    .expect("valid UUIDv7 backfill job");
+    let window = build_window(
+        job.checkpoint(0),
+        timestamp(OBSERVED_AT),
+        &[routed("route_demo", event)],
+    )
+    .expect("backfill vector window");
+    let batch = &window.batches[0];
+    assert_eq!(
+        serde_json::from_slice::<Value>(batch.exact_request_bytes()).expect("request JSON"),
+        fixture.get("request").cloned().expect("fixture request"),
+    );
+    assert_eq!(
+        String::from_utf8(batch.canonical_jsonl.clone()).expect("UTF-8 JSONL"),
+        fixture
+            .get("canonical_jsonl")
+            .and_then(Value::as_str)
+            .expect("fixture canonical JSONL"),
+    );
+    assert_eq!(
+        batch.canonical_sha256,
+        fixture
+            .get("canonical_sha256")
+            .and_then(Value::as_str)
+            .expect("fixture canonical digest"),
+    );
+    assert_eq!(
+        batch.batch_id,
+        fixture["request"]
+            .get("batch_id")
+            .and_then(Value::as_str)
+            .expect("fixture batch ID"),
+    );
+}
+
+#[test]
 fn request_events_remain_unique_and_each_batch_has_one_tenant_and_route() {
     let mut events = Vec::new();
     for (tenant, route) in [

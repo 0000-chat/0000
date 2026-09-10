@@ -150,10 +150,29 @@ const ProducerVersionSchema = z
     message: "Producer version cannot have leading or trailing whitespace",
   });
 
-export const MatrixCheckpointDigestSchema = strictObject({
-  kind: z.literal("matrix_sync_token_sha256"),
-  value: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-});
+const MatrixCheckpointDigestValueSchema = z
+  .string()
+  .regex(/^sha256:[0-9a-f]{64}$/);
+
+const MatrixCheckpointDigestObjectSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("matrix_sync_token_sha256"),
+      value: MatrixCheckpointDigestValueSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("matrix_backfill_run_sha256"),
+      value: MatrixCheckpointDigestValueSchema,
+    })
+    .strict(),
+]);
+
+export const MatrixCheckpointDigestSchema = z.preprocess(
+  snapshotStrictObjectInput,
+  MatrixCheckpointDigestObjectSchema,
+);
 
 export type MatrixCheckpointDigest = z.infer<
   typeof MatrixCheckpointDigestSchema
