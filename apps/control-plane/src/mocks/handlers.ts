@@ -157,12 +157,7 @@ export const handlers = [
     }
     const messageMode = simulatedStore.selectedMessageMode();
     if (messageMode === "error") {
-      return HttpResponse.json({
-        error: {
-          code: "service_unavailable",
-          message: "private backend detail",
-        },
-      }, { status: 503 });
+      return errorResponse(503, "service_unavailable");
     }
     const conversationId = String(params.conversationId);
     if (!simulatedStore.conversation(identityId, conversationId)) {

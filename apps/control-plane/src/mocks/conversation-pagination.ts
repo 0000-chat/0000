@@ -42,6 +42,14 @@ function decodeCursor(cursor: string) {
   }
 }
 
+const parseOccurredMilliseconds = (timestamp: string): number => {
+  const milliseconds = Date.parse(timestamp);
+  if (!Number.isSafeInteger(milliseconds)) {
+    throw new Error("invalid message timestamp");
+  }
+  return milliseconds;
+};
+
 export function paginateConversations(
   source: readonly ConversationSummary[],
   options: { limit?: number; cursor?: string },
@@ -81,9 +89,12 @@ export function paginateMessages(
   const limit = options.limit ?? 50;
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { ok: false };
 
-  const items = source.toSorted((left, right) =>
-    right.occurred_at.localeCompare(left.occurred_at)
-    || left.id.localeCompare(right.id));
+  const items = source.toSorted((left, right) => {
+    const leftOccurredMs = parseOccurredMilliseconds(left.occurred_at);
+    const rightOccurredMs = parseOccurredMilliseconds(right.occurred_at);
+    if (leftOccurredMs !== rightOccurredMs) return rightOccurredMs > leftOccurredMs ? 1 : -1;
+    return left.id.localeCompare(right.id);
+  });
   let start = 0;
   if (options.cursor) {
     let decoded: z.infer<typeof MessageCursorSchema>;

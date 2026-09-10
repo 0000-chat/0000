@@ -1387,7 +1387,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
 
       const rows = this.ctx.storage.sql
         .exec<ChannelStatQueryRow>(
-          "SELECT connection_id, SUM(unread_count) AS unread_count, MAX(last_activity_at) AS last_activity_at FROM conversations WHERE identity_id = ? AND deleted_at IS NULL GROUP BY connection_id ORDER BY connection_id ASC LIMIT 65",
+          "WITH channel_stats AS (SELECT connection_id, SUM(unread_count) AS unread_count, MAX(last_activity_ms) AS last_activity_ms FROM conversations WHERE identity_id = ? AND deleted_at IS NULL GROUP BY connection_id) SELECT channel_stats.connection_id, channel_stats.unread_count, (SELECT conversations.last_activity_at FROM conversations WHERE conversations.identity_id = ? AND conversations.connection_id = channel_stats.connection_id AND conversations.deleted_at IS NULL AND conversations.last_activity_ms = channel_stats.last_activity_ms ORDER BY conversations.id ASC LIMIT 1) AS last_activity_at FROM channel_stats ORDER BY channel_stats.connection_id ASC LIMIT 65",
+          parsed.identity_id,
           parsed.identity_id,
         )
         .toArray();

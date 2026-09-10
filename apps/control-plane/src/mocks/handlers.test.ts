@@ -232,6 +232,26 @@ describe("simulated API handlers", () => {
     expect(secondPage.next_cursor).toBeNull();
   });
 
+  it("returns the bounded generic error for simulated message failures", async () => {
+    const reset = await fetch("http://example.test/api/v1/testing/reset", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ message_mode: "error" }),
+    });
+    expect(reset.status).toBe(200);
+
+    const response = await fetch(
+      "http://example.test/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent",
+    );
+    expect(response.status).toBe(503);
+    expect(await json(response)).toEqual({
+      error: {
+        code: "service_unavailable",
+        message: "Service unavailable",
+      },
+    });
+  });
+
   it.each([
     "/api/v1/identities/identity_human/conversations?limit=2&limit=1",
     "/api/v1/identities/identity_human/conversations?unexpected=value",
