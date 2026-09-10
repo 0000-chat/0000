@@ -14,6 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use rand_core::{OsRng, RngCore};
 use reqwest::{
     StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE},
@@ -26,6 +27,8 @@ use crate::{config::OAuthClientAuthMethod, secret::SafeError};
 
 /// Maximum number of bytes retained from either an OAuth or ingestion body.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+/// Maximum OAuth token lifetime accepted from the ingestion worker contract.
+pub const MAX_OAUTH_TOKEN_TTL_SECONDS: u64 = 300;
 
 const INGESTION_PATH: &str = "/internal/v1/ingestion/batches";
 const OAUTH_INVALID_URL: &str = "oauth_invalid_url";
@@ -227,6 +230,8 @@ pub struct RetryPolicy {
     pub base_delay: Duration,
     /// Maximum calculated exponential-backoff delay.
     pub max_delay: Duration,
+    /// Maximum random jitter added to calculated backoff.
+    pub jitter: Duration,
     /// Maximum delay accepted from Retry-After.
     pub max_retry_after: Duration,
 }
@@ -237,6 +242,7 @@ impl Default for RetryPolicy {
             max_attempts: 3,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(5),
+            jitter: Duration::from_millis(100),
             max_retry_after: Duration::from_secs(30),
         }
     }
@@ -379,6 +385,7 @@ impl OAuthTokenProvider {
         if !parsed.token_type.eq_ignore_ascii_case("bearer")
             || parsed.access_token.is_empty()
             || parsed.expires_in == 0
+            || parsed.expires_in > MAX_OAUTH_TOKEN_TTL_SECONDS
         {
             return Err(SafeError::new(OAUTH_TOKEN_INVALID));
         }
@@ -539,10 +546,20 @@ impl IngestionClient {
             }
 
             if status == StatusCode::ACCEPTED {
-                return parse_accepted_response(response, batch).await;
+                match parse_accepted_response(response, batch).await {
+                    Ok(delivery) => return Ok(delivery),
+                    Err(error) if error.class() == DeliveryErrorClass::Retryable => {
+                        if attempt < max_attempts {
+                            sleep_for(Some(retry_delay(&self.retry_policy, attempt))).await;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS {
+            if is_retryable_status(status) {
                 let retry_after = bounded_retry_after(
                     response.headers().get("retry-after"),
                     self.retry_policy.max_retry_after,
@@ -555,22 +572,15 @@ impl IngestionClient {
                     .await;
                     continue;
                 }
+                let code = if status == StatusCode::TOO_MANY_REQUESTS {
+                    INGESTION_RATE_LIMITED
+                } else {
+                    INGESTION_SERVER_FAILED
+                };
                 return Err(DeliveryError::with_retry_after(
                     DeliveryErrorClass::Retryable,
-                    INGESTION_RATE_LIMITED,
+                    code,
                     retry_after,
-                ));
-            }
-
-            if is_retryable_status(status) {
-                drop(response);
-                if attempt < max_attempts {
-                    sleep_for(Some(retry_delay(&self.retry_policy, attempt))).await;
-                    continue;
-                }
-                return Err(DeliveryError::new(
-                    DeliveryErrorClass::Retryable,
-                    INGESTION_SERVER_FAILED,
                 ));
             }
 
@@ -591,7 +601,7 @@ impl IngestionClient {
             .post(self.endpoint.clone())
             .header(ACCEPT, "application/json")
             .header(AUTHORIZATION, format!("Bearer {}", token.as_str()))
-            .header(CONTENT_TYPE, "application/x-ndjson")
+            .header(CONTENT_TYPE, "application/json")
             .header(CONTENT_ENCODING, "identity")
             .header("x-tenant-id", batch.tenant_id())
             .header("x-batch-id", batch.batch_id())
@@ -645,10 +655,13 @@ async fn parse_accepted_response(
     }
     let body = read_response_body(response).await.map_err(|error| {
         DeliveryError::new(
-            DeliveryErrorClass::Terminal,
+            match error {
+                BodyReadError::TooLarge => DeliveryErrorClass::Terminal,
+                BodyReadError::Failed => DeliveryErrorClass::Retryable,
+            },
             match error {
                 BodyReadError::TooLarge => INGESTION_RESPONSE_TOO_LARGE,
-                BodyReadError::Failed => INGESTION_RESPONSE_INVALID,
+                BodyReadError::Failed => INGESTION_REQUEST_FAILED,
             },
         )
     })?;
@@ -672,6 +685,7 @@ async fn parse_accepted_response(
     Ok(Delivery::Accepted)
 }
 
+#[derive(Clone, Copy)]
 enum BodyReadError {
     TooLarge,
     Failed,
@@ -779,6 +793,7 @@ fn form_encode_component(value: &str, output: &mut String) {
 fn is_retryable_status(status: StatusCode) -> bool {
     status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_EARLY
+        || status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
 }
 
@@ -788,11 +803,30 @@ fn retry_delay(policy: &RetryPolicy, attempt: usize) -> Duration {
     }
     let exponent = attempt.saturating_sub(1).min(31) as u32;
     let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
-    policy
+    let exponential = policy
         .base_delay
         .checked_mul(multiplier)
         .unwrap_or(policy.max_delay)
+        .min(policy.max_delay);
+    exponential
+        .saturating_add(random_jitter(policy.jitter))
         .min(policy.max_delay)
+}
+
+fn random_jitter(maximum: Duration) -> Duration {
+    if maximum.is_zero() {
+        return Duration::ZERO;
+    }
+    let maximum_nanos = u64::try_from(maximum.as_nanos()).unwrap_or(u64::MAX);
+    if maximum_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let mut random_bytes = [0_u8; 8];
+    if OsRng.try_fill_bytes(&mut random_bytes).is_err() {
+        return Duration::ZERO;
+    }
+    let range = maximum_nanos.saturating_add(1);
+    Duration::from_nanos(u64::from_le_bytes(random_bytes) % range)
 }
 
 fn bounded_retry_after(

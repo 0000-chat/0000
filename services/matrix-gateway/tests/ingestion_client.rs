@@ -82,6 +82,7 @@ fn fast_retry_policy(max_attempts: usize) -> RetryPolicy {
         max_attempts,
         base_delay: Duration::ZERO,
         max_delay: Duration::ZERO,
+        jitter: Duration::ZERO,
         max_retry_after: Duration::from_millis(5),
     }
 }
@@ -154,7 +155,7 @@ async fn oauth_basic_auth_uses_form_encoding_without_secret_in_body() {
             );
             ResponseTemplate::new(200).set_body_raw(
                 format!(
-                    "{{\"access_token\":\"{TOKEN_CANARY}\",\"token_type\":\"Bearer\",\"expires_in\":3600}}"
+                    "{{\"access_token\":\"{TOKEN_CANARY}\",\"token_type\":\"Bearer\",\"expires_in\":300}}"
                 ),
                 "application/json",
             )
@@ -199,7 +200,7 @@ async fn oauth_body_auth_uses_percent_encoded_client_credentials() {
                 ])
             );
             ResponseTemplate::new(200).set_body_raw(
-                "{\"access_token\":\"body-token\",\"token_type\":\"Bearer\",\"expires_in\":3600}",
+                "{\"access_token\":\"body-token\",\"token_type\":\"Bearer\",\"expires_in\":300}",
                 "application/json",
             )
         })
@@ -229,7 +230,7 @@ async fn oauth_tokens_cache_in_memory_and_refresh_inside_configured_skew() {
     Mock::given(matchers::path("/token"))
         .respond_with(move |_request: &Request| {
             let number = responder_calls.fetch_add(1, Ordering::SeqCst);
-            let expires_in = if number == 1 { 1 } else { 3600 };
+            let expires_in = if number == 1 { 1 } else { 300 };
             ResponseTemplate::new(200).set_body_raw(
                 format!(
                     "{{\"access_token\":\"cached-token-{number}\",\"token_type\":\"Bearer\",\"expires_in\":{expires_in}}}"
@@ -268,6 +269,33 @@ async fn oauth_tokens_cache_in_memory_and_refresh_inside_configured_skew() {
     let _ = skewed.bearer(false).await.expect("skewed first token");
     let _ = skewed.bearer(false).await.expect("skewed refresh");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn oauth_rejects_token_lifetime_above_worker_limit() {
+    let server = MockServer::start().await;
+    Mock::given(matchers::path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "{\"access_token\":\"long-lived-token\",\"token_type\":\"Bearer\",\"expires_in\":301}",
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+
+    let provider = OAuthTokenProvider::new_for_test(
+        format!("{}/token", server.uri()),
+        "client",
+        SecretString::new(SECRET_CANARY),
+        OAuthClientAuthMethod::Post,
+        Duration::from_secs(1),
+        Duration::from_secs(30),
+    )
+    .expect("OAuth provider");
+    let error = provider
+        .bearer(false)
+        .await
+        .expect_err("OAuth lifetime above worker limit");
+    assert_eq!(error.code(), "oauth_token_invalid");
 }
 
 #[tokio::test]
@@ -339,7 +367,7 @@ async fn production_urls_are_https_only_and_test_urls_are_loopback_only() {
 }
 
 #[tokio::test]
-async fn ingestion_sets_json_accept_ndjson_identity_and_sends_exact_bytes() {
+async fn ingestion_sets_worker_compatible_json_headers_and_sends_exact_bytes() {
     let server = MockServer::start().await;
     Mock::given(matchers::method("POST"))
         .and(matchers::path("/internal/v1/ingestion/batches"))
@@ -361,8 +389,10 @@ async fn ingestion_sets_json_accept_ndjson_identity_and_sends_exact_bytes() {
     assert_eq!(requests[0].body, REQUEST_BODY);
     assert_eq!(header(&requests[0], "accept"), "application/json");
     assert_eq!(header(&requests[0], "authorization"), "Bearer bearer-token");
-    assert_eq!(header(&requests[0], "content-type"), "application/x-ndjson");
+    assert_eq!(header(&requests[0], "content-type"), "application/json");
     assert_eq!(header(&requests[0], "content-encoding"), "identity");
+    assert_eq!(header(&requests[0], "x-tenant-id"), TENANT_ID);
+    assert_eq!(header(&requests[0], "x-batch-id"), BATCH_ID);
 }
 
 #[tokio::test]
@@ -401,6 +431,25 @@ async fn response_loss_retries_the_same_pending_outbox_bytes() {
         Delivery::Accepted
     );
     let bodies = server_task.await.expect("response-loss server task");
+    assert_eq!(bodies, vec![REQUEST_BODY.to_vec(), REQUEST_BODY.to_vec()]);
+}
+
+#[tokio::test]
+async fn truncated_202_response_retries_the_same_pending_outbox_bytes() {
+    let (uri, server_task) = spawn_truncated_accepted_server().await;
+    let client = test_client(
+        &uri,
+        Arc::new(FakeTokenProvider::new(&["token"])),
+        Duration::from_secs(1),
+    );
+    assert_eq!(
+        client
+            .deliver(&pending_batch())
+            .await
+            .expect("accepted after truncated response"),
+        Delivery::Accepted
+    );
+    let bodies = server_task.await.expect("truncated-response server task");
     assert_eq!(bodies, vec![REQUEST_BODY.to_vec(), REQUEST_BODY.to_vec()]);
 }
 
@@ -585,6 +634,76 @@ async fn bounded_429_retry_after_and_5xx_are_retryable() {
 }
 
 #[tokio::test]
+async fn five_hundred_retry_after_is_honored_before_retrying() {
+    let server = MockServer::start().await;
+    Mock::given(matchers::path("/internal/v1/ingestion/batches"))
+        .respond_with(sequence(vec![
+            ResponseTemplate::new(503).insert_header("retry-after", "0"),
+            accepted_response("created"),
+        ]))
+        .mount(&server)
+        .await;
+    let client = IngestionClient::new_for_test(
+        server.uri(),
+        Arc::new(FakeTokenProvider::new(&["token"])),
+        Duration::from_secs(1),
+    )
+    .expect("loopback ingestion client")
+    .with_retry_policy(RetryPolicy {
+        max_attempts: 2,
+        base_delay: Duration::from_secs(1),
+        max_delay: Duration::from_secs(1),
+        jitter: Duration::ZERO,
+        max_retry_after: Duration::from_secs(1),
+    });
+
+    let result = tokio::time::timeout(Duration::from_millis(200), client.deliver(&pending_batch()))
+        .await
+        .expect("bounded Retry-After should avoid exponential delay")
+        .expect("5xx retry");
+    assert_eq!(result, Delivery::Accepted);
+}
+
+#[tokio::test]
+async fn malformed_and_oversized_5xx_retry_after_values_stay_bounded_and_redacted() {
+    for retry_after in ["not-a-duration", "999999"] {
+        let server = MockServer::start().await;
+        Mock::given(matchers::path("/internal/v1/ingestion/batches"))
+            .respond_with(sequence(vec![
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", retry_after)
+                    .set_body_string(UPSTREAM_CANARY),
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", retry_after)
+                    .set_body_string(UPSTREAM_CANARY),
+            ]))
+            .mount(&server)
+            .await;
+        let client = test_client(
+            &server.uri(),
+            Arc::new(FakeTokenProvider::new(&["token"])),
+            Duration::from_secs(1),
+        );
+
+        let error = client
+            .deliver(&pending_batch())
+            .await
+            .expect_err("bounded 5xx retry");
+        assert_eq!(error.class(), DeliveryErrorClass::Retryable);
+        assert!(!format!("{error:?}").contains(UPSTREAM_CANARY));
+        if retry_after == "not-a-duration" {
+            assert_eq!(error.retry_after(), None);
+        } else {
+            assert!(
+                error
+                    .retry_after()
+                    .is_some_and(|delay| delay <= Duration::from_millis(5))
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn redirects_are_rejected_and_ingestion_responses_are_bounded_json() {
     let server = MockServer::start().await;
     Mock::given(matchers::path("/internal/v1/ingestion/batches"))
@@ -738,6 +857,48 @@ async fn spawn_response_loss_server() -> (String, tokio::task::JoinHandle<Vec<Ve
                     .await
                     .expect("write accepted response");
             }
+        }
+        bodies
+    });
+    (format!("http://{address}"), task)
+}
+
+async fn spawn_truncated_accepted_server() -> (String, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind truncated-response server");
+    let address = listener
+        .local_addr()
+        .expect("truncated-response server address");
+    let task = tokio::spawn(async move {
+        let response_body = format!(
+            "{{\"schema_version\":1,\"tenant_id\":\"{TENANT_ID}\",\"batch_id\":\"{BATCH_ID}\",\"status\":\"accepted\",\"archive_status\":\"created\"}}"
+        );
+        let truncated_body = &response_body[..response_body.len() - 1];
+        let mut bodies = Vec::new();
+        for attempt in 0..2 {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept truncated-response request");
+            let body = read_request_body(&mut socket)
+                .await
+                .expect("read truncated-response request body");
+            bodies.push(body);
+            let body_to_send = if attempt == 0 {
+                truncated_body
+            } else {
+                response_body.as_str()
+            };
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                body_to_send
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write truncated-response response");
         }
         bodies
     });
