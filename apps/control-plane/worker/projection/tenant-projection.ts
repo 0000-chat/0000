@@ -208,7 +208,7 @@ type MessageQueryRow = {
 type ConversationExistsRow = { id: string };
 
 type ProjectionChangeQueryRow = {
-  sequence: number;
+  identity_sequence: number;
   event_id: string;
   event_type: ProjectionChange["event_type"];
   identity_id: string;
@@ -246,6 +246,7 @@ const DERIVED_PROJECTION_TABLES = [
   "applied_events",
   "projection_changes",
   "projection_change_floors",
+  "projection_identity_sequences",
   "projection_checkpoints",
 ] as const;
 
@@ -350,7 +351,7 @@ const readStatusForMeta = (
 
   const counts = storage.sql
     .exec<ProjectionCountRow>(
-      "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(sequence) FROM projection_changes), 0) AS latest_change_sequence",
+      "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(latest_sequence) FROM projection_identity_sequences), 0) AS latest_change_sequence",
     )
     .toArray()[0];
   if (counts === undefined) throw new Error("projection status counts are missing");
@@ -746,7 +747,8 @@ const readChangePage = (
 
   const latestRow = storage.sql
     .exec<LatestSequenceRow>(
-      "SELECT COALESCE(MAX(sequence), 0) AS latest_sequence FROM projection_changes",
+      "SELECT COALESCE((SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = ?), 0) AS latest_sequence",
+      input.identity_id,
     )
     .toArray()[0];
   if (latestRow === undefined) throw new Error("projection sequence is missing");
@@ -764,7 +766,7 @@ const readChangePage = (
     ? []
     : storage.sql
         .exec<ProjectionChangeQueryRow>(
-          "SELECT sequence, event_id, event_type, identity_id, connection_id, conversation_id, occurred_at, observed_at, generation FROM projection_changes WHERE identity_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+          "SELECT identity_sequence, event_id, event_type, identity_id, connection_id, conversation_id, occurred_at, observed_at, generation FROM projection_changes WHERE identity_id = ? AND identity_sequence > ? ORDER BY identity_sequence ASC LIMIT ?",
           input.identity_id,
           input.after_sequence,
           limit,
@@ -777,7 +779,7 @@ const readChangePage = (
     identity_id: input.identity_id,
     generation: meta.generation,
     items: rows.map((row) => ({
-      sequence: row.sequence,
+      sequence: row.identity_sequence,
       event_id: row.event_id,
       event_type: row.event_type,
       identity_id: row.identity_id,
@@ -1630,7 +1632,20 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         meta.generation,
       );
       this.ctx.storage.sql.exec(
-        "INSERT INTO projection_changes (event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projection_identity_sequences (identity_id, latest_sequence) VALUES (?, 1) ON CONFLICT(identity_id) DO UPDATE SET latest_sequence = latest_sequence + 1",
+        prepared.event.identity_id,
+      );
+      const identitySequenceRow = this.ctx.storage.sql
+        .exec<{ identity_sequence: number }>(
+          "SELECT latest_sequence AS identity_sequence FROM projection_identity_sequences WHERE identity_id = ?",
+          prepared.event.identity_id,
+        )
+        .toArray()[0];
+      if (identitySequenceRow === undefined) {
+        throw new Error("projection identity sequence is missing");
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO projection_changes (event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation, identity_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         prepared.event.event_id,
         prepared.event.event_type,
         prepared.event.identity_id,
@@ -1640,6 +1655,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         prepared.event.occurred_at,
         prepared.event.observed_at,
         meta.generation,
+        identitySequenceRow.identity_sequence,
       );
       appliedCount += 1;
     }
@@ -1868,7 +1884,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
 
     const affectedIdentities = this.ctx.storage.sql
       .exec<ProjectionChangeFloorRow>(
-        "SELECT identity_id, MAX(sequence) AS discarded_through_sequence FROM projection_changes WHERE sequence <= ? GROUP BY identity_id",
+        "SELECT identity_id, MAX(identity_sequence) AS discarded_through_sequence FROM projection_changes WHERE sequence <= ? GROUP BY identity_id",
         boundary.sequence,
       )
       .toArray();

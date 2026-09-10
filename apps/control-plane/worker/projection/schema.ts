@@ -334,9 +334,61 @@ const initialTenantProjectionMigration: ProjectionMigration = Object.freeze({
   statements: initialTenantProjectionStatements,
 });
 
+const identityLocalProjectionSequencesStatements = Object.freeze([
+  `CREATE TABLE projection_changes_v2 (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  event_type TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  identity_sequence INTEGER NOT NULL CHECK(identity_sequence >= 1)
+) STRICT`,
+  `INSERT INTO projection_changes_v2 (sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation, identity_sequence)
+SELECT sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation,
+  ROW_NUMBER() OVER (PARTITION BY identity_id ORDER BY sequence) + CASE WHEN EXISTS (
+    SELECT 1 FROM projection_change_floors AS floors WHERE floors.identity_id = projection_changes.identity_id
+  ) THEN 1 ELSE 0 END
+FROM projection_changes
+ORDER BY sequence`,
+  "DROP INDEX IF EXISTS idx_projection_changes_identity_sequence",
+  "DROP INDEX IF EXISTS idx_projection_changes_global_sequence",
+  "DROP TABLE projection_changes",
+  "ALTER TABLE projection_changes_v2 RENAME TO projection_changes",
+  "CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,identity_sequence)",
+  "CREATE INDEX idx_projection_changes_global_sequence ON projection_changes(sequence)",
+  "UPDATE projection_change_floors SET discarded_through_sequence = 1",
+  `CREATE TABLE projection_identity_sequences (
+  identity_id TEXT PRIMARY KEY,
+  latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= 0)
+) STRICT`,
+  `INSERT INTO projection_identity_sequences (identity_id, latest_sequence)
+SELECT identity_id, MAX(identity_sequence)
+FROM projection_changes
+GROUP BY identity_id
+UNION ALL
+SELECT floors.identity_id, floors.discarded_through_sequence
+FROM projection_change_floors AS floors
+WHERE NOT EXISTS (
+  SELECT 1 FROM projection_changes AS changes WHERE changes.identity_id = floors.identity_id
+)`,
+]);
+
+const identityLocalProjectionSequencesMigration: ProjectionMigration = Object.freeze({
+  version: 2,
+  name: "identity_local_projection_sequences",
+  appliedAt: "2026-09-10T00:00:00.000Z",
+  statements: identityLocalProjectionSequencesStatements,
+});
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] = Object.freeze([
   initialTenantProjectionMigration,
+  identityLocalProjectionSequencesMigration,
 ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */

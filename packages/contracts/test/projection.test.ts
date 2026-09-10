@@ -695,6 +695,39 @@ describe("projection RPC contracts and exact bounds", () => {
     expect(MessagePageResultSchema.parse({ items: [], next_cursor: null })).toEqual({ items: [], next_cursor: null });
   });
 
+  it("requires every public change-page item to stay on the requested identity and generation", () => {
+    const change = {
+      sequence: 1,
+      event_id: "$change:human-one",
+      event_type: "conversation.updated" as const,
+      identity_id: "identity_human",
+      connection_id: "connection_human",
+      conversation_id: "conversation_human",
+      occurred_at: timestamp,
+      observed_at: timestamp,
+      generation: 1,
+    };
+    const page = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      identity_id: "identity_human",
+      generation: 1,
+      items: [change],
+      latest_sequence: 1,
+      reset_required: false,
+    };
+
+    expect(ProjectionChangePageSchema.safeParse(page).success).toBe(true);
+    expect(ProjectionChangePageSchema.safeParse({
+      ...page,
+      items: [{ ...change, identity_id: "identity_agent" }],
+    }).success).toBe(false);
+    expect(ProjectionChangePageSchema.safeParse({
+      ...page,
+      items: [{ ...change, generation: 2 }],
+    }).success).toBe(false);
+  });
+
   it("exposes the complete event map without allowing unsupported event names", () => {
     expect(Object.keys(ProjectionPayloadSchemaByType).sort()).toEqual(Object.keys(validPayloads).sort());
     expect(ProjectionPayloadSchemaByType["message.created"].safeParse(validPayloads["message.created"]).success).toBe(true);

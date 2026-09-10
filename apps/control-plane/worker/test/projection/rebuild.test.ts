@@ -34,6 +34,7 @@ const DERIVED_TABLES = [
   "projection_changes",
   "projection_change_floors",
   "projection_checkpoints",
+  "projection_identity_sequences",
 ] as const;
 
 type RebuildRpc = {
@@ -366,7 +367,7 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       ]);
     }
     await expect(rows(stub, "SELECT COUNT(*) AS count FROM _sql_schema_migrations")).resolves.toEqual([
-      { count: 1 },
+      { count: 2 },
     ]);
     await expect(rows(stub, "SELECT tenant_id, state, generation, rebuild_id, rebuild_started_at FROM projection_meta")).resolves.toEqual([
       {
@@ -394,6 +395,106 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       (instance) => begin(instance, tenant, "rebuild_other", 1),
       "projection_rebuild_mismatch",
     );
+  });
+
+  it("restarts identity-local sequences in the new rebuild generation", async () => {
+    const tenant = newTenant();
+    const stub = await initialize(tenant);
+    const liveEvents = [
+      eventFor({
+        tenant,
+        eventId: "event_local_sequence_human",
+        identityId: "identity_human",
+        accountId: "account_human",
+        conversationId: "conversation_human",
+        messageId: "message_human",
+        eventSource: "live",
+      }),
+      eventFor({
+        tenant,
+        eventId: "event_local_sequence_agent",
+        identityId: "identity_agent",
+        accountId: "account_agent",
+        conversationId: "conversation_agent",
+        messageId: "message_agent",
+        eventSource: "live",
+      }),
+    ];
+    await stub.applyBatch({
+      schema_version: 1,
+      tenant_id: tenant,
+      authorization: auth(tenant, ["projection.write"], ["identity_agent", "identity_human"]),
+      mode: "live",
+      rebuild_id: null,
+      connections: [
+        binding("account_agent", "connection_agent", "identity_agent"),
+        binding("account_human", "connection_human", "identity_human"),
+      ],
+      events: liveEvents,
+      checkpoint: null,
+    });
+    await expect(rows(stub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+      { identity_id: "identity_agent", latest_sequence: 1 },
+      { identity_id: "identity_human", latest_sequence: 1 },
+    ]);
+
+    await begin(stub, tenant, "rebuild_local_sequences", 1);
+    await expect(rows(stub, "SELECT * FROM projection_identity_sequences")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM projection_change_floors")).resolves.toEqual([]);
+
+    const replayEvents = liveEvents.map((nextEvent) => ({
+      ...nextEvent,
+      event_source: "replay" as const,
+    }));
+    await replay(
+      stub,
+      tenant,
+      "rebuild_local_sequences",
+      pageFor(tenant, replayEvents),
+      null,
+      [
+        binding("account_agent", "connection_agent", "identity_agent"),
+        binding("account_human", "connection_human", "identity_human"),
+      ],
+    );
+    await stub.completeRebuild({
+      schema_version: 1,
+      tenant_id: tenant,
+      rebuild_id: "rebuild_local_sequences",
+      terminal_cursor: null,
+      completed_at: "2026-09-07T03:30:00.000Z",
+      authorization: auth(tenant, ["projection.rebuild"]),
+    });
+
+    await expect(rows(stub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+      { identity_id: "identity_agent", latest_sequence: 1 },
+      { identity_id: "identity_human", latest_sequence: 1 },
+    ]);
+    await expect(rows(stub, "SELECT identity_id, sequence, identity_sequence FROM projection_changes ORDER BY sequence")).resolves.toEqual([
+      { identity_id: "identity_agent", sequence: 1, identity_sequence: 1 },
+      { identity_id: "identity_human", sequence: 2, identity_sequence: 1 },
+    ]);
+    await expect(
+      stub.listChanges({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_human",
+        generation: 2,
+        after_sequence: 0,
+        authorization: auth(tenant, ["projection.read"], ["identity_human"]),
+      }),
+    ).resolves.toMatchObject({ latest_sequence: 1, items: [{ sequence: 1 }] });
+    await expect(
+      stub.listChanges({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_agent",
+        generation: 2,
+        after_sequence: 0,
+        authorization: auth(tenant, ["projection.read"], ["identity_agent"]),
+      }),
+    ).resolves.toMatchObject({ latest_sequence: 1, items: [{ sequence: 1 }] });
   });
 
   it("requires rebuild scope and the exact tenant on every rebuild RPC", async () => {

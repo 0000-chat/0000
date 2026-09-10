@@ -6,11 +6,16 @@ import type {
 } from "@communicator/contracts";
 import { describe, expect, it } from "vitest";
 import { getProjectionErrorCause, ProjectionError } from "../../projection/errors";
-import { runProjectionMigrations } from "../../projection/schema";
+import {
+  PROJECTION_MIGRATIONS,
+  runProjectionMigrations,
+} from "../../projection/schema";
 import type { TenantProjectionDO } from "../../projection/tenant-projection";
 
 const migrationName = "initial_tenant_projection";
 const migrationAppliedAt = "2026-09-07T00:00:00.000Z";
+const identitySequenceMigrationName = "identity_local_projection_sequences";
+const identitySequenceMigrationAppliedAt = "2026-09-10T00:00:00.000Z";
 const applicationTableNames = [
   "projection_meta",
   "connection_bindings",
@@ -32,6 +37,7 @@ const applicationTableNames = [
   "projection_changes",
   "projection_change_floors",
   "projection_checkpoints",
+  "projection_identity_sequences",
 ] as const;
 
 const authorization = (
@@ -349,6 +355,7 @@ const expectedColumns: Record<
     ["occurred_at", "TEXT", 1, 0, null],
     ["observed_at", "TEXT", 1, 0, null],
     ["generation", "INTEGER", 1, 0, null],
+    ["identity_sequence", "INTEGER", 1, 0, null],
   ],
   projection_change_floors: [
     ["identity_id", "TEXT", 1, 1, null],
@@ -367,6 +374,10 @@ const expectedColumns: Record<
     ["last_applied_count", "INTEGER", 0, 0, null],
     ["last_duplicate_count", "INTEGER", 0, 0, null],
     ["last_sequence", "INTEGER", 0, 0, null],
+  ],
+  projection_identity_sequences: [
+    ["identity_id", "TEXT", 1, 1, null],
+    ["latest_sequence", "INTEGER", 1, 0, null],
   ],
 };
 
@@ -426,7 +437,10 @@ const expectedChecks: Record<string, string[]> = {
   resource_tombstones: [
     "CHECK(resource_type IN ('message','conversation','participant','attachment'))",
   ],
-  projection_changes: ["CHECK(generation >= 1)"],
+  projection_changes: [
+    "CHECK(generation >= 1)",
+    "CHECK(identity_sequence >= 1)",
+  ],
   projection_change_floors: ["CHECK(discarded_through_sequence >= 0)"],
   projection_checkpoints: [
     "CHECK(page_digest IS NULL OR length(page_digest) = 64)",
@@ -435,6 +449,7 @@ const expectedChecks: Record<string, string[]> = {
     "CHECK(last_duplicate_count IS NULL OR last_duplicate_count >= 0)",
     "CHECK(last_sequence IS NULL OR last_sequence >= 0)",
   ],
+  projection_identity_sequences: ["CHECK(latest_sequence >= 0)"],
 };
 
 const expectedIndexes = [
@@ -465,6 +480,7 @@ const expectedIndexes = [
   "idx_event_tombstones_conversation_owner",
   "idx_applied_events_order",
   "idx_projection_changes_identity_sequence",
+  "idx_projection_changes_global_sequence",
   "idx_resource_tombstones_resource_order",
   "idx_resource_tombstones_id",
   "idx_resource_tombstones_conversation_owner",
@@ -524,7 +540,9 @@ const expectedIndexSql: Record<string, string> = {
   idx_applied_events_order:
     "CREATE INDEX idx_applied_events_order ON applied_events(observed_ms,event_id)",
   idx_projection_changes_identity_sequence:
-    "CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,sequence)",
+    "CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,identity_sequence)",
+  idx_projection_changes_global_sequence:
+    "CREATE INDEX idx_projection_changes_global_sequence ON projection_changes(sequence)",
   idx_resource_tombstones_resource_order:
     "CREATE INDEX idx_resource_tombstones_resource_order ON resource_tombstones(resource_type,resource_id,observed_ms)",
   idx_resource_tombstones_id:
@@ -533,8 +551,39 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_resource_tombstones_conversation_owner ON resource_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
 };
 
+const restoreVersionOneProjectionChanges = (state: DurableObjectState): void => {
+  state.storage.sql.exec(
+    "DROP INDEX IF EXISTS idx_projection_changes_identity_sequence",
+  );
+  state.storage.sql.exec(
+    "DROP INDEX IF EXISTS idx_projection_changes_global_sequence",
+  );
+  state.storage.sql.exec(
+    "DROP TABLE IF EXISTS projection_identity_sequences",
+  );
+  state.storage.sql.exec("DROP TABLE projection_changes");
+  state.storage.sql.exec(`CREATE TABLE projection_changes (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  event_type TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1)
+) STRICT`);
+  state.storage.sql.exec(
+    "CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,sequence)",
+  );
+  state.storage.sql.exec(
+    "DELETE FROM _sql_schema_migrations WHERE version = 2",
+  );
+};
+
 describe("tenant projection SQLite schema", () => {
-  it("creates the exact version-one tables, columns, checks, and named indexes", async () => {
+  it("creates the exact migrated tables, columns, checks, and named indexes", async () => {
     const stub = env.TENANT_PROJECTION.getByName("tenant_schema_catalog");
     const catalog = await runInDurableObject(stub, async (_instance, state) => {
       const objects = state.storage.sql
@@ -563,7 +612,7 @@ describe("tenant projection SQLite schema", () => {
     expect(tableObjects.map((row) => row.name).sort()).toEqual(
       Object.keys(expectedColumns).sort(),
     );
-    expect(tableObjects).toHaveLength(21);
+    expect(tableObjects).toHaveLength(22);
 
     for (const [table, columns] of Object.entries(expectedColumns)) {
       const rows = catalog.tableInfo[table] as Array<{
@@ -591,7 +640,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(30);
+    expect(indexNames).toHaveLength(31);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -619,7 +668,7 @@ describe("tenant projection SQLite schema", () => {
     }
   });
 
-  it("records one fixed migration row and remains idempotent across re-entry", async () => {
+  it("records fixed migrations in order and remains idempotent across re-entry", async () => {
     const stub = env.TENANT_PROJECTION.getByName("tenant_schema_idempotence");
     const first = await runInDurableObject(stub, async (_instance, state) =>
       state.storage.sql
@@ -630,7 +679,17 @@ describe("tenant projection SQLite schema", () => {
     );
     expect(first).toEqual([
       { version: 1, name: migrationName, applied_at: migrationAppliedAt },
+      {
+        version: 2,
+        name: identitySequenceMigrationName,
+        applied_at: identitySequenceMigrationAppliedAt,
+      },
     ]);
+    expect(PROJECTION_MIGRATIONS.map(({ version, name, appliedAt }) => ({
+      version,
+      name,
+      applied_at: appliedAt,
+    }))).toEqual(first);
 
     await evictDurableObject(stub);
     const second = await runInDurableObject(stub, async (_instance, state) =>
@@ -641,6 +700,114 @@ describe("tenant projection SQLite schema", () => {
         .toArray(),
     );
     expect(second).toEqual(first);
+  });
+
+  it("migrates interleaved version-one changes without altering global order or projection data", async () => {
+    const tenant = "tenant_schema_identity_sequence_migration";
+    const stub = env.TENANT_PROJECTION.getByName(tenant);
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      restoreVersionOneProjectionChanges(state);
+
+      const changes = [
+        [1, "event_human_one", "identity_human"],
+        [2, "event_agent_one", "identity_agent"],
+        [3, "event_human_two", "identity_human"],
+        [4, "event_agent_two", "identity_agent"],
+        [5, "event_floored_one", "identity_floored"],
+        [6, "event_floored_two", "identity_floored"],
+      ] as const;
+      for (const [sequence, eventId, identityId] of changes) {
+        const accountId = `account_${identityId}`;
+        const connectionId = `connection_${identityId}`;
+        const conversationId = `conversation_${identityId}`;
+        state.storage.sql.exec(
+          "INSERT INTO projection_changes (sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation) VALUES (?, ?, 'conversation.updated', ?, ?, ?, ?, '2026-09-10T01:00:00.000Z', '2026-09-10T01:00:01.000Z', 1)",
+          sequence,
+          eventId,
+          identityId,
+          accountId,
+          connectionId,
+          conversationId,
+        );
+        state.storage.sql.exec(
+          "INSERT INTO applied_events (event_id, event_hash, event_type, event_source, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, observed_ms, generation) VALUES (?, ?, 'conversation.updated', 'live', ?, ?, ?, ?, '2026-09-10T01:00:00.000Z', '2026-09-10T01:00:01.000Z', 1789002001000, 1)",
+          eventId,
+          "a".repeat(64),
+          identityId,
+          accountId,
+          connectionId,
+          conversationId,
+        );
+      }
+      state.storage.sql.exec(
+        "INSERT INTO projection_change_floors (identity_id, discarded_through_sequence) VALUES (?, ?), (?, ?)",
+        "identity_floored",
+        9,
+        "identity_empty",
+        12,
+      );
+
+      const beforeChanges = state.storage.sql
+        .exec<Record<string, SqlStorageValue>>(
+          "SELECT sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation FROM projection_changes ORDER BY sequence",
+        )
+        .toArray();
+      const beforeAppliedEvents = state.storage.sql
+        .exec<Record<string, SqlStorageValue>>(
+          "SELECT event_id, event_hash, event_type, event_source, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, observed_ms, generation FROM applied_events ORDER BY event_id",
+        )
+        .toArray();
+
+      runProjectionMigrations(state.storage);
+
+      return {
+        beforeChanges,
+        beforeAppliedEvents,
+        afterChanges: state.storage.sql
+          .exec<Record<string, SqlStorageValue>>(
+            "SELECT sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation, identity_sequence FROM projection_changes ORDER BY sequence",
+          )
+          .toArray(),
+        afterAppliedEvents: state.storage.sql
+          .exec<Record<string, SqlStorageValue>>(
+            "SELECT event_id, event_hash, event_type, event_source, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, observed_ms, generation FROM applied_events ORDER BY event_id",
+          )
+          .toArray(),
+        floors: state.storage.sql
+          .exec<Record<string, SqlStorageValue>>(
+            "SELECT identity_id, discarded_through_sequence FROM projection_change_floors ORDER BY identity_id",
+          )
+          .toArray(),
+        counters: state.storage.sql
+          .exec<Record<string, SqlStorageValue>>(
+            "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+          )
+          .toArray(),
+      };
+    });
+
+    expect(result.afterChanges.map(({ identity_sequence: _identitySequence, ...row }) => row)).toEqual(
+      result.beforeChanges,
+    );
+    expect(result.afterAppliedEvents).toEqual(result.beforeAppliedEvents);
+    expect(result.afterChanges.map((row) => [row.identity_id, row.identity_sequence])).toEqual([
+      ["identity_human", 1],
+      ["identity_agent", 1],
+      ["identity_human", 2],
+      ["identity_agent", 2],
+      ["identity_floored", 2],
+      ["identity_floored", 3],
+    ]);
+    expect(result.floors).toEqual([
+      { identity_id: "identity_empty", discarded_through_sequence: 1 },
+      { identity_id: "identity_floored", discarded_through_sequence: 1 },
+    ]);
+    expect(result.counters).toEqual([
+      { identity_id: "identity_agent", latest_sequence: 2 },
+      { identity_id: "identity_empty", latest_sequence: 1 },
+      { identity_id: "identity_floored", latest_sequence: 3 },
+      { identity_id: "identity_human", latest_sequence: 2 },
+    ]);
   });
 
   it("uses the required access-path indexes for summary and reverse ownership lookups", async () => {
@@ -847,7 +1014,7 @@ describe("tenant projection SQLite schema", () => {
       const schemaBefore = schemaSnapshot();
       state.storage.sql.exec(
         "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        2,
+        3,
         "future_projection_schema",
         migrationAppliedAt,
       );
@@ -955,7 +1122,7 @@ describe("tenant projection SQLite schema", () => {
       // application schema so the normal runner reaches its final metadata
       // insert, where the trigger forces the transaction to abort.
       for (const table of applicationTableNames) {
-        state.storage.sql.exec(`DROP TABLE ${table}`);
+        state.storage.sql.exec(`DROP TABLE IF EXISTS ${table}`);
       }
       const schemaBeforeFailure = schemaSnapshot();
       state.storage.sql.exec(
@@ -1015,7 +1182,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 1,
+      schema_generation: 2,
       state: "ready",
       generation: 1,
       rebuild_id: null,

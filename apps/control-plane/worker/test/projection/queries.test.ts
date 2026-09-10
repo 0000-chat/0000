@@ -820,7 +820,7 @@ describe("tenant projection query RPCs", () => {
     );
   });
 
-  it("resumes identity-filtered changes with tenant-global latest sequence and exact floor boundaries", async () => {
+  it("resumes identity-filtered changes with identity-local latest sequence and exact floor boundaries", async () => {
     const tenant = "tenant_queries_changes";
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(tenant);
@@ -850,7 +850,7 @@ describe("tenant projection query RPCs", () => {
       after_sequence: 0,
       authorization: queryAuth(tenant),
     });
-    expect(identityA.latest_sequence).toBe(2);
+    expect(identityA.latest_sequence).toBe(1);
     expect(identityA.reset_required).toBe(false);
     expect(identityA.items.map((item) => item.sequence)).toEqual([1]);
     expect(Object.keys(identityA.items[0]!).sort()).toEqual([
@@ -865,9 +865,39 @@ describe("tenant projection query RPCs", () => {
       "sequence",
     ]);
 
-    const floorRows = await readRows<{ sequence: number }>(
+    const identityB = await stub.listChanges({
+      schema_version: 1,
+      tenant_id: tenant,
+      identity_id: "identity_b",
+      generation: 1,
+      after_sequence: 0,
+      authorization: queryAuth(tenant, ["identity_b"]),
+    });
+    expect(identityB.latest_sequence).toBe(1);
+    expect(identityB.items.map((item) => item.sequence)).toEqual([1]);
+
+    await expect(
+      readRows<{ sequence: number; identity_sequence: number; identity_id: string }>(
+        stub,
+        "SELECT sequence, identity_sequence, identity_id FROM projection_changes ORDER BY sequence",
+      ),
+    ).resolves.toEqual([
+      { sequence: 1, identity_sequence: 1, identity_id: "identity_a" },
+      { sequence: 2, identity_sequence: 1, identity_id: "identity_b" },
+    ]);
+    await expect(
+      readRows<{ identity_id: string; latest_sequence: number }>(
+        stub,
+        "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+      ),
+    ).resolves.toEqual([
+      { identity_id: "identity_a", latest_sequence: 1 },
+      { identity_id: "identity_b", latest_sequence: 1 },
+    ]);
+
+    const floorRows = await readRows<{ identity_sequence: number }>(
       stub,
-      "SELECT sequence FROM projection_changes WHERE identity_id = ? ORDER BY sequence",
+      "SELECT identity_sequence FROM projection_changes WHERE identity_id = ? ORDER BY identity_sequence",
       "identity_a",
     );
     expect(floorRows).toHaveLength(1);
@@ -888,7 +918,7 @@ describe("tenant projection query RPCs", () => {
         after_sequence: 0,
         authorization: queryAuth(tenant),
       }),
-    ).resolves.toMatchObject({ items: [], latest_sequence: 2, reset_required: true });
+    ).resolves.toMatchObject({ items: [], latest_sequence: 1, reset_required: true });
     await expect(
       stub.listChanges({
         schema_version: 1,
@@ -898,7 +928,7 @@ describe("tenant projection query RPCs", () => {
         after_sequence: 1,
         authorization: queryAuth(tenant),
       }),
-    ).resolves.toMatchObject({ latest_sequence: 2, reset_required: false });
+    ).resolves.toMatchObject({ latest_sequence: 1, reset_required: false });
     await expect(
       stub.listChanges({
         schema_version: 1,
@@ -908,7 +938,7 @@ describe("tenant projection query RPCs", () => {
         after_sequence: 2,
         authorization: queryAuth(tenant),
       }),
-    ).resolves.toMatchObject({ items: [], latest_sequence: 2, reset_required: false });
+    ).resolves.toMatchObject({ items: [], latest_sequence: 1, reset_required: false });
     await expectQueryCode(
       stub,
       (instance) => instance.listChanges({
@@ -921,6 +951,77 @@ describe("tenant projection query RPCs", () => {
       }),
       "projection_conflict",
     );
+  });
+
+  it("keeps status latest change sequence after the highest identity counter rows are deleted", async () => {
+    const tenant = "tenant_queries_status_sequence";
+    const stub = env.TENANT_PROJECTION.getByName(tenant);
+    await initialize(tenant);
+    await stub.applyBatch(
+      input(
+        [
+          conversationEvent(
+            tenant,
+            "event_status_sequence_a_1",
+            "conversation_status_sequence_a_1",
+            "2026-09-07T01:00:00.000Z",
+          ),
+          conversationEvent(
+            tenant,
+            "event_status_sequence_b_1",
+            "conversation_status_sequence_b_1",
+            "2026-09-07T01:01:00.000Z",
+            { identity_id: "identity_b", account_id: "account_b" },
+          ),
+          conversationEvent(
+            tenant,
+            "event_status_sequence_a_2",
+            "conversation_status_sequence_a_2",
+            "2026-09-07T01:02:00.000Z",
+          ),
+        ],
+        {
+          tenant_id: tenant,
+          authorization: auth(
+            ["projection.write"],
+            ["identity_a", "identity_b"],
+            tenant,
+          ),
+          connections: [
+            bindingFor("account_a", "connection_a", "identity_a"),
+            bindingFor("account_b", "connection_b", "identity_b"),
+          ],
+        },
+      ),
+    );
+
+    const statusInput = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      authorization: auth(["projection.status"], [], tenant),
+    };
+    const before = await stub.getStatus(statusInput);
+    expect(before.latest_change_sequence).toBe(2);
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "DELETE FROM projection_changes WHERE identity_id = ?",
+        "identity_a",
+      );
+    });
+
+    await expect(
+      readRows<{ identity_id: string; latest_sequence: number }>(
+        stub,
+        "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+      ),
+    ).resolves.toEqual([
+      { identity_id: "identity_a", latest_sequence: 2 },
+      { identity_id: "identity_b", latest_sequence: 1 },
+    ]);
+    await expect(stub.getStatus(statusInput)).resolves.toMatchObject({
+      latest_change_sequence: before.latest_change_sequence,
+    });
   });
 
   it("returns zero latest sequence for an empty tenant and caps changes at 100", async () => {
@@ -970,12 +1071,18 @@ describe("tenant projection query RPCs", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       for (let index = 0; index < 101; index += 1) {
         state.storage.sql.exec(
-          "INSERT INTO projection_changes (event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation) VALUES (?, 'conversation.updated', ?, 'account_a', 'connection_a', ?, '2026-09-07T01:00:00.000Z', '2026-09-07T01:00:01.000Z', 1)",
+          "INSERT INTO projection_changes (event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation, identity_sequence) VALUES (?, 'conversation.updated', ?, 'account_a', 'connection_a', ?, '2026-09-07T01:00:00.000Z', '2026-09-07T01:00:01.000Z', 1, ?)",
           `event_change_${String(index).padStart(3, "0")}`,
           "identity_a",
           `conversation_change_${String(index).padStart(3, "0")}`,
+          index + 1,
         );
       }
+      state.storage.sql.exec(
+        "INSERT INTO projection_identity_sequences (identity_id, latest_sequence) VALUES (?, ?)",
+        "identity_a",
+        101,
+      );
     });
     const page = await stub.listChanges({
       schema_version: 1,
@@ -1183,7 +1290,7 @@ describe("tenant projection query RPCs", () => {
         .map((row) => row.detail),
       changes: state.storage.sql
         .exec<{ detail: string }>(
-          "EXPLAIN QUERY PLAN SELECT sequence FROM projection_changes WHERE identity_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+          "EXPLAIN QUERY PLAN SELECT identity_sequence FROM projection_changes WHERE identity_id = ? AND identity_sequence > ? ORDER BY identity_sequence ASC LIMIT ?",
           "identity_a",
           0,
           100,

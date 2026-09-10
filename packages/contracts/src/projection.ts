@@ -735,6 +735,23 @@ export const ProjectionChangePageSchema = strictObject({
   items: strictArray(ProjectionChangeSchema, MAX_PROJECTION_PAGE_SIZE),
   latest_sequence: NonnegativeSafeIntegerSchema,
   reset_required: z.boolean(),
+}).superRefine((value, context) => {
+  value.items.forEach((item, index) => {
+    if (item.identity_id !== value.identity_id) {
+      context.addIssue({
+        code: "custom",
+        path: ["items", index, "identity_id"],
+        message: "Projection change identity must match the page identity",
+      });
+    }
+    if (item.generation !== value.generation) {
+      context.addIssue({
+        code: "custom",
+        path: ["items", index, "generation"],
+        message: "Projection change generation must match the page generation",
+      });
+    }
+  });
 });
 
 export type ProjectionChangePage = z.infer<typeof ProjectionChangePageSchema>;
