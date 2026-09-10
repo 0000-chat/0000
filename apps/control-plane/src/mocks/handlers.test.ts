@@ -5,8 +5,9 @@ import {
   ConnectionSchema,
   ConversationSummarySchema,
   IdentitySchema,
-  MessageSchema,
+  MessagePageResultSchema,
   RealtimeEventSchema,
+  SessionResponseSchema,
 } from "@communicator/contracts";
 import { server } from "./server";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
@@ -87,10 +88,10 @@ describe("simulated API handlers", () => {
     expect(response.status).toBe(isMalformed ? 400 : 404);
     expect(await json(response)).toEqual({
       error: {
-        code: isMalformed ? "bad_request" : "not_found",
+        code: isMalformed ? "invalid_request" : "not_found",
         message: isMalformed
-          ? "The request is invalid."
-          : "The requested resource is not available.",
+          ? "Invalid request"
+          : "Resource not found",
       },
     });
   });
@@ -138,14 +139,14 @@ describe("simulated API handlers", () => {
     expect(await json(response)).toEqual({
       error: {
         code: "not_found",
-        message: "The requested resource is not available.",
+        message: "Resource not found",
       },
     });
   });
 
   it("serves contract-valid identity-scoped resources", async () => {
-    const me = await fetch("http://example.test/api/v1/me");
-    expect((await json<{ tenant_id: string }>(me)).tenant_id).toBe("tenant_pilot");
+    const session = await fetch("http://example.test/api/v1/session");
+    expect(SessionResponseSchema.parse(await json(session)).tenant.id).toBe("tenant_pilot");
 
     const identities = await fetch("http://example.test/api/v1/identities");
     expect(IdentitySchema.array().parse(await json(identities))).toHaveLength(2);
@@ -158,16 +159,18 @@ describe("simulated API handlers", () => {
     )).toBe(true);
 
     const agentConversations = await fetch(
-      "http://example.test/api/v1/conversations?identity_id=identity_agent",
+      "http://example.test/api/v1/identities/identity_agent/conversations",
     );
-    expect(ConversationSummarySchema.array().parse(await json(agentConversations)).every(
+    expect(ConversationSummarySchema.array().parse(
+      (await json<{ items: unknown[] }>(agentConversations)).items,
+    ).every(
       (conversation) => conversation.identity_id === "identity_agent",
     )).toBe(true);
 
     const agentMessages = await fetch(
       "http://example.test/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent",
     );
-    expect(MessageSchema.array().parse(await json(agentMessages)).every(
+    expect(MessagePageResultSchema.parse(await json(agentMessages)).items.every(
       (message) => message.identity_id === "identity_agent",
     )).toBe(true);
 
@@ -197,6 +200,71 @@ describe("simulated API handlers", () => {
       method: "POST",
     });
     expect(reset.status).toBe(200);
+  });
+
+  it("returns newest-first message pages with an opaque continuation cursor", async () => {
+    await fetch("http://example.test/api/v1/testing/reset", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ message_mode: "pages" }),
+    });
+    const defaultResponse = await fetch(
+      "http://example.test/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent",
+    );
+    const defaultPage = MessagePageResultSchema.parse(await json(defaultResponse));
+    expect(defaultPage.items).toHaveLength(2);
+
+    const firstResponse = await fetch(
+      "http://example.test/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent&limit=2",
+    );
+    const firstPage = MessagePageResultSchema.parse(await json(firstResponse));
+    expect(firstPage.items.map((message) => message.id)).toEqual([
+      "message_agent_one_inbound_two",
+      "message_agent_one_outbound",
+    ]);
+    expect(firstPage.next_cursor).toEqual(expect.any(String));
+
+    const secondResponse = await fetch(
+      `http://example.test/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent&limit=2&cursor=${encodeURIComponent(firstPage.next_cursor!)}`,
+    );
+    const secondPage = MessagePageResultSchema.parse(await json(secondResponse));
+    expect(secondPage.items.map((message) => message.id)).toEqual(["message_agent_one_inbound"]);
+    expect(secondPage.next_cursor).toBeNull();
+  });
+
+  it("returns the bounded generic error for simulated message failures", async () => {
+    const reset = await fetch("http://example.test/api/v1/testing/reset", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ message_mode: "error" }),
+    });
+    expect(reset.status).toBe(200);
+
+    const response = await fetch(
+      "http://example.test/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent",
+    );
+    expect(response.status).toBe(503);
+    expect(await json(response)).toEqual({
+      error: {
+        code: "service_unavailable",
+        message: "Service unavailable",
+      },
+    });
+  });
+
+  it.each([
+    "/api/v1/identities/identity_human/conversations?limit=2&limit=1",
+    "/api/v1/identities/identity_human/conversations?unexpected=value",
+    "/api/v1/conversations/conversation_agent_one/messages?identity_id=identity_agent&unexpected=value",
+  ])("rejects a malformed simulated read query with the bounded error shape: %s", async (path) => {
+    const response = await fetch(`http://example.test${path}`);
+    expect(response.status).toBe(400);
+    expect(await json(response)).toEqual({
+      error: {
+        code: "invalid_request",
+        message: "Invalid request",
+      },
+    });
   });
 
   it("rejects missing idempotency and unsupported delivery modes", async () => {
@@ -293,7 +361,7 @@ describe("simulated API handlers", () => {
     expect(await json(response)).toEqual({
       error: {
         code: "not_found",
-        message: "The requested resource is not available.",
+        message: "Resource not found",
       },
     });
   });

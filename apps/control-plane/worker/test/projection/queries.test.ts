@@ -371,6 +371,49 @@ describe("tenant projection query RPCs", () => {
     ]);
   });
 
+  it("selects channel activity by epoch milliseconds with a deterministic tie-break", async () => {
+    const tenant = "tenant_queries_channel_stats";
+    const stub = env.TENANT_PROJECTION.getByName(tenant);
+    await initialize(tenant);
+    await stub.applyBatch(
+      input([
+        conversationEvent(
+          tenant,
+          "event_channel_early",
+          "conversation_channel_early",
+          "2026-09-07T02:00:00.000+02:00",
+        ),
+        conversationEvent(
+          tenant,
+          "event_channel_latest_a",
+          "conversation_channel_latest_a",
+          "2026-09-07T01:30:00.000Z",
+        ),
+        conversationEvent(
+          tenant,
+          "event_channel_latest_b",
+          "conversation_channel_latest_b",
+          "2026-09-07T03:30:00.000+02:00",
+        ),
+      ], { tenant_id: tenant }),
+    );
+
+    await expect(
+      stub.listChannelStats({
+        schema_version: 1,
+        tenant_id: tenant,
+        identity_id: "identity_a",
+        authorization: queryAuth(tenant),
+      }),
+    ).resolves.toEqual([
+      {
+        connection_id: "connection_a",
+        unread_count: 0,
+        last_activity_at: "2026-09-07T01:30:00.000Z",
+      },
+    ]);
+  });
+
   it("enforces read scope, identity grants, tenant binding, and lifecycle state", async () => {
     const tenant = "tenant_queries_auth";
     const stub = env.TENANT_PROJECTION.getByName(tenant);
@@ -958,6 +1001,8 @@ describe("tenant projection query RPCs", () => {
       "abortRebuild",
       "applyReplayPage",
       "listConversations",
+      "getConversation",
+      "listChannelStats",
       "listMessages",
       "listChanges",
     ]);

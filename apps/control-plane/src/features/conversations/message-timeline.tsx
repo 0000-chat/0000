@@ -1,4 +1,14 @@
-import type { Message } from "@communicator/contracts";
+import type { Message, MessagePageResult } from "@communicator/contracts";
+
+export function chronologicalMessages(pages: readonly MessagePageResult[]): Message[] {
+  const seen = new Set<string>();
+  const newestFirst = pages.flatMap((page) => page.items).filter((message) => {
+    if (seen.has(message.id)) return false;
+    seen.add(message.id);
+    return true;
+  });
+  return newestFirst.reverse();
+}
 
 function formatTimestamp(timestamp: string) {
   return new Date(timestamp).toLocaleString("en-NZ", {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AuthorizedIdentitySchema,
+  ApiErrorResponseSchema,
   ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
@@ -15,6 +16,15 @@ import {
 } from "../src/index";
 
 describe("directory authorization schemas", () => {
+  it("accepts invalid_request and rejects unknown API error codes", () => {
+    expect(ApiErrorResponseSchema.safeParse({
+      error: { code: "invalid_request", message: "Invalid request" },
+    }).success).toBe(true);
+    expect(ApiErrorResponseSchema.safeParse({
+      error: { code: "internal_error", message: "Invalid request" },
+    }).success).toBe(false);
+  });
+
   it("accepts a strict authenticated session response", () => {
     expect(SessionResponseSchema.parse({
       tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },

@@ -4,19 +4,14 @@ import type {
   Connection,
   ConversationSummary,
   Identity,
-  Message,
+  MessagePageResult,
+  SessionResponse,
 } from "@communicator/contracts";
 import { pilotScenario, PilotScenarioSchema } from "@communicator/test-fixtures";
-import { compareConversationRecency } from "./conversation-pagination";
+import { compareConversationRecency, paginateMessages } from "./conversation-pagination";
 
 export type SimulatedScenario = "ready" | "attention_required";
-
-export type MeResponse = {
-  tenant_id: "tenant_pilot";
-  principal_id: "principal_pilot";
-  display_name: "Pilot operator";
-  authorized_identity_ids: ["identity_human", "identity_agent"];
-};
+export type SimulatedMessageMode = "normal" | "pages" | "error";
 
 const defaultSortPosition = new Map([
   ["connection_human_whatsapp", 10],
@@ -25,13 +20,6 @@ const defaultSortPosition = new Map([
   ["connection_agent_whatsapp", 10],
 ]);
 
-const notFound = {
-  error: {
-    code: "not_found" as const,
-    message: "The requested resource is not available.",
-  },
-};
-
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -39,24 +27,45 @@ function clone<T>(value: T): T {
 export class SimulatedStore {
   private state = clone(PilotScenarioSchema.parse(pilotScenario));
   private scenario: SimulatedScenario = "ready";
+  private messageMode: SimulatedMessageMode = "normal";
   private idempotency = new Map<string, Command>();
   private commandCounter = 0;
   private resetAt = this.state.fixture_reset_at;
 
-  reset(scenario: SimulatedScenario = "ready") {
+  reset(
+    scenario: SimulatedScenario = "ready",
+    messageMode: SimulatedMessageMode = "normal",
+  ) {
     this.state = clone(PilotScenarioSchema.parse(pilotScenario));
     this.scenario = scenario;
+    this.messageMode = messageMode;
     this.idempotency.clear();
     this.commandCounter = 0;
     this.resetAt = new Date().toISOString();
   }
 
-  me(): MeResponse {
+  session(): SessionResponse {
     return {
-      tenant_id: "tenant_pilot",
-      principal_id: "principal_pilot",
-      display_name: "Pilot operator",
-      authorized_identity_ids: ["identity_human", "identity_agent"],
+      tenant: {
+        id: "tenant_pilot",
+        slug: "pilot",
+        display_name: "Pilot tenant",
+      },
+      principal: {
+        id: "principal_pilot",
+        type: "operator",
+        display_name: "Pilot operator",
+      },
+      membership: {
+        id: "membership_pilot",
+        role: "admin",
+      },
+      identities: this.state.identities.map((identity) => ({
+        identity_id: identity.id,
+        kind: identity.kind,
+        display_name: identity.display_name,
+        scopes: ["conversation.read", "connection.read", "message.send"] as const,
+      })),
     };
   }
 
@@ -108,14 +117,19 @@ export class SimulatedStore {
     ) ?? null);
   }
 
-  messages(conversationId: string, identityId: string): Message[] | null {
+  messages(
+    conversationId: string,
+    identityId: string,
+    options: { limit?: number; cursor?: string } = {},
+  ): MessagePageResult | null {
     const conversation = this.state.conversations.find(
       (item) => item.id === conversationId && item.identity_id === identityId,
     );
     if (!conversation || !this.connections(identityId).some((item) => item.id === conversation.connection_id)) return null;
-    return clone(this.state.messages.filter(
+    const result = paginateMessages(this.state.messages.filter(
       (item) => item.conversation_id === conversationId && item.identity_id === identityId,
-    ));
+    ), options);
+    return result.ok ? clone(result.page) : null;
   }
 
   commands(identityId: string): Command[] {
@@ -172,7 +186,10 @@ export class SimulatedStore {
   selectedScenario() {
     return this.scenario;
   }
+
+  selectedMessageMode() {
+    return this.messageMode;
+  }
 }
 
 export const simulatedStore = new SimulatedStore();
-export { notFound };

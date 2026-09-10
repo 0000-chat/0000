@@ -1,9 +1,12 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { apiClient } from "@/lib/api/client";
 import { simulatedStore } from "@/mocks/store";
+import { server } from "@/mocks/server";
+import { pilotScenario } from "@communicator/test-fixtures";
 
 describe("conversation journeys", () => {
   it("labels the active thread with identity, provider, and account", async () => {
@@ -40,6 +43,36 @@ describe("conversation journeys", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("This conversation is unavailable.");
     expect(screen.queryByText("Family")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Return to All" })).toBeVisible();
+  });
+
+  it("loads older message pages at the top and renders all pages chronologically", async () => {
+    const conversationMessages = pilotScenario.messages.filter(
+      (message) => message.conversation_id === "conversation_human_whatsapp_family",
+    );
+    const newest = conversationMessages[1]!;
+    const oldest = conversationMessages[0]!;
+    server.use(http.get("*/api/v1/conversations/:conversationId/messages", ({ request }) => {
+      const cursor = new URL(request.url).searchParams.get("cursor");
+      return HttpResponse.json(cursor === "older-cursor"
+        ? { items: [oldest], next_cursor: null }
+        : { items: [newest], next_cursor: "older-cursor" });
+    }));
+
+    renderApp("/conversations/conversation_human_whatsapp_family?identity=identity_human&channel=connection_human_whatsapp");
+
+    const timeline = await screen.findByRole("list", { name: "Message timeline" });
+    expect(timeline).toHaveTextContent(newest.body);
+    const loadOlder = screen.getByRole("button", { name: "Load older messages" });
+    expect(loadOlder).toBeVisible();
+    const composer = screen.getByRole("form", { name: "Send a message" });
+
+    await userEvent.setup().click(loadOlder);
+
+    const messages = Array.from(timeline.querySelectorAll("li")).map((item) => item.textContent);
+    expect(messages[0]).toContain(oldest.body);
+    expect(messages[1]).toContain(newest.body);
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+    expect(composer).toBeVisible();
   });
 
   it("keeps the inbox and timeline scoped to the selected identity", async () => {

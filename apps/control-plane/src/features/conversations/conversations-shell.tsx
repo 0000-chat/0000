@@ -22,13 +22,9 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { search } = useLocation();
-  const { activeIdentity, isLoading: identityLoading } = useIdentityContext();
+  const { session, activeIdentity, isLoading: identityLoading } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
   const selectedChannelId = search.channel;
-  const meQuery = useQuery({
-    queryKey: queryKeys.me,
-    queryFn: () => apiClient.getMe(),
-  });
   const channelsQuery = useQuery({
     queryKey: queryKeys.channels(identityId),
     queryFn: () => apiClient.getChannels(identityId),
@@ -37,10 +33,10 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
   const [preferredChannelIds, setPreferredChannelIds] = useState<string[]>([]);
 
   useEffect(() => {
-    if (meQuery.data && identityId) {
-      setPreferredChannelIds(loadChannelOrder(meQuery.data.principal_id, identityId));
+    if (session && identityId) {
+      setPreferredChannelIds(loadChannelOrder(session.principal.id, identityId));
     }
-  }, [identityId, meQuery.data]);
+  }, [identityId, session]);
 
   const channels = useMemo(
     () => applyChannelOrder(channelsQuery.data ?? [], preferredChannelIds),
@@ -141,8 +137,8 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
   };
 
   const reorderChannels = (orderedIds: string[]) => {
-    if (!meQuery.data || !identityId) return;
-    saveChannelOrder(meQuery.data.principal_id, identityId, orderedIds);
+    if (!session || !identityId) return;
+    saveChannelOrder(session.principal.id, identityId, orderedIds);
     setPreferredChannelIds(orderedIds);
   };
 
@@ -238,6 +234,12 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
               >
                 {conversationsQuery.isFetchingNextPage ? "Loading older conversations…" : "Load older conversations"}
               </Button>
+            )}
+            {conversationsQuery.isFetchNextPageError && (
+              <div role="alert" className="m-3 space-y-2 border border-destructive/40 p-3 text-sm">
+                <p>Unable to load older conversations.</p>
+                <Button type="button" size="sm" onClick={() => void conversationsQuery.fetchNextPage()}>Retry</Button>
+              </div>
             )}
           </div>
         </section>

@@ -1,28 +1,23 @@
 import { z } from "zod";
 import {
   ChannelSummarySchema,
-  CommunicatorIdSchema,
   CommandSchema,
   ConnectionSchema,
   ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
-  MessageSchema,
+  MAX_IDENTITY_CONNECTIONS,
+  MessagePageResultSchema,
+  SessionResponseSchema,
   type Command,
   type ChannelSummary,
   type Connection,
   type ConversationPageResult,
   type ConversationSummary,
   type Identity,
-  type Message,
+  type MessagePageResult,
+  type SessionResponse,
 } from "@communicator/contracts";
-
-const MeResponseSchema = z.object({
-  tenant_id: CommunicatorIdSchema,
-  principal_id: CommunicatorIdSchema,
-  display_name: z.string().min(1),
-  authorized_identity_ids: z.array(CommunicatorIdSchema),
-}).strict();
 
 const ResetResponseSchema = z.object({
   status: z.literal("reset"),
@@ -36,9 +31,17 @@ const HealthResponseSchema = z.object({
   data_mode: z.enum(["unconfigured", "simulated", "live"]),
 }).strict();
 
-export type MeResponse = z.infer<typeof MeResponseSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 export type ResetResponse = z.infer<typeof ResetResponseSchema>;
+
+export function identitiesFromSession(session: SessionResponse): Identity[] {
+  return session.identities.map((identity) => IdentitySchema.parse({
+    id: identity.identity_id,
+    tenant_id: session.tenant.id,
+    kind: identity.kind,
+    display_name: identity.display_name,
+  }));
+}
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -69,32 +72,34 @@ export class ApiClient {
     if (!response.ok) {
       throw new ApiError(response.status, `Communicator API request failed with ${response.status}`);
     }
-    const parsed = schema.safeParse(await response.json());
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new ApiError(502, "Communicator API returned an invalid response");
+    }
+    const parsed = schema.safeParse(body);
     if (!parsed.success) {
       throw new ApiError(502, "Communicator API returned an invalid response");
     }
     return parsed.data;
   }
 
-  getMe() {
-    return this.request("/api/v1/me", MeResponseSchema);
-  }
-
-  getIdentities(): Promise<Identity[]> {
-    return this.request("/api/v1/identities", IdentitySchema.array());
+  getSession(): Promise<SessionResponse> {
+    return this.request("/api/v1/session", SessionResponseSchema);
   }
 
   getConnections(identityId: string): Promise<Connection[]> {
     return this.request(
       `/api/v1/connections?identity_id=${encodeURIComponent(identityId)}`,
-      ConnectionSchema.array(),
+      ConnectionSchema.array().max(MAX_IDENTITY_CONNECTIONS),
     );
   }
 
   getChannels(identityId: string): Promise<ChannelSummary[]> {
     return this.request(
       `/api/v1/identities/${encodeURIComponent(identityId)}/channels`,
-      ChannelSummarySchema.array(),
+      ChannelSummarySchema.array().max(MAX_IDENTITY_CONNECTIONS),
     );
   }
 
@@ -102,10 +107,11 @@ export class ApiClient {
     identityId: string,
     channelId?: string,
     cursor?: string,
+    limit = 50,
   ): Promise<ConversationPageResult> {
-    const search = new URLSearchParams({ limit: "50" });
-    if (channelId) search.set("channel_id", channelId);
-    if (cursor) search.set("cursor", cursor);
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (channelId !== undefined) search.set("channel_id", channelId);
+    if (cursor !== undefined) search.set("cursor", cursor);
     return this.request(
       `/api/v1/identities/${encodeURIComponent(identityId)}/conversations?${search}`,
       ConversationPageResultSchema,
@@ -119,10 +125,20 @@ export class ApiClient {
     );
   }
 
-  getMessages(conversationId: string, identityId: string): Promise<Message[]> {
+  getMessages(
+    conversationId: string,
+    identityId: string,
+    cursor?: string,
+    limit = 50,
+  ): Promise<MessagePageResult> {
+    const search = new URLSearchParams({
+      identity_id: identityId,
+      limit: String(limit),
+    });
+    if (cursor !== undefined) search.set("cursor", cursor);
     return this.request(
-      `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages?identity_id=${encodeURIComponent(identityId)}`,
-      MessageSchema.array(),
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages?${search}`,
+      MessagePageResultSchema,
     );
   }
 

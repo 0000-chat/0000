@@ -16,6 +16,7 @@ const applicationTables = [
   "identities",
   "identity_grants",
   "connections",
+  "connection_capabilities",
   "connection_routes",
   "gateway_routes",
   "connection_accounts",
@@ -71,6 +72,7 @@ async function dropControlDirectorySchema(db: D1Database) {
     "directory_mutations",
     "break_glass_grants",
     "revoked_tokens",
+    "connection_capabilities",
     "connection_routes",
     "connection_accounts",
     "connections",
@@ -104,13 +106,51 @@ describe("control directory schema", () => {
     expect(migrations.results.map((row) => row.name)).toEqual(expect.arrayContaining([
       "0001_control_directory.sql",
       "0002_ingestion_routing.sql",
+      "0003_connection_read_metadata.sql",
     ]));
     expect(migrations.results.findIndex((row) => row.name === "0002_ingestion_routing.sql"))
       .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0001_control_directory.sql"));
+    expect(migrations.results.findIndex((row) => row.name === "0003_connection_read_metadata.sql"))
+      .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0002_ingestion_routing.sql"));
     const legacyTables = await env.CONTROL_DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connection_routes'",
     ).all<{ name: string }>();
     expect(legacyTables.results).toEqual([{ name: "connection_routes" }]);
+  });
+
+  it("reapplying the complete migration harness is idempotent", async () => {
+    await expect(applyD1Migrations(env.CONTROL_DB, env.TEST_MIGRATIONS)).resolves.toBeUndefined();
+    const migrations = await env.CONTROL_DB.prepare(
+      "SELECT name FROM d1_migrations ORDER BY id",
+    ).all<{ name: string }>();
+    expect(migrations.results.filter((row) => row.name === "0003_connection_read_metadata.sql")).toHaveLength(1);
+  });
+
+  it("creates bounded connection metadata and capability constraints", async () => {
+    await seedDirectory(env.CONTROL_DB);
+    const columns = await env.CONTROL_DB.prepare(
+      "SELECT name, dflt_value FROM pragma_table_info('connections') WHERE name IN ('last_synced_at', 'attention_code', 'sort_position') ORDER BY name",
+    ).all<{ name: string; dflt_value: string | null }>();
+    expect(columns.results).toEqual([
+      { name: "attention_code", dflt_value: null },
+      { name: "last_synced_at", dflt_value: null },
+      { name: "sort_position", dflt_value: "0" },
+    ]);
+
+    await expect(env.CONTROL_DB.prepare(
+      "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+    ).bind("tenant_pilot", "connection_human_whatsapp", "not-a-capability", timestamp).run()).rejects.toThrow();
+    await expect(env.CONTROL_DB.prepare(
+      "UPDATE connections SET sort_position = -1 WHERE id = ?",
+    ).bind("connection_human_whatsapp").run()).rejects.toThrow();
+    await expect(env.CONTROL_DB.prepare(
+      "UPDATE connections SET attention_code = ? WHERE id = ?",
+    ).bind("a".repeat(101), "connection_human_whatsapp").run()).rejects.toThrow();
+
+    await insertTenant("tenant_other");
+    await expect(env.CONTROL_DB.prepare(
+      "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+    ).bind("tenant_other", "connection_human_whatsapp", "message.send", timestamp).run()).rejects.toThrow();
   });
 
   it("contains no forbidden secret or message columns", async () => {
@@ -503,6 +543,10 @@ describe("control directory schema", () => {
     ).bind("connection_migration_legacy").run()).rejects.toThrow();
 
     await dropControlDirectorySchema(env.CONTROL_DB);
+    const staleCapabilityTable = await env.CONTROL_DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connection_capabilities'",
+    ).all<{ name: string }>();
+    expect(staleCapabilityTable.results).toEqual([]);
     await applyD1Migrations(env.CONTROL_DB, [migrationOne, migrationTwo]);
     const freshMigrations = await env.CONTROL_DB.prepare(
       "SELECT name FROM d1_migrations ORDER BY id",

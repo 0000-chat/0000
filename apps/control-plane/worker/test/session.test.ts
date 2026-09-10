@@ -3,14 +3,21 @@ import {
   ApiErrorResponseSchema,
   SessionResponseSchema,
 } from "@communicator/contracts";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app";
+import { MAX_AUTH_TOKEN_CHARS } from "../auth/bearer";
 import type { VerifiedSubject } from "../auth/oidc";
 import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
 
 const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 
-function createTestApp() {
+type TestAppOptions = {
+  createAccessTokenVerifier?: (env: Cloudflare.Env) => {
+    verify(token: string): Promise<VerifiedSubject>;
+  };
+};
+
+function createTestApp(options: TestAppOptions = {}) {
   return createApp({
     createTokenVerifier: () => ({
       verify: async (token: string): Promise<VerifiedSubject> => {
@@ -23,6 +30,9 @@ function createTestApp() {
         throw new Error("invalid local test token");
       },
     }),
+    ...(options.createAccessTokenVerifier === undefined
+      ? {}
+      : { createAccessTokenVerifier: options.createAccessTokenVerifier }),
   });
 }
 
@@ -31,6 +41,14 @@ async function sessionRequest(authHeader?: string, tenant?: string) {
   if (authHeader !== undefined) headers.set("Authorization", authHeader);
   if (tenant !== undefined) headers.set("X-Communicator-Tenant", tenant);
   return createTestApp().request("http://example.test/api/v1/session", { headers }, env);
+}
+
+async function sessionRequestWithHeaders(
+  headers: Headers,
+  app = createTestApp(),
+  requestEnv: Cloudflare.Env = env,
+) {
+  return app.request("http://example.test/api/v1/session", { headers }, requestEnv);
 }
 
 beforeEach(async () => {
@@ -128,5 +146,129 @@ describe("GET /api/v1/session", () => {
     expect(text).not.toContain("route-user-human");
     expect(text).not.toContain("gateway-human");
     expect(text).not.toContain("bridge-human");
+  });
+
+  it("uses a valid Access assertion when Authorization is absent", async () => {
+    const accessVerify = vi.fn(async (token: string): Promise<VerifiedSubject> => {
+      expect(token).toBe("access.header.payload");
+      return { issuer: "https://issuer.example/", subject: "human-subject" };
+    });
+    const response = await sessionRequestWithHeaders(
+      new Headers({ "Cf-Access-Jwt-Assertion": "access.header.payload" }),
+      createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(accessVerify).toHaveBeenCalledOnce();
+  });
+
+  it("returns the generic 401 for a malformed or invalid Access assertion", async () => {
+    const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => {
+      throw new Error("access assertion rejected");
+    });
+    const app = createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) });
+    const assertions = ["not a jwt", "access.header.payload"];
+    const bodies = [];
+
+    for (const assertion of assertions) {
+      const response = await sessionRequestWithHeaders(
+        new Headers({ "Cf-Access-Jwt-Assertion": assertion }),
+        app,
+      );
+      expect(response.status).toBe(401);
+      bodies.push(await response.json());
+    }
+
+    expect(new Set(bodies.map((body) => JSON.stringify(body)))).toHaveLength(1);
+    expect(bodies[0]).toEqual({
+      error: { code: "unauthenticated", message: "Authentication required" },
+    });
+    expect(accessVerify).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an oversized Access assertion before verification", async () => {
+    const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => ({
+      issuer: "https://issuer.example/",
+      subject: "human-subject",
+    }));
+    const response = await sessionRequestWithHeaders(
+      new Headers({
+        "Cf-Access-Jwt-Assertion": `a.b.${"c".repeat(MAX_AUTH_TOKEN_CHARS)}`,
+      }),
+      createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { code: "unauthenticated", message: "Authentication required" },
+    });
+    expect(accessVerify).not.toHaveBeenCalled();
+  });
+
+  it("never falls back to Access after an Authorization failure", async () => {
+    const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => ({
+      issuer: "https://issuer.example/",
+      subject: "human-subject",
+    }));
+    const response = await sessionRequestWithHeaders(
+      new Headers({
+        Authorization: "Bearer invalid-bearer",
+        "Cf-Access-Jwt-Assertion": "access.header.payload",
+      }),
+      createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { code: "unauthenticated", message: "Authentication required" },
+    });
+    expect(accessVerify).not.toHaveBeenCalled();
+  });
+
+  it("does not expose Access credentials or verifier details on failure", async () => {
+    const assertion = "secret-access-assertion";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await sessionRequestWithHeaders(
+        new Headers({ "Cf-Access-Jwt-Assertion": assertion }),
+        createTestApp({
+          createAccessTokenVerifier: () => ({
+            verify: async (): Promise<VerifiedSubject> => {
+              throw new Error(`issuer=https://secret.example sub=secret-subject token=${assertion}`);
+            },
+          }),
+        }),
+      );
+
+      const body = await response.text();
+      expect(response.status).toBe(401);
+      expect(body).not.toContain(assertion);
+      expect(body).not.toContain("secret.example");
+      expect(body).not.toContain("secret-subject");
+      expect(JSON.stringify(log.mock.calls)).not.toContain(assertion);
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret.example");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret-subject");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("fails closed when Access configuration is missing", async () => {
+    const missingAccessConfig = {
+      ...env,
+      COMMUNICATOR_ACCESS_ISSUER: undefined,
+      COMMUNICATOR_ACCESS_AUDIENCE: undefined,
+      COMMUNICATOR_ACCESS_JWKS_URL: undefined,
+    } as unknown as Cloudflare.Env;
+    const response = await sessionRequestWithHeaders(
+      new Headers({ "Cf-Access-Jwt-Assertion": "access.header.payload" }),
+      createApp(),
+      missingAccessConfig,
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { code: "unauthenticated", message: "Authentication required" },
+    });
   });
 });

@@ -46,6 +46,7 @@ export const ApiErrorResponseSchema = z.object({
   error: z.object({
     code: z.enum([
       "unauthenticated",
+      "invalid_request",
       "not_found",
       "tenant_selection_required",
       "service_unavailable",

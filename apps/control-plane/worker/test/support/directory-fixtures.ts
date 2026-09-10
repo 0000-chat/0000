@@ -68,6 +68,18 @@ export async function seedDirectory(db: D1Database): Promise<void> {
     db.prepare(
       "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     ).bind("connection_agent_whatsapp", "gateway_route_agent", "bridge-agent", "route-user-agent", "route-room-agent", fixtureTimestamp, fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+    ).bind("tenant_pilot", "connection_human_whatsapp", "message.send", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+    ).bind("tenant_pilot", "connection_human_whatsapp", "receipt.read", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+    ).bind("tenant_pilot", "connection_human_whatsapp", "typing.send", fixtureTimestamp),
+    db.prepare(
+      "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+    ).bind("tenant_pilot", "connection_agent_whatsapp", "message.send", fixtureTimestamp),
   ]);
 }
 
@@ -91,6 +103,7 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM break_glass_grants"),
     db.prepare("DELETE FROM revoked_tokens"),
     db.prepare("DELETE FROM connection_accounts"),
+    db.prepare("DELETE FROM connection_capabilities"),
     db.prepare("DELETE FROM connection_routes"),
     db.prepare("DELETE FROM connections"),
     db.prepare("DELETE FROM identity_grants"),
