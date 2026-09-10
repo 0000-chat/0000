@@ -1,5 +1,6 @@
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { SessionResponseSchema } from "@communicator/contracts";
+import { HTTPException } from "hono/http-exception";
 import type { AuthorizationVariables } from "./auth/middleware";
 import { createAuthorizationMiddleware } from "./auth/middleware";
 import {
@@ -28,7 +29,22 @@ import {
   messagesHandler,
 } from "./routes/read";
 import { sessionRoute } from "./routes/session";
+import { realtimeTicketRoute } from "./routes/realtime";
+import {
+  realtimeTicketHandler,
+  realtimeUpgradeHandler,
+} from "./realtime/handlers";
 import { ReadError, readErrorResponse } from "./read/errors";
+
+const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
+const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
+
+const decorateRealtimeTicketResponse = (response: Response): Response => {
+  response.headers.set("Cache-Control", "no-store");
+  response.headers.set("Pragma", "no-cache");
+  response.headers.set("Referrer-Policy", "no-referrer");
+  return response;
+};
 
 export type AppServices = {
   createTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
@@ -47,6 +63,24 @@ export function createApp(services: AppServices = {}) {
       const error = readErrorResponse(new ReadError("invalid_request"));
       return context.json(error.body, error.status);
     },
+  });
+  app.onError((error, context) => {
+    if (
+      context.req.path === REALTIME_TICKET_PATH &&
+      error instanceof HTTPException &&
+      error.status === 400 &&
+      error.message === MALFORMED_JSON_MESSAGE
+    ) {
+      return decorateRealtimeTicketResponse(context.json({
+        error: { code: "invalid_request", message: "Invalid request" },
+      }, 400));
+    }
+    if (error instanceof HTTPException) {
+      const response = error.getResponse();
+      return context.newResponse(response.body, response);
+    }
+    console.error({ event: "internal_server_error" });
+    return context.text("Internal Server Error", 500);
   });
   let verifier: TokenVerifier | undefined;
   const getVerifier = (runtimeEnv: Cloudflare.Env) => {
@@ -90,22 +124,26 @@ export function createApp(services: AppServices = {}) {
     scheme: "bearer",
     bearerFormat: "JWT",
   });
-  app.use("/api/v1/session", createAuthorizationMiddleware({
-    getVerifier,
-    getAccessVerifier,
-  }));
-  const readAuthorization = createAuthorizationMiddleware({
+  const productAuthorization = createAuthorizationMiddleware({
     getVerifier,
     getAccessVerifier,
   });
-  app.use("/api/v1/identities", readAuthorization);
-  app.use("/api/v1/identities/*", readAuthorization);
-  app.use("/api/v1/connections", readAuthorization);
-  app.use("/api/v1/conversations/*", readAuthorization);
+  app.use(REALTIME_TICKET_PATH, async (context, next) => {
+    await next();
+    if (context.finalized) decorateRealtimeTicketResponse(context.res);
+  });
+  app.use("/api/v1/session", productAuthorization);
+  app.use(REALTIME_TICKET_PATH, productAuthorization);
+  app.use("/api/v1/identities", productAuthorization);
+  app.use("/api/v1/identities/*", productAuthorization);
+  app.use("/api/v1/connections", productAuthorization);
+  app.use("/api/v1/conversations/*", productAuthorization);
   app.openapi(sessionRoute, (context) => context.json(
     SessionResponseSchema.parse(context.get("authorization")),
     200,
   ));
+  app.openapi(realtimeTicketRoute, realtimeTicketHandler);
+  app.get("/api/v1/realtime", realtimeUpgradeHandler);
 
   app.openapi(identitiesRoute, identitiesHandler);
   app.openapi(connectionsRoute, connectionsHandler);

@@ -26,6 +26,10 @@ describe("published live read OpenAPI document", () => {
           security?: unknown;
           responses?: Record<string, unknown>;
         };
+        post?: {
+          security?: unknown;
+          responses?: Record<string, unknown>;
+        };
       }>;
       components?: { securitySchemes?: Record<string, unknown> };
     };
@@ -41,6 +45,7 @@ describe("published live read OpenAPI document", () => {
       "/api/v1/identities/{identity_id}/conversations",
       "/api/v1/identities/{identity_id}/conversations/{conversation_id}",
       "/api/v1/conversations/{conversation_id}/messages",
+      "/api/v1/realtime/tickets",
     ]));
     expect(document.components?.securitySchemes?.bearerAuth).toMatchObject({
       type: "http",
@@ -57,6 +62,10 @@ describe("published live read OpenAPI document", () => {
     const document = await response.json() as {
       paths: Record<string, {
         get?: {
+          security?: unknown;
+          responses?: Record<string, unknown>;
+        };
+        post?: {
           security?: unknown;
           responses?: Record<string, unknown>;
         };
@@ -82,6 +91,17 @@ describe("published live read OpenAPI document", () => {
         "503",
       ]));
     }
+
+    const ticketOperation = document.paths["/api/v1/realtime/tickets"]?.post;
+    expect(ticketOperation?.security).toEqual([{ bearerAuth: [] }]);
+    expect(Object.keys(ticketOperation?.responses ?? {})).toEqual(expect.arrayContaining([
+      "201",
+      "400",
+      "401",
+      "404",
+      "503",
+    ]));
+    expect(document.paths["/api/v1/realtime"]).toBeUndefined();
 
     const serialized = JSON.stringify(document);
     expect(serialized).not.toContain("projection_forbidden");
