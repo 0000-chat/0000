@@ -6,6 +6,7 @@ pub mod canonical;
 pub mod config;
 pub mod crypto;
 pub mod crypto_outbox;
+pub mod ingestion;
 pub mod matrix;
 pub mod matrix_http;
 pub mod model;
