@@ -1,0 +1,43 @@
+[package]
+name = "communicator-matrix-gateway"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "communicator-matrix-gateway"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+base64 = "=0.22.1"
+chacha20poly1305 = "=0.10.1"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+http.workspace = true
+futures-util.workspace = true
+matrix-sdk = { workspace = true, features = ["e2e-encryption", "sqlite", "bundled-sqlite"] }
+matrix-sdk-base = { workspace = true, features = ["e2e-encryption"] }
+matrix-sdk-common.workspace = true
+matrix-sdk-crypto = { workspace = true }
+matrix-sdk-sqlite = { workspace = true, features = ["bundled", "crypto-store", "state-store"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+reqwest.workspace = true
+ruma.workspace = true
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2 = { workspace = true, features = ["compress"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { version = "=1.26.0", features = ["v4"] }
+zeroize = "=1.9.0"
+
+[dev-dependencies]
+matrix-sdk = { workspace = true, features = ["e2e-encryption", "sqlite", "bundled-sqlite", "testing"] }
+matrix-sdk-crypto = { workspace = true, features = ["testing"] }
+matrix-sdk-test.workspace = true
+tempfile.workspace = true
+url.workspace = true
+wiremock.workspace = true
