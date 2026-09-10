@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+python3 - "$root" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+expected = {
+    ".github/workflows/quality.yml",
+    ".githooks/pre-commit",
+    ".gitignore",
+    "0000-product.json",
+    "AGENTS.md",
+    "README.md",
+    "docs/README.md",
+    "scripts/check",
+}
+tracked = set(subprocess.check_output(["git", "ls-files"], text=True).splitlines())
+if tracked != expected:
+    raise SystemExit(f"tracked scaffold mismatch: missing={sorted(expected-tracked)} extra={sorted(tracked-expected)}")
+metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
+if metadata.get("schema_version") != 1 or metadata.get("name") != root.name:
+    raise SystemExit("invalid product metadata")
+if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
+    raise SystemExit("product is not marked scaffold-only")
+if metadata.get("license_selected") is not False:
+    raise SystemExit("scaffold must not select a license")
+readme = (root / "README.md").read_text(encoding="utf-8")
+if "Standalone public" not in readme or "Cloudflare" not in readme:
+    raise SystemExit("README must state authentication and hosting intent")
+PY
+git diff --check
+echo "0000-database scaffold checks passed"
