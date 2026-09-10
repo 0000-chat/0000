@@ -1,6 +1,6 @@
 import type { SessionResponse } from "@communicator/contracts";
 import type { MiddlewareHandler } from "hono";
-import { parseBearerToken } from "./bearer";
+import { parseAccessAssertion, parseBearerToken } from "./bearer";
 import type { TokenVerifier } from "./oidc";
 import { resolveAuthorization } from "../control-directory/authorization";
 
@@ -10,6 +10,7 @@ export type AuthorizationVariables = {
 
 type AuthorizationMiddlewareOptions = {
   getVerifier: (env: Cloudflare.Env) => TokenVerifier;
+  getAccessVerifier: (env: Cloudflare.Env) => TokenVerifier;
 };
 
 function logAuthorizationFailure(status: number, requestId: string) {
@@ -30,8 +31,15 @@ export function createAuthorizationMiddleware(
     };
 
     try {
-      const token = parseBearerToken(context.req.header("Authorization"));
-      const subject = await options.getVerifier(context.env).verify(token);
+      const authorization = context.req.header("Authorization");
+      const accessAssertion = context.req.header("Cf-Access-Jwt-Assertion");
+      const subject = authorization !== undefined
+        ? await options.getVerifier(context.env).verify(
+            parseBearerToken(authorization),
+          )
+        : await options.getAccessVerifier(context.env).verify(
+            parseAccessAssertion(accessAssertion),
+          );
       const database = context.env.CONTROL_DB;
       if (!database) return respond(503, "service_unavailable", "Authorization service unavailable");
       const tenantHint = context.req.header("X-Communicator-Tenant") ?? undefined;
