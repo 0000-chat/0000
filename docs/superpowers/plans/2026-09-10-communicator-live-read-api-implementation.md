@@ -952,4 +952,3 @@ git commit -m "docs: add live read API operations"
    encrypted local upload outbox, and authenticated ingestion.
 3. Milestones 12–14: `IdentityCommandDO`, direct send, paced typing/read/send,
    cancellation, reactions, edits, deletes, and capability negotiation.
-
