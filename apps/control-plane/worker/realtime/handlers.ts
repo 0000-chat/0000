@@ -155,6 +155,7 @@ const internalUpgradeRequest = (
 ): Request => new Request(REALTIME_INTERNAL_UPGRADE_URL, {
   method: "GET",
   headers: {
+    Connection: "Upgrade",
     Upgrade: "websocket",
     "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
     [REALTIME_INTERNAL_CONTEXT_HEADER]: contextJson,

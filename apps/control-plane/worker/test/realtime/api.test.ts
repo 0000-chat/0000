@@ -501,6 +501,7 @@ describe("GET /api/v1/realtime", () => {
     expect(calls[0]?.tenant).toBe("tenant_pilot");
     expect(calls[0]?.request.url).toBe("https://tenant-projection.internal/realtime");
     expect([...calls[0]!.request.headers.entries()].sort()).toEqual([
+      ["connection", "Upgrade"],
       ["sec-websocket-protocol", REALTIME_SUBPROTOCOL],
       ["upgrade", "websocket"],
       ["x-communicator-realtime-context", expect.any(String)],
