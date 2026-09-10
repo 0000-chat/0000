@@ -11,12 +11,14 @@ use crate::{
     canonical::{self, CanonicalBatchInput, SourceCheckpoint},
     config::MAX_BATCH_CANONICAL_BYTES,
     crypto::AEAD_TAG_BYTES,
+    ingestion::PendingBatch,
     ledger::{
         BackfillState, FinalizeOutcome, MAX_BACKFILL_PAGINATION_BYTES,
         MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES, MAX_WINDOW_BATCHES,
-        MAX_WINDOW_ROOM_CANDIDATES, NewLiveGapJob, NewLiveWindow, RoomAnchorCandidate,
-        RoomEphemeralCandidate, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID,
-        STORE_LEDGER_NOT_READY, STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
+        MAX_WINDOW_ROOM_CANDIDATES, NewLiveGapJob, NewLiveWindow, PendingIngestionBatch,
+        RoomAnchorCandidate, RoomEphemeralCandidate, STORE_LEDGER_CAS_MISMATCH,
+        STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY,
+        STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
     },
     secret::{SafeError, SecretBytes},
     store_types::{InboxId, SyncInboxState},
@@ -59,6 +61,9 @@ struct StoredOutboxBatch {
     request: SecretBytes,
     request_sha256: [u8; 32],
     byte_count: usize,
+    attempt_count: u32,
+    next_attempt_at: DateTime<Utc>,
+    next_attempt_at_text: String,
 }
 
 struct StoredAnchor {
@@ -503,6 +508,180 @@ impl Store {
         Ok(FinalizeOutcome::Prepared {
             batch_count: window_validation.batch_count,
         })
+    }
+
+    /// Return one authenticated, due batch from the oldest pending live window.
+    pub fn next_pending_ingestion_batch(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<PendingIngestionBatch>, SafeError> {
+        if !valid_utc_millisecond(now) {
+            return Err(ledger_invalid());
+        }
+
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| ledger_corrupt())?;
+        let context = load_live_context(&transaction, &self.keyring)?;
+        let Some(index) = context.chain.first_uncommitted_index else {
+            return Ok(None);
+        };
+        let oldest = &context.chain.rows[index];
+        let expected_window_id = derive_window_id(&self.keyring, oldest.inbox_id().as_str())
+            .map_err(|_| ledger_corrupt())?;
+        let Some(window) = load_existing_window(
+            &transaction,
+            &expected_window_id,
+            oldest.inbox_id().as_str(),
+        )?
+        else {
+            return Ok(None);
+        };
+        if window.window_id != expected_window_id || window.inbox_id != oldest.inbox_id().as_str() {
+            return Err(ledger_corrupt());
+        }
+        validate_window_inbox_link(&context, &window)?;
+
+        let outbox = load_outbox_batches(&transaction, &self.keyring, &window.window_id)?;
+        let staged_anchors = load_staged_anchors(&transaction, &self.keyring, &window.window_id)?;
+        let staged_ephemeral =
+            load_staged_ephemeral(&transaction, &self.keyring, &window.window_id)?;
+        validate_window_children_against_metadata(
+            &window,
+            &outbox,
+            &staged_anchors,
+            &staged_ephemeral,
+        )?;
+        validate_live_window_metadata(&window, &outbox, oldest)?;
+
+        if window.state != "pending" {
+            return Ok(None);
+        }
+
+        for stored in outbox {
+            if stored.state != "pending" || stored.next_attempt_at > now {
+                continue;
+            }
+            let request = batch::reparse_and_verify_request(stored.request.as_bytes())
+                .map_err(|_| ledger_corrupt())?;
+            let batch = PendingBatch::new(
+                request.tenant_id,
+                stored.batch_row_id.clone(),
+                stored.request.as_bytes().to_vec(),
+            );
+            return PendingIngestionBatch::from_verified_parts(
+                stored.batch_row_id,
+                batch,
+                stored.attempt_count,
+                stored.next_attempt_at,
+            )
+            .map(Some)
+            .map_err(|_| ledger_corrupt());
+        }
+        Ok(None)
+    }
+
+    /// Record one delivery attempt with a single state-qualified CAS update.
+    pub fn record_ingestion_attempt(
+        &mut self,
+        row_id: &str,
+        expected_attempt_count: u32,
+        expected_next_attempt_at: DateTime<Utc>,
+        attempted_at: DateTime<Utc>,
+        next_attempt_at: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        if !valid_batch_id(row_id)
+            || expected_attempt_count > OUTBOX_ATTEMPT_COUNT_MAX as u32
+            || !valid_utc_millisecond(expected_next_attempt_at)
+            || !valid_utc_millisecond(attempted_at)
+            || !valid_utc_millisecond(next_attempt_at)
+            || attempted_at < expected_next_attempt_at
+            || next_attempt_at <= attempted_at
+        {
+            return Err(ledger_invalid());
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+        let context = load_live_context(&transaction, &self.keyring)?;
+        let Some(addressed) = load_outbox_batch_by_id(&transaction, &self.keyring, row_id)? else {
+            return Err(ledger_cas_mismatch());
+        };
+        let Some(window_id) = outbox_window_id(&transaction, row_id)? else {
+            return Err(ledger_cas_mismatch());
+        };
+        let window = load_window_by_id(&transaction, &window_id)?.ok_or_else(ledger_corrupt)?;
+        let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
+        let expected_window_id =
+            derive_window_id(&self.keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+        if window.window_id != expected_window_id {
+            return Err(ledger_corrupt());
+        }
+        validate_window_inbox_link(&context, &window)?;
+
+        if window.state != "pending" || addressed.state != "pending" {
+            return Err(ledger_cas_mismatch());
+        }
+        let Some(oldest_index) = context.chain.first_uncommitted_index else {
+            return Err(ledger_cas_mismatch());
+        };
+        let oldest = &context.chain.rows[oldest_index];
+        if oldest.inbox_id().as_str() != window.inbox_id {
+            return Err(ledger_cas_mismatch());
+        }
+
+        let outbox = load_outbox_batches(&transaction, &self.keyring, &window.window_id)?;
+        let staged_anchors = load_staged_anchors(&transaction, &self.keyring, &window.window_id)?;
+        let staged_ephemeral =
+            load_staged_ephemeral(&transaction, &self.keyring, &window.window_id)?;
+        validate_window_children_against_metadata(
+            &window,
+            &outbox,
+            &staged_anchors,
+            &staged_ephemeral,
+        )?;
+        validate_live_window_metadata(&window, &outbox, oldest)?;
+        let Some(current) = outbox.iter().find(|row| row.batch_row_id == row_id) else {
+            return Err(ledger_corrupt());
+        };
+        if current.attempt_count != expected_attempt_count
+            || current.next_attempt_at != expected_next_attempt_at
+            || current.attempt_count >= OUTBOX_ATTEMPT_COUNT_MAX as u32
+        {
+            return Err(ledger_cas_mismatch());
+        }
+
+        let updated = transaction
+            .execute(
+                "UPDATE outbox_batches
+                 SET attempt_count = attempt_count + 1, next_attempt_at = ?1
+                 WHERE batch_row_id = ?2 AND source_kind = 'live'
+                   AND window_id = ?3 AND backfill_job_id IS NULL
+                   AND state = 'pending' AND attempt_count = ?4
+                   AND next_attempt_at = ?5 AND attempt_count < ?6
+                   AND EXISTS (
+                     SELECT 1 FROM sync_windows AS w
+                     WHERE w.window_id = outbox_batches.window_id
+                       AND w.state = 'pending'
+                   )",
+                params![
+                    next_attempt_at.to_rfc3339(),
+                    row_id,
+                    window.window_id,
+                    i64::from(expected_attempt_count),
+                    current.next_attempt_at_text.as_str(),
+                    OUTBOX_ATTEMPT_COUNT_MAX,
+                ],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated != 1 {
+            return Err(ledger_cas_mismatch());
+        }
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(())
     }
 
     /// Complete a running live-gap job while preparing its linked live window.
@@ -1468,6 +1647,48 @@ fn validate_window_children_against_metadata(
     Ok(())
 }
 
+fn validate_live_window_metadata(
+    window: &StoredLiveWindow,
+    outbox: &[StoredOutboxBatch],
+    oldest: &super::RawSyncInbox,
+) -> Result<(), SafeError> {
+    let expected_checkpoint = SourceCheckpoint {
+        kind: "matrix_sync_token_sha256".to_owned(),
+        value: format!("sha256:{}", lowercase_hex(oldest.next_token_digest())),
+    };
+    let created_at = parse_stored_timestamp(&window.created_at).map_err(|_| ledger_corrupt())?;
+    let mut common_metadata: Option<(String, String, String, String)> = None;
+
+    for stored in outbox {
+        let request = batch::reparse_and_verify_request(stored.request.as_bytes())
+            .map_err(|_| ledger_corrupt())?;
+        let archived_at =
+            parse_input_timestamp(&request.archived_at).map_err(|_| ledger_corrupt())?;
+        if request.batch_id != stored.batch_row_id
+            || request.source_checkpoint != expected_checkpoint
+            || *oldest.observed_at() > archived_at
+            || created_at > archived_at
+        {
+            return Err(ledger_corrupt());
+        }
+
+        let metadata = (
+            request.tenant_id,
+            request.gateway_route_id,
+            request.archived_at,
+            request.source_checkpoint.value,
+        );
+        if let Some(common) = common_metadata.as_ref() {
+            if common != &metadata {
+                return Err(ledger_corrupt());
+            }
+        } else {
+            common_metadata = Some(metadata);
+        }
+    }
+    Ok(())
+}
+
 fn load_outbox_batches(
     transaction: &Transaction<'_>,
     keyring: &super::Keyring,
@@ -1496,6 +1717,72 @@ fn load_outbox_batches(
         result.push(read_and_verify_outbox(row, keyring, window_id)?);
     }
     Ok(result)
+}
+
+fn load_outbox_batch_by_id(
+    transaction: &Transaction<'_>,
+    keyring: &super::Keyring,
+    row_id: &str,
+) -> Result<Option<StoredOutboxBatch>, SafeError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT batch_row_id, source_kind, window_id, backfill_job_id, ordinal, state,
+                    request_cipher, request_nonce, request_key_version, request_sha256,
+                    byte_count, attempt_count, next_attempt_at, accepted_at, terminal_code
+             FROM outbox_batches WHERE batch_row_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let mut rows = statement.query([row_id]).map_err(|_| ledger_corrupt())?;
+    let Some(row) = rows.next().map_err(|_| ledger_corrupt())? else {
+        return Ok(None);
+    };
+    let source_kind = read_text(row, 1, SOURCE_KIND_MAX_BYTES, |value| {
+        matches!(value, "live" | "backfill")
+    })?;
+    if source_kind != "live" {
+        return Ok(None);
+    }
+    let window_id = read_optional_text(row, 2, MAX_LEDGER_ID_BYTES, valid_window_id)?
+        .ok_or_else(ledger_corrupt)?;
+    if read_optional_text(row, 3, MAX_LEDGER_ID_BYTES, |_| true)?.is_some() {
+        return Err(ledger_corrupt());
+    }
+    let result = read_and_verify_outbox(row, keyring, &window_id)?;
+    if rows.next().map_err(|_| ledger_corrupt())?.is_some() {
+        return Err(ledger_corrupt());
+    }
+    Ok(Some(result))
+}
+
+fn outbox_window_id(
+    transaction: &Transaction<'_>,
+    row_id: &str,
+) -> Result<Option<String>, SafeError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT source_kind, window_id, backfill_job_id
+             FROM outbox_batches WHERE batch_row_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let mut rows = statement.query([row_id]).map_err(|_| ledger_corrupt())?;
+    let Some(row) = rows.next().map_err(|_| ledger_corrupt())? else {
+        return Ok(None);
+    };
+    let source_kind = read_text(row, 0, SOURCE_KIND_MAX_BYTES, |value| {
+        matches!(value, "live" | "backfill")
+    })?;
+    let window_id = read_optional_text(row, 1, MAX_LEDGER_ID_BYTES, valid_window_id)?;
+    let backfill_job_id = read_optional_text(row, 2, MAX_LEDGER_ID_BYTES, |_| true)?;
+    if rows.next().map_err(|_| ledger_corrupt())?.is_some() {
+        return Err(ledger_corrupt());
+    }
+    if source_kind != "live" {
+        return Ok(None);
+    }
+    if window_id.is_none() || backfill_job_id.is_some() {
+        return Err(ledger_corrupt());
+    }
+    Ok(window_id)
 }
 
 fn read_and_verify_outbox(
@@ -1532,15 +1819,20 @@ fn read_and_verify_outbox(
     let key_version = read_integer(row, 8, 1, i64::from(u32::MAX))?;
     let request_sha256 = digest_from_blob(&read_blob(row, 9, 32, 32)?)?;
     let attempt_count = read_integer(row, 11, 0, OUTBOX_ATTEMPT_COUNT_MAX)?;
-    let next_attempt_at = read_text(row, 12, 64, valid_stored_utc_millisecond)?;
+    let next_attempt_at_text = read_text(row, 12, 64, valid_stored_utc_millisecond)?;
     let accepted_at = read_optional_text(row, 13, 64, valid_stored_utc_millisecond)?;
     let terminal_code = read_optional_text(row, 14, 64, valid_stored_reason_code)?;
+    let next_attempt_at =
+        parse_stored_timestamp(&next_attempt_at_text).map_err(|_| ledger_corrupt())?;
+    if let Some(accepted_at) = accepted_at.as_deref() {
+        parse_stored_timestamp(accepted_at).map_err(|_| ledger_corrupt())?;
+    }
     validate_outbox_lifecycle(
         &state,
         accepted_at.is_some(),
         terminal_code.is_some(),
         attempt_count,
-        &next_attempt_at,
+        &next_attempt_at_text,
     )?;
     let plaintext = open_stored_value(
         keyring,
@@ -1575,6 +1867,9 @@ fn read_and_verify_outbox(
         request: SecretBytes::new(plaintext.as_bytes().to_vec()),
         request_sha256,
         byte_count,
+        attempt_count: u32::try_from(attempt_count).map_err(|_| ledger_corrupt())?,
+        next_attempt_at,
+        next_attempt_at_text,
     })
 }
 
@@ -1982,6 +2277,10 @@ fn ledger_conflict() -> SafeError {
 
 fn ledger_not_ready() -> SafeError {
     SafeError::new(STORE_LEDGER_NOT_READY)
+}
+
+fn ledger_cas_mismatch() -> SafeError {
+    SafeError::new(STORE_LEDGER_CAS_MISMATCH)
 }
 
 fn ledger_corrupt() -> SafeError {
