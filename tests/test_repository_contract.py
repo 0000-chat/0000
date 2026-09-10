@@ -565,6 +565,13 @@ class RepositoryContractTests(unittest.TestCase):
                 False,
                 '"https://auth.local.invalid/.well-known/jwks.json"',
             ),
+            ("COMMUNICATOR_ACCESS_ISSUER", False, '"https://access.local.invalid/"'),
+            ("COMMUNICATOR_ACCESS_AUDIENCE", False, '"access-audience.local.invalid"'),
+            (
+                "COMMUNICATOR_ACCESS_JWKS_URL",
+                False,
+                '"https://access.local.invalid/cdn-cgi/access/certs"',
+            ),
             ("COMMUNICATOR_INGRESS_ENABLED", False, '"false"'),
             (
                 "COMMUNICATOR_INGESTION_OIDC_ISSUER",
