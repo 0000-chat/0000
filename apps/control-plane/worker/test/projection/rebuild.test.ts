@@ -10,6 +10,7 @@ import type {
   ProjectionEventEnvelope,
   ProjectionStatus,
 } from "@communicator/contracts";
+import { REALTIME_SUBPROTOCOL } from "@communicator/contracts";
 import { describe, expect, it } from "vitest";
 import { TenantProjectionDO } from "../../projection/tenant-projection";
 import { deriveManifestPrefix } from "../../archive/keys";
@@ -288,7 +289,173 @@ const replay = async (
     authorization: auth(tenant, ["projection.rebuild"]),
   });
 
+const nextSocketFrame = (
+  socket: WebSocket,
+  predicate: (frame: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
+  const onMessage = (event: MessageEvent) => {
+    const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+    if (!predicate(frame)) return;
+    cleanup();
+    resolve(frame);
+  };
+  const cleanup = () => {
+    socket.removeEventListener("message", onMessage);
+    clearTimeout(timeout);
+  };
+  const timeout = setTimeout(() => {
+    cleanup();
+    reject(new Error("Timed out waiting for realtime frame"));
+  }, 1_000);
+  socket.addEventListener("message", onMessage);
+});
+
+const nextSocketClose = (socket: WebSocket): Promise<number> => new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => {
+    reject(new Error("Timed out waiting for realtime socket close"));
+  }, 1_000);
+  socket.addEventListener("close", (event) => {
+    clearTimeout(timeout);
+    resolve((event as CloseEvent).code);
+  }, { once: true });
+});
+
 describe("TenantProjectionDO resumable rebuilds", () => {
+  it("sends the next-generation reset before closing sockets and never broadcasts replay pages", async () => {
+    const tenant = newTenant();
+    const stub = await initialize(tenant);
+    const issuedAt = new Date(Date.now() - 1_000);
+    const realtimeContext = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      principal_id: "principal_rebuild",
+      membership_id: "membership_rebuild",
+      subscriptions: [{ identity_id: "identity_a", families: ["projection"] as const }],
+      resume: [],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
+    };
+    const response = await stub.fetch(new Request(
+      "https://tenant-projection.internal/realtime",
+      {
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+          "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
+        },
+      },
+    ));
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (socket === null) throw new Error("missing realtime socket");
+    const frames: Record<string, unknown>[] = [];
+    socket.addEventListener("message", (event) => {
+      frames.push(JSON.parse(String(event.data)) as Record<string, unknown>);
+    });
+    const connected = nextSocketFrame(socket, (frame) => frame.type === "connected");
+    socket.accept();
+    await connected;
+    const reset = nextSocketFrame(socket, (frame) => frame.type === "reset_required");
+    const closed = new Promise<number>((resolve) => {
+      socket.addEventListener("close", (event) => resolve((event as CloseEvent).code), { once: true });
+    });
+
+    try {
+      await expect(begin(stub, tenant, "rebuild_socket_reset", 1)).resolves.toMatchObject({
+        state: "rebuilding",
+        generation: 2,
+      });
+      await expect(reset).resolves.toEqual({
+        schema_version: 1,
+        type: "reset_required",
+        tenant_id: tenant,
+        identity_id: "identity_a",
+        generation: 2,
+        latest_sequence: 0,
+        reason: "generation_changed",
+      });
+      await expect(closed).resolves.toBe(1012);
+
+      await replay(
+        stub,
+        tenant,
+        "rebuild_socket_reset",
+        pageFor(tenant, [eventFor({
+          tenant,
+          eventId: "historical_replay_should_not_broadcast",
+        })]),
+        null,
+        [binding("account_a", "connection_a", "identity_a")],
+      );
+
+      expect(frames.map((frame) => frame.type)).toEqual([
+        "connected",
+        "reset_required",
+      ]);
+    } finally {
+      if (socket.readyState !== 3) socket.close(1000, "test complete");
+    }
+  });
+
+  it("does not reset or close sockets when the rebuild transaction fails", async () => {
+    const tenant = newTenant();
+    const stub = await initialize(tenant);
+    const issuedAt = new Date(Date.now() - 1_000);
+    const realtimeContext = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      principal_id: "principal_rebuild",
+      membership_id: "membership_rebuild",
+      subscriptions: [{ identity_id: "identity_a", families: ["projection"] as const }],
+      resume: [],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
+    };
+    const response = await stub.fetch(new Request(
+      "https://tenant-projection.internal/realtime",
+      {
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+          "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
+        },
+      },
+    ));
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (socket === null) throw new Error("missing realtime socket");
+    const connected = nextSocketFrame(socket, (frame) => frame.type === "connected");
+    socket.accept();
+    await connected;
+    const reset = nextSocketFrame(socket, (frame) => frame.type === "reset_required");
+    const closed = nextSocketClose(socket);
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "CREATE TRIGGER fail_rebuild_socket_reset BEFORE UPDATE OF state ON projection_meta BEGIN SELECT RAISE(ABORT, 'synthetic begin failure'); END",
+      );
+    });
+    try {
+      await expectCode(
+        stub,
+        (instance) => begin(instance, tenant, "rebuild_socket_reset_failed", 1),
+        "projection_unavailable",
+      );
+      await expect(reset).rejects.toThrow("Timed out waiting for realtime frame");
+      await expect(closed).rejects.toThrow("Timed out waiting for realtime socket close");
+      expect(socket.readyState).not.toBe(3);
+    } finally {
+      await runInDurableObject(stub, async (_instance, state) => {
+        state.storage.sql.exec("DROP TRIGGER fail_rebuild_socket_reset");
+      });
+      if (socket.readyState !== 3) socket.close(1000, "test complete");
+    }
+  });
+
   it("begins a generation, clears only derived state, and makes the same begin retry idempotent", async () => {
     const tenant = newTenant();
     const stub = await initialize(tenant);

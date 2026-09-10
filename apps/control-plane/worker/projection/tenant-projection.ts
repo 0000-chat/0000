@@ -93,12 +93,15 @@ import {
   REALTIME_INTERNAL_PATH,
   REALTIME_SOCKET_TAG,
   batchRealtimeChanges,
+  broadcastRealtimeChanges,
   countPrincipalSockets,
   nextSocketExpiry,
   readRealtimeReplay,
   realtimeConnectionExpiry,
+  resetRealtimeSocketsForRebuild,
   serializeSafeRealtimeAttachment,
   sendRealtimeFrame,
+  type RealtimeBroadcastChange,
   type RealtimeReplayRow,
   tryParseRealtimeAttachment,
 } from "../realtime/tenant-sockets";
@@ -183,6 +186,11 @@ type ApplyPreparedBatchInput = {
     | null;
   readonly inputEventCount: number;
   readonly connections: readonly ProjectionConnectionBinding[];
+};
+
+type AppliedPreparedBatch = {
+  readonly result: ApplyProjectionBatchResult;
+  readonly changes: readonly RealtimeBroadcastChange[];
 };
 
 type PreparedReplayCheckpointMutation = {
@@ -1559,6 +1567,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         );
       });
 
+      try {
+        resetRealtimeSocketsForRebuild(
+          this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+          parsed.tenant_id,
+          nextGeneration,
+        );
+      } catch {
+        // Rebuild lifecycle state remains authoritative if socket cleanup fails.
+      }
+
       const started = readProjectionMeta(this.ctx.storage);
       if (started === undefined) throw new Error("projection metadata disappeared");
       return readStatusForMeta(this.ctx.storage, started);
@@ -2057,7 +2075,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     input: ApplyPreparedBatchInput,
   ): ApplyProjectionBatchResult {
     try {
-      return this.ctx.storage.transactionSync(() => {
+      const applied = this.ctx.storage.transactionSync<AppliedPreparedBatch>(() => {
         const meta = readProjectionMeta(this.ctx.storage);
         if (meta === undefined) throw projectionError("projection_not_found");
         requireStoredTenant(meta, input.tenantId);
@@ -2105,12 +2123,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             if (sameNullableString(existing.source_cursor, replayCheckpoint.sourceCursor)) {
               if (existing.page_digest === replayCheckpoint.pageDigest) {
                 return {
-                  schema_version: 1,
-                  tenant_id: input.tenantId,
-                  generation: meta.generation,
-                  applied_count: existing.last_applied_count ?? 0,
-                  duplicate_count: existing.last_duplicate_count ?? 0,
-                  last_sequence: existing.last_sequence ?? this.#readLastSequence(),
+                  result: {
+                    schema_version: 1,
+                    tenant_id: input.tenantId,
+                    generation: meta.generation,
+                    applied_count: existing.last_applied_count ?? 0,
+                    duplicate_count: existing.last_duplicate_count ?? 0,
+                    last_sequence: existing.last_sequence ?? this.#readLastSequence(),
+                  },
+                  changes: [],
                 };
               }
               throw projectionError("projection_conflict");
@@ -2139,12 +2160,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             meta,
           );
           return {
-            schema_version: 1,
-            tenant_id: input.tenantId,
-            generation: meta.generation,
-            applied_count: result.appliedCount,
-            duplicate_count: result.duplicateCount,
-            last_sequence: result.lastSequence,
+            result: {
+              schema_version: 1,
+              tenant_id: input.tenantId,
+              generation: meta.generation,
+              applied_count: result.appliedCount,
+              duplicate_count: result.duplicateCount,
+              last_sequence: result.lastSequence,
+            },
+            changes: [],
           };
         }
 
@@ -2161,14 +2185,29 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         this.#applyLiveCheckpoint(liveCheckpoint, meta, lastSequence);
 
         return {
-          schema_version: 1,
-          tenant_id: input.tenantId,
-          generation: meta.generation,
-          applied_count: result.appliedCount,
-          duplicate_count: result.duplicateCount,
-          last_sequence: lastSequence,
+          result: {
+            schema_version: 1,
+            tenant_id: input.tenantId,
+            generation: meta.generation,
+            applied_count: result.appliedCount,
+            duplicate_count: result.duplicateCount,
+            last_sequence: lastSequence,
+          },
+          changes: result.changes,
         };
       });
+      if (input.mode === "live" && applied.changes.length > 0) {
+        try {
+          broadcastRealtimeChanges(
+            this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+            input.tenantId,
+            applied.changes,
+          );
+        } catch {
+          // A live notification failure must never change the durable result.
+        }
+      }
+      return applied.result;
     } catch (error) {
       if (error instanceof ProjectionError) throw error;
       throw projectionError("projection_unavailable", error);
@@ -2183,9 +2222,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     appliedCount: number;
     duplicateCount: number;
     lastSequence: number;
+    changes: RealtimeBroadcastChange[];
   } {
     const storedEvents = this.#readAppliedEvents(preparedEvents);
     let appliedCount = 0;
+    const changes: RealtimeBroadcastChange[] = [];
     const touchedConversations = new Set<string>();
     for (const prepared of preparedEvents) {
       const stored = storedEvents.get(prepared.event.event_id);
@@ -2240,6 +2281,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         meta.generation,
         identitySequenceRow.identity_sequence,
       );
+      changes.push({
+        identity_id: prepared.event.identity_id,
+        generation: meta.generation,
+        sequence: identitySequenceRow.identity_sequence,
+        event_type: prepared.event.event_type,
+        connection_id: prepared.connection.connection_id,
+        conversation_id: prepared.event.conversation_id,
+        occurred_at: prepared.event.occurred_at,
+      });
       appliedCount += 1;
     }
 
@@ -2254,6 +2304,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       appliedCount,
       duplicateCount: inputEventCount - appliedCount,
       lastSequence,
+      changes,
     };
   }
 

@@ -5,6 +5,7 @@ import type {
   ProjectionAuthorizationContext,
   ProjectionEventEnvelope,
 } from "@communicator/contracts";
+import { REALTIME_SUBPROTOCOL } from "@communicator/contracts";
 import {
   cleanupIngestionFixture,
   createCapturingQueue,
@@ -58,6 +59,27 @@ const familyEvent = (
   occurred_at: `2026-09-08T00:59:${String(observedSecond).padStart(2, "0")}.000Z`,
   payload,
 }) as ProjectionEventEnvelope;
+
+const waitForRealtimeFrame = (
+  socket: WebSocket,
+  type: string,
+): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
+  const onMessage = (event: MessageEvent) => {
+    const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+    if (frame.type !== type) return;
+    cleanup();
+    resolve(frame);
+  };
+  const cleanup = () => {
+    socket.removeEventListener("message", onMessage);
+    clearTimeout(timeout);
+  };
+  const timeout = setTimeout(() => {
+    cleanup();
+    reject(new Error(`Timed out waiting for ${type} realtime frame`));
+  }, 1_000);
+  socket.addEventListener("message", onMessage);
+});
 
 describe("Matrix ingestion end to end", () => {
   it("archives Human WhatsApp ingress, queues a pointer, and projects it into the real tenant DO", async () => {
@@ -193,6 +215,105 @@ describe("Matrix ingestion end to end", () => {
         last_event_id: event.event_id,
       }),
     ]);
+  });
+
+  it("broadcasts a committed Queue projection change to its matching realtime socket", async () => {
+    const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
+    await projection.initialize({
+      schema_version: 1,
+      tenant_id: fixture.tenantId,
+      initialized_at: "2026-09-08T00:30:00.000Z",
+      authorization: authorizationFor(
+        fixture,
+        fixture.tenantId,
+        fixture.identities.human,
+        ["projection.initialize"],
+      ),
+    });
+
+    const issuedAt = new Date(Date.now() - 1_000);
+    const realtimeContext = {
+      schema_version: 1 as const,
+      tenant_id: fixture.tenantId,
+      principal_id: `principal_reader_${fixture.suffix}`,
+      membership_id: `membership_reader_${fixture.suffix}`,
+      subscriptions: [{
+        identity_id: fixture.identities.human,
+        families: ["projection"] as const,
+      }],
+      resume: [],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
+    };
+    const response = await projection.fetch(new Request(
+      "https://tenant-projection.internal/realtime",
+      {
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+          "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
+        },
+      },
+    ));
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (socket === null) throw new Error("missing realtime socket");
+    const connected = waitForRealtimeFrame(socket, "connected");
+    socket.accept();
+    await connected;
+    const liveFrame = waitForRealtimeFrame(socket, "projection.changes");
+
+    try {
+      const event = messageEvent(fixture, {
+        eventId: `$realtime_ingestion_${fixture.suffix}:example`,
+        body: "realtime ingestion body",
+      });
+      const request = await requestForEvents(fixture, [event]);
+      const { queue } = await postIngestionBatch(fixture, request);
+      await expect(deliverQueueMessages([
+        { id: `queue_realtime_${fixture.suffix}`, body: queue.messages[0]!.body },
+      ])).resolves.toMatchObject({
+        result: { retryMessages: [], explicitAcks: [`queue_realtime_${fixture.suffix}`] },
+      });
+
+      const persisted = await runInDurableObject(projection, async (_instance, state) =>
+        state.storage.sql.exec<{
+          identity_sequence: number;
+          event_type: string;
+          connection_id: string;
+          conversation_id: string;
+          occurred_at: string;
+        }>(
+          "SELECT identity_sequence, event_type, connection_id, conversation_id, occurred_at FROM projection_changes ORDER BY sequence",
+        ).toArray(),
+      );
+      expect(persisted).toEqual([{
+        identity_sequence: 1,
+        event_type: "message.created",
+        connection_id: fixture.connections.humanWhatsapp,
+        conversation_id: event.conversation_id,
+        occurred_at: event.occurred_at,
+      }]);
+
+      await expect(liveFrame).resolves.toMatchObject({
+        tenant_id: fixture.tenantId,
+        identity_id: fixture.identities.human,
+        generation: 1,
+        from_sequence: 1,
+        to_sequence: 2,
+        changes: [{
+          sequence: 1,
+          event_type: "message.created",
+          connection_id: fixture.connections.humanWhatsapp,
+          conversation_id: event.conversation_id,
+          occurred_at: event.occurred_at,
+        }],
+      });
+    } finally {
+      if (socket.readyState !== 3) socket.close(1000, "test complete");
+    }
   });
 
   it("projects Human and Agent WhatsApp messages into isolated identity views in one tenant DO", async () => {
