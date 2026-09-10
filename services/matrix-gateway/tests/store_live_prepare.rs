@@ -1,0 +1,434 @@
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, TimeZone, Utc};
+use communicator_matrix_gateway::{
+    batch::{BatchWindow, RoutedEvent, WindowSource, build_window},
+    crypto::{Keyring, Sealed},
+    ledger::{
+        FinalizeOutcome, NewLiveWindow, RoomAnchorCandidate, RoomEphemeralCandidate,
+        STORE_LEDGER_CONFLICT, STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY,
+    },
+    model::{
+        CanonicalEvent, CanonicalEventSource, CanonicalPayload, DeliveryStatus, Direction,
+        MessageCreatedPayload, Provider,
+    },
+    store::Store,
+    store_types::{NewBootstrapState, NewRawSyncInbox},
+};
+use rusqlite::Connection;
+use tempfile::{TempDir, tempdir};
+
+const INITIAL_TOKEN: &[u8] = b"initial-token";
+const NEXT_TOKEN: &[u8] = b"next-token";
+const ARCHIVED_AT: &str = "2026-09-11T01:02:03.000Z";
+const CANARY_BATCH: &str = "live-batch-canary-7b8d";
+const CANARY_ANCHOR: &str = "live-anchor-canary-2f91";
+const CANARY_TYPING: &str = "live-typing-canary-8c44";
+
+fn timestamp(milliseconds: i64) -> DateTime<Utc> {
+    Utc.timestamp_millis_opt(milliseconds)
+        .single()
+        .expect("valid test timestamp")
+}
+
+fn test_keyring() -> Keyring {
+    Keyring::new([0x11; 32], 1).expect("construct test keyring")
+}
+
+fn secure_tempdir() -> TempDir {
+    let directory = tempdir().expect("create temporary state directory");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .expect("secure temporary state directory");
+    directory
+}
+
+fn database_path(directory: &Path) -> PathBuf {
+    directory.join("gateway.sqlite3")
+}
+
+fn expected_window_id(inbox_id: &str) -> String {
+    let digest = test_keyring()
+        .lookup_digest("matrix-live-window-v1", &[inbox_id])
+        .expect("derive deterministic window ID");
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("window_{hex}")
+}
+
+fn setup_one_processed_row() -> (TempDir, PathBuf, Store, String) {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let mut store = Store::open(&path, test_keyring()).expect("open store");
+    store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                b"matrix-session".to_vec(),
+                INITIAL_TOKEN.to_vec(),
+                Vec::new(),
+                timestamp(1_725_000_000_000),
+            )
+            .expect("bootstrap state"),
+        )
+        .expect("initialize bootstrap state");
+    let inbox_id = store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                INITIAL_TOKEN.to_vec(),
+                NEXT_TOKEN.to_vec(),
+                b"raw-sync-response".to_vec(),
+                timestamp(1_725_000_001_000),
+            )
+            .expect("raw sync response"),
+        )
+        .expect("append raw response")
+        .as_str()
+        .to_owned();
+    store
+        .record_sdk_processing(&inbox_id, &[])
+        .expect("SDK processing");
+    store.mark_crypto_drained(&inbox_id).expect("crypto drain");
+    (directory, path, store, inbox_id)
+}
+
+fn message_event(body: &str) -> CanonicalEvent {
+    CanonicalEvent::new(
+        "$event_live_prepare:example.org",
+        CanonicalEventSource::Live,
+        "tenant_demo",
+        "identity_demo",
+        Provider::Whatsapp,
+        "account_demo",
+        "conversation_demo",
+        Some("!room:example.org".to_owned()),
+        Some("$event_live_prepare:example.org".to_owned()),
+        None,
+        "2026-09-11T01:02:02.000Z",
+        ARCHIVED_AT,
+        CanonicalPayload::MessageCreated(MessageCreatedPayload {
+            message_id: "message_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            direction: Direction::Inbound,
+            sender_participant_id: Some(
+                "participant_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_owned(),
+            ),
+            sender_label: "Alice".to_owned(),
+            body: body.to_owned(),
+            reply_to_message_id: None,
+            delivery_status: DeliveryStatus::Unknown,
+            unread: true,
+        }),
+    )
+    .expect("valid canonical event")
+}
+
+fn live_window(body: &str) -> BatchWindow {
+    build_window(
+        WindowSource::live(NEXT_TOKEN),
+        timestamp(1_757_550_123_000),
+        &[RoutedEvent::new("route_demo", message_event(body))],
+    )
+    .expect("valid live batch window")
+}
+
+fn new_window(inbox_id: &str, ignored_count: u64) -> NewLiveWindow {
+    NewLiveWindow::new(
+        expected_window_id(inbox_id),
+        timestamp(1_757_550_123_000),
+        ignored_count,
+    )
+    .expect("valid new live window")
+}
+
+fn candidate_sets() -> (Vec<RoomAnchorCandidate>, Vec<RoomEphemeralCandidate>) {
+    (
+        vec![
+            RoomAnchorCandidate::new(vec![0x22; 32], CANARY_ANCHOR.as_bytes().to_vec())
+                .expect("anchor candidate"),
+        ],
+        vec![
+            RoomEphemeralCandidate::new(
+                vec![0x33; 32],
+                CANARY_TYPING.as_bytes().to_vec(),
+                timestamp(1_757_550_124_000),
+            )
+            .expect("typing candidate"),
+        ],
+    )
+}
+
+fn table_count(path: &Path, table: &str) -> i64 {
+    Connection::open(path)
+        .expect("open sqlite inspection connection")
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .expect("count table rows")
+}
+
+fn sqlite_storage_bytes(path: &Path) -> Vec<u8> {
+    let mut bytes = fs::read(path).expect("read sqlite database");
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
+        if let Ok(mut sidecar_bytes) = fs::read(sidecar) {
+            bytes.append(&mut sidecar_bytes);
+        }
+    }
+    bytes
+}
+
+fn read_sealed(path: &Path, sql: &str) -> Sealed {
+    let connection = Connection::open(path).expect("open sqlite inspection connection");
+    connection
+        .query_row(sql, [], |row| {
+            let ciphertext: Vec<u8> = row.get(0)?;
+            let nonce: Vec<u8> = row.get(1)?;
+            let key_version: i64 = row.get(2)?;
+            Ok(Sealed {
+                nonce: nonce.try_into().expect("24-byte nonce"),
+                ciphertext,
+                key_version: key_version.try_into().expect("key version"),
+            })
+        })
+        .expect("read sealed value")
+}
+
+#[test]
+fn creates_only_oldest_crypto_drained_window_with_deterministic_id() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let expected_id = expected_window_id(&inbox_id);
+
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    assert_eq!(table_count(&path, "sync_windows"), 1);
+    let (stored_id, state, batch_count): (String, String, i64) = Connection::open(&path)
+        .expect("open sqlite inspection connection")
+        .query_row(
+            "SELECT window_id, state, batch_count FROM sync_windows",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read collecting window");
+    assert_eq!(stored_id, expected_id);
+    assert_eq!(state, "collecting");
+    assert_eq!(batch_count, 0);
+
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("identical creation is idempotent");
+    assert_eq!(table_count(&path, "sync_windows"), 1);
+
+    let changed = NewLiveWindow::new(expected_id, timestamp(1_757_550_123_001), 0)
+        .expect("changed immutable input remains DTO-valid");
+    let error = store
+        .create_collecting_live_window(&inbox_id, changed)
+        .expect_err("changed creation must conflict");
+    assert_eq!(error.code(), STORE_LEDGER_CONFLICT);
+    assert_eq!(table_count(&path, "sync_windows"), 1);
+}
+
+#[test]
+fn creation_requires_the_oldest_sdk_processed_crypto_drained_inbox() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let mut store = Store::open(&path, test_keyring()).expect("open store");
+    store
+        .initialize_bootstrap_state(
+            NewBootstrapState::new(
+                b"matrix-session".to_vec(),
+                INITIAL_TOKEN.to_vec(),
+                Vec::new(),
+                timestamp(1_725_000_000_000),
+            )
+            .expect("bootstrap state"),
+        )
+        .expect("initialize bootstrap state");
+    let first = store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                INITIAL_TOKEN.to_vec(),
+                b"next-one".to_vec(),
+                b"first-response".to_vec(),
+                timestamp(1_725_000_001_000),
+            )
+            .expect("first response"),
+        )
+        .expect("append first response")
+        .as_str()
+        .to_owned();
+    let second = store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                b"next-one".to_vec(),
+                b"next-two".to_vec(),
+                b"second-response".to_vec(),
+                timestamp(1_725_000_002_000),
+            )
+            .expect("second response"),
+        )
+        .expect("append second response")
+        .as_str()
+        .to_owned();
+    store
+        .record_sdk_processing(&first, &[])
+        .expect("process first response");
+    store
+        .record_sdk_processing(&second, &[])
+        .expect("process second response");
+
+    let error = store
+        .create_collecting_live_window(&second, new_window(&second, 0))
+        .expect_err("newer inbox cannot create a live window");
+    assert_eq!(error.code(), STORE_LEDGER_NOT_READY);
+    let error = store
+        .create_collecting_live_window(&first, new_window(&first, 0))
+        .expect_err("undrained oldest inbox cannot create a window");
+    assert_eq!(error.code(), STORE_LEDGER_NOT_READY);
+    assert_eq!(table_count(&path, "sync_windows"), 0);
+}
+
+#[test]
+fn finalization_encrypts_exact_rows_transitions_states_and_replays_idempotently() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    let window = live_window(CANARY_BATCH);
+    let exact_request = window.batches[0].exact_request_bytes().to_vec();
+    let batch_id = window.batches[0].batch_id.clone();
+    let (anchors, ephemeral) = candidate_sets();
+
+    let outcome = store
+        .finalize_live_window(&inbox_id, &window_id, &window, &anchors, &ephemeral)
+        .expect("finalize live window");
+    assert_eq!(outcome, FinalizeOutcome::Prepared { batch_count: 1 });
+
+    let connection = Connection::open(&path).expect("open sqlite inspection connection");
+    let inbox_state: String = connection
+        .query_row(
+            "SELECT state FROM sync_inbox WHERE inbox_id = ?1",
+            [&inbox_id],
+            |row| row.get(0),
+        )
+        .expect("read inbox state");
+    let window_state: (String, i64, i64) = connection
+        .query_row(
+            "SELECT state, batch_count, accepted_count FROM sync_windows WHERE window_id = ?1",
+            [&window_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read window state");
+    assert_eq!(inbox_state, "prepared");
+    assert_eq!(window_state, ("pending".to_owned(), 1, 0));
+    assert_eq!(table_count(&path, "outbox_batches"), 1);
+    assert_eq!(table_count(&path, "window_room_anchors"), 1);
+    assert_eq!(table_count(&path, "window_room_ephemeral"), 1);
+
+    let keyring = test_keyring();
+    let outbox = read_sealed(
+        &path,
+        "SELECT request_cipher, request_nonce, request_key_version
+         FROM outbox_batches",
+    );
+    let decrypted_request = keyring
+        .open("outbox_batches", &batch_id, "request", &outbox)
+        .expect("open exact outbox request");
+    assert_eq!(decrypted_request.as_bytes(), exact_request.as_slice());
+    let anchor = read_sealed(
+        &path,
+        "SELECT anchor_event_cipher, anchor_event_nonce, key_version
+         FROM window_room_anchors",
+    );
+    let anchor_row_id = format!("{window_id}:{}", "22".repeat(32));
+    assert_eq!(
+        keyring
+            .open(
+                "window_room_anchors",
+                &anchor_row_id,
+                "anchor_event",
+                &anchor,
+            )
+            .expect("open staged anchor")
+            .as_bytes(),
+        CANARY_ANCHOR.as_bytes()
+    );
+    assert!(
+        !sqlite_storage_bytes(&path)
+            .windows(CANARY_BATCH.len())
+            .any(|bytes| { bytes == CANARY_BATCH.as_bytes() })
+    );
+    assert!(
+        !sqlite_storage_bytes(&path)
+            .windows(CANARY_ANCHOR.len())
+            .any(|bytes| { bytes == CANARY_ANCHOR.as_bytes() })
+    );
+    assert!(
+        !sqlite_storage_bytes(&path)
+            .windows(CANARY_TYPING.len())
+            .any(|bytes| { bytes == CANARY_TYPING.as_bytes() })
+    );
+
+    let (anchors, ephemeral) = candidate_sets();
+    assert_eq!(
+        store
+            .finalize_live_window(&inbox_id, &window_id, &window, &anchors, &ephemeral)
+            .expect("identical finalization is idempotent"),
+        FinalizeOutcome::AlreadyPrepared { batch_count: 1 }
+    );
+
+    let changed = live_window("changed-live-batch");
+    let (anchors, ephemeral) = candidate_sets();
+    let error = store
+        .finalize_live_window(&inbox_id, &window_id, &changed, &anchors, &ephemeral)
+        .expect_err("changed request bytes must conflict");
+    assert_eq!(error.code(), STORE_LEDGER_CONFLICT);
+    assert_eq!(table_count(&path, "outbox_batches"), 1);
+}
+
+#[test]
+fn finalization_rejects_zero_batches_without_partial_rows() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    let empty = BatchWindow {
+        archived_at: ARCHIVED_AT.to_owned(),
+        source_checkpoint: build_window(
+            WindowSource::live(NEXT_TOKEN),
+            timestamp(1_757_550_123_000),
+            &[],
+        )
+        .expect("empty source checkpoint window")
+        .source_checkpoint,
+        batches: Vec::new(),
+        quarantined: Vec::new(),
+    };
+
+    let error = store
+        .finalize_live_window(&inbox_id, &window_id, &empty, &[], &[])
+        .expect_err("zero-batch finalization must fail");
+    assert_eq!(error.code(), STORE_LEDGER_INVALID);
+    assert_eq!(table_count(&path, "outbox_batches"), 0);
+    let states: (String, String) = Connection::open(&path)
+        .expect("open sqlite inspection connection")
+        .query_row(
+            "SELECT i.state, w.state
+             FROM sync_inbox i JOIN sync_windows w ON w.inbox_id = i.inbox_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read unchanged states");
+    assert_eq!(
+        states,
+        ("sdk_processed".to_owned(), "collecting".to_owned())
+    );
+}
