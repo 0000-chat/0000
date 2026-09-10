@@ -15,7 +15,10 @@ import { ChannelSelector } from "./channel-selector";
 import { ChannelSidebar } from "./channel-sidebar";
 import { ConversationList } from "./conversation-list";
 import { ConversationPage, ConversationUnavailable } from "./conversation-page";
-import { prepareConversationEvent } from "./apply-conversation-event";
+import {
+  prepareConversationEvent,
+  prepareConversationInvalidation,
+} from "./apply-conversation-event";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
 export function ConversationsShell({ conversationId }: { conversationId?: string }) {
@@ -78,53 +81,100 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     })()
     : null;
   const acceptedSequenceRef = useRef(0);
-  const activeScopeRef = useRef({ tenantId: activeIdentity?.tenant_id ?? "", identityId });
-  activeScopeRef.current = { tenantId: activeIdentity?.tenant_id ?? "", identityId };
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
+  const activeScopeRef = useRef({ tenantId: session?.tenant.id ?? "", identityId });
+  activeScopeRef.current = { tenantId: session?.tenant.id ?? "", identityId };
 
   useEffect(() => {
     acceptedSequenceRef.current = 0;
   }, [activeIdentity?.tenant_id, identityId]);
 
   useEffect(() => {
-    if (!runtimeRealtimeClient || !identityId) return;
-    void runtimeRealtimeClient.connect();
+    if (!runtimeRealtimeClient || !session || !identityId) return;
+    const subscribedIdentityId = identityId;
+    const tenantId = session.tenant.id;
+    const principalId = session.principal.id;
     const unsubscribe = runtimeRealtimeClient.subscribe((event) => {
       const currentScope = activeScopeRef.current;
-      if (currentScope.identityId !== identityId || currentScope.tenantId !== (activeIdentity?.tenant_id ?? "")) {
+      if (currentScope.identityId !== subscribedIdentityId || currentScope.tenantId !== tenantId) {
         return;
       }
       const update = prepareConversationEvent({
         tenantId: currentScope.tenantId,
         identityId: currentScope.identityId,
         lastSequence: acceptedSequenceRef.current,
-        channels,
+        channels: channelsRef.current,
       }, event);
-      if (!update) return;
-      acceptedSequenceRef.current = update.acceptedSequence;
 
-      const updateConversationCache = (queryKey: ReturnType<typeof queryKeys.conversations>) => {
-        let unsafe = false;
-        queryClient.setQueryData<InfiniteData<ConversationPageResult>>(queryKey, (current) => {
-          if (!current) return current;
-          unsafe = current.pages.length > 1 || current.pages.some((page) => page.next_cursor !== null);
-          if (unsafe) return current;
-          const pages = update.updatePages(current.pages);
-          return pages === current.pages ? current : { ...current, pages: pages ?? current.pages };
+      if (update) {
+        acceptedSequenceRef.current = update.acceptedSequence;
+
+        const updateConversationCache = (queryKey: ReturnType<typeof queryKeys.conversations>) => {
+          let unsafe = false;
+          queryClient.setQueryData<InfiniteData<ConversationPageResult>>(queryKey, (current) => {
+            if (!current) return current;
+            unsafe = current.pages.length > 1 || current.pages.some((page) => page.next_cursor !== null);
+            if (unsafe) return current;
+            const pages = update.updatePages(current.pages);
+            return pages === current.pages ? current : { ...current, pages: pages ?? current.pages };
+          });
+          if (unsafe) void queryClient.invalidateQueries({ queryKey });
+        };
+
+        updateConversationCache(queryKeys.conversations(subscribedIdentityId, undefined));
+        updateConversationCache(queryKeys.conversations(subscribedIdentityId, update.channelId));
+        queryClient.setQueryData<ChannelSummary[]>(
+          queryKeys.channels(subscribedIdentityId),
+          update.updateChannels,
+        );
+        return;
+      }
+
+      const invalidation = prepareConversationInvalidation(currentScope, event);
+      if (!invalidation) return;
+      if (invalidation.invalidateIdentity) {
+        if (invalidation.resetRequired) {
+          void queryClient.invalidateQueries({
+            predicate: (query) => query.queryKey.includes(invalidation.identityId),
+          });
+        } else {
+          invalidateIdentityConversationPrefixes(queryClient, invalidation.identityId);
+        }
+        return;
+      }
+
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.channels(invalidation.identityId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.conversations(invalidation.identityId, undefined),
+      });
+      for (const channelId of invalidation.channelIds) {
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.conversations(invalidation.identityId, channelId),
         });
-        if (unsafe) void queryClient.invalidateQueries({ queryKey });
-      };
-
-      updateConversationCache(queryKeys.conversations(identityId, undefined));
-      updateConversationCache(queryKeys.conversations(identityId, update.channelId));
-      queryClient.setQueryData<ChannelSummary[]>(
-        queryKeys.channels(identityId),
-        update.updateChannels,
-      );
+      }
+      for (const conversationId of invalidation.conversationIds) {
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.conversation(invalidation.identityId, conversationId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.messages(invalidation.identityId, conversationId),
+        });
+      }
     });
+    void runtimeRealtimeClient.connect({
+      tenantId,
+      principalId,
+      identityIds: [subscribedIdentityId],
+      families: ["projection"],
+    }).catch(() => undefined);
     return () => {
       unsubscribe();
+      runtimeRealtimeClient.close();
     };
-  }, [activeIdentity?.tenant_id, channels, identityId, queryClient]);
+  }, [identityId, queryClient, session?.principal.id, session?.tenant.id]);
 
   const selectChannel = (channelId?: string) => {
     void navigate({
@@ -279,5 +329,21 @@ function useConversationPages(identityId: string, channelId: string | undefined,
     initialPageParam: null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     enabled,
+  });
+}
+
+function invalidateIdentityConversationPrefixes(
+  queryClient: ReturnType<typeof useQueryClient>,
+  identityId: string,
+) {
+  void queryClient.invalidateQueries({ queryKey: queryKeys.channels(identityId) });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.conversations(identityId, undefined).slice(0, 2),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.conversation(identityId, "").slice(0, 2),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.messages(identityId, "").slice(0, 2),
   });
 }

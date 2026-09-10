@@ -1,10 +1,15 @@
 import type {
   ChannelSummary,
   ConversationPageResult,
+  RealtimeProjectionChangesFrame,
+  RealtimeResetRequiredFrame,
   RealtimeEvent,
 } from "@communicator/contracts";
 import { describe, expect, it } from "vitest";
-import { prepareConversationEvent } from "./apply-conversation-event";
+import {
+  prepareConversationEvent,
+  prepareConversationInvalidation,
+} from "./apply-conversation-event";
 
 const channels: ChannelSummary[] = [
   {
@@ -81,6 +86,32 @@ const scope = {
   channels,
 };
 
+const projectionChanges: RealtimeProjectionChangesFrame = {
+  schema_version: 1,
+  type: "projection.changes",
+  tenant_id: "tenant_pilot",
+  identity_id: "identity_human",
+  generation: 1,
+  from_sequence: 7,
+  to_sequence: 9,
+  changes: [
+    {
+      sequence: 7,
+      event_type: "message.created",
+      connection_id: "connection_human_telegram",
+      conversation_id: "conversation_human_telegram_alex",
+      occurred_at: "2026-08-28T00:07:00.000Z",
+    },
+    {
+      sequence: 8,
+      event_type: "message.created",
+      connection_id: "connection_human_whatsapp",
+      conversation_id: "conversation_human_whatsapp_family",
+      occurred_at: "2026-08-28T00:08:00.000Z",
+    },
+  ],
+};
+
 describe("prepareConversationEvent", () => {
   it("updates matching All and channel pages and preserves channel order", () => {
     const matchingPage: ConversationPageResult = {
@@ -140,5 +171,66 @@ describe("prepareConversationEvent", () => {
     expect(update?.updatePages([{ ...allPage, next_cursor: "next" }])).toEqual([
       { ...allPage, next_cursor: "next" },
     ]);
+  });
+});
+
+describe("prepareConversationInvalidation", () => {
+  it("returns every changed channel and conversation for one matching identity", () => {
+    expect(prepareConversationInvalidation(scope, projectionChanges)).toEqual({
+      identityId: "identity_human",
+      channelIds: ["connection_human_telegram", "connection_human_whatsapp"],
+      conversationIds: [
+        "conversation_human_telegram_alex",
+        "conversation_human_whatsapp_family",
+      ],
+      invalidateIdentity: false,
+      resetRequired: false,
+    });
+  });
+
+  it("uses a bounded identity fallback when a projection change lacks an identifier", () => {
+    expect(prepareConversationInvalidation(scope, {
+      ...projectionChanges,
+      changes: [{
+        ...projectionChanges.changes[0]!,
+        conversation_id: undefined,
+      }],
+    } as unknown as RealtimeProjectionChangesFrame)).toEqual({
+      identityId: "identity_human",
+      channelIds: [],
+      conversationIds: [],
+      invalidateIdentity: true,
+      resetRequired: false,
+    });
+  });
+
+  it("marks every query for the identity after reset_required", () => {
+    const reset: RealtimeResetRequiredFrame = {
+      schema_version: 1,
+      type: "reset_required",
+      tenant_id: "tenant_pilot",
+      identity_id: "identity_human",
+      generation: 2,
+      latest_sequence: 9,
+      reason: "history_unavailable",
+    };
+    expect(prepareConversationInvalidation(scope, reset)).toEqual({
+      identityId: "identity_human",
+      channelIds: [],
+      conversationIds: [],
+      invalidateIdentity: true,
+      resetRequired: true,
+    });
+  });
+
+  it("ignores frames outside the active tenant and identity", () => {
+    expect(prepareConversationInvalidation(scope, {
+      ...projectionChanges,
+      tenant_id: "tenant_other",
+    })).toBeNull();
+    expect(prepareConversationInvalidation(scope, {
+      ...projectionChanges,
+      identity_id: "identity_agent",
+    })).toBeNull();
   });
 });

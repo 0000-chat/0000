@@ -5,6 +5,7 @@ import {
   RealtimeEvent,
 } from "@communicator/contracts";
 import { compareConversationRecency } from "@/mocks/conversation-pagination";
+import type { RealtimeClientEvent } from "@/lib/realtime/client";
 
 export type ActiveScope = {
   tenantId: string;
@@ -22,6 +23,68 @@ export type ConversationCacheUpdate = {
   ) => ConversationPageResult[] | undefined;
   updateChannels: (items: ChannelSummary[] | undefined) => ChannelSummary[] | undefined;
 };
+
+export type ConversationInvalidation = {
+  identityId: string;
+  channelIds: string[];
+  conversationIds: string[];
+  invalidateIdentity: boolean;
+  resetRequired: boolean;
+};
+
+export function prepareConversationInvalidation(
+  scope: Pick<ActiveScope, "tenantId" | "identityId">,
+  event: RealtimeClientEvent,
+): ConversationInvalidation | null {
+  if (event.type === "connected") return null;
+  if (event.tenant_id !== scope.tenantId || event.identity_id !== scope.identityId) return null;
+
+  if (event.type === "reset_required") {
+    return {
+      identityId: scope.identityId,
+      channelIds: [],
+      conversationIds: [],
+      invalidateIdentity: true,
+      resetRequired: true,
+    };
+  }
+
+  if (event.type === "projection.changes") {
+    const changes = event.changes as Array<{
+      connection_id?: string;
+      conversation_id?: string;
+    }>;
+    if (changes.some((change) => !change.connection_id || !change.conversation_id)) {
+      return {
+        identityId: scope.identityId,
+        channelIds: [],
+        conversationIds: [],
+        invalidateIdentity: true,
+        resetRequired: false,
+      };
+    }
+    return {
+      identityId: scope.identityId,
+      channelIds: [...new Set(changes.map((change) => change.connection_id!))],
+      conversationIds: [...new Set(changes.map((change) => change.conversation_id!))],
+      invalidateIdentity: false,
+      resetRequired: false,
+    };
+  }
+
+  if ((event.type === "message.created" || event.type === "connection.updated")
+    && (!event.connection_id || !event.conversation_id)) {
+    return {
+      identityId: scope.identityId,
+      channelIds: [],
+      conversationIds: [],
+      invalidateIdentity: true,
+      resetRequired: false,
+    };
+  }
+
+  return null;
+}
 
 export function prepareConversationEvent(
   scope: ActiveScope,

@@ -80,6 +80,7 @@ test("message activity updates All without moving channel navigation", async ({ 
     "connection_human_telegram",
     "connection_human_messenger",
   ]);
+  await expect(page.locator("body")).not.toContainText(/rt1_|wss?:\/\/|bearer|Access/);
 });
 
 test("manual channel order survives ordinary navigation", async ({ page }) => {
