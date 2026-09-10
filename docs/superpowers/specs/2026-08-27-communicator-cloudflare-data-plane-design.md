@@ -775,9 +775,11 @@ HTTPS and then upgrades to the WebSocket endpoint. Long-lived bearer tokens are
 not placed in query strings.
 
 Clients subscribe only to authorized identities and event families. Server
-events include a monotonically increasing tenant change sequence. On
-reconnection, a client supplies its last sequence or uses REST to retrieve
-missed changes.
+events expose a monotonically increasing sequence for each authorized identity.
+The storage DO may retain a tenant-global sequence for internal ordering, but it
+must never expose that sequence or its gaps to an identity-scoped client. On
+reconnection, a client supplies its last identity-local sequence or uses REST to
+retrieve missed changes.
 
 Representative events include:
 
