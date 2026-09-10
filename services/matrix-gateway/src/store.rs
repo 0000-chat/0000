@@ -43,6 +43,9 @@ use crate::{
     },
 };
 
+mod backfill_ledger;
+mod live_ledger;
+
 /// The database lock is kept beside the database and has this extension.
 pub const STORE_LOCK_EXTENSION: &str = "lock";
 
