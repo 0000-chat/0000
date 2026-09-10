@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Row, Transaction, params, types::ValueRef};
+use zeroize::Zeroizing;
 
 use crate::{
     batch::{self, BatchWindow},
@@ -11,9 +12,11 @@ use crate::{
     config::MAX_BATCH_CANONICAL_BYTES,
     crypto::AEAD_TAG_BYTES,
     ledger::{
-        FinalizeOutcome, MAX_LEDGER_ID_BYTES, MAX_WINDOW_BATCHES, MAX_WINDOW_ROOM_CANDIDATES,
-        NewLiveWindow, RoomAnchorCandidate, RoomEphemeralCandidate, STORE_LEDGER_CONFLICT,
-        STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY, STORE_LEDGER_TOO_LARGE,
+        BackfillState, FinalizeOutcome, MAX_BACKFILL_PAGINATION_BYTES,
+        MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES, MAX_WINDOW_BATCHES,
+        MAX_WINDOW_ROOM_CANDIDATES, NewLiveGapJob, NewLiveWindow, RoomAnchorCandidate,
+        RoomEphemeralCandidate, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID,
+        STORE_LEDGER_NOT_READY, STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
     },
     secret::{SafeError, SecretBytes},
     store_types::{InboxId, SyncInboxState},
@@ -69,7 +72,128 @@ struct StoredEphemeral {
     typing_expires_at: DateTime<Utc>,
 }
 
+struct StoredBackfillJob {
+    job_id: String,
+    kind: String,
+    live_window_id: Option<String>,
+    state: BackfillState,
+    parameters: SecretBytes,
+    accepted_events: u64,
+    created_at: String,
+}
+
 impl Store {
+    /// Create one protected live-gap job for the oldest collecting window.
+    pub fn create_live_gap_job(&mut self, job: NewLiveGapJob) -> Result<(), SafeError> {
+        job.validate()?;
+        let created_at = job.created_at().to_rfc3339();
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+
+        let context = load_live_context(&transaction, keyring)?;
+        let existing_job = load_backfill_job(&transaction, keyring, job.job_id())?;
+        if let Some(existing_job) = existing_job.as_ref() {
+            if existing_job.kind != "live_gap"
+                || existing_job.live_window_id.as_deref() != Some(job.live_window_id())
+                || existing_job.created_at != created_at
+                || existing_job.parameters.as_bytes() != job.parameters().as_bytes()
+            {
+                return Err(ledger_conflict());
+            }
+            validate_live_gap_target(&context, &transaction, keyring, job.live_window_id(), false)?;
+            drop(transaction);
+            return Ok(());
+        }
+
+        validate_live_gap_target(&context, &transaction, keyring, job.live_window_id(), false)?;
+        let sealed = keyring
+            .seal(
+                "backfill_jobs",
+                job.job_id(),
+                "parameters",
+                job.parameters().as_bytes(),
+            )
+            .map_err(|_| ledger_corrupt())?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO backfill_jobs
+                 (job_id, kind, live_window_id, state, parameters_cipher, parameters_nonce,
+                  pagination_cipher, pagination_nonce, key_version, accepted_events, created_at,
+                  completed_at, cancelled_at, terminal_code)
+                 VALUES (?1, 'live_gap', ?2, 'pending', ?3, ?4, NULL, NULL, ?5, 0, ?6,
+                         NULL, NULL, NULL)",
+                params![
+                    job.job_id(),
+                    job.live_window_id(),
+                    sealed.ciphertext.as_slice(),
+                    sealed.nonce.as_slice(),
+                    i64::from(sealed.key_version),
+                    created_at,
+                ],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if inserted != 1 {
+            return Err(ledger_corrupt());
+        }
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(())
+    }
+
+    /// Claim a pending live-gap job or return a validated running job.
+    pub fn begin_or_resume_live_gap_job(
+        &mut self,
+        job_id: &str,
+    ) -> Result<StoredLiveGapJob, SafeError> {
+        if !valid_job_id(job_id) {
+            return Err(ledger_invalid());
+        }
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+        let job = load_backfill_job(&transaction, keyring, job_id)?.ok_or_else(ledger_not_ready)?;
+        if job.kind != "live_gap" {
+            return Err(ledger_not_ready());
+        }
+        let live_window_id = job.live_window_id.as_deref().ok_or_else(ledger_corrupt)?;
+        let context = load_live_context(&transaction, keyring)?;
+        validate_live_gap_target(&context, &transaction, keyring, live_window_id, true)?;
+
+        let state = match job.state {
+            BackfillState::Pending => {
+                let updated = transaction
+                    .execute(
+                        "UPDATE backfill_jobs SET state = 'running'
+                         WHERE job_id = ?1 AND kind = 'live_gap' AND state = 'pending'",
+                        [job_id],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if updated != 1 {
+                    return Err(ledger_corrupt());
+                }
+                BackfillState::Running
+            }
+            BackfillState::Running => BackfillState::Running,
+            BackfillState::Completed | BackfillState::Cancelled | BackfillState::Quarantined => {
+                return Err(ledger_not_ready());
+            }
+        };
+        let result = StoredLiveGapJob::from_verified_parts(
+            job.job_id,
+            live_window_id.to_owned(),
+            state,
+            Zeroizing::new(job.parameters.as_bytes().to_vec()).to_vec(),
+            job.accepted_events,
+        )
+        .map_err(|_| ledger_corrupt())?;
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(result)
+    }
+
     /// Create the deterministic collecting window for the oldest drained SDK row.
     pub fn create_collecting_live_window(
         &mut self,
@@ -396,6 +520,42 @@ fn validate_window_id(value: &str) -> Result<(), SafeError> {
     Ok(())
 }
 
+fn validate_live_gap_target(
+    context: &super::VerifiedCryptoContext,
+    transaction: &Transaction<'_>,
+    keyring: &super::Keyring,
+    window_id: &str,
+    missing_is_corrupt: bool,
+) -> Result<(), SafeError> {
+    let window = load_window_by_id(transaction, window_id)?.ok_or_else(|| {
+        if missing_is_corrupt {
+            ledger_corrupt()
+        } else {
+            ledger_not_ready()
+        }
+    })?;
+    let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
+    let expected_window_id =
+        derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+    if window.window_id != expected_window_id {
+        return Err(ledger_corrupt());
+    }
+    validate_window_inbox_link(context, &window)?;
+    validate_window_children(transaction, keyring, &window)?;
+    if window.state != "collecting" {
+        return Err(ledger_not_ready());
+    }
+    let target = oldest_target(context, &inbox_id)?;
+    if target.state() != SyncInboxState::SdkProcessed || !target.crypto_drained() {
+        return Err(ledger_not_ready());
+    }
+    let created_at = parse_stored_timestamp(&window.created_at)?;
+    if *target.observed_at() > created_at {
+        return Err(ledger_corrupt());
+    }
+    Ok(())
+}
+
 fn derive_window_id(keyring: &super::Keyring, inbox_id: &str) -> Result<String, SafeError> {
     let digest = keyring
         .lookup_digest(LIVE_WINDOW_ID_DOMAIN, &[inbox_id])
@@ -674,6 +834,212 @@ fn load_existing_window(
         result = Some(read_stored_window(row)?);
     }
     Ok(result)
+}
+
+fn load_window_by_id(
+    transaction: &Transaction<'_>,
+    window_id: &str,
+) -> Result<Option<StoredLiveWindow>, SafeError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT window_id, inbox_id, state, batch_count, accepted_count, ignored_count,
+                    created_at, committed_at, terminal_code
+             FROM sync_windows WHERE window_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let mut rows = statement.query([window_id]).map_err(|_| ledger_corrupt())?;
+    let mut result = None;
+    while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
+        if result.is_some() {
+            return Err(ledger_corrupt());
+        }
+        result = Some(read_stored_window(row)?);
+    }
+    Ok(result)
+}
+
+fn load_backfill_job(
+    transaction: &Transaction<'_>,
+    keyring: &super::Keyring,
+    job_id: &str,
+) -> Result<Option<StoredBackfillJob>, SafeError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT job_id, kind, live_window_id, state, parameters_cipher, parameters_nonce,
+                    pagination_cipher, pagination_nonce, key_version, accepted_events, created_at,
+                    completed_at, cancelled_at, terminal_code
+             FROM backfill_jobs WHERE job_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let mut rows = statement.query([job_id]).map_err(|_| ledger_corrupt())?;
+    let mut result = None;
+    while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
+        if result.is_some() {
+            return Err(ledger_corrupt());
+        }
+        result = Some(read_stored_backfill_job(row, keyring)?);
+    }
+    Ok(result)
+}
+
+fn read_stored_backfill_job(
+    row: &Row<'_>,
+    keyring: &super::Keyring,
+) -> Result<StoredBackfillJob, SafeError> {
+    let job_id = read_text(row, 0, MAX_LEDGER_ID_BYTES, valid_job_id)?;
+    let kind = read_text(
+        row,
+        1,
+        "live_gap".len().max("explicit".len()),
+        valid_job_kind,
+    )?;
+    let live_window_id = read_optional_text(row, 2, MAX_LEDGER_ID_BYTES, valid_window_id)?;
+    let state_text = read_text(row, 3, "quarantined".len(), valid_backfill_state)?;
+    let state = parse_backfill_state(&state_text)?;
+    let parameter_cipher = read_blob(
+        row,
+        4,
+        AEAD_TAG_BYTES,
+        MAX_BACKFILL_PARAMETERS_BYTES
+            .checked_add(AEAD_TAG_BYTES)
+            .ok_or_else(ledger_corrupt)?,
+    )?;
+    let parameter_nonce = read_blob(row, 5, 24, 24)?;
+    let pagination_cipher = read_optional_blob(
+        row,
+        6,
+        AEAD_TAG_BYTES,
+        MAX_BACKFILL_PAGINATION_BYTES
+            .checked_add(AEAD_TAG_BYTES)
+            .ok_or_else(ledger_corrupt)?,
+    )?;
+    let pagination_nonce = read_optional_blob(row, 7, 24, 24)?;
+    if pagination_cipher.is_some() != pagination_nonce.is_some() {
+        return Err(ledger_corrupt());
+    }
+    let key_version = read_integer(row, 8, 1, i64::from(u32::MAX))?;
+    let accepted_events_i64 = read_integer(
+        row,
+        9,
+        0,
+        i64::try_from(batch::MAX_BACKFILL_EVENTS).map_err(|_| ledger_corrupt())?,
+    )?;
+    let accepted_events = u64::try_from(accepted_events_i64).map_err(|_| ledger_corrupt())?;
+    let created_at = read_text(row, 10, 64, valid_stored_utc_millisecond)?;
+    let completed_at = read_optional_text(row, 11, 64, valid_stored_utc_millisecond)?;
+    let cancelled_at = read_optional_text(row, 12, 64, valid_stored_utc_millisecond)?;
+    let terminal_code = read_optional_text(row, 13, 64, valid_stored_reason_code)?;
+
+    let parameters_plaintext = open_stored_value(
+        keyring,
+        StoredValue {
+            table: "backfill_jobs",
+            row_id: &job_id,
+            column: "parameters",
+            ciphertext: Some(parameter_cipher.as_slice()),
+            nonce: Some(parameter_nonce.as_slice()),
+            key_version: Some(key_version),
+            max_plaintext_bytes: MAX_BACKFILL_PARAMETERS_BYTES,
+        },
+    )
+    .map_err(|_| ledger_corrupt())?;
+    let parameters = Zeroizing::new(parameters_plaintext.as_bytes().to_vec());
+    if parameters.is_empty() {
+        return Err(ledger_corrupt());
+    }
+    let pagination = match (pagination_cipher, pagination_nonce) {
+        (Some(ciphertext), Some(nonce)) => {
+            let pagination_plaintext = open_stored_value(
+                keyring,
+                StoredValue {
+                    table: "backfill_jobs",
+                    row_id: &job_id,
+                    column: "pagination",
+                    ciphertext: Some(ciphertext.as_slice()),
+                    nonce: Some(nonce.as_slice()),
+                    key_version: Some(key_version),
+                    max_plaintext_bytes: MAX_BACKFILL_PAGINATION_BYTES,
+                },
+            )
+            .map_err(|_| ledger_corrupt())?;
+            let pagination = Zeroizing::new(pagination_plaintext.as_bytes().to_vec());
+            Some(SecretBytes::new(pagination.to_vec()))
+        }
+        (None, None) => None,
+        _ => return Err(ledger_corrupt()),
+    };
+    if pagination
+        .as_ref()
+        .is_some_and(|value| value.as_bytes().is_empty())
+    {
+        return Err(ledger_corrupt());
+    }
+    if kind == "live_gap" && pagination.is_some() {
+        return Err(ledger_corrupt());
+    }
+    if kind == "live_gap" && live_window_id.is_none() {
+        return Err(ledger_corrupt());
+    }
+    if kind == "explicit" && live_window_id.is_some() {
+        return Err(ledger_corrupt());
+    }
+    validate_backfill_job_lifecycle(
+        state,
+        completed_at.as_deref(),
+        cancelled_at.as_deref(),
+        terminal_code.as_deref(),
+    )?;
+    let value = StoredBackfillJob {
+        job_id,
+        kind,
+        live_window_id,
+        state,
+        parameters: SecretBytes::new(parameters.to_vec()),
+        accepted_events,
+        created_at,
+    };
+    if value.kind == "live_gap" {
+        StoredLiveGapJob::from_verified_parts(
+            value.job_id.clone(),
+            value.live_window_id.clone().ok_or_else(ledger_corrupt)?,
+            value.state,
+            value.parameters.as_bytes().to_vec(),
+            value.accepted_events,
+        )
+        .map_err(|_| ledger_corrupt())?;
+    }
+    Ok(value)
+}
+
+fn validate_backfill_job_lifecycle(
+    state: BackfillState,
+    completed_at: Option<&str>,
+    cancelled_at: Option<&str>,
+    terminal_code: Option<&str>,
+) -> Result<(), SafeError> {
+    match state {
+        BackfillState::Pending | BackfillState::Running
+            if completed_at.is_none() && cancelled_at.is_none() && terminal_code.is_none() => {}
+        BackfillState::Completed
+            if completed_at.is_some() && cancelled_at.is_none() && terminal_code.is_none() => {}
+        BackfillState::Cancelled
+            if completed_at.is_none() && cancelled_at.is_some() && terminal_code.is_none() => {}
+        BackfillState::Quarantined
+            if completed_at.is_none() && cancelled_at.is_none() && terminal_code.is_some() => {}
+        _ => return Err(ledger_corrupt()),
+    }
+    Ok(())
+}
+
+fn parse_backfill_state(value: &str) -> Result<BackfillState, SafeError> {
+    match value {
+        "pending" => Ok(BackfillState::Pending),
+        "running" => Ok(BackfillState::Running),
+        "completed" => Ok(BackfillState::Completed),
+        "cancelled" => Ok(BackfillState::Cancelled),
+        "quarantined" => Ok(BackfillState::Quarantined),
+        _ => Err(ledger_corrupt()),
+    }
 }
 
 fn read_stored_window(row: &Row<'_>) -> Result<StoredLiveWindow, SafeError> {
@@ -1149,6 +1515,36 @@ fn valid_batch_id(value: &str) -> bool {
     valid_digest_id(value, "batch_")
 }
 
+fn valid_job_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LEDGER_ID_BYTES
+        && (crate::model::valid_resource_id(value) || valid_uuid_v7(value))
+}
+
+fn valid_uuid_v7(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8_usize, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8_usize, 13, 18, 23].contains(&index) || matches!(*byte, b'0'..=b'9' | b'a'..=b'f')
+        })
+        && bytes[14] == b'7'
+        && matches!(bytes[19], b'8'..=b'9' | b'a'..=b'b')
+}
+
+fn valid_job_kind(value: &str) -> bool {
+    matches!(value, "live_gap" | "explicit")
+}
+
+fn valid_backfill_state(value: &str) -> bool {
+    matches!(
+        value,
+        "pending" | "running" | "completed" | "cancelled" | "quarantined"
+    )
+}
+
 fn valid_window_state(value: &str) -> bool {
     matches!(
         value,
@@ -1230,6 +1626,21 @@ fn read_blob(
     match row.get_ref(index).map_err(|_| ledger_corrupt())? {
         ValueRef::Blob(bytes) if (min_bytes..=max_bytes).contains(&bytes.len()) => {
             Ok(bytes.to_vec())
+        }
+        _ => Err(ledger_corrupt()),
+    }
+}
+
+fn read_optional_blob(
+    row: &Row<'_>,
+    index: usize,
+    min_bytes: usize,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, SafeError> {
+    match row.get_ref(index).map_err(|_| ledger_corrupt())? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Blob(bytes) if (min_bytes..=max_bytes).contains(&bytes.len()) => {
+            Ok(Some(bytes.to_vec()))
         }
         _ => Err(ledger_corrupt()),
     }

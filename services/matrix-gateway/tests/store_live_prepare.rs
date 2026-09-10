@@ -9,8 +9,9 @@ use communicator_matrix_gateway::{
     batch::{BatchWindow, RoutedEvent, WindowSource, build_window},
     crypto::{Keyring, Sealed},
     ledger::{
-        FinalizeOutcome, NewLiveWindow, RoomAnchorCandidate, RoomEphemeralCandidate,
-        STORE_LEDGER_CONFLICT, STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY,
+        BackfillState, FinalizeOutcome, NewLiveGapJob, NewLiveWindow, RoomAnchorCandidate,
+        RoomEphemeralCandidate, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID,
+        STORE_LEDGER_NOT_READY,
     },
     model::{
         CanonicalEvent, CanonicalEventSource, CanonicalPayload, DeliveryStatus, Direction,
@@ -28,6 +29,7 @@ const ARCHIVED_AT: &str = "2026-09-11T01:02:03.000Z";
 const CANARY_BATCH: &str = "live-batch-canary-7b8d";
 const CANARY_ANCHOR: &str = "live-anchor-canary-2f91";
 const CANARY_TYPING: &str = "live-typing-canary-8c44";
+const CANARY_GAP_PARAMETERS: &str = "live-gap-parameters-canary-6d3a";
 
 fn timestamp(milliseconds: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(milliseconds)
@@ -144,6 +146,20 @@ fn new_window(inbox_id: &str, ignored_count: u64) -> NewLiveWindow {
         ignored_count,
     )
     .expect("valid new live window")
+}
+
+fn new_live_gap_job(window_id: &str, parameters: &[u8]) -> NewLiveGapJob {
+    new_live_gap_job_with_id(&format!("job_{}", "44".repeat(32)), window_id, parameters)
+}
+
+fn new_live_gap_job_with_id(job_id: &str, window_id: &str, parameters: &[u8]) -> NewLiveGapJob {
+    NewLiveGapJob::new(
+        job_id,
+        window_id,
+        parameters.to_vec(),
+        timestamp(1_757_550_123_001),
+    )
+    .expect("valid live-gap job")
 }
 
 fn candidate_sets() -> (Vec<RoomAnchorCandidate>, Vec<RoomEphemeralCandidate>) {
@@ -431,4 +447,145 @@ fn finalization_rejects_zero_batches_without_partial_rows() {
         states,
         ("sdk_processed".to_owned(), "collecting".to_owned())
     );
+}
+
+#[test]
+fn live_gap_creation_and_begin_are_idempotent_and_do_not_prepare_live_state() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    let parameters = CANARY_GAP_PARAMETERS.as_bytes();
+
+    store
+        .create_live_gap_job(new_live_gap_job(&window_id, parameters))
+        .expect("create live-gap job");
+    store
+        .create_live_gap_job(new_live_gap_job(&window_id, parameters))
+        .expect("identical live-gap creation is idempotent");
+    assert_eq!(table_count(&path, "backfill_jobs"), 1);
+    assert_eq!(table_count(&path, "outbox_batches"), 0);
+    let stored: (String, String, Option<Vec<u8>>, Option<Vec<u8>>) = Connection::open(&path)
+        .expect("open sqlite inspection connection")
+        .query_row(
+            "SELECT kind, state, pagination_cipher, pagination_nonce
+             FROM backfill_jobs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read live-gap job metadata");
+    assert_eq!(
+        stored,
+        ("live_gap".to_owned(), "pending".to_owned(), None, None)
+    );
+    let sealed = read_sealed(
+        &path,
+        "SELECT parameters_cipher, parameters_nonce, key_version
+         FROM backfill_jobs",
+    );
+    assert_eq!(
+        test_keyring()
+            .open(
+                "backfill_jobs",
+                &format!("job_{}", "44".repeat(32)),
+                "parameters",
+                &sealed,
+            )
+            .expect("open exact live-gap parameters")
+            .as_bytes(),
+        parameters
+    );
+    assert!(
+        !sqlite_storage_bytes(&path)
+            .windows(CANARY_GAP_PARAMETERS.len())
+            .any(|bytes| bytes == parameters)
+    );
+
+    let changed = new_live_gap_job(&window_id, b"changed-live-gap-parameters");
+    let error = store
+        .create_live_gap_job(changed)
+        .expect_err("changed live-gap parameters must conflict");
+    assert_eq!(error.code(), STORE_LEDGER_CONFLICT);
+
+    let job_id = format!("job_{}", "44".repeat(32));
+    let stored = store
+        .begin_or_resume_live_gap_job(&job_id)
+        .expect("begin live-gap job");
+    assert_eq!(stored.job_id(), job_id);
+    assert_eq!(stored.live_window_id(), window_id);
+    assert_eq!(stored.state(), BackfillState::Running);
+    assert_eq!(stored.parameters().as_bytes(), parameters);
+    assert_eq!(stored.accepted_events(), 0);
+
+    let resumed = store
+        .begin_or_resume_live_gap_job(&job_id)
+        .expect("resume running live-gap job");
+    assert_eq!(resumed.state(), BackfillState::Running);
+    assert_eq!(resumed.parameters().as_bytes(), parameters);
+    assert_eq!(table_count(&path, "outbox_batches"), 0);
+
+    let states: (String, String) = Connection::open(&path)
+        .expect("open sqlite inspection connection")
+        .query_row(
+            "SELECT i.state, w.state
+             FROM sync_inbox i JOIN sync_windows w ON w.inbox_id = i.inbox_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read unchanged live states");
+    assert_eq!(
+        states,
+        ("sdk_processed".to_owned(), "collecting".to_owned())
+    );
+}
+
+#[test]
+fn live_gap_accepts_the_closed_job_id_contract() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+
+    let job_id = "gap_job_0123456789abcdef";
+    store
+        .create_live_gap_job(new_live_gap_job_with_id(
+            job_id,
+            &window_id,
+            b"resource-id-parameters",
+        ))
+        .expect("resource-style job ID is valid");
+    assert_eq!(table_count(&path, "backfill_jobs"), 1);
+}
+
+#[test]
+fn live_gap_rejects_inconsistent_persisted_window_as_corrupt() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    store
+        .create_live_gap_job(new_live_gap_job(&window_id, b"window-state-canary"))
+        .expect("create live-gap job");
+
+    Connection::open(&path)
+        .expect("open sqlite mutation connection")
+        .execute(
+            "UPDATE sync_windows SET state = 'pending', batch_count = 1
+             WHERE window_id = ?1",
+            [&window_id],
+        )
+        .expect("tamper window state");
+
+    let error = store
+        .begin_or_resume_live_gap_job(&format!("job_{}", "44".repeat(32)))
+        .expect_err("inconsistent window state must be corrupt");
+    assert_eq!(error.code(), STORE_LEDGER_CORRUPT);
+    let state: String = Connection::open(&path)
+        .expect("open sqlite inspection connection")
+        .query_row("SELECT state FROM backfill_jobs", [], |row| row.get(0))
+        .expect("read unchanged job state");
+    assert_eq!(state, "pending");
 }
