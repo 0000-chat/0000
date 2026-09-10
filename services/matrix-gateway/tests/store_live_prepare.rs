@@ -560,6 +560,83 @@ fn live_gap_accepts_the_closed_job_id_contract() {
 }
 
 #[test]
+fn complete_live_gap_prepares_live_rows_and_completes_only_the_gap_job() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    let job_id = format!("job_{}", "44".repeat(32));
+    store
+        .create_live_gap_job(new_live_gap_job(&window_id, b"gap-complete-parameters"))
+        .expect("create live-gap job");
+    store
+        .begin_or_resume_live_gap_job(&job_id)
+        .expect("begin live-gap job");
+    let window = live_window(CANARY_BATCH);
+    let (anchors, ephemeral) = candidate_sets();
+
+    assert_eq!(
+        store
+            .complete_live_gap_and_finalize_window(&job_id, &window, &anchors, &ephemeral)
+            .expect("complete live-gap job and prepare window"),
+        FinalizeOutcome::Prepared { batch_count: 1 }
+    );
+
+    let connection = Connection::open(&path).expect("open sqlite inspection connection");
+    let states: (String, String, String, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT i.state, w.state, j.state, j.completed_at, j.cancelled_at
+             FROM sync_inbox i
+             JOIN sync_windows w ON w.inbox_id = i.inbox_id
+             JOIN backfill_jobs j ON j.live_window_id = w.window_id
+             WHERE i.inbox_id = ?1",
+            [&inbox_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read completed live-gap state");
+    assert_eq!(states.0, "prepared");
+    assert_eq!(states.1, "pending");
+    assert_eq!(states.2, "completed");
+    assert!(states.3.is_some());
+    assert!(states.4.is_none());
+    let ownership: (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT source_kind, window_id, backfill_job_id FROM outbox_batches",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read live outbox ownership");
+    assert_eq!(ownership, ("live".to_owned(), window_id, None));
+
+    drop(connection);
+    drop(store);
+    let mut reopened = Store::open(&path, test_keyring()).expect("reopen store");
+    let (anchors, ephemeral) = candidate_sets();
+    assert_eq!(
+        reopened
+            .complete_live_gap_and_finalize_window(&job_id, &window, &anchors, &ephemeral)
+            .expect("identical completion is idempotent after reopen"),
+        FinalizeOutcome::AlreadyPrepared { batch_count: 1 }
+    );
+    let changed = live_window("changed-live-gap-batch");
+    let (anchors, ephemeral) = candidate_sets();
+    let error = reopened
+        .complete_live_gap_and_finalize_window(&job_id, &changed, &anchors, &ephemeral)
+        .expect_err("changed completion bytes must conflict");
+    assert_eq!(error.code(), STORE_LEDGER_CONFLICT);
+    assert_eq!(table_count(&path, "outbox_batches"), 1);
+}
+
+#[test]
 fn live_gap_rejects_inconsistent_persisted_window_as_corrupt() {
     let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
     let window_id = expected_window_id(&inbox_id);

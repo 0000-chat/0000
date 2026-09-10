@@ -504,6 +504,313 @@ impl Store {
             batch_count: window_validation.batch_count,
         })
     }
+
+    /// Complete a running live-gap job while preparing its linked live window.
+    pub fn complete_live_gap_and_finalize_window(
+        &mut self,
+        gap_job_id: &str,
+        window: &BatchWindow,
+        anchors: &[RoomAnchorCandidate],
+        ephemeral: &[RoomEphemeralCandidate],
+    ) -> Result<FinalizeOutcome, SafeError> {
+        if !valid_job_id(gap_job_id) {
+            return Err(ledger_invalid());
+        }
+        let window_validation = validate_batch_window(window)?;
+        validate_candidates(anchors, ephemeral)?;
+        if !valid_utc_millisecond(window_validation.archived_at) {
+            return Err(ledger_invalid());
+        }
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+
+        let job =
+            load_backfill_job(&transaction, keyring, gap_job_id)?.ok_or_else(ledger_not_ready)?;
+        if job.kind != "live_gap" {
+            return Err(ledger_not_ready());
+        }
+        let live_window_id = job.live_window_id.as_deref().ok_or_else(ledger_corrupt)?;
+        validate_no_backfill_outbox_for_live_gap(&transaction, gap_job_id)?;
+
+        let context = load_live_context(&transaction, keyring)?;
+        let existing =
+            load_window_by_id(&transaction, live_window_id)?.ok_or_else(ledger_corrupt)?;
+        let inbox_id = validate_inbox_id(&existing.inbox_id).map_err(|_| ledger_corrupt())?;
+        let expected_window_id =
+            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+        if existing.window_id != expected_window_id || existing.window_id != live_window_id {
+            return Err(ledger_corrupt());
+        }
+        validate_window_inbox_link(&context, &existing)?;
+
+        let outbox = load_outbox_batches(&transaction, keyring, live_window_id)?;
+        let staged_anchors = load_staged_anchors(&transaction, keyring, live_window_id)?;
+        let staged_ephemeral = load_staged_ephemeral(&transaction, keyring, live_window_id)?;
+        validate_window_children_against_metadata(
+            &existing,
+            &outbox,
+            &staged_anchors,
+            &staged_ephemeral,
+        )?;
+
+        let expected_ignored =
+            i64::try_from(window_validation.ignored_count).map_err(|_| ledger_invalid())?;
+        if existing.ignored_count != expected_ignored {
+            return Err(ledger_conflict());
+        }
+
+        let target = context
+            .chain
+            .rows
+            .iter()
+            .find(|row| row.inbox_id() == &inbox_id)
+            .ok_or_else(ledger_corrupt)?;
+        let expected_checkpoint = SourceCheckpoint {
+            kind: "matrix_sync_token_sha256".to_owned(),
+            value: format!("sha256:{}", lowercase_hex(target.next_token_digest())),
+        };
+        if window.source_checkpoint != expected_checkpoint {
+            return Err(ledger_not_ready());
+        }
+
+        let created_at =
+            parse_stored_timestamp(&existing.created_at).map_err(|_| ledger_corrupt())?;
+        if *target.observed_at() > created_at {
+            return Err(ledger_corrupt());
+        }
+        if *target.observed_at() > window_validation.archived_at
+            || created_at > window_validation.archived_at
+        {
+            return Err(ledger_invalid());
+        }
+
+        match existing.state.as_str() {
+            "pending" | "committed" => {
+                if job.state != BackfillState::Completed {
+                    return Err(ledger_corrupt());
+                }
+                if !same_prepared_input(
+                    &existing,
+                    &outbox,
+                    &staged_anchors,
+                    &staged_ephemeral,
+                    window,
+                    anchors,
+                    ephemeral,
+                )? {
+                    return Err(ledger_conflict());
+                }
+                drop(transaction);
+                return Ok(FinalizeOutcome::AlreadyPrepared {
+                    batch_count: window_validation.batch_count,
+                });
+            }
+            "collecting" => {
+                match job.state {
+                    BackfillState::Running => {}
+                    BackfillState::Completed => return Err(ledger_corrupt()),
+                    BackfillState::Pending
+                    | BackfillState::Cancelled
+                    | BackfillState::Quarantined => return Err(ledger_not_ready()),
+                }
+                oldest_target(&context, &inbox_id)?;
+                if target.state() != SyncInboxState::SdkProcessed || !target.crypto_drained() {
+                    return Err(ledger_not_ready());
+                }
+                if !outbox.is_empty() || !staged_anchors.is_empty() || !staged_ephemeral.is_empty()
+                {
+                    return Err(ledger_corrupt());
+                }
+            }
+            "quarantined" => return Err(ledger_not_ready()),
+            _ => return Err(ledger_corrupt()),
+        }
+
+        let mut sealed_batches = Vec::with_capacity(window.batches.len());
+        for batch in &window.batches {
+            let request_plaintext = Zeroizing::new(batch.exact_request_bytes().to_vec());
+            let sealed = keyring
+                .seal(
+                    "outbox_batches",
+                    &batch.batch_id,
+                    "request",
+                    request_plaintext.as_slice(),
+                )
+                .map_err(|_| ledger_corrupt())?;
+            sealed_batches.push(sealed);
+        }
+        let mut sealed_anchors = Vec::with_capacity(anchors.len());
+        for candidate in anchors {
+            let row_id = candidate_row_id(live_window_id, candidate.room_lookup());
+            let anchor_plaintext = Zeroizing::new(candidate.anchor_event().as_bytes().to_vec());
+            let sealed = keyring
+                .seal(
+                    "window_room_anchors",
+                    &row_id,
+                    "anchor_event",
+                    anchor_plaintext.as_slice(),
+                )
+                .map_err(|_| ledger_corrupt())?;
+            sealed_anchors.push((candidate, sealed));
+        }
+        let mut sealed_ephemeral = Vec::with_capacity(ephemeral.len());
+        for candidate in ephemeral {
+            let row_id = candidate_row_id(live_window_id, candidate.room_lookup());
+            let typing_plaintext = Zeroizing::new(candidate.typing_set().as_bytes().to_vec());
+            let sealed = keyring
+                .seal(
+                    "window_room_ephemeral",
+                    &row_id,
+                    "typing_set",
+                    typing_plaintext.as_slice(),
+                )
+                .map_err(|_| ledger_corrupt())?;
+            sealed_ephemeral.push((candidate, sealed));
+        }
+
+        for (ordinal, (batch, sealed)) in window.batches.iter().zip(sealed_batches).enumerate() {
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO outbox_batches
+                     (batch_row_id, source_kind, window_id, backfill_job_id, ordinal, state,
+                      request_cipher, request_nonce, request_key_version, request_sha256,
+                      byte_count, attempt_count, next_attempt_at, accepted_at, terminal_code)
+                     VALUES (?1, 'live', ?2, NULL, ?3, 'pending', ?4, ?5, ?6, ?7, ?8,
+                             0, ?9, NULL, NULL)",
+                    params![
+                        batch.batch_id.as_str(),
+                        live_window_id,
+                        i64::try_from(ordinal).map_err(|_| ledger_corrupt())?,
+                        sealed.ciphertext.as_slice(),
+                        sealed.nonce.as_slice(),
+                        i64::from(sealed.key_version),
+                        batch_digest(batch.exact_request_bytes()).as_slice(),
+                        i64::try_from(batch.exact_request_bytes().len())
+                            .map_err(|_| ledger_too_large())?,
+                        window.archived_at.as_str(),
+                    ],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if inserted != 1 {
+                return Err(ledger_corrupt());
+            }
+        }
+
+        for (candidate, sealed) in sealed_anchors {
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO window_room_anchors
+                     (window_id, room_lookup, anchor_event_cipher, anchor_event_nonce, key_version)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        live_window_id,
+                        candidate.room_lookup(),
+                        sealed.ciphertext.as_slice(),
+                        sealed.nonce.as_slice(),
+                        i64::from(sealed.key_version),
+                    ],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if inserted != 1 {
+                return Err(ledger_corrupt());
+            }
+        }
+        for (candidate, sealed) in sealed_ephemeral {
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO window_room_ephemeral
+                     (window_id, room_lookup, typing_set_cipher, typing_set_nonce, key_version,
+                      typing_expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        live_window_id,
+                        candidate.room_lookup(),
+                        sealed.ciphertext.as_slice(),
+                        sealed.nonce.as_slice(),
+                        i64::from(sealed.key_version),
+                        candidate.typing_expires_at().to_rfc3339(),
+                    ],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if inserted != 1 {
+                return Err(ledger_corrupt());
+            }
+        }
+
+        let completed_job = transaction
+            .execute(
+                "UPDATE backfill_jobs
+                 SET state = 'completed', completed_at = ?1
+                 WHERE job_id = ?2 AND kind = 'live_gap' AND live_window_id = ?3
+                   AND state = 'running' AND completed_at IS NULL
+                   AND cancelled_at IS NULL AND terminal_code IS NULL",
+                params![window.archived_at.as_str(), gap_job_id, live_window_id],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if completed_job != 1 {
+            return Err(ledger_corrupt());
+        }
+
+        let updated_window = transaction
+            .execute(
+                "UPDATE sync_windows
+                 SET state = 'pending', batch_count = ?1, accepted_count = 0,
+                     committed_at = NULL, terminal_code = NULL
+                 WHERE window_id = ?2 AND inbox_id = ?3 AND state = 'collecting'
+                   AND batch_count = 0 AND accepted_count = 0
+                   AND committed_at IS NULL AND terminal_code IS NULL
+                   AND ignored_count = ?4",
+                params![
+                    i64::from(window_validation.batch_count),
+                    live_window_id,
+                    inbox_id.as_str(),
+                    expected_ignored,
+                ],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated_window != 1 {
+            return Err(ledger_corrupt());
+        }
+        let updated_inbox = transaction
+            .execute(
+                "UPDATE sync_inbox
+                 SET state = 'prepared', prepared_at = ?1
+                 WHERE inbox_id = ?2 AND state = 'sdk_processed' AND crypto_drained = 1
+                   AND sdk_processed_at IS NOT NULL AND prepared_at IS NULL
+                   AND committed_at IS NULL AND terminal_code IS NULL",
+                params![window.archived_at.as_str(), inbox_id.as_str()],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated_inbox != 1 {
+            return Err(ledger_corrupt());
+        }
+
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(FinalizeOutcome::Prepared {
+            batch_count: window_validation.batch_count,
+        })
+    }
+}
+
+fn validate_no_backfill_outbox_for_live_gap(
+    transaction: &Transaction<'_>,
+    job_id: &str,
+) -> Result<(), SafeError> {
+    let count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| ledger_corrupt())?;
+    if count != 0 {
+        return Err(ledger_corrupt());
+    }
+    Ok(())
 }
 
 fn validate_inbox_id(value: &str) -> Result<InboxId, SafeError> {
