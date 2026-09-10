@@ -10,7 +10,9 @@ import {
   DirectoryPrincipalSchema,
   IdentitySchema,
   MessageCreatedDataSchema,
+  RealtimeConnectedFrameSchema,
   RealtimeEventSchema,
+  RealtimeTicketRequestSchema,
   SessionResponseSchema,
   type ChannelSummary,
 } from "../src/index";
@@ -140,6 +142,15 @@ describe("public schemas", () => {
   it("requires command and realtime sequence identifiers", () => {
     expect(() => CommandSchema.parse({ operation: "message.send" })).toThrow();
     expect(() => RealtimeEventSchema.parse({ type: "command.updated" })).toThrow();
+  });
+
+  it("requires command and realtime contract identifiers", () => {
+    expect(() => CommandSchema.parse({ operation: "message.send" })).toThrow();
+    expect(() => RealtimeConnectedFrameSchema.parse({ type: "connected" })).toThrow();
+    expect(RealtimeTicketRequestSchema.safeParse({
+      schema_version: 1,
+      subscriptions: [],
+    }).success).toBe(false);
   });
 
   it("requires conversation ownership by identity and connection", () => {
