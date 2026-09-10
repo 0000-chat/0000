@@ -1,13 +1,14 @@
 import { Link } from "@tanstack/react-router";
 import { useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import type { ChannelSummary, ConversationSummary, Identity } from "@communicator/contracts";
 import { ArrowLeft } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { MessageComposer } from "./message-composer";
-import { MessageTimeline } from "./message-timeline";
+import { chronologicalMessages, MessageTimeline } from "./message-timeline";
 import { ProviderIcon } from "./provider-icon";
 
 export type ConversationPageProps = {
@@ -44,9 +45,15 @@ export function ConversationPage({
     && channel.identity_id === identity.id
     && conversation.tenant_id === channel.tenant_id
     && (!selectedChannelId || selectedChannelId === conversation.connection_id);
-  const messagesQuery = useQuery({
+  const messagesQuery = useInfiniteQuery({
     queryKey: queryKeys.messages(identity.id, conversation.id),
-    queryFn: () => apiClient.getMessages(conversation.id, identity.id),
+    queryFn: ({ pageParam }) => apiClient.getMessages(
+      conversation.id,
+      identity.id,
+      pageParam ?? undefined,
+    ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor,
     enabled: isSafe,
   });
 
@@ -84,7 +91,7 @@ export function ConversationPage({
       </header>
       <div data-testid="message-viewport" className="min-h-0 flex-1 overflow-y-auto">
         {messagesQuery.isLoading && <p role="status" className="p-4 text-sm text-muted-foreground">Loading messages…</p>}
-        {messagesQuery.isError && (
+        {messagesQuery.isError && !messagesQuery.data && (
           <div role="alert" className="space-y-3 p-4 text-sm">
             <p>Unable to load messages.</p>
             <button type="button" className="text-primary underline" onClick={() => void messagesQuery.refetch()}>
@@ -92,7 +99,30 @@ export function ConversationPage({
             </button>
           </div>
         )}
-        {messagesQuery.data && <MessageTimeline messages={messagesQuery.data} />}
+        {messagesQuery.data && (
+          <>
+            {messagesQuery.hasNextPage && (
+              <div className="p-4 pb-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  disabled={messagesQuery.isFetchingNextPage}
+                  onClick={() => void messagesQuery.fetchNextPage()}
+                >
+                  {messagesQuery.isFetchingNextPage ? "Loading older messages…" : "Load older messages"}
+                </Button>
+              </div>
+            )}
+            {messagesQuery.isFetchNextPageError && (
+              <div role="alert" className="space-y-2 p-4 text-sm">
+                <p>Unable to load older messages.</p>
+                <Button type="button" size="sm" onClick={() => void messagesQuery.fetchNextPage()}>Retry</Button>
+              </div>
+            )}
+            <MessageTimeline messages={chronologicalMessages(messagesQuery.data.pages)} />
+          </>
+        )}
       </div>
       <div className="shrink-0 border-t bg-background/95">
         <MessageComposer

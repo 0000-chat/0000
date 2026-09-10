@@ -83,6 +83,30 @@ describe("ConversationsShell", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findAllByTestId("conversation-row")).toHaveLength(6);
   });
+
+  it("keeps loaded conversations and shows bounded retry UI for an older-page failure", async () => {
+    const user = userEvent.setup();
+    server.use(http.get("*/api/v1/identities/identity_human/conversations", ({ request }) => {
+      return new URL(request.url).searchParams.has("cursor")
+        ? HttpResponse.json({
+          error: { code: "service_unavailable", message: "private conversation detail" },
+        }, { status: 503 })
+        : HttpResponse.json({
+          items: [pilotScenario.conversations[0]!],
+          next_cursor: "older-conversation-cursor",
+        });
+    }));
+
+    renderApp("/conversations?identity=identity_human");
+    const rows = await screen.findAllByTestId("conversation-row");
+    expect(rows).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Load older conversations" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load older conversations.");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("private conversation detail");
+    expect(screen.getAllByTestId("conversation-row")).toHaveLength(1);
+  });
 });
 
 function passthroughResponse() {
