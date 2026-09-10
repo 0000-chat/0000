@@ -31,10 +31,8 @@ if metadata.get("status") != "scaffold-only" or metadata.get("application_code")
 if metadata.get("license_selected") is not False:
     raise SystemExit("scaffold must not select a license")
 readme = (root / "README.md").read_text(encoding="utf-8")
-if "Standalone public" not in readme or "Cloudflare" not in readme:
-    raise SystemExit("README must state authentication and hosting intent")
-if "neither forks nor vendors Executor" not in readme:
-    raise SystemExit("README must state the Executor boundary")
+if "`0000-gateway` aims" not in readme or "No hard dependency" not in readme:
+    raise SystemExit("README must state the gateway purpose and dependency status")
 PY
 git diff --check
 echo "0000-gateway scaffold checks passed"
