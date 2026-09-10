@@ -8,6 +8,7 @@ pub mod crypto_outbox;
 pub mod matrix;
 pub mod matrix_http;
 pub mod model;
+pub mod normalize;
 pub mod protected;
 pub mod registry;
 pub mod secret;
