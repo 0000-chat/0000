@@ -535,9 +535,10 @@ GET  /v1/replays/{replay_id}
 ```
 
 Every mutation accepts an `Idempotency-Key`. Commands return `202 Accepted`
-unless the operation can be rejected synchronously. Collection endpoints use
-opaque cursor pagination. The API publishes an OpenAPI contract from which a
-TypeScript client can be generated.
+unless the operation can be rejected synchronously. The live-read navigation
+contract bounds identities, connections, and channels to 64 items. Conversation
+and message collections use opaque cursor pagination. The API publishes an
+OpenAPI contract from which a TypeScript client can be generated.
 
 Messages mirrored from remote systems are not generic CRUD rows. Directly
 editing projection SQLite is forbidden. Message create, edit, delete, and
