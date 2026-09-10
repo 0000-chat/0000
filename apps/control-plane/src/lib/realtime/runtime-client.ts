@@ -1,3 +1,4 @@
+import { LiveRealtimeClient } from "./live-client";
 import { SimulatedRealtimeClient } from "./simulated-client";
 
 const simulatedBuild = import.meta.env.VITE_DATA_MODE === "simulated"
@@ -5,4 +6,4 @@ const simulatedBuild = import.meta.env.VITE_DATA_MODE === "simulated"
 
 export const runtimeRealtimeClient = simulatedBuild
   ? new SimulatedRealtimeClient()
-  : null;
+  : new LiveRealtimeClient();

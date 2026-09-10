@@ -8,6 +8,8 @@ import {
   IdentitySchema,
   MAX_IDENTITY_CONNECTIONS,
   MessagePageResultSchema,
+  RealtimeTicketRequestSchema,
+  RealtimeTicketResponseSchema,
   SessionResponseSchema,
   type Command,
   type ChannelSummary,
@@ -16,6 +18,8 @@ import {
   type ConversationSummary,
   type Identity,
   type MessagePageResult,
+  type RealtimeTicketRequest,
+  type RealtimeTicketResponse,
   type SessionResponse,
 } from "@communicator/contracts";
 
@@ -190,6 +194,15 @@ export class ApiClient {
 
   getHealth(): Promise<HealthResponse> {
     return this.request("/api/v1/health", HealthResponseSchema);
+  }
+
+  createRealtimeTicket(request: RealtimeTicketRequest): Promise<RealtimeTicketResponse> {
+    const parsedRequest = RealtimeTicketRequestSchema.parse(request);
+    return this.request("/api/v1/realtime/tickets", RealtimeTicketResponseSchema, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(parsedRequest),
+    });
   }
 }
 
