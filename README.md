@@ -1,13 +1,21 @@
 # 0000-database
 
-Purpose: persistent-data boundary.
+`0000-database` aims to give 0000 products and services a dependable home for
+their durable data.
 
-Status: scaffold-only. No database engine, schema, application code, package,
-or deployment implementation is selected here. Standalone public use does not
-require hosted platform authentication.
+It should make data easy to store, find, change, and retain without requiring
+each service to solve persistence on its own. It should give consumers clear
+data ownership and predictable behavior as their needs grow.
 
-Cloudflare is the public ingress and normal runtime class. No resources are
-provisioned by this repository, and no license is selected.
+`0000-streams` depends on this service. Other 0000 services can use it when
+they need durable state, but that use does not make them part of the database.
 
-Validate with `./scripts/check`.
+This service is responsible for:
 
+- durable storage and retrieval;
+- clear ownership and lifecycle of stored data;
+- consistent access to data across the 0000 family;
+- protecting data integrity as products change.
+
+It is not responsible for user experiences, communication channels, reasoning,
+or coordinating the hosted platform.
