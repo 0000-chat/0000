@@ -705,6 +705,42 @@ class RepositoryContractTests(unittest.TestCase):
         ):
             self.assertIsNone(re.search(pattern, projection_text, flags=re.IGNORECASE))
 
+    def test_realtime_ticket_storage_is_digest_only_and_single_use(self):
+        migration = (ROOT / "apps/control-plane/migrations/0004_realtime_tickets.sql").read_text()
+        self.assertIn("CREATE TABLE realtime_tickets", migration)
+        self.assertIn(
+            "ticket_digest TEXT PRIMARY KEY CHECK(length(ticket_digest) = 64)",
+            migration,
+        )
+        self.assertIn(
+            "CREATE INDEX realtime_tickets_expiry_idx",
+            migration,
+        )
+        self.assertNotRegex(
+            migration,
+            re.compile(r"(?im)^\s*(?:ticket|raw_ticket|ticket_url|token|url)\s+", re.MULTILINE),
+        )
+
+        token_source = (ROOT / "apps/control-plane/worker/realtime/token.ts").read_text()
+        self.assertRegex(token_source, re.compile(r"new Uint8Array\(32\)"))
+        self.assertIn("crypto.getRandomValues", token_source)
+        self.assertIn('"SHA-256"', token_source)
+        self.assertNotIn("Math.random", token_source)
+
+        repository_source = (ROOT / "apps/control-plane/worker/realtime/ticket-repository.ts").read_text()
+        self.assertIn('withSession("first-primary")', repository_source)
+        self.assertRegex(
+            repository_source,
+            re.compile(
+                r"DELETE\s+FROM\s+realtime_tickets[\s\S]+"
+                r"WHERE\s+ticket_digest\s*=\s*\?\s+"
+                r"AND\s+expires_at_ms\s*>\s*\?[\s\S]+RETURNING",
+                re.IGNORECASE,
+            ),
+        )
+        self.assertIn("LIMIT ?", repository_source)
+        self.assertNotIn("console.", repository_source)
+
 
 if __name__ == "__main__":
     unittest.main()
