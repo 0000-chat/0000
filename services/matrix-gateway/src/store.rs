@@ -3138,10 +3138,27 @@ fn sync_inbox_scan_limit() -> Result<i64, SafeError> {
 }
 
 fn checked_sync_inbox_bytes(current_total: u64, new_bytes: u64) -> Result<u64, ()> {
+    checked_recovery_bytes(current_total, new_bytes)
+}
+
+fn checked_recovery_bytes(current_total: u64, new_bytes: u64) -> Result<u64, ()> {
     current_total
         .checked_add(new_bytes)
         .filter(|total| *total <= MAX_RECOVERY_BYTES)
         .ok_or(())
+}
+
+/// Add one protected value to the recovery aggregate.
+///
+/// Recovery limits count the ciphertext stored in SQLite. Callers pass the
+/// plaintext length for new values, so this helper adds the AEAD tag before
+/// applying the checked aggregate cap.
+fn checked_protected_recovery_bytes(current_total: u64, plaintext_len: usize) -> Result<u64, ()> {
+    let plaintext_len = u64::try_from(plaintext_len).map_err(|_| ())?;
+    let protected_len = plaintext_len
+        .checked_add(u64::try_from(AEAD_TAG_BYTES).map_err(|_| ())?)
+        .ok_or(())?;
+    checked_recovery_bytes(current_total, protected_len)
 }
 
 fn checked_crypto_recovery_bytes(
@@ -3156,12 +3173,7 @@ fn checked_crypto_recovery_bytes(
         response_ciphertext_len.unwrap_or(0),
     ]
     .into_iter()
-    .try_fold(current_total, |total, value| {
-        total
-            .checked_add(value)
-            .filter(|total| *total <= MAX_RECOVERY_BYTES)
-            .ok_or(())
-    })
+    .try_fold(current_total, checked_recovery_bytes)
 }
 
 fn retained_inbox_bounds(connection: &Connection) -> Result<RetainedInboxBounds, SafeError> {
@@ -4100,6 +4112,16 @@ mod tests {
         );
         assert_eq!(checked_sync_inbox_bytes(MAX_RECOVERY_BYTES, 1), Err(()));
         assert_eq!(checked_sync_inbox_bytes(u64::MAX, 1), Err(()));
+    }
+
+    #[test]
+    fn checked_recovery_bytes_applies_the_cap_across_each_addition() {
+        assert_eq!(
+            checked_recovery_bytes(MAX_RECOVERY_BYTES - 1, 1),
+            Ok(MAX_RECOVERY_BYTES)
+        );
+        assert_eq!(checked_recovery_bytes(MAX_RECOVERY_BYTES, 1), Err(()));
+        assert_eq!(checked_recovery_bytes(u64::MAX, 0), Err(()));
     }
 
     #[test]

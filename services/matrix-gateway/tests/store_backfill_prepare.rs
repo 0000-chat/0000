@@ -39,6 +39,16 @@ struct TerminalShape {
     terminal_code: Option<&'static str>,
 }
 
+#[derive(Debug, PartialEq)]
+struct CheckpointSnapshot {
+    state: String,
+    pagination_cipher: Option<Vec<u8>>,
+    pagination_nonce: Option<Vec<u8>>,
+    key_version: i64,
+    accepted_events: i64,
+    outbox_count: i64,
+}
+
 fn secure_tempdir() -> tempfile::TempDir {
     let directory = tempdir().expect("create temporary state directory");
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
@@ -158,6 +168,28 @@ fn backfill_state(path: &Path, job_id: &str) -> Option<String> {
         )
         .optional()
         .expect("read backfill state")
+}
+
+fn checkpoint_snapshot(path: &Path) -> CheckpointSnapshot {
+    Connection::open(path)
+        .expect("open sqlite snapshot connection")
+        .query_row(
+            "SELECT state, pagination_cipher, pagination_nonce, key_version, accepted_events,
+                    (SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1)
+             FROM backfill_jobs WHERE job_id = ?1",
+            [JOB_ID],
+            |row| {
+                Ok(CheckpointSnapshot {
+                    state: row.get(0)?,
+                    pagination_cipher: row.get(1)?,
+                    pagination_nonce: row.get(2)?,
+                    key_version: row.get(3)?,
+                    accepted_events: row.get(4)?,
+                    outbox_count: row.get(5)?,
+                })
+            },
+        )
+        .expect("read sqlite checkpoint snapshot")
 }
 
 #[test]
@@ -368,9 +400,16 @@ fn checkpoint_none_persists_encrypted_exhaustion_distinct_from_sql_null() {
             },
         )
         .expect("open exhaustion sentinel");
+    let marker: serde_json::Value =
+        serde_json::from_slice(plaintext.as_bytes()).expect("terminal marker JSON");
+    assert_eq!(marker["schema_version"], 1);
+    assert_eq!(marker["state"], "exhausted");
+    assert_eq!(marker["page_start"], 0);
+    assert_eq!(marker["page_length"], 0);
+    assert_eq!(marker["accepted_events"], 0);
     assert_eq!(
-        plaintext.as_bytes(),
-        br#"{"schema_version":1,"state":"exhausted"}"#
+        marker["page_requests_sha256"],
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
 
     let mut reopened = Store::open(&path, test_keyring()).expect("reopen gateway store");
@@ -382,9 +421,224 @@ fn checkpoint_none_persists_encrypted_exhaustion_distinct_from_sql_null() {
             .pagination()
             .expect("exhaustion checkpoint")
             .as_bytes(),
-        br#"{"schema_version":1,"state":"exhausted"}"#
+        plaintext.as_bytes()
     );
     assert_eq!(stored.accepted_events(), 0);
+}
+
+#[test]
+fn legacy_exhaustion_retry_is_rejected_without_mutation() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let first_page = checkpoint_window(&job, 0, "evt_legacy_exhaustion");
+    let empty_retry = empty_checkpoint_window(&job, 1);
+    let first_token = SecretBytes::from_text(b"first-page", 64 * 1024).expect("page token");
+    let legacy_exhausted = br#"{"schema_version":1,"state":"exhausted"}"#;
+
+    {
+        let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+        store
+            .create_backfill_job(new_job(&job, PARAMETERS))
+            .expect("create explicit backfill job");
+        store
+            .begin_or_resume_backfill_job(JOB_ID)
+            .expect("begin explicit backfill job");
+        store
+            .checkpoint_backfill_page(JOB_ID, Some(&first_token), &first_page, 1)
+            .expect("checkpoint first page");
+    }
+
+    let sealed = test_keyring()
+        .seal("backfill_jobs", JOB_ID, "pagination", legacy_exhausted)
+        .expect("seal legacy exhausted marker");
+    Connection::open(&path)
+        .expect("open sqlite database for legacy fixture")
+        .execute(
+            "UPDATE backfill_jobs
+             SET pagination_cipher = ?1, pagination_nonce = ?2
+             WHERE job_id = ?3",
+            params![sealed.ciphertext, sealed.nonce.as_slice(), JOB_ID],
+        )
+        .expect("install authenticated legacy exhausted marker");
+
+    let mut reopened = Store::open(&path, test_keyring()).expect("reopen gateway store");
+    let stored = reopened
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("reopen authenticated legacy exhausted job");
+    assert_eq!(stored.accepted_events(), 1);
+    assert_eq!(
+        stored
+            .pagination()
+            .expect("legacy exhaustion checkpoint")
+            .as_bytes(),
+        legacy_exhausted
+    );
+
+    let before = checkpoint_snapshot(&path);
+    let error = reopened
+        .checkpoint_backfill_page(JOB_ID, None, &empty_retry, 1)
+        .expect_err("legacy exhaustion cannot authorize an empty same-count retry");
+    assert_eq!(error.code(), STORE_BACKFILL_CONFLICT);
+    assert_eq!(checkpoint_snapshot(&path), before);
+}
+
+#[test]
+fn exhausted_backfill_cursor_replays_exactly_and_rejects_new_pages() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let page_zero = checkpoint_window(&job, 0, "evt_exhaustion_zero");
+    let final_page = empty_checkpoint_window(&job, 1);
+    let changed_final_page = checkpoint_window(&job, 1, "evt_exhaustion_changed");
+    let first_token = SecretBytes::from_text(b"first-page", 64 * 1024).expect("page token");
+    let new_token = SecretBytes::from_text(b"new-after-exhaustion", 64 * 1024)
+        .expect("post-exhaustion page token");
+
+    let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+    store
+        .create_backfill_job(new_job(&job, PARAMETERS))
+        .expect("create explicit backfill job");
+    store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("begin explicit backfill job");
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&first_token), &page_zero, 1)
+        .expect("checkpoint first page");
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &final_page, 1)
+        .expect("persist exhausted cursor");
+
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &final_page, 1)
+        .expect("exact exhausted-page retry is idempotent");
+    let before_new_page = checkpoint_snapshot(&path);
+    let error = store
+        .checkpoint_backfill_page(JOB_ID, Some(&new_token), &final_page, 1)
+        .expect_err("a new continuation token cannot replace exhaustion");
+    assert_eq!(error.code(), STORE_BACKFILL_CONFLICT);
+    assert_eq!(checkpoint_snapshot(&path), before_new_page);
+
+    let before_changed_page = checkpoint_snapshot(&path);
+    let error = store
+        .checkpoint_backfill_page(JOB_ID, None, &changed_final_page, 2)
+        .expect_err("a changed page cannot append after exhaustion");
+    assert_eq!(error.code(), STORE_BACKFILL_CONFLICT);
+    assert_eq!(checkpoint_snapshot(&path), before_changed_page);
+    assert_eq!(
+        Connection::open(&path)
+            .expect("open sqlite inspection connection")
+            .query_row(
+                "SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1",
+                [JOB_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count durable backfill rows"),
+        1
+    );
+}
+
+#[test]
+fn nonempty_terminal_backfill_page_replay_requires_exact_page_identity() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let page_zero = checkpoint_window(&job, 0, "evt_terminal_identity_zero");
+    let final_page = checkpoint_window(&job, 1, "evt_terminal_identity_final");
+    let changed_page = checkpoint_window(&job, 1, "evt_terminal_identity_changed");
+    let first_token = SecretBytes::from_text(b"first-page", 64 * 1024).expect("page token");
+
+    let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+    store
+        .create_backfill_job(new_job(&job, PARAMETERS))
+        .expect("create explicit backfill job");
+    store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("begin explicit backfill job");
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&first_token), &page_zero, 1)
+        .expect("checkpoint first page");
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &final_page, 2)
+        .expect("checkpoint non-empty terminal page");
+
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &final_page, 2)
+        .expect("exact non-empty terminal page retry");
+
+    let before_page_zero = checkpoint_snapshot(&path);
+    let error = store
+        .checkpoint_backfill_page(JOB_ID, None, &page_zero, 2)
+        .expect_err("an earlier page cannot replay after exhaustion");
+    assert_eq!(error.code(), STORE_BACKFILL_CONFLICT);
+    assert_eq!(checkpoint_snapshot(&path), before_page_zero);
+
+    let before_changed_page = checkpoint_snapshot(&path);
+    let error = store
+        .checkpoint_backfill_page(JOB_ID, None, &changed_page, 2)
+        .expect_err("changed terminal rows cannot replay after exhaustion");
+    assert_eq!(error.code(), STORE_BACKFILL_CONFLICT);
+    assert_eq!(checkpoint_snapshot(&path), before_changed_page);
+}
+
+#[test]
+fn empty_terminal_backfill_page_rejects_page_zero_replay() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let job = test_job(100);
+    let page_zero = checkpoint_window(&job, 0, "evt_empty_terminal_zero");
+    let empty_terminal = empty_checkpoint_window(&job, 1);
+    let first_token = SecretBytes::from_text(b"first-page", 64 * 1024).expect("page token");
+
+    let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+    store
+        .create_backfill_job(new_job(&job, PARAMETERS))
+        .expect("create explicit backfill job");
+    store
+        .begin_or_resume_backfill_job(JOB_ID)
+        .expect("begin explicit backfill job");
+    store
+        .checkpoint_backfill_page(JOB_ID, Some(&first_token), &page_zero, 1)
+        .expect("checkpoint first page");
+    store
+        .checkpoint_backfill_page(JOB_ID, None, &empty_terminal, 1)
+        .expect("checkpoint empty terminal page");
+
+    let before = checkpoint_snapshot(&path);
+    let error = store
+        .checkpoint_backfill_page(JOB_ID, None, &page_zero, 1)
+        .expect_err("page zero cannot replay after an empty terminal page");
+    assert_eq!(error.code(), STORE_BACKFILL_CONFLICT);
+    assert_eq!(checkpoint_snapshot(&path), before);
+}
+
+#[test]
+fn checkpoint_rejects_reserved_provider_cursor_bytes_without_mutation() {
+    for reserved in [
+        br#"{"schema_version":1,"state":"exhausted"}"#.as_slice(),
+        br#"{"schema_version":1,"state":"exhausted","page_start":"#.as_slice(),
+    ] {
+        let directory = secure_tempdir();
+        let path = database_path(directory.path());
+        let job = test_job(100);
+        let empty = empty_checkpoint_window(&job, 0);
+        let token = SecretBytes::from_text(reserved, 64 * 1024).expect("reserved cursor");
+
+        let mut store = Store::open(&path, test_keyring()).expect("open gateway store");
+        store
+            .create_backfill_job(new_job(&job, PARAMETERS))
+            .expect("create explicit backfill job");
+        store
+            .begin_or_resume_backfill_job(JOB_ID)
+            .expect("begin explicit backfill job");
+        let before = checkpoint_snapshot(&path);
+
+        let error = store
+            .checkpoint_backfill_page(JOB_ID, Some(&token), &empty, 0)
+            .expect_err("reserved provider cursor must be rejected");
+        assert_eq!(error.code(), STORE_BACKFILL_INVALID);
+        assert_eq!(checkpoint_snapshot(&path), before);
+    }
 }
 
 #[test]

@@ -4,6 +4,7 @@ use std::{collections::HashSet, str};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Row, Transaction, TransactionBehavior, params, types::ValueRef};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -24,7 +25,7 @@ use crate::{
     secret::SafeError,
 };
 
-use super::{Store, parse_stored_timestamp, valid_utc_millisecond};
+use super::{Store, lowercase_hex, parse_stored_timestamp, valid_utc_millisecond};
 
 const BACKFILL_KIND_EXPLICIT: &str = "explicit";
 const BACKFILL_KIND_LIVE_GAP: &str = "live_gap";
@@ -49,6 +50,8 @@ const MAX_BACKFILL_JOB_ENVELOPE_BYTES: usize = MAX_BACKFILL_PARAMETERS_BYTES
     + BACKFILL_ROOM_ID_MAX_BYTES
     + (2 * BACKFILL_TIMESTAMP_MAX_BYTES);
 const BACKFILL_EXHAUSTED_SENTINEL: &[u8] = b"{\"schema_version\":1,\"state\":\"exhausted\"}";
+const BACKFILL_TERMINAL_MARKER_PREFIX: &[u8] =
+    b"{\"schema_version\":1,\"state\":\"exhausted\",\"page_start\":";
 const BACKFILL_OUTBOX_SOURCE_KIND_MAX_BYTES: usize = "backfill".len();
 const BACKFILL_OUTBOX_STATE_MAX_BYTES: usize = "quarantined".len();
 const BACKFILL_OUTBOX_TIMESTAMP_MAX_BYTES: usize = 64;
@@ -57,6 +60,216 @@ const BACKFILL_OUTBOX_BATCH_ID_PREFIX: &str = "batch_";
 const BACKFILL_OUTBOX_REQUEST_MAX_CIPHERTEXT_BYTES: usize =
     MAX_BATCH_CANONICAL_BYTES + AEAD_TAG_BYTES;
 const BACKFILL_OUTBOX_ATTEMPT_COUNT_MAX: i64 = 1_000_000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalPageMarkerFields {
+    schema_version: u8,
+    state: String,
+    page_start: u64,
+    page_length: u64,
+    accepted_events: u64,
+    page_requests_sha256: String,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct TerminalPageMarker {
+    page_start: u64,
+    page_length: u64,
+    accepted_events: u64,
+    page_requests_sha256: [u8; 32],
+}
+
+enum StoredPagination {
+    None,
+    Provider,
+    LegacyExhausted,
+    Terminal(TerminalPageMarker),
+}
+
+fn checked_backfill_checkpoint_recovery_bytes<I>(
+    existing_request_ciphertext_bytes: u64,
+    request_plaintext_lengths: I,
+    pagination_plaintext_len: usize,
+) -> Result<u64, SafeError>
+where
+    I: IntoIterator<Item = usize>,
+{
+    let mut total = super::checked_recovery_bytes(0, existing_request_ciphertext_bytes)
+        .map_err(|_| backfill_too_large())?;
+    for request_plaintext_len in request_plaintext_lengths {
+        total = super::checked_protected_recovery_bytes(total, request_plaintext_len)
+            .map_err(|_| backfill_too_large())?;
+    }
+    super::checked_protected_recovery_bytes(total, pagination_plaintext_len)
+        .map_err(|_| backfill_too_large())
+}
+
+fn terminal_page_digest(window: &BatchWindow) -> Result<[u8; 32], SafeError> {
+    let mut digest = Sha256::new();
+    for batch in &window.batches {
+        let request = batch.exact_request_bytes();
+        let length = u64::try_from(request.len()).map_err(|_| backfill_invalid())?;
+        digest.update(length.to_be_bytes());
+        digest.update(request);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn encode_terminal_page_marker(
+    page_start: u64,
+    page_length: u64,
+    accepted_events: u64,
+    page_requests_sha256: [u8; 32],
+) -> Result<Vec<u8>, SafeError> {
+    let page_end = page_start
+        .checked_add(page_length)
+        .ok_or_else(backfill_corrupt)?;
+    if page_end > batch::MAX_BACKFILL_EVENTS
+        || page_length > u64::try_from(MAX_BACKFILL_PAGE_BATCHES).unwrap_or(u64::MAX)
+        || accepted_events > batch::MAX_BACKFILL_EVENTS
+    {
+        return Err(backfill_corrupt());
+    }
+    let marker = format!(
+        "{{\"schema_version\":1,\"state\":\"exhausted\",\"page_start\":{page_start},\"page_length\":{page_length},\"accepted_events\":{accepted_events},\"page_requests_sha256\":\"{}\"}}",
+        lowercase_hex(&page_requests_sha256)
+    )
+    .into_bytes();
+    if marker.len() > MAX_BACKFILL_PAGINATION_BYTES {
+        return Err(backfill_corrupt());
+    }
+    Ok(marker)
+}
+
+fn decode_hex_digest(value: &str) -> Result<[u8; 32], SafeError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return Err(backfill_corrupt());
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        let high = hex_digit(pair[0]).ok_or_else(backfill_corrupt)?;
+        let low = hex_digit(pair[1]).ok_or_else(backfill_corrupt)?;
+        digest[index] = (high << 4) | low;
+    }
+    Ok(digest)
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn decode_terminal_page_marker(bytes: &[u8]) -> Result<TerminalPageMarker, SafeError> {
+    let fields: TerminalPageMarkerFields =
+        serde_json::from_slice(bytes).map_err(|_| backfill_corrupt())?;
+    if fields.schema_version != 1 || fields.state != "exhausted" {
+        return Err(backfill_corrupt());
+    }
+    let page_end = fields
+        .page_start
+        .checked_add(fields.page_length)
+        .ok_or_else(backfill_corrupt)?;
+    if page_end > batch::MAX_BACKFILL_EVENTS
+        || fields.page_length > u64::try_from(MAX_BACKFILL_PAGE_BATCHES).unwrap_or(u64::MAX)
+        || fields.accepted_events > batch::MAX_BACKFILL_EVENTS
+    {
+        return Err(backfill_corrupt());
+    }
+    let page_requests_sha256 = decode_hex_digest(&fields.page_requests_sha256)?;
+    let marker = TerminalPageMarker {
+        page_start: fields.page_start,
+        page_length: fields.page_length,
+        accepted_events: fields.accepted_events,
+        page_requests_sha256,
+    };
+    if encode_terminal_page_marker(
+        marker.page_start,
+        marker.page_length,
+        marker.accepted_events,
+        marker.page_requests_sha256,
+    )? != bytes
+    {
+        return Err(backfill_corrupt());
+    }
+    Ok(marker)
+}
+
+fn stored_pagination(value: Option<&[u8]>) -> Result<StoredPagination, SafeError> {
+    match value {
+        None => Ok(StoredPagination::None),
+        Some(value) if value == BACKFILL_EXHAUSTED_SENTINEL => {
+            Ok(StoredPagination::LegacyExhausted)
+        }
+        Some(value) if value.starts_with(BACKFILL_TERMINAL_MARKER_PREFIX) => Ok(
+            StoredPagination::Terminal(decode_terminal_page_marker(value)?),
+        ),
+        Some(_) => Ok(StoredPagination::Provider),
+    }
+}
+
+fn is_reserved_provider_pagination(value: &[u8]) -> bool {
+    value == BACKFILL_EXHAUSTED_SENTINEL || value.starts_with(BACKFILL_TERMINAL_MARKER_PREFIX)
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn backfill_outbox_preflight_aggregates_actual_ciphertext_bytes() {
+        let job = BackfillJob::new(
+            "018f0f2c-5f5a-7abc-8def-abcdef012345",
+            "!backfill:example.test",
+            "2023-11-14T22:13:20.000Z",
+            "2023-11-15T22:13:20.000Z",
+            100,
+        )
+        .expect("construct backfill job");
+        let connection = Connection::open_in_memory().expect("open in-memory database");
+        connection
+            .execute_batch(
+                "CREATE TABLE outbox_batches(
+                     backfill_job_id TEXT, request_cipher BLOB, byte_count INTEGER
+                 );
+                 INSERT INTO outbox_batches(backfill_job_id, request_cipher, byte_count)
+                 VALUES ('018f0f2c-5f5a-7abc-8def-abcdef012345', zeroblob(20), 1);",
+            )
+            .expect("create backfill outbox fixture");
+
+        assert_eq!(
+            preflight_backfill_outbox_bytes(&connection, &job).expect("preflight backfill outbox"),
+            (1, 20)
+        );
+    }
+
+    #[test]
+    fn backfill_checkpoint_projection_counts_existing_and_protected_new_bytes() {
+        assert_eq!(
+            checked_backfill_checkpoint_recovery_bytes(
+                crate::config::MAX_RECOVERY_BYTES - 34,
+                [1_usize],
+                1,
+            )
+            .expect("exact recovery boundary"),
+            crate::config::MAX_RECOVERY_BYTES
+        );
+        assert!(
+            checked_backfill_checkpoint_recovery_bytes(
+                crate::config::MAX_RECOVERY_BYTES - 33,
+                [1_usize],
+                1,
+            )
+            .is_err()
+        );
+    }
+}
 
 struct StoredBackfillRow {
     job_id: String,
@@ -253,8 +466,6 @@ impl Store {
         accepted_events: u64,
     ) -> Result<(), SafeError> {
         validate_checkpoint_input(job_id, pagination, window, accepted_events)?;
-        let pagination_bytes =
-            pagination.map_or(BACKFILL_EXHAUSTED_SENTINEL, |value| value.as_bytes());
         let accepted_events_sql = i64::try_from(accepted_events).map_err(|_| backfill_invalid())?;
 
         let keyring = &self.keyring;
@@ -280,7 +491,8 @@ impl Store {
             return Err(backfill_invalid());
         }
 
-        let existing_count = load_backfill_outbox_rows(&transaction, keyring, &verified.job)?;
+        let (existing_count, existing_request_ciphertext_bytes) =
+            preflight_backfill_outbox_bytes(&transaction, &verified.job)?;
         if existing_count != 0 && verified.pagination.is_none() {
             return Err(backfill_corrupt());
         }
@@ -297,6 +509,64 @@ impl Store {
 
         if page_start > existing_count {
             return Err(backfill_invalid());
+        }
+
+        let page_requests_sha256 = terminal_page_digest(window)?;
+        let existing_pagination =
+            stored_pagination(verified.pagination.as_deref().map(|value| &**value))?;
+        let generated_pagination;
+        let pagination_bytes = match (&existing_pagination, pagination) {
+            (StoredPagination::LegacyExhausted, _) => return Err(backfill_conflict()),
+            (StoredPagination::Terminal(marker), None) => {
+                let marker_end = marker
+                    .page_start
+                    .checked_add(marker.page_length)
+                    .ok_or_else(backfill_corrupt)?;
+                if marker_end != existing_count {
+                    return Err(backfill_corrupt());
+                }
+                if marker.page_start != page_start
+                    || marker.page_length != page_length
+                    || marker.accepted_events != accepted_events
+                    || marker.page_requests_sha256 != page_requests_sha256
+                {
+                    return Err(backfill_conflict());
+                }
+                generated_pagination = encode_terminal_page_marker(
+                    page_start,
+                    page_length,
+                    accepted_events,
+                    page_requests_sha256,
+                )?;
+                generated_pagination.as_slice()
+            }
+            (StoredPagination::Terminal(_), Some(_)) => return Err(backfill_conflict()),
+            (_, Some(value)) => value.as_bytes(),
+            (_, None) => {
+                generated_pagination = encode_terminal_page_marker(
+                    page_start,
+                    page_length,
+                    accepted_events,
+                    page_requests_sha256,
+                )?;
+                generated_pagination.as_slice()
+            }
+        };
+        let new_request_plaintext_lengths = window
+            .batches
+            .iter()
+            .filter(|_| page_start == existing_count)
+            .map(|batch| batch.exact_request_bytes().len());
+        checked_backfill_checkpoint_recovery_bytes(
+            existing_request_ciphertext_bytes,
+            new_request_plaintext_lengths,
+            pagination_bytes.len(),
+        )?;
+
+        let validated_existing_count =
+            load_backfill_outbox_rows(&transaction, keyring, &verified.job)?;
+        if validated_existing_count != existing_count {
+            return Err(backfill_corrupt());
         }
         if page_start < existing_count {
             if page_end > existing_count {
@@ -858,11 +1128,24 @@ fn validate_checkpoint_input(
         if pagination.len() > MAX_BACKFILL_PAGINATION_BYTES {
             return Err(backfill_invalid());
         }
+        if is_reserved_provider_pagination(pagination.as_bytes()) {
+            return Err(backfill_invalid());
+        }
     }
+
+    let mut request_plaintext_lengths = Vec::with_capacity(window.batches.len());
+    for built in &window.batches {
+        validate_input_batch(window, built)?;
+        request_plaintext_lengths.push(built.exact_request_bytes().len());
+    }
+    checked_backfill_checkpoint_recovery_bytes(
+        0,
+        request_plaintext_lengths,
+        pagination.map_or(0, |value| value.len()),
+    )?;
 
     let mut batch_ids = HashSet::with_capacity(window.batches.len());
     for built in &window.batches {
-        validate_input_batch(window, built)?;
         if !batch_ids.insert(built.batch_id.as_str()) {
             return Err(backfill_invalid());
         }
@@ -1030,6 +1313,7 @@ fn load_backfill_row(
     connection: &rusqlite::Connection,
     job_id: &str,
 ) -> Result<Option<StoredBackfillRow>, SafeError> {
+    preflight_backfill_job_bytes(connection, job_id)?;
     let mut statement = connection
         .prepare(
             "SELECT job_id, kind, live_window_id, state,
@@ -1103,13 +1387,27 @@ fn validate_backfill_page_shape(
     if outbox_count != 0 && job.pagination.is_none() {
         return Err(backfill_corrupt());
     }
+    if let StoredPagination::Terminal(marker) =
+        stored_pagination(job.pagination.as_deref().map(|value| &**value))?
+    {
+        let marker_end = marker
+            .page_start
+            .checked_add(marker.page_length)
+            .ok_or_else(backfill_corrupt)?;
+        if marker_end != outbox_count {
+            return Err(backfill_corrupt());
+        }
+    }
     Ok(())
 }
 
 fn is_exhausted_pagination(job: &VerifiedBackfillRow) -> bool {
-    job.pagination
-        .as_ref()
-        .is_some_and(|value| value.as_slice() == BACKFILL_EXHAUSTED_SENTINEL)
+    job.pagination.as_ref().is_some_and(|value| {
+        value.as_slice() == BACKFILL_EXHAUSTED_SENTINEL
+            || value
+                .as_slice()
+                .starts_with(BACKFILL_TERMINAL_MARKER_PREFIX)
+    })
 }
 
 fn load_backfill_outbox_rows(
@@ -1120,23 +1418,132 @@ fn load_backfill_outbox_rows(
     Ok(scan_backfill_outbox_rows(connection, keyring, job, None)?.count)
 }
 
+fn preflight_backfill_outbox_bytes(
+    connection: &rusqlite::Connection,
+    job: &BackfillJob,
+) -> Result<(u64, u64), SafeError> {
+    preflight_backfill_outbox_ciphertext_bytes(connection, job.job_id(), job.max_events())
+}
+
+fn preflight_backfill_outbox_ciphertext_bytes(
+    connection: &rusqlite::Connection,
+    job_id: &str,
+    max_rows: u64,
+) -> Result<(u64, u64), SafeError> {
+    let min_ciphertext = i64::try_from(AEAD_TAG_BYTES).map_err(|_| backfill_corrupt())?;
+    let max_ciphertext = i64::try_from(BACKFILL_OUTBOX_REQUEST_MAX_CIPHERTEXT_BYTES)
+        .map_err(|_| backfill_corrupt())?;
+    let max_byte_count =
+        i64::try_from(MAX_BATCH_CANONICAL_BYTES).map_err(|_| backfill_corrupt())?;
+    let (count, total_bytes, invalid_count): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE
+                        WHEN typeof(request_cipher) = 'blob'
+                         AND length(request_cipher) >= ?2
+                         AND length(request_cipher) <= ?3
+                        THEN length(request_cipher) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE
+                        WHEN typeof(request_cipher) <> 'blob'
+                          OR length(request_cipher) < ?2
+                          OR length(request_cipher) > ?3
+                          OR typeof(byte_count) <> 'integer'
+                          OR byte_count < 1 OR byte_count > ?4
+                        THEN 1 ELSE 0 END), 0)
+             FROM outbox_batches WHERE backfill_job_id = ?1",
+            params![job_id, min_ciphertext, max_ciphertext, max_byte_count],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| backfill_corrupt())?;
+    if invalid_count != 0 {
+        return Err(backfill_corrupt());
+    }
+    let count = u64::try_from(count).map_err(|_| backfill_corrupt())?;
+    if count > max_rows {
+        return Err(backfill_corrupt());
+    }
+    let total_bytes = u64::try_from(total_bytes).map_err(|_| backfill_corrupt())?;
+    super::checked_recovery_bytes(0, total_bytes).map_err(|_| backfill_corrupt())?;
+    Ok((count, total_bytes))
+}
+
+fn preflight_backfill_job_bytes(
+    connection: &rusqlite::Connection,
+    job_id: &str,
+) -> Result<(), SafeError> {
+    let max_parameters_ciphertext = i64::try_from(
+        MAX_BACKFILL_JOB_ENVELOPE_BYTES
+            .checked_add(AEAD_TAG_BYTES)
+            .ok_or_else(backfill_corrupt)?,
+    )
+    .map_err(|_| backfill_corrupt())?;
+    let max_pagination_ciphertext = i64::try_from(
+        MAX_BACKFILL_PAGINATION_BYTES
+            .checked_add(AEAD_TAG_BYTES)
+            .ok_or_else(backfill_corrupt)?,
+    )
+    .map_err(|_| backfill_corrupt())?;
+    let min_ciphertext = i64::try_from(AEAD_TAG_BYTES).map_err(|_| backfill_corrupt())?;
+    let nonce_bytes = i64::try_from(BACKFILL_NONCE_BYTES).map_err(|_| backfill_corrupt())?;
+    let (job_count, parameters_bytes, pagination_bytes, invalid_count): (i64, i64, i64, i64) =
+        connection
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE
+                            WHEN typeof(parameters_cipher) = 'blob'
+                             AND length(parameters_cipher) BETWEEN ?2 AND ?3
+                            THEN length(parameters_cipher) ELSE 0 END), 0),
+                        COALESCE(SUM(CASE
+                            WHEN typeof(pagination_cipher) = 'blob'
+                             AND length(pagination_cipher) BETWEEN ?2 AND ?4
+                            THEN length(pagination_cipher) ELSE 0 END), 0),
+                        COALESCE(SUM(CASE
+                            WHEN typeof(parameters_cipher) <> 'blob'
+                              OR length(parameters_cipher) < ?2
+                              OR length(parameters_cipher) > ?3
+                              OR typeof(parameters_nonce) <> 'blob'
+                              OR length(parameters_nonce) <> ?5
+                              OR (pagination_cipher IS NULL) != (pagination_nonce IS NULL)
+                              OR (pagination_cipher IS NOT NULL AND
+                                  (typeof(pagination_cipher) <> 'blob'
+                                   OR length(pagination_cipher) < ?2
+                                   OR length(pagination_cipher) > ?4
+                                   OR typeof(pagination_nonce) <> 'blob'
+                                   OR length(pagination_nonce) <> ?5))
+                            THEN 1 ELSE 0 END), 0)
+                 FROM backfill_jobs WHERE job_id = ?1",
+                params![
+                    job_id,
+                    min_ciphertext,
+                    max_parameters_ciphertext,
+                    max_pagination_ciphertext,
+                    nonce_bytes,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|_| backfill_corrupt())?;
+    if job_count > 1 || invalid_count != 0 {
+        return Err(backfill_corrupt());
+    }
+    let mut total_bytes = u64::try_from(parameters_bytes).map_err(|_| backfill_corrupt())?;
+    total_bytes = super::checked_recovery_bytes(
+        total_bytes,
+        u64::try_from(pagination_bytes).map_err(|_| backfill_corrupt())?,
+    )
+    .map_err(|_| backfill_corrupt())?;
+    let (_, outbox_bytes) =
+        preflight_backfill_outbox_ciphertext_bytes(connection, job_id, batch::MAX_BACKFILL_EVENTS)?;
+    super::checked_recovery_bytes(total_bytes, outbox_bytes).map_err(|_| backfill_corrupt())?;
+    Ok(())
+}
+
 fn scan_backfill_outbox_rows(
     connection: &rusqlite::Connection,
     keyring: &crate::crypto::Keyring,
     job: &BackfillJob,
     now: Option<DateTime<Utc>>,
 ) -> Result<BackfillOutboxScan, SafeError> {
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1",
-            [job.job_id()],
-            |row| row.get(0),
-        )
-        .map_err(|_| backfill_corrupt())?;
-    let count = u64::try_from(count).map_err(|_| backfill_corrupt())?;
-    if count > job.max_events() {
-        return Err(backfill_corrupt());
-    }
+    let (count, _) = preflight_backfill_outbox_bytes(connection, job)?;
 
     let mut statement = connection
         .prepare(
@@ -1204,6 +1611,32 @@ fn load_backfill_outbox_row_by_id(
     connection: &rusqlite::Connection,
     row_id: &str,
 ) -> Result<Option<StoredBackfillOutboxRow>, SafeError> {
+    let mut ownership_statement = connection
+        .prepare(
+            "SELECT source_kind, backfill_job_id
+             FROM outbox_batches WHERE batch_row_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| backfill_corrupt())?;
+    let mut ownership_rows = ownership_statement
+        .query([row_id])
+        .map_err(|_| backfill_corrupt())?;
+    let Some(ownership_row) = ownership_rows.next().map_err(|_| backfill_corrupt())? else {
+        return Ok(None);
+    };
+    let source_kind = read_text(ownership_row, 0, BACKFILL_OUTBOX_SOURCE_KIND_MAX_BYTES)?;
+    let backfill_job_id = read_optional_text(ownership_row, 1, MAX_LEDGER_ID_BYTES)?;
+    if ownership_rows
+        .next()
+        .map_err(|_| backfill_corrupt())?
+        .is_some()
+    {
+        return Err(backfill_corrupt());
+    }
+    if source_kind == BACKFILL_KIND_OUTBOX {
+        let backfill_job_id = backfill_job_id.ok_or_else(backfill_corrupt)?;
+        preflight_backfill_job_bytes(connection, &backfill_job_id)?;
+    }
+
     let mut statement = connection
         .prepare(
             "SELECT batch_row_id, source_kind, window_id, backfill_job_id,
@@ -1526,6 +1959,8 @@ fn verify_backfill_row(
         )),
         _ => return Err(backfill_corrupt()),
     };
+
+    stored_pagination(pagination.as_deref().map(|value| &**value))?;
 
     if state == BackfillState::Pending && (accepted_events != 0 || pagination.is_some()) {
         return Err(backfill_corrupt());

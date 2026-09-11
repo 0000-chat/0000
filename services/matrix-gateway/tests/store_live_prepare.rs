@@ -9,9 +9,9 @@ use communicator_matrix_gateway::{
     batch::{BatchWindow, RoutedEvent, WindowSource, build_window},
     crypto::{Keyring, Sealed},
     ledger::{
-        BackfillState, FinalizeOutcome, NewLiveGapJob, NewLiveWindow, RoomAnchorCandidate,
-        RoomEphemeralCandidate, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID,
-        STORE_LEDGER_NOT_READY,
+        BackfillState, FinalizeOutcome, LiveCommitOutcome, NewLiveGapJob, NewLiveWindow,
+        RoomAnchorCandidate, RoomEphemeralCandidate, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT,
+        STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY,
     },
     model::{
         CanonicalEvent, CanonicalEventSource, CanonicalPayload, DeliveryStatus, Direction,
@@ -20,7 +20,7 @@ use communicator_matrix_gateway::{
     store::Store,
     store_types::{NewBootstrapState, NewRawSyncInbox},
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, types::Value};
 use tempfile::{TempDir, tempdir};
 
 const INITIAL_TOKEN: &[u8] = b"initial-token";
@@ -197,6 +197,35 @@ fn sqlite_storage_bytes(path: &Path) -> Vec<u8> {
         }
     }
     bytes
+}
+
+fn database_snapshot(path: &Path) -> Vec<Vec<Vec<Value>>> {
+    let connection = Connection::open(path).expect("open sqlite snapshot connection");
+    [
+        "sync_inbox",
+        "sync_windows",
+        "backfill_jobs",
+        "outbox_batches",
+        "window_room_anchors",
+        "window_room_ephemeral",
+    ]
+    .into_iter()
+    .map(|table| {
+        let mut statement = connection
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .expect("prepare sqlite snapshot query");
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|index| row.get(index))
+                    .collect::<Result<Vec<Value>, _>>()
+            })
+            .expect("query sqlite snapshot")
+            .collect::<Result<_, _>>()
+            .expect("collect sqlite snapshot")
+    })
+    .collect()
 }
 
 fn read_sealed(path: &Path, sql: &str) -> Sealed {
@@ -538,6 +567,94 @@ fn live_gap_creation_and_begin_are_idempotent_and_do_not_prepare_live_state() {
         states,
         ("sdk_processed".to_owned(), "collecting".to_owned())
     );
+}
+
+#[test]
+fn distinct_live_gap_job_for_same_window_conflicts_without_mutation() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window");
+    store
+        .create_live_gap_job(new_live_gap_job_with_id(
+            &format!("job_{}", "44".repeat(32)),
+            &window_id,
+            b"first-gap-parameters",
+        ))
+        .expect("create first live-gap job");
+    let before = database_snapshot(&path);
+
+    let error = store
+        .create_live_gap_job(new_live_gap_job_with_id(
+            &format!("job_{}", "55".repeat(32)),
+            &window_id,
+            b"second-gap-parameters",
+        ))
+        .expect_err("a second job ID for one live window must conflict");
+    assert_eq!(error.code(), STORE_LEDGER_CONFLICT);
+    assert_eq!(database_snapshot(&path), before);
+    assert_eq!(table_count(&path, "backfill_jobs"), 1);
+}
+
+#[test]
+fn live_window_id_remains_deterministic_across_key_rotation() {
+    let (_directory, path, mut store, inbox_id) = setup_one_processed_row();
+    let window_id = expected_window_id(&inbox_id);
+    let window = live_window(CANARY_BATCH);
+    store
+        .create_collecting_live_window(&inbox_id, new_window(&inbox_id, 0))
+        .expect("create collecting window under key version one");
+    store
+        .finalize_live_window(&inbox_id, &window_id, &window, &[], &[])
+        .expect("prepare live window under key version one");
+    drop(store);
+
+    let rotated = Keyring::new([0x22; 32], 2)
+        .expect("construct rotated keyring")
+        .with_decryption_key(1, [0x11; 32])
+        .expect("retain key version one");
+    let mut store = Store::open(&path, rotated).expect("reopen with rotated keyring");
+    assert_eq!(
+        store
+            .finalize_live_window(&inbox_id, &window_id, &window, &[], &[])
+            .expect("recognize prepared window after key rotation"),
+        FinalizeOutcome::AlreadyPrepared { batch_count: 1 }
+    );
+
+    let pending = store
+        .next_pending_ingestion_batch(timestamp(1_757_550_124_000))
+        .expect("select rotated-key live batch")
+        .expect("prepared live batch exists");
+    let row_id = pending.row_id().to_owned();
+    assert_eq!(
+        store
+            .accept_live_batch_and_maybe_commit_window(&row_id, timestamp(1_757_550_125_000))
+            .expect("complete original live window after rotation"),
+        LiveCommitOutcome::WindowCommitted
+    );
+
+    let new_inbox_id = store
+        .append_fetched_sync(
+            NewRawSyncInbox::new(
+                NEXT_TOKEN.to_vec(),
+                b"rotated-next-token".to_vec(),
+                b"rotated-response".to_vec(),
+                timestamp(1_757_550_126_000),
+            )
+            .expect("construct new rotated response"),
+        )
+        .expect("append new response under active key version two");
+    assert_ne!(new_inbox_id.as_str(), inbox_id);
+    let response_key_versions: Vec<i64> = Connection::open(&path)
+        .expect("open sqlite inspection connection")
+        .prepare("SELECT response_key_version FROM sync_inbox ORDER BY rowid")
+        .expect("prepare response key version query")
+        .query_map([], |row| row.get(0))
+        .expect("query response key versions")
+        .collect::<Result<_, _>>()
+        .expect("collect response key versions");
+    assert_eq!(response_key_versions, vec![1, 2]);
 }
 
 #[test]

@@ -111,6 +111,7 @@ impl Store {
             .map_err(|_| ledger_corrupt())?;
 
         let context = load_live_context(&transaction, keyring)?;
+        inspect_live_gap_links(&transaction, keyring, job.live_window_id(), job.job_id())?;
         let existing_job = load_backfill_job(&transaction, keyring, job.job_id())?;
         if let Some(existing_job) = existing_job.as_ref() {
             if existing_job.kind != "live_gap"
@@ -219,10 +220,6 @@ impl Store {
     ) -> Result<(), SafeError> {
         let inbox_id = validate_inbox_id(inbox_id)?;
         window.validate()?;
-        let expected_window_id = derive_window_id(&self.keyring, inbox_id.as_str())?;
-        if window.window_id() != expected_window_id {
-            return Err(ledger_invalid());
-        }
         let created_at = window.created_at().to_rfc3339();
         if !valid_utc_millisecond(*window.created_at()) {
             return Err(ledger_invalid());
@@ -236,6 +233,11 @@ impl Store {
             .map_err(|_| ledger_corrupt())?;
 
         let context = load_live_context(&transaction, keyring)?;
+        let expected_window_id =
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
+        if window.window_id() != expected_window_id {
+            return Err(ledger_invalid());
+        }
         let existing = load_existing_window(&transaction, &expected_window_id, inbox_id.as_str())?;
         if let Some(existing) = existing {
             validate_existing_window_identity(&existing, &expected_window_id, inbox_id.as_str())?;
@@ -288,10 +290,7 @@ impl Store {
     ) -> Result<FinalizeOutcome, SafeError> {
         let inbox_id = validate_inbox_id(inbox_id)?;
         validate_window_id(window_id)?;
-        let expected_window_id = derive_window_id(&self.keyring, inbox_id.as_str())?;
-        if window_id != expected_window_id {
-            return Err(ledger_invalid());
-        }
+        validate_live_prepare_recovery_bytes(window, anchors, ephemeral)?;
         let window_validation = validate_batch_window(window)?;
         validate_candidates(anchors, ephemeral)?;
         if !valid_utc_millisecond(window_validation.archived_at) {
@@ -305,6 +304,11 @@ impl Store {
             .map_err(|_| ledger_corrupt())?;
 
         let context = load_live_context(&transaction, keyring)?;
+        let expected_window_id =
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
+        if window_id != expected_window_id {
+            return Err(ledger_invalid());
+        }
         let existing = load_existing_window(&transaction, window_id, inbox_id.as_str())?
             .ok_or_else(ledger_not_ready)?;
         validate_existing_window_identity(&existing, window_id, inbox_id.as_str())?;
@@ -550,8 +554,11 @@ impl Store {
             && let Some(index) = context.chain.first_uncommitted_index
         {
             let oldest = &context.chain.rows[index];
-            let expected_window_id = derive_window_id(&self.keyring, oldest.inbox_id().as_str())
-                .map_err(|_| ledger_corrupt())?;
+            let expected_window_id = derive_window_id_for_inbox(
+                &transaction,
+                &self.keyring,
+                oldest.inbox_id().as_str(),
+            )?;
             if let Some(window) = load_existing_window(
                 &transaction,
                 &expected_window_id,
@@ -651,7 +658,7 @@ impl Store {
         let window = load_window_by_id(&transaction, &window_id)?.ok_or_else(ledger_corrupt)?;
         let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
         let expected_window_id =
-            derive_window_id(&self.keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+            derive_window_id_for_inbox(&transaction, &self.keyring, inbox_id.as_str())?;
         if window.window_id != expected_window_id {
             return Err(ledger_corrupt());
         }
@@ -740,7 +747,7 @@ impl Store {
         let window = load_window_by_id(&transaction, &window_id)?.ok_or_else(ledger_not_ready)?;
         let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
         let expected_window_id =
-            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
         if window.window_id != expected_window_id || window.window_id != window_id {
             return Err(ledger_corrupt());
         }
@@ -883,7 +890,7 @@ impl Store {
         let window = load_window_by_id(&transaction, window_id)?.ok_or_else(ledger_not_ready)?;
         let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
         let expected_window_id =
-            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
         if window.window_id != expected_window_id || window.window_id != window_id {
             return Err(ledger_corrupt());
         }
@@ -1189,8 +1196,8 @@ impl Store {
                 break;
             }
 
-            let window_id = derive_window_id(keyring, inbox.inbox_id().as_str())
-                .map_err(|_| ledger_corrupt())?;
+            let window_id =
+                derive_window_id_for_inbox(&transaction, keyring, inbox.inbox_id().as_str())?;
             let Some(window) = load_window_by_id(&transaction, &window_id)? else {
                 return Err(ledger_corrupt());
             };
@@ -1468,7 +1475,7 @@ impl Store {
         let window = load_window_by_id(&transaction, &window_id)?.ok_or_else(ledger_corrupt)?;
         let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
         let expected_window_id =
-            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
         if window.window_id != expected_window_id || window.window_id != window_id {
             return Err(ledger_corrupt());
         }
@@ -1625,10 +1632,6 @@ impl Store {
         if !valid_utc_millisecond(committed_at) {
             return Err(ledger_invalid());
         }
-        let expected_window_id = derive_window_id(&self.keyring, inbox_id.as_str())?;
-        if window_id != expected_window_id {
-            return Err(ledger_invalid());
-        }
 
         let keyring = &self.keyring;
         let transaction = self
@@ -1636,6 +1639,11 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| ledger_corrupt())?;
         let context = load_live_context(&transaction, keyring)?;
+        let expected_window_id =
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
+        if window_id != expected_window_id {
+            return Err(ledger_invalid());
+        }
         let window = load_window_by_id(&transaction, window_id)?.ok_or_else(ledger_not_ready)?;
         if window.window_id != window_id || window.inbox_id != inbox_id.as_str() {
             return Err(ledger_corrupt());
@@ -1741,6 +1749,7 @@ impl Store {
         if !valid_job_id(gap_job_id) {
             return Err(ledger_invalid());
         }
+        validate_live_prepare_recovery_bytes(window, anchors, ephemeral)?;
         let window_validation = validate_batch_window(window)?;
         validate_candidates(anchors, ephemeral)?;
         if !valid_utc_millisecond(window_validation.archived_at) {
@@ -1766,7 +1775,7 @@ impl Store {
             load_window_by_id(&transaction, live_window_id)?.ok_or_else(ledger_corrupt)?;
         let inbox_id = validate_inbox_id(&existing.inbox_id).map_err(|_| ledger_corrupt())?;
         let expected_window_id =
-            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+            derive_window_id_for_inbox(&transaction, keyring, inbox_id.as_str())?;
         if existing.window_id != expected_window_id || existing.window_id != live_window_id {
             return Err(ledger_corrupt());
         }
@@ -2722,8 +2731,7 @@ fn validate_live_gap_target(
         }
     })?;
     let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
-    let expected_window_id =
-        derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+    let expected_window_id = derive_window_id_for_inbox(transaction, keyring, inbox_id.as_str())?;
     if window.window_id != expected_window_id {
         return Err(ledger_corrupt());
     }
@@ -2743,11 +2751,57 @@ fn validate_live_gap_target(
     Ok(())
 }
 
-fn derive_window_id(keyring: &super::Keyring, inbox_id: &str) -> Result<String, SafeError> {
+fn derive_window_id(
+    keyring: &super::Keyring,
+    inbox_id: &str,
+    response_key_version: u32,
+) -> Result<String, SafeError> {
     let digest = keyring
-        .lookup_digest(LIVE_WINDOW_ID_DOMAIN, &[inbox_id])
-        .map_err(|_| ledger_invalid())?;
+        .lookup_digest_at(response_key_version, LIVE_WINDOW_ID_DOMAIN, &[inbox_id])
+        .map_err(|_| ledger_corrupt())?;
     Ok(format!("window_{}", lowercase_hex(&digest)))
+}
+
+fn derive_window_id_for_inbox(
+    transaction: &Transaction<'_>,
+    keyring: &super::Keyring,
+    inbox_id: &str,
+) -> Result<String, SafeError> {
+    let response_key_version = transaction
+        .query_row(
+            "SELECT response_key_version FROM sync_inbox WHERE inbox_id = ?1",
+            [inbox_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let response_key_version = u32::try_from(response_key_version)
+        .ok()
+        .filter(|version| *version != 0)
+        .ok_or_else(ledger_corrupt)?;
+    derive_window_id(keyring, inbox_id, response_key_version)
+}
+
+fn add_recovery_bytes(total: u64, plaintext_bytes: usize) -> Result<u64, SafeError> {
+    super::checked_protected_recovery_bytes(total, plaintext_bytes).map_err(|_| ledger_too_large())
+}
+
+fn validate_live_prepare_recovery_bytes(
+    window: &BatchWindow,
+    anchors: &[RoomAnchorCandidate],
+    ephemeral: &[RoomEphemeralCandidate],
+) -> Result<(), SafeError> {
+    let mut total = 0_u64;
+    for batch in &window.batches {
+        total = add_recovery_bytes(total, batch.exact_request_bytes().len())?;
+    }
+    for candidate in anchors {
+        total = add_recovery_bytes(total, candidate.anchor_event().as_bytes().len())?;
+    }
+    for candidate in ephemeral {
+        total = add_recovery_bytes(total, candidate.typing_set().as_bytes().len())?;
+    }
+    let _ = total;
+    Ok(())
 }
 
 fn validate_batch_window(window: &BatchWindow) -> Result<WindowValidation, SafeError> {
@@ -2888,6 +2942,14 @@ fn validate_candidates(
     anchors: &[RoomAnchorCandidate],
     ephemeral: &[RoomEphemeralCandidate],
 ) -> Result<(), SafeError> {
+    let mut total = 0_u64;
+    for candidate in anchors {
+        total = add_recovery_bytes(total, candidate.anchor_event().as_bytes().len())?;
+    }
+    for candidate in ephemeral {
+        total = add_recovery_bytes(total, candidate.typing_set().as_bytes().len())?;
+    }
+    let _ = total;
     let total = anchors
         .len()
         .checked_add(ephemeral.len())
@@ -3067,6 +3129,49 @@ fn load_backfill_job(
         result = Some(read_stored_backfill_job(row, keyring)?);
     }
     Ok(result)
+}
+
+fn inspect_live_gap_links(
+    transaction: &Transaction<'_>,
+    keyring: &super::Keyring,
+    window_id: &str,
+    requested_job_id: &str,
+) -> Result<(), SafeError> {
+    let linked_job_ids = linked_live_gap_job_ids(transaction, window_id)?;
+    if linked_job_ids.len() > 1 {
+        return Err(ledger_corrupt());
+    }
+    let Some(linked_job_id) = linked_job_ids.first() else {
+        return Ok(());
+    };
+    let stored =
+        load_backfill_job(transaction, keyring, linked_job_id)?.ok_or_else(ledger_corrupt)?;
+    if stored.kind != "live_gap" || stored.live_window_id.as_deref() != Some(window_id) {
+        return Err(ledger_corrupt());
+    }
+    if linked_job_id != requested_job_id {
+        return Err(ledger_conflict());
+    }
+    Ok(())
+}
+
+fn linked_live_gap_job_ids(
+    transaction: &Transaction<'_>,
+    window_id: &str,
+) -> Result<Vec<String>, SafeError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT job_id FROM backfill_jobs
+             WHERE live_window_id = ?1
+             ORDER BY job_id LIMIT 2",
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let mut rows = statement.query([window_id]).map_err(|_| ledger_corrupt())?;
+    let mut linked_job_ids = Vec::with_capacity(2);
+    while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
+        linked_job_ids.push(read_text(row, 0, MAX_LEDGER_ID_BYTES, valid_job_id)?);
+    }
+    Ok(linked_job_ids)
 }
 
 fn read_stored_backfill_job(
@@ -3389,11 +3494,122 @@ fn validate_live_window_metadata(
     Ok(())
 }
 
+fn validate_stored_aggregate(
+    count: i64,
+    total_bytes: i64,
+    invalid_count: i64,
+    max_rows: usize,
+) -> Result<(usize, u64), SafeError> {
+    if invalid_count != 0 {
+        return Err(ledger_corrupt());
+    }
+    let count = usize::try_from(count).map_err(|_| ledger_corrupt())?;
+    if count > max_rows {
+        return Err(ledger_corrupt());
+    }
+    let total_bytes = u64::try_from(total_bytes).map_err(|_| ledger_corrupt())?;
+    super::checked_recovery_bytes(0, total_bytes).map_err(|_| ledger_corrupt())?;
+    Ok((count, total_bytes))
+}
+
+fn preflight_live_outbox_metadata(
+    transaction: &Transaction<'_>,
+    window_id: &str,
+) -> Result<(usize, u64), SafeError> {
+    let min_ciphertext = i64::try_from(AEAD_TAG_BYTES).map_err(|_| ledger_corrupt())?;
+    let max_ciphertext = i64::try_from(
+        MAX_BATCH_CANONICAL_BYTES
+            .checked_add(AEAD_TAG_BYTES)
+            .ok_or_else(ledger_corrupt)?,
+    )
+    .map_err(|_| ledger_corrupt())?;
+    let max_byte_count = i64::try_from(MAX_BATCH_CANONICAL_BYTES).map_err(|_| ledger_corrupt())?;
+    let (count, total_bytes, invalid_count): (i64, i64, i64) = transaction
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE
+                        WHEN typeof(request_cipher) = 'blob'
+                         AND length(request_cipher) >= ?2
+                         AND length(request_cipher) <= ?3
+                        THEN length(request_cipher) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE
+                        WHEN typeof(request_cipher) <> 'blob'
+                          OR length(request_cipher) < ?2
+                          OR length(request_cipher) > ?3
+                          OR typeof(byte_count) <> 'integer'
+                          OR byte_count < 1 OR byte_count > ?4
+                        THEN 1 ELSE 0 END), 0)
+             FROM outbox_batches WHERE window_id = ?1",
+            params![window_id, min_ciphertext, max_ciphertext, max_byte_count],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| ledger_corrupt())?;
+    validate_stored_aggregate(count, total_bytes, invalid_count, MAX_WINDOW_BATCHES)
+}
+
+fn preflight_staged_candidate_metadata(
+    transaction: &Transaction<'_>,
+    window_id: &str,
+    cipher_column: &str,
+) -> Result<(usize, u64), SafeError> {
+    let min_ciphertext = i64::try_from(AEAD_TAG_BYTES).map_err(|_| ledger_corrupt())?;
+    let max_ciphertext = i64::try_from(MAX_CIPHER_ANCHOR_BYTES).map_err(|_| ledger_corrupt())?;
+    let query = format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE
+                    WHEN typeof({cipher_column}) = 'blob'
+                     AND length({cipher_column}) >= ?2
+                     AND length({cipher_column}) <= ?3
+                    THEN length({cipher_column}) ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN typeof({cipher_column}) <> 'blob'
+                      OR length({cipher_column}) < ?2
+                      OR length({cipher_column}) > ?3
+                    THEN 1 ELSE 0 END), 0)
+         FROM {} WHERE window_id = ?1",
+        if cipher_column == "anchor_event_cipher" {
+            "window_room_anchors"
+        } else {
+            "window_room_ephemeral"
+        }
+    );
+    let (count, total_bytes, invalid_count): (i64, i64, i64) = transaction
+        .query_row(
+            &query,
+            params![window_id, min_ciphertext, max_ciphertext,],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| ledger_corrupt())?;
+    validate_stored_aggregate(
+        count,
+        total_bytes,
+        invalid_count,
+        MAX_WINDOW_ROOM_CANDIDATES,
+    )
+}
+
+fn preflight_live_children_bytes(
+    transaction: &Transaction<'_>,
+    window_id: &str,
+) -> Result<(usize, usize, usize), SafeError> {
+    let (outbox_count, outbox_bytes) = preflight_live_outbox_metadata(transaction, window_id)?;
+    let (anchor_count, anchor_bytes) =
+        preflight_staged_candidate_metadata(transaction, window_id, "anchor_event_cipher")?;
+    let (ephemeral_count, ephemeral_bytes) =
+        preflight_staged_candidate_metadata(transaction, window_id, "typing_set_cipher")?;
+    let _total_bytes = super::checked_recovery_bytes(0, outbox_bytes)
+        .and_then(|total| super::checked_recovery_bytes(total, anchor_bytes))
+        .and_then(|total| super::checked_recovery_bytes(total, ephemeral_bytes))
+        .map_err(|_| ledger_corrupt())?;
+    Ok((outbox_count, anchor_count, ephemeral_count))
+}
+
 fn load_outbox_batches(
     transaction: &Transaction<'_>,
     keyring: &super::Keyring,
     window_id: &str,
 ) -> Result<Vec<StoredOutboxBatch>, SafeError> {
+    let (expected_count, _, _) = preflight_live_children_bytes(transaction, window_id)?;
     let limit = i64::try_from(MAX_WINDOW_BATCHES + 1).map_err(|_| ledger_corrupt())?;
     let mut statement = transaction
         .prepare(
@@ -3409,7 +3625,7 @@ fn load_outbox_batches(
     let mut rows = statement
         .query(params![window_id, limit])
         .map_err(|_| ledger_corrupt())?;
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(expected_count);
     while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
         if result.len() >= MAX_WINDOW_BATCHES {
             return Err(ledger_corrupt());
@@ -3601,6 +3817,7 @@ fn load_staged_anchors(
     keyring: &super::Keyring,
     window_id: &str,
 ) -> Result<Vec<StoredAnchor>, SafeError> {
+    let (_, expected_count, _) = preflight_live_children_bytes(transaction, window_id)?;
     let limit = i64::try_from(MAX_WINDOW_ROOM_CANDIDATES + 1).map_err(|_| ledger_corrupt())?;
     let mut statement = transaction
         .prepare(
@@ -3611,7 +3828,7 @@ fn load_staged_anchors(
     let mut rows = statement
         .query(params![window_id, limit])
         .map_err(|_| ledger_corrupt())?;
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(expected_count);
     let mut lookups = HashSet::new();
     while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
         if result.len() >= MAX_WINDOW_ROOM_CANDIDATES {
@@ -3654,6 +3871,7 @@ fn load_staged_ephemeral(
     keyring: &super::Keyring,
     window_id: &str,
 ) -> Result<Vec<StoredEphemeral>, SafeError> {
+    let (_, _, expected_count) = preflight_live_children_bytes(transaction, window_id)?;
     let limit = i64::try_from(MAX_WINDOW_ROOM_CANDIDATES + 1).map_err(|_| ledger_corrupt())?;
     let mut statement = transaction
         .prepare(
@@ -3665,7 +3883,7 @@ fn load_staged_ephemeral(
     let mut rows = statement
         .query(params![window_id, limit])
         .map_err(|_| ledger_corrupt())?;
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(expected_count);
     let mut lookups = HashSet::new();
     while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
         if result.len() >= MAX_WINDOW_ROOM_CANDIDATES {
@@ -3956,6 +4174,82 @@ fn read_optional_blob(
 
 const MAX_ANCHOR_BYTES: usize = crate::store_types::MAX_ROOM_ANCHOR_BYTES;
 const MAX_CIPHER_ANCHOR_BYTES: usize = MAX_ANCHOR_BYTES + AEAD_TAG_BYTES;
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn recovery_input_projection_includes_aead_overhead() {
+        assert_eq!(
+            add_recovery_bytes(crate::config::MAX_RECOVERY_BYTES - AEAD_TAG_BYTES as u64, 1),
+            Err(ledger_too_large())
+        );
+    }
+
+    #[test]
+    fn live_outbox_preflight_aggregates_actual_ciphertext_bytes() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory database");
+        connection
+            .execute_batch(
+                "CREATE TABLE outbox_batches(
+                     window_id TEXT, request_cipher BLOB, byte_count INTEGER
+                 );
+                 INSERT INTO outbox_batches(window_id, request_cipher, byte_count)
+                 VALUES ('window_test', zeroblob(20), 1);",
+            )
+            .expect("create live outbox fixture");
+        let transaction = connection.transaction().expect("start transaction");
+
+        assert_eq!(
+            preflight_live_outbox_metadata(&transaction, "window_test")
+                .expect("preflight live outbox"),
+            (1, 20)
+        );
+    }
+
+    #[test]
+    fn staged_candidate_preflight_aggregates_actual_ciphertext_bytes() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory database");
+        connection
+            .execute_batch(
+                "CREATE TABLE window_room_anchors(
+                     window_id TEXT, anchor_event_cipher BLOB
+                 );
+                 INSERT INTO window_room_anchors(window_id, anchor_event_cipher)
+                 VALUES ('window_test', zeroblob(20));",
+            )
+            .expect("create anchor fixture");
+        let transaction = connection.transaction().expect("start transaction");
+
+        assert_eq!(
+            preflight_staged_candidate_metadata(&transaction, "window_test", "anchor_event_cipher")
+                .expect("preflight staged anchor"),
+            (1, 20)
+        );
+    }
+
+    #[test]
+    fn linked_live_gap_id_scan_returns_at_most_two_rows() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory database");
+        connection
+            .execute_batch(
+                "CREATE TABLE backfill_jobs(job_id TEXT, live_window_id TEXT);
+                 INSERT INTO backfill_jobs(job_id, live_window_id)
+                 VALUES ('job_a', 'window_test'), ('job_b', 'window_test'),
+                        ('job_c', 'window_test');",
+            )
+            .expect("create linked-job fixture");
+        let transaction = connection.transaction().expect("start transaction");
+
+        assert_eq!(
+            linked_live_gap_job_ids(&transaction, "window_test").expect("scan linked live-gap IDs"),
+            vec!["job_a".to_owned(), "job_b".to_owned()]
+        );
+    }
+}
 
 fn map_storage_error(error: SafeError) -> SafeError {
     match error.code() {
