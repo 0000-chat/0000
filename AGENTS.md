@@ -15,3 +15,16 @@ adapter without choosing a provider in this scaffold.
 Run `./scripts/check` from this repository before committing. Work on a task
 branch; direct commits on `main` are blocked after bootstrap.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five default canonical labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context layout. See `docs/agents/domain.md`.
