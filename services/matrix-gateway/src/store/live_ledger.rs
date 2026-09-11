@@ -13,12 +13,12 @@ use crate::{
     crypto::AEAD_TAG_BYTES,
     ingestion::PendingBatch,
     ledger::{
-        BackfillState, FinalizeOutcome, LiveCommitOutcome, MAX_BACKFILL_PAGINATION_BYTES,
-        MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES, MAX_WINDOW_BATCHES,
-        MAX_WINDOW_ROOM_CANDIDATES, NewLiveGapJob, NewLiveWindow, PendingIngestionBatch,
-        RoomAnchorCandidate, RoomEphemeralCandidate, STORE_LEDGER_CAS_MISMATCH,
-        STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY,
-        STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
+        BackfillState, FinalizeOutcome, LedgerPressure, LiveCommitOutcome,
+        MAX_BACKFILL_PAGINATION_BYTES, MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES,
+        MAX_WINDOW_BATCHES, MAX_WINDOW_ROOM_CANDIDATES, NewLiveGapJob, NewLiveWindow,
+        PendingIngestionBatch, RoomAnchorCandidate, RoomEphemeralCandidate,
+        STORE_LEDGER_CAS_MISMATCH, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT,
+        STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY, STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
     },
     secret::{SafeError, SecretBytes},
     store_types::{InboxId, MAX_BOOTSTRAP_ROOM_ANCHORS, ReasonCode, SyncInboxState},
@@ -952,6 +952,168 @@ impl Store {
         }
         transaction.commit().map_err(|_| ledger_corrupt())?;
         Ok(())
+    }
+
+    /// Return bounded delivery pressure without opening any protected values.
+    pub fn ledger_pressure(&self) -> Result<LedgerPressure, SafeError> {
+        let max_live_ordinal =
+            i64::try_from(MAX_WINDOW_BATCHES - 1).map_err(|_| ledger_corrupt())?;
+        let max_byte_count =
+            i64::try_from(MAX_BATCH_CANONICAL_BYTES).map_err(|_| ledger_corrupt())?;
+        let max_ciphertext_bytes = max_byte_count
+            .checked_add(i64::try_from(AEAD_TAG_BYTES).map_err(|_| ledger_corrupt())?)
+            .ok_or_else(ledger_corrupt)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| ledger_corrupt())?;
+        let (pending_batches, pending_bytes, oldest_pending_at, invalid_rows): (
+            i64,
+            i64,
+            Option<String>,
+            i64,
+        ) = transaction
+            .query_row(
+                "SELECT
+                   COALESCE(SUM(CASE
+                     WHEN source_kind IN ('live', 'backfill') AND state = 'pending'
+                     THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                     WHEN source_kind IN ('live', 'backfill') AND state = 'pending'
+                     THEN byte_count ELSE 0 END), 0),
+                   MIN(CASE
+                     WHEN source_kind IN ('live', 'backfill') AND state = 'pending'
+                     THEN next_attempt_at END),
+                   COALESCE(SUM(CASE WHEN
+                     typeof(batch_row_id) <> 'text' OR length(batch_row_id) > ?1
+                     OR typeof(source_kind) <> 'text'
+                     OR source_kind NOT IN ('live', 'backfill')
+                     OR (source_kind = 'live'
+                         AND (window_id IS NULL OR backfill_job_id IS NOT NULL))
+                     OR (source_kind = 'backfill'
+                         AND (window_id IS NOT NULL OR backfill_job_id IS NULL))
+                     OR (window_id IS NOT NULL
+                         AND (typeof(window_id) <> 'text' OR length(window_id) > ?1))
+                     OR (backfill_job_id IS NOT NULL
+                         AND (typeof(backfill_job_id) <> 'text'
+                              OR length(backfill_job_id) > ?1))
+                     OR typeof(ordinal) <> 'integer' OR ordinal < 0
+                     OR (source_kind = 'live' AND ordinal > ?2)
+                     OR (source_kind = 'backfill' AND ordinal > ?3)
+                     OR typeof(state) <> 'text'
+                     OR state NOT IN ('pending', 'accepted', 'quarantined')
+                     OR typeof(request_cipher) <> 'blob'
+                     OR length(request_cipher) < ?4 OR length(request_cipher) > ?5
+                     OR typeof(request_nonce) <> 'blob' OR length(request_nonce) <> 24
+                     OR typeof(request_key_version) <> 'integer'
+                     OR request_key_version < 1 OR request_key_version > ?3
+                     OR typeof(request_sha256) <> 'blob' OR length(request_sha256) <> 32
+                     OR typeof(byte_count) <> 'integer'
+                     OR byte_count < 1 OR byte_count > ?6
+                     OR typeof(attempt_count) <> 'integer' OR attempt_count < 0
+                     OR (source_kind = 'live' AND attempt_count > ?7)
+                     OR (source_kind = 'backfill' AND attempt_count > ?3)
+                     OR typeof(next_attempt_at) <> 'text'
+                     OR length(next_attempt_at) < 17 OR length(next_attempt_at) > 64
+                     OR next_attempt_at NOT GLOB
+                       '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]*'
+                     OR (accepted_at IS NOT NULL AND (
+                       typeof(accepted_at) <> 'text'
+                       OR length(accepted_at) < 17 OR length(accepted_at) > 64
+                       OR accepted_at NOT GLOB
+                         '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]*'))
+                     OR (terminal_code IS NOT NULL AND (
+                       typeof(terminal_code) <> 'text'
+                       OR length(terminal_code) < 3 OR length(terminal_code) > 64))
+                     OR (state = 'pending'
+                         AND (accepted_at IS NOT NULL OR terminal_code IS NOT NULL))
+                     OR (state = 'accepted'
+                         AND (accepted_at IS NULL OR terminal_code IS NOT NULL))
+                     OR (state = 'quarantined'
+                         AND (accepted_at IS NOT NULL OR terminal_code IS NULL))
+                   THEN 1 ELSE 0 END), 0)
+                 FROM outbox_batches",
+                params![
+                    i64::try_from(MAX_LEDGER_ID_BYTES).map_err(|_| ledger_corrupt())?,
+                    max_live_ordinal,
+                    i64::from(u32::MAX),
+                    i64::try_from(AEAD_TAG_BYTES).map_err(|_| ledger_corrupt())?,
+                    max_ciphertext_bytes,
+                    max_byte_count,
+                    OUTBOX_ATTEMPT_COUNT_MAX,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if invalid_rows != 0 || pending_batches < 0 || pending_bytes < 0 {
+            return Err(ledger_corrupt());
+        }
+        let oldest_pending_at = oldest_pending_at
+            .map(|value| parse_stored_timestamp(&value).map_err(|_| ledger_corrupt()))
+            .transpose()?;
+
+        let (quarantined_windows, invalid_windows): (i64, i64) = transaction
+            .query_row(
+                "SELECT
+                   COALESCE(SUM(CASE WHEN state = 'quarantined' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN
+                     typeof(window_id) <> 'text' OR length(window_id) > ?1
+                     OR typeof(inbox_id) <> 'text' OR length(inbox_id) > ?1
+                     OR typeof(state) <> 'text'
+                     OR state NOT IN ('collecting', 'pending', 'committed', 'quarantined')
+                     OR typeof(batch_count) <> 'integer'
+                     OR batch_count < 0 OR batch_count > ?2
+                     OR typeof(accepted_count) <> 'integer'
+                     OR accepted_count < 0 OR accepted_count > batch_count
+                     OR typeof(ignored_count) <> 'integer' OR ignored_count < 0
+                     OR typeof(created_at) <> 'text'
+                     OR length(created_at) < 17 OR length(created_at) > 64
+                     OR created_at NOT GLOB
+                       '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]*'
+                     OR (committed_at IS NOT NULL AND (
+                       typeof(committed_at) <> 'text'
+                       OR length(committed_at) < 17 OR length(committed_at) > 64
+                       OR committed_at NOT GLOB
+                         '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]*'))
+                     OR (terminal_code IS NOT NULL AND (
+                       typeof(terminal_code) <> 'text'
+                       OR length(terminal_code) < 3 OR length(terminal_code) > 64))
+                     OR (state = 'collecting' AND (
+                       batch_count <> 0 OR accepted_count <> 0
+                       OR committed_at IS NOT NULL OR terminal_code IS NOT NULL))
+                     OR (state = 'pending' AND (
+                       batch_count = 0 OR committed_at IS NOT NULL OR terminal_code IS NOT NULL))
+                     OR (state = 'committed' AND (
+                       accepted_count <> batch_count OR committed_at IS NULL
+                       OR terminal_code IS NOT NULL))
+                     OR (state = 'quarantined' AND (
+                       batch_count = 0 OR committed_at IS NOT NULL OR terminal_code IS NULL))
+                   THEN 1 ELSE 0 END), 0)
+                 FROM sync_windows",
+                params![
+                    i64::try_from(MAX_LEDGER_ID_BYTES).map_err(|_| ledger_corrupt())?,
+                    i64::try_from(MAX_WINDOW_BATCHES).map_err(|_| ledger_corrupt())?,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if invalid_windows != 0 || quarantined_windows < 0 {
+            return Err(ledger_corrupt());
+        }
+
+        let pending_batches = u64::try_from(pending_batches).map_err(|_| ledger_corrupt())?;
+        let pending_bytes = u64::try_from(pending_bytes).map_err(|_| ledger_corrupt())?;
+        let quarantined_windows =
+            u64::try_from(quarantined_windows).map_err(|_| ledger_corrupt())?;
+        let pressure = LedgerPressure::new(
+            pending_batches,
+            pending_bytes,
+            quarantined_windows,
+            oldest_pending_at,
+        )
+        .map_err(|_| ledger_corrupt())?;
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(pressure)
     }
 
     /// Accept one live ingestion row and commit its source window when complete.

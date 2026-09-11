@@ -19,13 +19,20 @@ use communicator_matrix_gateway::{
     store::Store,
     store_types::{NewBootstrapState, NewRawSyncInbox, ReasonCode},
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use tempfile::{TempDir, tempdir};
 
 const INITIAL_TOKEN: &[u8] = b"initial-token";
 const NEXT_TOKEN: &[u8] = b"next-token";
 const OBSERVED_AT: i64 = 1_725_000_001_000;
 const ARCHIVED_AT: i64 = 1_757_550_123_000;
+const BACKFILL_JOB_ID: &str = "018f0f00-0000-7000-8000-000000000001";
+const BACKFILL_BATCH_ONE: &str =
+    "batch_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BACKFILL_BATCH_TWO: &str =
+    "batch_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const BACKFILL_BATCH_THREE: &str =
+    "batch_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 fn timestamp(milliseconds: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(milliseconds)
@@ -177,6 +184,173 @@ fn live_states(path: &Path) -> Vec<(i64, String, Option<String>, Option<String>)
         .expect("query state inspection")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect state inspection")
+}
+
+fn insert_backfill_pressure_fixture(path: &Path) {
+    let connection = Connection::open(path).expect("open backfill pressure connection");
+    connection
+        .execute(
+            "INSERT INTO backfill_jobs
+             (job_id, kind, live_window_id, state,
+              parameters_cipher, parameters_nonce, pagination_cipher, pagination_nonce,
+              key_version, accepted_events, created_at,
+              completed_at, cancelled_at, terminal_code)
+             VALUES (?1, 'explicit', NULL, 'running', ?2, ?3, NULL, NULL,
+                     1, 0, ?4, NULL, NULL, NULL)",
+            params![
+                BACKFILL_JOB_ID,
+                vec![0_u8; 32],
+                vec![0_u8; 24],
+                timestamp(ARCHIVED_AT - 30_000).to_rfc3339(),
+            ],
+        )
+        .expect("insert backfill pressure job");
+
+    for (row_id, ordinal, state, byte_count, next_attempt_at, terminal_code) in [
+        (
+            BACKFILL_BATCH_ONE,
+            0_i64,
+            "pending",
+            17_i64,
+            timestamp(ARCHIVED_AT - 20_000),
+            None,
+        ),
+        (
+            BACKFILL_BATCH_TWO,
+            1_i64,
+            "pending",
+            19_i64,
+            timestamp(ARCHIVED_AT + 20_000),
+            None,
+        ),
+        (
+            BACKFILL_BATCH_THREE,
+            2_i64,
+            "quarantined",
+            23_i64,
+            timestamp(ARCHIVED_AT - 40_000),
+            Some("delivery_failed"),
+        ),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO outbox_batches
+                 (batch_row_id, source_kind, window_id, backfill_job_id,
+                  ordinal, state, request_cipher, request_nonce, request_key_version,
+                  request_sha256, byte_count, attempt_count, next_attempt_at,
+                  accepted_at, terminal_code)
+                 VALUES (?1, 'backfill', NULL, ?2, ?3, ?4, ?5, ?6, 1,
+                         ?7, ?8, 0, ?9, NULL, ?10)",
+                params![
+                    row_id,
+                    BACKFILL_JOB_ID,
+                    ordinal,
+                    state,
+                    vec![0_u8; 32],
+                    vec![0_u8; 24],
+                    vec![0_u8; 32],
+                    byte_count,
+                    next_attempt_at.to_rfc3339(),
+                    terminal_code,
+                ],
+            )
+            .expect("insert backfill pressure row");
+    }
+}
+
+fn live_byte_count(path: &Path, row_id: &str) -> u64 {
+    let connection = Connection::open(path).expect("open live byte-count connection");
+    let byte_count: i64 = connection
+        .query_row(
+            "SELECT byte_count FROM outbox_batches WHERE batch_row_id = ?1",
+            [row_id],
+            |row| row.get(0),
+        )
+        .expect("read live byte count");
+    u64::try_from(byte_count).expect("valid live byte count")
+}
+
+#[test]
+fn ledger_pressure_reports_empty_store() {
+    let directory = secure_tempdir();
+    let path = database_path(directory.path());
+    let store = Store::open(&path, test_keyring()).expect("open empty store");
+
+    let pressure = store.ledger_pressure().expect("empty pressure snapshot");
+    assert_eq!(pressure.pending_batches(), 0);
+    assert_eq!(pressure.pending_bytes(), 0);
+    assert_eq!(pressure.quarantined_windows(), 0);
+    assert_eq!(pressure.oldest_pending_at(), None);
+}
+
+#[test]
+fn ledger_pressure_aggregates_live_and_backfill_rows_and_survives_reopen() {
+    let (_directory, path, mut store, inbox_id, row_id) = setup_pending_window();
+    let live_bytes = live_byte_count(&path, &row_id);
+    let oldest = timestamp(ARCHIVED_AT - 20_000);
+    insert_backfill_pressure_fixture(&path);
+
+    let pressure = store.ledger_pressure().expect("mixed pressure snapshot");
+    assert_eq!(pressure.pending_batches(), 3);
+    assert_eq!(pressure.pending_bytes(), live_bytes + 17 + 19);
+    assert_eq!(pressure.quarantined_windows(), 0);
+    assert_eq!(pressure.oldest_pending_at(), Some(&oldest));
+
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .quarantine_live_batch(
+            &row_id,
+            ReasonCode::new("delivery_failed").expect("valid quarantine reason"),
+        )
+        .expect("quarantine live row");
+    let pressure = store
+        .ledger_pressure()
+        .expect("quarantined mixed pressure snapshot");
+    assert_eq!(pressure.pending_batches(), 2);
+    assert_eq!(pressure.pending_bytes(), 17 + 19);
+    assert_eq!(pressure.quarantined_windows(), 1);
+    assert_eq!(pressure.oldest_pending_at(), Some(&oldest));
+
+    store
+        .retry_quarantined_window(&window_id, timestamp(ARCHIVED_AT + 10_000))
+        .expect("reopen live window");
+    let pressure = store.ledger_pressure().expect("reopened pressure snapshot");
+    assert_eq!(pressure.pending_batches(), 3);
+    assert_eq!(pressure.pending_bytes(), live_bytes + 17 + 19);
+    assert_eq!(pressure.quarantined_windows(), 0);
+    assert_eq!(pressure.oldest_pending_at(), Some(&oldest));
+
+    drop(store);
+    let reopened = Store::open(&path, test_keyring()).expect("reopen pressure store");
+    let pressure = reopened
+        .ledger_pressure()
+        .expect("pressure snapshot after reopen");
+    assert_eq!(pressure.pending_batches(), 3);
+    assert_eq!(pressure.pending_bytes(), live_bytes + 17 + 19);
+    assert_eq!(pressure.quarantined_windows(), 0);
+    assert_eq!(pressure.oldest_pending_at(), Some(&oldest));
+}
+
+#[test]
+fn ledger_pressure_rejects_corrupt_integer_and_timestamp_metadata() {
+    for update in [
+        "UPDATE outbox_batches SET byte_count = -1 WHERE batch_row_id = ?1",
+        "UPDATE outbox_batches SET byte_count = 9223372036854775807 WHERE batch_row_id = ?1",
+        "UPDATE outbox_batches SET attempt_count = -1 WHERE batch_row_id = ?1",
+        "UPDATE outbox_batches SET next_attempt_at = 'not-a-timestamp' WHERE batch_row_id = ?1",
+    ] {
+        let (_directory, path, store, _inbox_id, row_id) = setup_pending_window();
+        Connection::open(&path)
+            .expect("open pressure corruption connection")
+            .execute(update, [row_id.as_str()])
+            .expect("tamper pressure metadata");
+        assert_code(
+            store
+                .ledger_pressure()
+                .expect_err("corrupt pressure metadata must fail closed"),
+            STORE_LEDGER_CORRUPT,
+        );
+    }
 }
 
 #[test]
