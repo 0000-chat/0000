@@ -733,7 +733,8 @@ pub struct FetchedMatrixSync {
 }
 
 impl FetchedMatrixSync {
-    pub(crate) fn from_parts(
+    /// Construct a bounded fetched response from already protected values.
+    pub fn from_parts(
         request_token: SecretBytes,
         next_token: SecretBytes,
         exact_body: SecretBytes,
@@ -927,7 +928,8 @@ pub struct ObservedRoomEvent {
 
 #[allow(dead_code)]
 impl ObservedRoomEvent {
-    pub(crate) fn new(
+    /// Construct one bounded protected room observation.
+    pub fn new(
         room_id: SecretBytes,
         exact_json: SecretBytes,
         unable_to_decrypt: bool,
@@ -1000,7 +1002,8 @@ pub struct LimitedTimelineGap {
 
 #[allow(dead_code)]
 impl LimitedTimelineGap {
-    pub(crate) fn new(room_id: SecretBytes, prev_batch: SecretBytes) -> Result<Self, SafeError> {
+    /// Construct one bounded protected timeline-gap descriptor.
+    pub fn new(room_id: SecretBytes, prev_batch: SecretBytes) -> Result<Self, SafeError> {
         if room_id.is_empty() || prev_batch.is_empty() {
             return Err(SafeError::new(MATRIX_RESPONSE_INVALID));
         }
@@ -1063,7 +1066,8 @@ pub struct ProcessedSync {
 
 #[allow(dead_code)]
 impl ProcessedSync {
-    pub(crate) fn new(events: Vec<ObservedMatrixEvent>, gaps: Vec<LimitedTimelineGap>) -> Self {
+    /// Construct a processed response from validated adapter observations.
+    pub fn new(events: Vec<ObservedMatrixEvent>, gaps: Vec<LimitedTimelineGap>) -> Self {
         Self { events, gaps }
     }
 
@@ -1141,7 +1145,8 @@ pub struct CryptoAckProof {
 
 #[allow(dead_code)]
 impl CryptoAckProof {
-    pub(crate) fn new(row_id: String, response_sha256: [u8; 32]) -> Self {
+    /// Construct an acknowledgement proof from a verified row and response digest.
+    pub fn new(row_id: String, response_sha256: [u8; 32]) -> Self {
         Self {
             row_id,
             response_sha256,

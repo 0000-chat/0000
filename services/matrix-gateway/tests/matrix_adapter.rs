@@ -661,7 +661,28 @@ async fn recovery_requires_the_verified_frontier_not_token_inequality() {
     );
     drop(at_first);
 
-    assert!(at_second.recover_saved_sync(&row_one).await.is_ok());
+    let stale_restore = match restore_matrix_processor(
+        "https://matrix.example",
+        user_id.as_str(),
+        &sdk_first_path,
+        &SecretBytes::from_text(passphrase.as_bytes(), 1024).unwrap(),
+        &state_store,
+    )
+    .await
+    {
+        Ok(_) => panic!("a stale committed-prefix SDK store must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(stale_restore.code(), "matrix_session_invalid");
+
+    assert_eq!(
+        at_second
+            .recover_saved_sync(&row_one)
+            .await
+            .expect_err("already committed rows must not be in the recovery frontier")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
     assert!(at_second.recover_saved_sync(&row_two).await.is_ok());
     assert_eq!(
         at_second
@@ -701,8 +722,22 @@ async fn recovery_requires_the_verified_frontier_not_token_inequality() {
     )
     .await
     .unwrap();
-    assert!(at_third.recover_saved_sync(&row_one).await.is_ok());
-    assert!(at_third.recover_saved_sync(&row_two).await.is_ok());
+    assert_eq!(
+        at_third
+            .recover_saved_sync(&row_one)
+            .await
+            .expect_err("committed prefix rows must not be recoverable")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
+    assert_eq!(
+        at_third
+            .recover_saved_sync(&row_two)
+            .await
+            .expect_err("committed prefix rows must not be recoverable")
+            .code(),
+        "matrix_sdk_position_unjournaled"
+    );
     assert!(at_third.recover_saved_sync(&row_three).await.is_ok());
 }
 

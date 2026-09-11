@@ -15,5 +15,6 @@ pub mod normalize;
 pub mod protected;
 pub mod registry;
 pub mod secret;
+pub mod service;
 pub mod store;
 pub mod store_types;

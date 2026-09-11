@@ -504,7 +504,9 @@ struct VerifiedInboxChain {
     next_digest_index: HashMap<[u8; 32], usize>,
     ordered_indices: Vec<usize>,
     tail_index: Option<usize>,
+    /// Physical SQLite row index retained for live-ledger selection.
     first_uncommitted_index: Option<usize>,
+    first_uncommitted_position: Option<usize>,
 }
 
 struct VerifiedCryptoContext {
@@ -1400,6 +1402,19 @@ impl Store {
         }
     }
 
+    /// Return whether authenticated pending crypto work exists, even when its
+    /// persisted retry deadline has not arrived.
+    pub fn has_pending_crypto_request(&self) -> Result<bool, SafeError> {
+        let context = load_crypto_context(&self.connection, &self.keyring)?;
+        if context.gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        Ok(context
+            .crypto_rows
+            .iter()
+            .any(|row| row.state == CryptoLifecycle::Pending))
+    }
+
     /// Durably lease one pending request before its caller performs HTTP.
     pub fn record_attempt(
         &mut self,
@@ -1437,9 +1452,6 @@ impl Store {
         if addressed.state != CryptoLifecycle::Pending {
             return Err(store_crypto_not_ready());
         }
-        if addressed.attempt_count >= CRYPTO_ATTEMPT_COUNT_MAX as u32 {
-            return Err(store_crypto_not_ready());
-        }
         if addressed.attempt_count != expected_attempt_count
             || addressed.next_attempt_at != expected_next_attempt_at
         {
@@ -1452,10 +1464,14 @@ impl Store {
         let updated = transaction
             .execute(
                 "UPDATE matrix_crypto_outbox
-                 SET attempt_count = attempt_count + 1, next_attempt_at = ?1
+                 SET attempt_count = CASE
+                       WHEN attempt_count < ?6 THEN attempt_count + 1
+                       ELSE ?6
+                     END,
+                     next_attempt_at = ?1
                  WHERE crypto_row_id = ?2 AND state = 'pending'
                    AND attempt_count = ?3 AND next_attempt_at = ?4
-                   AND next_attempt_at <= ?5 AND attempt_count < ?6",
+                   AND next_attempt_at <= ?5",
                 params![
                     next.to_rfc3339(),
                     row_id.as_str(),
@@ -1713,16 +1729,29 @@ impl Store {
         if sha256(committed_token.as_bytes()) == sdk_token_digest {
             return Ok(SdkInboxPosition::Committed);
         }
-        chain
+        let sdk_row_index = chain
             .next_digest_index
             .get(&sdk_token_digest)
-            .map(|index| SdkInboxPosition::Journaled {
-                inbox_id: chain.rows[*index].inbox_id().clone(),
-            })
-            .ok_or_else(store_sdk_position_unjournaled)
+            .copied()
+            .ok_or_else(store_sdk_position_unjournaled)?;
+        let sdk_position = chain
+            .ordered_indices
+            .iter()
+            .position(|index| *index == sdk_row_index)
+            .ok_or_else(store_sync_corrupt)?;
+        if chain
+            .first_uncommitted_position
+            .is_none_or(|first| sdk_position < first)
+        {
+            return Err(store_sdk_position_unjournaled());
+        }
+        Ok(SdkInboxPosition::Journaled {
+            inbox_id: chain.rows[sdk_row_index].inbox_id().clone(),
+        })
     }
 
-    /// Return the verified journal rows at or before the SDK position.
+    /// Return the verified uncommitted journal rows from the first
+    /// uncommitted row through the SDK position.
     ///
     /// The returned IDs are derived from the authenticated predecessor chain,
     /// never from synthetic ID ordering. An empty frontier represents the
@@ -1761,7 +1790,11 @@ impl Store {
             .iter()
             .position(|index| *index == sdk_row_index)
             .ok_or_else(store_sync_corrupt)?;
-        Ok(chain.ordered_indices[..=frontier_end]
+        let frontier_start = chain
+            .first_uncommitted_position
+            .filter(|start| frontier_end >= *start)
+            .ok_or_else(store_sdk_position_unjournaled)?;
+        Ok(chain.ordered_indices[frontier_start..=frontier_end]
             .iter()
             .map(|index| chain.rows[*index].inbox_id().clone())
             .collect())
@@ -3432,6 +3465,7 @@ fn verify_inbox_chain(
             ordered_indices: Vec::new(),
             tail_index: None,
             first_uncommitted_index: None,
+            first_uncommitted_position: None,
         });
     }
 
@@ -3476,6 +3510,7 @@ fn verify_inbox_chain(
     let mut previous_index: Option<usize> = None;
     let mut tail_index = None;
     let mut first_uncommitted_index = None;
+    let mut first_uncommitted_position = None;
     let mut committed_tail_index = None;
     let mut ordered_indices = Vec::with_capacity(row_capacity);
     while let Some(index) = current {
@@ -3504,8 +3539,9 @@ fn verify_inbox_chain(
                 return Err(store_sync_corrupt());
             }
             committed_tail_index = Some(index);
-        } else if first_uncommitted_index.is_none() {
+        } else if first_uncommitted_position.is_none() {
             first_uncommitted_index = Some(index);
+            first_uncommitted_position = Some(ordered_indices.len() - 1);
         }
         tail_index = Some(index);
         previous_index = Some(index);
@@ -3532,6 +3568,7 @@ fn verify_inbox_chain(
         ordered_indices,
         tail_index: Some(tail_index),
         first_uncommitted_index,
+        first_uncommitted_position,
     })
 }
 
