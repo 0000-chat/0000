@@ -12,6 +12,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use communicator_matrix_gateway::{
+    batch::{RoutedEvent, WindowSource, build_window},
     crypto::Keyring,
     crypto_outbox::{ExactMatrixRequest, RawMatrixResponse},
     ingestion::{BatchSink, Delivery, PendingBatch},
@@ -21,6 +22,11 @@ use communicator_matrix_gateway::{
         MatrixProcessor, MatrixTransport, ObservedMatrixEvent, ObservedRoomEvent, ProcessedSync,
         RestartCryptoAck,
     },
+    model::{
+        CanonicalEvent, CanonicalEventSource, CanonicalPayload, DeliveryStatus, Direction,
+        MessageCreatedPayload, Provider,
+    },
+    registry::NewRoomBinding,
     secret::{SafeError, SecretBytes},
     service::{
         Clock, GatewayService, JitterSource, RetryPolicy, ServiceAction, Shutdown,
@@ -237,7 +243,9 @@ struct FakeProcessor {
     store_path: Option<PathBuf>,
     expected_body: Option<Vec<u8>>,
     pending_request: Mutex<Option<ExactMatrixRequest>>,
+    pending_error: Option<&'static str>,
     rebind_unrecoverable: bool,
+    processed_sync: Mutex<Option<ProcessedSync>>,
 }
 
 impl FakeProcessor {
@@ -251,7 +259,9 @@ impl FakeProcessor {
             store_path: None,
             expected_body: None,
             pending_request: Mutex::new(None),
+            pending_error: None,
             rebind_unrecoverable: false,
+            processed_sync: Mutex::new(None),
         }
     }
 
@@ -273,11 +283,23 @@ impl FakeProcessor {
                 store_path: Some(path.to_owned()),
                 expected_body: Some(body.to_vec()),
                 pending_request: Mutex::new(None),
+                pending_error: None,
                 rebind_unrecoverable: false,
+                processed_sync: Mutex::new(None),
             },
             processing_calls,
             processing_saw_persisted_row,
         )
+    }
+
+    fn with_processed_sync(self, processed: ProcessedSync) -> Self {
+        *self.processed_sync.lock().expect("processed sync lock") = Some(processed);
+        self
+    }
+
+    fn with_pending_error(mut self, code: &'static str) -> Self {
+        self.pending_error = Some(code);
+        self
     }
 }
 
@@ -306,7 +328,12 @@ impl MatrixProcessor for FakeProcessor {
                 saw_persisted_row.store(true, Ordering::SeqCst);
             }
         }
-        Ok(ProcessedSync::new(Vec::new(), Vec::new()))
+        Ok(self
+            .processed_sync
+            .lock()
+            .expect("processed sync lock")
+            .take()
+            .unwrap_or_else(|| ProcessedSync::new(Vec::new(), Vec::new())))
     }
 
     async fn recover_saved_sync(
@@ -318,6 +345,9 @@ impl MatrixProcessor for FakeProcessor {
     }
 
     async fn pending_crypto_requests(&self) -> Result<Vec<ExactMatrixRequest>, SafeError> {
+        if let Some(code) = self.pending_error {
+            return Err(SafeError::new(code));
+        }
         Ok(self
             .pending_request
             .lock()
@@ -429,6 +459,35 @@ fn append_inbox(
         .expect("append raw sync")
         .as_str()
         .to_owned()
+}
+
+fn canonical_delivery_event() -> CanonicalEvent {
+    CanonicalEvent::new(
+        "$service_delivery:example.org",
+        CanonicalEventSource::Live,
+        "tenant_demo",
+        "identity_demo",
+        Provider::Whatsapp,
+        "account_demo",
+        "conversation_demo",
+        Some("!room:example.org".to_owned()),
+        Some("$service_delivery:example.org".to_owned()),
+        None,
+        "2025-09-11T00:00:00.000Z",
+        "2025-09-11T00:00:00.000Z",
+        CanonicalPayload::MessageCreated(MessageCreatedPayload {
+            message_id: "message_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            direction: Direction::Inbound,
+            sender_participant_id: None,
+            sender_label: "sender".to_owned(),
+            body: "delivery".to_owned(),
+            reply_to_message_id: None,
+            delivery_status: DeliveryStatus::Unknown,
+            unread: true,
+        }),
+    )
+    .expect("valid canonical delivery event")
 }
 
 fn expected_window_id(inbox_id: &str) -> String {
@@ -668,6 +727,271 @@ async fn fetched_bytes_are_appended_before_processor_invocation() {
     );
     assert_eq!(processing_calls.load(Ordering::SeqCst), 1);
     assert!(saw_persisted_row.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn sdk_processed_message_is_prepared_from_the_verified_room_binding() {
+    let mut fixture = store_fixture();
+    fixture
+        .store
+        .as_mut()
+        .expect("fixture store")
+        .append_room_binding(
+            NewRoomBinding::new(
+                "binding_0123456789abcdef0123456789abcdef",
+                "!room:example.org",
+                "tenant_demo",
+                "identity_demo",
+                "connection_demo",
+                "account_demo",
+                Provider::Whatsapp,
+                "route_demo",
+                "conversation_demo",
+                "@owner:example.org",
+                timestamp(NOW_MILLIS - 1_000),
+            )
+            .expect("valid room binding"),
+        )
+        .expect("persist room binding");
+    let room_event = ObservedRoomEvent::new(
+        SecretBytes::from_text(b"!room:example.org", 64 * 1024).expect("room ID"),
+        SecretBytes::from_text(
+            br#"{"type":"m.room.message","event_id":"$event:example.org","sender":"@owner:example.org","origin_server_ts":1757500000000,"content":{"msgtype":"m.text","body":"hello"}}"#,
+            64 * 1024,
+        )
+        .expect("event JSON"),
+        false,
+    )
+    .expect("room event");
+    let processor =
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_processed_sync(
+            ProcessedSync::new(vec![ObservedMatrixEvent::Timeline(room_event)], Vec::new()),
+        );
+    let inbox_id = append_test_inbox(&mut fixture, timestamp(NOW_MILLIS - 1_000));
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        processor,
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"later-token",
+            br#"{"next_batch":"later-token"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+    );
+    service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+
+    assert_eq!(
+        service.tick().await.expect("process inbox"),
+        ServiceAction::ProcessedInbox
+    );
+    assert_eq!(
+        service.tick().await.expect("drain crypto"),
+        ServiceAction::MarkedCryptoDrained
+    );
+    assert_eq!(
+        service.tick().await.expect("prepare live window"),
+        ServiceAction::PreparedLiveWindow
+    );
+    let state: String = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT state FROM sync_inbox WHERE inbox_id = ?1",
+            [inbox_id],
+            |row| row.get(0),
+        )
+        .expect("read inbox state");
+    assert_eq!(state, "prepared");
+}
+
+#[tokio::test]
+async fn keys_upload_policy_sets_persisted_crypto_maintenance_before_projection() {
+    let mut fixture = store_fixture();
+    let inbox_id = append_test_inbox(&mut fixture, timestamp(NOW_MILLIS - 1_000));
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_pending_error(
+            communicator_matrix_gateway::matrix::MATRIX_CRYPTO_MAINTENANCE_REQUIRED,
+        ),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"later-token",
+            br#"{"next_batch":"later-token"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+    );
+    service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+    assert_eq!(
+        service.tick().await.expect_err("maintenance must halt"),
+        SafeError::new("service_maintenance_required")
+    );
+
+    let maintenance: String = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT maintenance_code FROM gateway_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read maintenance marker");
+    assert_eq!(maintenance, "crypto_maintenance_required");
+    let state: String = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT state FROM sync_inbox WHERE inbox_id = ?1",
+            [inbox_id],
+            |row| row.get(0),
+        )
+        .expect("read inbox state");
+    assert_eq!(state, "fetched");
+}
+
+#[tokio::test]
+async fn missing_key_recovery_stops_at_sixteen_persisted_later_responses() {
+    let mut fixture = store_fixture();
+    let head_id = append_test_inbox(&mut fixture, timestamp(NOW_MILLIS - 1_000));
+    let mut previous = b"next-token".to_vec();
+    for index in 0..16 {
+        let next = format!("recovery-token-{index}").into_bytes();
+        append_inbox(
+            &mut fixture,
+            &previous,
+            &next,
+            format!(r#"{{"next_batch":"recovery-token-{index}"}}"#).as_bytes(),
+            timestamp(NOW_MILLIS - 1_000 + (index as i64 + 1) * 1_000),
+        );
+        previous = next;
+    }
+    let unable = ObservedRoomEvent::new(
+        SecretBytes::from_text(b"!room:example.org", 64 * 1024).expect("room ID"),
+        SecretBytes::from_text(br#"{"type":"m.room.encrypted"}"#, 64 * 1024).expect("event JSON"),
+        true,
+    )
+    .expect("undecryptable event");
+    let processor =
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_processed_sync(
+            ProcessedSync::new(vec![ObservedMatrixEvent::Timeline(unable)], Vec::new()),
+        );
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        processor,
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"unused-fetch",
+            br#"{"next_batch":"unused-fetch"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+    );
+    service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+    assert_eq!(
+        service.tick().await.expect("process recovery head"),
+        ServiceAction::ProcessedInbox
+    );
+    assert_eq!(
+        service.tick().await.expect("drain recovery head"),
+        ServiceAction::MarkedCryptoDrained
+    );
+    for _ in 0..16 {
+        assert!(matches!(
+            service.tick().await.expect("apply later recovery response"),
+            ServiceAction::ProcessedInbox
+        ));
+        assert_eq!(
+            service.tick().await.expect("drain later recovery response"),
+            ServiceAction::MarkedCryptoDrained
+        );
+    }
+    let error = service
+        .tick()
+        .await
+        .expect_err("recovery must stop at the inclusive bound");
+    assert_eq!(error.code(), "matrix_key_recovery_exhausted");
+    let state: String = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT state FROM sync_inbox WHERE inbox_id = ?1",
+            [head_id],
+            |row| row.get(0),
+        )
+        .expect("read blocked head");
+    assert_eq!(state, "sdk_processed");
+}
+
+#[tokio::test]
+async fn prepared_live_batch_is_delivered_and_accepted_before_fetching_again() {
+    let mut fixture = store_fixture();
+    let inbox_id = append_test_inbox(&mut fixture, timestamp(NOW_MILLIS - 1_000));
+    let store = fixture.store.as_mut().expect("fixture store");
+    store
+        .record_sdk_processing(&inbox_id, &[])
+        .expect("persist empty crypto set");
+    store
+        .mark_crypto_drained(&inbox_id)
+        .expect("drain empty crypto set");
+    let window = build_window(
+        WindowSource::live(b"next-token"),
+        timestamp(NOW_MILLIS),
+        &[RoutedEvent::new("route_demo", canonical_delivery_event())],
+    )
+    .expect("build deterministic delivery window");
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(
+            &inbox_id,
+            NewLiveWindow::new(window_id.clone(), timestamp(NOW_MILLIS), 0)
+                .expect("collecting window"),
+        )
+        .expect("create collecting window");
+    store
+        .finalize_live_window(&inbox_id, &window_id, &window, &[], &[])
+        .expect("persist exact delivery bytes");
+
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"later-token",
+            br#"{"next_batch":"later-token"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+    );
+    service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+    assert_eq!(
+        service.tick().await.expect("delivery action"),
+        ServiceAction::AcceptedIngestionBatch
+    );
+
+    let (state, committed): (String, i64) = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT state, (SELECT COUNT(*) FROM outbox_batches WHERE state = 'accepted')
+             FROM sync_inbox WHERE inbox_id = ?1",
+            [inbox_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read accepted delivery state");
+    assert_eq!(state, "committed");
+    assert_eq!(committed, 1);
 }
 
 #[tokio::test]

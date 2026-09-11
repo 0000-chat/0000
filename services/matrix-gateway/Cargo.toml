@@ -30,7 +30,7 @@ rustix = { version = "=1.1.4", features = ["fs", "process"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 uuid = { version = "=1.26.0", features = ["v4"] }
 zeroize = "=1.9.0"
 

@@ -1415,6 +1415,23 @@ impl Store {
             .any(|row| row.state == CryptoLifecycle::Pending))
     }
 
+    /// Return the earliest authenticated retry deadline for pending crypto.
+    ///
+    /// The selector deliberately reads only the bounded scheduling metadata;
+    /// it never reconstructs or exposes a request body.
+    pub(crate) fn next_crypto_retry_at(&self) -> Result<Option<DateTime<Utc>>, SafeError> {
+        let context = load_crypto_context(&self.connection, &self.keyring)?;
+        if context.gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        Ok(context
+            .crypto_rows
+            .iter()
+            .filter(|row| row.state == CryptoLifecycle::Pending)
+            .map(|row| row.next_attempt_at)
+            .min())
+    }
+
     /// Durably lease one pending request before its caller performs HTTP.
     pub fn record_attempt(
         &mut self,
@@ -1846,6 +1863,57 @@ impl Store {
         Ok(chain.into_first_uncommitted())
     }
 
+    /// Return the authenticated inbox suffix after the contiguous committed
+    /// prefix.  The rows are ordered by the verified predecessor chain rather
+    /// than SQLite row order, and protected values never cross this crate
+    /// boundary except through the returned validated DTOs.
+    pub(crate) fn uncommitted_inbox_rows(&self) -> Result<Vec<RawSyncInbox>, SafeError> {
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Err(store_not_bootstrapped());
+        };
+        let committed_token = load_verified_gateway_token(
+            &self.connection,
+            &self.keyring,
+            GatewayTokenField::Committed,
+        )?;
+        let fetch_token =
+            load_verified_gateway_token(&self.connection, &self.keyring, GatewayTokenField::Fetch)?;
+        let chain = verify_inbox_chain(
+            &self.connection,
+            &self.keyring,
+            &committed_token,
+            &fetch_token,
+        )?;
+        Ok(chain.into_uncommitted())
+    }
+
+    /// Return the deterministic live-window identifier for one authenticated
+    /// inbox row.  The response key version is read from the verified row so
+    /// key rotation cannot change an existing window identity.
+    pub(crate) fn live_window_id_for_inbox(&self, inbox_id: &str) -> Result<String, SafeError> {
+        if !valid_stored_inbox_id(inbox_id) {
+            return Err(store_sync_invalid());
+        }
+        let response_key_version: i64 = self
+            .connection
+            .query_row(
+                "SELECT response_key_version FROM sync_inbox WHERE inbox_id = ?1",
+                [inbox_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        let response_key_version = u32::try_from(response_key_version)
+            .ok()
+            .filter(|version| *version != 0)
+            .ok_or_else(store_sync_corrupt)?;
+        let digest = self
+            .keyring
+            .lookup_digest_at(response_key_version, "matrix-live-window-v1", &[inbox_id])
+            .map_err(|_| store_sync_corrupt())?;
+        Ok(format!("window_{}", lowercase_hex(&digest)))
+    }
+
     /// Return the authenticated Matrix session after validating store state.
     pub fn matrix_session(&self) -> Result<Option<SecretBytes>, SafeError> {
         let retained_bounds = retained_inbox_bounds(&self.connection)?;
@@ -1905,6 +1973,63 @@ impl Store {
             room_progress_count,
             Some(room_lookup),
         )
+    }
+
+    /// Return the authenticated persisted typing snapshot for one room. This
+    /// read is intentionally bounded and exposes only the protected value to
+    /// the in-crate service coordinator for restart-time normalization.
+    pub(crate) fn room_ephemeral_typing(
+        &self,
+        room_lookup: &[u8],
+    ) -> Result<Option<(SecretBytes, DateTime<Utc>)>, SafeError> {
+        if room_lookup.len() != 32 {
+            return Err(store_sync_corrupt());
+        }
+        let _session = self.matrix_session()?.ok_or_else(store_not_bootstrapped)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT typing_set_cipher, typing_set_nonce, typing_key_version,
+                        typing_expires_at
+                 FROM room_ephemeral_state WHERE room_lookup = ?1 LIMIT 2",
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        let mut rows = statement
+            .query(params![room_lookup])
+            .map_err(|_| store_sync_corrupt())?;
+        let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? else {
+            return Ok(None);
+        };
+        let ciphertext: Vec<u8> = row.get(0).map_err(|_| store_sync_corrupt())?;
+        let nonce: Vec<u8> = row.get(1).map_err(|_| store_sync_corrupt())?;
+        let key_version: i64 = row.get(2).map_err(|_| store_sync_corrupt())?;
+        let expires_at: String = row.get(3).map_err(|_| store_sync_corrupt())?;
+        if rows.next().map_err(|_| store_sync_corrupt())?.is_some()
+            || nonce.len() != 24
+            || ciphertext.len() < AEAD_TAG_BYTES
+            || key_version <= 0
+        {
+            return Err(store_sync_corrupt());
+        }
+        let expires_at = parse_stored_timestamp(&expires_at)?;
+        let lookup: [u8; 32] = room_lookup.try_into().map_err(|_| store_sync_corrupt())?;
+        let row_id = room_progress_row_id(&lookup);
+        let plaintext = open_stored_value(
+            &self.keyring,
+            StoredValue {
+                table: "room_ephemeral_state",
+                row_id: &row_id,
+                column: "typing_set",
+                ciphertext: Some(ciphertext.as_slice()),
+                nonce: Some(nonce.as_slice()),
+                key_version: Some(key_version),
+                max_plaintext_bytes: MAX_ROOM_ANCHOR_BYTES,
+            },
+        )?;
+        Ok(Some((
+            SecretBytes::new(plaintext.as_bytes().to_vec()),
+            expires_at,
+        )))
     }
 
     /// Append one active protected room binding in a single durable
@@ -3160,6 +3285,17 @@ impl VerifiedInboxChain {
     fn into_first_uncommitted(self) -> Option<RawSyncInbox> {
         let index = self.first_uncommitted_index?;
         self.rows.into_iter().nth(index)
+    }
+
+    fn into_uncommitted(self) -> Vec<RawSyncInbox> {
+        let Some(start) = self.first_uncommitted_position else {
+            return Vec::new();
+        };
+        let mut rows = self.rows.into_iter().map(Some).collect::<Vec<_>>();
+        self.ordered_indices[start..]
+            .iter()
+            .map(|index| rows[*index].take().expect("verified inbox index"))
+            .collect()
     }
 }
 
