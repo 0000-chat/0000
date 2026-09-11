@@ -13,3 +13,16 @@ database, API, secret, or license.
 
 Run `./scripts/check`; direct commits on `main` are blocked after bootstrap.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in this repository’s GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
