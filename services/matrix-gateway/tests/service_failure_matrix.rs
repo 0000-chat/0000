@@ -236,6 +236,9 @@ impl MatrixTransport for FakeMatrixTransport {
 
 struct FakeProcessor {
     sdk_digest: Option<[u8; 32]>,
+    later_sdk_digest: Option<[u8; 32]>,
+    later_sdk_digest_after: usize,
+    sdk_digest_calls: AtomicUsize,
     processing_calls: Arc<AtomicUsize>,
     recovery_calls: Arc<AtomicUsize>,
     rebind_calls: Arc<AtomicUsize>,
@@ -246,12 +249,17 @@ struct FakeProcessor {
     pending_error: Option<&'static str>,
     rebind_unrecoverable: bool,
     processed_sync: Mutex<Option<ProcessedSync>>,
+    recovered_sync: Mutex<Option<ProcessedSync>>,
+    recovered_sync_factory: Option<fn() -> ProcessedSync>,
 }
 
 impl FakeProcessor {
     fn at_digest(digest: Option<[u8; 32]>) -> Self {
         Self {
             sdk_digest: digest,
+            later_sdk_digest: None,
+            later_sdk_digest_after: usize::MAX,
+            sdk_digest_calls: AtomicUsize::new(0),
             processing_calls: Arc::new(AtomicUsize::new(0)),
             recovery_calls: Arc::new(AtomicUsize::new(0)),
             rebind_calls: Arc::new(AtomicUsize::new(0)),
@@ -262,6 +270,8 @@ impl FakeProcessor {
             pending_error: None,
             rebind_unrecoverable: false,
             processed_sync: Mutex::new(None),
+            recovered_sync: Mutex::new(None),
+            recovered_sync_factory: None,
         }
     }
 
@@ -276,6 +286,9 @@ impl FakeProcessor {
         (
             Self {
                 sdk_digest: Some(Sha256::digest(INITIAL_TOKEN).into()),
+                later_sdk_digest: None,
+                later_sdk_digest_after: usize::MAX,
+                sdk_digest_calls: AtomicUsize::new(0),
                 processing_calls: Arc::clone(&processing_calls),
                 recovery_calls: Arc::new(AtomicUsize::new(0)),
                 rebind_calls: Arc::new(AtomicUsize::new(0)),
@@ -286,6 +299,8 @@ impl FakeProcessor {
                 pending_error: None,
                 rebind_unrecoverable: false,
                 processed_sync: Mutex::new(None),
+                recovered_sync: Mutex::new(None),
+                recovered_sync_factory: None,
             },
             processing_calls,
             processing_saw_persisted_row,
@@ -294,6 +309,22 @@ impl FakeProcessor {
 
     fn with_processed_sync(self, processed: ProcessedSync) -> Self {
         *self.processed_sync.lock().expect("processed sync lock") = Some(processed);
+        self
+    }
+
+    fn with_recovered_sync(self, processed: ProcessedSync) -> Self {
+        *self.recovered_sync.lock().expect("recovered sync lock") = Some(processed);
+        self
+    }
+
+    fn with_recovered_sync_factory(mut self, factory: fn() -> ProcessedSync) -> Self {
+        self.recovered_sync_factory = Some(factory);
+        self
+    }
+
+    fn with_later_sdk_digest(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.later_sdk_digest = digest;
+        self.later_sdk_digest_after = 2;
         self
     }
 
@@ -306,7 +337,12 @@ impl FakeProcessor {
 #[async_trait]
 impl MatrixProcessor for FakeProcessor {
     async fn sdk_token_digest(&self) -> Result<Option<[u8; 32]>, SafeError> {
-        Ok(self.sdk_digest)
+        let call = self.sdk_digest_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(if call >= self.later_sdk_digest_after {
+            self.later_sdk_digest.or(self.sdk_digest)
+        } else {
+            self.sdk_digest
+        })
     }
 
     async fn apply_saved_sync(
@@ -341,7 +377,15 @@ impl MatrixProcessor for FakeProcessor {
         _response: &RawSyncInbox,
     ) -> Result<ProcessedSync, SafeError> {
         self.recovery_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ProcessedSync::new(Vec::new(), Vec::new()))
+        if let Some(factory) = self.recovered_sync_factory {
+            return Ok(factory());
+        }
+        Ok(self
+            .recovered_sync
+            .lock()
+            .expect("recovered sync lock")
+            .take()
+            .unwrap_or_else(|| ProcessedSync::new(Vec::new(), Vec::new())))
     }
 
     async fn pending_crypto_requests(&self) -> Result<Vec<ExactMatrixRequest>, SafeError> {
@@ -459,6 +503,36 @@ fn append_inbox(
         .expect("append raw sync")
         .as_str()
         .to_owned()
+}
+
+fn observed_message_event() -> ObservedMatrixEvent {
+    ObservedMatrixEvent::Timeline(
+        ObservedRoomEvent::new(
+            SecretBytes::from_text(b"!room:example.org", 64 * 1024).expect("room ID"),
+            SecretBytes::from_text(
+                br#"{"type":"m.room.message","event_id":"$event:example.org","sender":"@owner:example.org","origin_server_ts":1757500000000,"content":{"msgtype":"m.text","body":"hello"}}"#,
+                64 * 1024,
+            )
+            .expect("event JSON"),
+            false,
+        )
+        .expect("room event"),
+    )
+}
+
+fn undecryptable_processed_sync() -> ProcessedSync {
+    ProcessedSync::new(
+        vec![ObservedMatrixEvent::Timeline(
+            ObservedRoomEvent::new(
+                SecretBytes::from_text(b"!room:example.org", 64 * 1024).expect("room ID"),
+                SecretBytes::from_text(br#"{"type":"m.room.encrypted"}"#, 64 * 1024)
+                    .expect("event JSON"),
+                true,
+            )
+            .expect("undecryptable event"),
+        )],
+        Vec::new(),
+    )
 }
 
 fn canonical_delivery_event() -> CanonicalEvent {
@@ -730,6 +804,183 @@ async fn fetched_bytes_are_appended_before_processor_invocation() {
 }
 
 #[tokio::test]
+async fn crash_after_sdk_processing_before_window_preparation_recovers_saved_observations() {
+    let mut fixture = store_fixture();
+    fixture
+        .store
+        .as_mut()
+        .expect("fixture store")
+        .append_room_binding(
+            NewRoomBinding::new(
+                "binding_0123456789abcdef0123456789abcdef",
+                "!room:example.org",
+                "tenant_demo",
+                "identity_demo",
+                "connection_demo",
+                "account_demo",
+                Provider::Whatsapp,
+                "route_demo",
+                "conversation_demo",
+                "@owner:example.org",
+                timestamp(NOW_MILLIS - 1_000),
+            )
+            .expect("valid room binding"),
+        )
+        .expect("persist room binding");
+    let inbox_id = append_test_inbox(&mut fixture, timestamp(NOW_MILLIS - 1_000));
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut first_service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_processed_sync(
+            ProcessedSync::new(vec![observed_message_event()], Vec::new()),
+        ),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"later-token",
+            br#"{"next_batch":"later-token"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+    );
+    first_service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+    assert_eq!(
+        first_service.tick().await.expect("process inbox"),
+        ServiceAction::ProcessedInbox
+    );
+    drop(first_service);
+
+    fixture.store = Some(Store::open(&fixture.path, keyring()).expect("reopen store"));
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut restarted_service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_recovered_sync(
+            ProcessedSync::new(vec![observed_message_event()], Vec::new()),
+        ),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"later-token",
+            br#"{"next_batch":"later-token"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+    );
+    restarted_service
+        .reconcile_startup()
+        .await
+        .expect("restart reconcile");
+    assert_eq!(
+        restarted_service.tick().await.expect("drain crypto"),
+        ServiceAction::MarkedCryptoDrained
+    );
+    assert_eq!(
+        restarted_service.tick().await.expect("prepare live window"),
+        ServiceAction::PreparedLiveWindow
+    );
+    drop(restarted_service);
+
+    let reopened = Store::open(&fixture.path, keyring()).expect("inspect reopened store");
+    assert_eq!(
+        reopened
+            .ledger_pressure()
+            .expect("read ledger pressure")
+            .pending_batches(),
+        1
+    );
+    let state: String = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT state FROM sync_inbox WHERE inbox_id = ?1",
+            [inbox_id],
+            |row| row.get(0),
+        )
+        .expect("read inbox state");
+    assert_eq!(state, "prepared");
+}
+
+#[tokio::test]
+async fn current_sdk_digest_protects_recovery_reconciliation_row_during_purge() {
+    let mut fixture = store_fixture();
+    let old = timestamp(NOW_MILLIS - 8 * 24 * 60 * 60 * 1_000);
+    let first_id =
+        append_and_commit_empty_inbox(&mut fixture, INITIAL_TOKEN, b"committed-token-1", old, old);
+    let (jitter, _) = DeterministicJitter::new(0);
+    let clock = ManualClock::new(timestamp(NOW_MILLIS - 7 * 24 * 60 * 60 * 1_000));
+    let clock_now = Arc::clone(&clock.now);
+    let mut service = GatewayService::new(
+        fixture.store.take().expect("fixture store is available"),
+        FakeProcessor::at_digest(Some(Sha256::digest(b"committed-token-1").into()))
+            .with_later_sdk_digest(Some(Sha256::digest(b"recovery-token-3").into())),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            b"committed-token-1",
+            b"recovery-token-3",
+            br#"{"next_batch":"recovery-token-3"}"#,
+        )),
+        FakeIngestionSink,
+        clock,
+        jitter,
+        FakeShutdown::new(),
+        RetryPolicy::new(Duration::from_millis(100), Duration::from_secs(5), 10)
+            .expect("valid retry policy"),
+    )
+    .expect("valid service");
+    service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+    assert_eq!(
+        service.tick().await.expect("fetch later row"),
+        ServiceAction::FetchedSync
+    );
+    assert_eq!(
+        service.tick().await.expect("process later row"),
+        ServiceAction::ProcessedInbox
+    );
+    assert_eq!(
+        service.tick().await.expect("drain later row"),
+        ServiceAction::MarkedCryptoDrained
+    );
+    let second_id: String = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row(
+            "SELECT inbox_id FROM sync_inbox WHERE predecessor_id = ?1",
+            [first_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("read later row");
+    assert_eq!(
+        service.tick().await.expect("prepare later row"),
+        ServiceAction::CommittedEmptyWindow
+    );
+    *clock_now.lock().expect("clock lock") = timestamp(NOW_MILLIS);
+    assert_eq!(
+        service.tick().await.expect("purge tick"),
+        ServiceAction::PurgedCommittedPrefix
+    );
+    drop(service);
+
+    let connection = Connection::open(&fixture.path).expect("open state inspector");
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_inbox WHERE inbox_id IN (?1, ?2)",
+            params![first_id, second_id],
+            |row| row.get(0),
+        )
+        .expect("count retained inbox rows");
+    assert_eq!(remaining, 1);
+    let retained_newest: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_inbox WHERE inbox_id = ?1",
+            [second_id],
+            |row| row.get(0),
+        )
+        .expect("check newest committed row");
+    assert_eq!(retained_newest, 1);
+}
+
+#[tokio::test]
 async fn sdk_processed_message_is_prepared_from_the_verified_room_binding() {
     let mut fixture = store_fixture();
     fixture
@@ -753,20 +1004,15 @@ async fn sdk_processed_message_is_prepared_from_the_verified_room_binding() {
             .expect("valid room binding"),
         )
         .expect("persist room binding");
-    let room_event = ObservedRoomEvent::new(
-        SecretBytes::from_text(b"!room:example.org", 64 * 1024).expect("room ID"),
-        SecretBytes::from_text(
-            br#"{"type":"m.room.message","event_id":"$event:example.org","sender":"@owner:example.org","origin_server_ts":1757500000000,"content":{"msgtype":"m.text","body":"hello"}}"#,
-            64 * 1024,
-        )
-        .expect("event JSON"),
-        false,
-    )
-    .expect("room event");
-    let processor =
-        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_processed_sync(
-            ProcessedSync::new(vec![ObservedMatrixEvent::Timeline(room_event)], Vec::new()),
-        );
+    let processor = FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into()))
+        .with_processed_sync(ProcessedSync::new(
+            vec![observed_message_event()],
+            Vec::new(),
+        ))
+        .with_recovered_sync(ProcessedSync::new(
+            vec![observed_message_event()],
+            Vec::new(),
+        ));
     let inbox_id = append_test_inbox(&mut fixture, timestamp(NOW_MILLIS - 1_000));
     let (jitter, _) = DeterministicJitter::new(0);
     let mut service = service_with(
@@ -877,10 +1123,12 @@ async fn missing_key_recovery_stops_at_sixteen_persisted_later_responses() {
         true,
     )
     .expect("undecryptable event");
-    let processor =
-        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())).with_processed_sync(
-            ProcessedSync::new(vec![ObservedMatrixEvent::Timeline(unable)], Vec::new()),
-        );
+    let processor = FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into()))
+        .with_processed_sync(ProcessedSync::new(
+            vec![ObservedMatrixEvent::Timeline(unable)],
+            Vec::new(),
+        ))
+        .with_recovered_sync_factory(undecryptable_processed_sync);
     let (jitter, _) = DeterministicJitter::new(0);
     let mut service = service_with(
         &mut fixture,

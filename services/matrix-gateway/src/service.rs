@@ -53,11 +53,6 @@ const MAX_PENDING_INBOX_ROWS: u64 = 2_000;
 const MAX_PROTECTED_BYTES: u64 = 256 * 1024 * 1024;
 const CRYPTO_MAINTENANCE_CODE: &str = "crypto_maintenance_required";
 
-struct ProcessedInbox {
-    inbox_id: String,
-    processed: ProcessedSync,
-}
-
 #[derive(Clone)]
 struct TypingSnapshot {
     members: Vec<String>,
@@ -249,8 +244,6 @@ where
     retry_policy: RetryPolicy,
     reconciled: bool,
     sdk_position: Option<SdkInboxPosition>,
-    sdk_token_digest: Option<[u8; 32]>,
-    processed_inbox: Option<ProcessedInbox>,
     recovery_head: Option<String>,
     recovery_responses: usize,
     recovery_started_at: Option<DateTime<Utc>>,
@@ -298,8 +291,6 @@ where
             retry_policy,
             reconciled: false,
             sdk_position: None,
-            sdk_token_digest: None,
-            processed_inbox: None,
             recovery_head: None,
             recovery_responses: 0,
             recovery_started_at: None,
@@ -323,7 +314,6 @@ where
             .reconcile_sdk_position(&digest)
             .map_err(|error| SafeError::new(error.code()))?;
         self.sdk_position = Some(position);
-        self.sdk_token_digest = Some(digest);
         self.reconciled = true;
         Ok(())
     }
@@ -496,14 +486,20 @@ where
         let purge_cutoff = now
             .checked_sub_signed(ChronoDuration::days(7))
             .ok_or_else(|| SafeError::new(SERVICE_RETRY_INVALID))?;
-        if let Some(digest) = self.sdk_token_digest {
-            let purged = self
-                .store
-                .purge_committed_prefix(purge_cutoff, &digest)
-                .map_err(|error| SafeError::new(error.code()))?;
-            if purged.inbox_rows() > 0 {
-                return Ok(ServiceAction::PurgedCommittedPrefix);
-            }
+        let digest = self
+            .processor
+            .sdk_token_digest()
+            .await?
+            .ok_or_else(|| SafeError::new(crate::matrix::MATRIX_SDK_POSITION_UNJOURNALED))?;
+        self.store
+            .reconcile_sdk_position(&digest)
+            .map_err(|error| SafeError::new(error.code()))?;
+        let purged = self
+            .store
+            .purge_committed_prefix(purge_cutoff, &digest)
+            .map_err(|error| SafeError::new(error.code()))?;
+        if purged.inbox_rows() > 0 {
+            return Ok(ServiceAction::PurgedCommittedPrefix);
         }
 
         if self.fetch_backpressured(now)? {
@@ -574,10 +570,6 @@ where
             .record_sdk_processing(inbox.inbox_id().as_str(), &requests)
             .map_err(|error| SafeError::new(error.code()))?;
         let has_recovery_marker = processed.has_undecryptable_events();
-        self.processed_inbox = Some(ProcessedInbox {
-            inbox_id: inbox.inbox_id().as_str().to_owned(),
-            processed,
-        });
         if has_recovery_marker {
             self.recovery_head = Some(inbox.inbox_id().as_str().to_owned());
             self.recovery_started_at = Some(*inbox.observed_at());
@@ -603,33 +595,9 @@ where
         inbox: &crate::store_types::RawSyncInbox,
         now: DateTime<Utc>,
     ) -> Result<Option<ServiceAction>, SafeError> {
-        let processed = match self.processed_inbox.take() {
-            Some(value) if value.inbox_id == inbox.inbox_id().as_str() => {
-                let was_undecryptable = value.processed.has_undecryptable_events();
-                if was_undecryptable {
-                    let recovered = self.processor.recover_saved_sync(inbox).await?;
-                    if recovered.event_count() == 0 {
-                        value.processed
-                    } else {
-                        recovered
-                    }
-                } else {
-                    value.processed
-                }
-            }
-            Some(value) => {
-                self.processed_inbox = Some(value);
-                self.processor.recover_saved_sync(inbox).await?
-            }
-            None => self.processor.recover_saved_sync(inbox).await?,
-        };
+        let processed = self.processor.recover_saved_sync(inbox).await?;
 
         if processed.has_undecryptable_events() {
-            let head_id = inbox.inbox_id().as_str().to_owned();
-            self.processed_inbox = Some(ProcessedInbox {
-                inbox_id: head_id,
-                processed,
-            });
             self.recovery_head
                 .get_or_insert_with(|| inbox.inbox_id().as_str().to_owned());
             self.recovery_started_at.get_or_insert(*inbox.observed_at());
@@ -688,25 +656,16 @@ where
         self.recovery_head = None;
         self.recovery_started_at = None;
         self.recovery_responses = 0;
-        self.processed_inbox = Some(ProcessedInbox {
-            inbox_id: inbox.inbox_id().as_str().to_owned(),
-            processed,
-        });
-        self.prepare_live_window(inbox, now).await
+        self.prepare_live_window(inbox, now, &processed).await
     }
 
     async fn prepare_live_window(
         &mut self,
         inbox: &crate::store_types::RawSyncInbox,
         now: DateTime<Utc>,
+        processed: &ProcessedSync,
     ) -> Result<Option<ServiceAction>, SafeError> {
-        let processed = self
-            .processed_inbox
-            .take()
-            .filter(|value| value.inbox_id == inbox.inbox_id().as_str())
-            .map(|value| value.processed)
-            .unwrap_or_else(|| ProcessedSync::new(Vec::new(), Vec::new()));
-        let (routed, ignored_count, typing) = self.project_observations(&processed, inbox, now)?;
+        let (routed, ignored_count, typing) = self.project_observations(processed, inbox, now)?;
         let window_id = self
             .store
             .live_window_id_for_inbox(inbox.inbox_id().as_str())
