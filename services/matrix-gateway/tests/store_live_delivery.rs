@@ -7,14 +7,17 @@ use std::{
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use communicator_matrix_gateway::{
     batch::{BackfillJob, BatchWindow, RoutedEvent, WindowSource, build_window},
-    crypto::Keyring,
-    ledger::{STORE_LEDGER_CAS_MISMATCH, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID},
+    crypto::{Keyring, Sealed},
+    ledger::{
+        LiveCommitOutcome, RoomAnchorCandidate, RoomEphemeralCandidate, STORE_LEDGER_CAS_MISMATCH,
+        STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT, STORE_LEDGER_INVALID,
+    },
     model::{
         CanonicalEvent, CanonicalEventSource, CanonicalPayload, DeliveryStatus, Direction,
         MessageCreatedPayload, Provider,
     },
     store::Store,
-    store_types::{NewBootstrapState, NewRawSyncInbox},
+    store_types::{NewBootstrapState, NewRawSyncInbox, RoomAnchor},
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -61,6 +64,13 @@ fn expected_window_id(inbox_id: &str) -> String {
 }
 
 fn setup_processed_row(drain_crypto: bool) -> (TempDir, PathBuf, Store, String) {
+    setup_processed_row_with_anchors(drain_crypto, Vec::new())
+}
+
+fn setup_processed_row_with_anchors(
+    drain_crypto: bool,
+    anchors: Vec<RoomAnchor>,
+) -> (TempDir, PathBuf, Store, String) {
     let directory = secure_tempdir();
     let path = database_path(directory.path());
     let mut store = Store::open(&path, test_keyring()).expect("open store");
@@ -69,7 +79,7 @@ fn setup_processed_row(drain_crypto: bool) -> (TempDir, PathBuf, Store, String) 
             NewBootstrapState::new(
                 b"matrix-session".to_vec(),
                 INITIAL_TOKEN.to_vec(),
-                Vec::new(),
+                anchors,
                 timestamp(1_725_000_000_000),
             )
             .expect("bootstrap state"),
@@ -301,6 +311,22 @@ fn outbox_schedule(path: &Path, row_id: &str) -> (i64, String) {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("read outbox schedule")
+}
+
+fn read_sealed(path: &Path, sql: &str) -> Sealed {
+    Connection::open(path)
+        .expect("open sqlite sealed-value inspection connection")
+        .query_row(sql, [], |row| {
+            let ciphertext: Vec<u8> = row.get(0)?;
+            let nonce: Vec<u8> = row.get(1)?;
+            let key_version: i64 = row.get(2)?;
+            Ok(Sealed {
+                nonce: nonce.try_into().expect("24-byte nonce"),
+                ciphertext,
+                key_version: key_version.try_into().expect("key version"),
+            })
+        })
+        .expect("read sealed value")
 }
 
 fn assert_code(error: communicator_matrix_gateway::secret::SafeError, code: &str) {
@@ -612,4 +638,411 @@ fn reopened_store_returns_none_until_due_and_preserves_attempt_state() {
         selected.batch().exact_request_bytes(),
         window.batches[0].exact_request_bytes()
     );
+}
+
+#[test]
+fn accepts_the_final_live_batch_and_commits_the_window() {
+    let (_directory, _path, mut store, inbox_id) = setup_processed_row(true);
+    let window = prepare_live_window(&mut store, &inbox_id, 1);
+    let row_id = window.batches[0].batch_id.as_str();
+
+    let outcome = store
+        .accept_live_batch_and_maybe_commit_window(row_id, timestamp(CAS_NEXT_MILLIS))
+        .expect("accept final live batch");
+
+    assert_eq!(outcome, LiveCommitOutcome::WindowCommitted);
+}
+
+#[test]
+fn accepts_siblings_once_and_advances_tokens_only_after_the_final_row() {
+    let (_directory, _path, mut store, inbox_id) = setup_processed_row(true);
+    let window = prepare_live_window(&mut store, &inbox_id, 501);
+    assert_eq!(window.batches.len(), 2, "fixture must create two batches");
+    let first_id = window.batches[0].batch_id.clone();
+    let second_id = window.batches[1].batch_id.clone();
+    let first_at = timestamp(CAS_NEXT_MILLIS);
+    let second_at = timestamp(CAS_NEXT_MILLIS + 1_000);
+
+    assert_eq!(
+        store
+            .accept_live_batch_and_maybe_commit_window(&first_id, first_at)
+            .expect("accept first sibling"),
+        LiveCommitOutcome::BatchAccepted {
+            accepted_count: 1,
+            batch_count: 2,
+        }
+    );
+    assert_eq!(
+        store
+            .committed_sync_token()
+            .expect("read committed token")
+            .expect("committed token")
+            .as_bytes(),
+        INITIAL_TOKEN
+    );
+    assert_eq!(
+        store
+            .fetch_sync_token()
+            .expect("read fetch token")
+            .expect("fetch token")
+            .as_bytes(),
+        NEXT_TOKEN
+    );
+
+    assert_eq!(
+        store
+            .accept_live_batch_and_maybe_commit_window(&first_id, first_at)
+            .expect("duplicate first acceptance is idempotent"),
+        LiveCommitOutcome::BatchAccepted {
+            accepted_count: 1,
+            batch_count: 2,
+        }
+    );
+
+    drop(store);
+    let mut reopened = Store::open(&_path, test_keyring()).expect("reopen delivery store");
+    assert_eq!(
+        reopened
+            .accept_live_batch_and_maybe_commit_window(&second_id, second_at)
+            .expect("accept final sibling after reopen"),
+        LiveCommitOutcome::WindowCommitted
+    );
+    assert_eq!(
+        reopened
+            .committed_sync_token()
+            .expect("read committed token after final acceptance")
+            .expect("committed token after final acceptance")
+            .as_bytes(),
+        NEXT_TOKEN
+    );
+    assert_eq!(
+        reopened
+            .fetch_sync_token()
+            .expect("read fetch token after final acceptance")
+            .expect("fetch token after final acceptance")
+            .as_bytes(),
+        NEXT_TOKEN
+    );
+    assert_eq!(
+        reopened
+            .accept_live_batch_and_maybe_commit_window(&second_id, second_at)
+            .expect("duplicate final acceptance is idempotent"),
+        LiveCommitOutcome::AlreadyCommitted
+    );
+    assert_eq!(
+        reopened
+            .accept_live_batch_and_maybe_commit_window(&first_id, first_at)
+            .expect("duplicate earlier acceptance is idempotent"),
+        LiveCommitOutcome::AlreadyCommitted
+    );
+}
+
+#[test]
+fn staged_room_state_is_invisible_until_final_acceptance() {
+    let old_anchor = RoomAnchor::new([0x22; 32], b"old-anchor".to_vec()).expect("old anchor");
+    let (_directory, path, mut store, inbox_id) =
+        setup_processed_row_with_anchors(true, vec![old_anchor]);
+    let window_id = expected_window_id(&inbox_id);
+    let window = live_window(1, ARCHIVED_AT_MILLIS);
+    let anchor = RoomAnchorCandidate::new([0x22; 32].to_vec(), b"new-anchor".to_vec())
+        .expect("new anchor candidate");
+    let typing = RoomEphemeralCandidate::new(
+        [0x33; 32].to_vec(),
+        b"typing-members".to_vec(),
+        timestamp(CAS_NEXT_MILLIS + 30_000),
+    )
+    .expect("typing candidate");
+
+    store
+        .create_collecting_live_window(
+            &inbox_id,
+            communicator_matrix_gateway::ledger::NewLiveWindow::new(
+                window_id.clone(),
+                timestamp(ARCHIVED_AT_MILLIS),
+                0,
+            )
+            .expect("collecting window"),
+        )
+        .expect("create collecting window");
+    store
+        .finalize_live_window(
+            &inbox_id,
+            &window_id,
+            &window,
+            std::slice::from_ref(&anchor),
+            std::slice::from_ref(&typing),
+        )
+        .expect("prepare staged state");
+
+    assert_eq!(
+        store
+            .room_anchor(&[0x22; 32])
+            .expect("read old anchor")
+            .expect("old anchor exists")
+            .as_bytes(),
+        b"old-anchor"
+    );
+    assert_eq!(
+        Connection::open(&path)
+            .expect("open visibility inspection connection")
+            .query_row("SELECT COUNT(*) FROM room_ephemeral_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count applied typing rows"),
+        0
+    );
+
+    assert_eq!(
+        store
+            .accept_live_batch_and_maybe_commit_window(
+                &window.batches[0].batch_id,
+                timestamp(CAS_NEXT_MILLIS),
+            )
+            .expect("accept final batch"),
+        LiveCommitOutcome::WindowCommitted
+    );
+    assert_eq!(
+        store
+            .room_anchor(&[0x22; 32])
+            .expect("read committed anchor")
+            .expect("committed anchor exists")
+            .as_bytes(),
+        b"new-anchor"
+    );
+    let typing_sealed = read_sealed(
+        &path,
+        "SELECT typing_set_cipher, typing_set_nonce, typing_key_version
+         FROM room_ephemeral_state",
+    );
+    assert_eq!(
+        test_keyring()
+            .open(
+                "room_ephemeral_state",
+                &format!("room_{}", "33".repeat(32)),
+                "typing_set",
+                &typing_sealed,
+            )
+            .expect("open committed typing state")
+            .as_bytes(),
+        b"typing-members"
+    );
+}
+
+#[test]
+fn empty_live_window_commit_replays_exactly_and_conflicts_on_changed_values() {
+    let old_anchor =
+        RoomAnchor::new([0x22; 32], b"old-empty-anchor".to_vec()).expect("old empty anchor");
+    let (_directory, path, mut store, inbox_id) =
+        setup_processed_row_with_anchors(true, vec![old_anchor]);
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(
+            &inbox_id,
+            communicator_matrix_gateway::ledger::NewLiveWindow::new(
+                window_id.clone(),
+                timestamp(ARCHIVED_AT_MILLIS),
+                0,
+            )
+            .expect("empty collecting window"),
+        )
+        .expect("create empty collecting window");
+    let anchors = vec![
+        RoomAnchorCandidate::new([0x22; 32].to_vec(), b"committed-empty-anchor".to_vec())
+            .expect("empty anchor candidate"),
+    ];
+    let ephemeral = vec![
+        RoomEphemeralCandidate::new(
+            [0x33; 32].to_vec(),
+            b"committed-empty-typing".to_vec(),
+            timestamp(CAS_NEXT_MILLIS + 30_000),
+        )
+        .expect("empty typing candidate"),
+    ];
+    let committed_at = timestamp(CAS_NEXT_MILLIS);
+
+    store
+        .commit_empty_live_window(&inbox_id, &window_id, &anchors, &ephemeral, committed_at)
+        .expect("commit empty live window");
+    assert_eq!(
+        store
+            .committed_sync_token()
+            .expect("read empty committed token")
+            .expect("empty committed token")
+            .as_bytes(),
+        NEXT_TOKEN
+    );
+    assert_eq!(
+        store
+            .fetch_sync_token()
+            .expect("read empty fetch token")
+            .expect("empty fetch token")
+            .as_bytes(),
+        NEXT_TOKEN
+    );
+    assert_eq!(
+        Connection::open(&path)
+            .expect("open empty postcondition connection")
+            .query_row("SELECT COUNT(*) FROM outbox_batches", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count empty outbox"),
+        0
+    );
+
+    drop(store);
+    let mut reopened = Store::open(&path, test_keyring()).expect("reopen empty store");
+    reopened
+        .commit_empty_live_window(&inbox_id, &window_id, &anchors, &ephemeral, committed_at)
+        .expect("identical empty replay");
+    let changed = vec![
+        RoomAnchorCandidate::new([0x22; 32].to_vec(), b"changed-empty-anchor".to_vec())
+            .expect("changed empty anchor"),
+    ];
+    let error = reopened
+        .commit_empty_live_window(&inbox_id, &window_id, &changed, &ephemeral, committed_at)
+        .expect_err("changed empty replay must conflict");
+    assert_eq!(error.code(), STORE_LEDGER_CONFLICT);
+}
+
+#[test]
+fn corrupt_request_anchor_typing_or_token_rolls_back_acceptance() {
+    let (_directory, path, mut store, inbox_id) = setup_processed_row(true);
+    let window = prepare_live_window(&mut store, &inbox_id, 1);
+    let row_id = window.batches[0].batch_id.clone();
+    Connection::open(&path)
+        .expect("open request corruption connection")
+        .execute(
+            "UPDATE outbox_batches SET request_cipher = zeroblob(32) WHERE batch_row_id = ?1",
+            [&row_id],
+        )
+        .expect("tamper request ciphertext");
+    assert_code(
+        store
+            .accept_live_batch_and_maybe_commit_window(&row_id, timestamp(CAS_NEXT_MILLIS))
+            .expect_err("corrupt request must fail closed"),
+        STORE_LEDGER_CORRUPT,
+    );
+    assert_eq!(outbox_state(&path, &row_id), "pending");
+
+    let old_anchor =
+        RoomAnchor::new([0x22; 32], b"old-corruption-anchor".to_vec()).expect("old anchor");
+    let (_directory, path, mut store, inbox_id) =
+        setup_processed_row_with_anchors(true, vec![old_anchor]);
+    let window_id = expected_window_id(&inbox_id);
+    let window = live_window(1, ARCHIVED_AT_MILLIS);
+    let anchor = RoomAnchorCandidate::new([0x22; 32].to_vec(), b"staged-anchor".to_vec())
+        .expect("anchor candidate");
+    store
+        .create_collecting_live_window(
+            &inbox_id,
+            communicator_matrix_gateway::ledger::NewLiveWindow::new(
+                window_id.clone(),
+                timestamp(ARCHIVED_AT_MILLIS),
+                0,
+            )
+            .expect("collecting window"),
+        )
+        .expect("create collecting window");
+    store
+        .finalize_live_window(
+            &inbox_id,
+            &window_id,
+            &window,
+            std::slice::from_ref(&anchor),
+            &[],
+        )
+        .expect("stage anchor");
+    Connection::open(&path)
+        .expect("open anchor corruption connection")
+        .execute(
+            "UPDATE window_room_anchors SET anchor_event_cipher = zeroblob(32)",
+            [],
+        )
+        .expect("tamper staged anchor ciphertext");
+    assert_code(
+        store
+            .accept_live_batch_and_maybe_commit_window(
+                &window.batches[0].batch_id,
+                timestamp(CAS_NEXT_MILLIS),
+            )
+            .expect_err("corrupt anchor must fail closed"),
+        STORE_LEDGER_CORRUPT,
+    );
+    assert_eq!(outbox_state(&path, &window.batches[0].batch_id), "pending");
+
+    let (_directory, path, mut store, inbox_id) = setup_processed_row(true);
+    let window_id = expected_window_id(&inbox_id);
+    let window = live_window(1, ARCHIVED_AT_MILLIS);
+    let typing = RoomEphemeralCandidate::new(
+        [0x33; 32].to_vec(),
+        b"staged-typing".to_vec(),
+        timestamp(CAS_NEXT_MILLIS + 30_000),
+    )
+    .expect("typing candidate");
+    store
+        .create_collecting_live_window(
+            &inbox_id,
+            communicator_matrix_gateway::ledger::NewLiveWindow::new(
+                window_id.clone(),
+                timestamp(ARCHIVED_AT_MILLIS),
+                0,
+            )
+            .expect("collecting window"),
+        )
+        .expect("create collecting window");
+    store
+        .finalize_live_window(
+            &inbox_id,
+            &window_id,
+            &window,
+            &[],
+            std::slice::from_ref(&typing),
+        )
+        .expect("stage typing");
+    Connection::open(&path)
+        .expect("open typing corruption connection")
+        .execute(
+            "UPDATE window_room_ephemeral SET typing_set_cipher = zeroblob(32)",
+            [],
+        )
+        .expect("tamper staged typing ciphertext");
+    assert_code(
+        store
+            .accept_live_batch_and_maybe_commit_window(
+                &window.batches[0].batch_id,
+                timestamp(CAS_NEXT_MILLIS),
+            )
+            .expect_err("corrupt typing must fail closed"),
+        STORE_LEDGER_CORRUPT,
+    );
+    assert_eq!(outbox_state(&path, &window.batches[0].batch_id), "pending");
+
+    let (_directory, path, mut store, inbox_id) = setup_processed_row(true);
+    let window = prepare_live_window(&mut store, &inbox_id, 1);
+    let row_id = window.batches[0].batch_id.clone();
+    Connection::open(&path)
+        .expect("open token corruption connection")
+        .execute(
+            "UPDATE sync_inbox SET next_token_cipher = zeroblob(32) WHERE inbox_id = ?1",
+            [&inbox_id],
+        )
+        .expect("tamper inbox next-token ciphertext");
+    assert_code(
+        store
+            .accept_live_batch_and_maybe_commit_window(&row_id, timestamp(CAS_NEXT_MILLIS))
+            .expect_err("corrupt token must fail closed"),
+        STORE_LEDGER_CORRUPT,
+    );
+    assert_eq!(outbox_state(&path, &row_id), "pending");
+}
+
+fn outbox_state(path: &Path, row_id: &str) -> String {
+    Connection::open(path)
+        .expect("open sqlite outbox-state inspection connection")
+        .query_row(
+            "SELECT state FROM outbox_batches WHERE batch_row_id = ?1",
+            [row_id],
+            |row| row.get(0),
+        )
+        .expect("read outbox state")
 }
