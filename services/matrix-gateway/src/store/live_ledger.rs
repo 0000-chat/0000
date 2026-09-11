@@ -535,63 +535,74 @@ impl Store {
             .connection
             .unchecked_transaction()
             .map_err(|_| ledger_corrupt())?;
-        let context = load_live_context(&transaction, &self.keyring)?;
-        let Some(index) = context.chain.first_uncommitted_index else {
-            return Ok(None);
-        };
-        let oldest = &context.chain.rows[index];
-        let expected_window_id = derive_window_id(&self.keyring, oldest.inbox_id().as_str())
+        let gateway_state_count: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM gateway_state", [], |row| row.get(0))
             .map_err(|_| ledger_corrupt())?;
-        let Some(window) = load_existing_window(
-            &transaction,
-            &expected_window_id,
-            oldest.inbox_id().as_str(),
-        )?
-        else {
-            return Ok(None);
-        };
-        if window.window_id != expected_window_id || window.inbox_id != oldest.inbox_id().as_str() {
-            return Err(ledger_corrupt());
-        }
-        validate_window_inbox_link(&context, &window)?;
-
-        let outbox = load_outbox_batches(&transaction, &self.keyring, &window.window_id)?;
-        let staged_anchors = load_staged_anchors(&transaction, &self.keyring, &window.window_id)?;
-        let staged_ephemeral =
-            load_staged_ephemeral(&transaction, &self.keyring, &window.window_id)?;
-        validate_window_children_against_metadata(
-            &window,
-            &outbox,
-            &staged_anchors,
-            &staged_ephemeral,
-        )?;
-        validate_live_window_metadata(&window, &outbox, oldest)?;
-
-        if window.state != "pending" {
-            return Ok(None);
-        }
-
-        for stored in outbox {
-            if stored.state != "pending" || stored.next_attempt_at > now {
-                continue;
+        let context = match load_live_context(&transaction, &self.keyring) {
+            Ok(context) => Some(context),
+            Err(error) if error.code() == STORE_LEDGER_NOT_READY && gateway_state_count == 0 => {
+                None
             }
-            let request = batch::reparse_and_verify_request(stored.request.as_bytes())
+            Err(error) => return Err(error),
+        };
+
+        if let Some(context) = context
+            && let Some(index) = context.chain.first_uncommitted_index
+        {
+            let oldest = &context.chain.rows[index];
+            let expected_window_id = derive_window_id(&self.keyring, oldest.inbox_id().as_str())
                 .map_err(|_| ledger_corrupt())?;
-            let batch = PendingBatch::new(
-                request.tenant_id,
-                stored.batch_row_id.clone(),
-                stored.request.as_bytes().to_vec(),
-            );
-            return PendingIngestionBatch::from_verified_parts(
-                stored.batch_row_id,
-                batch,
-                stored.attempt_count,
-                stored.next_attempt_at,
-            )
-            .map(Some)
-            .map_err(|_| ledger_corrupt());
+            if let Some(window) = load_existing_window(
+                &transaction,
+                &expected_window_id,
+                oldest.inbox_id().as_str(),
+            )? {
+                if window.window_id != expected_window_id
+                    || window.inbox_id != oldest.inbox_id().as_str()
+                {
+                    return Err(ledger_corrupt());
+                }
+                validate_window_inbox_link(&context, &window)?;
+
+                let outbox = load_outbox_batches(&transaction, &self.keyring, &window.window_id)?;
+                let staged_anchors =
+                    load_staged_anchors(&transaction, &self.keyring, &window.window_id)?;
+                let staged_ephemeral =
+                    load_staged_ephemeral(&transaction, &self.keyring, &window.window_id)?;
+                validate_window_children_against_metadata(
+                    &window,
+                    &outbox,
+                    &staged_anchors,
+                    &staged_ephemeral,
+                )?;
+                validate_live_window_metadata(&window, &outbox, oldest)?;
+
+                if window.state == "pending" {
+                    for stored in outbox {
+                        if stored.state != "pending" || stored.next_attempt_at > now {
+                            continue;
+                        }
+                        let request = batch::reparse_and_verify_request(stored.request.as_bytes())
+                            .map_err(|_| ledger_corrupt())?;
+                        let batch = PendingBatch::new(
+                            request.tenant_id,
+                            stored.batch_row_id.clone(),
+                            stored.request.as_bytes().to_vec(),
+                        );
+                        return PendingIngestionBatch::from_verified_parts(
+                            stored.batch_row_id,
+                            batch,
+                            stored.attempt_count,
+                            stored.next_attempt_at,
+                        )
+                        .map(Some)
+                        .map_err(|_| ledger_corrupt());
+                    }
+                }
+            }
         }
-        Ok(None)
+
+        super::backfill_ledger::select_next_pending_backfill_batch(&transaction, &self.keyring, now)
     }
 
     /// Record one delivery attempt with a single state-qualified CAS update.
@@ -618,6 +629,18 @@ impl Store {
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| ledger_corrupt())?;
+        if let Some(()) = super::backfill_ledger::try_record_backfill_ingestion_attempt(
+            &transaction,
+            &self.keyring,
+            row_id,
+            expected_attempt_count,
+            expected_next_attempt_at,
+            attempted_at,
+            next_attempt_at,
+        )? {
+            transaction.commit().map_err(|_| ledger_corrupt())?;
+            return Ok(());
+        }
         let context = load_live_context(&transaction, &self.keyring)?;
         let Some(addressed) = load_outbox_batch_by_id(&transaction, &self.keyring, row_id)? else {
             return Err(ledger_cas_mismatch());

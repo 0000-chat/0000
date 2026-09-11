@@ -2,8 +2,8 @@
 
 use std::{collections::HashSet, str};
 
-use chrono::DateTime;
-use rusqlite::{Row, TransactionBehavior, params, types::ValueRef};
+use chrono::{DateTime, Utc};
+use rusqlite::{Row, Transaction, TransactionBehavior, params, types::ValueRef};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -12,17 +12,19 @@ use crate::{
     canonical::{self, CanonicalBatchInput, SourceCheckpoint},
     config::{MAX_BATCH_CANONICAL_BYTES, MAX_EVENT_CANONICAL_BYTES},
     crypto::{AEAD_TAG_BYTES, Sealed},
+    ingestion::PendingBatch,
     ledger::{
-        BackfillState, MAX_BACKFILL_PAGE_BATCHES, MAX_BACKFILL_PAGINATION_BYTES,
-        MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES, NewBackfillJob,
-        STORE_BACKFILL_CONFLICT, STORE_BACKFILL_CORRUPT, STORE_BACKFILL_INVALID,
-        STORE_BACKFILL_NOT_READY, StoredBackfillJob,
+        BackfillCommitOutcome, BackfillState, MAX_BACKFILL_PAGE_BATCHES,
+        MAX_BACKFILL_PAGINATION_BYTES, MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES,
+        NewBackfillJob, PendingIngestionBatch, STORE_BACKFILL_CONFLICT, STORE_BACKFILL_CORRUPT,
+        STORE_BACKFILL_INVALID, STORE_BACKFILL_NOT_READY, STORE_LEDGER_CAS_MISMATCH,
+        StoredBackfillJob,
     },
     model,
     secret::SafeError,
 };
 
-use super::Store;
+use super::{Store, parse_stored_timestamp, valid_utc_millisecond};
 
 const BACKFILL_KIND_EXPLICIT: &str = "explicit";
 const BACKFILL_KIND_LIVE_GAP: &str = "live_gap";
@@ -54,6 +56,7 @@ const BACKFILL_OUTBOX_TERMINAL_CODE_MAX_BYTES: usize = 64;
 const BACKFILL_OUTBOX_BATCH_ID_PREFIX: &str = "batch_";
 const BACKFILL_OUTBOX_REQUEST_MAX_CIPHERTEXT_BYTES: usize =
     MAX_BATCH_CANONICAL_BYTES + AEAD_TAG_BYTES;
+const BACKFILL_OUTBOX_ATTEMPT_COUNT_MAX: i64 = 1_000_000;
 
 struct StoredBackfillRow {
     job_id: String,
@@ -74,6 +77,7 @@ struct StoredBackfillRow {
 
 struct VerifiedBackfillRow {
     job: BackfillJob,
+    state: BackfillState,
     parameters: Zeroizing<Vec<u8>>,
     pagination: Option<Zeroizing<Vec<u8>>>,
     accepted_events: u64,
@@ -102,6 +106,20 @@ struct VerifiedBackfillOutboxRow {
     batch_row_id: String,
     ordinal: u64,
     request: Zeroizing<Vec<u8>>,
+    request_sha256: [u8; 32],
+    byte_count: usize,
+    state: String,
+    attempt_count: u32,
+    next_attempt_at: DateTime<Utc>,
+    next_attempt_at_text: String,
+    accepted_at: Option<DateTime<Utc>>,
+}
+
+struct BackfillOutboxScan {
+    count: u64,
+    pending_count: u64,
+    quarantined_count: u64,
+    candidate: Option<VerifiedBackfillOutboxRow>,
 }
 
 impl Store {
@@ -399,6 +417,423 @@ impl Store {
         transaction.commit().map_err(|_| backfill_corrupt())?;
         Ok(())
     }
+
+    /// Accept one explicit-backfill row and complete its job when its durable
+    /// page checkpoint proves that the row is the final accepted row.
+    pub fn accept_backfill_batch_and_maybe_complete_job(
+        &mut self,
+        row_id: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<BackfillCommitOutcome, SafeError> {
+        if !valid_batch_row_id(row_id) || !valid_utc_millisecond(accepted_at) {
+            return Err(backfill_invalid());
+        }
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let target =
+            load_backfill_outbox_row_by_id(&transaction, row_id)?.ok_or_else(backfill_not_ready)?;
+        if target.source_kind != BACKFILL_KIND_OUTBOX {
+            return Err(backfill_not_ready());
+        }
+        if target.window_id.is_some() {
+            return Err(backfill_corrupt());
+        }
+        let job_id = target
+            .backfill_job_id
+            .clone()
+            .ok_or_else(backfill_corrupt)?;
+        validate_job_id(&job_id).map_err(|_| backfill_corrupt())?;
+        let job_row = load_backfill_row(&transaction, &job_id)?.ok_or_else(backfill_corrupt)?;
+        validate_explicit_job_shape(&job_row)?;
+        let verified = verify_backfill_row(keyring, &job_row)?;
+        let created_at =
+            parse_stored_timestamp(&verified.created_at).map_err(|_| backfill_corrupt())?;
+        if accepted_at < created_at {
+            return Err(backfill_invalid());
+        }
+        let scan = scan_backfill_outbox_rows(&transaction, keyring, &verified.job, None)?;
+        validate_backfill_page_shape(&verified, scan.count)?;
+        let target = verify_backfill_outbox_row(keyring, &verified.job, target)?;
+        if target.batch_row_id != row_id || target.state == "quarantined" {
+            return Err(backfill_not_ready());
+        }
+
+        match verified.state {
+            BackfillState::Completed => {
+                if scan.pending_count != 0
+                    || scan.quarantined_count != 0
+                    || !is_exhausted_pagination(&verified)
+                {
+                    return Err(backfill_corrupt());
+                }
+                if target.state != "accepted" {
+                    return Err(backfill_corrupt());
+                }
+                if target.accepted_at != Some(accepted_at) {
+                    return Err(backfill_conflict());
+                }
+                drop(transaction);
+                return Ok(BackfillCommitOutcome::AlreadyCompleted {
+                    accepted_events: verified.accepted_events,
+                });
+            }
+            BackfillState::Running => {}
+            BackfillState::Pending | BackfillState::Cancelled | BackfillState::Quarantined => {
+                return Err(backfill_not_ready());
+            }
+        }
+
+        match target.state.as_str() {
+            "pending" => {
+                let updated = transaction
+                    .execute(
+                        "UPDATE outbox_batches
+                         SET state = 'accepted', accepted_at = ?1
+                         WHERE batch_row_id = ?2 AND source_kind = 'backfill'
+                           AND window_id IS NULL AND backfill_job_id = ?3
+                           AND ordinal = ?4 AND state = 'pending'
+                           AND request_sha256 = ?5 AND byte_count = ?6
+                           AND attempt_count = ?7 AND next_attempt_at = ?8
+                           AND accepted_at IS NULL AND terminal_code IS NULL
+                           AND EXISTS (
+                             SELECT 1 FROM backfill_jobs AS j
+                             WHERE j.job_id = outbox_batches.backfill_job_id
+                               AND j.kind = 'explicit' AND j.live_window_id IS NULL
+                               AND j.state = 'running'
+                           )",
+                        params![
+                            accepted_at.to_rfc3339(),
+                            row_id,
+                            job_id.as_str(),
+                            i64::try_from(target.ordinal).map_err(|_| backfill_corrupt())?,
+                            target.request_sha256.as_slice(),
+                            i64::try_from(target.byte_count).map_err(|_| backfill_corrupt())?,
+                            i64::from(target.attempt_count),
+                            target.next_attempt_at_text.as_str(),
+                        ],
+                    )
+                    .map_err(|_| backfill_corrupt())?;
+                if updated != 1 {
+                    return Err(backfill_corrupt());
+                }
+            }
+            "accepted" => {
+                if target.accepted_at != Some(accepted_at) {
+                    return Err(backfill_conflict());
+                }
+            }
+            _ => return Err(backfill_corrupt()),
+        }
+
+        let after = scan_backfill_outbox_rows(&transaction, keyring, &verified.job, None)?;
+        validate_backfill_page_shape(&verified, after.count)?;
+        if after.pending_count == 0
+            && after.quarantined_count == 0
+            && is_exhausted_pagination(&verified)
+        {
+            let updated = transaction
+                .execute(
+                    "UPDATE backfill_jobs
+                     SET state = 'completed', completed_at = ?1
+                     WHERE job_id = ?2 AND kind = 'explicit' AND live_window_id IS NULL
+                       AND state = 'running' AND completed_at IS NULL
+                       AND cancelled_at IS NULL AND terminal_code IS NULL
+                       AND accepted_events = ?3",
+                    params![
+                        accepted_at.to_rfc3339(),
+                        job_id.as_str(),
+                        verified.accepted_events
+                    ],
+                )
+                .map_err(|_| backfill_corrupt())?;
+            if updated != 1 {
+                return Err(backfill_corrupt());
+            }
+            transaction.commit().map_err(|_| backfill_corrupt())?;
+            return Ok(BackfillCommitOutcome::JobCompleted {
+                accepted_events: verified.accepted_events,
+            });
+        }
+
+        transaction.commit().map_err(|_| backfill_corrupt())?;
+        Ok(BackfillCommitOutcome::BatchAccepted {
+            accepted_events: verified.accepted_events,
+        })
+    }
+
+    /// Complete an explicit backfill whose authenticated page state is exhausted.
+    pub fn complete_backfill_job(
+        &mut self,
+        job_id: &str,
+        completed_at: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        validate_job_id(job_id)?;
+        if !valid_utc_millisecond(completed_at) {
+            return Err(backfill_invalid());
+        }
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let row = load_backfill_row(&transaction, job_id)?.ok_or_else(backfill_not_ready)?;
+        validate_explicit_job_shape(&row)?;
+        let verified = verify_backfill_row(keyring, &row)?;
+        let created_at =
+            parse_stored_timestamp(&verified.created_at).map_err(|_| backfill_corrupt())?;
+        if completed_at < created_at {
+            return Err(backfill_invalid());
+        }
+        let scan = scan_backfill_outbox_rows(&transaction, keyring, &verified.job, None)?;
+        validate_backfill_page_shape(&verified, scan.count)?;
+
+        match verified.state {
+            BackfillState::Completed => {
+                if scan.pending_count != 0
+                    || scan.quarantined_count != 0
+                    || !is_exhausted_pagination(&verified)
+                {
+                    return Err(backfill_corrupt());
+                }
+                let stored = row.completed_at.as_deref().ok_or_else(backfill_corrupt)?;
+                if parse_stored_timestamp(stored).map_err(|_| backfill_corrupt())? != completed_at {
+                    return Err(backfill_conflict());
+                }
+                drop(transaction);
+                Ok(())
+            }
+            BackfillState::Running => {
+                if scan.pending_count != 0
+                    || scan.quarantined_count != 0
+                    || !is_exhausted_pagination(&verified)
+                {
+                    return Err(backfill_not_ready());
+                }
+                let updated = transaction
+                    .execute(
+                        "UPDATE backfill_jobs
+                         SET state = 'completed', completed_at = ?1
+                         WHERE job_id = ?2 AND kind = 'explicit' AND live_window_id IS NULL
+                           AND state = 'running' AND completed_at IS NULL
+                           AND cancelled_at IS NULL AND terminal_code IS NULL
+                           AND accepted_events = ?3",
+                        params![completed_at.to_rfc3339(), job_id, verified.accepted_events],
+                    )
+                    .map_err(|_| backfill_corrupt())?;
+                if updated != 1 {
+                    return Err(backfill_corrupt());
+                }
+                transaction.commit().map_err(|_| backfill_corrupt())?;
+                Ok(())
+            }
+            BackfillState::Pending | BackfillState::Cancelled | BackfillState::Quarantined => {
+                Err(backfill_not_ready())
+            }
+        }
+    }
+
+    /// Cancel an explicit backfill while retaining its encrypted audit rows.
+    pub fn cancel_backfill_job(
+        &mut self,
+        job_id: &str,
+        cancelled_at: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        validate_job_id(job_id)?;
+        if !valid_utc_millisecond(cancelled_at) {
+            return Err(backfill_invalid());
+        }
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let row = load_backfill_row(&transaction, job_id)?.ok_or_else(backfill_not_ready)?;
+        validate_explicit_job_shape(&row)?;
+        let verified = verify_backfill_row(keyring, &row)?;
+        let created_at =
+            parse_stored_timestamp(&verified.created_at).map_err(|_| backfill_corrupt())?;
+        if cancelled_at < created_at {
+            return Err(backfill_invalid());
+        }
+        let scan = scan_backfill_outbox_rows(&transaction, keyring, &verified.job, None)?;
+        validate_backfill_page_shape(&verified, scan.count)?;
+
+        match verified.state {
+            BackfillState::Cancelled => {
+                let stored = row.cancelled_at.as_deref().ok_or_else(backfill_corrupt)?;
+                if parse_stored_timestamp(stored).map_err(|_| backfill_corrupt())? != cancelled_at {
+                    return Err(backfill_conflict());
+                }
+                drop(transaction);
+                Ok(())
+            }
+            BackfillState::Pending | BackfillState::Running => {
+                if verified.state == BackfillState::Pending && scan.count != 0 {
+                    return Err(backfill_corrupt());
+                }
+                let updated = transaction
+                    .execute(
+                        "UPDATE backfill_jobs
+                         SET state = 'cancelled', cancelled_at = ?1
+                         WHERE job_id = ?2 AND kind = 'explicit' AND live_window_id IS NULL
+                           AND state IN ('pending', 'running')
+                           AND completed_at IS NULL AND cancelled_at IS NULL
+                           AND terminal_code IS NULL AND accepted_events = ?3",
+                        params![cancelled_at.to_rfc3339(), job_id, verified.accepted_events],
+                    )
+                    .map_err(|_| backfill_corrupt())?;
+                if updated != 1 {
+                    return Err(backfill_corrupt());
+                }
+                transaction.commit().map_err(|_| backfill_corrupt())?;
+                Ok(())
+            }
+            BackfillState::Completed | BackfillState::Quarantined => Err(backfill_not_ready()),
+        }
+    }
+}
+
+/// Select the oldest due explicit-backfill row after authenticating the entire
+/// candidate job and all of its durable outbox rows.
+pub(crate) fn select_next_pending_backfill_batch(
+    transaction: &Transaction<'_>,
+    keyring: &crate::crypto::Keyring,
+    now: DateTime<Utc>,
+) -> Result<Option<PendingIngestionBatch>, SafeError> {
+    if !valid_utc_millisecond(now) {
+        return Err(backfill_invalid());
+    }
+
+    let mut statement = transaction
+        .prepare(
+            "SELECT job_id FROM backfill_jobs
+             WHERE kind = 'explicit' AND live_window_id IS NULL AND state = 'running'
+             ORDER BY created_at ASC, job_id ASC",
+        )
+        .map_err(|_| backfill_corrupt())?;
+    let mut rows = statement.query([]).map_err(|_| backfill_corrupt())?;
+    while let Some(row) = rows.next().map_err(|_| backfill_corrupt())? {
+        let job_id = read_text(row, 0, MAX_LEDGER_ID_BYTES)?;
+        let job_row = load_backfill_row(transaction, &job_id)?.ok_or_else(backfill_corrupt)?;
+        validate_explicit_job_shape(&job_row)?;
+        let verified = verify_backfill_row(keyring, &job_row)?;
+        if verified.state != BackfillState::Running {
+            return Err(backfill_corrupt());
+        }
+        let scan = scan_backfill_outbox_rows(transaction, keyring, &verified.job, Some(now))?;
+        validate_backfill_page_shape(&verified, scan.count)?;
+        let Some(candidate) = scan.candidate else {
+            continue;
+        };
+        let request = batch::reparse_and_verify_request(candidate.request.as_slice())
+            .map_err(|_| backfill_corrupt())?;
+        let batch = PendingBatch::new(
+            request.tenant_id,
+            candidate.batch_row_id.clone(),
+            candidate.request.as_slice().to_vec(),
+        );
+        return PendingIngestionBatch::from_verified_parts(
+            candidate.batch_row_id,
+            batch,
+            candidate.attempt_count,
+            candidate.next_attempt_at,
+        )
+        .map(Some)
+        .map_err(|_| backfill_corrupt());
+    }
+    Ok(None)
+}
+
+/// Apply the backfill half of the shared ingestion-attempt CAS API.
+///
+/// `None` means the addressed row is a live row and the caller should continue
+/// with the live ledger.  `Some` means the row was a backfill row and this
+/// helper has either applied the CAS or returned its stable failure.
+pub(crate) fn try_record_backfill_ingestion_attempt(
+    transaction: &Transaction<'_>,
+    keyring: &crate::crypto::Keyring,
+    row_id: &str,
+    expected_attempt_count: u32,
+    expected_next_attempt_at: DateTime<Utc>,
+    attempted_at: DateTime<Utc>,
+    next_attempt_at: DateTime<Utc>,
+) -> Result<Option<()>, SafeError> {
+    let Some(stored_target) = load_backfill_outbox_row_by_id(transaction, row_id)? else {
+        return Ok(None);
+    };
+    match stored_target.source_kind.as_str() {
+        "live" => return Ok(None),
+        BACKFILL_KIND_OUTBOX => {}
+        _ => return Err(backfill_corrupt()),
+    }
+    let job_id = stored_target
+        .backfill_job_id
+        .clone()
+        .ok_or_else(backfill_corrupt)?;
+    validate_job_id(&job_id).map_err(|_| backfill_corrupt())?;
+    if stored_target.window_id.is_some() {
+        return Err(backfill_corrupt());
+    }
+    let job_row = load_backfill_row(transaction, &job_id)?.ok_or_else(backfill_corrupt)?;
+    validate_explicit_job_shape(&job_row)?;
+    let verified_job = verify_backfill_row(keyring, &job_row)?;
+    let scan = scan_backfill_outbox_rows(transaction, keyring, &verified_job.job, None)?;
+    validate_backfill_page_shape(&verified_job, scan.count)?;
+    if verified_job.state != BackfillState::Running {
+        return Err(ledger_cas_mismatch());
+    }
+    let target = verify_backfill_outbox_row(keyring, &verified_job.job, stored_target)?;
+    if target.state != "pending"
+        || target.ordinal >= scan.count
+        || target.attempt_count != expected_attempt_count
+        || target.next_attempt_at != expected_next_attempt_at
+        || target.attempt_count >= BACKFILL_OUTBOX_ATTEMPT_COUNT_MAX as u32
+        || attempted_at < expected_next_attempt_at
+        || next_attempt_at <= attempted_at
+    {
+        return Err(ledger_cas_mismatch());
+    }
+
+    let updated = transaction
+        .execute(
+            "UPDATE outbox_batches
+             SET attempt_count = attempt_count + 1, next_attempt_at = ?1
+             WHERE batch_row_id = ?2 AND source_kind = 'backfill'
+               AND window_id IS NULL AND backfill_job_id = ?3
+               AND ordinal = ?4 AND state = 'pending'
+               AND attempt_count = ?5 AND next_attempt_at = ?6
+               AND attempt_count < ?7 AND accepted_at IS NULL AND terminal_code IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM backfill_jobs AS j
+                 WHERE j.job_id = outbox_batches.backfill_job_id
+                   AND j.kind = 'explicit' AND j.live_window_id IS NULL
+                   AND j.state = 'running'
+               )",
+            params![
+                next_attempt_at.to_rfc3339(),
+                row_id,
+                job_id.as_str(),
+                i64::try_from(target.ordinal).map_err(|_| backfill_corrupt())?,
+                i64::from(expected_attempt_count),
+                target.next_attempt_at_text.as_str(),
+                BACKFILL_OUTBOX_ATTEMPT_COUNT_MAX,
+            ],
+        )
+        .map_err(|_| backfill_corrupt())?;
+    if updated != 1 {
+        return Err(ledger_cas_mismatch());
+    }
+    Ok(Some(()))
+}
+
+fn ledger_cas_mismatch() -> SafeError {
+    SafeError::new(STORE_LEDGER_CAS_MISMATCH)
 }
 
 fn validate_checkpoint_input(
@@ -648,11 +1083,49 @@ fn read_backfill_row(row: &Row<'_>) -> Result<StoredBackfillRow, SafeError> {
     })
 }
 
+fn validate_explicit_job_shape(row: &StoredBackfillRow) -> Result<(), SafeError> {
+    if row.kind != BACKFILL_KIND_EXPLICIT || row.live_window_id.is_some() {
+        if row.kind == BACKFILL_KIND_LIVE_GAP {
+            return Err(backfill_not_ready());
+        }
+        return Err(backfill_corrupt());
+    }
+    Ok(())
+}
+
+fn validate_backfill_page_shape(
+    job: &VerifiedBackfillRow,
+    outbox_count: u64,
+) -> Result<(), SafeError> {
+    if outbox_count > job.job.max_events() {
+        return Err(backfill_corrupt());
+    }
+    if outbox_count != 0 && job.pagination.is_none() {
+        return Err(backfill_corrupt());
+    }
+    Ok(())
+}
+
+fn is_exhausted_pagination(job: &VerifiedBackfillRow) -> bool {
+    job.pagination
+        .as_ref()
+        .is_some_and(|value| value.as_slice() == BACKFILL_EXHAUSTED_SENTINEL)
+}
+
 fn load_backfill_outbox_rows(
     connection: &rusqlite::Connection,
     keyring: &crate::crypto::Keyring,
     job: &BackfillJob,
 ) -> Result<u64, SafeError> {
+    Ok(scan_backfill_outbox_rows(connection, keyring, job, None)?.count)
+}
+
+fn scan_backfill_outbox_rows(
+    connection: &rusqlite::Connection,
+    keyring: &crate::crypto::Keyring,
+    job: &BackfillJob,
+    now: Option<DateTime<Utc>>,
+) -> Result<BackfillOutboxScan, SafeError> {
     let count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM outbox_batches WHERE backfill_job_id = ?1",
@@ -680,6 +1153,10 @@ fn load_backfill_outbox_rows(
         .query([job.job_id()])
         .map_err(|_| backfill_corrupt())?;
     let mut expected_ordinal = 0_u64;
+    let mut pending_count = 0_u64;
+    let mut quarantined_count = 0_u64;
+    let mut candidate = None;
+    let mut pending_head_blocked = false;
     while let Some(row) = rows.next().map_err(|_| backfill_corrupt())? {
         let stored = read_backfill_outbox_row(row)?;
         let checked = verify_backfill_outbox_row(keyring, job, stored)?;
@@ -689,11 +1166,62 @@ fn load_backfill_outbox_rows(
         expected_ordinal = expected_ordinal
             .checked_add(1)
             .ok_or_else(backfill_corrupt)?;
+        match checked.state.as_str() {
+            "pending" => {
+                pending_count = pending_count.checked_add(1).ok_or_else(backfill_corrupt)?;
+                if let Some(now) = now
+                    && !pending_head_blocked
+                    && candidate.is_none()
+                {
+                    if checked.next_attempt_at <= now {
+                        candidate = Some(checked);
+                    } else {
+                        pending_head_blocked = true;
+                    }
+                }
+            }
+            "quarantined" => {
+                quarantined_count = quarantined_count
+                    .checked_add(1)
+                    .ok_or_else(backfill_corrupt)?;
+            }
+            "accepted" => {}
+            _ => return Err(backfill_corrupt()),
+        }
     }
     if expected_ordinal != count {
         return Err(backfill_corrupt());
     }
-    Ok(count)
+    Ok(BackfillOutboxScan {
+        count,
+        pending_count,
+        quarantined_count,
+        candidate,
+    })
+}
+
+fn load_backfill_outbox_row_by_id(
+    connection: &rusqlite::Connection,
+    row_id: &str,
+) -> Result<Option<StoredBackfillOutboxRow>, SafeError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT batch_row_id, source_kind, window_id, backfill_job_id,
+                    ordinal, state, request_cipher, request_nonce, request_key_version,
+                    request_sha256, byte_count, attempt_count, next_attempt_at,
+                    accepted_at, terminal_code
+             FROM outbox_batches WHERE batch_row_id = ?1 LIMIT 2",
+        )
+        .map_err(|_| backfill_corrupt())?;
+    let mut rows = statement.query([row_id]).map_err(|_| backfill_corrupt())?;
+    let Some(row) = rows.next().map_err(|_| backfill_corrupt())? else {
+        return Ok(None);
+    };
+    let stored = read_backfill_outbox_row(row)?;
+    if rows.next().map_err(|_| backfill_corrupt())?.is_some() {
+        return Err(backfill_corrupt());
+    }
+    Ok(Some(stored))
 }
 
 fn validate_existing_page(
@@ -769,7 +1297,7 @@ fn read_backfill_outbox_row(row: &Row<'_>) -> Result<StoredBackfillOutboxRow, Sa
         request_key_version: read_integer(row, 8, 1, i64::from(u32::MAX))?,
         request_sha256: read_blob(row, 9, 32, 32)?,
         byte_count: read_integer(row, 10, 1, MAX_BATCH_CANONICAL_BYTES as i64)?,
-        attempt_count: read_integer(row, 11, 0, i64::from(u32::MAX))?,
+        attempt_count: read_integer(row, 11, 0, BACKFILL_OUTBOX_ATTEMPT_COUNT_MAX)?,
         next_attempt_at: read_text(row, 12, BACKFILL_OUTBOX_TIMESTAMP_MAX_BYTES)?,
         accepted_at: read_optional_text(row, 13, BACKFILL_OUTBOX_TIMESTAMP_MAX_BYTES)?,
         terminal_code: read_optional_text(row, 14, BACKFILL_OUTBOX_TERMINAL_CODE_MAX_BYTES)?,
@@ -795,17 +1323,21 @@ fn verify_backfill_outbox_row(
     let state = row.state.as_str();
     match state {
         "pending" if row.accepted_at.is_none() && row.terminal_code.is_none() => {}
-        "accepted" if row.accepted_at.is_some() && row.terminal_code.is_none() => {
-            if row.attempt_count == 0 {
-                return Err(backfill_corrupt());
-            }
-        }
+        "accepted" if row.accepted_at.is_some() && row.terminal_code.is_none() => {}
         "quarantined" if row.accepted_at.is_none() && row.terminal_code.is_some() => {}
         _ => return Err(backfill_corrupt()),
     }
     validate_timestamp(&row.next_attempt_at)?;
     validate_optional_timestamp(row.accepted_at.as_deref())?;
     validate_terminal_code(row.terminal_code.as_deref())?;
+    let next_attempt_at =
+        parse_stored_timestamp(&row.next_attempt_at).map_err(|_| backfill_corrupt())?;
+    let accepted_at = row
+        .accepted_at
+        .as_deref()
+        .map(parse_stored_timestamp)
+        .transpose()
+        .map_err(|_| backfill_corrupt())?;
 
     let byte_count = usize::try_from(row.byte_count).map_err(|_| backfill_corrupt())?;
     let plaintext = open_outbox_value(
@@ -838,19 +1370,29 @@ fn verify_backfill_outbox_row(
         batch_row_id: row.batch_row_id,
         ordinal,
         request: Zeroizing::new(plaintext.as_bytes().to_vec()),
+        request_sha256,
+        byte_count,
+        state: row.state,
+        attempt_count: u32::try_from(row.attempt_count).map_err(|_| backfill_corrupt())?,
+        next_attempt_at,
+        next_attempt_at_text: row.next_attempt_at,
+        accepted_at,
     })
 }
 
 fn validate_batch_row_id(value: &str) -> Result<(), SafeError> {
-    if value.len() != BACKFILL_OUTBOX_BATCH_ID_PREFIX.len() + 64
-        || !value.starts_with(BACKFILL_OUTBOX_BATCH_ID_PREFIX)
-        || !value[BACKFILL_OUTBOX_BATCH_ID_PREFIX.len()..]
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if !valid_batch_row_id(value) {
         return Err(backfill_corrupt());
     }
     Ok(())
+}
+
+fn valid_batch_row_id(value: &str) -> bool {
+    value.len() == BACKFILL_OUTBOX_BATCH_ID_PREFIX.len() + 64
+        && value.starts_with(BACKFILL_OUTBOX_BATCH_ID_PREFIX)
+        && value[BACKFILL_OUTBOX_BATCH_ID_PREFIX.len()..]
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn persist_backfill_checkpoint(
@@ -939,6 +1481,17 @@ fn verify_backfill_row(
         row.cancelled_at.is_some(),
         row.terminal_code.is_some(),
     )?;
+    let created_at = parse_stored_timestamp(&row.created_at).map_err(|_| backfill_corrupt())?;
+    if let Some(completed_at) = row.completed_at.as_deref()
+        && parse_stored_timestamp(completed_at).map_err(|_| backfill_corrupt())? < created_at
+    {
+        return Err(backfill_corrupt());
+    }
+    if let Some(cancelled_at) = row.cancelled_at.as_deref()
+        && parse_stored_timestamp(cancelled_at).map_err(|_| backfill_corrupt())? < created_at
+    {
+        return Err(backfill_corrupt());
+    }
 
     let accepted_events = u64::try_from(row.accepted_events).map_err(|_| backfill_corrupt())?;
     let parameters_plaintext = open_backfill_value(
@@ -980,6 +1533,7 @@ fn verify_backfill_row(
 
     Ok(VerifiedBackfillRow {
         job,
+        state,
         parameters,
         pagination,
         accepted_events,
@@ -1224,8 +1778,12 @@ fn validate_job_id(value: &str) -> Result<(), SafeError> {
 }
 
 fn validate_timestamp(value: &str) -> Result<(), SafeError> {
+    let Ok(timestamp) = DateTime::parse_from_rfc3339(value) else {
+        return Err(backfill_corrupt());
+    };
     if !model::valid_timestamp(value)
-        || DateTime::parse_from_rfc3339(value).is_err()
+        || timestamp.offset().local_minus_utc() != 0
+        || !timestamp.timestamp_subsec_nanos().is_multiple_of(1_000_000)
         || !value.is_ascii()
     {
         return Err(backfill_corrupt());
