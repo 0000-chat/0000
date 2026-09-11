@@ -16,7 +16,7 @@ use crate::{
         BackfillState, FinalizeOutcome, LedgerPressure, LiveCommitOutcome,
         MAX_BACKFILL_PAGINATION_BYTES, MAX_BACKFILL_PARAMETERS_BYTES, MAX_LEDGER_ID_BYTES,
         MAX_WINDOW_BATCHES, MAX_WINDOW_ROOM_CANDIDATES, NewLiveGapJob, NewLiveWindow,
-        PendingIngestionBatch, RoomAnchorCandidate, RoomEphemeralCandidate,
+        PendingIngestionBatch, PurgeOutcome, RoomAnchorCandidate, RoomEphemeralCandidate,
         STORE_LEDGER_CAS_MISMATCH, STORE_LEDGER_CONFLICT, STORE_LEDGER_CORRUPT,
         STORE_LEDGER_INVALID, STORE_LEDGER_NOT_READY, STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
     },
@@ -87,6 +87,16 @@ struct StoredBackfillJob {
     parameters: SecretBytes,
     accepted_events: u64,
     created_at: String,
+}
+
+struct PurgeSelection {
+    inbox_id: String,
+    window_id: String,
+    staged_anchor_count: usize,
+    staged_ephemeral_count: usize,
+    ingestion_row_ids: Vec<String>,
+    crypto_row_ids: Vec<String>,
+    live_gap_job_ids: Vec<String>,
 }
 
 impl Store {
@@ -1114,6 +1124,300 @@ impl Store {
         .map_err(|_| ledger_corrupt())?;
         transaction.commit().map_err(|_| ledger_corrupt())?;
         Ok(pressure)
+    }
+
+    /// Purge the contiguous oldest prefix of safely retained committed rows.
+    pub fn purge_committed_prefix(
+        &mut self,
+        cutoff: DateTime<Utc>,
+        sdk_token_digest: &[u8],
+    ) -> Result<PurgeOutcome, SafeError> {
+        if !valid_utc_millisecond(cutoff) || sdk_token_digest.len() != 32 {
+            return Err(ledger_invalid());
+        }
+        let sdk_token_digest: [u8; 32] =
+            sdk_token_digest.try_into().map_err(|_| ledger_invalid())?;
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+        let context = load_live_context(&transaction, keyring)?;
+        let newest_committed_index = context
+            .chain
+            .ordered_indices
+            .iter()
+            .rev()
+            .copied()
+            .find(|index| context.chain.rows[*index].state() == SyncInboxState::Committed);
+
+        let mut selections = Vec::new();
+        for index in &context.chain.ordered_indices {
+            let inbox = &context.chain.rows[*index];
+            if inbox.state() != SyncInboxState::Committed {
+                break;
+            }
+            if Some(*index) == newest_committed_index {
+                break;
+            }
+            let committed_at = inbox.committed_at().ok_or_else(ledger_corrupt)?;
+            if *committed_at >= cutoff || inbox.next_token_digest() == &sdk_token_digest {
+                break;
+            }
+
+            let window_id = derive_window_id(keyring, inbox.inbox_id().as_str())
+                .map_err(|_| ledger_corrupt())?;
+            let Some(window) = load_window_by_id(&transaction, &window_id)? else {
+                return Err(ledger_corrupt());
+            };
+            if window.state != "committed" {
+                break;
+            }
+            validate_window_inbox_link(&context, &window)?;
+
+            let outbox = load_outbox_batches(&transaction, keyring, &window_id)?;
+            let staged_anchors = load_staged_anchors(&transaction, keyring, &window_id)?;
+            let staged_ephemeral = load_staged_ephemeral(&transaction, keyring, &window_id)?;
+            if outbox.iter().any(|row| row.state != "accepted") {
+                break;
+            }
+            validate_window_children_against_metadata(
+                &window,
+                &outbox,
+                &staged_anchors,
+                &staged_ephemeral,
+            )?;
+            validate_live_window_metadata(&window, &outbox, inbox)?;
+            validate_accepted_timestamps(&outbox, inbox)?;
+            validate_committed_live_state(
+                &transaction,
+                keyring,
+                &window,
+                inbox,
+                &staged_anchors,
+                &staged_ephemeral,
+            )?;
+
+            let mut linked_job_ids = Vec::new();
+            {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT job_id FROM backfill_jobs
+                         WHERE kind = 'live_gap' AND live_window_id = ?1 ORDER BY rowid",
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                let mut rows = statement
+                    .query([window_id.as_str()])
+                    .map_err(|_| ledger_corrupt())?;
+                while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
+                    linked_job_ids.push(read_text(row, 0, MAX_LEDGER_ID_BYTES, valid_job_id)?);
+                }
+            }
+
+            let mut terminal_job_ids = Vec::with_capacity(linked_job_ids.len());
+            let mut non_terminal_job = false;
+            for job_id in linked_job_ids {
+                let job = load_backfill_job(&transaction, keyring, &job_id)?
+                    .ok_or_else(ledger_corrupt)?;
+                if job.kind != "live_gap"
+                    || job.live_window_id.as_deref() != Some(window_id.as_str())
+                {
+                    return Err(ledger_corrupt());
+                }
+                match job.state {
+                    BackfillState::Pending | BackfillState::Running => {
+                        non_terminal_job = true;
+                    }
+                    BackfillState::Completed
+                    | BackfillState::Cancelled
+                    | BackfillState::Quarantined => terminal_job_ids.push(job_id),
+                }
+            }
+            if non_terminal_job {
+                break;
+            }
+            for job_id in &terminal_job_ids {
+                validate_no_backfill_outbox_for_live_gap(&transaction, job_id)?;
+            }
+
+            let crypto_row_ids = context
+                .crypto_rows
+                .iter()
+                .filter(|row| row.inbox_id == *inbox.inbox_id())
+                .map(|row| {
+                    if super::is_unresolved_crypto_state(row.state) {
+                        None
+                    } else {
+                        Some(row.crypto_row_id.as_str().to_owned())
+                    }
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(crypto_row_ids) = crypto_row_ids else {
+                break;
+            };
+
+            selections.push(PurgeSelection {
+                inbox_id: inbox.inbox_id().as_str().to_owned(),
+                window_id,
+                staged_anchor_count: staged_anchors.len(),
+                staged_ephemeral_count: staged_ephemeral.len(),
+                ingestion_row_ids: outbox.into_iter().map(|row| row.batch_row_id).collect(),
+                crypto_row_ids,
+                live_gap_job_ids: terminal_job_ids,
+            });
+        }
+
+        if selections.is_empty() {
+            drop(transaction);
+            return Ok(PurgeOutcome::new(0, 0, 0, 0, 0));
+        }
+
+        let selected_last_inbox_id = selections
+            .last()
+            .ok_or_else(ledger_corrupt)?
+            .inbox_id
+            .as_str();
+        let selected_last_index = context
+            .chain
+            .ordered_indices
+            .iter()
+            .position(|index| {
+                context.chain.rows[*index].inbox_id().as_str() == selected_last_inbox_id
+            })
+            .ok_or_else(ledger_corrupt)?;
+        let retained_index = selected_last_index
+            .checked_add(1)
+            .and_then(|index| context.chain.ordered_indices.get(index).copied())
+            .ok_or_else(ledger_corrupt)?;
+        let retained = &context.chain.rows[retained_index];
+        if retained.predecessor_id().map(|id| id.as_str()) != Some(selected_last_inbox_id) {
+            return Err(ledger_corrupt());
+        }
+        let rewired = transaction
+            .execute(
+                "UPDATE sync_inbox SET predecessor_id = NULL
+                 WHERE inbox_id = ?1 AND predecessor_id = ?2",
+                params![retained.inbox_id().as_str(), selected_last_inbox_id],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if rewired != 1 {
+            return Err(ledger_corrupt());
+        }
+
+        let mut crypto_count = 0_u64;
+        let mut ingestion_count = 0_u64;
+        let mut live_gap_count = 0_u64;
+        for selection in &selections {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM window_room_anchors WHERE window_id = ?1",
+                    [selection.window_id.as_str()],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if deleted != selection.staged_anchor_count {
+                return Err(ledger_corrupt());
+            }
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM window_room_ephemeral WHERE window_id = ?1",
+                    [selection.window_id.as_str()],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if deleted != selection.staged_ephemeral_count {
+                return Err(ledger_corrupt());
+            }
+
+            for row_id in &selection.ingestion_row_ids {
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM outbox_batches
+                         WHERE batch_row_id = ?1 AND source_kind = 'live'
+                           AND window_id = ?2 AND backfill_job_id IS NULL
+                           AND state = 'accepted'",
+                        params![row_id, selection.window_id.as_str()],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if deleted != 1 {
+                    return Err(ledger_corrupt());
+                }
+                ingestion_count = ingestion_count.checked_add(1).ok_or_else(ledger_corrupt)?;
+            }
+
+            for job_id in &selection.live_gap_job_ids {
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM backfill_jobs
+                         WHERE job_id = ?1 AND kind = 'live_gap'
+                           AND live_window_id = ?2
+                           AND state IN ('completed', 'cancelled', 'quarantined')",
+                        params![job_id, selection.window_id.as_str()],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if deleted != 1 {
+                    return Err(ledger_corrupt());
+                }
+                live_gap_count = live_gap_count.checked_add(1).ok_or_else(ledger_corrupt)?;
+            }
+
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM sync_windows
+                     WHERE window_id = ?1 AND inbox_id = ?2 AND state = 'committed'",
+                    params![selection.window_id.as_str(), selection.inbox_id.as_str()],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if deleted != 1 {
+                return Err(ledger_corrupt());
+            }
+
+            for crypto_row_id in &selection.crypto_row_ids {
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM matrix_crypto_outbox
+                         WHERE crypto_row_id = ?1 AND inbox_id = ?2 AND state = 'accepted'",
+                        params![crypto_row_id, selection.inbox_id.as_str()],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if deleted != 1 {
+                    return Err(ledger_corrupt());
+                }
+                crypto_count = crypto_count.checked_add(1).ok_or_else(ledger_corrupt)?;
+            }
+        }
+
+        for selection in selections.iter().rev() {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM sync_inbox
+                     WHERE inbox_id = ?1 AND state = 'committed'",
+                    [selection.inbox_id.as_str()],
+                )
+                .map_err(|_| ledger_corrupt())?;
+            if deleted != 1 {
+                return Err(ledger_corrupt());
+            }
+        }
+
+        let mut foreign_key_check = transaction
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(|_| ledger_corrupt())?;
+        let mut violations = foreign_key_check.query([]).map_err(|_| ledger_corrupt())?;
+        if violations.next().map_err(|_| ledger_corrupt())?.is_some() {
+            return Err(ledger_corrupt());
+        }
+        drop(violations);
+        drop(foreign_key_check);
+
+        let outcome = PurgeOutcome::new(
+            u64::try_from(selections.len()).map_err(|_| ledger_corrupt())?,
+            u64::try_from(selections.len()).map_err(|_| ledger_corrupt())?,
+            crypto_count,
+            ingestion_count,
+            live_gap_count,
+        );
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(outcome)
     }
 
     /// Accept one live ingestion row and commit its source window when complete.
