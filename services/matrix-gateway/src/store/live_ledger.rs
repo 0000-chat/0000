@@ -21,7 +21,7 @@ use crate::{
         STORE_LEDGER_TOO_LARGE, StoredLiveGapJob,
     },
     secret::{SafeError, SecretBytes},
-    store_types::{InboxId, MAX_BOOTSTRAP_ROOM_ANCHORS, SyncInboxState},
+    store_types::{InboxId, MAX_BOOTSTRAP_ROOM_ANCHORS, ReasonCode, SyncInboxState},
 };
 
 use super::{
@@ -65,6 +65,7 @@ struct StoredOutboxBatch {
     next_attempt_at: DateTime<Utc>,
     next_attempt_at_text: String,
     accepted_at: Option<DateTime<Utc>>,
+    terminal_code: Option<String>,
 }
 
 struct StoredAnchor {
@@ -685,6 +686,274 @@ impl Store {
         Ok(())
     }
 
+    /// Terminally quarantine one pending live ingestion row and its owner.
+    pub fn quarantine_live_batch(
+        &mut self,
+        row_id: &str,
+        terminal_code: ReasonCode,
+    ) -> Result<(), SafeError> {
+        if !valid_batch_id(row_id) || !valid_stored_reason_code(terminal_code.as_str()) {
+            return Err(ledger_invalid());
+        }
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+        let addressed =
+            load_outbox_batch_by_id(&transaction, keyring, row_id)?.ok_or_else(ledger_not_ready)?;
+        let window_id = outbox_window_id(&transaction, row_id)?.ok_or_else(ledger_not_ready)?;
+        let window = load_window_by_id(&transaction, &window_id)?.ok_or_else(ledger_not_ready)?;
+        let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
+        let expected_window_id =
+            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+        if window.window_id != expected_window_id || window.window_id != window_id {
+            return Err(ledger_corrupt());
+        }
+
+        let temporarily_prepared = if window.state == "quarantined" {
+            temporarily_prepare_quarantined_inboxes(&transaction)?
+        } else {
+            Vec::new()
+        };
+        let quarantined_inbox_code = temporarily_prepared
+            .iter()
+            .find(|(candidate, _)| candidate == inbox_id.as_str())
+            .map(|(_, code)| code.clone());
+        let context = load_live_context(&transaction, keyring)?;
+        let inbox = context
+            .chain
+            .rows
+            .iter()
+            .find(|row| row.inbox_id().as_str() == inbox_id.as_str())
+            .ok_or_else(ledger_corrupt)?;
+        if window.state == "quarantined" {
+            let inbox_code = quarantined_inbox_code
+                .as_deref()
+                .ok_or_else(ledger_corrupt)?;
+            validate_quarantined_window_inbox_link(&window, inbox, inbox_code)?;
+        } else {
+            validate_window_inbox_link(&context, &window)?;
+        }
+
+        let outbox = load_outbox_batches(&transaction, keyring, &window_id)?;
+        let staged_anchors = load_staged_anchors(&transaction, keyring, &window_id)?;
+        let staged_ephemeral = load_staged_ephemeral(&transaction, keyring, &window_id)?;
+        validate_window_children_against_metadata(
+            &window,
+            &outbox,
+            &staged_anchors,
+            &staged_ephemeral,
+        )?;
+        validate_live_window_metadata(&window, &outbox, inbox)?;
+        validate_accepted_timestamps(&outbox, inbox)?;
+        let current = outbox
+            .iter()
+            .find(|candidate| candidate.batch_row_id == row_id)
+            .ok_or_else(ledger_corrupt)?;
+
+        match window.state.as_str() {
+            "pending" => {
+                let oldest = oldest_target(&context, &inbox_id)?;
+                validate_pending_live_target(&context, oldest)?;
+                if addressed.state != "pending" || current.state != "pending" {
+                    return Err(ledger_not_ready());
+                }
+
+                let updated_outbox = transaction
+                    .execute(
+                        "UPDATE outbox_batches
+                         SET state = 'quarantined', terminal_code = ?1
+                         WHERE batch_row_id = ?2 AND source_kind = 'live'
+                           AND window_id = ?3 AND backfill_job_id IS NULL
+                           AND state = 'pending' AND accepted_at IS NULL
+                           AND terminal_code IS NULL",
+                        params![terminal_code.as_str(), row_id, window_id],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if updated_outbox != 1 {
+                    return Err(ledger_corrupt());
+                }
+                let updated_window = transaction
+                    .execute(
+                        "UPDATE sync_windows
+                         SET state = 'quarantined', terminal_code = ?1
+                         WHERE window_id = ?2 AND inbox_id = ?3 AND state = 'pending'
+                           AND batch_count = ?4 AND accepted_count = ?5
+                           AND committed_at IS NULL AND terminal_code IS NULL",
+                        params![
+                            terminal_code.as_str(),
+                            window_id,
+                            inbox_id.as_str(),
+                            window.batch_count,
+                            window.accepted_count,
+                        ],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if updated_window != 1 {
+                    return Err(ledger_corrupt());
+                }
+                let updated_inbox = transaction
+                    .execute(
+                        "UPDATE sync_inbox
+                         SET state = 'quarantined', terminal_code = ?1
+                         WHERE inbox_id = ?2 AND state = 'prepared' AND crypto_drained = 1
+                           AND sdk_processed_at IS NOT NULL AND prepared_at IS NOT NULL
+                           AND committed_at IS NULL AND terminal_code IS NULL",
+                        params![terminal_code.as_str(), inbox_id.as_str()],
+                    )
+                    .map_err(|_| ledger_corrupt())?;
+                if updated_inbox != 1 {
+                    return Err(ledger_corrupt());
+                }
+                transaction.commit().map_err(|_| ledger_corrupt())?;
+                Ok(())
+            }
+            "quarantined" => {
+                let oldest = oldest_target(&context, &inbox_id)?;
+                validate_pending_live_target(&context, oldest)?;
+                validate_quarantined_live_children(&window, &outbox)?;
+                if addressed.state != "quarantined" || current.state != "quarantined" {
+                    return Err(ledger_not_ready());
+                }
+                let stored_code = current
+                    .terminal_code
+                    .as_deref()
+                    .ok_or_else(ledger_corrupt)?;
+                if terminal_code.as_str() != stored_code {
+                    return Err(ledger_conflict());
+                }
+                drop(transaction);
+                Ok(())
+            }
+            "collecting" | "committed" => Err(ledger_not_ready()),
+            _ => Err(ledger_corrupt()),
+        }
+    }
+
+    /// Atomically reopen one quarantined live window for delivery retry.
+    pub fn retry_quarantined_window(
+        &mut self,
+        window_id: &str,
+        retry_at: DateTime<Utc>,
+    ) -> Result<(), SafeError> {
+        if !valid_window_id(window_id) || !valid_utc_millisecond(retry_at) {
+            return Err(ledger_invalid());
+        }
+
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ledger_corrupt())?;
+        let window = load_window_by_id(&transaction, window_id)?.ok_or_else(ledger_not_ready)?;
+        let inbox_id = validate_inbox_id(&window.inbox_id).map_err(|_| ledger_corrupt())?;
+        let expected_window_id =
+            derive_window_id(keyring, inbox_id.as_str()).map_err(|_| ledger_corrupt())?;
+        if window.window_id != expected_window_id || window.window_id != window_id {
+            return Err(ledger_corrupt());
+        }
+
+        let temporarily_prepared = if window.state == "quarantined" {
+            temporarily_prepare_quarantined_inboxes(&transaction)?
+        } else {
+            Vec::new()
+        };
+        let quarantined_inbox_code = temporarily_prepared
+            .iter()
+            .find(|(candidate, _)| candidate == inbox_id.as_str())
+            .map(|(_, code)| code.clone());
+        let context = load_live_context(&transaction, keyring)?;
+        let inbox = context
+            .chain
+            .rows
+            .iter()
+            .find(|row| row.inbox_id().as_str() == inbox_id.as_str())
+            .ok_or_else(ledger_corrupt)?;
+        if window.state == "quarantined" {
+            let inbox_code = quarantined_inbox_code
+                .as_deref()
+                .ok_or_else(ledger_corrupt)?;
+            validate_quarantined_window_inbox_link(&window, inbox, inbox_code)?;
+        } else {
+            validate_window_inbox_link(&context, &window)?;
+        }
+
+        let outbox = load_outbox_batches(&transaction, keyring, window_id)?;
+        let staged_anchors = load_staged_anchors(&transaction, keyring, window_id)?;
+        let staged_ephemeral = load_staged_ephemeral(&transaction, keyring, window_id)?;
+        validate_window_children_against_metadata(
+            &window,
+            &outbox,
+            &staged_anchors,
+            &staged_ephemeral,
+        )?;
+        validate_live_window_metadata(&window, &outbox, inbox)?;
+        validate_accepted_timestamps(&outbox, inbox)?;
+
+        if window.state != "quarantined" {
+            return Err(ledger_not_ready());
+        }
+        let code = window.terminal_code.as_deref().ok_or_else(ledger_corrupt)?;
+        if quarantined_inbox_code.as_deref() != Some(code) {
+            return Err(ledger_corrupt());
+        }
+        let quarantined_count = validate_quarantined_live_children(&window, &outbox)?;
+        let oldest = oldest_target(&context, &inbox_id)?;
+        validate_pending_live_target(&context, oldest)?;
+
+        restore_quarantined_inboxes(&transaction, &temporarily_prepared)?;
+
+        let updated_outbox = transaction
+            .execute(
+                "UPDATE outbox_batches
+                 SET state = 'pending', next_attempt_at = ?1, terminal_code = NULL
+                 WHERE source_kind = 'live' AND window_id = ?2
+                   AND backfill_job_id IS NULL AND state = 'quarantined'
+                   AND accepted_at IS NULL AND terminal_code = ?3",
+                params![retry_at.to_rfc3339(), window_id, code],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated_outbox != quarantined_count {
+            return Err(ledger_corrupt());
+        }
+        let updated_window = transaction
+            .execute(
+                "UPDATE sync_windows
+                 SET state = 'pending', terminal_code = NULL
+                 WHERE window_id = ?1 AND inbox_id = ?2 AND state = 'quarantined'
+                   AND batch_count = ?3 AND accepted_count = ?4
+                   AND committed_at IS NULL AND terminal_code = ?5",
+                params![
+                    window_id,
+                    inbox_id.as_str(),
+                    window.batch_count,
+                    window.accepted_count,
+                    code,
+                ],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated_window != 1 {
+            return Err(ledger_corrupt());
+        }
+        let updated_inbox = transaction
+            .execute(
+                "UPDATE sync_inbox
+                 SET state = 'prepared', terminal_code = NULL
+                 WHERE inbox_id = ?1 AND state = 'quarantined' AND crypto_drained = 1
+                   AND sdk_processed_at IS NOT NULL AND prepared_at IS NOT NULL
+                   AND committed_at IS NULL AND terminal_code = ?2",
+                params![inbox_id.as_str(), code],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated_inbox != 1 {
+            return Err(ledger_corrupt());
+        }
+        transaction.commit().map_err(|_| ledger_corrupt())?;
+        Ok(())
+    }
+
     /// Accept one live ingestion row and commit its source window when complete.
     pub fn accept_live_batch_and_maybe_commit_window(
         &mut self,
@@ -1261,6 +1530,120 @@ impl Store {
             batch_count: window_validation.batch_count,
         })
     }
+}
+
+fn validate_quarantined_window_inbox_link(
+    window: &StoredLiveWindow,
+    inbox: &super::RawSyncInbox,
+    inbox_code: &str,
+) -> Result<(), SafeError> {
+    if window.state != "quarantined"
+        || window.committed_at.is_some()
+        || window.terminal_code.as_deref() != Some(inbox_code)
+        || inbox.state() != SyncInboxState::Prepared
+        || !inbox.crypto_drained()
+        || inbox.prepared_at().is_none()
+        || inbox.committed_at().is_some()
+        || inbox.terminal_code().is_some()
+    {
+        return Err(ledger_corrupt());
+    }
+    Ok(())
+}
+
+fn validate_quarantined_live_children(
+    window: &StoredLiveWindow,
+    outbox: &[StoredOutboxBatch],
+) -> Result<usize, SafeError> {
+    let window_code = window.terminal_code.as_deref().ok_or_else(ledger_corrupt)?;
+    let mut quarantined_count = 0_usize;
+    for row in outbox {
+        if row.state == "quarantined" {
+            quarantined_count = quarantined_count
+                .checked_add(1)
+                .ok_or_else(ledger_corrupt)?;
+            if row.accepted_at.is_some() || row.terminal_code.as_deref() != Some(window_code) {
+                return Err(ledger_corrupt());
+            }
+        }
+    }
+    if quarantined_count == 0 {
+        return Err(ledger_corrupt());
+    }
+    Ok(quarantined_count)
+}
+
+fn temporarily_prepare_quarantined_inboxes(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<(String, String)>, SafeError> {
+    let max_rows =
+        usize::try_from(crate::config::MAX_PENDING_REQUEST_ROWS).map_err(|_| ledger_corrupt())?;
+    let limit = crate::config::MAX_PENDING_REQUEST_ROWS
+        .checked_add(1)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(ledger_corrupt)?;
+    let mut statement = transaction
+        .prepare(
+            "SELECT inbox_id, terminal_code
+             FROM sync_inbox WHERE state = 'quarantined' ORDER BY rowid LIMIT ?1",
+        )
+        .map_err(|_| ledger_corrupt())?;
+    let mut rows = statement
+        .query(params![limit])
+        .map_err(|_| ledger_corrupt())?;
+    let mut quarantined = Vec::new();
+    while let Some(row) = rows.next().map_err(|_| ledger_corrupt())? {
+        if quarantined.len() >= max_rows {
+            return Err(ledger_corrupt());
+        }
+        let inbox_id = read_text(row, 0, MAX_LEDGER_ID_BYTES, valid_stored_inbox_id)?;
+        let terminal_code =
+            read_optional_text(row, 1, 64, valid_stored_reason_code)?.ok_or_else(ledger_corrupt)?;
+        quarantined.push((inbox_id, terminal_code));
+    }
+    drop(rows);
+    drop(statement);
+
+    for (inbox_id, terminal_code) in &quarantined {
+        let updated = transaction
+            .execute(
+                "UPDATE sync_inbox
+                 SET state = 'prepared', terminal_code = NULL
+                 WHERE inbox_id = ?1 AND state = 'quarantined'
+                   AND crypto_drained = 1 AND sdk_processed_at IS NOT NULL
+                   AND prepared_at IS NOT NULL AND committed_at IS NULL
+                   AND terminal_code = ?2",
+                params![inbox_id, terminal_code],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated != 1 {
+            return Err(ledger_corrupt());
+        }
+    }
+    Ok(quarantined)
+}
+
+fn restore_quarantined_inboxes(
+    transaction: &Transaction<'_>,
+    quarantined: &[(String, String)],
+) -> Result<(), SafeError> {
+    for (inbox_id, terminal_code) in quarantined {
+        let updated = transaction
+            .execute(
+                "UPDATE sync_inbox
+                 SET state = 'quarantined', terminal_code = ?1
+                 WHERE inbox_id = ?2 AND state = 'prepared'
+                   AND crypto_drained = 1 AND sdk_processed_at IS NOT NULL
+                   AND prepared_at IS NOT NULL AND committed_at IS NULL
+                   AND terminal_code IS NULL",
+                params![terminal_code, inbox_id],
+            )
+            .map_err(|_| ledger_corrupt())?;
+        if updated != 1 {
+            return Err(ledger_corrupt());
+        }
+    }
+    Ok(())
 }
 
 fn validate_pending_live_target(
@@ -2703,6 +3086,7 @@ fn read_and_verify_outbox(
             .map(parse_stored_timestamp)
             .transpose()
             .map_err(|_| ledger_corrupt())?,
+        terminal_code,
     })
 }
 
