@@ -499,6 +499,30 @@ struct RetainedInboxBounds {
     total_bytes: u64,
 }
 
+/// Content-free pressure metrics for retained inbox and crypto request state.
+pub(crate) struct InboxCryptoPressure {
+    pending_request_rows: u64,
+    protected_bytes: u64,
+    oldest_pending_at: Option<DateTime<Utc>>,
+}
+
+impl InboxCryptoPressure {
+    /// Return the number of unresolved crypto request rows.
+    pub(crate) const fn pending_request_rows(&self) -> u64 {
+        self.pending_request_rows
+    }
+
+    /// Return the bytes protected by retained inbox and crypto request rows.
+    pub(crate) const fn protected_bytes(&self) -> u64 {
+        self.protected_bytes
+    }
+
+    /// Return the oldest inbox or unresolved crypto retry timestamp.
+    pub(crate) const fn oldest_pending_at(&self) -> Option<DateTime<Utc>> {
+        self.oldest_pending_at
+    }
+}
+
 struct VerifiedInboxChain {
     rows: Vec<RawSyncInbox>,
     next_digest_index: HashMap<[u8; 32], usize>,
@@ -1886,6 +1910,64 @@ impl Store {
             &fetch_token,
         )?;
         Ok(chain.into_uncommitted())
+    }
+
+    /// Return authenticated, content-free pressure metrics for retained inbox
+    /// rows and unresolved crypto requests.
+    pub(crate) fn inbox_crypto_pressure(&self) -> Result<InboxCryptoPressure, SafeError> {
+        let context = load_crypto_context(&self.connection, &self.keyring)?;
+        let mut protected_bytes = 0_u64;
+        let mut oldest_pending_at: Option<DateTime<Utc>> = None;
+
+        for row in &context.chain.rows {
+            let byte_count = u64::try_from(row.byte_count()).map_err(|_| store_sync_corrupt())?;
+            protected_bytes = protected_bytes
+                .checked_add(byte_count)
+                .ok_or_else(store_sync_corrupt)?;
+            if !matches!(
+                row.state(),
+                SyncInboxState::Committed | SyncInboxState::Quarantined
+            ) {
+                oldest_pending_at = Some(
+                    oldest_pending_at
+                        .map_or(*row.observed_at(), |oldest| oldest.min(*row.observed_at())),
+                );
+            }
+        }
+
+        let mut pending_request_rows = 0_u64;
+        for row in &context.crypto_rows {
+            if !matches!(
+                row.state,
+                CryptoLifecycle::Pending | CryptoLifecycle::ResponseReceived
+            ) {
+                continue;
+            }
+            pending_request_rows = pending_request_rows
+                .checked_add(1)
+                .ok_or_else(store_crypto_corrupt)?;
+            let byte_count = u64::try_from(row.byte_count).map_err(|_| store_crypto_corrupt())?;
+            protected_bytes = protected_bytes
+                .checked_add(byte_count)
+                .ok_or_else(store_crypto_corrupt)?;
+            let parent = context
+                .chain
+                .rows
+                .iter()
+                .find(|candidate| candidate.inbox_id() == &row.inbox_id)
+                .ok_or_else(store_crypto_corrupt)?;
+            let parent_observed_at = *parent.observed_at();
+            oldest_pending_at = Some(
+                oldest_pending_at
+                    .map_or(parent_observed_at, |oldest| oldest.min(parent_observed_at)),
+            );
+        }
+
+        Ok(InboxCryptoPressure {
+            pending_request_rows,
+            protected_bytes,
+            oldest_pending_at,
+        })
     }
 
     /// Return the deterministic live-window identifier for one authenticated
@@ -4468,5 +4550,66 @@ mod tests {
             assert_eq!(error.code(), expected_code);
             assert_eq!(store_snapshot(&store), before);
         }
+    }
+
+    #[test]
+    fn inbox_crypto_pressure_uses_immutable_parent_age() {
+        let directory = tempdir().expect("create crypto pressure test directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure crypto pressure test directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let mut store = Store::open(&path, Keyring::new([0x11; 32], 1).expect("test keyring"))
+            .expect("open crypto pressure test store");
+        let parent_observed_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("parent timestamp");
+        store
+            .initialize_bootstrap_state(
+                NewBootstrapState::new(
+                    b"session".to_vec(),
+                    b"initial".to_vec(),
+                    Vec::new(),
+                    parent_observed_at,
+                )
+                .expect("construct bootstrap test state"),
+            )
+            .expect("initialize crypto pressure test store");
+
+        let inbox_id = store
+            .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                b"initial".to_vec(),
+                b"next-1".to_vec(),
+                b"response".to_vec(),
+                parent_observed_at,
+            ))
+            .expect("append old inbox");
+        let request = ExactMatrixRequest::keys_query(b"sdk-request-id".to_vec(), br#"{}"#.to_vec())
+            .expect("construct crypto request");
+        store
+            .record_sdk_processing(inbox_id.as_str(), &[request])
+            .expect("record crypto request");
+        let request_lookup =
+            matrix_request_lookup(&store.keyring, b"{}").expect("derive crypto request lookup");
+        let crypto_row_id =
+            derive_crypto_row_id(&inbox_id, &request_lookup).expect("derive crypto row id");
+        let retry_at = Utc
+            .timestamp_millis_opt(1_700_000_002_000)
+            .single()
+            .expect("retry timestamp");
+        store
+            .record_attempt(
+                crypto_row_id.as_str(),
+                0,
+                parent_observed_at,
+                Utc.timestamp_millis_opt(1_700_000_001_000)
+                    .single()
+                    .expect("lease timestamp"),
+                retry_at,
+            )
+            .expect("lease and reschedule crypto request");
+
+        let pressure = store.inbox_crypto_pressure().expect("read crypto pressure");
+        assert_eq!(pressure.oldest_pending_at(), Some(parent_observed_at));
     }
 }

@@ -978,33 +978,23 @@ where
     }
 
     fn fetch_backpressured(&self, now: DateTime<Utc>) -> Result<bool, SafeError> {
-        let rows = self
+        let inbox_crypto = self
             .store
-            .uncommitted_inbox_rows()
+            .inbox_crypto_pressure()
             .map_err(|error| SafeError::new(error.code()))?;
-        let pending_bytes = rows.iter().try_fold(0_u64, |total, row| {
-            total
-                .checked_add(
-                    u64::try_from(row.byte_count())
-                        .map_err(|_| SafeError::new(SERVICE_RETRY_INVALID))?,
-                )
-                .ok_or_else(|| SafeError::new(SERVICE_RETRY_INVALID))
-        })?;
-        let oldest = rows.iter().map(|row| *row.observed_at()).min();
-        let inbox_pressure = rows.len() as u64 >= MAX_PENDING_INBOX_ROWS
-            || pending_bytes >= MAX_PROTECTED_BYTES
-            || oldest
-                .is_some_and(|value| now.signed_duration_since(value) > ChronoDuration::hours(24));
         let ledger = self
             .store
             .ledger_pressure()
             .map_err(|error| SafeError::new(error.code()))?;
-        Ok(inbox_pressure
-            || ledger.pending_batches() >= MAX_PENDING_INBOX_ROWS
-            || ledger.pending_bytes() >= MAX_PROTECTED_BYTES
-            || ledger
-                .oldest_pending_at()
-                .is_some_and(|value| now.signed_duration_since(*value) > ChronoDuration::hours(24)))
+        fetch_pressure_decision(
+            now,
+            inbox_crypto.pending_request_rows(),
+            ledger.pending_batches(),
+            inbox_crypto.protected_bytes(),
+            ledger.pending_bytes(),
+            inbox_crypto.oldest_pending_at(),
+            ledger.oldest_pending_at().copied(),
+        )
     }
 
     fn persist_typing_snapshots(&mut self, typing: Vec<TypingCandidate>) {
@@ -1057,6 +1047,32 @@ where
 
 fn valid_millisecond(value: DateTime<Utc>) -> bool {
     value.timestamp_subsec_nanos().is_multiple_of(1_000_000)
+}
+
+fn fetch_pressure_decision(
+    now: DateTime<Utc>,
+    crypto_request_rows: u64,
+    pending_ingestion_batches: u64,
+    retained_bytes: u64,
+    pending_ingestion_bytes: u64,
+    oldest_inbox_or_crypto_at: Option<DateTime<Utc>>,
+    oldest_ingestion_at: Option<DateTime<Utc>>,
+) -> Result<bool, SafeError> {
+    let request_rows = crypto_request_rows
+        .checked_add(pending_ingestion_batches)
+        .ok_or_else(|| SafeError::new(SERVICE_RETRY_INVALID))?;
+    let protected_bytes = retained_bytes
+        .checked_add(pending_ingestion_bytes)
+        .ok_or_else(|| SafeError::new(SERVICE_RETRY_INVALID))?;
+    let oldest_pending_at = [oldest_inbox_or_crypto_at, oldest_ingestion_at]
+        .into_iter()
+        .flatten()
+        .min();
+
+    Ok(request_rows >= MAX_PENDING_INBOX_ROWS
+        || protected_bytes >= MAX_PROTECTED_BYTES
+        || oldest_pending_at
+            .is_some_and(|value| now.signed_duration_since(value) > ChronoDuration::hours(24)))
 }
 
 struct ConvertedObservation {
@@ -1494,4 +1510,56 @@ fn parse_attachments(content: &Value) -> Vec<MatrixAttachment> {
 
 fn now_before_expiry(now: DateTime<Utc>, observed_at: DateTime<Utc>) -> bool {
     now <= observed_at + ChronoDuration::seconds(30)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timestamp(millis: i64) -> DateTime<Utc> {
+        Utc.timestamp_millis_opt(millis)
+            .single()
+            .expect("valid test timestamp")
+    }
+
+    #[test]
+    fn request_row_cap_counts_crypto_and_ingestion_rows() {
+        let now = timestamp(0);
+        assert!(
+            !fetch_pressure_decision(now, 1_000, 999, 0, 0, None, None).expect("pressure decision")
+        );
+        assert!(
+            fetch_pressure_decision(now, 1_000, 1_000, 0, 0, None, None)
+                .expect("pressure decision")
+        );
+    }
+
+    #[test]
+    fn protected_byte_components_stop_at_the_checked_cap() {
+        let now = timestamp(0);
+        assert!(
+            fetch_pressure_decision(now, 0, 0, MAX_PROTECTED_BYTES - 1, 1, None, None,)
+                .expect("pressure decision")
+        );
+    }
+
+    #[test]
+    fn exactly_one_day_is_allowed_but_one_millisecond_more_is_not() {
+        let now = timestamp(86_400_000);
+        assert!(
+            !fetch_pressure_decision(now, 0, 0, 0, 0, Some(timestamp(0)), None,)
+                .expect("pressure decision")
+        );
+        assert!(
+            fetch_pressure_decision(now, 0, 0, 0, 0, Some(timestamp(-1)), None,)
+                .expect("pressure decision")
+        );
+    }
+
+    #[test]
+    fn checked_pressure_addition_overflow_is_retry_invalid() {
+        let error = fetch_pressure_decision(timestamp(0), u64::MAX, 1, 0, 0, None, None)
+            .expect_err("row addition must be checked");
+        assert_eq!(error.code(), SERVICE_RETRY_INVALID);
+    }
 }
