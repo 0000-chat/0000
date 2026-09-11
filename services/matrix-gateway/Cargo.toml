@@ -30,7 +30,7 @@ rustix = { version = "=1.1.4", features = ["fs", "process"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "=1.26.0", features = ["v4"] }
 zeroize = "=1.9.0"
 
@@ -39,5 +39,6 @@ matrix-sdk = { workspace = true, features = ["e2e-encryption", "sqlite", "bundle
 matrix-sdk-crypto = { workspace = true, features = ["testing"] }
 matrix-sdk-test.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 url.workspace = true
 wiremock.workspace = true

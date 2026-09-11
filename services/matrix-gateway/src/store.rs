@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{
     Connection, OptionalExtension, Row, TransactionBehavior, ffi, params, types::ValueRef,
 };
@@ -504,6 +504,7 @@ pub(crate) struct InboxCryptoPressure {
     pending_request_rows: u64,
     protected_bytes: u64,
     oldest_pending_at: Option<DateTime<Utc>>,
+    next_retention_at: Option<DateTime<Utc>>,
 }
 
 impl InboxCryptoPressure {
@@ -520,6 +521,11 @@ impl InboxCryptoPressure {
     /// Return the oldest inbox or unresolved crypto retry timestamp.
     pub(crate) const fn oldest_pending_at(&self) -> Option<DateTime<Utc>> {
         self.oldest_pending_at
+    }
+
+    /// Return the strict retention deadline for the oldest purgeable row.
+    pub(crate) const fn next_retention_at(&self) -> Option<DateTime<Utc>> {
+        self.next_retention_at
     }
 }
 
@@ -1963,10 +1969,34 @@ impl Store {
             );
         }
 
+        let committed_prefix = context
+            .chain
+            .ordered_indices
+            .iter()
+            .map(|index| &context.chain.rows[*index])
+            .take_while(|row| row.state() == SyncInboxState::Committed)
+            .collect::<Vec<_>>();
+        let oldest_purge_candidate = committed_prefix
+            .split_last()
+            .and_then(|(_, purgeable_prefix)| purgeable_prefix.first())
+            .copied();
+        let next_retention_at = oldest_purge_candidate
+            .map(|row| {
+                let committed_at = *row.committed_at().ok_or_else(store_sync_corrupt)?;
+                let retention_cutoff = committed_at
+                    .checked_add_signed(ChronoDuration::days(7))
+                    .ok_or_else(store_sync_corrupt)?;
+                retention_cutoff
+                    .checked_add_signed(ChronoDuration::milliseconds(1))
+                    .ok_or_else(store_sync_corrupt)
+            })
+            .transpose()?;
+
         Ok(InboxCryptoPressure {
             pending_request_rows,
             protected_bytes,
             oldest_pending_at,
+            next_retention_at,
         })
     }
 
@@ -4354,6 +4384,7 @@ fn normalize_sql(sql: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::NewLiveWindow;
     use chrono::TimeZone;
     use rusqlite::types::Value;
     use std::os::unix::fs::PermissionsExt;
@@ -4611,5 +4642,125 @@ mod tests {
 
         let pressure = store.inbox_crypto_pressure().expect("read crypto pressure");
         assert_eq!(pressure.oldest_pending_at(), Some(parent_observed_at));
+    }
+
+    #[test]
+    fn inbox_crypto_pressure_reports_oldest_purge_candidate_deadline() {
+        let directory = tempdir().expect("create retention deadline test directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure retention deadline test directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let mut store = Store::open(&path, Keyring::new([0x11; 32], 1).expect("test keyring"))
+            .expect("open retention deadline test store");
+        let first_observed_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("first observation timestamp");
+        store
+            .initialize_bootstrap_state(
+                NewBootstrapState::new(
+                    b"session".to_vec(),
+                    b"initial".to_vec(),
+                    Vec::new(),
+                    first_observed_at,
+                )
+                .expect("construct bootstrap test state"),
+            )
+            .expect("initialize retention deadline test store");
+
+        let first_id = store
+            .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                b"initial".to_vec(),
+                b"next-1".to_vec(),
+                br#"{"next_batch":"next-1"}"#.to_vec(),
+                first_observed_at,
+            ))
+            .expect("append first inbox")
+            .as_str()
+            .to_owned();
+        store
+            .record_sdk_processing(&first_id, &[])
+            .expect("record first empty SDK processing");
+        store
+            .mark_crypto_drained(&first_id)
+            .expect("drain first empty crypto set");
+        let first_window_id = format!(
+            "window_{}",
+            store
+                .keyring
+                .lookup_digest("matrix-live-window-v1", &[&first_id])
+                .expect("derive first window ID")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        store
+            .create_collecting_live_window(
+                &first_id,
+                NewLiveWindow::new(first_window_id.clone(), first_observed_at, 0)
+                    .expect("create first collecting window"),
+            )
+            .expect("create first empty window");
+        let first_committed_at = Utc
+            .timestamp_millis_opt(1_700_000_000_100)
+            .single()
+            .expect("first commit timestamp");
+        store
+            .commit_empty_live_window(&first_id, &first_window_id, &[], &[], first_committed_at)
+            .expect("commit first empty window");
+
+        let second_observed_at = Utc
+            .timestamp_millis_opt(1_700_000_001_000)
+            .single()
+            .expect("second observation timestamp");
+        let second_id = store
+            .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                b"next-1".to_vec(),
+                b"next-2".to_vec(),
+                br#"{"next_batch":"next-2"}"#.to_vec(),
+                second_observed_at,
+            ))
+            .expect("append second inbox")
+            .as_str()
+            .to_owned();
+        store
+            .record_sdk_processing(&second_id, &[])
+            .expect("record second empty SDK processing");
+        store
+            .mark_crypto_drained(&second_id)
+            .expect("drain second empty crypto set");
+        let second_window_id = format!(
+            "window_{}",
+            store
+                .keyring
+                .lookup_digest("matrix-live-window-v1", &[&second_id])
+                .expect("derive second window ID")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        store
+            .create_collecting_live_window(
+                &second_id,
+                NewLiveWindow::new(second_window_id.clone(), second_observed_at, 0)
+                    .expect("create second collecting window"),
+            )
+            .expect("create second empty window");
+        let second_committed_at = Utc
+            .timestamp_millis_opt(1_700_000_001_100)
+            .single()
+            .expect("second commit timestamp");
+        store
+            .commit_empty_live_window(&second_id, &second_window_id, &[], &[], second_committed_at)
+            .expect("commit second empty window");
+
+        let expected = first_committed_at
+            .checked_add_signed(chrono::Duration::days(7))
+            .and_then(|value| value.checked_add_signed(chrono::Duration::milliseconds(1)))
+            .expect("retention deadline");
+        let pressure = store
+            .inbox_crypto_pressure()
+            .expect("read retention pressure");
+        assert_eq!(pressure.next_retention_at(), Some(expected));
     }
 }

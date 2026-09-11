@@ -7,6 +7,7 @@
 
 use std::{collections::BTreeMap, fmt, str, time::Duration as StdDuration};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, TimeZone, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -72,9 +73,12 @@ pub trait JitterSource: Send {
 }
 
 /// A source of an externally managed shutdown request.
+#[async_trait]
 pub trait Shutdown: Send + Sync {
     /// Return whether the next action must be suppressed.
     fn requested(&self) -> bool;
+    /// Wait until shutdown has been requested.
+    async fn wait_requested(&self);
 }
 
 /// The content-free action selected by one service tick.
@@ -528,7 +532,17 @@ where
                 ServiceAction::Shutdown => return Ok(()),
                 ServiceAction::Wait => {
                     let delay = self.next_wait_duration()?;
-                    tokio::time::sleep(delay).await;
+                    let sleep = async {
+                        match delay {
+                            Some(delay) => tokio::time::sleep(delay).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = self.shutdown.wait_requested() => return Ok(()),
+                        _ = sleep => {}
+                    }
                 }
                 _ => {}
             }
@@ -1009,7 +1023,7 @@ where
         }
     }
 
-    fn next_wait_duration(&self) -> Result<StdDuration, SafeError> {
+    fn next_wait_duration(&self) -> Result<Option<StdDuration>, SafeError> {
         let now = self.clock.now();
         if !valid_millisecond(now) {
             return Err(SafeError::new(SERVICE_RETRY_INVALID));
@@ -1024,25 +1038,44 @@ where
             .map_err(|error| SafeError::new(error.code()))?
             .oldest_pending_at()
             .copied();
-        let deadline = [crypto_deadline, ledger_deadline]
-            .into_iter()
-            .flatten()
-            .min();
+        let retention_deadline = self
+            .store
+            .inbox_crypto_pressure()
+            .map_err(|error| SafeError::new(error.code()))?
+            .next_retention_at();
+        let deadline =
+            select_next_wait_deadline(now, crypto_deadline, ledger_deadline, retention_deadline);
         let Some(deadline) = deadline else {
-            return Ok(StdDuration::from_millis(10));
+            return Ok(None);
         };
         if deadline <= now {
-            return Ok(StdDuration::ZERO);
+            return Ok(Some(StdDuration::ZERO));
         }
         let millis = deadline.signed_duration_since(now).num_milliseconds();
         let millis = u64::try_from(millis).map_err(|_| SafeError::new(SERVICE_RETRY_INVALID))?;
-        Ok(StdDuration::from_millis(millis))
+        Ok(Some(StdDuration::from_millis(millis)))
     }
 
     #[allow(dead_code)]
     fn _keep_sink_owned(&self) -> &I {
         &self.sink
     }
+}
+
+fn select_next_wait_deadline(
+    now: DateTime<Utc>,
+    crypto_deadline: Option<DateTime<Utc>>,
+    ingestion_deadline: Option<DateTime<Utc>>,
+    retention_deadline: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    [
+        crypto_deadline,
+        ingestion_deadline,
+        retention_deadline.filter(|deadline| *deadline > now),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 fn valid_millisecond(value: DateTime<Utc>) -> bool {
@@ -1561,5 +1594,20 @@ mod tests {
         let error = fetch_pressure_decision(timestamp(0), u64::MAX, 1, 0, 0, None, None)
             .expect_err("row addition must be checked");
         assert_eq!(error.code(), SERVICE_RETRY_INVALID);
+    }
+
+    #[test]
+    fn retention_deadline_is_selected_only_when_it_is_future() {
+        let now = timestamp(0);
+        let future_retention = timestamp(5_000);
+
+        assert_eq!(
+            select_next_wait_deadline(now, None, None, Some(future_retention)),
+            Some(future_retention)
+        );
+        assert_eq!(
+            select_next_wait_deadline(now, None, None, Some(timestamp(-1))),
+            None
+        );
     }
 }

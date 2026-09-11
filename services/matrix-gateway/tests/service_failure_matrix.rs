@@ -38,6 +38,7 @@ use communicator_matrix_gateway::{
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
+use tokio::sync::Notify;
 
 const INITIAL_TOKEN: &[u8] = b"initial-token";
 const NOW_MILLIS: i64 = 1_757_500_000_000;
@@ -144,26 +145,53 @@ impl JitterSource for DeterministicJitter {
 #[derive(Clone)]
 struct FakeShutdown {
     requested: Arc<AtomicBool>,
+    notification: Arc<Notify>,
+    requested_checks: Arc<Notify>,
 }
 
 impl FakeShutdown {
     fn new() -> Self {
         Self {
             requested: Arc::new(AtomicBool::new(false)),
+            notification: Arc::new(Notify::new()),
+            requested_checks: Arc::new(Notify::new()),
         }
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        self.notification.notify_one();
+    }
+
+    fn requested_check_notification(&self) -> Arc<Notify> {
+        Arc::clone(&self.requested_checks)
     }
 }
 
+#[async_trait]
 impl Shutdown for FakeShutdown {
     fn requested(&self) -> bool {
+        self.requested_checks.notify_one();
         self.requested.load(Ordering::SeqCst)
+    }
+
+    async fn wait_requested(&self) {
+        loop {
+            let notified = self.notification.notified();
+            if self.requested.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
 struct FakeMatrixTransport {
     next_fetch: Mutex<Option<FetchedMatrixSync>>,
     crypto_error: Option<&'static str>,
-    fetch_calls: AtomicUsize,
+    fetch_calls: Arc<AtomicUsize>,
+    fetch_started: Option<Arc<Notify>>,
+    fetch_release: Option<Arc<Notify>>,
     processor_path: Option<PathBuf>,
     observed_crypto_attempt: CryptoAttempt,
 }
@@ -173,10 +201,34 @@ impl FakeMatrixTransport {
         Self {
             next_fetch: Mutex::new(Some(response)),
             crypto_error: None,
-            fetch_calls: AtomicUsize::new(0),
+            fetch_calls: Arc::new(AtomicUsize::new(0)),
+            fetch_started: None,
+            fetch_release: None,
             processor_path: None,
             observed_crypto_attempt: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn with_blocked_fetch(response: FetchedMatrixSync) -> (Self, Arc<Notify>, Arc<Notify>) {
+        let fetch_started = Arc::new(Notify::new());
+        let fetch_release = Arc::new(Notify::new());
+        (
+            Self {
+                next_fetch: Mutex::new(Some(response)),
+                crypto_error: None,
+                fetch_calls: Arc::new(AtomicUsize::new(0)),
+                fetch_started: Some(Arc::clone(&fetch_started)),
+                fetch_release: Some(Arc::clone(&fetch_release)),
+                processor_path: None,
+                observed_crypto_attempt: Arc::new(Mutex::new(None)),
+            },
+            fetch_started,
+            fetch_release,
+        )
+    }
+
+    fn fetch_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.fetch_calls)
     }
 
     fn for_crypto(path: &Path, error: &'static str) -> (Self, CryptoAttempt) {
@@ -185,7 +237,9 @@ impl FakeMatrixTransport {
             Self {
                 next_fetch: Mutex::new(None),
                 crypto_error: Some(error),
-                fetch_calls: AtomicUsize::new(0),
+                fetch_calls: Arc::new(AtomicUsize::new(0)),
+                fetch_started: None,
+                fetch_release: None,
                 processor_path: Some(path.to_owned()),
                 observed_crypto_attempt: Arc::clone(&observed_crypto_attempt),
             },
@@ -198,6 +252,13 @@ impl FakeMatrixTransport {
 impl MatrixTransport for FakeMatrixTransport {
     async fn fetch_sync(&self, _since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError> {
         self.fetch_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(fetch_release) = &self.fetch_release {
+            self.fetch_started
+                .as_ref()
+                .expect("blocked fetch start notification")
+                .notify_one();
+            fetch_release.notified().await;
+        }
         self.next_fetch
             .lock()
             .expect("fetch lock")
@@ -671,6 +732,21 @@ fn append_response_received_crypto(fixture: &mut StoreFixture) -> String {
     row_id
 }
 
+fn append_future_crypto_retry(fixture: &mut StoreFixture) {
+    let inbox_id = append_test_inbox(fixture, timestamp(NOW_MILLIS + 3_600_000));
+    let request = ExactMatrixRequest::keys_query(
+        b"future-retry-request".to_vec(),
+        br#"{"device_keys":{}}"#.to_vec(),
+    )
+    .expect("valid future crypto request");
+    fixture
+        .store
+        .as_mut()
+        .expect("fixture store")
+        .record_sdk_processing(&inbox_id, &[request])
+        .expect("persist future crypto request");
+}
+
 #[tokio::test]
 async fn one_tick_exposes_only_one_service_action() {
     let mut fixture = store_fixture();
@@ -693,6 +769,121 @@ async fn one_tick_exposes_only_one_service_action() {
         service.tick().await.expect("one tick"),
         ServiceAction::FetchedSync
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_exits_when_shutdown_interrupts_a_persisted_retry_wait() {
+    let mut fixture = store_fixture();
+    append_future_crypto_retry(&mut fixture);
+    let transport = FakeMatrixTransport::with_fetch(fetched_sync(
+        INITIAL_TOKEN,
+        b"next-token",
+        br#"{"next_batch":"next-token"}"#,
+    ));
+    let fetch_calls = transport.fetch_counter();
+    let shutdown = FakeShutdown::new();
+    let shutdown_request = shutdown.clone();
+    let requested_check = shutdown.requested_check_notification();
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())),
+        transport,
+        jitter,
+        shutdown,
+    );
+    service
+        .reconcile_startup()
+        .await
+        .expect("startup reconcile");
+
+    let run = tokio::spawn(async move { service.run().await });
+    requested_check.notified().await;
+    shutdown_request.request();
+
+    for _ in 0..4 {
+        if run.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        run.is_finished(),
+        "shutdown must wake a persisted retry wait without advancing time"
+    );
+    run.await
+        .expect("service task must join")
+        .expect("shutdown must return successfully");
+    assert_eq!(fetch_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_before_a_normal_fetch_results_in_zero_fetch_calls() {
+    let mut fixture = store_fixture();
+    let transport = FakeMatrixTransport::with_fetch(fetched_sync(
+        INITIAL_TOKEN,
+        b"next-token",
+        br#"{"next_batch":"next-token"}"#,
+    ));
+    let fetch_calls = transport.fetch_counter();
+    let shutdown = FakeShutdown::new();
+    shutdown.request();
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())),
+        transport,
+        jitter,
+        shutdown,
+    );
+
+    service
+        .run()
+        .await
+        .expect("shutdown must return successfully");
+    assert_eq!(fetch_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_fetch_allows_the_durable_append_before_exit() {
+    let mut fixture = store_fixture();
+    let (transport, fetch_started, fetch_release) =
+        FakeMatrixTransport::with_blocked_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"next-token",
+            br#"{"next_batch":"next-token"}"#,
+        ));
+    let fetch_calls = transport.fetch_counter();
+    let shutdown = FakeShutdown::new();
+    let shutdown_request = shutdown.clone();
+    let fetch_started_wait = fetch_started.notified();
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with(
+        &mut fixture,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())),
+        transport,
+        jitter,
+        shutdown,
+    );
+
+    let run = tokio::spawn(async move { service.run().await });
+    fetch_started_wait.await;
+    shutdown_request.request();
+    assert!(
+        !run.is_finished(),
+        "the in-flight fetch must not be cancelled"
+    );
+    fetch_release.notify_one();
+
+    run.await
+        .expect("service task must join")
+        .expect("shutdown must return successfully");
+    assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+    let inbox_count: i64 = Connection::open(&fixture.path)
+        .expect("open state inspector")
+        .query_row("SELECT COUNT(*) FROM sync_inbox", [], |row| row.get(0))
+        .expect("count durably appended sync responses");
+    assert_eq!(inbox_count, 1);
 }
 
 #[tokio::test]
