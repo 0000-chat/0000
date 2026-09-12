@@ -1,0 +1,16 @@
+{
+  "name": "communicator",
+  "private": true,
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "test:rust": "cargo test --workspace --all-features",
+    "check": "pnpm check:rust && pnpm -r --if-present check",
+    "test": "pnpm test:rust && pnpm -r --if-present test",
+    "test:python": "python3 -m unittest discover -s tests -v"
+  }
+}

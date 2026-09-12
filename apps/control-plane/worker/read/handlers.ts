@@ -1,0 +1,307 @@
+import {
+  ChannelSummarySchema,
+  ConnectionSchema,
+  ConversationPageResultSchema,
+  ConversationSummarySchema,
+  IdentitySchema,
+  MAX_IDENTITY_CONNECTIONS,
+  MessagePageResultSchema,
+  type ChannelSummary,
+  type Connection,
+  type ConversationPageResult,
+  type ConversationSummary,
+  type Identity,
+  type MessagePageResult,
+  type SessionResponse,
+} from "@communicator/contracts";
+import type { DirectoryConnection } from "../control-directory/read-repository";
+import { listConnectionsForIdentity } from "../control-directory/read-repository";
+import type { TenantProjectionDO } from "../projection/tenant-projection";
+import { requireAuthorizedIdentity, toProjectionReadAuthorization } from "./authorization";
+import { mapReadError, ReadError } from "./errors";
+
+export type ReadHandlerContext = {
+  env: Cloudflare.Env;
+  authorization: SessionResponse;
+};
+
+export type ListConnectionsInput = {
+  identity_id: string;
+};
+
+export type ListChannelsInput = {
+  identity_id: string;
+};
+
+export type ListConversationsInput = {
+  identity_id: string;
+  channel_id?: string;
+  cursor?: string;
+  limit?: number;
+};
+
+export type GetConversationInput = {
+  identity_id: string;
+  conversation_id: string;
+};
+
+export type ListMessagesInput = {
+  identity_id: string;
+  conversation_id: string;
+  cursor?: string;
+  limit?: number;
+};
+
+type ProjectionReadStub = Pick<
+  DurableObjectStub<TenantProjectionDO>,
+  "listChannelStats" | "listConversations" | "getConversation" | "listMessages"
+>;
+
+const directorySession = (env: Cloudflare.Env): D1DatabaseSession => {
+  const database = env.CONTROL_DB;
+  if (database === undefined || typeof database.withSession !== "function") {
+    throw new ReadError("service_unavailable");
+  }
+  try {
+    return database.withSession("first-primary");
+  } catch (error) {
+    throw new ReadError("service_unavailable", error);
+  }
+};
+
+const projection = (
+  context: ReadHandlerContext,
+): ProjectionReadStub => {
+  const namespace = context.env.TENANT_PROJECTION;
+  if (namespace === undefined || typeof namespace.getByName !== "function") {
+    throw new ReadError("service_unavailable");
+  }
+  try {
+    return namespace.getByName(context.authorization.tenant.id);
+  } catch (error) {
+    throw new ReadError("service_unavailable", error);
+  }
+};
+
+const withReadErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
+  try {
+    return await operation();
+  } catch (error) {
+    throw mapReadError(error);
+  }
+};
+
+const publicConnection = ({ sort_position: _sortPosition, ...connection }: DirectoryConnection): Connection =>
+  ConnectionSchema.parse(connection);
+
+const listDirectoryConnections = async (
+  context: ReadHandlerContext,
+  identityId: string,
+): Promise<DirectoryConnection[]> => {
+  const session = directorySession(context.env);
+  return listConnectionsForIdentity(
+    session,
+    context.authorization.tenant.id,
+    identityId,
+  );
+};
+
+export async function listIdentities(
+  context: ReadHandlerContext,
+): Promise<Identity[]> {
+  return withReadErrors(async () => {
+    const values = context.authorization.identities.map((identity) => ({
+      id: identity.identity_id,
+      tenant_id: context.authorization.tenant.id,
+      kind: identity.kind,
+      display_name: identity.display_name,
+    }));
+    return IdentitySchema.array()
+      .max(MAX_IDENTITY_CONNECTIONS)
+      .parse(values);
+  });
+}
+
+export async function listConnections(
+  context: ReadHandlerContext,
+  input: ListConnectionsInput,
+): Promise<Connection[]> {
+  return withReadErrors(async () => {
+    requireAuthorizedIdentity(
+      context.authorization,
+      input.identity_id,
+      "connection.read",
+    );
+    const connections = await listDirectoryConnections(context, input.identity_id);
+    return ConnectionSchema.array().max(MAX_IDENTITY_CONNECTIONS).parse(
+      connections.map(publicConnection),
+    );
+  });
+}
+
+const channelRows = (
+  connections: readonly DirectoryConnection[],
+  stats: readonly { connection_id: string; unread_count: number; last_activity_at: string | null }[],
+): ChannelSummary[] => {
+  const statsByConnection = new Map<string, {
+    unread_count: number;
+    last_activity_at: string | null;
+  }>();
+  for (const stat of stats) {
+    if (statsByConnection.has(stat.connection_id)) {
+      throw new Error("duplicate projection channel statistic");
+    }
+    statsByConnection.set(stat.connection_id, {
+      unread_count: stat.unread_count,
+      last_activity_at: stat.last_activity_at,
+    });
+  }
+
+  const connectionIds = new Set(connections.map((connection) => connection.id));
+  for (const stat of stats) {
+    if (!connectionIds.has(stat.connection_id)) {
+      throw new Error("projection channel statistic is outside the directory");
+    }
+  }
+
+  return ChannelSummarySchema.array()
+    .max(MAX_IDENTITY_CONNECTIONS)
+    .parse(connections.map((connection) => {
+      const stat = statsByConnection.get(connection.id);
+      return {
+        id: connection.id,
+        tenant_id: connection.tenant_id,
+        identity_id: connection.identity_id,
+        provider: connection.provider,
+        display_label: connection.display_label,
+        status: connection.status,
+        capabilities: connection.capabilities,
+        unread_count: stat?.unread_count ?? 0,
+        last_activity_at: stat?.last_activity_at ?? null,
+        sort_position: connection.sort_position,
+        ...(connection.attention_code === undefined
+          ? {}
+          : { attention_code: connection.attention_code }),
+      };
+    }));
+};
+
+export async function listChannels(
+  context: ReadHandlerContext,
+  input: ListChannelsInput,
+): Promise<ChannelSummary[]> {
+  return withReadErrors(async () => {
+    requireAuthorizedIdentity(
+      context.authorization,
+      input.identity_id,
+      "conversation.read",
+    );
+    requireAuthorizedIdentity(
+      context.authorization,
+      input.identity_id,
+      "connection.read",
+    );
+    const connections = await listDirectoryConnections(context, input.identity_id);
+    const stats = await projection(context).listChannelStats({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      identity_id: input.identity_id,
+      authorization: toProjectionReadAuthorization(
+        context.authorization,
+        input.identity_id,
+      ),
+    });
+    return channelRows(connections, stats);
+  });
+}
+
+const validateChannelFilter = async (
+  context: ReadHandlerContext,
+  identityId: string,
+  channelId: string | undefined,
+): Promise<void> => {
+  if (channelId === undefined) return;
+  const connections = await listDirectoryConnections(context, identityId);
+  if (!connections.some((connection) => connection.id === channelId)) {
+    throw new ReadError("not_found");
+  }
+};
+
+export async function listConversations(
+  context: ReadHandlerContext,
+  input: ListConversationsInput,
+): Promise<ConversationPageResult> {
+  return withReadErrors(async () => {
+    requireAuthorizedIdentity(
+      context.authorization,
+      input.identity_id,
+      "conversation.read",
+    );
+    await validateChannelFilter(context, input.identity_id, input.channel_id);
+    const projectionInput = {
+      schema_version: 1 as const,
+      tenant_id: context.authorization.tenant.id,
+      identity_id: input.identity_id,
+      connection_id: input.channel_id ?? null,
+      ...(input.limit === undefined ? {} : { page_size: input.limit }),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      authorization: toProjectionReadAuthorization(
+        context.authorization,
+        input.identity_id,
+      ),
+    };
+    const page = await projection(context).listConversations(projectionInput);
+    return ConversationPageResultSchema.parse(structuredClone(page));
+  });
+}
+
+export async function getConversation(
+  context: ReadHandlerContext,
+  input: GetConversationInput,
+): Promise<ConversationSummary> {
+  return withReadErrors(async () => {
+    requireAuthorizedIdentity(
+      context.authorization,
+      input.identity_id,
+      "conversation.read",
+    );
+    const conversation = await projection(context).getConversation({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      identity_id: input.identity_id,
+      conversation_id: input.conversation_id,
+      authorization: toProjectionReadAuthorization(
+        context.authorization,
+        input.identity_id,
+      ),
+    });
+    if (conversation === null) throw new ReadError("not_found");
+    return ConversationSummarySchema.parse(structuredClone(conversation));
+  });
+}
+
+export async function listMessages(
+  context: ReadHandlerContext,
+  input: ListMessagesInput,
+): Promise<MessagePageResult> {
+  return withReadErrors(async () => {
+    requireAuthorizedIdentity(
+      context.authorization,
+      input.identity_id,
+      "conversation.read",
+    );
+    const page = await projection(context).listMessages({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      identity_id: input.identity_id,
+      conversation_id: input.conversation_id,
+      ...(input.limit === undefined ? {} : { page_size: input.limit }),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      authorization: toProjectionReadAuthorization(
+        context.authorization,
+        input.identity_id,
+      ),
+    });
+    return MessagePageResultSchema.parse(structuredClone(page));
+  });
+}

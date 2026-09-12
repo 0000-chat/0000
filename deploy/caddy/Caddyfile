@@ -1,0 +1,15 @@
+communicator.0000.gold {
+  header /.well-known/matrix/* Access-Control-Allow-Origin "*"
+  header /.well-known/matrix/* Content-Type "application/json"
+  respond /.well-known/matrix/server `{"m.server":"matrix.communicator.0000.gold:443"}` 200
+  respond /.well-known/matrix/client `{"m.homeserver":{"base_url":"https://matrix.communicator.0000.gold"}}` 200
+  respond 404
+}
+
+matrix.communicator.0000.gold {
+  @client path /_matrix/client/* /_matrix/media/* /_synapse/client/*
+  handle @client {
+    reverse_proxy synapse:8008
+  }
+  respond 404
+}

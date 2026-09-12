@@ -1,9 +1,47 @@
+# Local environment and secret material
+.env
+.env.*
+!.env.example
+secrets/
+config/generated/
+
+# Runtime state
+data/
+volumes/
+backups/
+exports/
+media/
+logs/
+
+# Credentials, databases, and generated registrations
+*.key
+*.pem
+*.p12
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.registration.yaml
+
+# Local tooling and generated output
+.worktrees/
+.cache/
+.tmp/
+.tmp-model/
+.test-tmp/
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+target/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .coverage
-.env
-.env.*
-.DS_Store
-
+coverage/
+dist/
+.wrangler/
+playwright-report/
+test-results/
+blob-report/
