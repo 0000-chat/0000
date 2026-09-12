@@ -1,13 +1,16 @@
 //! Read-only, content-free inspection of the gateway state database.
 
-use std::{fmt, path::Path, time::Duration};
+use std::{fmt, path::Path, str, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{
-    Connection, Error as SqliteError, ErrorCode, OpenFlags, Transaction, TransactionBehavior,
+    Connection, Error as SqliteError, ErrorCode, OpenFlags, Row, Transaction, TransactionBehavior,
+    types::ValueRef,
 };
 
-use crate::config::MAX_RECOVERY_BYTES;
+use crate::config::{
+    MAX_BATCH_CANONICAL_BYTES, MAX_PENDING_AGE_SECS, MAX_PENDING_REQUEST_ROWS, MAX_RECOVERY_BYTES,
+};
 
 /// Stable error returned when the health database cannot be opened.
 pub const HEALTH_DATABASE_UNAVAILABLE: &str = "health_database_unavailable";
@@ -137,7 +140,9 @@ impl SessionState {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LimitState {
     WithinLimits,
+    RowsExceeded,
     BytesExceeded,
+    AgeExceeded,
     Corrupt,
 }
 
@@ -145,7 +150,9 @@ impl LimitState {
     const fn as_str(self) -> &'static str {
         match self {
             Self::WithinLimits => "within_limits",
+            Self::RowsExceeded => "rows_exceeded",
             Self::BytesExceeded => "bytes_exceeded",
+            Self::AgeExceeded => "age_exceeded",
             Self::Corrupt => "corrupt",
         }
     }
@@ -156,10 +163,7 @@ impl LimitState {
 }
 
 /// Inspect the state database at a caller-supplied UTC time.
-pub fn inspect_at(
-    path: impl AsRef<Path>,
-    _now: DateTime<Utc>,
-) -> Result<HealthReport, HealthError> {
+pub fn inspect_at(path: impl AsRef<Path>, now: DateTime<Utc>) -> Result<HealthReport, HealthError> {
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(map_open_error)?;
     connection
@@ -178,9 +182,8 @@ pub fn inspect_at(
         Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
         Err(_) => SessionState::Missing,
     };
-    let outbox_state = match pending_outbox_bytes(&transaction) {
-        Ok(bytes) if bytes >= MAX_RECOVERY_BYTES => LimitState::BytesExceeded,
-        Ok(_) => LimitState::WithinLimits,
+    let outbox_state = match pending_outbox_pressure(&transaction) {
+        Ok(pressure) => pressure.state(now),
         Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
         Err(_) => LimitState::Corrupt,
     };
@@ -212,24 +215,113 @@ fn session_present(transaction: &Transaction<'_>) -> Result<bool, HealthError> {
     Ok(row.0 == 1 && row.1 == 1)
 }
 
-fn pending_outbox_bytes(transaction: &Transaction<'_>) -> Result<u64, HealthError> {
+struct OutboxPressure {
+    pending_rows: u64,
+    pending_bytes: u64,
+    oldest_pending_at: Option<DateTime<Utc>>,
+}
+
+impl OutboxPressure {
+    fn state(&self, now: DateTime<Utc>) -> LimitState {
+        if self.pending_rows >= MAX_PENDING_REQUEST_ROWS {
+            return LimitState::RowsExceeded;
+        }
+        if self.pending_bytes >= MAX_RECOVERY_BYTES {
+            return LimitState::BytesExceeded;
+        }
+        if self.oldest_pending_at.is_some_and(|oldest| {
+            now.signed_duration_since(oldest) > ChronoDuration::seconds(MAX_PENDING_AGE_SECS as i64)
+        }) {
+            return LimitState::AgeExceeded;
+        }
+        LimitState::WithinLimits
+    }
+}
+
+fn pending_outbox_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure, HealthError> {
     let mut statement = transaction
-        .prepare("SELECT byte_count FROM outbox_batches WHERE state = 'pending'")
+        .prepare(
+            "SELECT source_kind, state, byte_count, next_attempt_at
+             FROM outbox_batches",
+        )
         .map_err(map_query_error)?;
     let mut rows = statement.query([]).map_err(map_query_error)?;
-    let mut total = 0_u64;
+    let mut pending_rows = 0_u64;
+    let mut pending_bytes = 0_u64;
+    let mut oldest_pending_at = None;
 
     while let Some(row) = rows.next().map_err(map_query_error)? {
-        let byte_count = row.get::<_, i64>(0).map_err(map_query_error)?;
-        if byte_count < 0 {
-            return Err(HealthError::new(HEALTH_DATABASE_UNAVAILABLE));
+        let source_kind = text_value(row, 0)?;
+        if !matches!(source_kind, "live" | "backfill") {
+            return Err(corrupt_error());
         }
-        total = total
-            .checked_add(byte_count as u64)
-            .ok_or_else(|| HealthError::new(HEALTH_DATABASE_UNAVAILABLE))?;
+        let state = text_value(row, 1)?;
+        if !matches!(state, "pending" | "accepted" | "quarantined") {
+            return Err(corrupt_error());
+        }
+        let byte_count = u64::try_from(bounded_integer(
+            row,
+            2,
+            1,
+            MAX_BATCH_CANONICAL_BYTES as i64,
+        )?)
+        .map_err(|_| corrupt_error())?;
+        let next_attempt_at = timestamp_value(row, 3)?;
+        if state == "pending" {
+            pending_rows = pending_rows.checked_add(1).ok_or_else(corrupt_error)?;
+            pending_bytes = pending_bytes
+                .checked_add(byte_count)
+                .ok_or_else(corrupt_error)?;
+            oldest_pending_at = Some(
+                oldest_pending_at.map_or(next_attempt_at, |oldest: DateTime<Utc>| {
+                    oldest.min(next_attempt_at)
+                }),
+            );
+        }
     }
 
-    Ok(total)
+    Ok(OutboxPressure {
+        pending_rows,
+        pending_bytes,
+        oldest_pending_at,
+    })
+}
+
+fn text_value<'row>(row: &'row Row<'_>, index: usize) -> Result<&'row str, HealthError> {
+    match row.get_ref(index).map_err(map_query_error)? {
+        ValueRef::Text(bytes) => str::from_utf8(bytes).map_err(|_| corrupt_error()),
+        _ => Err(corrupt_error()),
+    }
+}
+
+fn bounded_integer(
+    row: &Row<'_>,
+    index: usize,
+    minimum: i64,
+    maximum: i64,
+) -> Result<i64, HealthError> {
+    match row.get_ref(index).map_err(map_query_error)? {
+        ValueRef::Integer(value) if (minimum..=maximum).contains(&value) => Ok(value),
+        _ => Err(corrupt_error()),
+    }
+}
+
+fn timestamp_value(row: &Row<'_>, index: usize) -> Result<DateTime<Utc>, HealthError> {
+    let value = text_value(row, index)?;
+    if !crate::model::valid_timestamp(value) {
+        return Err(corrupt_error());
+    }
+    let timestamp = DateTime::parse_from_rfc3339(value).map_err(|_| corrupt_error())?;
+    if timestamp.offset().local_minus_utc() != 0
+        || !timestamp.timestamp_subsec_nanos().is_multiple_of(1_000_000)
+    {
+        return Err(corrupt_error());
+    }
+    Ok(timestamp.with_timezone(&Utc))
+}
+
+fn corrupt_error() -> HealthError {
+    HealthError::new(HEALTH_DATABASE_UNAVAILABLE)
 }
 
 fn map_open_error(error: SqliteError) -> HealthError {
