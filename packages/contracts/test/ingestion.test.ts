@@ -25,6 +25,19 @@ const BATCH_ID = `batch_${"a".repeat(64)}`;
 const TENANT_ID = "tenant_pilot";
 const GATEWAY_ROUTE_ID = "gateway_route_pilot";
 const MANIFEST_KEY = `manifests/${TENANT_ID}/2026/09/07/01/${BATCH_ID}.json`;
+const CHECKPOINT_KINDS = [
+  "matrix_sync_token_sha256",
+  "matrix_backfill_run_sha256",
+] as const;
+
+type MatrixCheckpointKind = (typeof CHECKPOINT_KINDS)[number];
+
+const validCheckpoint = (
+  kind: MatrixCheckpointKind = CHECKPOINT_KINDS[0],
+): Record<string, string> => ({
+  kind,
+  value: `sha256:${"b".repeat(64)}`,
+});
 
 const validEvent = (
   overrides: Partial<CanonicalEventEnvelope> = {},
@@ -65,10 +78,7 @@ const validRequest = (
   batch_id: BATCH_ID,
   archived_at: "2026-09-07T01:03:03.000Z",
   producer_version: "gateway-2026.09.07",
-  source_checkpoint: {
-    kind: "matrix_sync_token_sha256",
-    value: `sha256:${"b".repeat(64)}`,
-  },
+  source_checkpoint: validCheckpoint(),
   events: [validEvent()],
   ...overrides,
 });
@@ -96,10 +106,7 @@ const validManifest = (
     service: "communicator-control-plane",
     version: "gateway-2026.09.07",
   },
-  source_checkpoint: {
-    kind: "matrix_sync_token_sha256",
-    value: `sha256:${"b".repeat(64)}`,
-  },
+  source_checkpoint: validCheckpoint(),
   ...overrides,
 });
 
@@ -174,6 +181,24 @@ describe("ingestion contract exports", () => {
       error: { code: "ingestion_invalid", message: "Invalid ingestion request" },
     });
     expect(ArchiveManifestKeySchema.parse(MANIFEST_KEY)).toBe(MANIFEST_KEY);
+  });
+
+  it("accepts both exact Matrix checkpoint variants in requests and manifests", () => {
+    for (const kind of CHECKPOINT_KINDS) {
+      const checkpoint = validCheckpoint(kind);
+
+      expect(MatrixCheckpointDigestSchema.parse(checkpoint)).toEqual(checkpoint);
+      expect(
+        IngestionBatchRequestSchema.parse(validRequest({
+          source_checkpoint: checkpoint,
+        })).source_checkpoint,
+      ).toEqual(checkpoint);
+      expect(
+        IngestionCommittedArchiveManifestSchema.parse(validManifest({
+          source_checkpoint: checkpoint,
+        })).source_checkpoint,
+      ).toEqual(checkpoint);
+    }
   });
 
   it("rejects unexpected fields in every public envelope", () => {
@@ -272,6 +297,43 @@ describe("ingestion request cross-field constraints", () => {
       archived_at: " ".repeat(MAX_INGESTION_TIMESTAMP_CHARS + 1),
     }));
   });
+
+  it("rejects unknown kinds, malformed digests, and extra checkpoint keys everywhere", () => {
+    const invalidCheckpoints: Record<string, unknown>[] = [
+      {
+        kind: "matrix_unknown_sha256",
+        value: `sha256:${"d".repeat(64)}`,
+      },
+      {
+        kind: "matrix_backfill_run_sha256",
+        value: `sha256:${"D".repeat(64)}`,
+      },
+      {
+        kind: "matrix_sync_token_sha256",
+        value: `sha256:${"g".repeat(64)}`,
+      },
+      {
+        kind: "matrix_sync_token_sha256",
+        value: `sha256:${"d".repeat(63)}`,
+      },
+      {
+        ...validCheckpoint("matrix_backfill_run_sha256"),
+        unexpected: true,
+      },
+    ];
+
+    for (const checkpoint of invalidCheckpoints) {
+      expectRejected(MatrixCheckpointDigestSchema, checkpoint);
+      expectRejected(
+        IngestionBatchRequestSchema,
+        validRequest({ source_checkpoint: checkpoint }),
+      );
+      expectRejected(
+        IngestionCommittedArchiveManifestSchema,
+        validManifest({ source_checkpoint: checkpoint }),
+      );
+    }
+  });
 });
 
 describe("pointer and committed-manifest constraints", () => {
@@ -335,6 +397,50 @@ describe("descriptor-safe hostile input handling", () => {
     });
     expect(IngestionBatchRequestSchema.safeParse(proxyInput).success).toBe(true);
     expect(getCalls).toBe(0);
+
+    const checkpointAccessor = validCheckpoint("matrix_backfill_run_sha256");
+    let checkpointGetterCalls = 0;
+    Object.defineProperty(checkpointAccessor, "kind", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        checkpointGetterCalls += 1;
+        throw new Error("checkpoint getter must not execute");
+      },
+    });
+    expectRejected(MatrixCheckpointDigestSchema, checkpointAccessor);
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({ source_checkpoint: checkpointAccessor }),
+    );
+    expectRejected(
+      IngestionCommittedArchiveManifestSchema,
+      validManifest({ source_checkpoint: checkpointAccessor }),
+    );
+    expect(checkpointGetterCalls).toBe(0);
+
+    let checkpointGetCalls = 0;
+    const checkpointProxy = new Proxy(
+      validCheckpoint("matrix_backfill_run_sha256"),
+      {
+        get: () => {
+          checkpointGetCalls += 1;
+          throw new Error("checkpoint proxy get must not execute");
+        },
+      },
+    );
+    expect(MatrixCheckpointDigestSchema.safeParse(checkpointProxy).success).toBe(true);
+    expect(
+      IngestionBatchRequestSchema.safeParse(
+        validRequest({ source_checkpoint: checkpointProxy }),
+      ).success,
+    ).toBe(true);
+    expect(
+      IngestionCommittedArchiveManifestSchema.safeParse(
+        validManifest({ source_checkpoint: checkpointProxy }),
+      ).success,
+    ).toBe(true);
+    expect(checkpointGetCalls).toBe(0);
   });
 
   it.each(["ownKeys", "getOwnPropertyDescriptor", "getPrototypeOf"] as const)(

@@ -1,0 +1,9 @@
+{
+  "cases": [
+    {"name":"duplicate-matrix-event","outcome":"events","event_types":["message.created"],"reason_code":null},
+    {"name":"mixed-tenants","outcome":"events","event_types":["message.created"],"reason_code":null},
+    {"name":"cross-room-relation","outcome":"ignored","event_types":[],"reason_code":"matrix_missing_relation_target"},
+    {"name":"owner-outbound","outcome":"events","event_types":["message.created"],"reason_code":null},
+    {"name":"non-owner-inbound","outcome":"events","event_types":["message.created"],"reason_code":null}
+  ]
+}

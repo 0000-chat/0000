@@ -763,7 +763,7 @@ fn record_attempt_compare_and_swap_allows_exactly_one_of_two_stale_leases() {
 }
 
 #[test]
-fn record_attempt_rejects_future_invalid_time_wrong_row_wrong_state_maintenance_and_overflow() {
+fn record_attempt_rejects_invalid_time_wrong_row_wrong_state_and_maintenance_and_saturates_count() {
     let (_directory, path, mut store, first, _second) = setup_two_fetched_rows();
     let body = canonical_keys_query();
     let request = request_with_body(b"sdk-request-id-reject", &body);
@@ -861,27 +861,40 @@ fn record_attempt_rejects_future_invalid_time_wrong_row_wrong_state_maintenance_
     );
 
     let (_directory, path, mut store, first, _second) = setup_two_fetched_rows();
-    let request = request_with_body(b"sdk-request-id-overflow", &body);
+    let request = request_with_body(b"sdk-request-id-saturated", &body);
     store
         .record_sdk_processing(&first, std::slice::from_ref(&request))
-        .expect("record overflow fixture");
+        .expect("record saturation fixture");
     let row_id = raw_crypto_row_id(&path);
     mutate_sql(
         &path,
         "UPDATE matrix_crypto_outbox SET attempt_count = 1000000",
     );
-    assert_code(
-        store
-            .record_attempt(
-                &row_id,
-                1_000_000,
-                expected,
-                now,
-                timestamp(1_700_000_002_000),
-            )
-            .expect_err("attempt count overflow"),
-        STORE_CRYPTO_NOT_READY,
-    );
+    let saturated = store
+        .next_pending_crypto_request(now)
+        .expect("select saturated request")
+        .expect("saturated request remains pending");
+    assert_eq!(saturated.attempt_count(), 1_000_000);
+    assert_eq!(saturated.next_attempt_at(), expected);
+
+    let next = timestamp(1_700_000_002_000);
+    store
+        .record_attempt(
+            &row_id,
+            saturated.attempt_count(),
+            saturated.next_attempt_at(),
+            now,
+            next,
+        )
+        .expect("saturated attempt remains retryable");
+
+    let rescheduled = store
+        .next_pending_crypto_request(next)
+        .expect("select rescheduled saturated request")
+        .expect("saturated request remains pending after retry");
+    assert_eq!(rescheduled.attempt_count(), 1_000_000);
+    assert_eq!(rescheduled.next_attempt_at(), next);
+    assert!(rescheduled.next_attempt_at() > saturated.next_attempt_at());
 }
 
 #[test]

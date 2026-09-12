@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{
     Connection, OptionalExtension, Row, TransactionBehavior, ffi, params, types::ValueRef,
 };
@@ -42,6 +42,9 @@ use crate::{
         RawSyncInbox, ReasonCode, SdkInboxPosition, SyncInboxState,
     },
 };
+
+mod backfill_ledger;
+mod live_ledger;
 
 /// The database lock is kept beside the database and has this extension.
 pub const STORE_LOCK_EXTENSION: &str = "lock";
@@ -496,12 +499,44 @@ struct RetainedInboxBounds {
     total_bytes: u64,
 }
 
+/// Content-free pressure metrics for retained inbox and crypto request state.
+pub(crate) struct InboxCryptoPressure {
+    pending_request_rows: u64,
+    protected_bytes: u64,
+    oldest_pending_at: Option<DateTime<Utc>>,
+    next_retention_at: Option<DateTime<Utc>>,
+}
+
+impl InboxCryptoPressure {
+    /// Return the number of unresolved crypto request rows.
+    pub(crate) const fn pending_request_rows(&self) -> u64 {
+        self.pending_request_rows
+    }
+
+    /// Return the bytes protected by retained inbox and crypto request rows.
+    pub(crate) const fn protected_bytes(&self) -> u64 {
+        self.protected_bytes
+    }
+
+    /// Return the oldest inbox or unresolved crypto retry timestamp.
+    pub(crate) const fn oldest_pending_at(&self) -> Option<DateTime<Utc>> {
+        self.oldest_pending_at
+    }
+
+    /// Return the strict retention deadline for the oldest purgeable row.
+    pub(crate) const fn next_retention_at(&self) -> Option<DateTime<Utc>> {
+        self.next_retention_at
+    }
+}
+
 struct VerifiedInboxChain {
     rows: Vec<RawSyncInbox>,
     next_digest_index: HashMap<[u8; 32], usize>,
     ordered_indices: Vec<usize>,
     tail_index: Option<usize>,
+    /// Physical SQLite row index retained for live-ledger selection.
     first_uncommitted_index: Option<usize>,
+    first_uncommitted_position: Option<usize>,
 }
 
 struct VerifiedCryptoContext {
@@ -1397,6 +1432,36 @@ impl Store {
         }
     }
 
+    /// Return whether authenticated pending crypto work exists, even when its
+    /// persisted retry deadline has not arrived.
+    pub fn has_pending_crypto_request(&self) -> Result<bool, SafeError> {
+        let context = load_crypto_context(&self.connection, &self.keyring)?;
+        if context.gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        Ok(context
+            .crypto_rows
+            .iter()
+            .any(|row| row.state == CryptoLifecycle::Pending))
+    }
+
+    /// Return the earliest authenticated retry deadline for pending crypto.
+    ///
+    /// The selector deliberately reads only the bounded scheduling metadata;
+    /// it never reconstructs or exposes a request body.
+    pub(crate) fn next_crypto_retry_at(&self) -> Result<Option<DateTime<Utc>>, SafeError> {
+        let context = load_crypto_context(&self.connection, &self.keyring)?;
+        if context.gateway.maintenance_code.is_some() {
+            return Err(store_crypto_not_ready());
+        }
+        Ok(context
+            .crypto_rows
+            .iter()
+            .filter(|row| row.state == CryptoLifecycle::Pending)
+            .map(|row| row.next_attempt_at)
+            .min())
+    }
+
     /// Durably lease one pending request before its caller performs HTTP.
     pub fn record_attempt(
         &mut self,
@@ -1434,9 +1499,6 @@ impl Store {
         if addressed.state != CryptoLifecycle::Pending {
             return Err(store_crypto_not_ready());
         }
-        if addressed.attempt_count >= CRYPTO_ATTEMPT_COUNT_MAX as u32 {
-            return Err(store_crypto_not_ready());
-        }
         if addressed.attempt_count != expected_attempt_count
             || addressed.next_attempt_at != expected_next_attempt_at
         {
@@ -1449,10 +1511,14 @@ impl Store {
         let updated = transaction
             .execute(
                 "UPDATE matrix_crypto_outbox
-                 SET attempt_count = attempt_count + 1, next_attempt_at = ?1
+                 SET attempt_count = CASE
+                       WHEN attempt_count < ?6 THEN attempt_count + 1
+                       ELSE ?6
+                     END,
+                     next_attempt_at = ?1
                  WHERE crypto_row_id = ?2 AND state = 'pending'
                    AND attempt_count = ?3 AND next_attempt_at = ?4
-                   AND next_attempt_at <= ?5 AND attempt_count < ?6",
+                   AND next_attempt_at <= ?5",
                 params![
                     next.to_rfc3339(),
                     row_id.as_str(),
@@ -1710,16 +1776,29 @@ impl Store {
         if sha256(committed_token.as_bytes()) == sdk_token_digest {
             return Ok(SdkInboxPosition::Committed);
         }
-        chain
+        let sdk_row_index = chain
             .next_digest_index
             .get(&sdk_token_digest)
-            .map(|index| SdkInboxPosition::Journaled {
-                inbox_id: chain.rows[*index].inbox_id().clone(),
-            })
-            .ok_or_else(store_sdk_position_unjournaled)
+            .copied()
+            .ok_or_else(store_sdk_position_unjournaled)?;
+        let sdk_position = chain
+            .ordered_indices
+            .iter()
+            .position(|index| *index == sdk_row_index)
+            .ok_or_else(store_sync_corrupt)?;
+        if chain
+            .first_uncommitted_position
+            .is_none_or(|first| sdk_position < first)
+        {
+            return Err(store_sdk_position_unjournaled());
+        }
+        Ok(SdkInboxPosition::Journaled {
+            inbox_id: chain.rows[sdk_row_index].inbox_id().clone(),
+        })
     }
 
-    /// Return the verified journal rows at or before the SDK position.
+    /// Return the verified uncommitted journal rows from the first
+    /// uncommitted row through the SDK position.
     ///
     /// The returned IDs are derived from the authenticated predecessor chain,
     /// never from synthetic ID ordering. An empty frontier represents the
@@ -1758,7 +1837,11 @@ impl Store {
             .iter()
             .position(|index| *index == sdk_row_index)
             .ok_or_else(store_sync_corrupt)?;
-        Ok(chain.ordered_indices[..=frontier_end]
+        let frontier_start = chain
+            .first_uncommitted_position
+            .filter(|start| frontier_end >= *start)
+            .ok_or_else(store_sdk_position_unjournaled)?;
+        Ok(chain.ordered_indices[frontier_start..=frontier_end]
             .iter()
             .map(|index| chain.rows[*index].inbox_id().clone())
             .collect())
@@ -1808,6 +1891,139 @@ impl Store {
             &fetch_token,
         )?;
         Ok(chain.into_first_uncommitted())
+    }
+
+    /// Return the authenticated inbox suffix after the contiguous committed
+    /// prefix.  The rows are ordered by the verified predecessor chain rather
+    /// than SQLite row order, and protected values never cross this crate
+    /// boundary except through the returned validated DTOs.
+    pub(crate) fn uncommitted_inbox_rows(&self) -> Result<Vec<RawSyncInbox>, SafeError> {
+        let Some(_gateway) = require_bootstrap_singleton(&self.connection, &self.keyring, true)?
+        else {
+            return Err(store_not_bootstrapped());
+        };
+        let committed_token = load_verified_gateway_token(
+            &self.connection,
+            &self.keyring,
+            GatewayTokenField::Committed,
+        )?;
+        let fetch_token =
+            load_verified_gateway_token(&self.connection, &self.keyring, GatewayTokenField::Fetch)?;
+        let chain = verify_inbox_chain(
+            &self.connection,
+            &self.keyring,
+            &committed_token,
+            &fetch_token,
+        )?;
+        Ok(chain.into_uncommitted())
+    }
+
+    /// Return authenticated, content-free pressure metrics for retained inbox
+    /// rows and unresolved crypto requests.
+    pub(crate) fn inbox_crypto_pressure(&self) -> Result<InboxCryptoPressure, SafeError> {
+        let context = load_crypto_context(&self.connection, &self.keyring)?;
+        let mut protected_bytes = 0_u64;
+        let mut oldest_pending_at: Option<DateTime<Utc>> = None;
+
+        for row in &context.chain.rows {
+            let byte_count = u64::try_from(row.byte_count()).map_err(|_| store_sync_corrupt())?;
+            protected_bytes = protected_bytes
+                .checked_add(byte_count)
+                .ok_or_else(store_sync_corrupt)?;
+            if !matches!(
+                row.state(),
+                SyncInboxState::Committed | SyncInboxState::Quarantined
+            ) {
+                oldest_pending_at = Some(
+                    oldest_pending_at
+                        .map_or(*row.observed_at(), |oldest| oldest.min(*row.observed_at())),
+                );
+            }
+        }
+
+        let mut pending_request_rows = 0_u64;
+        for row in &context.crypto_rows {
+            if !matches!(
+                row.state,
+                CryptoLifecycle::Pending | CryptoLifecycle::ResponseReceived
+            ) {
+                continue;
+            }
+            pending_request_rows = pending_request_rows
+                .checked_add(1)
+                .ok_or_else(store_crypto_corrupt)?;
+            let byte_count = u64::try_from(row.byte_count).map_err(|_| store_crypto_corrupt())?;
+            protected_bytes = protected_bytes
+                .checked_add(byte_count)
+                .ok_or_else(store_crypto_corrupt)?;
+            let parent = context
+                .chain
+                .rows
+                .iter()
+                .find(|candidate| candidate.inbox_id() == &row.inbox_id)
+                .ok_or_else(store_crypto_corrupt)?;
+            let parent_observed_at = *parent.observed_at();
+            oldest_pending_at = Some(
+                oldest_pending_at
+                    .map_or(parent_observed_at, |oldest| oldest.min(parent_observed_at)),
+            );
+        }
+
+        let committed_prefix = context
+            .chain
+            .ordered_indices
+            .iter()
+            .map(|index| &context.chain.rows[*index])
+            .take_while(|row| row.state() == SyncInboxState::Committed)
+            .collect::<Vec<_>>();
+        let oldest_purge_candidate = committed_prefix
+            .split_last()
+            .and_then(|(_, purgeable_prefix)| purgeable_prefix.first())
+            .copied();
+        let next_retention_at = oldest_purge_candidate
+            .map(|row| {
+                let committed_at = *row.committed_at().ok_or_else(store_sync_corrupt)?;
+                let retention_cutoff = committed_at
+                    .checked_add_signed(ChronoDuration::days(7))
+                    .ok_or_else(store_sync_corrupt)?;
+                retention_cutoff
+                    .checked_add_signed(ChronoDuration::milliseconds(1))
+                    .ok_or_else(store_sync_corrupt)
+            })
+            .transpose()?;
+
+        Ok(InboxCryptoPressure {
+            pending_request_rows,
+            protected_bytes,
+            oldest_pending_at,
+            next_retention_at,
+        })
+    }
+
+    /// Return the deterministic live-window identifier for one authenticated
+    /// inbox row.  The response key version is read from the verified row so
+    /// key rotation cannot change an existing window identity.
+    pub(crate) fn live_window_id_for_inbox(&self, inbox_id: &str) -> Result<String, SafeError> {
+        if !valid_stored_inbox_id(inbox_id) {
+            return Err(store_sync_invalid());
+        }
+        let response_key_version: i64 = self
+            .connection
+            .query_row(
+                "SELECT response_key_version FROM sync_inbox WHERE inbox_id = ?1",
+                [inbox_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        let response_key_version = u32::try_from(response_key_version)
+            .ok()
+            .filter(|version| *version != 0)
+            .ok_or_else(store_sync_corrupt)?;
+        let digest = self
+            .keyring
+            .lookup_digest_at(response_key_version, "matrix-live-window-v1", &[inbox_id])
+            .map_err(|_| store_sync_corrupt())?;
+        Ok(format!("window_{}", lowercase_hex(&digest)))
     }
 
     /// Return the authenticated Matrix session after validating store state.
@@ -1869,6 +2085,63 @@ impl Store {
             room_progress_count,
             Some(room_lookup),
         )
+    }
+
+    /// Return the authenticated persisted typing snapshot for one room. This
+    /// read is intentionally bounded and exposes only the protected value to
+    /// the in-crate service coordinator for restart-time normalization.
+    pub(crate) fn room_ephemeral_typing(
+        &self,
+        room_lookup: &[u8],
+    ) -> Result<Option<(SecretBytes, DateTime<Utc>)>, SafeError> {
+        if room_lookup.len() != 32 {
+            return Err(store_sync_corrupt());
+        }
+        let _session = self.matrix_session()?.ok_or_else(store_not_bootstrapped)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT typing_set_cipher, typing_set_nonce, typing_key_version,
+                        typing_expires_at
+                 FROM room_ephemeral_state WHERE room_lookup = ?1 LIMIT 2",
+            )
+            .map_err(|_| store_sync_corrupt())?;
+        let mut rows = statement
+            .query(params![room_lookup])
+            .map_err(|_| store_sync_corrupt())?;
+        let Some(row) = rows.next().map_err(|_| store_sync_corrupt())? else {
+            return Ok(None);
+        };
+        let ciphertext: Vec<u8> = row.get(0).map_err(|_| store_sync_corrupt())?;
+        let nonce: Vec<u8> = row.get(1).map_err(|_| store_sync_corrupt())?;
+        let key_version: i64 = row.get(2).map_err(|_| store_sync_corrupt())?;
+        let expires_at: String = row.get(3).map_err(|_| store_sync_corrupt())?;
+        if rows.next().map_err(|_| store_sync_corrupt())?.is_some()
+            || nonce.len() != 24
+            || ciphertext.len() < AEAD_TAG_BYTES
+            || key_version <= 0
+        {
+            return Err(store_sync_corrupt());
+        }
+        let expires_at = parse_stored_timestamp(&expires_at)?;
+        let lookup: [u8; 32] = room_lookup.try_into().map_err(|_| store_sync_corrupt())?;
+        let row_id = room_progress_row_id(&lookup);
+        let plaintext = open_stored_value(
+            &self.keyring,
+            StoredValue {
+                table: "room_ephemeral_state",
+                row_id: &row_id,
+                column: "typing_set",
+                ciphertext: Some(ciphertext.as_slice()),
+                nonce: Some(nonce.as_slice()),
+                key_version: Some(key_version),
+                max_plaintext_bytes: MAX_ROOM_ANCHOR_BYTES,
+            },
+        )?;
+        Ok(Some((
+            SecretBytes::new(plaintext.as_bytes().to_vec()),
+            expires_at,
+        )))
     }
 
     /// Append one active protected room binding in a single durable
@@ -3125,6 +3398,17 @@ impl VerifiedInboxChain {
         let index = self.first_uncommitted_index?;
         self.rows.into_iter().nth(index)
     }
+
+    fn into_uncommitted(self) -> Vec<RawSyncInbox> {
+        let Some(start) = self.first_uncommitted_position else {
+            return Vec::new();
+        };
+        let mut rows = self.rows.into_iter().map(Some).collect::<Vec<_>>();
+        self.ordered_indices[start..]
+            .iter()
+            .map(|index| rows[*index].take().expect("verified inbox index"))
+            .collect()
+    }
 }
 
 fn sync_inbox_scan_limit() -> Result<i64, SafeError> {
@@ -3135,10 +3419,27 @@ fn sync_inbox_scan_limit() -> Result<i64, SafeError> {
 }
 
 fn checked_sync_inbox_bytes(current_total: u64, new_bytes: u64) -> Result<u64, ()> {
+    checked_recovery_bytes(current_total, new_bytes)
+}
+
+fn checked_recovery_bytes(current_total: u64, new_bytes: u64) -> Result<u64, ()> {
     current_total
         .checked_add(new_bytes)
         .filter(|total| *total <= MAX_RECOVERY_BYTES)
         .ok_or(())
+}
+
+/// Add one protected value to the recovery aggregate.
+///
+/// Recovery limits count the ciphertext stored in SQLite. Callers pass the
+/// plaintext length for new values, so this helper adds the AEAD tag before
+/// applying the checked aggregate cap.
+fn checked_protected_recovery_bytes(current_total: u64, plaintext_len: usize) -> Result<u64, ()> {
+    let plaintext_len = u64::try_from(plaintext_len).map_err(|_| ())?;
+    let protected_len = plaintext_len
+        .checked_add(u64::try_from(AEAD_TAG_BYTES).map_err(|_| ())?)
+        .ok_or(())?;
+    checked_recovery_bytes(current_total, protected_len)
 }
 
 fn checked_crypto_recovery_bytes(
@@ -3153,12 +3454,7 @@ fn checked_crypto_recovery_bytes(
         response_ciphertext_len.unwrap_or(0),
     ]
     .into_iter()
-    .try_fold(current_total, |total, value| {
-        total
-            .checked_add(value)
-            .filter(|total| *total <= MAX_RECOVERY_BYTES)
-            .ok_or(())
-    })
+    .try_fold(current_total, checked_recovery_bytes)
 }
 
 fn retained_inbox_bounds(connection: &Connection) -> Result<RetainedInboxBounds, SafeError> {
@@ -3417,6 +3713,7 @@ fn verify_inbox_chain(
             ordered_indices: Vec::new(),
             tail_index: None,
             first_uncommitted_index: None,
+            first_uncommitted_position: None,
         });
     }
 
@@ -3461,6 +3758,7 @@ fn verify_inbox_chain(
     let mut previous_index: Option<usize> = None;
     let mut tail_index = None;
     let mut first_uncommitted_index = None;
+    let mut first_uncommitted_position = None;
     let mut committed_tail_index = None;
     let mut ordered_indices = Vec::with_capacity(row_capacity);
     while let Some(index) = current {
@@ -3489,8 +3787,9 @@ fn verify_inbox_chain(
                 return Err(store_sync_corrupt());
             }
             committed_tail_index = Some(index);
-        } else if first_uncommitted_index.is_none() {
+        } else if first_uncommitted_position.is_none() {
             first_uncommitted_index = Some(index);
+            first_uncommitted_position = Some(ordered_indices.len() - 1);
         }
         tail_index = Some(index);
         previous_index = Some(index);
@@ -3517,6 +3816,7 @@ fn verify_inbox_chain(
         ordered_indices,
         tail_index: Some(tail_index),
         first_uncommitted_index,
+        first_uncommitted_position,
     })
 }
 
@@ -4084,6 +4384,7 @@ fn normalize_sql(sql: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::NewLiveWindow;
     use chrono::TimeZone;
     use rusqlite::types::Value;
     use std::os::unix::fs::PermissionsExt;
@@ -4097,6 +4398,16 @@ mod tests {
         );
         assert_eq!(checked_sync_inbox_bytes(MAX_RECOVERY_BYTES, 1), Err(()));
         assert_eq!(checked_sync_inbox_bytes(u64::MAX, 1), Err(()));
+    }
+
+    #[test]
+    fn checked_recovery_bytes_applies_the_cap_across_each_addition() {
+        assert_eq!(
+            checked_recovery_bytes(MAX_RECOVERY_BYTES - 1, 1),
+            Ok(MAX_RECOVERY_BYTES)
+        );
+        assert_eq!(checked_recovery_bytes(MAX_RECOVERY_BYTES, 1), Err(()));
+        assert_eq!(checked_recovery_bytes(u64::MAX, 0), Err(()));
     }
 
     #[test]
@@ -4270,5 +4581,186 @@ mod tests {
             assert_eq!(error.code(), expected_code);
             assert_eq!(store_snapshot(&store), before);
         }
+    }
+
+    #[test]
+    fn inbox_crypto_pressure_uses_immutable_parent_age() {
+        let directory = tempdir().expect("create crypto pressure test directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure crypto pressure test directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let mut store = Store::open(&path, Keyring::new([0x11; 32], 1).expect("test keyring"))
+            .expect("open crypto pressure test store");
+        let parent_observed_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("parent timestamp");
+        store
+            .initialize_bootstrap_state(
+                NewBootstrapState::new(
+                    b"session".to_vec(),
+                    b"initial".to_vec(),
+                    Vec::new(),
+                    parent_observed_at,
+                )
+                .expect("construct bootstrap test state"),
+            )
+            .expect("initialize crypto pressure test store");
+
+        let inbox_id = store
+            .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                b"initial".to_vec(),
+                b"next-1".to_vec(),
+                b"response".to_vec(),
+                parent_observed_at,
+            ))
+            .expect("append old inbox");
+        let request = ExactMatrixRequest::keys_query(b"sdk-request-id".to_vec(), br#"{}"#.to_vec())
+            .expect("construct crypto request");
+        store
+            .record_sdk_processing(inbox_id.as_str(), &[request])
+            .expect("record crypto request");
+        let request_lookup =
+            matrix_request_lookup(&store.keyring, b"{}").expect("derive crypto request lookup");
+        let crypto_row_id =
+            derive_crypto_row_id(&inbox_id, &request_lookup).expect("derive crypto row id");
+        let retry_at = Utc
+            .timestamp_millis_opt(1_700_000_002_000)
+            .single()
+            .expect("retry timestamp");
+        store
+            .record_attempt(
+                crypto_row_id.as_str(),
+                0,
+                parent_observed_at,
+                Utc.timestamp_millis_opt(1_700_000_001_000)
+                    .single()
+                    .expect("lease timestamp"),
+                retry_at,
+            )
+            .expect("lease and reschedule crypto request");
+
+        let pressure = store.inbox_crypto_pressure().expect("read crypto pressure");
+        assert_eq!(pressure.oldest_pending_at(), Some(parent_observed_at));
+    }
+
+    #[test]
+    fn inbox_crypto_pressure_reports_oldest_purge_candidate_deadline() {
+        let directory = tempdir().expect("create retention deadline test directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure retention deadline test directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let mut store = Store::open(&path, Keyring::new([0x11; 32], 1).expect("test keyring"))
+            .expect("open retention deadline test store");
+        let first_observed_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("first observation timestamp");
+        store
+            .initialize_bootstrap_state(
+                NewBootstrapState::new(
+                    b"session".to_vec(),
+                    b"initial".to_vec(),
+                    Vec::new(),
+                    first_observed_at,
+                )
+                .expect("construct bootstrap test state"),
+            )
+            .expect("initialize retention deadline test store");
+
+        let first_id = store
+            .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                b"initial".to_vec(),
+                b"next-1".to_vec(),
+                br#"{"next_batch":"next-1"}"#.to_vec(),
+                first_observed_at,
+            ))
+            .expect("append first inbox")
+            .as_str()
+            .to_owned();
+        store
+            .record_sdk_processing(&first_id, &[])
+            .expect("record first empty SDK processing");
+        store
+            .mark_crypto_drained(&first_id)
+            .expect("drain first empty crypto set");
+        let first_window_id = format!(
+            "window_{}",
+            store
+                .keyring
+                .lookup_digest("matrix-live-window-v1", &[&first_id])
+                .expect("derive first window ID")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        store
+            .create_collecting_live_window(
+                &first_id,
+                NewLiveWindow::new(first_window_id.clone(), first_observed_at, 0)
+                    .expect("create first collecting window"),
+            )
+            .expect("create first empty window");
+        let first_committed_at = Utc
+            .timestamp_millis_opt(1_700_000_000_100)
+            .single()
+            .expect("first commit timestamp");
+        store
+            .commit_empty_live_window(&first_id, &first_window_id, &[], &[], first_committed_at)
+            .expect("commit first empty window");
+
+        let second_observed_at = Utc
+            .timestamp_millis_opt(1_700_000_001_000)
+            .single()
+            .expect("second observation timestamp");
+        let second_id = store
+            .append_fetched_sync(NewRawSyncInbox::new_unchecked_for_test(
+                b"next-1".to_vec(),
+                b"next-2".to_vec(),
+                br#"{"next_batch":"next-2"}"#.to_vec(),
+                second_observed_at,
+            ))
+            .expect("append second inbox")
+            .as_str()
+            .to_owned();
+        store
+            .record_sdk_processing(&second_id, &[])
+            .expect("record second empty SDK processing");
+        store
+            .mark_crypto_drained(&second_id)
+            .expect("drain second empty crypto set");
+        let second_window_id = format!(
+            "window_{}",
+            store
+                .keyring
+                .lookup_digest("matrix-live-window-v1", &[&second_id])
+                .expect("derive second window ID")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        store
+            .create_collecting_live_window(
+                &second_id,
+                NewLiveWindow::new(second_window_id.clone(), second_observed_at, 0)
+                    .expect("create second collecting window"),
+            )
+            .expect("create second empty window");
+        let second_committed_at = Utc
+            .timestamp_millis_opt(1_700_000_001_100)
+            .single()
+            .expect("second commit timestamp");
+        store
+            .commit_empty_live_window(&second_id, &second_window_id, &[], &[], second_committed_at)
+            .expect("commit second empty window");
+
+        let expected = first_committed_at
+            .checked_add_signed(chrono::Duration::days(7))
+            .and_then(|value| value.checked_add_signed(chrono::Duration::milliseconds(1)))
+            .expect("retention deadline");
+        let pressure = store
+            .inbox_crypto_pressure()
+            .expect("read retention pressure");
+        assert_eq!(pressure.next_retention_at(), Some(expected));
     }
 }
