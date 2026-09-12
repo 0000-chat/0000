@@ -2,6 +2,8 @@
 
 Date: 2026-09-12 (UTC)
 
+Paused task handoff: `codex://threads/01a03e08-02aa-75e3-af87-94dee9e66438`.
+
 This branch preserves the destination repository history while importing the
 useful application history from `/home/ubuntu/communicator`. The source
 checkout was not changed. The destination branch is
@@ -97,13 +99,13 @@ main 0541524cf6732463ccb2af17da9a6b734dc6d90e
 plan/matrix-core da2136042e6d5ed8c56e7a03a4c3b043cb77b07a
 ```
 
-Other divergent work remains reachable only through the preservation refs and
-bundle. It was not indiscriminately merged.
+Other divergent work remains reachable through the preservation refs and bundle
+and through the untouched source checkout. It was not indiscriminately merged.
 
 ## Dirty and local work preservation
 
-The source root had 14 untracked `.test-tmp` files (84K). They are preserved
-at:
+The inventory covered all 50 source worktrees. The source root had 14
+untracked `.test-tmp` files (84K). They are preserved at:
 
 `/home/ubuntu/0000-full/migration-backups/communicator-20260912T081132Z/source-test-tmp.tar.gz`
 
@@ -123,6 +125,12 @@ the observer currently opens the database read-only and emits the healthy
 shape; the empty-store test intentionally remains RED because it expects
 `blocked`/`missing`. Do not fix that behavior as part of migration.
 
+The `matrix-wave1-security-fix` worktree had 15,829 untracked files under its
+32G `target/` directory. These are Rust build outputs and were excluded as
+regenerable cache state. The other 47 worktrees had no tracked or untracked
+working-tree changes. Ignored dependency and runtime state is covered in the
+exclusions below.
+
 Task 7 daemon/admin work and Task 8 packaging work had not started. The
 receive-only Matrix service-loop plan remains the active foundation; an
 outbound command path is still a product decision.
@@ -135,8 +143,9 @@ open, so its candidate tickets are not canonical issues.
 
 The source checkout was about 42G, including 42G of `.worktrees` and 623M of
 root `node_modules`. Those regenerable trees were excluded from backup. The
-source refs and complete history are preserved by the bundle, and the only
-dirty worktree state was captured explicitly above.
+source refs and complete history are preserved by the bundle, and all
+meaningful dirty worktree state is accounted for above; the 32G build tree is
+explicitly recorded as a regenerable exclusion.
 
 Also excluded from backup were per-worktree `node_modules`, `target`,
 `dist`, test reports, coverage, Wrangler generated state, and local cache/tmp
@@ -163,13 +172,15 @@ matrix-health-untracked.tar.gz
 ## Validation and pending work
 
 Completed migration checks include bundle verification, exact source-to-
-destination preservation-ref comparison, SHA-256 comparison of copied Task 6
-files, and merge-conflict resolution. Run `./scripts/check` after this report
-and the preserved wayfinder draft are staged. Also run `git diff --check` and
-`git fsck --full` on the migration branch.
+destination preservation-ref comparison with zero mismatches across 120 refs,
+SHA-256 comparison of copied Task 6 files, merge-conflict resolution,
+`./scripts/check` passing, and `git diff --check` passing. `git fsck --full
+--no-progress` exited 0 and reported one dangling tree
+`97f2deba53704279b085453cafc3a7bbb8754141`, with no corruption errors.
 
-The focused health test remains a known intentional RED (one passing test and
-one missing-session failure) pending the separately authorized Task 6 fix.
+The paused handoff reports a focused health result of one passing test and one
+intentional missing-session RED. No fresh health test was run during migration;
+the failure remains pending the separately authorized Task 6 fix.
 Full Rust, Worker, Python, Docker, or deployment checks are not a migration
 requirement and were not run here. No push, deployment, issue creation, or
 external write was performed.
