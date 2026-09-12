@@ -1,13 +1,14 @@
 # 0000-communicator
 
-This independent repository is the scaffold for communication adapters and
-delivery channels. It is coordinated by `0000-full`, not embedded application
-source.
+This independent repository contains the communication adapter application and
+its delivery-channel boundary. It is coordinated by `0000-full`, not embedded
+application source.
 
-The current delivery contains metadata, documentation, a local check, a
-pre-commit hook, and CI only. It contains no application source, package
-manifest, generated dependency tree, database, API, deployment configuration,
-secret, or license.
+The application history was migrated from the previous local Communicator
+checkout. Treat `docs/migration/2026-09-12-communicator-migration.md` as the
+handoff for preserved refs, dirty work, excluded local state, and pending
+validation. Keep credentials, runtime databases, generated dependencies, and
+other local state outside tracked files.
 
 Standalone public components do not require hosted platform authentication.
 Cloudflare is the public ingress and normal runtime class. Run
@@ -26,3 +27,12 @@ The default five-role triage vocabulary is used. See `docs/agents/triage-labels.
 ### Domain docs
 
 This repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
+
+### Wayfinding
+
+When choosing the next product slice, defining a pilot boundary, or deciding
+whether this is a pilot or a full product, read
+`/home/ubuntu/0000-full/skills/ecosystem/wayfinder/SKILL.md` first. The
+current migration leaves that scope decision open; keep
+`docs/migration/wayfinder-draft.md` proposed until the human decision is
+recorded.
