@@ -4,6 +4,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use communicator_matrix_gateway::{
     crypto::Keyring, health::inspect_at, store::Store, store_types::NewBootstrapState,
 };
+use rusqlite::Connection;
 use tempfile::{TempDir, tempdir};
 
 const HEALTHY_JSON: &str = r#"{"schema_version":1,"status":"healthy","session":"present","inbox_state":"within_limits","outbox_state":"within_limits","maintenance_code":null,"terminal_quarantine":false}"#;
@@ -62,4 +63,41 @@ fn missing_session_is_blocked() {
     let report = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect empty store");
 
     assert_eq!(report.to_json(), MISSING_SESSION_JSON);
+}
+
+#[test]
+fn pending_outbox_bytes_at_limit_are_blocked() {
+    let (_directory, path, store) = bootstrap_store();
+    drop(store);
+    let connection = Connection::open(&path).expect("open fixture connection");
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .expect("disable fixture foreign keys");
+    connection
+        .execute(
+            "WITH RECURSIVE numbers(value) AS (
+                 SELECT 0
+                 UNION ALL SELECT value + 1 FROM numbers WHERE value < 63
+             )
+             INSERT INTO outbox_batches
+             (batch_row_id, source_kind, window_id, backfill_job_id, ordinal, state,
+              request_cipher, request_nonce, request_key_version, request_sha256,
+              byte_count, attempt_count, next_attempt_at, accepted_at, terminal_code)
+             SELECT 'batch_' || printf('%064x', value), 'live',
+                    'window_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    NULL, value, 'pending', zeroblob(16), zeroblob(24), 1, zeroblob(32),
+                    4194304, 0, '2023-11-14T22:13:20.000Z', NULL, NULL
+             FROM numbers",
+            [],
+        )
+        .expect("insert pressure fixtures");
+
+    let report = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect pressured store");
+
+    assert!(
+        report
+            .to_json()
+            .contains("\"outbox_state\":\"bytes_exceeded\"")
+    );
+    assert!(!report.is_healthy());
 }
