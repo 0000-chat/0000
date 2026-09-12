@@ -32,13 +32,12 @@ This repository uses a single-context domain-doc layout. See `docs/agents/domain
 
 When choosing the next product slice, defining a pilot boundary, or deciding
 the outbound route, read `/home/ubuntu/0000-full/skills/ecosystem/wayfinder/SKILL.md`
-first and then follow the [canonical wayfinder map](https://github.com/0000-chat/0000-communicator/issues/1),
-"WhatsApp pilot with reusable provider boundaries".
+first and then follow the [WhatsApp pilot with reusable provider boundaries](https://github.com/0000-chat/0000-communicator/issues/1).
 
 The pilot direction is settled: WhatsApp comes first, with provider boundaries
 that support adding other providers shortly thereafter. Preserve and reconcile
 the imported history recorded in `docs/migration/2026-09-12-communicator-migration.md`.
-The map Notes allow execution because the user requested continuation. Chart
-research now, and execute at most one nonresearch ticket per session. Inbound
-and reply acceptance remains open in child issue #3; use the map for its current
-dependencies and ticket order.
+The map Notes allow execution because the user requested continuation. Execute
+at most one nonresearch ticket per session. Inbound and reply acceptance remains
+open in [Decide WhatsApp pilot acceptance](https://github.com/0000-chat/0000-communicator/issues/3);
+use the map for its current dependencies and ticket order.
