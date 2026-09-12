@@ -144,6 +144,19 @@ fn insert_crypto_row(
         .expect("insert crypto fixture");
 }
 
+fn insert_quarantined_window(connection: &Connection, inbox_id: &str) {
+    connection
+        .execute(
+            "INSERT INTO sync_windows
+             (window_id, inbox_id, state, batch_count, accepted_count, ignored_count,
+              created_at, committed_at, terminal_code)
+             VALUES ('window_quarantine', ?1, 'quarantined', 1, 0, 0,
+                     '2023-11-14T22:13:20.000Z', NULL, 'terminal')",
+            [inbox_id],
+        )
+        .expect("insert quarantined window fixture");
+}
+
 #[test]
 fn healthy_bootstrap_has_exact_compact_json_and_key_order() {
     let (_directory, path, _store) = bootstrap_store();
@@ -560,4 +573,167 @@ fn missing_crypto_parent_or_invalid_inbox_value_is_corrupt() {
         assert!(report.to_json().contains("\"inbox_state\":\"corrupt\""));
         assert!(!report.is_healthy());
     }
+}
+
+#[test]
+fn maintenance_code_persists_across_health_reopen() {
+    for code in [
+        "crypto_maintenance_required",
+        "matrix_crypto_kind_not_allowed",
+        "matrix_crypto_ack_unrecoverable",
+    ] {
+        let (_directory, path, store) = bootstrap_store();
+        drop(store);
+        let connection = Connection::open(&path).expect("open fixture connection");
+        connection
+            .execute(
+                "UPDATE gateway_state
+                 SET maintenance_code = ?1, maintenance_since = ?2
+                 WHERE singleton = 1",
+                params![code, "2023-11-14T22:13:20.000Z"],
+            )
+            .expect("persist maintenance fixture");
+        drop(connection);
+
+        let first = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect maintenance");
+        let second =
+            inspect_at(&path, timestamp(1_700_000_001_000)).expect("reopen maintenance database");
+        for report in [first, second] {
+            let json = report.to_json();
+            assert!(json.contains(&format!("\"maintenance_code\":\"{code}\"")));
+            assert!(json.contains("\"terminal_quarantine\":false"));
+            assert!(!report.is_healthy());
+        }
+    }
+}
+
+#[test]
+fn terminal_quarantine_is_reported_for_crypto_window_and_batch() {
+    {
+        let (_directory, path, store) = bootstrap_store();
+        drop(store);
+        let connection = Connection::open(&path).expect("open fixture connection");
+        insert_sync_row(
+            &connection,
+            "inbox_crypto_quarantine",
+            1,
+            "sdk_processed",
+            "2023-11-14T22:13:20.000Z",
+        );
+        insert_crypto_row(
+            &connection,
+            "crypto_quarantine",
+            "inbox_crypto_quarantine",
+            1,
+            "quarantined",
+            "2023-11-14T22:13:20.000Z",
+        );
+        let report =
+            inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect crypto quarantine");
+        assert!(report.to_json().contains("\"terminal_quarantine\":true"));
+        assert!(!report.is_healthy());
+    }
+
+    {
+        let (_directory, path, store) = bootstrap_store();
+        drop(store);
+        let connection = Connection::open(&path).expect("open fixture connection");
+        insert_sync_row(
+            &connection,
+            "inbox_window_quarantine",
+            1,
+            "fetched",
+            "2023-11-14T22:13:20.000Z",
+        );
+        insert_quarantined_window(&connection, "inbox_window_quarantine");
+        let report =
+            inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect window quarantine");
+        assert!(report.to_json().contains("\"terminal_quarantine\":true"));
+        assert!(!report.is_healthy());
+    }
+
+    {
+        let (_directory, path, store) = bootstrap_store();
+        drop(store);
+        let connection = Connection::open(&path).expect("open fixture connection");
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON")
+            .expect("disable batch constraints");
+        insert_pending_outbox_rows(&connection, 1, 1, "2023-11-14T22:13:20.000Z");
+        connection
+            .execute(
+                "UPDATE outbox_batches
+                 SET state = 'quarantined', terminal_code = 'terminal'",
+                [],
+            )
+            .expect("quarantine batch fixture");
+        let report =
+            inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect batch quarantine");
+        assert!(report.to_json().contains("\"terminal_quarantine\":true"));
+        assert!(!report.is_healthy());
+    }
+}
+
+#[test]
+fn invalid_maintenance_metadata_is_corrupt_and_content_free() {
+    let updates = [
+        "UPDATE gateway_state SET maintenance_code = 'unknown_code', maintenance_since = '2023-11-14T22:13:20.000Z' WHERE singleton = 1",
+        "UPDATE gateway_state SET maintenance_code = NULL, maintenance_since = '2023-11-14T22:13:20.000Z' WHERE singleton = 1",
+        "UPDATE gateway_state SET maintenance_code = 'crypto_maintenance_required', maintenance_since = NULL WHERE singleton = 1",
+        "UPDATE gateway_state SET maintenance_code = 42, maintenance_since = '2023-11-14T22:13:20.000Z' WHERE singleton = 1",
+        "UPDATE gateway_state SET maintenance_code = 'crypto_maintenance_required', maintenance_since = 'not-a-time' WHERE singleton = 1",
+    ];
+    for update in updates {
+        let (_directory, path, store) = bootstrap_store();
+        drop(store);
+        let connection = Connection::open(&path).expect("open fixture connection");
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .expect("disable maintenance constraints");
+        connection
+            .execute(update, [])
+            .expect("corrupt maintenance fixture");
+        let report =
+            inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect corrupt maintenance");
+        let json = report.to_json();
+        assert!(json.contains("\"inbox_state\":\"corrupt\""));
+        assert!(json.contains("\"maintenance_code\":null"));
+        assert!(!json.contains("unknown_code"));
+        assert!(!report.is_healthy());
+    }
+}
+
+#[test]
+fn invalid_terminal_code_is_corrupt_without_quarantine_flag() {
+    let (_directory, path, store) = bootstrap_store();
+    drop(store);
+    let connection = Connection::open(&path).expect("open fixture connection");
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON")
+        .expect("disable terminal constraints");
+    insert_sync_row(
+        &connection,
+        "inbox_invalid_terminal",
+        1,
+        "sdk_processed",
+        "2023-11-14T22:13:20.000Z",
+    );
+    insert_crypto_row(
+        &connection,
+        "crypto_invalid_terminal",
+        "inbox_invalid_terminal",
+        1,
+        "quarantined",
+        "2023-11-14T22:13:20.000Z",
+    );
+    connection
+        .execute("UPDATE matrix_crypto_outbox SET terminal_code = 'BAD'", [])
+        .expect("corrupt terminal code");
+
+    let report =
+        inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect invalid terminal code");
+    let json = report.to_json();
+    assert!(json.contains("\"inbox_state\":\"corrupt\""));
+    assert!(json.contains("\"terminal_quarantine\":false"));
+    assert!(!report.is_healthy());
 }

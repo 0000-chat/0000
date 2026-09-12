@@ -67,12 +67,17 @@ pub struct HealthReport {
 impl HealthReport {
     /// Serialize the report as one compact JSON object.
     pub fn to_json(&self) -> String {
+        let maintenance_code = self
+            .maintenance_code
+            .map_or_else(|| "null".to_owned(), |code| format!("\"{code}\""));
         format!(
-            r#"{{"schema_version":1,"status":"{}","session":"{}","inbox_state":"{}","outbox_state":"{}","maintenance_code":null,"terminal_quarantine":false}}"#,
+            r#"{{"schema_version":1,"status":"{}","session":"{}","inbox_state":"{}","outbox_state":"{}","maintenance_code":{},"terminal_quarantine":{}}}"#,
             self.status().as_str(),
             self.session.as_str(),
             self.inbox_state.as_str(),
             self.outbox_state.as_str(),
+            maintenance_code,
+            self.terminal_quarantine,
         )
     }
 
@@ -81,14 +86,9 @@ impl HealthReport {
         matches!(self.status(), HealthStatus::Healthy)
     }
 
-    /// Return the process status a future healthcheck command should use.
-    pub const fn exit_status(&self) -> i32 {
-        if self.is_healthy() { 0 } else { 1 }
-    }
-
     /// Return the process exit code a future healthcheck command should use.
     pub const fn exit_code(&self) -> i32 {
-        self.exit_status()
+        if self.is_healthy() { 0 } else { 1 }
     }
 
     const fn status(&self) -> HealthStatus {
@@ -167,22 +167,27 @@ impl LimitState {
 /// Inspect the state database at a caller-supplied UTC time.
 pub fn inspect_at(path: impl AsRef<Path>, now: DateTime<Utc>) -> Result<HealthReport, HealthError> {
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(map_open_error)?;
+        .map_err(map_query_error)?;
     connection
         .busy_timeout(HEALTH_BUSY_TIMEOUT)
-        .map_err(map_connection_error)?;
+        .map_err(map_query_error)?;
     connection
         .pragma_update(None, "query_only", true)
-        .map_err(map_connection_error)?;
+        .map_err(map_query_error)?;
 
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Deferred)
-        .map_err(map_connection_error)?;
+        .map_err(map_query_error)?;
     let session = match session_present(&transaction) {
         Ok(true) => SessionState::Present,
         Ok(false) => SessionState::Missing,
         Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
         Err(_) => SessionState::Missing,
+    };
+    let (maintenance_code, maintenance_corrupt) = match maintenance_state(&transaction) {
+        Ok(code) => (code, false),
+        Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
+        Err(_) => (None, true),
     };
     let outbox_pressure = match pending_outbox_pressure(&transaction) {
         Ok(pressure) => Some(pressure),
@@ -194,16 +199,26 @@ pub fn inspect_at(path: impl AsRef<Path>, now: DateTime<Utc>) -> Result<HealthRe
         Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
         Err(_) => None,
     };
-    let (inbox_state, outbox_state) =
+    let (mut inbox_state, mut outbox_state) =
         combined_pressure_states(inbox_pressure.as_ref(), outbox_pressure.as_ref(), now);
-    transaction.commit().map_err(map_connection_error)?;
+    if maintenance_corrupt {
+        inbox_state = LimitState::Corrupt;
+        outbox_state = LimitState::Corrupt;
+    }
+    let terminal_quarantine = inbox_pressure
+        .as_ref()
+        .is_some_and(|pressure| pressure.terminal_quarantine)
+        || outbox_pressure
+            .as_ref()
+            .is_some_and(|pressure| pressure.terminal_quarantine);
+    transaction.commit().map_err(map_query_error)?;
 
     Ok(HealthReport {
         session,
         inbox_state,
         outbox_state,
-        maintenance_code: None,
-        terminal_quarantine: false,
+        maintenance_code,
+        terminal_quarantine,
     })
 }
 
@@ -224,10 +239,41 @@ fn session_present(transaction: &Transaction<'_>) -> Result<bool, HealthError> {
     Ok(row.0 == 1 && row.1 == 1)
 }
 
+fn maintenance_state(transaction: &Transaction<'_>) -> Result<Option<&'static str>, HealthError> {
+    let mut statement = transaction
+        .prepare("SELECT maintenance_code, maintenance_since FROM gateway_state")
+        .map_err(map_query_error)?;
+    let mut rows = statement.query([]).map_err(map_query_error)?;
+    let mut result = None;
+    while let Some(row) = rows.next().map_err(map_query_error)? {
+        if result.is_some() {
+            return Err(corrupt_error());
+        }
+        let code = optional_text_value(row, 0)?;
+        let since = optional_text_value(row, 1)?;
+        result = match (code, since) {
+            (None, None) => Some(None),
+            (Some(code), Some(since)) => {
+                let code = match code {
+                    "crypto_maintenance_required" => "crypto_maintenance_required",
+                    "matrix_crypto_kind_not_allowed" => "matrix_crypto_kind_not_allowed",
+                    "matrix_crypto_ack_unrecoverable" => "matrix_crypto_ack_unrecoverable",
+                    _ => return Err(corrupt_error()),
+                };
+                parse_timestamp_value(since)?;
+                Some(Some(code))
+            }
+            _ => return Err(corrupt_error()),
+        };
+    }
+    Ok(result.flatten())
+}
+
 struct OutboxPressure {
     pending_rows: u64,
     pending_bytes: u64,
     oldest_pending_at: Option<DateTime<Utc>>,
+    terminal_quarantine: bool,
 }
 
 impl OutboxPressure {
@@ -298,13 +344,14 @@ fn shared_limit_state(current: LimitState, shared: LimitState) -> LimitState {
 fn inbox_crypto_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure, HealthError> {
     let mut statement = transaction
         .prepare(
-            "SELECT inbox_id, byte_count, state, observed_at
+            "SELECT inbox_id, byte_count, state, observed_at, terminal_code
              FROM sync_inbox",
         )
         .map_err(map_query_error)?;
     let mut rows = statement.query([]).map_err(map_query_error)?;
     let mut pending_bytes = 0_u64;
     let mut oldest_pending_at = None;
+    let mut terminal_quarantine = false;
 
     while let Some(row) = rows.next().map_err(map_query_error)? {
         let _inbox_id = text_value(row, 0)?;
@@ -318,6 +365,7 @@ fn inbox_crypto_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure
             return Err(corrupt_error());
         }
         let observed_at = timestamp_value(row, 3)?;
+        terminal_quarantine |= terminal_state(row, 4, state)?;
         pending_bytes = pending_bytes
             .checked_add(byte_count)
             .ok_or_else(corrupt_error)?;
@@ -332,7 +380,7 @@ fn inbox_crypto_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure
     let mut statement = transaction
         .prepare(
             "SELECT c.inbox_id, c.state, c.byte_count, c.next_attempt_at,
-                    i.observed_at
+                    i.observed_at, c.terminal_code
              FROM matrix_crypto_outbox AS c
              LEFT JOIN sync_inbox AS i ON i.inbox_id = c.inbox_id",
         )
@@ -358,6 +406,7 @@ fn inbox_crypto_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure
         .map_err(|_| corrupt_error())?;
         let _next_attempt_at = timestamp_value(row, 3)?;
         let parent_observed_at = timestamp_value(row, 4)?;
+        terminal_quarantine |= terminal_state(row, 5, state)?;
         if matches!(state, "pending" | "response_received") {
             pending_rows = pending_rows.checked_add(1).ok_or_else(corrupt_error)?;
             pending_bytes = pending_bytes
@@ -371,17 +420,33 @@ fn inbox_crypto_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure
         }
     }
 
+    let mut statement = transaction
+        .prepare("SELECT state, terminal_code FROM sync_windows")
+        .map_err(map_query_error)?;
+    let mut rows = statement.query([]).map_err(map_query_error)?;
+    while let Some(row) = rows.next().map_err(map_query_error)? {
+        let state = text_value(row, 0)?;
+        if !matches!(
+            state,
+            "collecting" | "pending" | "committed" | "quarantined"
+        ) {
+            return Err(corrupt_error());
+        }
+        terminal_quarantine |= terminal_state(row, 1, state)?;
+    }
+
     Ok(OutboxPressure {
         pending_rows,
         pending_bytes,
         oldest_pending_at,
+        terminal_quarantine,
     })
 }
 
 fn pending_outbox_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure, HealthError> {
     let mut statement = transaction
         .prepare(
-            "SELECT source_kind, state, byte_count, next_attempt_at
+            "SELECT source_kind, state, byte_count, next_attempt_at, terminal_code
              FROM outbox_batches",
         )
         .map_err(map_query_error)?;
@@ -389,6 +454,7 @@ fn pending_outbox_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressu
     let mut pending_rows = 0_u64;
     let mut pending_bytes = 0_u64;
     let mut oldest_pending_at = None;
+    let mut terminal_quarantine = false;
 
     while let Some(row) = rows.next().map_err(map_query_error)? {
         let source_kind = text_value(row, 0)?;
@@ -407,6 +473,7 @@ fn pending_outbox_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressu
         )?)
         .map_err(|_| corrupt_error())?;
         let next_attempt_at = timestamp_value(row, 3)?;
+        terminal_quarantine |= terminal_state(row, 4, state)?;
         if state == "pending" {
             pending_rows = pending_rows.checked_add(1).ok_or_else(corrupt_error)?;
             pending_bytes = pending_bytes
@@ -424,6 +491,7 @@ fn pending_outbox_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressu
         pending_rows,
         pending_bytes,
         oldest_pending_at,
+        terminal_quarantine,
     })
 }
 
@@ -448,6 +516,10 @@ fn bounded_integer(
 
 fn timestamp_value(row: &Row<'_>, index: usize) -> Result<DateTime<Utc>, HealthError> {
     let value = text_value(row, index)?;
+    parse_timestamp_value(value)
+}
+
+fn parse_timestamp_value(value: &str) -> Result<DateTime<Utc>, HealthError> {
     if !crate::model::valid_timestamp(value) {
         return Err(corrupt_error());
     }
@@ -460,24 +532,45 @@ fn timestamp_value(row: &Row<'_>, index: usize) -> Result<DateTime<Utc>, HealthE
     Ok(timestamp.with_timezone(&Utc))
 }
 
+fn optional_text_value<'row>(
+    row: &'row Row<'_>,
+    index: usize,
+) -> Result<Option<&'row str>, HealthError> {
+    match row.get_ref(index).map_err(map_query_error)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Text(bytes) => str::from_utf8(bytes).map(Some).map_err(|_| corrupt_error()),
+        _ => Err(corrupt_error()),
+    }
+}
+
+fn terminal_state(row: &Row<'_>, index: usize, state: &str) -> Result<bool, HealthError> {
+    let terminal_code = optional_text_value(row, index)?;
+    match (state, terminal_code) {
+        ("quarantined", Some(code)) if valid_reason_code(code) => Ok(true),
+        ("quarantined", _) => Err(corrupt_error()),
+        (_, None) => Ok(false),
+        (_, Some(_)) => Err(corrupt_error()),
+    }
+}
+
+fn valid_reason_code(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if !(3..=64).contains(&bytes.len()) {
+        return false;
+    }
+    if !matches!(bytes.first(), Some(b'a'..=b'z'))
+        || !matches!(bytes.last(), Some(b'a'..=b'z' | b'0'..=b'9'))
+    {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(index, byte)| {
+        matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_')
+            && (index == 0 || *byte != b'_' || bytes[index - 1] != b'_')
+    })
+}
+
 fn corrupt_error() -> HealthError {
     HealthError::new(HEALTH_DATABASE_UNAVAILABLE)
-}
-
-fn map_open_error(error: SqliteError) -> HealthError {
-    if is_busy(&error) {
-        HealthError::new(HEALTH_DATABASE_BUSY)
-    } else {
-        HealthError::new(HEALTH_DATABASE_UNAVAILABLE)
-    }
-}
-
-fn map_connection_error(error: SqliteError) -> HealthError {
-    if is_busy(&error) {
-        HealthError::new(HEALTH_DATABASE_BUSY)
-    } else {
-        HealthError::new(HEALTH_DATABASE_UNAVAILABLE)
-    }
 }
 
 fn map_query_error(error: SqliteError) -> HealthError {
