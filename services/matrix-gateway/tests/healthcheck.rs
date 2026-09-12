@@ -2,17 +2,12 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
 use communicator_matrix_gateway::{
-    crypto::Keyring,
-    health::inspect_at,
-    store::Store,
-    store_types::NewBootstrapState,
+    crypto::Keyring, health::inspect_at, store::Store, store_types::NewBootstrapState,
 };
 use tempfile::{TempDir, tempdir};
 
-const HEALTHY_JSON: &str =
-    r#"{"schema_version":1,"status":"healthy","session":"present","inbox_state":"within_limits","outbox_state":"within_limits","maintenance_code":null,"terminal_quarantine":false}"#;
-const MISSING_SESSION_JSON: &str =
-    r#"{"schema_version":1,"status":"blocked","session":"missing","inbox_state":"within_limits","outbox_state":"within_limits","maintenance_code":null,"terminal_quarantine":false}"#;
+const HEALTHY_JSON: &str = r#"{"schema_version":1,"status":"healthy","session":"present","inbox_state":"within_limits","outbox_state":"within_limits","maintenance_code":null,"terminal_quarantine":false}"#;
+const MISSING_SESSION_JSON: &str = r#"{"schema_version":1,"status":"blocked","session":"missing","inbox_state":"within_limits","outbox_state":"within_limits","maintenance_code":null,"terminal_quarantine":false}"#;
 
 fn timestamp(milliseconds: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(milliseconds)
