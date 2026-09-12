@@ -10,7 +10,9 @@ use rusqlite::{
 
 use crate::config::{
     MAX_BATCH_CANONICAL_BYTES, MAX_PENDING_AGE_SECS, MAX_PENDING_REQUEST_ROWS, MAX_RECOVERY_BYTES,
+    MAX_SYNC_RESPONSE_BYTES,
 };
+use crate::crypto_outbox::MAX_MATRIX_CRYPTO_REQUEST_BYTES;
 
 /// Stable error returned when the health database cannot be opened.
 pub const HEALTH_DATABASE_UNAVAILABLE: &str = "health_database_unavailable";
@@ -182,16 +184,23 @@ pub fn inspect_at(path: impl AsRef<Path>, now: DateTime<Utc>) -> Result<HealthRe
         Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
         Err(_) => SessionState::Missing,
     };
-    let outbox_state = match pending_outbox_pressure(&transaction) {
-        Ok(pressure) => pressure.state(now),
+    let outbox_pressure = match pending_outbox_pressure(&transaction) {
+        Ok(pressure) => Some(pressure),
         Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
-        Err(_) => LimitState::Corrupt,
+        Err(_) => None,
     };
+    let inbox_pressure = match inbox_crypto_pressure(&transaction) {
+        Ok(pressure) => Some(pressure),
+        Err(error) if error.code() == HEALTH_DATABASE_BUSY => return Err(error),
+        Err(_) => None,
+    };
+    let (inbox_state, outbox_state) =
+        combined_pressure_states(inbox_pressure.as_ref(), outbox_pressure.as_ref(), now);
     transaction.commit().map_err(map_connection_error)?;
 
     Ok(HealthReport {
         session,
-        inbox_state: LimitState::WithinLimits,
+        inbox_state,
         outbox_state,
         maintenance_code: None,
         terminal_quarantine: false,
@@ -236,6 +245,137 @@ impl OutboxPressure {
         }
         LimitState::WithinLimits
     }
+}
+
+fn combined_pressure_states(
+    inbox: Option<&OutboxPressure>,
+    outbox: Option<&OutboxPressure>,
+    now: DateTime<Utc>,
+) -> (LimitState, LimitState) {
+    let Some(inbox) = inbox else {
+        return (
+            LimitState::Corrupt,
+            outbox.map_or(LimitState::Corrupt, |pressure| pressure.state(now)),
+        );
+    };
+    let Some(outbox) = outbox else {
+        return (inbox.state(now), LimitState::Corrupt);
+    };
+
+    let mut inbox_state = inbox.state(now);
+    let mut outbox_state = outbox.state(now);
+    let Some(combined_rows) = inbox.pending_rows.checked_add(outbox.pending_rows) else {
+        return (LimitState::Corrupt, LimitState::Corrupt);
+    };
+    let Some(combined_bytes) = inbox.pending_bytes.checked_add(outbox.pending_bytes) else {
+        return (LimitState::Corrupt, LimitState::Corrupt);
+    };
+
+    if combined_rows >= MAX_PENDING_REQUEST_ROWS
+        && inbox.pending_rows < MAX_PENDING_REQUEST_ROWS
+        && outbox.pending_rows < MAX_PENDING_REQUEST_ROWS
+    {
+        inbox_state = shared_limit_state(inbox_state, LimitState::RowsExceeded);
+        outbox_state = shared_limit_state(outbox_state, LimitState::RowsExceeded);
+    } else if combined_bytes >= MAX_RECOVERY_BYTES
+        && inbox.pending_bytes < MAX_RECOVERY_BYTES
+        && outbox.pending_bytes < MAX_RECOVERY_BYTES
+    {
+        inbox_state = shared_limit_state(inbox_state, LimitState::BytesExceeded);
+        outbox_state = shared_limit_state(outbox_state, LimitState::BytesExceeded);
+    }
+    (inbox_state, outbox_state)
+}
+
+fn shared_limit_state(current: LimitState, shared: LimitState) -> LimitState {
+    if current == LimitState::Corrupt {
+        current
+    } else {
+        shared
+    }
+}
+
+fn inbox_crypto_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure, HealthError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT inbox_id, byte_count, state, observed_at
+             FROM sync_inbox",
+        )
+        .map_err(map_query_error)?;
+    let mut rows = statement.query([]).map_err(map_query_error)?;
+    let mut pending_bytes = 0_u64;
+    let mut oldest_pending_at = None;
+
+    while let Some(row) = rows.next().map_err(map_query_error)? {
+        let _inbox_id = text_value(row, 0)?;
+        let byte_count = u64::try_from(bounded_integer(row, 1, 1, MAX_SYNC_RESPONSE_BYTES as i64)?)
+            .map_err(|_| corrupt_error())?;
+        let state = text_value(row, 2)?;
+        if !matches!(
+            state,
+            "fetched" | "sdk_processed" | "prepared" | "committed" | "quarantined"
+        ) {
+            return Err(corrupt_error());
+        }
+        let observed_at = timestamp_value(row, 3)?;
+        pending_bytes = pending_bytes
+            .checked_add(byte_count)
+            .ok_or_else(corrupt_error)?;
+        if matches!(state, "fetched" | "sdk_processed" | "prepared") {
+            oldest_pending_at = Some(
+                oldest_pending_at
+                    .map_or(observed_at, |oldest: DateTime<Utc>| oldest.min(observed_at)),
+            );
+        }
+    }
+
+    let mut statement = transaction
+        .prepare(
+            "SELECT c.inbox_id, c.state, c.byte_count, c.next_attempt_at,
+                    i.observed_at
+             FROM matrix_crypto_outbox AS c
+             LEFT JOIN sync_inbox AS i ON i.inbox_id = c.inbox_id",
+        )
+        .map_err(map_query_error)?;
+    let mut rows = statement.query([]).map_err(map_query_error)?;
+    let mut pending_rows = 0_u64;
+
+    while let Some(row) = rows.next().map_err(map_query_error)? {
+        let _inbox_id = text_value(row, 0)?;
+        let state = text_value(row, 1)?;
+        if !matches!(
+            state,
+            "pending" | "response_received" | "accepted" | "quarantined"
+        ) {
+            return Err(corrupt_error());
+        }
+        let byte_count = u64::try_from(bounded_integer(
+            row,
+            2,
+            1,
+            MAX_MATRIX_CRYPTO_REQUEST_BYTES as i64,
+        )?)
+        .map_err(|_| corrupt_error())?;
+        let _next_attempt_at = timestamp_value(row, 3)?;
+        let parent_observed_at = timestamp_value(row, 4)?;
+        if matches!(state, "pending" | "response_received") {
+            pending_rows = pending_rows.checked_add(1).ok_or_else(corrupt_error)?;
+            pending_bytes = pending_bytes
+                .checked_add(byte_count)
+                .ok_or_else(corrupt_error)?;
+            oldest_pending_at = Some(
+                oldest_pending_at.map_or(parent_observed_at, |oldest: DateTime<Utc>| {
+                    oldest.min(parent_observed_at)
+                }),
+            );
+        }
+    }
+
+    Ok(OutboxPressure {
+        pending_rows,
+        pending_bytes,
+        oldest_pending_at,
+    })
 }
 
 fn pending_outbox_pressure(transaction: &Transaction<'_>) -> Result<OutboxPressure, HealthError> {
