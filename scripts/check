@@ -14,9 +14,11 @@ expected = {
     ".github/workflows/quality.yml",
     ".githooks/pre-commit",
     ".gitignore",
+    ".oxlintrc.json",
     "0000-product.json",
     "AGENTS.md",
     "README.md",
+    "biome.json",
     "docs/README.md",
     "scripts/check",
 }
