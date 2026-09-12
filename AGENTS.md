@@ -38,6 +38,5 @@ The pilot direction is settled: WhatsApp comes first, with provider boundaries
 that support adding other providers shortly thereafter. Preserve and reconcile
 the imported history recorded in `docs/migration/2026-09-12-communicator-migration.md`.
 The map Notes allow execution because the user requested continuation. Execute
-at most one nonresearch ticket per session. Inbound and reply acceptance remains
-open in [Decide WhatsApp pilot acceptance](https://github.com/0000-chat/0000-communicator/issues/3);
-use the map for its current dependencies and ticket order.
+at most one nonresearch ticket per session. Use the map and named child tickets
+for current acceptance, dependencies, and ticket order.
