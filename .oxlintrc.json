@@ -1,0 +1,10 @@
+{
+  "$schema": "https://oxc.rs/schema/oxlint.json",
+  "plugins": ["eslint", "typescript", "oxc", "unicorn"],
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/target/**",
+    "**/.git/**"
+  ]
+}
