@@ -10,6 +10,7 @@ import { createApp } from "../../app";
 import type { VerifiedSubject } from "../../auth/oidc";
 import type { AttachmentProvider } from "../../attachments/provider";
 import { sha256Hex } from "../../archive/codec";
+import { recordRemoval } from "../../removals/ledger";
 import {
   auth,
   bindingFor,
@@ -599,6 +600,49 @@ describe("authenticated attachment reads", () => {
     expect(errorBody.error.code).toBe("forbidden");
     expect(provider.read).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(errorBody)).not.toContain("fixture attachment bytes");
+  });
+
+  it("rechecks removal authority after provider I/O before releasing bytes", async () => {
+    await seedProjection();
+    const provider: AttachmentProvider = {
+      read: vi.fn(async () => {
+        await recordRemoval(workerEnv.CONTROL_DB, {
+          tenant_id: tenantId,
+          resource_type: "attachment",
+          resource_id: attachmentId,
+          content_generation: attachmentId,
+          account_id: accountId,
+          conversation_id: conversationId,
+          source_event_id: "event_attachment_removed_during_read",
+          source_object_key: null,
+          reason: "requested",
+          removed_at: "2026-09-07T00:00:00.000Z",
+        });
+        return {
+          status: "available" as const,
+          bytes,
+          mime_type: "image/png",
+          sha256: await sha256Hex(bytes),
+        };
+      }),
+    };
+    const app = createTestApp(provider);
+    const metadataResponse = await request(
+      app,
+      `/api/v1/attachments/${attachmentId}?identity_id=${identityId}`,
+    );
+    const metadata = AttachmentMetadataSchema.parse(
+      await metadataResponse.json(),
+    );
+    const response = await request(
+      app,
+      `/api/v1/attachments/${attachmentId}/download?download_grant=${encodeURIComponent(metadata.download_grant ?? "")}`,
+    );
+    expect(response.status).toBe(410);
+    expect(ApiErrorResponseSchema.parse(await response.json()).error.code).toBe(
+      "attachment_removed",
+    );
+    expect(provider.read).toHaveBeenCalledTimes(1);
   });
 
   it("revalidates account identity state after provider I/O", async () => {

@@ -110,6 +110,7 @@ import {
   type ProjectionStatusCheckpoint,
   type ProjectionStatusInput,
   type ProjectionConnectionBinding,
+  type ProjectionEventEnvelope,
 } from "@communicator/contracts";
 import { DurableObject } from "cloudflare:workers";
 import { deriveManifestPrefix } from "../archive/keys";
@@ -170,6 +171,12 @@ import {
 } from "../realtime/contracts";
 import { revalidateRealtimeSocketAuthorization } from "../realtime/authorization";
 import { transitionOutboundLifecycle } from "../outbound/lifecycle";
+import {
+  contentGenerationForResource,
+  recordRemovalWithSuppression,
+} from "../removals/service";
+import { listRemovalAuthorities } from "../removals/ledger";
+import type { RecordRemovalInput } from "../../../../packages/contracts/src/removals";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -546,6 +553,52 @@ const parseReplayCursor = (cursor: string | null, tenantId: string): void => {
   } catch (error) {
     throw mapArchiveFailure(error);
   }
+};
+
+const removalInputForEvent = (
+  event: ProjectionEventEnvelope,
+): RecordRemovalInput | null => {
+  const reasonFor = (
+    reasonCode: string | null,
+  ): RecordRemovalInput["reason"] =>
+    reasonCode === "retention"
+      ? "retention"
+      : reasonCode === "expired"
+        ? "expired"
+        : "requested";
+  if (event.event_type === "message.deleted") {
+    return {
+      tenant_id: event.tenant_id,
+      resource_type: "message",
+      resource_id: event.payload.message_id,
+      content_generation: contentGenerationForResource(
+        event.payload.message_id,
+      ),
+      account_id: event.account_id,
+      conversation_id: event.conversation_id,
+      source_event_id: event.event_id,
+      source_object_key: null,
+      reason: reasonFor(event.payload.reason_code),
+      removed_at: event.occurred_at,
+    };
+  }
+  if (event.event_type === "deletion.tombstone") {
+    return {
+      tenant_id: event.tenant_id,
+      resource_type: event.payload.resource_type,
+      resource_id: event.payload.resource_id,
+      content_generation: contentGenerationForResource(
+        event.payload.resource_id,
+      ),
+      account_id: event.account_id,
+      conversation_id: event.conversation_id,
+      source_event_id: event.event_id,
+      source_object_key: null,
+      reason: reasonFor(event.payload.reason_code),
+      removed_at: event.occurred_at,
+    };
+  }
+  return null;
 };
 
 const replayPageDigest = async (
@@ -2567,15 +2620,17 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       this.#requireReadyState(meta);
 
       const prepared = await prepareProjectionBatch(parsed);
+      const preparedEvents = await this.#recordRemovedEvents(prepared.events);
       const applied = await this.#applyPreparedBatch({
         tenantId: prepared.tenantId,
         mode: "live",
         rebuildId: null,
-        preparedEvents: prepared.events,
+        preparedEvents,
         checkpointMutation: prepared.checkpointMutation,
         inputEventCount: prepared.inputEventCount,
         connections: prepared.connections,
       });
+      await this.#reapplyExternalRemovalRedactions(prepared.tenantId);
       return applied.result;
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
@@ -2999,7 +3054,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           events: parsed.page.events,
           checkpoint: null,
         });
-        preparedEvents = prepared.events;
+        preparedEvents = await this.#recordRemovedEvents(prepared.events);
         connections = prepared.connections;
       }
 
@@ -3029,6 +3084,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         inputEventCount,
         connections,
       });
+      await this.#reapplyExternalRemovalRedactions(parsed.tenant_id);
       return applied.result;
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
@@ -4734,6 +4790,111 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
+  }
+
+  /**
+   * Record deletion authority before dispatching the batch. The local stable
+   * tombstone is retained, and the redaction pass below re-applies the
+   * authority after every mutation so a late event cannot resurrect content.
+   */
+  async #recordRemovedEvents(
+    preparedEvents: readonly PreparedProjectionEvent[],
+  ): Promise<readonly PreparedProjectionEvent[]> {
+    const database = this.env.CONTROL_DB;
+    if (database === undefined) {
+      throw projectionError("projection_unavailable");
+    }
+
+    for (const prepared of preparedEvents) {
+      const removal = removalInputForEvent(prepared.event);
+      if (removal !== null) {
+        await recordRemovalWithSuppression(database, removal);
+      }
+    }
+
+    return preparedEvents;
+  }
+
+  /** Reapply external suppression after a replay/live mutation can add rows. */
+  async #reapplyExternalRemovalRedactions(tenantId: string): Promise<void> {
+    const database = this.env.CONTROL_DB;
+    if (database === undefined) {
+      throw projectionError("projection_unavailable");
+    }
+    const authorities = await listRemovalAuthorities(database, tenantId);
+    this.ctx.storage.transactionSync(() => {
+      for (const authority of authorities) {
+        const removedAt = authority.removed_at;
+        const reason = authority.reason;
+        switch (authority.resource_type) {
+          case "message":
+            this.ctx.storage.sql.exec(
+              "UPDATE message_versions SET body = '', editor_participant_id = NULL WHERE message_id = ?",
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "DELETE FROM reactions WHERE message_id = ?",
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "DELETE FROM receipts WHERE message_id = ?",
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, deleted_at = COALESCE(deleted_at, ?) WHERE message_id = ?",
+              removedAt,
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "UPDATE messages SET sender_participant_id = NULL, sender_label = 'Deleted sender', body = '', reply_to_message_id = NULL, matrix_room_id = NULL, matrix_event_id = NULL, remote_message_id = NULL, unread = 0, local_read_at = NULL, edited_at = NULL, deleted_at = COALESCE(deleted_at, ?), deletion_reason = COALESCE(deletion_reason, ?), attachment_count = 0, delivery_failure_code = NULL WHERE id = ?",
+              removedAt,
+              reason,
+              authority.resource_id,
+            );
+            break;
+          case "attachment":
+            this.ctx.storage.sql.exec(
+              "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, expires_at = NULL, deleted_at = COALESCE(deleted_at, ?) WHERE id = ?",
+              removedAt,
+              authority.resource_id,
+            );
+            break;
+          case "conversation":
+            this.ctx.storage.sql.exec(
+              "UPDATE conversations SET title = 'Deleted conversation', last_message_preview = '', archived = 0, muted = 0, unread_count = 0, message_count = 0, attachment_count = 0, deleted_at = COALESCE(deleted_at, ?) WHERE id = ?",
+              removedAt,
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "UPDATE messages SET sender_participant_id = NULL, sender_label = 'Deleted sender', body = '', reply_to_message_id = NULL, matrix_room_id = NULL, matrix_event_id = NULL, remote_message_id = NULL, unread = 0, local_read_at = NULL, edited_at = NULL, deleted_at = COALESCE(deleted_at, ?), deletion_reason = COALESCE(deletion_reason, ?), attachment_count = 0, delivery_failure_code = NULL WHERE conversation_id = ?",
+              removedAt,
+              reason,
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, expires_at = NULL, deleted_at = COALESCE(deleted_at, ?) WHERE conversation_id = ?",
+              removedAt,
+              authority.resource_id,
+            );
+            break;
+          case "participant":
+            this.ctx.storage.sql.exec(
+              "UPDATE participants SET display_name = 'Deleted participant', remote_id = NULL, avatar_url = NULL, deleted_at = COALESCE(deleted_at, ?) WHERE id = ?",
+              removedAt,
+              authority.resource_id,
+            );
+            this.ctx.storage.sql.exec(
+              "UPDATE messages SET sender_participant_id = NULL, sender_label = 'Deleted sender' WHERE sender_participant_id = ?",
+              authority.resource_id,
+            );
+            break;
+          default:
+            throw new Error(
+              `Unhandled removal resource: ${authority.resource_type}`,
+            );
+        }
+      }
+    });
   }
 
   /** The sole owner of every multi-table live or replay projection transaction. */

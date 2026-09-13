@@ -12,6 +12,7 @@ import {
   runWebhookRetryTick,
   type WebhookProjection,
 } from "../webhooks/delivery";
+import { recordRemoval } from "../removals/ledger";
 import {
   clearDirectory,
   seedAccountAccess,
@@ -830,6 +831,104 @@ describe("durable incoming webhook delivery", () => {
         response_size: 8_192,
       },
     ]);
+  });
+
+  it("rechecks cutover after a removal epoch advances during rehydration", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_removal_epoch_race",
+        destinationUrl: "https://hooks.example.test/old-authority",
+      }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_removal_epoch_race")],
+      now: () => fixedNow,
+    });
+
+    let getMessageCount = 0;
+    let enterInitialHydration!: () => void;
+    let releaseInitialHydration!: () => void;
+    let enterRehydration!: () => void;
+    let releaseRehydration!: () => void;
+    const initialHydrationEntered = new Promise<void>((resolve) => {
+      enterInitialHydration = resolve;
+    });
+    const initialHydrationRelease = new Promise<void>((resolve) => {
+      releaseInitialHydration = resolve;
+    });
+    const rehydrationEntered = new Promise<void>((resolve) => {
+      enterRehydration = resolve;
+    });
+    const rehydrationRelease = new Promise<void>((resolve) => {
+      releaseRehydration = resolve;
+    });
+    const projection: WebhookProjection = {
+      getWebhookMessage: async () => {
+        getMessageCount += 1;
+        if (getMessageCount === 1) {
+          enterInitialHydration();
+          await initialHydrationRelease;
+        } else {
+          enterRehydration();
+          await rehydrationRelease;
+        }
+        return message();
+      },
+    };
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection,
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await initialHydrationEntered;
+    await recordRemoval(workerEnv.CONTROL_DB, {
+      tenant_id: "tenant_pilot",
+      resource_type: "message",
+      resource_id: "message_epoch_probe",
+      content_generation: "message_epoch_probe",
+      account_id: "account_human",
+      conversation_id: "conversation_one",
+      source_event_id: "event_epoch_probe",
+      source_object_key: null,
+      reason: "requested",
+      removed_at: fixedNow.toISOString(),
+    });
+    releaseInitialHydration();
+
+    await rehydrationEntered;
+    await workerEnv.CONTROL_DB.prepare(
+      `UPDATE webhook_subscriptions
+       SET destination_url = ?, destination_version = destination_version + 1,
+           updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        "https://hooks.example.test/new-authority",
+        fixedNow.toISOString(),
+        "webhook_removal_epoch_race",
+      )
+      .run();
+    releaseRehydration();
+    await delivery;
+
+    expect(getMessageCount).toBe(2);
+    expect(fetchCount).toBe(0);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "destination_version_mismatch",
+    });
   });
 
   it("keeps a 4xx response retryable until the fixed deadline", async () => {

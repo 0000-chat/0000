@@ -14,6 +14,8 @@ import { sha256Hex } from "../archive/codec";
 import { issueAttachmentGrant } from "../attachments/grants";
 import { hasAccountOperationGrant } from "../control-directory/grants";
 import { getWebhookSubscription } from "../control-directory/webhooks";
+import { readAuthorizedMessageRemoval } from "../removals/service";
+import { readTenantDeletionEpoch } from "../removals/ledger";
 
 const DELIVERY_LEASE_MS = 60_000;
 const MAX_DELIVERY_BATCH = 100;
@@ -979,6 +981,31 @@ const hydrateCurrentPayload = async (
   return { payload, revision: message.revision };
 };
 
+const removalForDelivery = async (
+  database: D1Database,
+  delivery: Pick<
+    DeliveryRow,
+    | "tenant_id"
+    | "source_message_id"
+    | "source_account_id"
+    | "source_conversation_id"
+  >,
+) => {
+  if (
+    delivery.source_message_id === null ||
+    delivery.source_account_id === null ||
+    delivery.source_conversation_id === null
+  ) {
+    return null;
+  }
+  return readAuthorizedMessageRemoval(database, {
+    tenantId: delivery.tenant_id,
+    messageId: delivery.source_message_id,
+    accountId: delivery.source_account_id,
+    conversationId: delivery.source_conversation_id,
+  });
+};
+
 const deliverOne = async (
   database: D1Database,
   projection: WebhookProjection,
@@ -992,6 +1019,7 @@ const deliverOne = async (
   const lease = claim.lease;
   if (lease === null) return;
   const db = databaseSession(database);
+  let removalEpoch = await readTenantDeletionEpoch(database, tenantId);
   let payloadJson: string | null = null;
   const authorizationMatches = async (
     subscription: WebhookSubscription | null,
@@ -1028,6 +1056,34 @@ const deliverOne = async (
       now.toISOString(),
     );
   };
+
+  const cancelForRemoval = async (): Promise<void> => {
+    await cancelDelivery(
+      database,
+      tenantId,
+      deliveryId,
+      lease.lease_id,
+      "source_removed",
+      now.toISOString(),
+    );
+  };
+
+  const removalFence = async (): Promise<{
+    changed: boolean;
+    removed: boolean;
+  }> => {
+    const currentEpoch = await readTenantDeletionEpoch(database, tenantId);
+    const authority = await removalForDelivery(database, lease);
+    const changed = currentEpoch !== removalEpoch;
+    removalEpoch = currentEpoch;
+    return { changed, removed: authority !== null };
+  };
+
+  const initialRemoval = await removalFence();
+  if (initialRemoval.removed) {
+    await cancelForRemoval();
+    return;
+  }
 
   const markNetworkFailure = async (
     errorCode: string,
@@ -1130,8 +1186,8 @@ const deliverOne = async (
       await cancelFor(finalSubscription, credentialRef);
       return;
     }
-    const activeFinalSubscription = finalSubscription;
-    const hydrated = await hydrateCurrentPayload(
+    let activeFinalSubscription = finalSubscription;
+    let hydrated = await hydrateCurrentPayload(
       database,
       projection,
       lease,
@@ -1149,7 +1205,87 @@ const deliverOne = async (
       );
       return;
     }
+
+    // A removal epoch can advance while the current message and attachment
+    // grants are being prepared. Rehydrate once after any observed advance,
+    // then perform one final scoped authority read immediately before HTTP.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const fence = await removalFence();
+      if (fence.removed) {
+        await cancelForRemoval();
+        return;
+      }
+      if (!fence.changed) break;
+      const refreshedSubscription = await currentSubscription(
+        db,
+        tenantId,
+        lease.subscription_id,
+      );
+      if (
+        refreshedSubscription === null ||
+        !(await authorizationMatches(refreshedSubscription, credentialRef))
+      ) {
+        await cancelFor(refreshedSubscription, credentialRef);
+        return;
+      }
+      activeFinalSubscription = refreshedSubscription;
+      hydrated = await hydrateCurrentPayload(
+        database,
+        projection,
+        lease,
+        activeFinalSubscription,
+        now,
+      );
+      if (hydrated === null) {
+        await cancelDelivery(
+          database,
+          tenantId,
+          deliveryId,
+          lease.lease_id,
+          "source_tombstoned_or_unavailable",
+          now.toISOString(),
+        );
+        return;
+      }
+    }
     payloadJson = JSON.stringify(hydrated.payload);
+
+    const preparedSubscription = await currentSubscription(
+      db,
+      tenantId,
+      lease.subscription_id,
+    );
+    if (
+      preparedSubscription === null ||
+      !(await authorizationMatches(preparedSubscription, credentialRef))
+    ) {
+      await cancelFor(preparedSubscription, credentialRef);
+      return;
+    }
+    activeFinalSubscription = preparedSubscription;
+    const finalRemoval = await removalFence();
+    if (finalRemoval.removed) {
+      await cancelForRemoval();
+      return;
+    }
+    const sendSubscription = await currentSubscription(
+      db,
+      tenantId,
+      lease.subscription_id,
+    );
+    if (
+      sendSubscription === null ||
+      !(await authorizationMatches(sendSubscription, credentialRef))
+    ) {
+      await cancelFor(sendSubscription, credentialRef);
+      return;
+    }
+    activeFinalSubscription = sendSubscription;
+    const sendRemoval = await removalFence();
+    if (sendRemoval.removed) {
+      await cancelForRemoval();
+      return;
+    }
 
     const response = await fetchWithTimeout(
       services.fetch ?? fetch,

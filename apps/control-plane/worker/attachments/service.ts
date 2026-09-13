@@ -15,6 +15,10 @@ import {
 import { ReadError } from "../read/errors";
 import { issueAttachmentGrant, readAttachmentGrant } from "./grants";
 import { AttachmentProviderError, type AttachmentProvider } from "./provider";
+import {
+  readAuthorizedMessageRemoval,
+  readAuthorizedResourceRemoval,
+} from "../removals/service";
 
 type ReadableAttachment = ProjectionAttachment & {
   file_name: string | null;
@@ -109,24 +113,61 @@ const hasReadableMetadata = (
   attachment.media_key !== null &&
   attachment.size_bytes <= MAX_ATTACHMENT_BYTES;
 
+const removalForAttachment = async (
+  context: AttachmentServiceContext,
+  attachment: ProjectionAttachment,
+): Promise<boolean> => {
+  const database = context.env.CONTROL_DB;
+  if (database === undefined) {
+    throw new AttachmentServiceError("service_unavailable", 503);
+  }
+  try {
+    const attachmentRemoval = await readAuthorizedResourceRemoval(database, {
+      tenantId: context.authorization.tenant.id,
+      resourceType: "attachment",
+      resourceId: attachment.attachment_id,
+      accountId: attachment.account_id,
+      conversationId: attachment.conversation_id,
+    });
+    if (attachmentRemoval !== null) return true;
+    const messageRemoval = await readAuthorizedMessageRemoval(database, {
+      tenantId: context.authorization.tenant.id,
+      messageId: attachment.message_id,
+      accountId: attachment.account_id,
+      conversationId: attachment.conversation_id,
+    });
+    return messageRemoval !== null;
+  } catch (error) {
+    throw new AttachmentServiceError("service_unavailable", 503, error);
+  }
+};
+
+const removedMetadata = (
+  attachment: ProjectionAttachment,
+): AttachmentMetadata =>
+  AttachmentMetadataSchema.parse({
+    attachment_id: attachment.attachment_id,
+    message_id: attachment.message_id,
+    mime_type: null,
+    file_name: null,
+    size_bytes: null,
+    sha256: null,
+    revision: attachment.revision,
+    availability: "removed",
+    download_grant: null,
+    download_grant_expires_at: null,
+  });
+
 export const metadataFor = async (
   context: AttachmentServiceContext,
   attachment: ProjectionAttachment,
 ): Promise<AttachmentMetadata> => {
   const now = nowFor(context);
+  if (await removalForAttachment(context, attachment)) {
+    return removedMetadata(attachment);
+  }
   if (attachment.deleted_at !== null) {
-    return AttachmentMetadataSchema.parse({
-      attachment_id: attachment.attachment_id,
-      message_id: attachment.message_id,
-      mime_type: null,
-      file_name: null,
-      size_bytes: null,
-      sha256: null,
-      revision: attachment.revision,
-      availability: "removed",
-      download_grant: null,
-      download_grant_expires_at: null,
-    });
+    return removedMetadata(attachment);
   }
   if (isExpired(attachment, now)) {
     return AttachmentMetadataSchema.parse({
@@ -164,6 +205,9 @@ export const metadataFor = async (
       attachment,
       now,
     );
+    if (await removalForAttachment(context, attachment)) {
+      return removedMetadata(attachment);
+    }
     return AttachmentMetadataSchema.parse({
       attachment_id: attachment.attachment_id,
       message_id: attachment.message_id,
@@ -285,6 +329,9 @@ const assertCurrentAuthorization = async (
   }
   if (row.revision !== grant.revision) {
     throw new AttachmentServiceError("attachment_unavailable", 409);
+  }
+  if (await removalForAttachment(context, row)) {
+    throw new AttachmentServiceError("attachment_removed", 410);
   }
   if (row.deleted_at !== null) {
     throw new AttachmentServiceError("attachment_removed", 410);

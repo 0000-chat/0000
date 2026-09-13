@@ -6,6 +6,7 @@ import {
   runWebhookRetryTick,
   type WebhookCredentialStore,
 } from "./webhooks/delivery";
+import { runRemovalExpiryAndSuppress } from "./removals/service";
 
 const webhookCredentialStore = (
   env: Cloudflare.Env,
@@ -37,7 +38,15 @@ const worker: ExportedHandler<Cloudflare.Env, unknown> = {
         error: error instanceof Error ? error.name : "unknown",
       });
     });
-    context.waitUntil(Promise.all([history, webhooks]));
+    const removals = runRemovalExpiryAndSuppress(env.CONTROL_DB).catch(
+      (error: unknown) => {
+        console.error({
+          event: "removal_expiry_schedule_error",
+          error: error instanceof Error ? error.name : "unknown",
+        });
+      },
+    );
+    context.waitUntil(Promise.all([history, webhooks, removals]));
   },
 };
 

@@ -140,3 +140,18 @@ export type ScheduleRemovalExpiryInput = z.input<
 export type NormalizedScheduleRemovalExpiryInput = z.output<
   typeof ScheduleRemovalExpiryInputSchema
 >;
+
+/**
+ * Administrator status keeps active suppression separate from physical purge.
+ * The active-removal ticket never reports a purge as complete.
+ */
+export const RemovalStatusResponseSchema = z
+  .object({
+    tenant_id: CommunicatorIdSchema,
+    authorities: z.array(RemovalAuthoritySchema).max(10_000),
+    incomplete: z.array(RemovalAuthoritySchema).max(10_000),
+    active_suppression: z.literal("enforced"),
+    physical_purge: z.literal("not_implemented"),
+  })
+  .strict();
+export type RemovalStatusResponse = z.infer<typeof RemovalStatusResponseSchema>;

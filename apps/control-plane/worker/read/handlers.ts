@@ -36,6 +36,11 @@ import {
 } from "../attachments/service";
 import { attachmentProviderFromEnv } from "../attachments/provider";
 import type { ProjectionAttachment } from "@communicator/contracts";
+import {
+  readAuthorizedMessageRemoval,
+  readAuthorizedResourceRemoval,
+} from "../removals/service";
+import type { RemovalAuthority } from "../../../../packages/contracts/src/removals";
 
 export type ReadHandlerContext = {
   env: Cloudflare.Env;
@@ -117,6 +122,81 @@ const withReadErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
     throw mapReadError(error);
   }
 };
+
+const removalDatabase = (context: ReadHandlerContext): D1Database => {
+  const database = context.env.CONTROL_DB;
+  if (database === undefined) throw new ReadError("service_unavailable");
+  return database;
+};
+
+const removalFor = async (
+  context: ReadHandlerContext,
+  resourceType: string,
+  resourceId: string,
+  accountId: string,
+  conversationId: string,
+): Promise<RemovalAuthority | null> => {
+  try {
+    return await readAuthorizedResourceRemoval(removalDatabase(context), {
+      tenantId: context.authorization.tenant.id,
+      resourceType,
+      resourceId,
+      accountId,
+      conversationId,
+    });
+  } catch (error) {
+    throw new ReadError("service_unavailable", error);
+  }
+};
+
+const messageRemovalFor = async (
+  context: ReadHandlerContext,
+  messageId: string,
+  accountId: string,
+  conversationId: string,
+): Promise<RemovalAuthority | null> => {
+  try {
+    return await readAuthorizedMessageRemoval(removalDatabase(context), {
+      tenantId: context.authorization.tenant.id,
+      messageId,
+      accountId,
+      conversationId,
+    });
+  } catch (error) {
+    throw new ReadError("service_unavailable", error);
+  }
+};
+
+const redactMessage = (
+  message: MessagePageResult["items"][number],
+  authority: RemovalAuthority | null,
+): MessagePageResult["items"][number] =>
+  authority === null
+    ? message
+    : ({
+        ...message,
+        sender_participant_id: null,
+        sender_label: "Deleted sender",
+        body: "",
+        attachment_count: 0,
+        attachments: [],
+      } satisfies MessagePageResult["items"][number]);
+
+const redactSearchResult = (
+  message: MessageSearchPageResult["items"][number],
+  authority: RemovalAuthority | null,
+): MessageSearchPageResult["items"][number] =>
+  authority === null
+    ? message
+    : ({
+        ...message,
+        sender_label: "Deleted sender",
+        body: "",
+        attachments: [],
+        removed: true,
+        removed_at: authority.removed_at,
+        removal_reason: authority.reason,
+      } satisfies MessageSearchPageResult["items"][number]);
 
 const publicConnection = ({
   sort_position: _sortPosition,
@@ -364,7 +444,29 @@ export async function listConversations(
       authorization,
     };
     const page = await projection(context).listConversations(projectionInput);
-    return ConversationPageResultSchema.parse(structuredClone(page));
+    const parsedPage = ConversationPageResultSchema.parse(
+      structuredClone(page),
+    );
+    const visibleItems = await Promise.all(
+      parsedPage.items.map(async (conversation) =>
+        (await removalFor(
+          context,
+          "conversation",
+          conversation.id,
+          conversation.account_id ?? "",
+          conversation.id,
+        )) === null
+          ? conversation
+          : null,
+      ),
+    );
+    return ConversationPageResultSchema.parse({
+      ...parsedPage,
+      items: visibleItems.filter(
+        (conversation): conversation is NonNullable<typeof conversation> =>
+          conversation !== null,
+      ),
+    });
   });
 }
 
@@ -410,6 +512,17 @@ export async function getConversation(
       authorization,
     });
     if (conversation === null) throw new ReadError("not_found");
+    if (
+      (await removalFor(
+        context,
+        "conversation",
+        conversation.id,
+        conversation.account_id ?? "",
+        conversation.id,
+      )) !== null
+    ) {
+      throw new ReadError("not_found");
+    }
     return ConversationSummarySchema.parse(structuredClone(conversation));
   });
 }
@@ -473,15 +586,30 @@ export async function listMessages(
       authorization,
     });
     const parsedPage = MessagePageResultSchema.parse(structuredClone(page));
+    const removedMessageIds = new Set<string>();
+    const messageItems = await Promise.all(
+      parsedPage.items.map(async (item) => {
+        const authority = await messageRemovalFor(
+          context,
+          item.id,
+          item.account_id ?? "",
+          item.conversation_id,
+        );
+        if (authority !== null) removedMessageIds.add(item.id);
+        return redactMessage(item, authority);
+      }),
+    );
     const attachmentRows: ProjectionAttachment[] =
-      parsedPage.items.length === 0
+      messageItems.length === 0
         ? []
         : await projectionStub.listAttachments({
             schema_version: 1,
             tenant_id: context.authorization.tenant.id,
             identity_id: resourceIdentityId,
             conversation_id: input.conversation_id,
-            message_ids: parsedPage.items.map((item) => item.id),
+            message_ids: messageItems
+              .filter((item) => !removedMessageIds.has(item.id))
+              .map((item) => item.id),
             ...(input.account_id === undefined
               ? {}
               : { account_id: input.account_id }),
@@ -506,7 +634,7 @@ export async function listMessages(
       provider: attachmentProviderFromEnv(context.env),
     };
     const enrichedItems = await Promise.all(
-      parsedPage.items.map(async (item) => {
+      messageItems.map(async (item) => {
         const rows = attachmentsByMessage.get(item.id) ?? [];
         const attachments = await Promise.all(
           rows.map((attachment) => metadataFor(attachmentContext, attachment)),
@@ -517,9 +645,22 @@ export async function listMessages(
         };
       }),
     );
+    const finalItems = await Promise.all(
+      enrichedItems.map(async (item) =>
+        redactMessage(
+          item,
+          await messageRemovalFor(
+            context,
+            item.id,
+            item.account_id ?? "",
+            item.conversation_id,
+          ),
+        ),
+      ),
+    );
     const enrichedPage = MessagePageResultSchema.parse({
       ...parsedPage,
-      items: enrichedItems,
+      items: finalItems,
     });
     const accountId = conversation.account_id;
     let hasMessages = parsedPage.items.length > 0;
@@ -620,6 +761,22 @@ export async function searchMessages(
         : { cursor: parsedInput.cursor }),
       authorization,
     });
-    return MessageSearchPageResultSchema.parse(structuredClone(page));
+    const parsedPage = MessageSearchPageResultSchema.parse(
+      structuredClone(page),
+    );
+    const items = await Promise.all(
+      parsedPage.items.map(async (item) =>
+        redactSearchResult(
+          item,
+          await messageRemovalFor(
+            context,
+            item.id,
+            item.account_id,
+            item.conversation_id,
+          ),
+        ),
+      ),
+    );
+    return MessageSearchPageResultSchema.parse({ ...parsedPage, items });
   });
 }
