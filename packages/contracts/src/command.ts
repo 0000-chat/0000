@@ -7,6 +7,8 @@ export const DeliveryModeSchema = z.enum(["direct", "paced"]);
 
 export const CommandStatusSchema = z.enum([
   "accepted",
+  "waiting_for_connection",
+  "confirmation_required",
   "scheduled",
   "reading",
   "typing",
@@ -39,15 +41,25 @@ export const CommandSchema = z
     dispatch_id: CommunicatorIdSchema.optional(),
     actor_principal_id: CommunicatorIdSchema.optional(),
     actor_identity_id: CommunicatorIdSchema.optional(),
+    confirmation_due_at: TimestampSchema.optional(),
+    confirmation_decision: z.enum(["confirm", "cancel"]).optional(),
+    confirmation_actor_principal_id: CommunicatorIdSchema.optional(),
+    confirmation_actor_identity_id: CommunicatorIdSchema.optional(),
+    confirmation_decided_at: TimestampSchema.optional(),
   })
   .strict();
 
 export const OutboundDispatchStatusSchema = z.enum([
   "pending",
+  "waiting_for_connection",
+  "confirmation_required",
   "wakeup_failed",
   "dispatching",
   "dispatched",
+  "cancelled",
 ]);
+
+export const ConfirmationDecisionSchema = z.enum(["confirm", "cancel"]);
 
 export const OutboundDispatchSchema = z
   .object({
@@ -66,6 +78,11 @@ export const OutboundDispatchSchema = z
     status: OutboundDispatchStatusSchema,
     created_at: TimestampSchema,
     updated_at: TimestampSchema,
+    confirmation_due_at: TimestampSchema.nullable().optional(),
+    confirmation_decision: ConfirmationDecisionSchema.optional(),
+    confirmation_actor_principal_id: CommunicatorIdSchema.optional(),
+    confirmation_actor_identity_id: CommunicatorIdSchema.optional(),
+    confirmation_decided_at: TimestampSchema.optional(),
   })
   .strict();
 
@@ -81,6 +98,10 @@ export const AcceptTextReplyInputSchema = z
     delivery_mode: DeliveryModeSchema,
     idempotency_key: z.string().trim().min(1).max(200),
     accepted_at: TimestampSchema,
+    initial_dispatch_status: z
+      .enum(["pending", "waiting_for_connection"])
+      .optional(),
+    confirmation_due_at: TimestampSchema.nullable().optional(),
   })
   .strict();
 
@@ -99,6 +120,38 @@ export const AcceptTextReplyResultSchema = z
   .object({
     command: CommandSchema,
     message: MessageSchema,
+    dispatch: OutboundDispatchSchema,
+    replayed: z.boolean(),
+  })
+  .strict();
+
+export const OutboundDecisionInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    decision: ConfirmationDecisionSchema,
+    idempotency_key: z.string().trim().min(1).max(200),
+    actor_principal_id: CommunicatorIdSchema,
+    actor_identity_id: CommunicatorIdSchema,
+    decided_at: TimestampSchema,
+    connection_available: z.boolean().optional(),
+  })
+  .strict();
+
+export const OutboundReconcileInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    now: TimestampSchema,
+    connection_available: z.boolean().optional(),
+  })
+  .strict();
+
+export const OutboundDecisionResultSchema = z
+  .object({
+    command: CommandSchema,
     dispatch: OutboundDispatchSchema,
     replayed: z.boolean(),
   })
@@ -130,6 +183,14 @@ export type OutboundDispatch = z.infer<typeof OutboundDispatchSchema>;
 export type TextReplyRequest = z.infer<typeof TextReplyRequestSchema>;
 export type AcceptTextReplyInput = z.infer<typeof AcceptTextReplyInputSchema>;
 export type AcceptTextReplyResult = z.infer<typeof AcceptTextReplyResultSchema>;
+export type OutboundDecisionInput = z.infer<typeof OutboundDecisionInputSchema>;
+export type OutboundReconcileInput = z.infer<
+  typeof OutboundReconcileInputSchema
+>;
+export type OutboundDecisionResult = z.infer<
+  typeof OutboundDecisionResultSchema
+>;
+export type ConfirmationDecision = z.infer<typeof ConfirmationDecisionSchema>;
 export type ResolveConversationOwnerInput = z.infer<
   typeof ResolveConversationOwnerInputSchema
 >;

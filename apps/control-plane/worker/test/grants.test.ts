@@ -1539,4 +1539,209 @@ describe("account-scoped grant API", () => {
       ),
     ).toHaveLength(2);
   });
+
+  it("anchors offline waiting to the saved clock, reconnects without aging it, and cancels durably", async () => {
+    const grant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `offline-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grant.status).toBe(201);
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2026-09-14T00:00:00.000Z");
+    const app = createTestApp({ outboundAcceptance: { now: () => now } });
+    const send = async (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Offline waiting reply",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const waitingKey = `offline-waiting-${crypto.randomUUID()}`;
+    const waiting = await send(waitingKey);
+    expect(waiting.status).toBe(202);
+    const waitingCommand = (await waiting.json()) as {
+      id: string;
+      status: string;
+      created_at: string;
+      confirmation_due_at?: string;
+    };
+    expect(waitingCommand.status).toBe("waiting_for_connection");
+    expect(waitingCommand.created_at).toBe(now.toISOString());
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const waitingDispatch = await rows<{
+      status: string;
+      created_at: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT status, created_at, confirmation_due_at FROM outbound_dispatches WHERE idempotency_key = ?",
+      waitingKey,
+    );
+    expect(waitingDispatch).toEqual([
+      {
+        status: "waiting_for_connection",
+        created_at: now.toISOString(),
+        confirmation_due_at: "2026-09-14T04:00:00.000Z",
+      },
+    ]);
+
+    now = new Date("2026-09-14T03:59:59.999Z");
+    const beforeDue = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(beforeDue.status).toBe(200);
+    expect((await beforeDue.json()).dispatch.status).toBe(
+      "waiting_for_connection",
+    );
+    const tooEarly = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/confirm`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `offline-confirm-early-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(tooEarly.status).toBe(400);
+
+    now = new Date("2026-09-14T04:00:00.000Z");
+    const atDue = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(atDue.status).toBe(200);
+    expect((await atDue.json()).dispatch.status).toBe(
+      "confirmation_required",
+    );
+    const cancelKey = `offline-cancel-${crypto.randomUUID()}`;
+    const cancelled = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: cancelKey }),
+      },
+    );
+    expect(cancelled.status).toBe(200);
+    const cancelledValue = (await cancelled.json()) as {
+      replayed: boolean;
+      command: { id: string; status: string; confirmation_decision?: string };
+      dispatch: {
+        status: string;
+        confirmation_decision?: string;
+        confirmation_actor_principal_id?: string;
+        confirmation_decided_at?: string;
+      };
+    };
+    expect(cancelledValue.replayed).toBe(false);
+    expect(cancelledValue.command.status).toBe("cancelled");
+    expect(cancelledValue.command.confirmation_decision).toBe("cancel");
+    expect(cancelledValue.dispatch.status).toBe("cancelled");
+    expect(cancelledValue.dispatch.confirmation_decision).toBe("cancel");
+    expect(cancelledValue.dispatch.confirmation_actor_principal_id).toBe(
+      "principal_human",
+    );
+    expect(cancelledValue.dispatch.confirmation_decided_at).toBe(
+      now.toISOString(),
+    );
+
+    const replayCancel = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: cancelKey }),
+      },
+    );
+    expect(replayCancel.status).toBe(200);
+    expect((await replayCancel.json()).replayed).toBe(true);
+    const conflictingCancel = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `offline-cancel-conflict-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(conflictingCancel.status).toBe(400);
+
+    now = new Date("2026-09-14T01:00:00.000Z");
+    const reconnectKey = `offline-reconnect-${crypto.randomUUID()}`;
+    const reconnect = await send(reconnectKey);
+    expect(reconnect.status).toBe(202);
+    const reconnectCommand = (await reconnect.json()) as {
+      id: string;
+      status: string;
+      created_at: string;
+    };
+    expect(reconnectCommand.status).toBe("waiting_for_connection");
+    expect(reconnectCommand.created_at).toBe(now.toISOString());
+
+    now = new Date("2026-09-14T02:00:00.000Z");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'ready' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const reconnected = await requestForApp(
+      app,
+      `/api/v1/commands/${reconnectCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(reconnected.status).toBe(200);
+    expect((await reconnected.json()).dispatch.status).toBe("pending");
+    const reconnectDispatch = await rows<{
+      status: string;
+      created_at: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT status, created_at, confirmation_due_at FROM outbound_dispatches WHERE idempotency_key = ?",
+      reconnectKey,
+    );
+    expect(reconnectDispatch[0]?.status).toBe("pending");
+    expect(reconnectDispatch[0]?.created_at).toBe(
+      "2026-09-14T01:00:00.000Z",
+    );
+    expect(reconnectDispatch[0]?.confirmation_due_at).toBe(
+      "2026-09-14T05:00:00.000Z",
+    );
+  });
 });

@@ -2,6 +2,8 @@ import type { Command, CommandStatus } from "@communicator/contracts";
 
 const phaseLabels: Record<CommandStatus, string> = {
   accepted: "Accepted",
+  waiting_for_connection: "Waiting for connection",
+  confirmation_required: "Confirmation required",
   scheduled: "Scheduled",
   reading: "Reading",
   typing: "Typing",

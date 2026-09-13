@@ -3,6 +3,7 @@ import {
   ApiErrorResponseSchema,
   CommandSchema,
   CommunicatorIdSchema,
+  OutboundDecisionResultSchema,
   TextReplyRequestSchema,
 } from "@communicator/contracts";
 import { z } from "zod";
@@ -11,6 +12,8 @@ import type { AuthorizationVariables } from "../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../auth/ingestion-middleware";
 import {
   acceptTextReply,
+  decideOutboundCommand,
+  reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "../outbound/acceptance";
 import { readErrorResponse, mapReadError } from "../read/errors";
@@ -26,6 +29,9 @@ const TextReplyBodySchema = TextReplyRequestSchema.omit({
   conversation_id: true,
 });
 type TextReplyBody = z.infer<typeof TextReplyBodySchema>;
+const DecisionBodySchema = z
+  .object({ idempotency_key: z.string().trim().min(1).max(200) })
+  .strict();
 
 export const textReplyRoute = createRoute({
   method: "post",
@@ -100,3 +106,115 @@ export const textReplyHandler =
       return outboundFailure(context, error);
     }
   };
+
+type CommandRouteEnv = OutboundRouteEnv;
+
+const commandPath = z.object({ command_id: boundedId }).strict();
+
+const commandRouteResponse = {
+  200: {
+    description: "Outbound command lifecycle state",
+    content: { "application/json": { schema: OutboundDecisionResultSchema } },
+  },
+  400: { description: "Invalid request", content: errorContent },
+  401: { description: "Authentication required", content: errorContent },
+  403: { description: "Forbidden", content: errorContent },
+  404: { description: "Command not found", content: errorContent },
+  503: { description: "Projection unavailable", content: errorContent },
+};
+
+export const reconcileOutboundRoute = createRoute({
+  method: "post",
+  path: "/api/v1/commands/{command_id}/reconcile",
+  security: [{ bearerAuth: [] }],
+  request: { params: commandPath },
+  responses: commandRouteResponse,
+});
+
+export const confirmOutboundRoute = createRoute({
+  method: "post",
+  path: "/api/v1/commands/{command_id}/confirm",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: commandPath,
+    body: { content: { "application/json": { schema: DecisionBodySchema } } },
+  },
+  responses: commandRouteResponse,
+});
+
+export const cancelOutboundRoute = createRoute({
+  method: "post",
+  path: "/api/v1/commands/{command_id}/cancel",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: commandPath,
+    body: { content: { "application/json": { schema: DecisionBodySchema } } },
+  },
+  responses: commandRouteResponse,
+});
+
+type ReconcileHandler = Handler<
+  CommandRouteEnv,
+  string,
+  { out: { param: { command_id: string } } }
+>;
+
+export const reconcileOutboundHandler =
+  (services: OutboundAcceptanceServices = {}): ReconcileHandler =>
+  async (context) => {
+    try {
+      const params = context.req.valid("param");
+      const result = await reconcileOutboundCommand(
+        {
+          env: context.env,
+          authorization: context.get("authorization"),
+        },
+        params.command_id,
+        services,
+      );
+      return context.json(result, 200);
+    } catch (error) {
+      return outboundFailure(context, error);
+    }
+  };
+
+type DecisionHandler = Handler<
+  CommandRouteEnv,
+  string,
+  {
+    out: {
+      param: { command_id: string };
+      json: { idempotency_key: string };
+    };
+  }
+>;
+
+const decisionHandler =
+  (decision: "confirm" | "cancel", services: OutboundAcceptanceServices = {}) =>
+  async (context: Parameters<DecisionHandler>[0]) => {
+    try {
+      const params = context.req.valid("param");
+      const body = context.req.valid("json");
+      const result = await decideOutboundCommand(
+        {
+          env: context.env,
+          authorization: context.get("authorization"),
+        },
+        params.command_id,
+        decision,
+        body.idempotency_key,
+        services,
+      );
+      return context.json(result, 200);
+    } catch (error) {
+      return outboundFailure(context, error);
+    }
+  };
+
+export const confirmOutboundHandler =
+  (services: OutboundAcceptanceServices = {}): DecisionHandler =>
+  decisionHandler("confirm", services);
+
+export const cancelOutboundHandler =
+  (services: OutboundAcceptanceServices = {}): DecisionHandler =>
+  decisionHandler("cancel", services);

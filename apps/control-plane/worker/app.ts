@@ -35,7 +35,16 @@ import {
 } from "./routes/read";
 import { sessionRoute } from "./routes/session";
 import { realtimeTicketRoute } from "./routes/realtime";
-import { textReplyRoute, textReplyHandler } from "./routes/outbound";
+import {
+  textReplyRoute,
+  textReplyHandler,
+  reconcileOutboundRoute,
+  reconcileOutboundHandler,
+  confirmOutboundRoute,
+  confirmOutboundHandler,
+  cancelOutboundRoute,
+  cancelOutboundHandler,
+} from "./routes/outbound";
 import type { OutboundDispatch } from "@communicator/contracts";
 import type { OutboundAcceptanceServices } from "./outbound/acceptance";
 import {
@@ -371,6 +380,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/grants/*", productAuthorization);
   app.use("/api/v1/permission-requests", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
+  app.use("/api/v1/commands/*", productAuthorization);
   app.use("/api/v1/identities/*/link-sessions", productAuthorization);
   app.use("/api/v1/link-sessions/*", productAuthorization);
   app.use("/api/v1/search/*", productAuthorization);
@@ -397,6 +407,18 @@ export function createApp(services: AppServices = {}) {
   app.openapi(messagesRoute, messagesHandler);
   app.openapi(searchMessagesRoute, searchMessagesHandler);
   app.openapi(textReplyRoute, textReplyHandler(outboundAcceptanceServices));
+  app.openapi(
+    reconcileOutboundRoute,
+    reconcileOutboundHandler(outboundAcceptanceServices),
+  );
+  app.openapi(
+    confirmOutboundRoute,
+    confirmOutboundHandler(outboundAcceptanceServices),
+  );
+  app.openapi(
+    cancelOutboundRoute,
+    cancelOutboundHandler(outboundAcceptanceServices),
+  );
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);
   app.openapi(grantTargetsRoute, grantTargetsHandler);

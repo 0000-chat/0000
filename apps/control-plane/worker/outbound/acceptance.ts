@@ -2,6 +2,8 @@ import {
   AcceptTextReplyInputSchema,
   type AcceptTextReplyResult,
   type OutboundDispatch,
+  OutboundDecisionResultSchema,
+  type OutboundDecisionResult,
   type SessionResponse,
   type TextReplyRequest,
   TextReplyRequestSchema,
@@ -9,6 +11,7 @@ import {
 import { getTenantProjection } from "../projection/routing";
 import { hasAccountOperationGrant } from "../control-directory/grants";
 import { mapReadError, ReadError } from "../read/errors";
+import { isAdministratorSession } from "../read/authorization";
 
 export type OutboundAcceptanceContext = {
   env: Cloudflare.Env;
@@ -16,6 +19,8 @@ export type OutboundAcceptanceContext = {
 };
 
 export type OutboundAcceptanceServices = {
+  /** Runtime clock used to anchor the immutable acceptance timestamp. */
+  now?: () => Date;
   /** Controlled test seam before the DO transaction is entered. */
   beforeCommit?: () => void | Promise<void>;
   /** Controlled test seam after the DO transaction commits. */
@@ -25,6 +30,13 @@ export type OutboundAcceptanceServices = {
   /** Wake a controlled adapter after the durable transaction commits. */
   wakeDispatch?: (dispatch: OutboundDispatch) => Promise<void>;
 };
+
+const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+const USABLE_CONNECTION_STATUSES = new Set([
+  "connected",
+  "syncing",
+  "ready",
+]);
 
 const requireSendIdentity = (
   session: SessionResponse,
@@ -88,6 +100,32 @@ export async function acceptTextReply(
   }
   if (!granted) throw new ReadError("forbidden");
 
+  let connectionAvailable = false;
+  try {
+    const connection = await database
+      .withSession("first-primary")
+      .prepare(
+        "SELECT status FROM connections WHERE tenant_id = ? AND id = ? LIMIT 1",
+      )
+      .bind(context.authorization.tenant.id, owner.connection_id)
+      .first<{ status: string }>();
+    if (connection === null) throw new ReadError("not_found");
+    connectionAvailable = USABLE_CONNECTION_STATUSES.has(connection.status);
+  } catch (error) {
+    if (error instanceof ReadError) throw error;
+    throw mapReadError(error);
+  }
+
+  const acceptedAt = (
+    services.now === undefined ? new Date() : services.now()
+  ).toISOString();
+  const initialDispatchStatus = connectionAvailable
+    ? "pending"
+    : "waiting_for_connection";
+  const confirmationDueAt = connectionAvailable
+    ? null
+    : new Date(Date.parse(acceptedAt) + FOUR_HOURS_MS).toISOString();
+
   if (services.beforeCommit !== undefined) {
     await services.beforeCommit();
   }
@@ -103,7 +141,9 @@ export async function acceptTextReply(
       body: parsed.body,
       delivery_mode: parsed.delivery_mode,
       idempotency_key: idempotencyKey,
-      accepted_at: new Date().toISOString(),
+      accepted_at: acceptedAt,
+      initial_dispatch_status: initialDispatchStatus,
+      confirmation_due_at: confirmationDueAt,
     }),
   );
 
@@ -113,10 +153,16 @@ export async function acceptTextReply(
     if (services.afterCommit !== undefined) {
       await services.afterCommit(accepted);
     }
-    if (services.beforeWakeup !== undefined) {
+    if (
+      accepted.dispatch.status === "pending" &&
+      services.beforeWakeup !== undefined
+    ) {
       await services.beforeWakeup(accepted.dispatch);
     }
-    if (services.wakeDispatch !== undefined) {
+    if (
+      accepted.dispatch.status === "pending" &&
+      services.wakeDispatch !== undefined
+    ) {
       try {
         await services.wakeDispatch(accepted.dispatch);
       } catch {
@@ -126,4 +172,68 @@ export async function acceptTextReply(
     }
   }
   return accepted;
+}
+
+const requireHumanAdministrator = (session: SessionResponse): void => {
+  if (!isAdministratorSession(session)) throw new ReadError("forbidden");
+};
+
+const acceptanceNow = (services: OutboundAcceptanceServices): string =>
+  (services.now === undefined ? new Date() : services.now()).toISOString();
+
+export async function reconcileOutboundCommand(
+  context: OutboundAcceptanceContext,
+  commandId: string,
+  services: OutboundAcceptanceServices = {},
+): Promise<OutboundDecisionResult> {
+  const projection = getTenantProjection(
+    context.env,
+    context.authorization.tenant.id,
+  );
+  try {
+    return OutboundDecisionResultSchema.parse(
+      await projection.reconcileOutbound({
+        schema_version: 1,
+        tenant_id: context.authorization.tenant.id,
+        command_id: commandId,
+        now: acceptanceNow(services),
+      }),
+    );
+  } catch (error) {
+    throw mapReadError(error);
+  }
+}
+
+export async function decideOutboundCommand(
+  context: OutboundAcceptanceContext,
+  commandId: string,
+  decision: "confirm" | "cancel",
+  idempotencyKey: string,
+  services: OutboundAcceptanceServices = {},
+): Promise<OutboundDecisionResult> {
+  requireHumanAdministrator(context.authorization);
+  const identity = context.authorization.identities.find((candidate) =>
+    candidate.scopes.includes("message.send"),
+  );
+  if (identity === undefined) throw new ReadError("forbidden");
+  const projection = getTenantProjection(
+    context.env,
+    context.authorization.tenant.id,
+  );
+  try {
+    return OutboundDecisionResultSchema.parse(
+      await projection.decideOutbound({
+        schema_version: 1,
+        tenant_id: context.authorization.tenant.id,
+        command_id: commandId,
+        decision,
+        idempotency_key: idempotencyKey,
+        actor_principal_id: context.authorization.principal.id,
+        actor_identity_id: identity.identity_id,
+        decided_at: acceptanceNow(services),
+      }),
+    );
+  } catch (error) {
+    throw mapReadError(error);
+  }
 }

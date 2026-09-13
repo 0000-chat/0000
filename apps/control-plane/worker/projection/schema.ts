@@ -424,12 +424,95 @@ const durableOutboundAcceptanceMigration: ProjectionMigration = Object.freeze({
   ],
 });
 
+/**
+ * Offline acceptance extends the authoritative outbound ledger with a
+ * connection wait state and one immutable human decision. The receive-side
+ * command table is rebuilt here because SQLite cannot alter a CHECK constraint;
+ * all existing rows are copied verbatim before the old table is removed.
+ */
+const offlineOutboundConfirmationMigration: ProjectionMigration =
+  Object.freeze({
+    version: 4,
+    name: "offline_outbound_confirmation",
+    appliedAt: "2026-09-14T00:00:00.000Z",
+    statements: [
+      "DROP INDEX IF EXISTS idx_commands_conversation_owner",
+      "ALTER TABLE commands RENAME TO commands_v3",
+      `CREATE TABLE commands (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation = 'message.send'),
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed')),
+  failure_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL
+) STRICT`,
+      "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) SELECT id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id FROM commands_v3",
+      "DROP TABLE commands_v3",
+      "CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)",
+      "DROP INDEX IF EXISTS idx_outbound_dispatches_account_conversation",
+      "DROP INDEX IF EXISTS idx_outbound_dispatches_actor_created",
+      "ALTER TABLE outbound_dispatches RENAME TO outbound_dispatches_v3",
+      `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','waiting_for_connection','confirmation_required','wakeup_failed','dispatching','dispatched','cancelled')),
+  confirmation_due_at TEXT,
+  confirmation_decision TEXT CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel')),
+  confirmation_actor_principal_id TEXT,
+  confirmation_actor_identity_id TEXT,
+  confirmation_decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key)
+) STRICT`,
+      "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, NULL, NULL, NULL, NULL, NULL, created_at, updated_at FROM outbound_dispatches_v3",
+      "DROP TABLE outbound_dispatches_v3",
+      "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+      "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+      `CREATE TABLE outbound_command_decisions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  command_id TEXT NOT NULL UNIQUE,
+  dispatch_id TEXT NOT NULL UNIQUE,
+  decision TEXT NOT NULL CHECK(decision IN ('confirm','cancel')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  decided_at TEXT NOT NULL
+) STRICT`,
+      "CREATE INDEX idx_outbound_command_decisions_tenant_decided ON outbound_command_decisions(tenant_id, decided_at, command_id)",
+    ],
+  });
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
   Object.freeze([
     initialTenantProjectionMigration,
     identityLocalProjectionSequencesMigration,
     durableOutboundAcceptanceMigration,
+    offlineOutboundConfirmationMigration,
   ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */
