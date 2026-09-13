@@ -55,6 +55,7 @@ import {
   reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "./outbound/acceptance";
+import { registerRemovalMcpTools } from "./removals/mcp";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -317,6 +318,11 @@ const registerTools = (
   context: ReadHandlerContext,
   outboundServices: OutboundAcceptanceServices,
 ): void => {
+  registerRemovalMcpTools(server, {
+    env: context.env,
+    authorization: context.authorization,
+  });
+
   server.registerTool(
     "list_identities",
     {
