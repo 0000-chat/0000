@@ -178,3 +178,16 @@ The dependency-related failures were traced to the worker removing a temporary
 untracked root `node_modules` symlink after validation; no source or lockfile
 changes were lost. The worker must retain the dependency links through final
 validation and report or fix the three failures before another merge decision.
+
+## Grants follow-up recovery
+
+The three full-suite failures were identified as an outdated attachment-schema
+expectation, a source-inspection test broken by an async signature, and an
+ingestion socket fixture missing reader membership and an identity grant. The
+worker fixed those cases in the uncommitted follow-up after `bc80a6a`.
+
+The SQL pagination path now uses `EXISTS`, and explicit account authorization
+resolves only the requested account. Focused regressions pass: grants 6/6,
+cross-owner 1/1, and TypeScript. The final full Worker/UI runs are still in
+progress; the follow-up is not committed or merged, and #12 remains held until
+clean committed full-suite results are reported.
