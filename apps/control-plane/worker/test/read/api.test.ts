@@ -426,7 +426,18 @@ describe("authenticated live read API", () => {
       await wrongConversationResponse.json(),
     );
     expect(wrongConversationResponse.status).toBe(200);
-    expect(wrongConversationPage).toEqual({ items: [], next_cursor: null });
+    expect(wrongConversationPage).toMatchObject({
+      items: [],
+      next_cursor: null,
+      history: {
+        account_id: "account_human",
+        known_gap_count: 0,
+        latest_import_id: null,
+        requested_end_at: null,
+        requested_start_at: null,
+        state: "not_imported",
+      },
+    });
   });
 
   it("maps a delegated identity to a human-owned account for list, detail, and messages", async () => {
