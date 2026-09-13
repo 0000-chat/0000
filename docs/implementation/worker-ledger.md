@@ -6,9 +6,10 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `c16c12a` | Health worker #5 merged serially; focused tests and `scripts/check` passed; ledger update pending this commit. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `f681496` | Runtime worker #9 merged serially after health; focused runtime/health tests and `scripts/check` passed; ledger update pending this commit. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
+| Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
 | Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Dirty implementation handoff: modified `packages/contracts/src/{authorization,conversation,index,projection}.ts`; untracked `apps/control-plane/migrations/0005_account_grants.sql` and `packages/contracts/src/grants.ts`. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
@@ -30,7 +31,7 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | Ticket | Scope | Initial state |
 | --- | --- | --- |
 | #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
-| #9 | Runtime | implementing on `codex/implement-runtime-9` in `/tmp/communicator-implementation/worker-9/0000-communicator`; health dependency merged |
+| #9 | Runtime | verified and merged as `f681496`; issue remains open until aggregate PR merge |
 | #11 | Agent messaging specification | aggregate parent / planned |
 | #12 | T01 account grants | implementing on `codex/implement-grants-12` in `/tmp/0000-communicator-worker-12`; dirty handoff |
 | #13–#36 | T02–T25 child tickets | planned; dependencies in aggregate plan |
@@ -47,6 +48,17 @@ the full worker branch as aggregate merge commit `c16c12a`. The focused
 canonical-basename `./scripts/check` also passed. The protected original dirty
 health worktree remains separate and was not staged, cleaned, or merged from
 directly.
+
+## Runtime merge evidence
+
+Worker #9 source `659f02b683bd3583652b5575b0a74f9035387988` was merged as
+aggregate commit `f681496`. Focused aggregate verification passed the binary
+behavior test (1/1) and healthcheck suite (24/24), followed by the canonical
+basename `./scripts/check`. The worker also reported registry-admin (10),
+configuration/redaction (20), and Matrix transport (17) suites, clippy with
+warnings denied, formatting, diff, and JSON checks passing. Its systemd parse
+could not run because the installed binary is absent; no deployment was
+attempted.
 
 ## Coordination artifacts
 
