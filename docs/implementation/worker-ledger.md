@@ -6,10 +6,10 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `ae19135df426e2a713aebd5030dcccd9f043cc13` | Planning baseline, plan, authorization, and draft-PR metadata committed; clean before this coordination update. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `82c5f18afdf1fadde410c1e4ac41c94870ffcf6f` | Planning baseline, plan, authorization, recovery note, decision #7, and draft-PR metadata committed; clean before this ledger update. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`. |
-| Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty with the same two health files; awaiting worker handoff/commit. |
-| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Clean at migration head; implementation not yet committed. |
+| Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean implementation commit; pending serialized review/merge and focused checks. |
+| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Dirty implementation handoff: modified `packages/contracts/src/{authorization,conversation,index,projection}.ts`; untracked `apps/control-plane/migrations/0005_account_grants.sql` and `packages/contracts/src/grants.ts`. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
