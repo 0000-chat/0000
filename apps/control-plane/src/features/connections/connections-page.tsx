@@ -603,9 +603,39 @@ export function ConnectionsPage() {
           </p>
         )}
       <div className="grid gap-5 xl:grid-cols-2">
-        {connectionsQuery.data?.map((connection) => (
-          <ConnectionCard key={connection.id} connection={connection} />
-        ))}
+        {connectionsQuery.data?.map((connection) => {
+          const targetIdentity = session?.identities.find(
+            (identity) => identity.identity_id === connection.identity_id,
+          );
+          const canManageLinking = Boolean(
+            isAdministrator &&
+              activeIdentity?.kind === "human" &&
+              activeIdentity.id === connection.identity_id &&
+              targetIdentity?.kind === "human" &&
+              targetIdentity.scopes.includes("connection.manage"),
+          );
+          return (
+            <ConnectionCard
+              key={connection.id}
+              connection={connection}
+              canManageLinking={canManageLinking}
+              actorDisplayName={
+                session?.principal.display_name ?? "Administrator"
+              }
+              identityDisplayName={
+                activeIdentity?.display_name ?? connection.display_label
+              }
+              onLinked={() => {
+                void queryClient.invalidateQueries({
+                  queryKey: queryKeys.connections(identityId),
+                });
+                void queryClient.invalidateQueries({
+                  queryKey: queryKeys.connectedAccounts(identityId),
+                });
+              }}
+            />
+          );
+        })}
       </div>
       {isAdministrator && (
         <>

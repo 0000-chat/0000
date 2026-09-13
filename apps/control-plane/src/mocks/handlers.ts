@@ -7,6 +7,8 @@ import {
   AccountGrantPageSchema,
   AccountGrantSchema,
   AccountGrantUpdateSchema,
+  LinkSessionActionRequestSchema,
+  LinkSessionStartSchema,
   MAX_PROJECTION_CURSOR_CHARS,
   MAX_PROJECTION_PAGE_SIZE,
   MessagePageResultSchema,
@@ -40,8 +42,8 @@ const simulatedMessageEventSchema = z
   .strict();
 
 const errorResponse = (
-  status: 400 | 404 | 503,
-  code: "invalid_request" | "not_found" | "service_unavailable",
+  status: 400 | 403 | 404 | 409 | 503,
+  code: "invalid_request" | "forbidden" | "not_found" | "service_unavailable",
 ) =>
   HttpResponse.json(
     {
@@ -113,6 +115,62 @@ export const handlers = [
   http.get("*/api/v1/session", () =>
     HttpResponse.json(simulatedStore.session()),
   ),
+
+  http.post(
+    "*/api/v1/identities/:identityId/link-sessions",
+    async ({ request, params }) => {
+      if (!request.headers.get("Idempotency-Key"))
+        return errorResponse(400, "invalid_request");
+      const input = LinkSessionStartSchema.safeParse(await request.json());
+      const identityId = String(params.identityId);
+      if (!input.success || input.data.confirmed_identity_id !== identityId) {
+        return errorResponse(400, "invalid_request");
+      }
+      const session = simulatedStore.startLinkSession(identityId, input.data);
+      return session
+        ? HttpResponse.json(session, { status: 201 })
+        : errorResponse(403, "forbidden");
+    },
+  ),
+
+  http.get("*/api/v1/link-sessions/:sessionId", ({ params }) => {
+    const session = simulatedStore.linkSession(String(params.sessionId));
+    return session
+      ? HttpResponse.json(session)
+      : errorResponse(404, "not_found");
+  }),
+
+  http.post(
+    "*/api/v1/link-sessions/:sessionId/actions",
+    async ({ request, params }) => {
+      if (!request.headers.get("Idempotency-Key"))
+        return errorResponse(400, "invalid_request");
+      const input = LinkSessionActionRequestSchema.safeParse(
+        await request.json(),
+      );
+      if (!input.success) return errorResponse(400, "invalid_request");
+      const result = simulatedStore.actLinkSession(
+        String(params.sessionId),
+        input.data,
+      );
+      if (result.kind !== "ok") {
+        return errorResponse(
+          result.kind === "missing" ? 404 : 409,
+          result.kind === "missing" ? "not_found" : "invalid_request",
+        );
+      }
+      return HttpResponse.json(result.session);
+    },
+  ),
+
+  http.delete("*/api/v1/link-sessions/:sessionId", ({ request, params }) => {
+    if (!request.headers.get("Idempotency-Key"))
+      return errorResponse(400, "invalid_request");
+    const session = simulatedStore.cancelLinkSession(String(params.sessionId));
+    return session
+      ? HttpResponse.json(session)
+      : errorResponse(404, "not_found");
+  }),
 
   http.get("*/api/v1/accounts", ({ request }) => {
     const search = new URL(request.url).searchParams;

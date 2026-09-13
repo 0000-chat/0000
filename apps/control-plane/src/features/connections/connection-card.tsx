@@ -1,6 +1,8 @@
+import { useState } from "react";
 import type { Connection } from "@communicator/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { WhatsAppLinkSheet } from "./whatsapp-link-sheet";
 
 function titleCase(value: string) {
   return value
@@ -12,7 +14,20 @@ function providerLabel(provider: Connection["provider"]) {
   return provider === "whatsapp" ? "WhatsApp" : titleCase(provider);
 }
 
-export function ConnectionCard({ connection }: { connection: Connection }) {
+export function ConnectionCard({
+  connection,
+  canManageLinking,
+  actorDisplayName,
+  identityDisplayName,
+  onLinked,
+}: {
+  connection: Connection;
+  canManageLinking: boolean;
+  actorDisplayName: string;
+  identityDisplayName: string;
+  onLinked: () => void;
+}) {
+  const [linkOpen, setLinkOpen] = useState(false);
   const isAttentionRequired = connection.status === "attention_required";
   const lastSynced = connection.last_synced_at
     ? new Date(connection.last_synced_at).toLocaleString("en-NZ", {
@@ -72,9 +87,26 @@ export function ConnectionCard({ connection }: { connection: Connection }) {
       </details>
 
       <div className="mt-5 flex flex-wrap gap-2">
-        {(
-          ["Connect account", "Reconnect", "Disconnect", "Unlink"] as const
-        ).map((label) => (
+        {canManageLinking && connection.provider === "whatsapp" ? (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setLinkOpen(true)}
+          >
+            Link WhatsApp account
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            disabled
+            title="Linking is available to human administrators only"
+            aria-label="Link WhatsApp account"
+          >
+            Link WhatsApp account
+          </Button>
+        )}
+        {(["Reconnect", "Disconnect", "Unlink"] as const).map((label) => (
           <Button
             key={label}
             type="button"
@@ -87,6 +119,14 @@ export function ConnectionCard({ connection }: { connection: Connection }) {
           </Button>
         ))}
       </div>
+      <WhatsAppLinkSheet
+        identityId={connection.identity_id}
+        identityDisplayName={identityDisplayName}
+        actorDisplayName={actorDisplayName}
+        open={linkOpen}
+        onOpenChange={setLinkOpen}
+        onLinked={onLinked}
+      />
     </article>
   );
 }
