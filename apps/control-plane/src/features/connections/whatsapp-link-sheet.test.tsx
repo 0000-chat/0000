@@ -114,6 +114,29 @@ describe("WhatsApp linking", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 
+  it("hides the QR when expiry wins a delayed provider poll", async () => {
+    simulatedStore.setLinkActionDelay(1_500);
+    simulatedStore.setLinkActionExpiry(1_200);
+    renderApp("/connections?identity=identity_human");
+    await screen.findByText("Personal WhatsApp");
+    await openLinkSheet();
+    await screen.findByAltText("WhatsApp QR code to scan from Linked devices");
+
+    expect(await screen.findByText("QR session expired")).toBeVisible();
+    expect(
+      screen.queryByAltText("WhatsApp QR code to scan from Linked devices"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("WhatsApp account linked"),
+    ).not.toBeInTheDocument();
+
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(simulatedStore.linkSession("link_sim_1")).toMatchObject({
+      status: "cancelled",
+      qr: null,
+    });
+  });
+
   it("offers retry after a provider error and handles duplicate identity safely", async () => {
     simulatedStore.setLinkScenario("provider_error");
     renderApp("/connections?identity=identity_human");

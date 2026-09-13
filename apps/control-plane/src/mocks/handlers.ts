@@ -149,6 +149,10 @@ export const handlers = [
         await request.json(),
       );
       if (!input.success) return errorResponse(400, "invalid_request");
+      const actionDelay = simulatedStore.linkActionDelay();
+      if (actionDelay > 0 && input.data.action === "poll") {
+        await new Promise((resolve) => setTimeout(resolve, actionDelay));
+      }
       const result = simulatedStore.actLinkSession(
         String(params.sessionId),
         input.data,

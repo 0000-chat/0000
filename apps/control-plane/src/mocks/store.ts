@@ -55,6 +55,8 @@ export class SimulatedStore {
   private linkScenario: SimulatedLinkScenario = "connected";
   private linkSessionState: LinkSession | null = null;
   private linkQrCounter = 0;
+  private linkActionDelayMs = 0;
+  private linkActionExpiryMs = 60_000;
   private resetAt = this.state.fixture_reset_at;
 
   reset(
@@ -71,6 +73,8 @@ export class SimulatedStore {
     this.linkScenario = "connected";
     this.linkSessionState = null;
     this.linkQrCounter = 0;
+    this.linkActionDelayMs = 0;
+    this.linkActionExpiryMs = 60_000;
     this.resetAt = new Date().toISOString();
   }
 
@@ -260,6 +264,18 @@ export class SimulatedStore {
     this.linkScenario = scenario;
   }
 
+  setLinkActionDelay(milliseconds: number) {
+    this.linkActionDelayMs = milliseconds;
+  }
+
+  setLinkActionExpiry(milliseconds: number) {
+    this.linkActionExpiryMs = milliseconds;
+  }
+
+  linkActionDelay() {
+    return this.linkActionDelayMs;
+  }
+
   startLinkSession(
     identityId: string,
     input: LinkSessionStart,
@@ -286,7 +302,7 @@ export class SimulatedStore {
       status: "awaiting_user",
       action: "scan_qr",
       expires_at: new Date(now + 10 * 60_000).toISOString(),
-      action_expires_at: new Date(now + 60_000).toISOString(),
+      action_expires_at: new Date(now + this.linkActionExpiryMs).toISOString(),
       qr: `WAPPAYLOAD-${this.linkQrCounter}`,
       connection_id: null,
       account_id: null,
@@ -309,6 +325,16 @@ export class SimulatedStore {
     const current = this.linkSessionState;
     if (!current || current.id !== sessionId) return { kind: "missing" };
     if (current.generation !== input.generation) return { kind: "stale" };
+    if (
+      current.status === "connected" ||
+      current.status === "expired" ||
+      current.status === "failed" ||
+      current.status === "cancelled" ||
+      current.status === "relink_required" ||
+      current.status === "reconciliation_required"
+    ) {
+      return { kind: "stale" };
+    }
     if (input.action === "refresh") {
       this.linkQrCounter += 1;
       const now = Date.now();
@@ -317,7 +343,9 @@ export class SimulatedStore {
         generation: current.generation + 1,
         status: "awaiting_user",
         action: "scan_qr",
-        action_expires_at: new Date(now + 60_000).toISOString(),
+        action_expires_at: new Date(
+          now + this.linkActionExpiryMs,
+        ).toISOString(),
         qr: `WAPPAYLOAD-${this.linkQrCounter}`,
         error_code: null,
       };

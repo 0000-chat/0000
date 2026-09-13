@@ -248,7 +248,12 @@ export function WhatsAppLinkSheet({
       generationRef.current = generation;
       const previousQr = action === "refresh" ? null : current.qr;
       if (action === "refresh") {
-        setState({ ...current, qr: null, message: null });
+        setState({
+          ...current,
+          session: { ...current.session, qr: null },
+          qr: null,
+          message: null,
+        });
       }
       try {
         const session = await apiClient.actLinkSession(
@@ -270,6 +275,23 @@ export function WhatsAppLinkSheet({
       }
     },
     [cancelSession, isCurrent],
+  );
+
+  const expireSession = useCallback(
+    (session: LinkSession) => {
+      generationRef.current += 1;
+      const expired: LinkSession = {
+        ...session,
+        status: "expired",
+        action: "none",
+        action_expires_at: null,
+        qr: null,
+        error_code: "expired",
+      };
+      setState({ kind: "terminal", session: expired });
+      void cancelSession(session.id);
+    },
+    [cancelSession],
   );
 
   useEffect(() => {
@@ -295,24 +317,29 @@ export function WhatsAppLinkSheet({
     )
       return;
     const timer = window.setTimeout(() => {
-      if (Date.parse(challengeExpiresAt(state.session)) <= Date.now()) {
-        generationRef.current += 1;
-        const expired: LinkSession = {
-          ...state.session,
-          status: "expired",
-          action: "none",
-          action_expires_at: null,
-          qr: null,
-          error_code: "expired",
-        };
-        setState({ kind: "terminal", session: expired });
-        void cancelSession(state.session.id);
-        return;
-      }
       void runAction("poll");
     }, 1_000);
     return () => window.clearTimeout(timer);
-  }, [cancelSession, open, runAction, state]);
+  }, [open, runAction, state]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      state.kind !== "active" ||
+      !pendingStatuses.has(state.session.status)
+    )
+      return;
+    const delay = Date.parse(challengeExpiresAt(state.session)) - Date.now();
+    if (delay <= 0) {
+      expireSession(state.session);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => expireSession(state.session),
+      delay + 1,
+    );
+    return () => window.clearTimeout(timer);
+  }, [expireSession, open, state]);
 
   useEffect(() => {
     if (!open || state.kind !== "active") return;
@@ -396,7 +423,9 @@ export function WhatsAppLinkSheet({
                   {secondsRemaining(challengeExpiresAt(active.session), now)}s
                 </span>
               </div>
-              {active.qr ? (
+              {active &&
+              active.qr &&
+              Date.parse(challengeExpiresAt(active.session)) > now ? (
                 <QrImage payload={active.qr} />
               ) : (
                 <p role="status" className="text-sm text-muted-foreground">
