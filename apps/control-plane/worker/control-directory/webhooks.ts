@@ -516,6 +516,22 @@ const mutationStatement = (
       occurredAt,
     );
 
+const cutoverMutationStatement = (
+  db: D1Database,
+  key: string,
+  actor: WebhookActor,
+  hash: string,
+  occurredAt: string,
+) =>
+  db
+    .prepare(
+      `INSERT INTO directory_mutations
+       (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at)
+       SELECT ?, ?, ?, 'webhook.subscription.cutover', ?, ?
+       WHERE changes() = 1`,
+    )
+    .bind(key, actor.tenantId, actor.principalId, hash, occurredAt);
+
 const auditStatements = (
   db: D1Database,
   input: {
@@ -560,6 +576,75 @@ const auditStatements = (
       ),
   ];
 };
+
+const cutoverAuditStatements = (
+  db: D1Database,
+  input: {
+    key: string;
+    actor: WebhookActor;
+    subscriptionId: string;
+    destination: WebhookDestination;
+    occurredAt: string;
+  },
+) => [
+  db
+    .prepare(
+      `INSERT OR IGNORE INTO audit_events
+       (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at)
+       SELECT ?, ?, ?, 'webhook.subscription.cutover', 'webhook_subscription', ?, NULL,
+              json_object(
+                'previous_destination_version', destination_version - 1,
+                'destination_version', destination_version,
+                'destination_url', ?,
+                'destination_credential_ref', ?
+              ), ?
+       FROM webhook_subscriptions
+       WHERE tenant_id = ? AND id = ? AND status = 'active'
+         AND EXISTS (
+           SELECT 1 FROM directory_mutations WHERE idempotency_key = ?
+         )`,
+    )
+    .bind(
+      `audit_webhook_${input.key}`,
+      input.actor.tenantId,
+      input.actor.principalId,
+      input.subscriptionId,
+      input.destination.url,
+      input.destination.credential_ref ?? null,
+      input.occurredAt,
+      input.actor.tenantId,
+      input.subscriptionId,
+      input.key,
+    ),
+  db
+    .prepare(
+      `INSERT OR IGNORE INTO control_event_outbox
+       (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at)
+       SELECT ?, ?, 'webhook.subscription.cutover', 'webhook_subscription', ?,
+              json_object(
+                'previous_destination_version', destination_version - 1,
+                'destination_version', destination_version,
+                'destination_url', ?,
+                'destination_credential_ref', ?
+              ), ?
+       FROM webhook_subscriptions
+       WHERE tenant_id = ? AND id = ? AND status = 'active'
+         AND EXISTS (
+           SELECT 1 FROM directory_mutations WHERE idempotency_key = ?
+         )`,
+    )
+    .bind(
+      `control_webhook_${input.key}`,
+      input.actor.tenantId,
+      input.subscriptionId,
+      input.destination.url,
+      input.destination.credential_ref ?? null,
+      input.occurredAt,
+      input.actor.tenantId,
+      input.subscriptionId,
+      input.key,
+    ),
+];
 
 const ruleStatements = (
   db: D1Database,
@@ -1063,8 +1148,13 @@ export async function cutoverWebhookSubscription(
   idempotencyKey: string,
   occurredAt: string,
 ): Promise<WebhookSubscription> {
+  const database = db.withSession("first-primary");
+  const payload = {
+    operation: "cutover",
+    subscriptionId,
+    destination: destinationForStorage(destination),
+  };
   try {
-    const database = db.withSession("first-primary");
     const existing = await readSubscription(
       database,
       actor.tenantId,
@@ -1072,69 +1162,79 @@ export async function cutoverWebhookSubscription(
     );
     await requireSubscriptionAuthority(database, actor, existing);
     if (existing.status !== "active") throw webhookError("webhook_conflict");
-    const payload = {
-      operation: "cutover",
-      subscriptionId,
-      destination: destinationForStorage(destination),
-    };
     const idempotency = await checkIdempotency(
       database,
       idempotencyKey,
       payload,
     );
     if (idempotency.exists) return existing;
-    const nextVersion = existing.destination_version + 1;
     await db.batch([
-      mutationStatement(
-        db,
-        idempotencyKey,
-        actor,
-        "webhook.subscription.cutover",
-        idempotency.hash,
-        occurredAt,
-      ),
       db
         .prepare(
           `UPDATE webhook_subscriptions
            SET destination_url = ?, destination_credential_ref = ?,
-               destination_version = ?, updated_at = ?
+               destination_version = destination_version + 1, updated_at = ?
            WHERE tenant_id = ? AND id = ? AND status = 'active'`,
         )
         .bind(
           destination.url,
           destination.credential_ref ?? null,
-          nextVersion,
           occurredAt,
           actor.tenantId,
           subscriptionId,
         ),
+      cutoverMutationStatement(
+        db,
+        idempotencyKey,
+        actor,
+        idempotency.hash,
+        occurredAt,
+      ),
       db
         .prepare(
           `UPDATE webhook_deliveries
            SET status = 'cancelled', cancelled_at = ?,
                cancellation_reason = 'destination_cutover'
            WHERE tenant_id = ? AND subscription_id = ?
-             AND destination_version < ?
+             AND destination_version < (
+               SELECT destination_version
+               FROM webhook_subscriptions
+               WHERE tenant_id = ? AND id = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM directory_mutations WHERE idempotency_key = ?
+             )
              AND status IN ('pending', 'leased')`,
         )
-        .bind(occurredAt, actor.tenantId, subscriptionId, nextVersion),
-      ...auditStatements(db, {
+        .bind(
+          occurredAt,
+          actor.tenantId,
+          subscriptionId,
+          actor.tenantId,
+          subscriptionId,
+          idempotencyKey,
+        ),
+      ...cutoverAuditStatements(db, {
         key: idempotencyKey,
         actor,
-        action: "webhook.subscription.cutover",
         subscriptionId,
-        payload: {
-          previous_destination_version: existing.destination_version,
-          destination_version: nextVersion,
-          destination_url: destination.url,
-          destination_credential_ref: destination.credential_ref ?? null,
-        },
+        destination,
         occurredAt,
       }),
     ]);
+    const committed = await checkIdempotency(database, idempotencyKey, payload);
+    if (!committed.exists) throw webhookError("webhook_conflict");
     return await readSubscription(database, actor.tenantId, subscriptionId);
   } catch (error) {
     if (error instanceof WebhookRepositoryError) throw error;
+    const retryIdempotency = await checkIdempotency(
+      database,
+      idempotencyKey,
+      payload,
+    );
+    if (retryIdempotency.exists) {
+      return await readSubscription(database, actor.tenantId, subscriptionId);
+    }
     throw webhookError("webhook_conflict", error);
   }
 }
