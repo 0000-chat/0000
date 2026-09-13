@@ -14,6 +14,7 @@ import {
   bindingFor,
   event,
   initialize,
+  rows,
 } from "./projection/projector-test-support";
 import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
 
@@ -676,5 +677,333 @@ describe("account-scoped grant API", () => {
       },
     );
     expect(otherIdentityRequest.status).toBe(403);
+  });
+
+  it("accepts an account-scoped text reply once, separates keys, and survives rebuild", async () => {
+    const conversationPath =
+      "/api/v1/conversations/conversation_human_one/messages";
+    const firstKey = `reply-first-${crypto.randomUUID()}`;
+    const secondKey = `reply-second-${crypto.randomUUID()}`;
+    const before = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(before.status).toBe(403);
+    expect(
+      await rows(
+        workerEnv.TENANT_PROJECTION.getByName(tenantId),
+        "SELECT id FROM outbound_dispatches WHERE idempotency_key = ?",
+        firstKey,
+      ),
+    ).toEqual([]);
+
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          account_id: "account_human",
+          operation_scope: "message.send",
+          idempotency_key: `send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const firstResponse = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(firstResponse.status).toBe(202);
+    const first = (await firstResponse.json()) as {
+      id: string;
+      status: string;
+      account_id?: string;
+      message_id?: string;
+      event_id?: string;
+      dispatch_id?: string;
+    };
+    expect(first).toMatchObject({
+      status: "accepted",
+      account_id: "account_human",
+    });
+    expect(first.message_id).toEqual(expect.any(String));
+    expect(first.event_id).toEqual(expect.any(String));
+    expect(first.dispatch_id).toEqual(expect.any(String));
+
+    const replayResponse = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(replayResponse.status).toBe(202);
+    const replay = (await replayResponse.json()) as { id: string };
+    expect(replay.id).toBe(first.id);
+
+    const secondResponse = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": secondKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(secondResponse.status).toBe(202);
+    const second = (await secondResponse.json()) as {
+      id: string;
+      message_id?: string;
+    };
+    expect(second.id).not.toBe(first.id);
+    expect(second.message_id).not.toBe(first.message_id);
+
+    const conflict = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "changed durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(conflict.status).toBe(400);
+    expect(ApiErrorResponseSchema.parse(await conflict.json()).error.code).toBe(
+      "invalid_request",
+    );
+
+    const dispatchRows = await rows<{ id: string; message_id: string; command_id: string }>(
+      workerEnv.TENANT_PROJECTION.getByName(tenantId),
+      "SELECT id, message_id, command_id FROM outbound_dispatches WHERE idempotency_key IN (?, ?) ORDER BY idempotency_key",
+      firstKey,
+      secondKey,
+    );
+    expect(dispatchRows).toHaveLength(2);
+    expect(
+      await rows(
+        workerEnv.TENANT_PROJECTION.getByName(tenantId),
+        "SELECT id FROM messages WHERE id IN (?, ?)",
+        dispatchRows[0]!.message_id,
+        dispatchRows[1]!.message_id,
+      ),
+    ).toHaveLength(2);
+    expect(
+      await rows(
+        workerEnv.TENANT_PROJECTION.getByName(tenantId),
+        "SELECT id FROM commands WHERE id IN (?, ?)",
+        dispatchRows[0]!.command_id,
+        dispatchRows[1]!.command_id,
+      ),
+    ).toHaveLength(2);
+
+    const revoke = await request(
+      `/api/v1/grants/${(await grantResponse.clone().json() as { id: string }).id}`,
+      "human-token",
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": `revoke-send-${crypto.randomUUID()}` },
+      },
+    );
+    expect(revoke.status).toBe(200);
+    const afterRevoke = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": `reply-after-revoke-${crypto.randomUUID()}` },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "must be denied",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(afterRevoke.status).toBe(403);
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const deletionEvent = event(
+      "event_outbound_deleted",
+      { message_id: first.message_id!, reason_code: "redacted" },
+      "message.deleted",
+      {
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-13T02:00:00.000Z",
+        observed_at: "2026-09-13T02:00:01.000Z",
+      },
+    );
+    await projection.applyBatch({
+      schema_version: 1,
+      tenant_id: tenantId,
+      authorization: auth(
+        ["projection.write"],
+        ["identity_human"],
+        tenantId,
+      ),
+      mode: "live",
+      rebuild_id: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      events: [deletionEvent],
+      checkpoint: null,
+    });
+    expect(
+      await rows<{ body: string; deleted_at: string | null }>(
+        projection,
+        "SELECT body, deleted_at FROM messages WHERE id = ?",
+        first.message_id!,
+      ),
+    ).toEqual([{ body: "", deleted_at: expect.any(String) }]);
+
+    const currentMeta = await rows<{ generation: number }>(
+      projection,
+      "SELECT generation FROM projection_meta WHERE singleton = 1",
+    );
+    const rebuildId = `rebuild_outbound_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rebuildAuthorization = auth(
+      ["projection.rebuild"],
+      ["identity_human"],
+      tenantId,
+    );
+    await projection.beginRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      expected_generation: currentMeta[0]!.generation,
+      started_at: "2026-09-13T02:00:00.000Z",
+      authorization: rebuildAuthorization,
+    });
+    const replayEvent = event(
+      `event_rebuild_outbound_${crypto.randomUUID().replaceAll("-", "")}`,
+      { title: "Granted conversation", archived: false, muted: false },
+      "conversation.updated",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-13T02:00:00.000Z",
+        observed_at: "2026-09-13T02:00:01.000Z",
+      },
+    );
+    const replayDeletionEvent = event(
+      "event_rebuild_outbound_deleted",
+      { message_id: first.message_id!, reason_code: "redacted" },
+      "message.deleted",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-13T02:00:02.000Z",
+        observed_at: "2026-09-13T02:00:03.000Z",
+      },
+    );
+    await projection.applyReplayPage({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      source_cursor: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      page: {
+        schema_version: 1,
+        replay_mode: "projection_only",
+        tenant_id: tenantId,
+        manifests: [
+          {
+            schema_version: 1,
+            tenant_id: tenantId,
+            batch_id: "batch_outbound_rebuild",
+            data_key: `events/${tenantId}/2026/09/13/02/batch_outbound_rebuild.jsonl.gz`,
+            compression: "gzip",
+            content_type: "application/x-ndjson",
+            event_count: 2,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            canonical_sha256: "0".repeat(64),
+            data_etag: "etag-outbound-rebuild",
+            first_event_id: replayEvent.event_id,
+            last_event_id: replayDeletionEvent.event_id,
+            first_observed_at: replayEvent.observed_at,
+            last_observed_at: replayDeletionEvent.observed_at,
+            archived_at: "2026-09-13T02:00:02.000Z",
+            producer: {
+              service: "communicator-control-plane",
+              version: "outbound-test/1",
+            },
+            source_checkpoint: null,
+          },
+        ],
+        events: [replayEvent, replayDeletionEvent],
+        next_cursor: null,
+      },
+      authorization: rebuildAuthorization,
+    });
+    const completeInput = {
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      terminal_cursor: null,
+      completed_at: "2026-09-13T02:00:03.000Z",
+      authorization: rebuildAuthorization,
+    } as const;
+    await projection.completeRebuild(completeInput);
+
+    expect(
+      await rows(
+        projection,
+        "SELECT id FROM outbound_dispatches WHERE idempotency_key IN (?, ?)",
+        firstKey,
+        secondKey,
+      ),
+    ).toHaveLength(2);
+    expect(
+      await rows<{ body: string; deleted_at: string | null }>(
+        projection,
+        "SELECT body, deleted_at FROM messages WHERE id = ?",
+        first.message_id!,
+      ),
+    ).toEqual([{ body: "", deleted_at: expect.any(String) }]);
+    expect(
+      await rows(
+        projection,
+        "SELECT id FROM messages WHERE id IN (?, ?)",
+        dispatchRows[0]!.message_id,
+        dispatchRows[1]!.message_id,
+      ),
+    ).toHaveLength(2);
+    expect(
+      await rows(
+        projection,
+        "SELECT id FROM commands WHERE id IN (?, ?)",
+        dispatchRows[0]!.command_id,
+        dispatchRows[1]!.command_id,
+      ),
+    ).toHaveLength(2);
   });
 });

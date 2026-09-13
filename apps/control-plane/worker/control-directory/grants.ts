@@ -110,6 +110,60 @@ export type AccountReadScope = {
   allowedConversationIds: string[];
 };
 
+/** Check one account/chat operation grant without materializing grant scope. */
+export async function hasAccountOperationGrant(
+  db: D1DatabaseSession,
+  tenantId: string,
+  membershipId: string,
+  identityId: string,
+  accountId: string,
+  conversationId: string,
+  operationScope: AccountGrantOperationScope,
+): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT 1 AS granted
+       FROM account_grants AS g
+       JOIN connections AS c
+         ON c.tenant_id = g.tenant_id
+       JOIN connection_accounts AS ca
+         ON ca.connection_id = c.id
+        AND ca.account_id = g.account_id
+        AND ca.status = 'active'
+       WHERE g.tenant_id = ?
+         AND g.membership_id = ?
+         AND g.identity_id = ?
+         AND g.account_id = ?
+         AND g.operation_scope = ?
+         AND g.status = 'active'
+         AND (
+           g.chat_scope = 'all_chats'
+           OR EXISTS (
+             SELECT 1
+             FROM account_grant_chats AS gc
+             WHERE gc.tenant_id = g.tenant_id
+               AND gc.grant_id = g.id
+               AND gc.chat_id = ?
+           )
+         )
+       LIMIT 1`,
+      )
+      .bind(
+        tenantId,
+        membershipId,
+        identityId,
+        accountId,
+        operationScope,
+        conversationId,
+      )
+      .first<{ granted: number }>();
+    return row !== null;
+  } catch (error) {
+    throw grantError("grant_unavailable", error);
+  }
+}
+
 export type ListAccountGrantsInput = {
   tenantId: string;
   membershipId?: string;

@@ -33,6 +33,8 @@ import {
 } from "./routes/read";
 import { sessionRoute } from "./routes/session";
 import { realtimeTicketRoute } from "./routes/realtime";
+import { textReplyRoute, textReplyHandler } from "./routes/outbound";
+import type { OutboundDispatch } from "@communicator/contracts";
 import {
   accountsRoute,
   accountsHandler,
@@ -88,6 +90,8 @@ export type AppServices = {
   createOAuthAccessTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createIngestionTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   sendIngestionQueue?: IngestionQueueSender;
+  /** Controlled adapter wakeup after an outbound acceptance commits. */
+  wakeDispatch?: (dispatch: OutboundDispatch) => Promise<void>;
   resolveOAuthHumanSession?: (
     request: Request,
     env: Cloudflare.Env,
@@ -344,6 +348,14 @@ export function createApp(services: AppServices = {}) {
   app.openapi(conversationsRoute, conversationsHandler);
   app.openapi(conversationRoute, conversationHandler);
   app.openapi(messagesRoute, messagesHandler);
+  app.openapi(
+    textReplyRoute,
+    textReplyHandler(
+      services.wakeDispatch === undefined
+        ? {}
+        : { wakeDispatch: services.wakeDispatch },
+    ),
+  );
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);
   app.openapi(grantTargetsRoute, grantTargetsHandler);
