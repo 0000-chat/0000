@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Message } from "@communicator/contracts";
 import {
   paginateConversations,
   paginateMessages,
@@ -56,7 +57,7 @@ describe("paginateConversations", () => {
 });
 
 describe("paginateMessages", () => {
-  const messages = [
+  const messages: Message[] = [
     {
       id: "message_oldest",
       tenant_id: "tenant_pilot",
@@ -69,6 +70,7 @@ describe("paginateMessages", () => {
       occurred_at: "2026-08-28T00:01:00.000Z",
       delivery_status: "delivered" as const,
       attachment_count: 0,
+      attachments: [],
     },
     {
       id: "message_newest",
@@ -82,8 +84,9 @@ describe("paginateMessages", () => {
       occurred_at: "2026-08-28T00:03:00.000Z",
       delivery_status: "sent" as const,
       attachment_count: 0,
+      attachments: [],
     },
-  ] as const;
+  ];
 
   it("returns newest-first pages and resumes from an opaque message cursor", () => {
     const first = paginateMessages(messages, { limit: 1 });
@@ -105,19 +108,21 @@ describe("paginateMessages", () => {
   });
 
   it("orders by epoch milliseconds, uses the id tie-break, and resumes from its opaque cursor", () => {
+    const baseMessage = messages.at(0);
+    if (baseMessage === undefined) throw new Error("fixture message missing");
     const offsetMessages = [
       {
-        ...messages[0],
+        ...baseMessage,
         id: "message_tie_b",
         occurred_at: "2026-08-28T03:00:00.000+02:00",
       },
       {
-        ...messages[0],
+        ...baseMessage,
         id: "message_tie_a",
         occurred_at: "2026-08-28T01:00:00.000Z",
       },
       {
-        ...messages[0],
+        ...baseMessage,
         id: "message_newest",
         occurred_at: "2026-08-28T01:30:00.000Z",
       },

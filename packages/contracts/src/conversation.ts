@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AttachmentMetadataSchema, MAX_ATTACHMENT_COUNT } from "./attachments";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 import { HistoryCoverageSchema } from "./history";
 
@@ -169,6 +170,7 @@ const MessageObjectSchema = z
     occurred_at: TimestampSchema,
     delivery_status: DeliveryStatusSchema,
     attachment_count: z.number().int().nonnegative(),
+    attachments: z.array(AttachmentMetadataSchema).max(MAX_ATTACHMENT_COUNT),
   })
   .strict();
 

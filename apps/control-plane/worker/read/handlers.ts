@@ -1,4 +1,5 @@
 import {
+  AttachmentMetadataSchema,
   ChannelSummarySchema,
   ConnectionSchema,
   ConversationPageResultSchema,
@@ -29,6 +30,12 @@ import {
   toGrantedProjectionReadAuthorization,
 } from "./authorization";
 import { mapReadError, ReadError } from "./errors";
+import {
+  metadataFor,
+  type AttachmentServiceContext,
+} from "../attachments/service";
+import { attachmentProviderFromEnv } from "../attachments/provider";
+import type { ProjectionAttachment } from "@communicator/contracts";
 
 export type ReadHandlerContext = {
   env: Cloudflare.Env;
@@ -75,6 +82,7 @@ type ProjectionReadStub = Pick<
   | "listConversations"
   | "getConversation"
   | "listMessages"
+  | "listAttachments"
   | "searchMessages"
 >;
 
@@ -465,6 +473,54 @@ export async function listMessages(
       authorization,
     });
     const parsedPage = MessagePageResultSchema.parse(structuredClone(page));
+    const attachmentRows: ProjectionAttachment[] =
+      parsedPage.items.length === 0
+        ? []
+        : await projectionStub.listAttachments({
+            schema_version: 1,
+            tenant_id: context.authorization.tenant.id,
+            identity_id: resourceIdentityId,
+            conversation_id: input.conversation_id,
+            message_ids: parsedPage.items.map((item) => item.id),
+            ...(input.account_id === undefined
+              ? {}
+              : { account_id: input.account_id }),
+            authorization,
+          });
+    const attachmentsByMessage = new Map<string, ProjectionAttachment[]>();
+    for (const attachment of attachmentRows) {
+      const existing = attachmentsByMessage.get(attachment.message_id);
+      if (existing === undefined) {
+        attachmentsByMessage.set(attachment.message_id, [attachment]);
+      } else {
+        existing.push(attachment);
+      }
+    }
+    const attachmentContext: AttachmentServiceContext = {
+      env: context.env,
+      authorization: context.authorization,
+      requestedIdentityId: input.identity_id,
+      ...(context.delegated === undefined
+        ? {}
+        : { delegated: context.delegated }),
+      provider: attachmentProviderFromEnv(context.env),
+    };
+    const enrichedItems = await Promise.all(
+      parsedPage.items.map(async (item) => {
+        const rows = attachmentsByMessage.get(item.id) ?? [];
+        const attachments = await Promise.all(
+          rows.map((attachment) => metadataFor(attachmentContext, attachment)),
+        );
+        return {
+          ...item,
+          attachments: AttachmentMetadataSchema.array().parse(attachments),
+        };
+      }),
+    );
+    const enrichedPage = MessagePageResultSchema.parse({
+      ...parsedPage,
+      items: enrichedItems,
+    });
     const accountId = conversation.account_id;
     let hasMessages = parsedPage.items.length > 0;
     if (!hasMessages) {
@@ -486,9 +542,9 @@ export async function listMessages(
         MessagePageResultSchema.parse(structuredClone(coverageProbe)).items
           .length > 0;
     }
-    if (accountId === undefined) return parsedPage;
+    if (accountId === undefined) return enrichedPage;
     return MessagePageResultSchema.parse({
-      ...parsedPage,
+      ...enrichedPage,
       history: await historyCoverage(
         context.env.CONTROL_DB,
         context.authorization.tenant.id,

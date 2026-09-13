@@ -908,6 +908,7 @@ describe("tenant projection query RPCs", () => {
     expect(Object.keys(page.items[0]!).sort()).toEqual([
       "account_id",
       "attachment_count",
+      "attachments",
       "body",
       "connection_id",
       "conversation_id",
@@ -1336,6 +1337,8 @@ describe("tenant projection query RPCs", () => {
       "listConversations",
       "getConversation",
       "listChannelStats",
+      "getAttachment",
+      "listAttachments",
       "listMessages",
       "searchMessages",
       "listChanges",

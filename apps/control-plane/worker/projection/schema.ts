@@ -633,6 +633,21 @@ const uncertaintyReconciliationMigration: ProjectionMigration = Object.freeze({
   ],
 });
 
+/**
+ * Attachment expiry is optional provider metadata. Older projections keep
+ * their existing rows and become immediately compatible with the scoped file
+ * reader once this column is added.
+ */
+const attachmentExpiryMigration: ProjectionMigration = Object.freeze({
+  version: 6,
+  name: "attachment_expiry",
+  appliedAt: "2026-09-14T00:45:00.000Z",
+  statements: [
+    "ALTER TABLE attachments ADD COLUMN expires_at TEXT",
+    "CREATE INDEX idx_attachments_expiry ON attachments(expires_at) WHERE expires_at IS NOT NULL",
+  ],
+});
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
   Object.freeze([
@@ -641,6 +656,7 @@ export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
     durableOutboundAcceptanceMigration,
     offlineOutboundConfirmationMigration,
     uncertaintyReconciliationMigration,
+    attachmentExpiryMigration,
   ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */

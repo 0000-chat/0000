@@ -87,6 +87,7 @@ type AttachmentRow = OwnedProjectionRow & {
   observed_at: string;
   last_observed_ms: number;
   last_event_id: string;
+  expires_at: string | null;
   deleted_at: string | null;
 };
 
@@ -135,7 +136,7 @@ const readAttachment = (
 ): AttachmentRow | undefined =>
   sql
     .exec<AttachmentRow>(
-      "SELECT id, message_id, identity_id, account_id, connection_id, conversation_id, platform, file_name, mime_type, size_bytes, sha256, r2_key, observed_at, last_observed_ms, last_event_id, deleted_at FROM attachments WHERE id = ?",
+      "SELECT id, message_id, identity_id, account_id, connection_id, conversation_id, platform, file_name, mime_type, size_bytes, sha256, r2_key, observed_at, last_observed_ms, last_event_id, expires_at, deleted_at FROM attachments WHERE id = ?",
       attachmentId,
     )
     .toArray()[0];
@@ -640,7 +641,7 @@ const projectAttachmentObserved = (
     // Redaction is a standing invariant, not another LWW candidate: even an
     // older observation must not expose metadata left by an earlier path.
     sql.exec(
-      "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, deleted_at = ? WHERE id = ?",
+      "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, expires_at = NULL, deleted_at = ? WHERE id = ?",
       deletionTombstone!.occurred_at,
       payload.attachment_id,
     );
@@ -668,7 +669,7 @@ const projectAttachmentObserved = (
 
   if (existing === undefined) {
     sql.exec(
-      "INSERT INTO attachments (id, message_id, identity_id, account_id, connection_id, conversation_id, platform, file_name, mime_type, size_bytes, sha256, r2_key, observed_at, last_observed_ms, last_event_id, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO attachments (id, message_id, identity_id, account_id, connection_id, conversation_id, platform, file_name, mime_type, size_bytes, sha256, r2_key, observed_at, last_observed_ms, last_event_id, expires_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       payload.attachment_id,
       payload.message_id,
       owner.identityId,
@@ -684,13 +685,14 @@ const projectAttachmentObserved = (
       event.observed_at,
       prepared.observedMs,
       event.event_id,
+      payload.expires_at ?? null,
       deletedAt,
     );
     return;
   }
 
   sql.exec(
-    "UPDATE attachments SET identity_id = ?, account_id = ?, connection_id = ?, conversation_id = ?, platform = ?, file_name = ?, mime_type = ?, size_bytes = ?, sha256 = ?, r2_key = ?, observed_at = ?, last_observed_ms = ?, last_event_id = ?, deleted_at = ? WHERE id = ?",
+    "UPDATE attachments SET identity_id = ?, account_id = ?, connection_id = ?, conversation_id = ?, platform = ?, file_name = ?, mime_type = ?, size_bytes = ?, sha256 = ?, r2_key = ?, observed_at = ?, last_observed_ms = ?, last_event_id = ?, expires_at = ?, deleted_at = ? WHERE id = ?",
     owner.identityId,
     owner.accountId,
     owner.connectionId,
@@ -704,6 +706,7 @@ const projectAttachmentObserved = (
     event.observed_at,
     prepared.observedMs,
     event.event_id,
+    payload.expires_at ?? null,
     deletedAt,
     payload.attachment_id,
   );

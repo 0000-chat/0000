@@ -628,6 +628,11 @@ describe("tenant projection full-domain convergence proof", () => {
         name: "uncertainty_reconciliation",
         applied_at: "2026-09-14T00:30:00.000Z",
       },
+      {
+        version: 6,
+        name: "attachment_expiry",
+        applied_at: "2026-09-14T00:45:00.000Z",
+      },
     ]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);

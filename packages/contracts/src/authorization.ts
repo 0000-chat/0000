@@ -71,6 +71,8 @@ export const ApiErrorResponseSchema = z
           "forbidden",
           "not_found",
           "tenant_selection_required",
+          "attachment_unavailable",
+          "attachment_removed",
           "service_unavailable",
         ]),
         message: z.string().min(1).max(100),

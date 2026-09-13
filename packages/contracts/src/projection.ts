@@ -12,6 +12,7 @@ import {
 import { CommandStatusSchema } from "./command";
 import { DeliveryModeSchema } from "./command";
 import { ProviderSchema } from "./connection";
+import { MAX_ATTACHMENT_COUNT } from "./attachments";
 import {
   ConversationSummarySchema,
   DeliveryStatusSchema,
@@ -294,6 +295,66 @@ export type GetProjectionConversationInput = z.infer<
 export const GetProjectionConversationResultSchema =
   ConversationSummarySchema.nullable();
 
+/** Internal projection row used to issue a scoped attachment grant. */
+export const ProjectionAttachmentSchema = strictObject({
+  attachment_id: CanonicalResourceIdSchema,
+  message_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema,
+  connection_id: CanonicalResourceIdSchema,
+  conversation_id: CanonicalResourceIdSchema,
+  platform: ProviderSchema,
+  file_name: z.string().max(512).nullable(),
+  mime_type: z.string().min(1).max(255).nullable(),
+  size_bytes: z.number().int().safe().nonnegative().nullable(),
+  sha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .nullable(),
+  /** Internal bounded media key; it is never returned to an agent. */
+  media_key: z.string().min(1).max(512).nullable(),
+  revision: OpaqueEventIdSchema,
+  expires_at: TimestampSchema.nullable(),
+  deleted_at: TimestampSchema.nullable(),
+});
+
+export type ProjectionAttachment = z.infer<typeof ProjectionAttachmentSchema>;
+
+export const GetProjectionAttachmentInputSchema = strictObject({
+  schema_version: z.literal(1),
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  attachment_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema.optional(),
+  authorization: ProjectionAuthorizationContextSchema,
+});
+
+export type GetProjectionAttachmentInput = z.infer<
+  typeof GetProjectionAttachmentInputSchema
+>;
+
+export const GetProjectionAttachmentResultSchema =
+  ProjectionAttachmentSchema.nullable();
+
+export const ListProjectionAttachmentsInputSchema = strictObject({
+  schema_version: z.literal(1),
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  conversation_id: CanonicalResourceIdSchema,
+  message_ids: strictArray(CanonicalResourceIdSchema, MAX_PROJECTION_PAGE_SIZE),
+  account_id: CanonicalResourceIdSchema.optional(),
+  authorization: ProjectionAuthorizationContextSchema,
+});
+
+export type ListProjectionAttachmentsInput = z.infer<
+  typeof ListProjectionAttachmentsInputSchema
+>;
+
+export const ListProjectionAttachmentsResultSchema = strictArray(
+  ProjectionAttachmentSchema,
+  MAX_ATTACHMENT_COUNT * MAX_PROJECTION_PAGE_SIZE,
+);
+
 const ProjectionConnectionBindingObjectSchema = strictObject({
   account_id: CanonicalResourceIdSchema,
   connection_id: CanonicalResourceIdSchema,
@@ -394,6 +455,9 @@ const AttachmentObservedProjectionPayloadSchema = strictObject({
     .max(512)
     .regex(/^[\x20-\x7E]+$/)
     .nullable(),
+  // Optional keeps older gateway events byte-for-byte canonical while the
+  // projector stores a missing expiry as NULL.
+  expires_at: TimestampSchema.nullable().optional(),
 });
 
 const ConversationUpdatedProjectionPayloadSchema = strictObject({
@@ -459,10 +523,21 @@ export const ProjectionPayloadSchemaByType = {
   "deletion.tombstone": DeletionTombstoneProjectionPayloadSchema,
 } as const satisfies Record<CanonicalEventType, z.ZodTypeAny>;
 
+/**
+ * The expiry field was added after the first gateway event format. Validation
+ * therefore accepts an omitted field, but the typed projection value exposes
+ * the storage-safe NULL form used by projectors and archive consumers.
+ */
+type ProjectionPayloadFor<EventType extends CanonicalEventType> =
+  EventType extends "attachment.observed"
+    ? Omit<
+        z.infer<typeof AttachmentObservedProjectionPayloadSchema>,
+        "expires_at"
+      > & { expires_at: string | null }
+    : z.infer<(typeof ProjectionPayloadSchemaByType)[EventType]>;
+
 export type ProjectionPayload = {
-  [EventType in CanonicalEventType]: z.infer<
-    (typeof ProjectionPayloadSchemaByType)[EventType]
-  >;
+  [EventType in CanonicalEventType]: ProjectionPayloadFor<EventType>;
 }[CanonicalEventType];
 
 type ProjectionEventEnvelopeFor<EventType extends CanonicalEventType> = Omit<
@@ -470,7 +545,7 @@ type ProjectionEventEnvelopeFor<EventType extends CanonicalEventType> = Omit<
   "event_type" | "payload"
 > & {
   event_type: EventType;
-  payload: z.infer<(typeof ProjectionPayloadSchemaByType)[EventType]>;
+  payload: ProjectionPayloadFor<EventType>;
 };
 
 export type ProjectionEventEnvelope = {

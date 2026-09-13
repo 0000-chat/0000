@@ -16,3 +16,4 @@ export * from "./linking";
 export * from "./search";
 export * from "./webhooks";
 export * from "./history";
+export * from "./attachments";

@@ -23,6 +23,7 @@ const applicationTables = [
   "connection_provider_identities",
   "account_grants",
   "account_grant_chats",
+  "attachment_download_grants",
   "permission_requests",
   "break_glass_grants",
   "revoked_tokens",
@@ -104,6 +105,7 @@ async function dropControlDirectorySchema(db: D1Database) {
   }
 
   for (const table of [
+    "attachment_download_grants",
     "audit_events",
     "control_event_outbox",
     "directory_mutations",

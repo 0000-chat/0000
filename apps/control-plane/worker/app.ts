@@ -131,6 +131,12 @@ import {
   providerCapabilitiesRoute,
   type HistoryRouteServices,
 } from "./history/routes";
+import {
+  attachmentDownloadRoute,
+  attachmentMetadataRoute,
+  createAttachmentHandlers,
+  type AttachmentRouteServices,
+} from "./attachments/routes";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -173,6 +179,8 @@ export type AppServices = {
   createHistoryImportProvider?: HistoryRouteServices["createProvider"];
   historyNow?: HistoryRouteServices["now"];
   applyHistoryEvents?: HistoryRouteServices["applyEvents"];
+  createAttachmentProvider?: AttachmentRouteServices["createProvider"];
+  attachmentNow?: AttachmentRouteServices["now"];
 };
 
 export function createApp(services: AppServices = {}) {
@@ -410,6 +418,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/webhook-subscriptions", productAuthorization);
   app.use("/api/v1/webhook-subscriptions/*", productAuthorization);
   app.use("/api/v1/history-imports/*", productAuthorization);
+  app.use("/api/v1/attachments/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -510,6 +519,14 @@ export function createApp(services: AppServices = {}) {
   app.openapi(historyImportDetailRoute, historyHandlers.detail);
   app.openapi(historyImportAdvanceRoute, historyHandlers.advance);
   app.openapi(providerCapabilitiesRoute, historyHandlers.capabilities);
+  const attachmentServices: AttachmentRouteServices = {};
+  if (services.createAttachmentProvider !== undefined)
+    attachmentServices.createProvider = services.createAttachmentProvider;
+  if (services.attachmentNow !== undefined)
+    attachmentServices.now = services.attachmentNow;
+  const attachmentHandlers = createAttachmentHandlers(attachmentServices);
+  app.openapi(attachmentDownloadRoute, attachmentHandlers.download);
+  app.openapi(attachmentMetadataRoute, attachmentHandlers.metadata);
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",

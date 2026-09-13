@@ -14,6 +14,7 @@ const message = (id: string, occurredAt: string) => ({
   occurred_at: occurredAt,
   delivery_status: "delivered" as const,
   attachment_count: 0,
+  attachments: [],
 });
 
 describe("chronologicalMessages", () => {

@@ -844,15 +844,6 @@ describe("tenant projection deletion", () => {
         {
           occurred_at: "2026-09-07T05:00:00.000Z",
           observed_at: "2026-09-07T05:00:01.000Z",
-          payload: {
-            attachment_id: "attachment_tuple_attachment",
-            message_id: "attachment_tuple_message",
-            file_name: "late-secret.jpg",
-            mime_type: "image/jpeg",
-            size_bytes: 999,
-            sha256: null,
-            r2_key: null,
-          },
         },
       ),
     ];

@@ -48,6 +48,8 @@ const PUBLIC_ERROR_MESSAGES: Record<PublicErrorCode, string> = {
   not_found: "Resource not found",
   tenant_selection_required: "Select an authorized tenant",
   service_unavailable: "Service unavailable",
+  attachment_unavailable: "Attachment unavailable",
+  attachment_removed: "Attachment removed",
 };
 
 const publicError = (code: PublicErrorCode): ApiErrorResponse =>
