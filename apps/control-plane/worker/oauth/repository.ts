@@ -286,19 +286,21 @@ export async function consumeOAuthCode(
   codeId: string,
   transactionId: string,
   consumedAt: string,
-): Promise<void> {
-  await db.batch([
-    db
-      .prepare(
-        "UPDATE oauth_authorization_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
-      )
-      .bind(consumedAt, codeId),
-    db
-      .prepare(
-        "UPDATE oauth_authorization_transactions SET completed_at = ? WHERE id = ? AND completed_at IS NULL",
-      )
-      .bind(consumedAt, transactionId),
-  ]);
+): Promise<boolean> {
+  const claimed = await db
+    .prepare(
+      "UPDATE oauth_authorization_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL RETURNING id",
+    )
+    .bind(consumedAt, codeId)
+    .first<{ id: string }>();
+  if (!claimed) return false;
+  await db
+    .prepare(
+      "UPDATE oauth_authorization_transactions SET completed_at = ? WHERE id = ? AND completed_at IS NULL",
+    )
+    .bind(consumedAt, transactionId)
+    .run();
+  return true;
 }
 
 export async function createOAuthInstallation(

@@ -1,0 +1,6 @@
+{
+  "client_id": "replace-with-registered-client-id",
+  "client_name": "ChatGPT Work",
+  "redirect_uri": "https://mcp-client.example/callback",
+  "status": "active"
+}

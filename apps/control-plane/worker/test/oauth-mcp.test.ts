@@ -1,12 +1,13 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SignJWT, exportJWK, generateKeyPair } from "jose";
+import { SignJWT, decodeJwt, exportJWK, generateKeyPair } from "jose";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   createOAuthAccessTokenVerifier,
+  signOAuthAccessToken,
   type OAuthRuntimeConfig,
 } from "../oauth/tokens";
 import { randomBase64url, sha256Base64url } from "../oauth/crypto";
@@ -78,6 +79,17 @@ const createDefaultUpstreamApp = (fetcher: typeof fetch) =>
     }),
     oauthClock: () => fixedNow,
     fetchOAuthUpstream: fetcher,
+  });
+
+const createDefaultTokenApp = (clock = fixedNow) =>
+  createApp({
+    createTokenVerifier: () => ({
+      verify: async (_token: string): Promise<VerifiedSubject> => {
+        throw new Error("not a human bearer");
+      },
+    }),
+    oauthConfig: () => config,
+    oauthClock: () => clock,
   });
 
 const makeCodeChallenge = async (verifier: string) => sha256Base64url(verifier);
@@ -216,6 +228,7 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
     const upstreamApp = createDefaultUpstreamApp(async (input, init) => {
       const url = input.toString();
       if (url === "https://idp.example/jwks") {
+        expect(new Headers(init?.headers).get("Authorization")).toBeNull();
         return new Response(JSON.stringify({ keys: [publicJwk] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -321,11 +334,58 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
   it("completes browser login, creates a non-admin installation, denies then reads after a local grant", async () => {
     const upstream = { value: undefined as string | undefined };
     const app = createTestApp(upstream);
+    const metadata = await app.request(
+      "https://communicator.example/.well-known/oauth-protected-resource",
+      {},
+      workerEnv,
+    );
+    expect(metadata.status).toBe(200);
+    expect(await metadata.json()).toMatchObject({
+      resource,
+      authorization_servers: [config.issuer],
+    });
+    const pathMetadata = await app.request(
+      "https://communicator.example/.well-known/oauth-protected-resource/mcp",
+      {},
+      workerEnv,
+    );
+    expect(pathMetadata.status).toBe(200);
+    const unauthenticated = await app.request(
+      "https://communicator.example/api/v1/accounts",
+      {},
+      workerEnv,
+    );
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers.get("WWW-Authenticate")).toContain(
+      'resource_metadata="https://communicator.example/.well-known/oauth-protected-resource"',
+    );
     const verifier = randomBase64url(48);
     const state = randomBase64url(24);
     const challenge = await makeCodeChallenge(verifier);
+    const authorizationParams = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      resource,
+      scope: "communicator.read",
+    });
+    const badClientAuthorization = await app.request(
+      `https://communicator.example/oauth/authorize?${new URLSearchParams({ ...Object.fromEntries(authorizationParams), client_id: "unknown-client" })}`,
+      {},
+      workerEnv,
+    );
+    expect(badClientAuthorization.status).toBe(400);
+    const badRedirectAuthorization = await app.request(
+      `https://communicator.example/oauth/authorize?${new URLSearchParams({ ...Object.fromEntries(authorizationParams), redirect_uri: "https://evil.example/callback" })}`,
+      {},
+      workerEnv,
+    );
+    expect(badRedirectAuthorization.status).toBe(400);
     const authorization = await app.request(
-      `https://communicator.example/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&code_challenge=${challenge}&code_challenge_method=S256&resource=${encodeURIComponent(resource)}&scope=communicator.read`,
+      `https://communicator.example/oauth/authorize?${authorizationParams.toString()}`,
       {},
       workerEnv,
     );
@@ -339,6 +399,18 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
     expect(upstreamLocation.searchParams.get("client_id")).toBe(
       "communicator-client",
     );
+
+    const badStateCallback = await app.request(
+      `https://communicator.example/oauth/callback?state=${randomBase64url(24)}&code=upstream-code`,
+      {},
+      workerEnv,
+    );
+    expect(badStateCallback.status).toBe(400);
+    expect(
+      await workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM oauth_client_installations",
+      ).first<{ count: number }>(),
+    ).toEqual({ count: 0 });
 
     const callback = await app.request(
       `https://communicator.example/oauth/callback?state=${encodeURIComponent(upstreamLocation.searchParams.get("state") ?? "")}&code=upstream-code`,
@@ -379,19 +451,58 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
     const code = callbackLocation.searchParams.get("code");
     expect(code).toBeTruthy();
 
+    const tokenForm = (overrides: Record<string, string> = {}) =>
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code ?? "",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+        resource,
+        ...overrides,
+      });
+    const badClientToken = await app.request(
+      "https://communicator.example/oauth/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: tokenForm({ client_id: "unknown-client" }),
+      },
+      workerEnv,
+    );
+    expect(badClientToken.status).toBe(400);
+    const badRedirectToken = await app.request(
+      "https://communicator.example/oauth/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: tokenForm({ redirect_uri: "https://evil.example/callback" }),
+      },
+      workerEnv,
+    );
+    expect(badRedirectToken.status).toBe(400);
+    const badVerifierToken = await app.request(
+      "https://communicator.example/oauth/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: tokenForm({ code_verifier: randomBase64url(48) }),
+      },
+      workerEnv,
+    );
+    expect(badVerifierToken.status).toBe(400);
+    expect(
+      await workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM oauth_client_installations",
+      ).first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+
     const tokenResponse = await app.request(
       "https://communicator.example/oauth/token",
       {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "authorization_code",
-          code: code ?? "",
-          client_id: clientId,
-          redirect_uri: redirectUri,
-          code_verifier: verifier,
-          resource,
-        }),
+        body: tokenForm(),
       },
       workerEnv,
     );
@@ -429,6 +540,79 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
         .first<{ count: number }>(),
     ).toEqual({ count: 0 });
 
+    const reusedCode = await app.request(
+      "https://communicator.example/oauth/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: tokenForm(),
+      },
+      workerEnv,
+    );
+    expect(reusedCode.status).toBe(400);
+
+    const installationToken = (
+      overrides: Partial<{
+        issuer: string;
+        resource: string;
+        clientId: string;
+        scope: string;
+        tokenId: string;
+        issuedAt: Date;
+        expiresAt: Date;
+      }> = {},
+    ) =>
+      signOAuthAccessToken(config, {
+        installationId: installation?.id ?? "",
+        clientId,
+        subject: installation?.principal_id ?? "",
+        scope: "communicator.read",
+        issuer: config.issuer,
+        resource,
+        tokenId: randomBase64url(24),
+        issuedAt: fixedNow,
+        expiresAt: new Date(fixedNow.getTime() + 300_000),
+        ...overrides,
+      });
+    const defaultTokenApp = createDefaultTokenApp();
+    const expectUnauthorized = async (
+      token: string,
+      targetApp = defaultTokenApp,
+    ) => {
+      const response = await requestApi(
+        targetApp,
+        token,
+        `/api/v1/accounts?identity_id=${installation?.identity_id}`,
+      );
+      expect(response.status).toBe(401);
+      expect(response.headers.get("WWW-Authenticate")).toContain(
+        'resource_metadata="https://communicator.example/.well-known/oauth-protected-resource"',
+      );
+    };
+    await expectUnauthorized(
+      await installationToken({ resource: "https://other.example/mcp" }),
+    );
+    await expectUnauthorized(
+      await installationToken({ issuer: "https://other.example/issuer" }),
+    );
+    await expectUnauthorized(
+      await installationToken({
+        expiresAt: new Date(fixedNow.getTime() - 1_000),
+      }),
+    );
+    await expectUnauthorized(
+      await installationToken({
+        expiresAt: new Date(fixedNow.getTime() + 30_000),
+      }),
+      createDefaultTokenApp(new Date(fixedNow.getTime() + 60_000)),
+    );
+    await expectUnauthorized(
+      await installationToken({ clientId: "forged-client-id" }),
+    );
+    const scopeUpgradeToken = await installationToken({
+      scope: "communicator.read communicator.send",
+    });
+
     const { client, transport } = await connectMcpClient(
       app,
       tokenBody.access_token,
@@ -455,6 +639,26 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
     expect(await apiDenied.json()).toMatchObject({
       error: { code: "forbidden" },
     });
+    const forgedIdentity = await client.callTool({
+      name: "list_accounts",
+      arguments: { identity_id: "identity_human" },
+    });
+    expect(forgedIdentity.isError).toBe(true);
+    expect(forgedIdentity.content).toEqual([
+      { type: "text", text: expect.stringContaining("not_found") },
+    ]);
+    const { client: scopeUpgradeClient, transport: scopeUpgradeTransport } =
+      await connectMcpClient(defaultTokenApp, await scopeUpgradeToken);
+    const scopeUpgradeDenied = await scopeUpgradeClient.callTool({
+      name: "list_accounts",
+      arguments: { identity_id: installation?.identity_id },
+    });
+    expect(scopeUpgradeDenied.isError).toBe(true);
+    expect(scopeUpgradeDenied.content).toEqual([
+      { type: "text", text: expect.stringContaining("forbidden") },
+    ]);
+    await scopeUpgradeClient.close();
+    await scopeUpgradeTransport.close();
     const wrongTenant = await requestToken(app, tokenBody.access_token, {
       method: "POST",
       headers: {
@@ -474,6 +678,9 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
       }),
     });
     expect(wrongTenant.status).toBe(401);
+    expect(wrongTenant.headers.get("WWW-Authenticate")).toContain(
+      'resource_metadata="https://communicator.example/.well-known/oauth-protected-resource"',
+    );
     const badOrigin = await requestToken(app, tokenBody.access_token, {
       method: "POST",
       headers: {
@@ -512,6 +719,10 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
       "/api/v1/accounts?identity_id=identity_human",
     );
     expect(overlap.status).toBe(403);
+    await expectUnauthorized(
+      await installationToken({ resource: "https://other.example/mcp" }),
+      overlappingVerifierApp,
+    );
 
     await workerEnv.CONTROL_DB.prepare(
       "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
@@ -565,6 +776,32 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
         (item) => item.id,
       ),
     );
+    const revocableToken = await installationToken();
+    const revocableJti = decodeJwt(revocableToken).jti;
+    expect(revocableJti).toBeTruthy();
+    await workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO revoked_tokens (issuer, token_id, principal_id, reason, revoked_at) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind(
+        config.issuer,
+        revocableJti ?? "",
+        installation?.principal_id ?? "",
+        "OAuth test revocation",
+        fixedNow.toISOString(),
+      )
+      .run();
+    await expectUnauthorized(revocableToken);
+    const installationRevocationToken = await installationToken();
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE oauth_client_installations SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(
+        fixedNow.toISOString(),
+        fixedNow.toISOString(),
+        installation?.id ?? "",
+      )
+      .run();
+    await expectUnauthorized(installationRevocationToken);
     await client.close();
     await transport.close();
   });

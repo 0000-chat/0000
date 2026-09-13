@@ -66,7 +66,13 @@ export function createAuthorizationMiddleware(
       message: string,
     ) => {
       logAuthorizationFailure(status, requestId);
-      return context.json({ error: { code, message } }, status);
+      const headers =
+        status === 401
+          ? {
+              "WWW-Authenticate": `Bearer resource_metadata="${new URL(context.req.url).origin}/.well-known/oauth-protected-resource"`,
+            }
+          : undefined;
+      return context.json({ error: { code, message } }, status, headers);
     };
 
     try {

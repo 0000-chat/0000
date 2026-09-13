@@ -133,6 +133,17 @@ const EXPECTED_WRANGLER_VAR_KEYS = [
   "COMMUNICATOR_INGESTION_OIDC_ISSUER",
   "COMMUNICATOR_INGESTION_OIDC_AUDIENCE",
   "COMMUNICATOR_INGESTION_OIDC_JWKS_URL",
+  "COMMUNICATOR_OAUTH_ISSUER",
+  "COMMUNICATOR_OAUTH_RESOURCE",
+  "COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS",
+  "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL",
+  "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID",
+  "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI",
+  "COMMUNICATOR_OAUTH_HUMAN_SCOPE",
+  "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL",
+  "COMMUNICATOR_OAUTH_HUMAN_ISSUER",
+  "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE",
+  "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL",
 ] as const;
 
 const CLOUDFLARE_UUID_PATTERN =
@@ -145,7 +156,7 @@ const LOCAL_D1_SENTINELS = new Set([
   "00000000-0000-0000-0000-000000000001",
 ]);
 const CREDENTIAL_KEY_PATTERN =
-  /(?:secret|token|private[_-]?key|access[_-]?key|password|cookie|credential)/i;
+  /(?:secret|token(?![_-]?(?:url|ttl))|private[_-]?key|access[_-]?key|password|cookie|credential)/i;
 const CREDENTIAL_VALUE_PATTERN =
   /(?:-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|\b(?:bearer|basic)\s+[^\s]+|\b(?:client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token|password|credential)\s*[:=]|\b(?:eyJ[A-Za-z0-9_-]+\.){2})/i;
 const RFC3339_UTC_PATTERN =

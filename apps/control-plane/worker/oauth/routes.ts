@@ -11,6 +11,7 @@ import {
 import {
   completeOAuthUpstreamLogin,
   createOAuthInstallation,
+  consumeOAuthCode,
   findOAuthClient,
   findOAuthCode,
   findOAuthUpstreamLogin,
@@ -655,6 +656,20 @@ async function token(
     return oauthError(context, "invalid_grant", "PKCE verifier is invalid");
   }
 
+  const consumed = await consumeOAuthCode(
+    db,
+    row.code_id,
+    row.transaction_id,
+    current.toISOString(),
+  );
+  if (!consumed) {
+    return oauthError(
+      context,
+      "invalid_grant",
+      "Authorization code is invalid or expired",
+    );
+  }
+
   const installationId = randomIdentifier("oauth_installation");
   const principalId = randomIdentifier("principal");
   const membershipId = randomIdentifier("membership");
@@ -673,19 +688,6 @@ async function token(
     createdAt: current.toISOString(),
     asIssuer: config.issuer,
   });
-  await db
-    .prepare(
-      "UPDATE oauth_authorization_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
-    )
-    .bind(current.toISOString(), row.code_id)
-    .run();
-  await db
-    .prepare(
-      "UPDATE oauth_authorization_transactions SET completed_at = ? WHERE id = ? AND completed_at IS NULL",
-    )
-    .bind(current.toISOString(), row.transaction_id)
-    .run();
-
   const issuedAt = current;
   const expiresAt = new Date(
     current.getTime() + config.accessTokenTtlSeconds * 1000,
@@ -747,7 +749,7 @@ export function registerOAuthRoutes(
       );
     }
   });
-  app.get("/.well-known/oauth-protected-resource", (context) => {
+  const protectedResourceMetadata = (context: OAuthContext) => {
     try {
       const config = runtimeConfig(services, context.env);
       const origin = new URL(context.req.url).origin;
@@ -769,7 +771,12 @@ export function registerOAuthRoutes(
         503,
       );
     }
-  });
+  };
+  app.get("/.well-known/oauth-protected-resource", protectedResourceMetadata);
+  app.get(
+    "/.well-known/oauth-protected-resource/mcp",
+    protectedResourceMetadata,
+  );
   app.get("/oauth/authorize", (context) => authorize(context, services));
   app.get("/oauth/callback", (context) => upstreamCallback(context, services));
   app.post("/oauth/consent", (context) => consent(context, services));
