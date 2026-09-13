@@ -627,15 +627,17 @@ impl ProvisioningGatewayServer {
 }
 
 #[derive(Debug)]
-struct HttpRequest {
-    path: String,
-    authorization: Option<String>,
-    request_id: Option<String>,
-    idempotency_key: Option<String>,
-    body: Vec<u8>,
+pub(crate) struct HttpRequest {
+    pub(crate) path: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) request_id: Option<String>,
+    pub(crate) idempotency_key: Option<String>,
+    pub(crate) body: Vec<u8>,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, std::io::Error> {
+pub(crate) async fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<HttpRequest, std::io::Error> {
     let mut buffer = Vec::with_capacity(4096);
     let header_end = loop {
         let mut chunk = [0_u8; 2048];
@@ -716,14 +718,14 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, std::i
     })
 }
 
-fn response(status: u16, body: Value) -> (u16, Vec<u8>) {
+pub(crate) fn response(status: u16, body: Value) -> (u16, Vec<u8>) {
     (
         status,
         serde_json::to_vec(&body).unwrap_or_else(|_| b"{\"error\":\"provider_error\"}".to_vec()),
     )
 }
 
-async fn write_http_response(
+pub(crate) async fn write_http_response(
     stream: &mut TcpStream,
     status: u16,
     body: &[u8],

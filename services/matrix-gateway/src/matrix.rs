@@ -39,7 +39,10 @@ use ruma::{
         uiaa::{MatrixUserIdentifier, UserIdentifier},
     },
     api::{IncomingRequest, IncomingResponse},
-    events::{AnySyncEphemeralRoomEvent, AnySyncStateEvent, AnySyncTimelineEvent},
+    events::{
+        AnyStateEvent, AnySyncEphemeralRoomEvent, AnySyncStateEvent, AnySyncTimelineEvent,
+        AnyTimelineEvent,
+    },
     serde::Raw,
 };
 use sha2::{Digest, Sha256};
@@ -59,6 +62,66 @@ use crate::{
 
 /// Re-export the central gateway response-size limit for transport callers.
 pub use crate::config::MAX_SYNC_RESPONSE_BYTES;
+
+/// Stable error returned when a Matrix history page cannot be fetched.
+pub const MATRIX_HISTORY_UNAVAILABLE: &str = "matrix_history_unavailable";
+
+/// A bounded raw response from Matrix's room-message pagination endpoint.
+///
+/// Event bodies stay in Ruma's raw wrapper until the history boundary decides
+/// how to normalize them. The transport layer does not deserialize provider
+/// or projection payloads.
+pub struct RawBackfillPage {
+    start: String,
+    end: Option<String>,
+    chunk: Vec<Raw<AnyTimelineEvent>>,
+    state: Vec<Raw<AnyStateEvent>>,
+}
+
+impl RawBackfillPage {
+    /// Construct one validated page returned by Matrix.
+    pub(crate) fn new(
+        start: String,
+        end: Option<String>,
+        chunk: Vec<Raw<AnyTimelineEvent>>,
+        state: Vec<Raw<AnyStateEvent>>,
+    ) -> Result<Self, SafeError> {
+        if start.is_empty()
+            || start.len() > crate::store_types::MAX_SYNC_TOKEN_BYTES
+            || end.as_deref().is_some_and(|value| {
+                value.is_empty() || value.len() > crate::store_types::MAX_SYNC_TOKEN_BYTES
+            })
+        {
+            return Err(SafeError::new(MATRIX_RESPONSE_INVALID));
+        }
+        Ok(Self {
+            start,
+            end,
+            chunk,
+            state,
+        })
+    }
+
+    /// Return the Matrix token at the beginning of this page.
+    pub fn start(&self) -> &str {
+        &self.start
+    }
+
+    /// Return the next Matrix pagination token, when one exists.
+    pub fn end(&self) -> Option<&str> {
+        self.end.as_deref()
+    }
+
+    /// Borrow the raw timeline events in Matrix response order.
+    pub fn chunk(&self) -> &[Raw<AnyTimelineEvent>] {
+        &self.chunk
+    }
+
+    /// Borrow the raw state events included for this page.
+    pub fn state(&self) -> &[Raw<AnyStateEvent>] {
+        &self.state
+    }
+}
 
 async fn open_unactivated_base_client(
     state_path: impl AsRef<Path>,
@@ -271,7 +334,10 @@ fn optional_event_id_from_raw<T>(event: &Raw<T>) -> Result<Option<OwnedEventId>,
         .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))
 }
 
-fn validate_raw_event_room<T>(event: &Raw<T>, room_id: &OwnedRoomId) -> Result<(), SafeError> {
+pub(crate) fn validate_raw_event_room<T>(
+    event: &Raw<T>,
+    room_id: &OwnedRoomId,
+) -> Result<(), SafeError> {
     let embedded_room = event
         .get_field::<OwnedRoomId>("room_id")
         .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?;
@@ -1267,6 +1333,20 @@ impl fmt::Display for RestartCryptoAck {
 #[async_trait]
 pub trait MatrixTransport: Send + Sync {
     async fn fetch_sync(&self, since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError>;
+
+    /// Fetch one bounded backward room-history page.
+    ///
+    /// Implementations that do not expose history retain the receive-only
+    /// service boundary by returning a stable unavailable error.
+    async fn backfill_page(
+        &self,
+        room_id: &str,
+        from: Option<&SecretBytes>,
+        limit: u64,
+    ) -> Result<RawBackfillPage, SafeError> {
+        let _ = (room_id, from, limit);
+        Err(SafeError::new(MATRIX_HISTORY_UNAVAILABLE))
+    }
 
     async fn send_crypto(
         &self,

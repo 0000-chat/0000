@@ -7,6 +7,7 @@ pub mod config;
 pub mod crypto;
 pub mod crypto_outbox;
 pub mod health;
+pub mod history;
 pub mod ingestion;
 pub mod ledger;
 pub mod matrix;

@@ -2344,6 +2344,93 @@ impl Store {
         let binding = verify_active_room_binding(&self.keyring, &row)?;
         Ok(Some(binding))
     }
+
+    /// Resolve one active Matrix room from the complete history owner tuple.
+    ///
+    /// The caller supplies the authenticated Communicator authority rather
+    /// than a room ID. The account lookup narrows the encrypted registry scan;
+    /// every candidate is then decrypted and compared against all five
+    /// immutable authority fields before it can be returned.
+    pub fn active_room_binding_for_history(
+        &self,
+        tenant_id: &str,
+        account_id: &str,
+        connection_id: &str,
+        identity_id: &str,
+        platform: model::Provider,
+    ) -> Result<Option<RoomBinding>, SafeError> {
+        if !model::valid_resource_id(tenant_id)
+            || !model::valid_resource_id(account_id)
+            || !model::valid_resource_id(connection_id)
+            || !model::valid_resource_id(identity_id)
+        {
+            return Err(room_binding_invalid());
+        }
+        let account_lookup = registry_account_lookup(&self.keyring, platform, account_id)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
+                        payload_nonce, key_version, status, created_at, retired_at
+                 FROM room_bindings
+                 WHERE account_lookup = ?1 AND status = 'active'
+                 ORDER BY binding_id",
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let rows = statement
+            .query_map(
+                params![account_lookup.as_slice()],
+                read_stored_room_binding_row,
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let mut matches = Vec::new();
+        for row in rows {
+            let row = row.map_err(|_| room_binding_invalid())?;
+            if row.account_lookup.as_slice() != account_lookup.as_slice() {
+                return Err(room_binding_invalid());
+            }
+            let binding = verify_active_room_binding(&self.keyring, &row)?;
+            if binding.tenant_id() == tenant_id
+                && binding.account_id() == account_id
+                && binding.connection_id() == connection_id
+                && binding.identity_id() == identity_id
+                && binding.platform() == platform
+            {
+                matches.push(binding);
+            }
+        }
+        drop(statement);
+
+        if matches.len() > 1 {
+            return Err(room_binding_invalid());
+        }
+        Ok(matches.pop())
+    }
+
+    /// Derive an opaque, authority-bound cursor for one Matrix history page.
+    ///
+    /// The Matrix token is supplied only to the keyed digest and is never
+    /// returned. The corresponding raw token remains in the encrypted
+    /// backfill pagination envelope.
+    pub fn history_cursor_token(
+        &self,
+        import_id: &str,
+        range_id: &str,
+        source_cursor: &str,
+    ) -> Result<String, SafeError> {
+        if !model::valid_resource_id(import_id)
+            || !model::valid_resource_id(range_id)
+            || source_cursor.is_empty()
+            || source_cursor.len() > MAX_SYNC_TOKEN_BYTES
+        {
+            return Err(room_binding_invalid());
+        }
+        let digest = self
+            .keyring
+            .lookup_digest("history-cursor-v1", &[import_id, range_id, source_cursor])
+            .map_err(|_| room_binding_invalid())?;
+        Ok(format!("history_{}", lowercase_hex(&digest)))
+    }
 }
 
 fn room_binding_invalid() -> SafeError {

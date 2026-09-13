@@ -2197,19 +2197,23 @@ fn validate_state_shape(
 }
 
 fn validate_job_id(value: &str) -> Result<(), SafeError> {
-    if value.len() != 36
-        || ![8_usize, 13, 18, 23]
-            .into_iter()
-            .all(|index| value.as_bytes().get(index) == Some(&b'-'))
-        || value.as_bytes().get(14) != Some(&b'7')
-        || !matches!(value.as_bytes().get(19), Some(b'8'..=b'9' | b'a'..=b'b'))
-        || value.as_bytes().iter().enumerate().any(|(index, byte)| {
-            ![8_usize, 13, 18, 23].contains(&index) && !matches!(*byte, b'0'..=b'9' | b'a'..=b'f')
-        })
-    {
+    if !(model::valid_resource_id(value) || valid_uuid_v7(value)) {
         return Err(backfill_invalid());
     }
     Ok(())
+}
+
+fn valid_uuid_v7(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8_usize, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8_usize, 13, 18, 23].contains(&index) || matches!(*byte, b'0'..=b'9' | b'a'..=b'f')
+        })
+        && bytes[14] == b'7'
+        && matches!(bytes[19], b'8'..=b'9' | b'a'..=b'b')
 }
 
 fn validate_timestamp(value: &str) -> Result<(), SafeError> {

@@ -8,8 +8,12 @@ use ruma::api::{
     IncomingRequest, IncomingResponse, OutgoingRequest, SupportedVersions,
     auth_scheme::SendAccessToken,
     client::keys::get_keys::v3::{Request as KeysQueryRequest, Response as KeysQueryResponse},
+    client::message::get_message_events::v3::{
+        Request as MessagesRequest, Response as MessagesResponse,
+    },
     client::sync::sync_events::v3::{Request as SyncRequest, Response as SyncResponse},
 };
+use ruma::{OwnedRoomId, UInt};
 use sha2::Digest;
 use zeroize::Zeroize;
 
@@ -19,13 +23,18 @@ use crate::{
         RawMatrixResponse, validate_canonical_request_bytes,
     },
     matrix::{
-        FetchedMatrixSync, MATRIX_RESPONSE_EMPTY, MATRIX_RESPONSE_INVALID,
-        MATRIX_RESPONSE_TOO_LARGE, MATRIX_TRANSPORT_FAILED, MATRIX_TRANSPORT_INVALID,
-        MatrixTransport,
+        FetchedMatrixSync, MATRIX_HISTORY_UNAVAILABLE, MATRIX_RESPONSE_EMPTY,
+        MATRIX_RESPONSE_INVALID, MATRIX_RESPONSE_TOO_LARGE, MATRIX_TRANSPORT_FAILED,
+        MATRIX_TRANSPORT_INVALID, MatrixTransport, RawBackfillPage, validate_raw_event_room,
     },
     secret::{SafeError, SecretBytes},
     store::STORE_CRYPTO_TOO_LARGE,
 };
+
+/// Maximum bytes accepted for one `/messages` response. This is independent
+/// of the larger receive-sync cap because history pages are bounded by the
+/// private import contract and are retained only as parsed raw events.
+const MAX_HISTORY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// A bounded raw Matrix HTTP transport with no implicit retry, proxy,
 /// redirect, cookie, or response-decompression behavior.
@@ -201,6 +210,71 @@ impl ReqwestMatrixTransport {
             .body(request.request().as_bytes().to_vec())
             .timeout(self.request_timeout))
     }
+
+    fn backfill_request(
+        &self,
+        room_id: &str,
+        from: Option<&SecretBytes>,
+        limit: u64,
+    ) -> Result<RequestBuilder, SafeError> {
+        let room_id: OwnedRoomId = room_id
+            .parse()
+            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
+        let limit = UInt::try_from(limit).map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
+        let from = from
+            .map(|value| {
+                validate_sync_token(value)?;
+                str::from_utf8(value.as_bytes())
+                    .map(str::to_owned)
+                    .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))
+            })
+            .transpose()?;
+        let mut request = MessagesRequest::backward(room_id);
+        request.from = from;
+        request.limit = limit;
+        let access_token = str::from_utf8(self.access_token.as_bytes())
+            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
+        let supported = SupportedVersions::from_parts(&["v1.1".to_owned()], &Default::default());
+        let request: http::Request<Vec<u8>> = request
+            .try_into_http_request(
+                self.homeserver_url.as_str(),
+                SendAccessToken::IfRequired(access_token),
+                Cow::Owned(supported),
+            )
+            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
+        let mut headers = request.headers().clone();
+        if let Some(value) = headers.get_mut(AUTHORIZATION) {
+            value.set_sensitive(true);
+        }
+        let url = Url::parse(&request.uri().to_string())
+            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_INVALID))?;
+        Ok(self
+            .client
+            .request(request.method().clone(), url)
+            .headers(headers)
+            .timeout(self.request_timeout))
+    }
+
+    async fn fetch_backfill_page(
+        &self,
+        room_id: &str,
+        from: Option<&SecretBytes>,
+        limit: u64,
+    ) -> Result<RawBackfillPage, SafeError> {
+        if !(1..=500).contains(&limit) {
+            return Err(SafeError::new(MATRIX_TRANSPORT_INVALID));
+        }
+        let response = self
+            .backfill_request(room_id, from, limit)?
+            .send()
+            .await
+            .map_err(|_| SafeError::new(MATRIX_TRANSPORT_FAILED))?;
+        if !response.status().is_success() {
+            return Err(SafeError::new(MATRIX_HISTORY_UNAVAILABLE));
+        }
+        let body = read_bounded_body(response, MAX_HISTORY_RESPONSE_BYTES).await?;
+        parse_backfill_response(&body, room_id)
+    }
 }
 
 impl fmt::Debug for ReqwestMatrixTransport {
@@ -226,6 +300,15 @@ impl MatrixTransport for ReqwestMatrixTransport {
             SecretBytes::new(next_token),
             SecretBytes::new(body),
         )
+    }
+
+    async fn backfill_page(
+        &self,
+        room_id: &str,
+        from: Option<&SecretBytes>,
+        limit: u64,
+    ) -> Result<RawBackfillPage, SafeError> {
+        self.fetch_backfill_page(room_id, from, limit).await
     }
 
     async fn send_crypto(
@@ -403,6 +486,26 @@ fn parse_sync_response(body: &[u8]) -> Result<SyncResponse, SafeError> {
         return Err(SafeError::new(MATRIX_RESPONSE_TOO_LARGE));
     }
     Ok(typed)
+}
+
+fn parse_backfill_response(body: &[u8], room_id: &str) -> Result<RawBackfillPage, SafeError> {
+    let room_id: OwnedRoomId = room_id
+        .parse()
+        .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?;
+    let response = http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?;
+    let typed = MessagesResponse::try_from_http_response(response)
+        .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?;
+    for event in &typed.chunk {
+        validate_raw_event_room(event, &room_id)?;
+    }
+    for event in &typed.state {
+        validate_raw_event_room(event, &room_id)?;
+    }
+    RawBackfillPage::new(typed.start, typed.end, typed.chunk, typed.state)
 }
 
 fn validate_keys_query_response(body: &[u8]) -> Result<(), SafeError> {
