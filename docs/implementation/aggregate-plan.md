@@ -72,10 +72,10 @@ reopen the #12 feature gate or block implementation of its independent child
 contracts.
 
 T02/#13 and T24/#14 were therefore dispatched independently from aggregate
-checkpoint `cf6b50f` (OAuth worker branch `codex/implement-oauth-13`; linking
-worker checkout is being provisioned). Their own implementation and acceptance
-evidence remain pending. Reserve migrations `0006_oauth` and `0007_linking` for
-those workers; do not claim either migration or child ticket complete from the
+checkpoint `cf6b50f` (OAuth branch `codex/implement-oauth-13`; linking branch
+`codex/implement-linking-14`). Their own implementation and acceptance evidence
+remain pending. Reserve migrations `0006_oauth` and `0007_linking` for those
+workers; do not claim either migration or child ticket complete from the
 dispatch alone.
 
 ## Merge and release rules
