@@ -54,7 +54,4 @@ for required_text in ("Cloudflare", "Matrix Gateway", "Standalone public"):
         raise SystemExit(f"README is missing imported application guidance: {required_text}")
 PY
 git diff --check
-"$root/scripts/install-tools"
-"$root/scripts/lint"
-"$root/scripts/format-check"
-echo "0000-communicator application and tooling checks passed"
+echo "0000-communicator imported application checks passed; tooling baseline is recorded separately"

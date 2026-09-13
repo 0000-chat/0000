@@ -60,6 +60,23 @@ warnings denied, formatting, diff, and JSON checks passing. Its systemd parse
 could not run because the installed binary is absent; no deployment was
 attempted.
 
+## Default-branch merge evidence
+
+Fetched `origin/main` at `5aa71396cdea9925013c68d20bca095a64efda46` and merged
+it into the aggregate as `8331ad4`. The three conflicts were resolved by
+preserving the migrated application check and metadata, adding main's Node 24
+workflow setup and Biome/Oxlint assets, and unioning the ignore rules. The
+scaffold-only metadata rule was not retained because it contradicts the
+imported application handoff.
+
+Focused post-merge Rust verification passed the binary behavior test (1/1)
+and healthcheck suite (24/24). The adapted `./scripts/check` passed. Running
+the newly imported tooling scripts separately identified a pre-existing
+application baseline: Oxlint exits 1 on existing warnings and Biome reports
+193 formatting errors across 232 files. No whole-tree formatting or unrelated
+source cleanup was applied; the scripts remain available for a reviewed
+baseline-cleanup pass.
+
 ## Coordination artifacts
 
 The pinned WhatsApp bridge contract is copied verbatim at
