@@ -3,6 +3,7 @@ import { SessionResponseSchema } from "@communicator/contracts";
 import { HTTPException } from "hono/http-exception";
 import type { AuthorizationVariables } from "./auth/middleware";
 import { createAuthorizationMiddleware } from "./auth/middleware";
+import { parseBearerToken } from "./auth/bearer";
 import {
   createIngestionAuthorizationMiddleware,
   type IngestionAuthorizationVariables,
@@ -55,6 +56,20 @@ import {
   realtimeUpgradeHandler,
 } from "./realtime/handlers";
 import { ReadError, readErrorResponse } from "./read/errors";
+import {
+  registerOAuthRoutes,
+  type OAuthHumanSession,
+  type OAuthRouteServices,
+  type OAuthUpstreamLoginInput,
+} from "./oauth/routes";
+import {
+  createOAuthAccessTokenVerifier,
+  getOAuthRuntimeConfig,
+  type OAuthRuntimeConfig,
+} from "./oauth/tokens";
+import type { OAuthAccessTokenClaims } from "./oauth/tokens";
+import { resolveAuthorization } from "./control-directory/authorization";
+import { handleMcpGet, handleMcpRequest } from "./mcp";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -69,8 +84,23 @@ const decorateRealtimeTicketResponse = (response: Response): Response => {
 export type AppServices = {
   createTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createAccessTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
+  createOAuthAccessTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createIngestionTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   sendIngestionQueue?: IngestionQueueSender;
+  resolveOAuthHumanSession?: (
+    request: Request,
+    env: Cloudflare.Env,
+  ) => Promise<OAuthHumanSession | null>;
+  completeOAuthUpstreamLogin?: (
+    input: OAuthUpstreamLoginInput,
+  ) => Promise<OAuthHumanSession | null>;
+  oauthClock?: () => Date;
+  oauthConfig?: (env: Cloudflare.Env) => OAuthRuntimeConfig;
+  signOAuthAccessToken?: (
+    env: Cloudflare.Env,
+    config: OAuthRuntimeConfig,
+    claims: OAuthAccessTokenClaims,
+  ) => Promise<string>;
 };
 
 export function createApp(services: AppServices = {}) {
@@ -135,6 +165,45 @@ export function createApp(services: AppServices = {}) {
     return accessVerifier;
   };
 
+  let oauthVerifier: TokenVerifier | undefined;
+  const getOAuthVerifier = (runtimeEnv: Cloudflare.Env) => {
+    oauthVerifier ??= (
+      services.createOAuthAccessTokenVerifier ??
+      ((env) =>
+        createOAuthAccessTokenVerifier(
+          (services.oauthConfig ?? getOAuthRuntimeConfig)(env),
+          services.oauthClock ? { currentDate: services.oauthClock() } : {},
+        ))
+    )(runtimeEnv);
+    return oauthVerifier;
+  };
+
+  const resolveOAuthHumanSession =
+    services.resolveOAuthHumanSession ??
+    (async (request: Request, env: Cloudflare.Env): Promise<OAuthHumanSession | null> => {
+      const header = request.headers.get("Authorization");
+      if (!header) return null;
+      try {
+        const subject = await getVerifier(env).verify(parseBearerToken(header));
+        if (subject.installation_id) return null;
+        const database = env.CONTROL_DB;
+        if (!database || typeof database.withSession !== "function") return null;
+        const tenantHint = request.headers.get("X-Communicator-Tenant") ?? undefined;
+        const result = await resolveAuthorization(database, subject, tenantHint);
+        if (!result.ok) return null;
+        if (result.context.principal.type !== "human" && result.context.principal.type !== "operator") return null;
+        return {
+          issuer: subject.issuer,
+          subject: subject.subject,
+          tenantId: result.context.tenant.id,
+          membershipId: result.context.membership.id,
+          principalId: result.context.principal.id,
+        };
+      } catch {
+        return null;
+      }
+    });
+
   let ingestionVerifier: TokenVerifier | undefined;
   const getIngestionVerifier = (runtimeEnv: Cloudflare.Env) => {
     ingestionVerifier ??= (
@@ -166,12 +235,24 @@ export function createApp(services: AppServices = {}) {
   const productAuthorization = createAuthorizationMiddleware({
     getVerifier,
     getAccessVerifier,
+    getOAuthVerifier,
   });
+  const oauthServices: OAuthRouteServices = {
+    resolveHumanSession: resolveOAuthHumanSession,
+  };
+  if (services.oauthConfig) oauthServices.getConfig = services.oauthConfig;
+  if (services.oauthClock) oauthServices.clock = services.oauthClock;
+  if (services.completeOAuthUpstreamLogin)
+    oauthServices.completeUpstreamLogin = services.completeOAuthUpstreamLogin;
+  if (services.signOAuthAccessToken)
+    oauthServices.signAccessToken = services.signOAuthAccessToken;
+  registerOAuthRoutes(app, oauthServices);
   app.use(REALTIME_TICKET_PATH, async (context, next) => {
     await next();
     if (context.finalized) decorateRealtimeTicketResponse(context.res);
   });
   app.use("/api/v1/session", productAuthorization);
+  app.use("/mcp", productAuthorization);
   app.use(REALTIME_TICKET_PATH, productAuthorization);
   app.use("/api/v1/identities", productAuthorization);
   app.use("/api/v1/identities/*", productAuthorization);
@@ -191,6 +272,8 @@ export function createApp(services: AppServices = {}) {
   );
   app.openapi(realtimeTicketRoute, realtimeTicketHandler);
   app.get("/api/v1/realtime", realtimeUpgradeHandler);
+  app.post("/mcp", handleMcpRequest);
+  app.get("/mcp", handleMcpGet);
 
   app.openapi(identitiesRoute, identitiesHandler);
   app.openapi(connectionsRoute, connectionsHandler);

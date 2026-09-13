@@ -40,6 +40,7 @@ const readResponses = (schema: z.ZodTypeAny, description: string) => ({
   },
   400: { description: "Invalid request", content: errorContent },
   401: { description: "Authentication required", content: errorContent },
+  403: { description: "Forbidden", content: errorContent },
   404: { description: "Resource not found", content: errorContent },
   503: { description: "Service unavailable", content: errorContent },
 });
@@ -184,6 +185,7 @@ const readContext = <I extends Input>(
 ): ReadHandlerContext => ({
   env: context.env,
   authorization: context.get("authorization"),
+  delegated: context.get("delegated"),
 });
 
 const failureResponse = (context: Context<ReadRouteEnv>, error: unknown) => {

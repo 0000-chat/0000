@@ -9,6 +9,7 @@ import {
   listActiveMemberships,
   listAuthorizedIdentities,
 } from "./repository";
+import { findActiveOAuthInstallation } from "../oauth/repository";
 
 export type AuthorizationFailureCode =
   | "unauthenticated"
@@ -83,6 +84,93 @@ export async function resolveAuthorization(
       identities,
     });
     return { ok: true, context };
+  } catch {
+    return { ok: false, code: "directory_unavailable" };
+  }
+}
+
+/**
+ * Resolve a locally issued OAuth token through its installation binding.
+ * Human issuer/subject claims carried as consent provenance are intentionally
+ * ignored here; the token subject must be the generated installation agent
+ * principal and the installation must still be active.
+ */
+export async function resolveOAuthInstallationAuthorization(
+  db: D1Database,
+  subject: VerifiedSubject,
+): Promise<AuthorizationResult> {
+  if (!subject.installation_id || !subject.client_id || !subject.resource) {
+    return { ok: false, code: "unauthenticated" };
+  }
+  if (!subject.token_id) return { ok: false, code: "unauthenticated" };
+
+  try {
+    const session = db.withSession("first-primary");
+    const installation = await findActiveOAuthInstallation(
+      session,
+      subject.installation_id,
+    );
+    if (
+      installation === null ||
+      installation.client_id !== subject.client_id ||
+      installation.resource !== subject.resource ||
+      installation.principal_id !== subject.subject ||
+      (await isTokenRevoked(session, subject.issuer, subject.token_id))
+    ) {
+      return { ok: false, code: "unauthenticated" };
+    }
+
+    const memberships = await listActiveMemberships(
+      session,
+      installation.principal_id,
+      installation.tenant_id,
+    );
+    const membership = memberships.find(
+      (candidate) => candidate.id === installation.membership_id,
+    );
+    if (!membership) return { ok: false, code: "unauthenticated" };
+    const identities = await listAuthorizedIdentities(
+      session,
+      membership.id,
+      membership.tenant_id,
+    );
+    if (
+      !identities.some(
+        (identity) => identity.identity_id === installation.identity_id,
+      )
+    ) {
+      return { ok: false, code: "unauthenticated" };
+    }
+    const principal = await session
+      .prepare(
+        "SELECT id, principal_type, display_name FROM principals WHERE id = ? AND status = 'active' AND revoked_at IS NULL LIMIT 1",
+      )
+      .bind(installation.principal_id)
+      .first<{
+        id: string;
+        principal_type: "human" | "service" | "agent" | "operator";
+        display_name: string;
+      }>();
+    if (!principal || principal.principal_type !== "agent") {
+      return { ok: false, code: "unauthenticated" };
+    }
+    return {
+      ok: true,
+      context: SessionResponseSchema.parse({
+        tenant: {
+          id: membership.tenant_id,
+          slug: membership.tenant_slug,
+          display_name: membership.tenant_display_name,
+        },
+        principal: {
+          id: principal.id,
+          type: principal.principal_type,
+          display_name: principal.display_name,
+        },
+        membership: { id: membership.id, role: membership.role },
+        identities,
+      }),
+    };
   } catch {
     return { ok: false, code: "directory_unavailable" };
   }

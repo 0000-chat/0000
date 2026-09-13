@@ -1,16 +1,22 @@
 import type { SessionResponse } from "@communicator/contracts";
 import type { MiddlewareHandler } from "hono";
 import { parseAccessAssertion, parseBearerToken } from "./bearer";
-import type { TokenVerifier } from "./oidc";
-import { resolveAuthorization } from "../control-directory/authorization";
+import type { TokenVerifier, VerifiedSubject } from "./oidc";
+import {
+  resolveAuthorization,
+  resolveOAuthInstallationAuthorization,
+} from "../control-directory/authorization";
 
 export type AuthorizationVariables = {
   authorization: SessionResponse;
+  /** True only for a locally issued installation-bound OAuth access token. */
+  delegated: boolean;
 };
 
 type AuthorizationMiddlewareOptions = {
   getVerifier: (env: Cloudflare.Env) => TokenVerifier;
   getAccessVerifier: (env: Cloudflare.Env) => TokenVerifier;
+  getOAuthVerifier?: (env: Cloudflare.Env) => TokenVerifier;
 };
 
 function logAuthorizationFailure(status: number, requestId: string) {
@@ -41,14 +47,22 @@ export function createAuthorizationMiddleware(
     try {
       const authorization = context.req.header("Authorization");
       const accessAssertion = context.req.header("Cf-Access-Jwt-Assertion");
-      const subject =
-        authorization !== undefined
-          ? await options
-              .getVerifier(context.env)
-              .verify(parseBearerToken(authorization))
-          : await options
-              .getAccessVerifier(context.env)
-              .verify(parseAccessAssertion(accessAssertion));
+      let delegated = false;
+      let subject: VerifiedSubject;
+      if (authorization !== undefined) {
+        const token = parseBearerToken(authorization);
+        try {
+          subject = await options.getVerifier(context.env).verify(token);
+        } catch (humanError) {
+          if (!options.getOAuthVerifier) throw humanError;
+          subject = await options.getOAuthVerifier(context.env).verify(token);
+          delegated = true;
+        }
+      } else {
+        subject = await options
+          .getAccessVerifier(context.env)
+          .verify(parseAccessAssertion(accessAssertion));
+      }
       const database = context.env.CONTROL_DB;
       if (!database)
         return respond(
@@ -58,9 +72,12 @@ export function createAuthorizationMiddleware(
         );
       const tenantHint =
         context.req.header("X-Communicator-Tenant") ?? undefined;
-      const result = await resolveAuthorization(database, subject, tenantHint);
+      const result = delegated
+        ? await resolveOAuthInstallationAuthorization(database, subject)
+        : await resolveAuthorization(database, subject, tenantHint);
       if (result.ok) {
         context.set("authorization", result.context);
+        context.set("delegated", delegated);
         await next();
         return;
       }

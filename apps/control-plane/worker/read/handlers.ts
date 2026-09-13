@@ -28,6 +28,7 @@ import { mapReadError, ReadError } from "./errors";
 export type ReadHandlerContext = {
   env: Cloudflare.Env;
   authorization: SessionResponse;
+  delegated?: boolean;
 };
 
 export type ListConnectionsInput = {
@@ -156,6 +157,7 @@ export async function listConnections(
       context.env,
       context.authorization,
       input.identity_id,
+      context.delegated,
     );
     const connections = filterGrantedConnections(
       await listDirectoryConnections(context, input.identity_id),
@@ -242,6 +244,7 @@ export async function listChannels(
       context.env,
       context.authorization,
       input.identity_id,
+      context.delegated,
     );
     const connections = filterGrantedConnections(
       await listDirectoryConnections(context, input.identity_id),
@@ -304,6 +307,7 @@ export async function listConversations(
         context.authorization,
         input.identity_id,
         input.account_id,
+        context.delegated,
       );
       resourceIdentityId = resolved.resourceIdentityId;
       authorization = resolved.authorization;
@@ -317,6 +321,7 @@ export async function listConversations(
         context.env,
         context.authorization,
         input.identity_id,
+        context.delegated,
       );
     }
     validateAccountFilter(input.account_id, authorization);
@@ -356,6 +361,7 @@ export async function getConversation(
         context.authorization,
         input.identity_id,
         input.account_id,
+        context.delegated,
       );
       resourceIdentityId = resolved.resourceIdentityId;
       authorization = resolved.authorization;
@@ -369,6 +375,7 @@ export async function getConversation(
         context.env,
         context.authorization,
         input.identity_id,
+        context.delegated,
       );
     }
     validateAccountFilter(input.account_id, authorization);
@@ -400,6 +407,7 @@ export async function listMessages(
         context.authorization,
         input.identity_id,
         input.account_id,
+        context.delegated,
       );
       resourceIdentityId = resolved.resourceIdentityId;
       authorization = resolved.authorization;
@@ -413,6 +421,7 @@ export async function listMessages(
         context.env,
         context.authorization,
         input.identity_id,
+        context.delegated,
       );
     }
     validateAccountFilter(input.account_id, authorization);

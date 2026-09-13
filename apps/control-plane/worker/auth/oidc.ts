@@ -17,6 +17,11 @@ export type VerifiedSubject = {
   issuer: string;
   subject: string;
   token_id?: string;
+  /** Present only for a locally issued, installation-bound delegated token. */
+  installation_id?: string;
+  client_id?: string;
+  resource?: string;
+  scope?: string[];
 };
 
 export type OidcConfig = {
