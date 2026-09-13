@@ -1042,6 +1042,16 @@ export async function ensureDefaultCapabilities(
       "conditional" as const,
       "Provider receipt support is documented, but a live provider result is still required.",
     ],
+    [
+      "message.send.text",
+      "unverified" as const,
+      "Pinned WhatsApp text sending is implemented behind the provider-neutral adapter, but this deployment has no controlled sacrificial-account proof yet.",
+    ],
+    [
+      "account.route",
+      "unverified" as const,
+      "Account-bound routing is enforced by the control directory; a live provider route and session generation still require controlled proof.",
+    ],
   ];
   for (const [capability, status, productClaim] of defaults) {
     await upsertCapability(

@@ -138,6 +138,13 @@ impl HistoryGatewayServer {
         })
     }
 
+    /// Share the exclusively opened state store with the authenticated
+    /// outbound gateway. Both routes stay inside the same process lock and
+    /// therefore cannot observe an uncommitted journal mutation.
+    pub(crate) fn store_handle(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.store)
+    }
+
     /// Serve history routes on a private listener.
     pub async fn serve(self, listener: TcpListener) -> Result<(), std::io::Error> {
         loop {

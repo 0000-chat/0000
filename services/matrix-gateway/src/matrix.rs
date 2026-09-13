@@ -287,6 +287,67 @@ async fn open_restored_base_client(
     Ok(base)
 }
 
+/// Restore the one high-level SDK client used by the private outbound route.
+///
+/// The client is built around one unactivated `BaseClient` and restores the
+/// persisted session exactly once. The returned client therefore shares the
+/// activated Olm machine and SQLite stores with no second crypto client.
+pub async fn restore_matrix_client(
+    homeserver_url: &str,
+    expected_user_id: &str,
+    sdk_store_path: &Path,
+    sdk_store_passphrase: &SecretBytes,
+    state_store: &Store,
+) -> Result<Client, SafeError> {
+    let expected_user_id = parse_matrix_user_id(expected_user_id)?;
+    validate_bootstrap_homeserver_url(homeserver_url)?;
+    let session_bytes = state_store
+        .matrix_session()
+        .map_err(|_| SafeError::new(MATRIX_SESSION_INVALID))?
+        .ok_or_else(|| SafeError::new(MATRIX_SESSION_INVALID))?;
+    let session = deserialize_matrix_session(&session_bytes)?;
+    if session.meta.user_id != expected_user_id || session.tokens.access_token.is_empty() {
+        return Err(SafeError::new(MATRIX_SESSION_INVALID));
+    }
+    let passphrase = secret_utf8(sdk_store_passphrase, MATRIX_SESSION_INVALID)?;
+    inspect_sdk_store_path(sdk_store_path, true)?;
+    inspect_persisted_sdk_store(sdk_store_path)?;
+    let base = open_unactivated_base_client(sdk_store_path, sdk_store_path, passphrase).await?;
+    let client = match Client::builder()
+        .homeserver_url(homeserver_url)
+        .server_versions([ruma::api::MatrixVersion::V1_1])
+        .request_config(RequestConfig::default().disable_retry())
+        .base_client(base.clone())
+        .build()
+        .await
+    {
+        Ok(client) => client,
+        Err(_) => {
+            let _ = base.close_stores().await;
+            return Err(SafeError::new(MATRIX_SESSION_INVALID));
+        }
+    };
+    if client.restore_session(session.clone()).await.is_err() {
+        drop(client);
+        let _ = base.close_stores().await;
+        return Err(SafeError::new(MATRIX_SESSION_INVALID));
+    }
+    let valid_account = base.session_meta().is_some_and(|meta| {
+        meta.user_id == session.meta.user_id && meta.device_id == session.meta.device_id
+    });
+    let machine_guard = base.olm_machine().await;
+    let valid_machine = machine_guard.as_ref().is_some_and(|machine| {
+        machine.user_id() == session.meta.user_id && machine.device_id() == session.meta.device_id
+    });
+    drop(machine_guard);
+    if !valid_account || !valid_machine {
+        drop(client);
+        let _ = base.close_stores().await;
+        return Err(SafeError::new(MATRIX_SESSION_INVALID));
+    }
+    Ok(client)
+}
+
 /// Public SDK-backed Matrix processing seam used after bootstrap or restore.
 pub struct MatrixSdkProcessor {
     base: BaseClient,

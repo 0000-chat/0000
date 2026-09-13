@@ -188,6 +188,10 @@ fn registry_add_accepts_protected_json_and_returns_only_a_synthetic_id() {
     assert_eq!(binding.tenant_id(), "tenant_personal");
     assert_eq!(binding.platform().as_str(), "whatsapp");
     assert_eq!(binding.status(), RoomBindingStatus::Active);
+    assert_eq!(
+        binding.session_generation(),
+        Some("2026-09-13T00:00:00.000Z")
+    );
 }
 
 #[test]

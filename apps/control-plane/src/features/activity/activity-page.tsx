@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { useIdentityContext } from "@/components/identity/identity-switcher";
 import { Button } from "@/components/ui/button";
 import { apiClient, isDefinitiveRequestRejection } from "@/lib/api/client";
@@ -7,10 +8,14 @@ import { CommandTimeline } from "./command-timeline";
 import type {
   ConfirmationDecision,
   OutboundAction,
+  OutboundEvidenceRecord,
 } from "@communicator/contracts";
 
 export function ActivityPage() {
   const queryClient = useQueryClient();
+  const [evidenceCommandId, setEvidenceCommandId] = useState<string | null>(
+    null,
+  );
   const {
     session,
     identities,
@@ -25,6 +30,11 @@ export function ActivityPage() {
     queryKey: queryKeys.commands(),
     queryFn: () => apiClient.getCommands(),
     enabled: isAdministrator,
+  });
+  const evidenceQuery = useQuery({
+    queryKey: queryKeys.commandEvidence(evidenceCommandId ?? "none"),
+    queryFn: () => apiClient.getCommandEvidence(evidenceCommandId ?? ""),
+    enabled: isAdministrator && evidenceCommandId !== null,
   });
   const decisionMutation = useMutation({
     mutationFn: ({
@@ -52,6 +62,10 @@ export function ActivityPage() {
   const identityLabels = new Map(
     identities.map((identity) => [identity.id, identity.display_name]),
   );
+  const evidenceByCommand = new Map<string, OutboundEvidenceRecord[]>();
+  if (evidenceCommandId !== null && evidenceQuery.data !== undefined) {
+    evidenceByCommand.set(evidenceCommandId, evidenceQuery.data);
+  }
 
   return (
     <section className="space-y-6">
@@ -109,6 +123,22 @@ export function ActivityPage() {
           </Button>
         </div>
       )}
+      {evidenceQuery.isError && evidenceCommandId !== null && (
+        <div
+          role="alert"
+          className="space-y-2 rounded-lg border border-destructive/40 p-3 text-sm text-destructive"
+        >
+          <p>Unable to load evidence for this saved command.</p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void evidenceQuery.refetch()}
+          >
+            Refresh evidence
+          </Button>
+        </div>
+      )}
       {isAdministrator &&
         !commandsQuery.isLoading &&
         !commandsQuery.isError &&
@@ -123,6 +153,14 @@ export function ActivityPage() {
           identityLabels={identityLabels}
           canDecide
           isDeciding={decisionMutation.isPending}
+          evidenceByCommand={evidenceByCommand}
+          evidenceCommandId={evidenceCommandId}
+          isLoadingEvidence={evidenceQuery.isFetching}
+          onEvidenceRequest={(commandId) =>
+            setEvidenceCommandId((current) =>
+              current === commandId ? null : commandId,
+            )
+          }
           onDecision={(commandId, decision) =>
             decisionMutation.mutate({
               commandId,

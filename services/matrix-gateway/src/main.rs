@@ -22,9 +22,11 @@ use communicator_matrix_gateway::{
     history::HistoryGatewayServer,
     ingestion::{IngestionClient, OAuthTokenProvider, SecretString},
     matrix::{
-        MATRIX_SESSION_INVALID, MatrixProcessor, matrix_access_token, restore_matrix_processor,
+        MATRIX_SESSION_INVALID, MatrixProcessor, matrix_access_token, restore_matrix_client,
+        restore_matrix_processor,
     },
     matrix_http::ReqwestMatrixTransport,
+    outbound::MatrixSdkTextSender,
     provisioning::{
         GatewayRouteMetadata, ProvisioningGatewayServer, WhatsAppProvisioningClient,
         serve_private_gateway,
@@ -236,6 +238,20 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         .matrix_session()?
         .ok_or_else(|| SafeError::new(MATRIX_SESSION_INVALID))?;
     let access_token = matrix_access_token(&session, config.matrix_user_id())?;
+    let passphrase = load_secret(
+        config.matrix_store_passphrase_file(),
+        SecretKind::Text {
+            max_bytes: MAX_TEXT_SECRET_BYTES,
+        },
+    )?;
+    let matrix_client = restore_matrix_client(
+        config.homeserver_url(),
+        config.matrix_user_id(),
+        config.matrix_store_dir(),
+        &passphrase,
+        &store,
+    )
+    .await?;
     let transport = ReqwestMatrixTransport::new(
         config.homeserver_url(),
         access_token,
@@ -261,7 +277,13 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         },
     )
     .map_err(|error| SafeError::new(error.code()))?;
-    let server = server.with_history(history);
+    let server =
+        server
+            .with_history(history)
+            .with_outbound_sender(Arc::new(MatrixSdkTextSender::new(
+                matrix_client,
+                Duration::from_secs(config.request_timeout_secs()),
+            )));
     serve_private_gateway(server, provisioning.listen_addr())
         .await
         .map_err(|_| SafeError::new("provisioning_listen_failed"))

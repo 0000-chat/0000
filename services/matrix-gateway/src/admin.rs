@@ -148,6 +148,7 @@ struct AddDocument {
     gateway_route_id: String,
     conversation_id: String,
     owner_matrix_user_id: String,
+    session_generation: String,
 }
 
 impl AddDocument {
@@ -160,7 +161,7 @@ impl AddDocument {
             return Err(AdminError::new(ADMIN_INPUT_INVALID));
         }
 
-        NewRoomBinding::new(
+        NewRoomBinding::new_with_session_generation(
             binding_id,
             self.matrix_room_id,
             self.tenant_id,
@@ -171,6 +172,7 @@ impl AddDocument {
             self.gateway_route_id,
             self.conversation_id,
             self.owner_matrix_user_id,
+            self.session_generation,
             created_at,
         )
         .map_err(|_| AdminError::new(ADMIN_INPUT_INVALID))

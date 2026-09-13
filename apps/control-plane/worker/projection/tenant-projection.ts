@@ -5,6 +5,11 @@ import {
   OutboundDecisionResultSchema,
   OutboundReconcileInputSchema,
   ListOutboundCommandsInputSchema,
+  GetOutboundDispatchPayloadInputSchema,
+  FailOutboundDispatchInputSchema,
+  ListOutboundEvidenceInputSchema,
+  OutboundDispatchPayloadSchema,
+  OutboundEvidenceRecordSchema,
   ApplyProjectionBatchInputSchema,
   ApplyReplayPageInputSchema,
   compareOpaqueEventIds,
@@ -89,6 +94,11 @@ import {
   type OutboundDecisionResult,
   type OutboundReconcileInput,
   type ListOutboundCommandsInput,
+  type GetOutboundDispatchPayloadInput,
+  type FailOutboundDispatchInput,
+  type ListOutboundEvidenceInput,
+  type OutboundDispatchPayload,
+  type OutboundEvidenceRecord,
   type ProjectionChannelStat,
   type ProjectionChange,
   type ProjectionChangePage,
@@ -3431,6 +3441,201 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         return mapOutboundDispatch(claimed);
       });
       return structuredClone(result);
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /**
+   * Release the saved body only to a caller holding the current dispatch
+   * lease. This is an internal adapter boundary; public command projections
+   * intentionally remain body-free and deleted messages cannot be revived.
+   */
+  async getOutboundDispatchPayload(
+    input: GetOutboundDispatchPayloadInput,
+  ): Promise<OutboundDispatchPayload> {
+    try {
+      const parsed = parseProjectionInput(
+        GetOutboundDispatchPayloadInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const dispatch = readOutboundDispatchByCommand(
+        this.ctx.storage,
+        parsed.command_id,
+      );
+      if (
+        dispatch === undefined ||
+        dispatch.tenant_id !== parsed.tenant_id ||
+        dispatch.status !== "dispatching" ||
+        dispatch.dispatch_lease_id !== parsed.lease_id ||
+        dispatch.dispatch_lease_expires_at === null ||
+        Date.parse(dispatch.dispatch_lease_expires_at) <= Date.parse(parsed.now)
+      ) {
+        throw projectionError("projection_conflict");
+      }
+      const message = readOutboundMessage(
+        this.ctx.storage,
+        dispatch.message_id,
+      );
+      if (
+        message === undefined ||
+        message.deleted_at !== null ||
+        message.body.length === 0
+      ) {
+        throw projectionError("projection_conflict");
+      }
+      return structuredClone(
+        OutboundDispatchPayloadSchema.parse({
+          schema_version: 1,
+          tenant_id: dispatch.tenant_id,
+          command_id: dispatch.command_id,
+          dispatch_id: dispatch.id,
+          message_id: dispatch.message_id,
+          event_id: dispatch.event_id,
+          identity_id: dispatch.actor_identity_id,
+          resource_identity_id: dispatch.resource_identity_id,
+          account_id: dispatch.account_id,
+          connection_id: dispatch.connection_id,
+          conversation_id: dispatch.conversation_id,
+          provider: dispatch.platform,
+          body: message.body,
+          transaction_id: dispatch.transaction_id,
+          request_digest: dispatch.request_digest,
+          projection_generation: dispatch.projection_generation,
+          dispatch_lease_id: dispatch.dispatch_lease_id,
+          dispatch_lease_expires_at: dispatch.dispatch_lease_expires_at,
+          created_at: dispatch.created_at,
+        }),
+      );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /** Persist a pre-I/O adapter rejection against the claimed lease. */
+  async failOutboundDispatch(
+    input: FailOutboundDispatchInput,
+  ): Promise<OutboundDecisionResult> {
+    try {
+      const parsed = parseProjectionInput(
+        FailOutboundDispatchInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const result = this.ctx.storage.transactionSync(() => {
+        const dispatch = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        const command = dispatch
+          ? readOutboundCommand(this.ctx.storage, parsed.command_id)
+          : undefined;
+        if (dispatch === undefined || command === undefined) {
+          throw projectionError("projection_not_found");
+        }
+        if (
+          dispatch.status !== "dispatching" ||
+          dispatch.dispatch_lease_id !== parsed.lease_id
+        ) {
+          throw projectionError("projection_conflict");
+        }
+        this.ctx.storage.sql.exec(
+          "UPDATE outbound_dispatches SET status = 'cancelled', dispatch_lease_id = NULL, dispatch_lease_expires_at = NULL, uncertainty_reason = ?, updated_at = ? WHERE id = ? AND status = 'dispatching' AND dispatch_lease_id = ?",
+          parsed.failure_code,
+          parsed.now,
+          dispatch.id,
+          parsed.lease_id,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE commands SET status = 'failed', failure_code = ?, updated_at = ? WHERE id = ? AND status NOT IN ('cancelled', 'delivered')",
+          parsed.failure_code,
+          parsed.now,
+          command.id,
+        );
+        const updatedDispatch = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        const updatedCommand = readOutboundCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        if (updatedDispatch === undefined || updatedCommand === undefined) {
+          throw projectionError("projection_conflict");
+        }
+        return OutboundDecisionResultSchema.parse({
+          command: mapOutboundCommand(
+            parsed.tenant_id,
+            updatedCommand,
+            updatedDispatch,
+          ),
+          dispatch: mapOutboundDispatch(updatedDispatch),
+          replayed: false,
+        });
+      });
+      return structuredClone(result);
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /** Return redacted, durable stage evidence to administrator-only callers. */
+  async listOutboundEvidence(
+    input: ListOutboundEvidenceInput,
+  ): Promise<OutboundEvidenceRecord[]> {
+    try {
+      const parsed = parseProjectionInput(
+        ListOutboundEvidenceInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      if (
+        readOutboundDispatchByCommand(this.ctx.storage, parsed.command_id) ===
+        undefined
+      ) {
+        throw projectionError("projection_not_found");
+      }
+      const rows = this.ctx.storage.sql
+        .exec<OutboundEvidenceRow>(
+          "SELECT id, tenant_id, command_id, dispatch_id, source, evidence_id, transaction_id, request_digest, account_id, conversation_id, generation, status, observed_at, provider_operation_id, provider_message_id, remote_echo_id, reason, created_at FROM outbound_evidence WHERE tenant_id = ? AND command_id = ? ORDER BY observed_at ASC, id ASC LIMIT 100",
+          parsed.tenant_id,
+          parsed.command_id,
+        )
+        .toArray();
+      return structuredClone(
+        rows.map((row) =>
+          OutboundEvidenceRecordSchema.parse({
+            id: row.id,
+            tenant_id: row.tenant_id,
+            command_id: row.command_id,
+            dispatch_id: row.dispatch_id,
+            source: row.source,
+            evidence_id: row.evidence_id,
+            transaction_id: row.transaction_id,
+            request_digest: row.request_digest,
+            account_id: row.account_id,
+            conversation_id: row.conversation_id,
+            generation: row.generation,
+            status: row.status,
+            observed_at: row.observed_at,
+            provider_operation_id: row.provider_operation_id,
+            provider_message_id: row.provider_message_id,
+            remote_echo_id: row.remote_echo_id,
+            reason: row.reason,
+            created_at: row.created_at,
+          }),
+        ),
+      );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }

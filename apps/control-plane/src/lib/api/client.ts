@@ -26,6 +26,7 @@ import {
   MAX_IDENTITY_CONNECTIONS,
   MessagePageResultSchema,
   OutboundDecisionResultSchema,
+  OutboundEvidenceRecordSchema,
   RealtimeTicketRequestSchema,
   RealtimeTicketResponseSchema,
   SessionResponseSchema,
@@ -53,6 +54,7 @@ import {
   type MessagePageResult,
   type ConfirmationDecision,
   type OutboundAction,
+  type OutboundEvidenceRecord,
   type RealtimeTicketRequest,
   type RealtimeTicketResponse,
   type SessionResponse,
@@ -480,6 +482,13 @@ export class ApiClient {
             : {}),
         }),
       },
+    );
+  }
+
+  getCommandEvidence(commandId: string): Promise<OutboundEvidenceRecord[]> {
+    return this.request(
+      `/api/v1/commands/${encodeURIComponent(commandId)}/evidence`,
+      OutboundEvidenceRecordSchema.array().max(100),
     );
   }
 

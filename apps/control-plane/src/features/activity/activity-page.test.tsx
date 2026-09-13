@@ -214,4 +214,46 @@ describe("administrator activity", () => {
       screen.getByRole("button", { name: "Refresh activity" }),
     ).toBeVisible();
   });
+
+  it("loads durable stage evidence for the selected command", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("*/api/v1/commands", () => HttpResponse.json([reviewCommand])),
+      http.get("*/api/v1/commands/:commandId/evidence", ({ params }) =>
+        HttpResponse.json([
+          {
+            id: `evidence_${String(params.commandId)}_provider_send_1`,
+            tenant_id: reviewCommand.tenant_id,
+            command_id: String(params.commandId),
+            dispatch_id: reviewCommand.dispatch_id,
+            source: "provider",
+            evidence_id: "provider_send_1",
+            transaction_id: "transaction_command_offline_review",
+            request_digest: "0".repeat(64),
+            account_id: reviewCommand.account_id!,
+            conversation_id: reviewCommand.conversation_id,
+            generation: 1,
+            status: "accepted",
+            observed_at: "2026-08-29T05:01:00.000Z",
+            provider_operation_id: "wa-operation-1",
+            provider_message_id: "wa-message-1",
+            remote_echo_id: null,
+            reason: null,
+            created_at: "2026-08-29T05:01:00.000Z",
+          },
+        ]),
+      ),
+    );
+
+    renderApp("/activity");
+    await user.click(
+      await screen.findByRole("button", { name: "View provider evidence" }),
+    );
+
+    expect(await screen.findByText("provider: accepted")).toBeVisible();
+    expect(
+      screen.getByText("Provider operation: wa-operation-1"),
+    ).toBeVisible();
+    expect(screen.getByText("Provider message: wa-message-1")).toBeVisible();
+  });
 });

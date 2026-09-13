@@ -22,5 +22,7 @@ export const queryKeys = {
     ["messages", identityId, conversationId] as const,
   commands: (identityId?: string) =>
     ["commands", identityId ?? "tenant"] as const,
+  commandEvidence: (commandId: string) =>
+    ["command-evidence", commandId] as const,
   health: ["health"] as const,
 };

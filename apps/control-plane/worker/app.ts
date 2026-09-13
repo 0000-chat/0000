@@ -43,7 +43,9 @@ import {
   outboundStatusRoute,
   outboundStatusHandler,
   outboundEvidenceRoute,
+  outboundEvidenceListRoute,
   evidenceOutboundHandler,
+  evidenceListOutboundHandler,
   outboundCommandsRoute,
   outboundCommandsHandler,
   confirmOutboundRoute,
@@ -452,6 +454,7 @@ export function createApp(services: AppServices = {}) {
     outboundEvidenceRoute,
     evidenceOutboundHandler(outboundAcceptanceServices),
   );
+  app.openapi(outboundEvidenceListRoute, evidenceListOutboundHandler());
   app.openapi(outboundCommandsRoute, outboundCommandsHandler());
   app.openapi(
     confirmOutboundRoute,

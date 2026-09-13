@@ -9,6 +9,7 @@ import {
   ConnectionSchema,
   ConversationPageResultSchema,
   OutboundDecisionResultSchema,
+  OutboundEvidenceRecordSchema,
 } from "@communicator/contracts";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppServices } from "../app";
@@ -2882,6 +2883,31 @@ describe("account-scoped grant API", () => {
       },
     );
     expect(evidence.status).toBe(200);
+
+    const evidenceList = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+    );
+    expect(evidenceList.status).toBe(200);
+    expect(
+      OutboundEvidenceRecordSchema.array().parse(await evidenceList.json()),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "provider",
+          status: "accepted",
+          evidence_id: "provider-rebuild-accepted-1",
+        }),
+      ]),
+    );
+
+    const delegatedEvidenceList = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "agent-token",
+    );
+    expect(delegatedEvidenceList.status).toBe(403);
 
     const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
     const currentMeta = await rows<{ generation: number }>(

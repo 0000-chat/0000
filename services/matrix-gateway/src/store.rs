@@ -117,6 +117,13 @@ pub const STORE_ATTACHMENT_INVALID: &str = "store_attachment_invalid";
 /// Stable error returned when one attachment revision is rebound to different
 /// protected Matrix media metadata.
 pub const STORE_ATTACHMENT_CONFLICT: &str = "store_attachment_conflict";
+/// Stable error returned when an outbound text journal entry is malformed.
+pub const STORE_OUTBOUND_INVALID: &str = "store_outbound_invalid";
+/// Stable error returned when an outbound transaction conflicts with a
+/// previously committed request.
+pub const STORE_OUTBOUND_CONFLICT: &str = "store_outbound_conflict";
+/// Stable error returned when an outbound journal row cannot be authenticated.
+pub const STORE_OUTBOUND_CORRUPT: &str = "store_outbound_corrupt";
 
 /// Stable error returned when bootstrap state does not exist yet.
 pub const STORE_NOT_BOOTSTRAPPED: &str = "store_not_bootstrapped";
@@ -294,6 +301,61 @@ CREATE TABLE matrix_crypto_outbox(
 CREATE UNIQUE INDEX one_unresolved_crypto_request
   ON matrix_crypto_outbox((1))
   WHERE state IN ('pending','response_received','quarantined');
+CREATE TABLE outbound_transactions(
+  transaction_id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  body_digest BLOB NOT NULL CHECK(length(body_digest) = 32),
+  tenant_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  matrix_room_id TEXT NOT NULL,
+  session_generation TEXT NOT NULL,
+  projection_generation INTEGER NOT NULL CHECK(projection_generation > 0),
+  body_cipher BLOB NOT NULL, body_nonce BLOB NOT NULL,
+  body_key_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  matrix_stage TEXT NOT NULL,
+  bridge_stage TEXT NOT NULL,
+  provider_stage TEXT NOT NULL,
+  response_cipher BLOB, response_nonce BLOB, response_key_version INTEGER,
+  response_sha256 BLOB,
+  matrix_evidence_cipher BLOB, matrix_evidence_nonce BLOB,
+  matrix_evidence_key_version INTEGER,
+  bridge_evidence_cipher BLOB, bridge_evidence_nonce BLOB,
+  bridge_evidence_key_version INTEGER,
+  provider_evidence_cipher BLOB, provider_evidence_nonce BLOB,
+  provider_evidence_key_version INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(state IN ('pending','accepted','uncertain','rejected','rate_limited',
+                 'session_expired','missing_capability')),
+  CHECK(matrix_stage IN ('unknown','confirmed')),
+  CHECK(bridge_stage IN ('unknown','accepted','uncertain')),
+  CHECK(provider_stage IN ('unknown','accepted','delivered','uncertain')),
+  CHECK((response_cipher IS NULL AND response_nonce IS NULL
+         AND response_key_version IS NULL AND response_sha256 IS NULL)
+     OR (response_cipher IS NOT NULL AND response_nonce IS NOT NULL
+         AND response_key_version IS NOT NULL AND response_sha256 IS NOT NULL)),
+  CHECK((matrix_evidence_cipher IS NULL AND matrix_evidence_nonce IS NULL
+         AND matrix_evidence_key_version IS NULL)
+     OR (matrix_evidence_cipher IS NOT NULL AND matrix_evidence_nonce IS NOT NULL
+         AND matrix_evidence_key_version IS NOT NULL)),
+  CHECK((bridge_evidence_cipher IS NULL AND bridge_evidence_nonce IS NULL
+         AND bridge_evidence_key_version IS NULL)
+     OR (bridge_evidence_cipher IS NOT NULL AND bridge_evidence_nonce IS NOT NULL
+         AND bridge_evidence_key_version IS NOT NULL)),
+  CHECK((provider_evidence_cipher IS NULL AND provider_evidence_nonce IS NULL
+         AND provider_evidence_key_version IS NULL)
+     OR (provider_evidence_cipher IS NOT NULL AND provider_evidence_nonce IS NOT NULL
+         AND provider_evidence_key_version IS NOT NULL))
+);
+CREATE UNIQUE INDEX outbound_transaction_scope
+  ON outbound_transactions(tenant_id, transaction_id);
 "#;
 
 // Schema version 1 stores created before the attachment boundary did not
@@ -305,6 +367,67 @@ CREATE TABLE IF NOT EXISTS attachment_descriptors(
   payload_cipher BLOB NOT NULL, payload_nonce BLOB NOT NULL,
   key_version INTEGER NOT NULL, updated_at TEXT NOT NULL
 );
+"#;
+
+// Version 1 stores predate the outbound text boundary. Keep the schema
+// version stable while installing this additive, authenticated journal table
+// before the exact schema-object check.
+const OUTBOUND_TRANSACTION_MIGRATION_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS outbound_transactions(
+  transaction_id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  body_digest BLOB NOT NULL CHECK(length(body_digest) = 32),
+  tenant_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  matrix_room_id TEXT NOT NULL,
+  session_generation TEXT NOT NULL,
+  projection_generation INTEGER NOT NULL CHECK(projection_generation > 0),
+  body_cipher BLOB NOT NULL, body_nonce BLOB NOT NULL,
+  body_key_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  matrix_stage TEXT NOT NULL,
+  bridge_stage TEXT NOT NULL,
+  provider_stage TEXT NOT NULL,
+  response_cipher BLOB, response_nonce BLOB, response_key_version INTEGER,
+  response_sha256 BLOB,
+  matrix_evidence_cipher BLOB, matrix_evidence_nonce BLOB,
+  matrix_evidence_key_version INTEGER,
+  bridge_evidence_cipher BLOB, bridge_evidence_nonce BLOB,
+  bridge_evidence_key_version INTEGER,
+  provider_evidence_cipher BLOB, provider_evidence_nonce BLOB,
+  provider_evidence_key_version INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(state IN ('pending','accepted','uncertain','rejected','rate_limited',
+                 'session_expired','missing_capability')),
+  CHECK(matrix_stage IN ('unknown','confirmed')),
+  CHECK(bridge_stage IN ('unknown','accepted','uncertain')),
+  CHECK(provider_stage IN ('unknown','accepted','delivered','uncertain')),
+  CHECK((response_cipher IS NULL AND response_nonce IS NULL
+         AND response_key_version IS NULL AND response_sha256 IS NULL)
+     OR (response_cipher IS NOT NULL AND response_nonce IS NOT NULL
+         AND response_key_version IS NOT NULL AND response_sha256 IS NOT NULL)),
+  CHECK((matrix_evidence_cipher IS NULL AND matrix_evidence_nonce IS NULL
+         AND matrix_evidence_key_version IS NULL)
+     OR (matrix_evidence_cipher IS NOT NULL AND matrix_evidence_nonce IS NOT NULL
+         AND matrix_evidence_key_version IS NOT NULL)),
+  CHECK((bridge_evidence_cipher IS NULL AND bridge_evidence_nonce IS NULL
+         AND bridge_evidence_key_version IS NULL)
+     OR (bridge_evidence_cipher IS NOT NULL AND bridge_evidence_nonce IS NOT NULL
+         AND bridge_evidence_key_version IS NOT NULL)),
+  CHECK((provider_evidence_cipher IS NULL AND provider_evidence_nonce IS NULL
+         AND provider_evidence_key_version IS NULL)
+     OR (provider_evidence_cipher IS NOT NULL AND provider_evidence_nonce IS NOT NULL
+         AND provider_evidence_key_version IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS outbound_transaction_scope
+  ON outbound_transactions(tenant_id, transaction_id);
 "#;
 
 /// The SQLite settings applied to the private state connection.
@@ -446,6 +569,82 @@ struct StoredCryptoRow {
     next_attempt_at: String,
     accepted_at: Option<String>,
     terminal_code: Option<String>,
+}
+
+/// Input for one provider-neutral outbound text journal entry.  The body is
+/// sealed by `Store` before SQLite is touched; callers never write plaintext
+/// content through a raw connection.
+#[derive(Clone)]
+pub struct NewOutboundText {
+    pub transaction_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub tenant_id: String,
+    pub account_id: String,
+    pub connection_id: String,
+    pub identity_id: String,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub event_id: String,
+    pub matrix_room_id: String,
+    pub session_generation: String,
+    pub projection_generation: u64,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The result of claiming an outbound transaction before Matrix I/O.
+pub enum OutboundTextPreparation {
+    /// This request inserted a new pending row and owns the one send attempt.
+    Created,
+    /// A previous attempt already reached a terminal result. The encrypted
+    /// response is returned for an idempotent replay.
+    ExistingTerminal { response: Vec<u8> },
+    /// A previous process committed the journal but did not record a result.
+    /// The caller must surface uncertainty and must not send again.
+    ExistingPending,
+}
+
+/// Durable stage/result update for one outbound transaction.  Evidence is
+/// encrypted separately by stage so a missing bridge or provider receipt is
+/// represented as unknown rather than promoted from Matrix acceptance.
+pub struct OutboundTextCompletion {
+    pub state: String,
+    pub matrix_stage: String,
+    pub bridge_stage: String,
+    pub provider_stage: String,
+    pub response: Vec<u8>,
+    pub matrix_evidence: Option<Vec<u8>>,
+    pub bridge_evidence: Option<Vec<u8>>,
+    pub provider_evidence: Option<Vec<u8>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+struct StoredOutboundTextRow {
+    transaction_id: String,
+    idempotency_key: String,
+    request_digest: String,
+    body_digest: Vec<u8>,
+    tenant_id: String,
+    account_id: String,
+    connection_id: String,
+    identity_id: String,
+    conversation_id: String,
+    message_id: String,
+    event_id: String,
+    matrix_room_id: String,
+    session_generation: String,
+    projection_generation: i64,
+    body_cipher: Vec<u8>,
+    body_nonce: Vec<u8>,
+    body_key_version: i64,
+    state: String,
+    response_cipher: Option<Vec<u8>>,
+    response_nonce: Option<Vec<u8>>,
+    response_key_version: Option<i64>,
+    response_sha256: Option<Vec<u8>>,
+    created_at: String,
+    updated_at: String,
 }
 
 struct StoredCryptoResponseFields {
@@ -623,6 +822,307 @@ impl Store {
     /// Read-only view of the required connection settings.
     pub fn pragmas(&self) -> &StorePragmas {
         &self.pragmas
+    }
+
+    /// Commit one outbound request before any Matrix or bridge I/O occurs.
+    ///
+    /// The transaction ID is the provider-neutral idempotency key. A matching
+    /// request replays its stored response; a matching journal entry without
+    /// a response is deliberately returned as pending so a restart cannot
+    /// authorize a second send.
+    pub fn prepare_outbound_text(
+        &mut self,
+        input: NewOutboundText,
+    ) -> Result<OutboundTextPreparation, SafeError> {
+        validate_outbound_text_input(&input)?;
+        let body_digest = sha256(input.body.as_bytes());
+        let body_sealed = self
+            .keyring
+            .seal(
+                "outbound_transactions",
+                &input.transaction_id,
+                "body",
+                input.body.as_bytes(),
+            )
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_INVALID))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_INVALID))?;
+        let existing = transaction
+            .query_row(
+                "SELECT transaction_id, idempotency_key, request_digest, body_digest,
+                        tenant_id, account_id, connection_id, identity_id,
+                        conversation_id, message_id, event_id, matrix_room_id,
+                        session_generation, projection_generation,
+                        body_cipher, body_nonce, body_key_version, state,
+                        response_cipher, response_nonce, response_key_version,
+                        response_sha256, created_at, updated_at
+                 FROM outbound_transactions
+                 WHERE tenant_id = ?1 AND transaction_id = ?2
+                 LIMIT 1",
+                params![input.tenant_id.as_str(), input.transaction_id.as_str()],
+                read_stored_outbound_row,
+            )
+            .optional()
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+
+        if let Some(row) = existing {
+            let body = open_outbound_body(&self.keyring, &row)?;
+            if !outbound_matches(&row, &input, &body_digest, body.as_slice()) {
+                return Err(SafeError::new(STORE_OUTBOUND_CONFLICT));
+            }
+            let result = if row.state == "pending" {
+                OutboundTextPreparation::ExistingPending
+            } else {
+                let response = open_outbound_response(&self.keyring, &row)?
+                    .ok_or_else(|| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+                OutboundTextPreparation::ExistingTerminal { response }
+            };
+            transaction
+                .commit()
+                .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+            return Ok(result);
+        }
+
+        let created_at = input.created_at.to_rfc3339();
+        transaction
+            .execute(
+                "INSERT INTO outbound_transactions
+                 (transaction_id, idempotency_key, request_digest, body_digest,
+                  tenant_id, account_id, connection_id, identity_id,
+                  conversation_id, message_id, event_id, matrix_room_id,
+                  session_generation, projection_generation,
+                  body_cipher, body_nonce, body_key_version, state,
+                  matrix_stage, bridge_stage, provider_stage,
+                  response_cipher, response_nonce, response_key_version,
+                  response_sha256, matrix_evidence_cipher, matrix_evidence_nonce,
+                  matrix_evidence_key_version, bridge_evidence_cipher,
+                  bridge_evidence_nonce, bridge_evidence_key_version,
+                  provider_evidence_cipher, provider_evidence_nonce,
+                  provider_evidence_key_version, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         ?13, ?14, ?15, ?16, ?17, 'pending', 'unknown',
+                         'unknown', 'unknown', NULL, NULL, NULL, NULL, NULL,
+                         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                         ?18, ?18)",
+                params![
+                    input.transaction_id,
+                    input.idempotency_key,
+                    input.request_digest,
+                    body_digest.as_slice(),
+                    input.tenant_id,
+                    input.account_id,
+                    input.connection_id,
+                    input.identity_id,
+                    input.conversation_id,
+                    input.message_id,
+                    input.event_id,
+                    input.matrix_room_id,
+                    input.session_generation,
+                    i64::try_from(input.projection_generation)
+                        .map_err(|_| SafeError::new(STORE_OUTBOUND_INVALID))?,
+                    body_sealed.ciphertext.as_slice(),
+                    body_sealed.nonce.as_slice(),
+                    i64::from(body_sealed.key_version),
+                    created_at,
+                ],
+            )
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+        transaction
+            .commit()
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+        Ok(OutboundTextPreparation::Created)
+    }
+
+    /// Persist the result of the one authorized outbound attempt. Once this
+    /// method records a non-pending state, subsequent duplicate deliveries
+    /// only replay the authenticated response.
+    pub fn complete_outbound_text(
+        &mut self,
+        tenant_id: &str,
+        transaction_id: &str,
+        request_digest: &str,
+        completion: OutboundTextCompletion,
+    ) -> Result<(), SafeError> {
+        if !valid_resource_id_for_store(tenant_id)
+            || !valid_resource_id_for_store(transaction_id)
+            || !valid_digest(request_digest)
+            || !valid_outbound_state(&completion.state)
+            || !valid_matrix_stage(&completion.matrix_stage)
+            || !valid_bridge_stage(&completion.bridge_stage)
+            || !valid_provider_stage(&completion.provider_stage)
+            || completion.response.is_empty()
+            || completion.response.len() > 64 * 1024
+            || !model::valid_timestamp(&completion.updated_at.to_rfc3339())
+        {
+            return Err(SafeError::new(STORE_OUTBOUND_INVALID));
+        }
+        if completion.state == "pending" {
+            return Err(SafeError::new(STORE_OUTBOUND_INVALID));
+        }
+        let response_sealed = self
+            .keyring
+            .seal(
+                "outbound_transactions",
+                transaction_id,
+                "response",
+                &completion.response,
+            )
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_INVALID))?;
+        let matrix_evidence = seal_optional_outbound_value(
+            &self.keyring,
+            transaction_id,
+            "matrix_evidence",
+            completion.matrix_evidence.as_deref(),
+        )?;
+        let bridge_evidence = seal_optional_outbound_value(
+            &self.keyring,
+            transaction_id,
+            "bridge_evidence",
+            completion.bridge_evidence.as_deref(),
+        )?;
+        let provider_evidence = seal_optional_outbound_value(
+            &self.keyring,
+            transaction_id,
+            "provider_evidence",
+            completion.provider_evidence.as_deref(),
+        )?;
+        let response_sha256 = sha256(&completion.response);
+        let updated_at = completion.updated_at.to_rfc3339();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+        let current: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT state, matrix_stage FROM outbound_transactions
+                 WHERE tenant_id = ?1 AND transaction_id = ?2
+                   AND request_digest = ?3 LIMIT 1",
+                params![tenant_id, transaction_id, request_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+        let Some((current_state, current_matrix_stage)) = current else {
+            return Err(SafeError::new(STORE_OUTBOUND_CONFLICT));
+        };
+        if current_state != "pending" {
+            // A duplicate arriving while the first authorized sender is still
+            // in flight may conservatively record `uncertain`.  The original
+            // sender can then return with authoritative Matrix confirmation.
+            // Preserve that stronger evidence and its replay response without
+            // downgrading any bridge/provider evidence already present.
+            if matches!(current_state.as_str(), "uncertain" | "accepted")
+                && current_matrix_stage != "confirmed"
+                && completion.state == "accepted"
+                && completion.matrix_stage == "confirmed"
+            {
+                let updated = transaction
+                    .execute(
+                        "UPDATE outbound_transactions
+                         SET state = 'accepted', matrix_stage = 'confirmed',
+                             response_cipher = ?1, response_nonce = ?2,
+                             response_key_version = ?3, response_sha256 = ?4,
+                             matrix_evidence_cipher = ?5,
+                             matrix_evidence_nonce = ?6,
+                             matrix_evidence_key_version = ?7,
+                             updated_at = ?8
+                         WHERE tenant_id = ?9 AND transaction_id = ?10
+                           AND request_digest = ?11
+                           AND state IN ('uncertain', 'accepted')
+                           AND matrix_stage != 'confirmed'",
+                        params![
+                            response_sealed.ciphertext.as_slice(),
+                            response_sealed.nonce.as_slice(),
+                            i64::from(response_sealed.key_version),
+                            response_sha256.as_slice(),
+                            matrix_evidence
+                                .as_ref()
+                                .map(|value| value.ciphertext.as_slice()),
+                            matrix_evidence.as_ref().map(|value| value.nonce.as_slice()),
+                            matrix_evidence
+                                .as_ref()
+                                .map(|value| i64::from(value.key_version)),
+                            updated_at,
+                            tenant_id,
+                            transaction_id,
+                            request_digest,
+                        ],
+                    )
+                    .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+                if updated > 1 {
+                    return Err(SafeError::new(STORE_OUTBOUND_CORRUPT));
+                }
+            }
+            transaction
+                .commit()
+                .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+            return Ok(());
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE outbound_transactions
+                 SET state = ?1, matrix_stage = ?2, bridge_stage = ?3,
+                     provider_stage = ?4, response_cipher = ?5,
+                     response_nonce = ?6, response_key_version = ?7,
+                     response_sha256 = ?8, matrix_evidence_cipher = ?9,
+                     matrix_evidence_nonce = ?10,
+                     matrix_evidence_key_version = ?11,
+                     bridge_evidence_cipher = ?12,
+                     bridge_evidence_nonce = ?13,
+                     bridge_evidence_key_version = ?14,
+                     provider_evidence_cipher = ?15,
+                     provider_evidence_nonce = ?16,
+                     provider_evidence_key_version = ?17,
+                     updated_at = ?18
+                 WHERE tenant_id = ?19 AND transaction_id = ?20
+                   AND request_digest = ?21 AND state = 'pending'",
+                params![
+                    completion.state,
+                    completion.matrix_stage,
+                    completion.bridge_stage,
+                    completion.provider_stage,
+                    response_sealed.ciphertext.as_slice(),
+                    response_sealed.nonce.as_slice(),
+                    i64::from(response_sealed.key_version),
+                    response_sha256.as_slice(),
+                    matrix_evidence
+                        .as_ref()
+                        .map(|value| value.ciphertext.as_slice()),
+                    matrix_evidence.as_ref().map(|value| value.nonce.as_slice()),
+                    matrix_evidence
+                        .as_ref()
+                        .map(|value| i64::from(value.key_version)),
+                    bridge_evidence
+                        .as_ref()
+                        .map(|value| value.ciphertext.as_slice()),
+                    bridge_evidence.as_ref().map(|value| value.nonce.as_slice()),
+                    bridge_evidence
+                        .as_ref()
+                        .map(|value| i64::from(value.key_version)),
+                    provider_evidence
+                        .as_ref()
+                        .map(|value| value.ciphertext.as_slice()),
+                    provider_evidence
+                        .as_ref()
+                        .map(|value| value.nonce.as_slice()),
+                    provider_evidence
+                        .as_ref()
+                        .map(|value| i64::from(value.key_version)),
+                    updated_at,
+                    tenant_id,
+                    transaction_id,
+                    request_digest,
+                ],
+            )
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+        if updated != 1 {
+            return Err(SafeError::new(STORE_OUTBOUND_CONFLICT));
+        }
+        transaction
+            .commit()
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))
     }
 
     /// Persist the one-shot Matrix session, initial token, and room anchors.
@@ -2418,6 +2918,69 @@ impl Store {
                 && binding.connection_id() == connection_id
                 && binding.identity_id() == identity_id
                 && binding.platform() == platform
+            {
+                matches.push(binding);
+            }
+        }
+        drop(statement);
+
+        if matches.len() > 1 {
+            return Err(room_binding_invalid());
+        }
+        Ok(matches.pop())
+    }
+
+    /// Resolve one active outbound room from the complete authority tuple and
+    /// the requested conversation.  Outbound routing is conversation-scoped:
+    /// an account may own several active chats, so the history resolver's
+    /// account-wide uniqueness rule cannot be reused here.
+    pub fn active_room_binding_for_outbound(
+        &self,
+        tenant_id: &str,
+        account_id: &str,
+        connection_id: &str,
+        identity_id: &str,
+        platform: model::Provider,
+        conversation_id: &str,
+    ) -> Result<Option<RoomBinding>, SafeError> {
+        if !model::valid_resource_id(tenant_id)
+            || !model::valid_resource_id(account_id)
+            || !model::valid_resource_id(connection_id)
+            || !model::valid_resource_id(identity_id)
+            || !model::valid_resource_id(conversation_id)
+        {
+            return Err(room_binding_invalid());
+        }
+        let account_lookup = registry_account_lookup(&self.keyring, platform, account_id)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
+                        payload_nonce, key_version, status, created_at, retired_at
+                 FROM room_bindings
+                 WHERE account_lookup = ?1 AND status = 'active'
+                 ORDER BY binding_id",
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let rows = statement
+            .query_map(
+                params![account_lookup.as_slice()],
+                read_stored_room_binding_row,
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let mut matches = Vec::new();
+        for row in rows {
+            let row = row.map_err(|_| room_binding_invalid())?;
+            if row.account_lookup.as_slice() != account_lookup.as_slice() {
+                return Err(room_binding_invalid());
+            }
+            let binding = verify_active_room_binding(&self.keyring, &row)?;
+            if binding.tenant_id() == tenant_id
+                && binding.account_id() == account_id
+                && binding.connection_id() == connection_id
+                && binding.identity_id() == identity_id
+                && binding.platform() == platform
+                && binding.conversation_id() == conversation_id
             {
                 matches.push(binding);
             }
@@ -4557,6 +5120,9 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Stor
     connection
         .execute_batch(ATTACHMENT_DESCRIPTOR_MIGRATION_SQL)
         .map_err(|_| StoreError::new(STORE_SCHEMA_INITIALIZE))?;
+    connection
+        .execute_batch(OUTBOUND_TRANSACTION_MIGRATION_SQL)
+        .map_err(|_| StoreError::new(STORE_SCHEMA_INITIALIZE))?;
     validate_schema_objects(connection)
 }
 
@@ -4644,6 +5210,208 @@ fn validate_schema_objects(connection: &Connection) -> Result<(), StoreError> {
 
 fn normalize_sql(sql: &str) -> &str {
     sql.trim_end_matches(';').trim()
+}
+
+fn valid_resource_id_for_store(value: &str) -> bool {
+    model::valid_resource_id(value)
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_outbound_state(value: &str) -> bool {
+    matches!(
+        value,
+        "accepted"
+            | "uncertain"
+            | "rejected"
+            | "rate_limited"
+            | "session_expired"
+            | "missing_capability"
+    )
+}
+
+fn valid_matrix_stage(value: &str) -> bool {
+    matches!(value, "unknown" | "confirmed")
+}
+
+fn valid_bridge_stage(value: &str) -> bool {
+    matches!(value, "unknown" | "accepted" | "uncertain")
+}
+
+fn valid_provider_stage(value: &str) -> bool {
+    matches!(value, "unknown" | "accepted" | "delivered" | "uncertain")
+}
+
+fn validate_outbound_text_input(input: &NewOutboundText) -> Result<(), SafeError> {
+    if !valid_resource_id_for_store(&input.transaction_id)
+        || input.idempotency_key.is_empty()
+        || input.idempotency_key.len() > 512
+        || !valid_digest(&input.request_digest)
+        || !valid_resource_id_for_store(&input.tenant_id)
+        || !valid_resource_id_for_store(&input.account_id)
+        || !valid_resource_id_for_store(&input.connection_id)
+        || !valid_resource_id_for_store(&input.identity_id)
+        || !valid_resource_id_for_store(&input.conversation_id)
+        || !valid_resource_id_for_store(&input.message_id)
+        || !valid_resource_id_for_store(&input.event_id)
+        || !model::valid_matrix_room_id(&input.matrix_room_id)
+        || !model::valid_timestamp(&input.session_generation)
+        || input.projection_generation == 0
+        || input.body.is_empty()
+        || input.body.len() > 20_000
+        || !model::valid_timestamp(&input.created_at.to_rfc3339())
+    {
+        return Err(SafeError::new(STORE_OUTBOUND_INVALID));
+    }
+    Ok(())
+}
+
+fn read_stored_outbound_row(row: &Row<'_>) -> rusqlite::Result<StoredOutboundTextRow> {
+    Ok(StoredOutboundTextRow {
+        transaction_id: row.get(0)?,
+        idempotency_key: row.get(1)?,
+        request_digest: row.get(2)?,
+        body_digest: row.get(3)?,
+        tenant_id: row.get(4)?,
+        account_id: row.get(5)?,
+        connection_id: row.get(6)?,
+        identity_id: row.get(7)?,
+        conversation_id: row.get(8)?,
+        message_id: row.get(9)?,
+        event_id: row.get(10)?,
+        matrix_room_id: row.get(11)?,
+        session_generation: row.get(12)?,
+        projection_generation: row.get(13)?,
+        body_cipher: row.get(14)?,
+        body_nonce: row.get(15)?,
+        body_key_version: row.get(16)?,
+        state: row.get(17)?,
+        response_cipher: row.get(18)?,
+        response_nonce: row.get(19)?,
+        response_key_version: row.get(20)?,
+        response_sha256: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
+    })
+}
+
+fn outbound_matches(
+    row: &StoredOutboundTextRow,
+    input: &NewOutboundText,
+    body_digest: &[u8; 32],
+    body: &[u8],
+) -> bool {
+    row.transaction_id == input.transaction_id
+        && row.idempotency_key == input.idempotency_key
+        && row.request_digest == input.request_digest
+        && row.body_digest.as_slice() == body_digest
+        && row.tenant_id == input.tenant_id
+        && row.account_id == input.account_id
+        && row.connection_id == input.connection_id
+        && row.identity_id == input.identity_id
+        && row.conversation_id == input.conversation_id
+        && row.message_id == input.message_id
+        && row.event_id == input.event_id
+        && row.matrix_room_id == input.matrix_room_id
+        && row.session_generation == input.session_generation
+        && row.projection_generation == i64::try_from(input.projection_generation).unwrap_or(-1)
+        && body == input.body.as_bytes()
+}
+
+fn sealed_outbound_value(
+    ciphertext: Vec<u8>,
+    nonce: Vec<u8>,
+    key_version: i64,
+) -> Result<Sealed, SafeError> {
+    let nonce: [u8; 24] = nonce
+        .try_into()
+        .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    let key_version =
+        u32::try_from(key_version).map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    Ok(Sealed {
+        nonce,
+        ciphertext,
+        key_version,
+    })
+}
+
+fn open_outbound_body(
+    keyring: &Keyring,
+    row: &StoredOutboundTextRow,
+) -> Result<Vec<u8>, SafeError> {
+    let sealed = sealed_outbound_value(
+        row.body_cipher.clone(),
+        row.body_nonce.clone(),
+        row.body_key_version,
+    )?;
+    let plaintext = keyring
+        .open(
+            "outbound_transactions",
+            &row.transaction_id,
+            "body",
+            &sealed,
+        )
+        .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    if sha256(plaintext.as_bytes()).as_slice() != row.body_digest.as_slice() {
+        return Err(SafeError::new(STORE_OUTBOUND_CORRUPT));
+    }
+    Ok(plaintext.as_bytes().to_vec())
+}
+
+fn open_outbound_response(
+    keyring: &Keyring,
+    row: &StoredOutboundTextRow,
+) -> Result<Option<Vec<u8>>, SafeError> {
+    let Some(ciphertext) = row.response_cipher.clone() else {
+        return Ok(None);
+    };
+    let nonce = row
+        .response_nonce
+        .clone()
+        .ok_or_else(|| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    let key_version = row
+        .response_key_version
+        .ok_or_else(|| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    let expected_digest = row
+        .response_sha256
+        .as_deref()
+        .ok_or_else(|| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    let sealed = sealed_outbound_value(ciphertext, nonce, key_version)?;
+    let plaintext = keyring
+        .open(
+            "outbound_transactions",
+            &row.transaction_id,
+            "response",
+            &sealed,
+        )
+        .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+    if sha256(plaintext.as_bytes()).as_slice() != expected_digest {
+        return Err(SafeError::new(STORE_OUTBOUND_CORRUPT));
+    }
+    Ok(Some(plaintext.as_bytes().to_vec()))
+}
+
+fn seal_optional_outbound_value(
+    keyring: &Keyring,
+    transaction_id: &str,
+    column: &str,
+    value: Option<&[u8]>,
+) -> Result<Option<Sealed>, SafeError> {
+    value
+        .map(|value| {
+            if value.is_empty() || value.len() > 16 * 1024 {
+                return Err(SafeError::new(STORE_OUTBOUND_INVALID));
+            }
+            keyring
+                .seal("outbound_transactions", transaction_id, column, value)
+                .map_err(|_| SafeError::new(STORE_OUTBOUND_INVALID))
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -4845,6 +5613,105 @@ mod tests {
                 .expect_err("unchecked invalid DTO must be rejected by append");
             assert_eq!(error.code(), expected_code);
             assert_eq!(store_snapshot(&store), before);
+        }
+    }
+
+    #[test]
+    fn outbound_completion_promotes_late_matrix_confirmation_and_replays_after_reopen() {
+        let directory = tempdir().expect("create outbound completion test directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure outbound completion test directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let key_material = [0x22; 32];
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("test timestamp");
+        let input = NewOutboundText {
+            transaction_id: "txn_outbound_race".to_owned(),
+            idempotency_key: "idem_outbound_race".to_owned(),
+            request_digest: "a".repeat(64),
+            tenant_id: "tenant_test".to_owned(),
+            account_id: "account_test".to_owned(),
+            connection_id: "connection_test".to_owned(),
+            identity_id: "identity_test".to_owned(),
+            conversation_id: "conversation_test".to_owned(),
+            message_id: "message_test".to_owned(),
+            event_id: "event_test".to_owned(),
+            matrix_room_id: "!room-test:example.org".to_owned(),
+            session_generation: created_at.to_rfc3339(),
+            projection_generation: 1,
+            body: "durable outbound body".to_owned(),
+            created_at,
+        };
+        let uncertain_response = br#"{"outcome":"uncertain"}"#.to_vec();
+        let accepted_response = br#"{"outcome":"accepted","event_id":"$event"}"#.to_vec();
+        let matrix_evidence =
+            br#"{"source":"matrix","status":"confirmed","event_id":"$event"}"#.to_vec();
+
+        {
+            let mut store =
+                Store::open(&path, Keyring::new(key_material, 1).expect("test keyring"))
+                    .expect("open outbound store");
+            assert!(matches!(
+                store
+                    .prepare_outbound_text(input.clone())
+                    .expect("claim outbound row"),
+                OutboundTextPreparation::Created
+            ));
+            store
+                .complete_outbound_text(
+                    &input.tenant_id,
+                    &input.transaction_id,
+                    &input.request_digest,
+                    OutboundTextCompletion {
+                        state: "uncertain".to_owned(),
+                        matrix_stage: "unknown".to_owned(),
+                        bridge_stage: "unknown".to_owned(),
+                        provider_stage: "unknown".to_owned(),
+                        response: uncertain_response,
+                        matrix_evidence: None,
+                        bridge_evidence: None,
+                        provider_evidence: None,
+                        updated_at: created_at,
+                    },
+                )
+                .expect("record duplicate uncertainty");
+            store
+                .complete_outbound_text(
+                    &input.tenant_id,
+                    &input.transaction_id,
+                    &input.request_digest,
+                    OutboundTextCompletion {
+                        state: "accepted".to_owned(),
+                        matrix_stage: "confirmed".to_owned(),
+                        bridge_stage: "unknown".to_owned(),
+                        provider_stage: "unknown".to_owned(),
+                        response: accepted_response.clone(),
+                        matrix_evidence: Some(matrix_evidence),
+                        bridge_evidence: None,
+                        provider_evidence: None,
+                        updated_at: created_at + chrono::Duration::seconds(1),
+                    },
+                )
+                .expect("promote late Matrix confirmation");
+        }
+
+        let mut reopened = Store::open(
+            &path,
+            Keyring::new(key_material, 1).expect("reopen test keyring"),
+        )
+        .expect("reopen outbound store");
+        match reopened
+            .prepare_outbound_text(input)
+            .expect("replay outbound row after reopen")
+        {
+            OutboundTextPreparation::ExistingTerminal { response } => {
+                assert_eq!(response, accepted_response);
+            }
+            OutboundTextPreparation::Created | OutboundTextPreparation::ExistingPending => {
+                panic!("late Matrix confirmation was not durably replayable")
+            }
         }
     }
 

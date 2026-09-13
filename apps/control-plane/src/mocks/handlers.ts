@@ -551,6 +551,10 @@ export const handlers = [
     );
   }),
 
+  http.get("*/api/v1/commands/:commandId/evidence", () =>
+    HttpResponse.json([]),
+  ),
+
   http.post(
     "*/api/v1/commands/:commandId/:decision",
     async ({ request, params }) => {
