@@ -498,6 +498,131 @@ describe("account-scoped grant API", () => {
     }
   });
 
+  it("keeps API acceptance atomic across controlled crash boundaries", async () => {
+    const create = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          idempotency_key: `crash-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(create.status).toBe(201);
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const rowsFor = (idempotencyKey: string) =>
+      rows<{
+        id: string;
+        command_id: string;
+        message_id: string;
+        status: string;
+      }>(
+        projection,
+        "SELECT id, command_id, message_id, status FROM outbound_dispatches WHERE idempotency_key = ?",
+        idempotencyKey,
+      );
+    const send = (
+      app: ReturnType<typeof createApp>,
+      idempotencyKey: string,
+    ) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Crash boundary reply",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const crashCases = [
+      {
+        name: "before-commit",
+        persistedAfterFailure: false,
+        services: {
+          beforeCommit: () => {
+            throw new Error("controlled before-commit crash");
+          },
+        },
+      },
+      {
+        name: "after-commit",
+        persistedAfterFailure: true,
+        services: {
+          afterCommit: () => {
+            throw new Error("controlled after-commit crash");
+          },
+        },
+      },
+      {
+        name: "before-wakeup",
+        persistedAfterFailure: true,
+        services: {
+          beforeWakeup: () => {
+            throw new Error("controlled before-wakeup crash");
+          },
+        },
+      },
+    ] as const;
+
+    for (const crashCase of crashCases) {
+      const idempotencyKey = `crash-${crashCase.name}-${crypto.randomUUID()}`;
+      const failed = await send(
+        createTestApp({ outboundAcceptance: crashCase.services }),
+        idempotencyKey,
+      );
+      expect(failed.status).toBe(503);
+      const afterFailure = await rowsFor(idempotencyKey);
+      expect(afterFailure).toHaveLength(
+        crashCase.persistedAfterFailure ? 1 : 0,
+      );
+
+      const retry = await send(createTestApp(), idempotencyKey);
+      expect(retry.status).toBe(202);
+      const retryCommand = (await retry.json()) as { id: string };
+      const afterRetry = await rowsFor(idempotencyKey);
+      expect(afterRetry).toHaveLength(1);
+      expect(retryCommand.id).toBe(afterRetry[0]!.command_id);
+      expect(afterRetry[0]!.status).toBe("pending");
+
+      const replay = await send(createTestApp(), idempotencyKey);
+      expect(replay.status).toBe(202);
+      expect(((await replay.json()) as { id: string }).id).toBe(
+        retryCommand.id,
+      );
+      expect(await rowsFor(idempotencyKey)).toHaveLength(1);
+    }
+
+    let wakeCalls = 0;
+    const wakeFailureKey = `wake-failure-${crypto.randomUUID()}`;
+    const wakeFailure = await send(
+      createTestApp({
+        outboundAcceptance: {
+          wakeDispatch: async () => {
+            wakeCalls += 1;
+            throw new Error("controlled adapter wakeup failure");
+          },
+        },
+      }),
+      wakeFailureKey,
+    );
+    expect(wakeFailure.status).toBe(202);
+    expect(wakeCalls).toBe(1);
+    const wakeCommand = (await wakeFailure.json()) as { id: string };
+    const wakeRows = await rowsFor(wakeFailureKey);
+    expect(wakeRows).toHaveLength(1);
+    expect(wakeRows[0]!.command_id).toBe(wakeCommand.id);
+    expect(wakeRows[0]!.status).toBe("pending");
+  });
+
   it("denies an agent grant, cross-account reads, and cross-tenant account binding", async () => {
     await workerEnv.CONTROL_DB.prepare(
       "UPDATE memberships SET role = 'admin' WHERE id = ?",
