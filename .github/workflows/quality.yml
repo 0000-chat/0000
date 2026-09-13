@@ -10,5 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run repository checks
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Run repository and tooling checks
         run: ./scripts/check
