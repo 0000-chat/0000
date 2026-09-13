@@ -13,11 +13,10 @@ other local state outside tracked files.
 Standalone public components do not require hosted platform authentication.
 Cloudflare is the public ingress and normal runtime class. Run
 `./scripts/check`; it validates the imported application metadata and required
-repository files. The pinned `scripts/lint` and `scripts/format-check` tools
-remain available for reviewed cleanup work; the imported application currently
-has a recorded pre-existing tooling baseline and the repository check does not
-claim that baseline is clean. Direct commits on `main` are blocked after
-bootstrap.
+repository files, then runs the pinned Biome/Oxlint tools. The imported
+application currently has a recorded pre-existing tooling baseline, so a
+check failure in those tools must be reconciled through reviewed cleanup.
+Direct commits on `main` are blocked after bootstrap.
 
 ## Agent skills
 
