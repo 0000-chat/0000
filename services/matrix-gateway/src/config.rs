@@ -6,6 +6,7 @@
 
 use std::{
     fmt,
+    net::SocketAddr,
     path::{Component, Path, PathBuf},
 };
 
@@ -79,6 +80,28 @@ pub struct GatewayConfig {
     oauth_client_secret_file: PathBuf,
     request_timeout_secs: u64,
     sync_timeout_secs: u64,
+    provisioning: Option<ProvisioningConfig>,
+}
+
+/// Private authenticated provisioning gateway configuration. Secret values
+/// are represented only by protected file paths and loaded by the command
+/// runner immediately before binding the private listener.
+#[derive(Clone)]
+pub struct ProvisioningConfig {
+    listen_addr: SocketAddr,
+    bridge_url: String,
+    bridge_shared_secret_file: PathBuf,
+    gateway_shared_secret_file: PathBuf,
+    matrix_user_id: String,
+    gateway_route_id: String,
+    bridge_instance_id: String,
+    matrix_room_namespace: String,
+}
+
+impl fmt::Debug for ProvisioningConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProvisioningConfig([REDACTED])")
+    }
 }
 
 impl fmt::Debug for GatewayConfig {
@@ -122,6 +145,21 @@ struct RawGatewayConfig {
     oauth_client_secret_file: PathBuf,
     request_timeout_secs: u64,
     sync_timeout_secs: u64,
+    #[serde(default)]
+    provisioning: Option<RawProvisioningConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProvisioningConfig {
+    listen_addr: String,
+    bridge_url: String,
+    bridge_shared_secret_file: PathBuf,
+    gateway_shared_secret_file: PathBuf,
+    matrix_user_id: String,
+    gateway_route_id: String,
+    bridge_instance_id: String,
+    matrix_room_namespace: String,
 }
 
 /// Stable, value-free configuration validation error.
@@ -193,6 +231,10 @@ impl GatewayConfig {
             oauth_client_secret_file: raw.oauth_client_secret_file,
             request_timeout_secs: raw.request_timeout_secs,
             sync_timeout_secs: raw.sync_timeout_secs,
+            provisioning: raw
+                .provisioning
+                .map(ProvisioningConfig::from_raw)
+                .transpose()?,
         };
         config.validate()?;
         Ok(config)
@@ -216,6 +258,9 @@ impl GatewayConfig {
         }
         if self.sync_timeout_secs == 0 || self.sync_timeout_secs > MAX_SYNC_TIMEOUT_SECS {
             return Err(ConfigError::invalid());
+        }
+        if let Some(provisioning) = &self.provisioning {
+            provisioning.validate()?;
         }
         Ok(())
     }
@@ -290,6 +335,11 @@ impl GatewayConfig {
         self.sync_timeout_secs
     }
 
+    /// Return the optional private provisioning gateway configuration.
+    pub fn provisioning(&self) -> Option<&ProvisioningConfig> {
+        self.provisioning.as_ref()
+    }
+
     /// Return fixed backpressure and retention limits.
     pub const fn limits() -> GatewayLimits {
         GatewayLimits {
@@ -298,6 +348,81 @@ impl GatewayConfig {
             max_pending_age_secs: MAX_PENDING_AGE_SECS,
             accepted_retention_secs: ACCEPTED_RETENTION_SECS,
         }
+    }
+}
+
+impl ProvisioningConfig {
+    fn from_raw(raw: RawProvisioningConfig) -> Result<Self, ConfigError> {
+        let listen_addr = raw
+            .listen_addr
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::invalid())?;
+        let config = Self {
+            listen_addr,
+            bridge_url: raw.bridge_url,
+            bridge_shared_secret_file: raw.bridge_shared_secret_file,
+            gateway_shared_secret_file: raw.gateway_shared_secret_file,
+            matrix_user_id: raw.matrix_user_id,
+            gateway_route_id: raw.gateway_route_id,
+            bridge_instance_id: raw.bridge_instance_id,
+            matrix_room_namespace: raw.matrix_room_namespace,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.listen_addr.port() == 0 {
+            return Err(ConfigError::invalid());
+        }
+        validate_https_root_endpoint(&self.bridge_url)?;
+        validate_path(&self.bridge_shared_secret_file)?;
+        validate_path(&self.gateway_shared_secret_file)?;
+        validate_matrix_user_id(&self.matrix_user_id)?;
+        validate_text(&self.gateway_route_id)?;
+        validate_text(&self.bridge_instance_id)?;
+        validate_text(&self.matrix_room_namespace)?;
+        Ok(())
+    }
+
+    /// Return the private listener address.
+    pub const fn listen_addr(&self) -> SocketAddr {
+        self.listen_addr
+    }
+
+    /// Return the pinned bridge HTTPS root URL.
+    pub fn bridge_url(&self) -> &str {
+        &self.bridge_url
+    }
+
+    /// Return the protected bridge shared-secret path.
+    pub fn bridge_shared_secret_file(&self) -> &Path {
+        &self.bridge_shared_secret_file
+    }
+
+    /// Return the protected Worker-to-gateway shared-secret path.
+    pub fn gateway_shared_secret_file(&self) -> &Path {
+        &self.gateway_shared_secret_file
+    }
+
+    /// Return the Matrix provisioning service user ID.
+    pub fn matrix_user_id(&self) -> &str {
+        &self.matrix_user_id
+    }
+
+    /// Return the configured route identity.
+    pub fn gateway_route_id(&self) -> &str {
+        &self.gateway_route_id
+    }
+
+    /// Return the configured bridge instance label.
+    pub fn bridge_instance_id(&self) -> &str {
+        &self.bridge_instance_id
+    }
+
+    /// Return the configured Matrix room namespace.
+    pub fn matrix_room_namespace(&self) -> &str {
+        &self.matrix_room_namespace
     }
 }
 
@@ -387,6 +512,15 @@ fn validate_https_endpoint(value: &str) -> Result<(), ConfigError> {
         return Err(invalid());
     }
     if uri.query().is_some() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_https_root_endpoint(value: &str) -> Result<(), ConfigError> {
+    validate_https_endpoint(value)?;
+    let uri = parse_absolute_uri(value)?;
+    if uri.path() != "" && uri.path() != "/" {
         return Err(invalid());
     }
     Ok(())

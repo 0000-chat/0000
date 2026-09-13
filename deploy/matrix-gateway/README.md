@@ -8,9 +8,13 @@ identity, and protected-file paths with deployment values. Install the unit as
 `/etc/systemd/system/communicator-matrix-gateway.service`.
 
 Create the configured state and Matrix-store directories before starting the
-unit. Protected secret files must be provisioned separately with the ownership
-and permissions required by the existing secret loader. The package contains
-no secret values, runtime database, Matrix session, or generated SDK store.
+receive-only unit. If the optional `provisioning` block is present, install
+`communicator-matrix-provisioning.service` as a separate private-network
+unit; it exposes only the authenticated gateway listener and never a public
+Caddy route. Protected secret files must be provisioned separately with the
+ownership and permissions required by the existing secret loader. The package
+contains no secret values, runtime database, Matrix session, or generated SDK
+store.
 
 Run the local review and health gates in
 `docs/runbooks/matrix-gateway-operations.md` before enabling the unit. The

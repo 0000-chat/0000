@@ -14,6 +14,9 @@ import {
   ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
+  LinkSessionActionRequestSchema,
+  LinkSessionSchema,
+  LinkSessionStartSchema,
   MAX_IDENTITY_CONNECTIONS,
   MessagePageResultSchema,
   RealtimeTicketRequestSchema,
@@ -33,6 +36,9 @@ import {
   type ConversationPageResult,
   type ConversationSummary,
   type Identity,
+  type LinkSession,
+  type LinkSessionActionRequest,
+  type LinkSessionStart,
   type MessagePageResult,
   type RealtimeTicketRequest,
   type RealtimeTicketResponse,
@@ -134,6 +140,65 @@ export class ApiClient {
     return this.request(
       `/api/v1/connections?identity_id=${encodeURIComponent(identityId)}`,
       ConnectionSchema.array().max(MAX_IDENTITY_CONNECTIONS),
+    );
+  }
+
+  startLinkSession(
+    identityId: string,
+    input: LinkSessionStart,
+    idempotencyKey: string,
+  ): Promise<LinkSession> {
+    return this.request(
+      `/api/v1/identities/${encodeURIComponent(identityId)}/link-sessions`,
+      LinkSessionSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(LinkSessionStartSchema.parse(input)),
+      },
+    );
+  }
+
+  getLinkSession(sessionId: string): Promise<LinkSession> {
+    return this.request(
+      `/api/v1/link-sessions/${encodeURIComponent(sessionId)}`,
+      LinkSessionSchema,
+    );
+  }
+
+  actLinkSession(
+    sessionId: string,
+    input: LinkSessionActionRequest,
+    idempotencyKey: string,
+  ): Promise<LinkSession> {
+    return this.request(
+      `/api/v1/link-sessions/${encodeURIComponent(sessionId)}/actions`,
+      LinkSessionSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(LinkSessionActionRequestSchema.parse(input)),
+      },
+    );
+  }
+
+  cancelLinkSession(
+    sessionId: string,
+    idempotencyKey: string,
+  ): Promise<LinkSession> {
+    return this.request(
+      `/api/v1/link-sessions/${encodeURIComponent(sessionId)}`,
+      LinkSessionSchema,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
     );
   }
 

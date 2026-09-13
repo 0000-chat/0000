@@ -15,11 +15,13 @@
     ]
   },
   "exports": {
-    "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" }
+    "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" },
+    "LinkSessionDO": { "type": "durable-object", "storage": "sqlite" }
   },
   "durable_objects": {
     "bindings": [
-      { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+      { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" },
+      { "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
     ]
   },
   "observability": { "enabled": true },
@@ -80,7 +82,8 @@
     "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL": "https://auth.local.invalid/token",
     "COMMUNICATOR_OAUTH_HUMAN_ISSUER": "https://auth.local.invalid/",
     "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": "communicator-api",
-    "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+    "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json",
+    "CONNECTION_GATEWAY_URL": "https://matrix-gateway.internal.example.invalid"
   },
   "env": {
     "staging": {
@@ -116,11 +119,13 @@
         "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL": "https://auth.local.invalid/token",
         "COMMUNICATOR_OAUTH_HUMAN_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": "communicator-api-staging",
-        "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json",
+        "CONNECTION_GATEWAY_URL": "https://matrix-gateway.internal.example.invalid"
       },
       "durable_objects": {
         "bindings": [
-          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" },
+          { "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
         ]
       },
       "r2_buckets": [
@@ -182,11 +187,13 @@
         "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL": "https://auth.local.invalid/token",
         "COMMUNICATOR_OAUTH_HUMAN_ISSUER": "https://auth.local.invalid/",
         "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": "communicator-api-production",
-        "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json",
+        "CONNECTION_GATEWAY_URL": "https://matrix-gateway.internal.example.invalid"
       },
       "durable_objects": {
         "bindings": [
-          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" },
+          { "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
         ]
       },
       "r2_buckets": [

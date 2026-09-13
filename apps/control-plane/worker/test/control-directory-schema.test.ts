@@ -20,6 +20,7 @@ const applicationTables = [
   "connection_routes",
   "gateway_routes",
   "connection_accounts",
+  "connection_provider_identities",
   "account_grants",
   "account_grant_chats",
   "permission_requests",

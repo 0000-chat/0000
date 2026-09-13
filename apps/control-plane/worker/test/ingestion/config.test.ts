@@ -105,10 +105,16 @@ const expectedNames = {
 const requiredBindings = {
   d1: { binding: "CONTROL_DB", migrations_dir: "migrations" },
   r2: { binding: "EVENT_ARCHIVE" },
-  durableObject: {
-    name: "TENANT_PROJECTION",
-    class_name: "TenantProjectionDO",
-  },
+  durableObjects: [
+    {
+      name: "TENANT_PROJECTION",
+      class_name: "TenantProjectionDO",
+    },
+    {
+      name: "LINK_SESSIONS",
+      class_name: "LinkSessionDO",
+    },
+  ],
   producer: { binding: "INGESTION_QUEUE" },
 } as const;
 
@@ -144,6 +150,7 @@ const EXPECTED_WRANGLER_VAR_KEYS = [
   "COMMUNICATOR_OAUTH_HUMAN_ISSUER",
   "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE",
   "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL",
+  "CONNECTION_GATEWAY_URL",
 ] as const;
 
 const CLOUDFLARE_UUID_PATTERN =
@@ -178,7 +185,7 @@ function assertEnvironmentBindings(
     { binding: requiredBindings.r2.binding, bucket_name: names.r2 },
   ]);
   expect(environment.durable_objects).toEqual({
-    bindings: [requiredBindings.durableObject],
+    bindings: requiredBindings.durableObjects,
   });
   expect(environment.queues.producers).toEqual([
     { ...requiredBindings.producer, queue: names.queue },

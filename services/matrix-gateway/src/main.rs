@@ -24,6 +24,10 @@ use communicator_matrix_gateway::{
         MATRIX_SESSION_INVALID, MatrixProcessor, matrix_access_token, restore_matrix_processor,
     },
     matrix_http::ReqwestMatrixTransport,
+    provisioning::{
+        GatewayRouteMetadata, ProvisioningGatewayServer, WhatsAppProvisioningClient,
+        serve_private_gateway,
+    },
     secret::{MAX_TEXT_SECRET_BYTES, SafeError, SecretKind, load_secret},
     service::{Clock, GatewayService, JitterSource, RetryPolicy, Shutdown},
     store::Store,
@@ -217,6 +221,36 @@ async fn run_daemon(config_path: &Path) -> Result<(), SafeError> {
     service.run().await
 }
 
+async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
+    let config = read_config(config_path)?;
+    let provisioning = config
+        .provisioning()
+        .ok_or_else(|| SafeError::new("provisioning_config_missing"))?;
+    let bridge_secret = load_text(provisioning.bridge_shared_secret_file())?;
+    let gateway_secret = load_text(provisioning.gateway_shared_secret_file())?;
+    let client = WhatsAppProvisioningClient::new(
+        provisioning.bridge_url(),
+        SecretString::new(bridge_secret),
+        provisioning.matrix_user_id(),
+        Duration::from_secs(config.request_timeout_secs()),
+    )
+    .map_err(|error| SafeError::new(error.code()))?;
+    let server = ProvisioningGatewayServer::new(
+        client,
+        SecretString::new(gateway_secret),
+        GatewayRouteMetadata {
+            gateway_route_id: provisioning.gateway_route_id().to_owned(),
+            bridge_instance_id: provisioning.bridge_instance_id().to_owned(),
+            matrix_user_id: provisioning.matrix_user_id().to_owned(),
+            matrix_room_namespace: provisioning.matrix_room_namespace().to_owned(),
+        },
+    )
+    .map_err(|error| SafeError::new(error.code()))?;
+    serve_private_gateway(server, provisioning.listen_addr())
+        .await
+        .map_err(|_| SafeError::new("provisioning_listen_failed"))
+}
+
 async fn verify_clear_maintenance(config_path: &Path) -> Result<(), SafeError> {
     let config = read_config(config_path)?;
     let keyring = load_keyring(config.state_key_file())?;
@@ -252,6 +286,7 @@ fn runtime_exit_code(code: &str) -> u8 {
         || code == "matrix_transport_invalid"
         || code.starts_with("oauth_")
         || code.starts_with("ingestion_")
+        || code.starts_with("provisioning_")
     {
         78
     } else {
@@ -327,6 +362,19 @@ async fn main() -> ExitCode {
                 Err(error) => return write_admin_error(error),
             };
             match run_daemon(&config).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    let _ = writeln!(io::stderr().lock(), "{}", error.code());
+                    ExitCode::from(runtime_exit_code(error.code()))
+                }
+            }
+        }
+        "provisioning" => {
+            let config = match parse_config_option(&args, &["provisioning"]) {
+                Ok(path) => path,
+                Err(error) => return write_admin_error(error),
+            };
+            match run_provisioning(&config).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     let _ = writeln!(io::stderr().lock(), "{}", error.code());

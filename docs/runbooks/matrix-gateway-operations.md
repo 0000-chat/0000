@@ -20,14 +20,18 @@ performed by daemon startup.
    passphrase, state key, and OAuth client secret. Keep them outside Git,
    images, environment interpolation, logs, and process arguments. The daemon
    reads the passphrase, state key, and OAuth secret; it does not read the
-   password during normal receive-only operation.
+   password during normal receive-only operation. When the optional
+   `provisioning` block is enabled, provision its bridge and gateway shared
+   secret files with the same protected ownership and mode.
 4. Create the configured Matrix-store and state directories owned by the
    service account. Preserve the encrypted state database and SDK store across
    upgrades and restarts.
 5. Install
    `deploy/matrix-gateway/communicator-matrix-gateway.service` as a systemd
    unit. Inspect its paths, user, restart policy, and protected mounts before
-   enabling it.
+   enabling it. Install the separate
+   `communicator-matrix-provisioning.service` only when the private gateway
+   address and both protected provisioning secrets have been reviewed.
 
 Do not enable the unit until the local review, fixture run, and proof gates
 have passed. This package does not activate production or send live messages.

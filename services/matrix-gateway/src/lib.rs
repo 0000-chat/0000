@@ -14,6 +14,7 @@ pub mod matrix_http;
 pub mod model;
 pub mod normalize;
 pub mod protected;
+pub mod provisioning;
 pub mod registry;
 pub mod secret;
 pub mod service;

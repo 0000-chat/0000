@@ -8,7 +8,11 @@ import type {
   Connection,
   ConversationSummary,
   Identity,
+  LinkSession,
+  LinkSessionActionRequest,
+  LinkSessionStart,
   MessagePageResult,
+  OperationScope,
   SessionResponse,
 } from "@communicator/contracts";
 import {
@@ -23,6 +27,11 @@ import {
 
 export type SimulatedScenario = "ready" | "attention_required";
 export type SimulatedMessageMode = "normal" | "pages" | "error";
+export type SimulatedLinkScenario =
+  | "connected"
+  | "provider_error"
+  | "duplicate"
+  | "expired";
 
 const defaultSortPosition = new Map([
   ["connection_human_whatsapp", 10],
@@ -43,6 +52,11 @@ export class SimulatedStore {
   private commandCounter = 0;
   private grantCounter = 0;
   private grants: AccountGrant[] = [];
+  private linkScenario: SimulatedLinkScenario = "connected";
+  private linkSessionState: LinkSession | null = null;
+  private linkQrCounter = 0;
+  private linkActionDelayMs = 0;
+  private linkActionExpiryMs = 60_000;
   private resetAt = this.state.fixture_reset_at;
 
   reset(
@@ -56,6 +70,11 @@ export class SimulatedStore {
     this.commandCounter = 0;
     this.grantCounter = 0;
     this.grants = [];
+    this.linkScenario = "connected";
+    this.linkSessionState = null;
+    this.linkQrCounter = 0;
+    this.linkActionDelayMs = 0;
+    this.linkActionExpiryMs = 60_000;
     this.resetAt = new Date().toISOString();
   }
 
@@ -75,16 +94,23 @@ export class SimulatedStore {
         id: "membership_pilot",
         role: "admin",
       },
-      identities: this.state.identities.map((identity) => ({
-        identity_id: identity.id,
-        kind: identity.kind,
-        display_name: identity.display_name,
-        scopes: [
-          "conversation.read",
-          "connection.read",
-          "message.send",
-        ] as const,
-      })),
+      identities: this.state.identities.map((identity) => {
+        const scopes: OperationScope[] =
+          identity.kind === "human"
+            ? [
+                "conversation.read",
+                "connection.read",
+                "connection.manage",
+                "message.send",
+              ]
+            : ["conversation.read", "connection.read", "message.send"];
+        return {
+          identity_id: identity.id,
+          kind: identity.kind,
+          display_name: identity.display_name,
+          scopes,
+        };
+      }),
     };
   }
 
@@ -232,6 +258,153 @@ export class SimulatedStore {
       revoked_at: "2026-08-29T00:00:00.000Z",
     });
     return clone(grant);
+  }
+
+  setLinkScenario(scenario: SimulatedLinkScenario) {
+    this.linkScenario = scenario;
+  }
+
+  setLinkActionDelay(milliseconds: number) {
+    this.linkActionDelayMs = milliseconds;
+  }
+
+  setLinkActionExpiry(milliseconds: number) {
+    this.linkActionExpiryMs = milliseconds;
+  }
+
+  linkActionDelay() {
+    return this.linkActionDelayMs;
+  }
+
+  startLinkSession(
+    identityId: string,
+    input: LinkSessionStart,
+  ): LinkSession | null {
+    const identity = this.identities().find((item) => item.id === identityId);
+    if (!identity || identity.kind !== "human" || input.provider !== "whatsapp")
+      return null;
+    const existing = this.linkSessionState;
+    if (
+      existing &&
+      (existing.status === "created" ||
+        existing.status === "awaiting_user" ||
+        existing.status === "authenticating")
+    ) {
+      return clone({ ...existing, qr: null });
+    }
+    this.linkQrCounter += 1;
+    const now = Date.now();
+    const session: LinkSession = {
+      id: `link_sim_${this.linkQrCounter}`,
+      identity_id: identityId,
+      provider: "whatsapp",
+      generation: 1,
+      status: "awaiting_user",
+      action: "scan_qr",
+      expires_at: new Date(now + 10 * 60_000).toISOString(),
+      action_expires_at: new Date(now + this.linkActionExpiryMs).toISOString(),
+      qr: `WAPPAYLOAD-${this.linkQrCounter}`,
+      connection_id: null,
+      account_id: null,
+      provider_label: null,
+      error_code: null,
+    };
+    this.linkSessionState = session;
+    return clone(session);
+  }
+
+  linkSession(sessionId: string): LinkSession | null {
+    if (this.linkSessionState?.id !== sessionId) return null;
+    return clone({ ...this.linkSessionState, qr: null });
+  }
+
+  actLinkSession(
+    sessionId: string,
+    input: LinkSessionActionRequest,
+  ): { kind: "ok"; session: LinkSession } | { kind: "missing" | "stale" } {
+    const current = this.linkSessionState;
+    if (!current || current.id !== sessionId) return { kind: "missing" };
+    if (current.generation !== input.generation) return { kind: "stale" };
+    if (
+      current.status === "connected" ||
+      current.status === "expired" ||
+      current.status === "failed" ||
+      current.status === "cancelled" ||
+      current.status === "relink_required" ||
+      current.status === "reconciliation_required"
+    ) {
+      return { kind: "stale" };
+    }
+    if (input.action === "refresh") {
+      this.linkQrCounter += 1;
+      const now = Date.now();
+      this.linkSessionState = {
+        ...current,
+        generation: current.generation + 1,
+        status: "awaiting_user",
+        action: "scan_qr",
+        action_expires_at: new Date(
+          now + this.linkActionExpiryMs,
+        ).toISOString(),
+        qr: `WAPPAYLOAD-${this.linkQrCounter}`,
+        error_code: null,
+      };
+      return { kind: "ok", session: clone(this.linkSessionState) };
+    }
+    const terminal =
+      this.linkScenario === "connected"
+        ? {
+            status: "connected" as const,
+            error_code: null,
+            connection_id: "connection_linked_whatsapp",
+            account_id: "account_linked_whatsapp",
+            provider_label: "Linked WhatsApp",
+          }
+        : this.linkScenario === "duplicate"
+          ? {
+              status: "relink_required" as const,
+              error_code: "relink_required" as const,
+              connection_id: null,
+              account_id: null,
+              provider_label: null,
+            }
+          : this.linkScenario === "expired"
+            ? {
+                status: "expired" as const,
+                error_code: "expired" as const,
+                connection_id: null,
+                account_id: null,
+                provider_label: null,
+              }
+            : {
+                status: "failed" as const,
+                error_code: "provider_error" as const,
+                connection_id: null,
+                account_id: null,
+                provider_label: null,
+              };
+    this.linkSessionState = {
+      ...current,
+      ...terminal,
+      action: "none",
+      action_expires_at: null,
+      qr: null,
+    };
+    return { kind: "ok", session: clone(this.linkSessionState) };
+  }
+
+  cancelLinkSession(sessionId: string): LinkSession | null {
+    const current = this.linkSessionState;
+    if (!current || current.id !== sessionId) return null;
+    this.linkSessionState = {
+      ...current,
+      status: "cancelled",
+      action: "none",
+      action_expires_at: null,
+      qr: null,
+      error_code: "cancelled",
+    };
+    return clone(this.linkSessionState);
   }
 
   channels(identityId: string): ChannelSummary[] {

@@ -1,0 +1,25 @@
+[Unit]
+Description=Communicator private WhatsApp provisioning gateway
+After=network-online.target communicator-matrix-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=communicator
+Group=communicator
+ExecStart=/usr/local/bin/communicator-matrix-gateway provisioning --config /etc/communicator/matrix-gateway/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

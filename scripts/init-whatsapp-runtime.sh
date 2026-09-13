@@ -24,10 +24,17 @@ if [[ ! -f "$registration" ]]; then
   docker compose --env-file deploy/images.lock.env --project-name "$project" run --rm --no-deps whatsapp >/dev/null 2>&1
 fi
 [[ -f "$registration" ]]
-python3 scripts/render-whatsapp-config.py \
-  --db-password-file "$runtime_dir/secrets/whatsapp-db.password" \
-  --registration "$registration" \
-  --output "$config" >/dev/null
+render_args=(
+  python3 scripts/render-whatsapp-config.py
+  --db-password-file "$runtime_dir/secrets/whatsapp-db.password"
+  --registration "$registration"
+  --output "$config"
+)
+if [[ -f "$runtime_dir/secrets/whatsapp-provisioning" ]]; then
+  render_args+=(--provisioning-secret-file "$runtime_dir/secrets/whatsapp-provisioning")
+fi
+"${render_args[@]}" \
+  >/dev/null
 
 chown 1337:1337 "$config" "$whatsapp_dir"
 chmod 0600 "$config"

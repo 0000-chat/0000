@@ -420,6 +420,7 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM break_glass_grants"),
     db.prepare("DELETE FROM revoked_tokens"),
     db.prepare("DELETE FROM connection_accounts"),
+    db.prepare("DELETE FROM connection_provider_identities"),
     db.prepare("DELETE FROM connection_capabilities"),
     db.prepare("DELETE FROM connection_routes"),
     db.prepare("DELETE FROM connections"),
