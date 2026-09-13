@@ -2,16 +2,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
   CommunicatorIdSchema,
+  DeliveryModeSchema,
   MessageSearchDirectionSchema,
   WebhookEventFilterSchema,
   WebhookSubscriptionCreateSchema,
   WebhookSubscriptionCutoverSchema,
   WebhookSubscriptionUpdateSchema,
   WebhookSubscriptionRevokeSchema,
+  type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
 import { z } from "zod/v4";
 import type { AuthorizationVariables } from "./auth/middleware";
+import type { IngestionAuthorizationVariables } from "./auth/ingestion-middleware";
 import {
   isAdministratorSession,
   toGrantedProjectionReadAuthorization,
@@ -43,10 +46,14 @@ import {
   WebhookRepositoryError,
   type WebhookActor,
 } from "./control-directory/webhooks";
+import {
+  acceptTextReply,
+  type OutboundAcceptanceServices,
+} from "./outbound/acceptance";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
-  Variables: AuthorizationVariables;
+  Variables: AuthorizationVariables & IngestionAuthorizationVariables;
 }>;
 
 const boundedId = CommunicatorIdSchema.max(128);
@@ -142,6 +149,15 @@ const webhookEvaluateInput = {
   subscription_id: boundedId,
   account_id: boundedId,
   chat_id: boundedId.nullable().optional(),
+};
+const sendTextReplyInput = {
+  identity_id: boundedId,
+  conversation_id: boundedId,
+  account_id: optionalId,
+  body: z.string().trim().min(1).max(20_000),
+  delivery_mode: DeliveryModeSchema,
+  idempotency_key: z.string().trim().min(1).max(200),
+  attachments: z.array(z.unknown()).max(0).optional(),
 };
 
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
@@ -284,6 +300,7 @@ const listAccounts = async (
 const registerTools = (
   server: McpServer,
   context: ReadHandlerContext,
+  outboundServices: OutboundAcceptanceServices,
 ): void => {
   server.registerTool(
     "list_identities",
@@ -568,6 +585,36 @@ const registerTools = (
         );
       }),
   );
+
+  server.registerTool(
+    "send_text_reply",
+    {
+      description:
+        "Save one account-scoped text reply before controlled adapter dispatch",
+      inputSchema: sendTextReplyInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        const request: TextReplyRequest = {
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+          body: input.body,
+          delivery_mode: input.delivery_mode,
+        };
+        return acceptTextReply(
+          {
+            env: context.env,
+            authorization: context.authorization,
+          },
+          request,
+          input.idempotency_key,
+          outboundServices,
+        );
+      }),
+  );
 };
 
 const validMcpRequestHeaders = (request: Request): boolean => {
@@ -586,7 +633,10 @@ const validMcpRequestHeaders = (request: Request): boolean => {
  * instance is not a durable session store; the SDK still validates the full
  * initialize/tools/call protocol and request headers.
  */
-export async function handleMcpRequest(context: McpContext): Promise<Response> {
+export async function handleMcpRequest(
+  context: McpContext,
+  outboundServices: OutboundAcceptanceServices = {},
+): Promise<Response> {
   if (!validMcpRequestHeaders(context.req.raw)) {
     return new Response(
       JSON.stringify({
@@ -599,7 +649,7 @@ export async function handleMcpRequest(context: McpContext): Promise<Response> {
   }
 
   const server = new McpServer({ name: "communicator", version: "1.0.0" });
-  registerTools(server, contextForRead(context));
+  registerTools(server, contextForRead(context), outboundServices);
   const requestUrl = new URL(context.req.url);
   const transport = new WebStandardStreamableHTTPServerTransport({
     enableJsonResponse: true,

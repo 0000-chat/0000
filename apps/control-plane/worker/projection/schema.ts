@@ -386,11 +386,50 @@ const identityLocalProjectionSequencesMigration: ProjectionMigration =
     statements: identityLocalProjectionSequencesStatements,
   });
 
+/**
+ * The outbound ledger is intentionally separate from the receive-side command
+ * projection. It owns the request idempotency tuple and the dispatch wakeup
+ * handoff while the existing `messages` and `commands` tables remain the
+ * durable read model.
+ */
+const durableOutboundAcceptanceMigration: ProjectionMigration = Object.freeze({
+  version: 3,
+  name: "durable_outbound_acceptance",
+  appliedAt: "2026-09-13T00:00:00.000Z",
+  statements: [
+    `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','wakeup_failed','dispatching','dispatched')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key)
+) STRICT`,
+    "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+    "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+  ],
+});
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
   Object.freeze([
     initialTenantProjectionMigration,
     identityLocalProjectionSequencesMigration,
+    durableOutboundAcceptanceMigration,
   ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */

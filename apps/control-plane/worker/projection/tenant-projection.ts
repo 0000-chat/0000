@@ -1,10 +1,15 @@
 import {
+  AcceptTextReplyInputSchema,
+  AcceptTextReplyResultSchema,
   ApplyProjectionBatchInputSchema,
   ApplyReplayPageInputSchema,
   compareOpaqueEventIds,
   ConversationPageResultSchema,
+  CommandSchema,
+  ConversationOwnerSchema,
   GetProjectionConversationInputSchema,
   GetProjectionConversationResultSchema,
+  ResolveConversationOwnerInputSchema,
   DEFAULT_PROJECTION_PAGE_SIZE,
   ListProjectionChannelStatsInputSchema,
   MAX_PROJECTION_CHANGES,
@@ -17,6 +22,8 @@ import {
   MessageSearchPageResultSchema,
   MessageSearchResultSchema,
   MessagePageResultSchema,
+  MessageSchema,
+  OutboundDispatchSchema,
   MAX_IDENTITY_CONNECTIONS,
   MAX_PROJECTION_PAGE_SIZE,
   MAX_REALTIME_ATTACHMENT_JSON_BYTES,
@@ -35,9 +42,12 @@ import {
   ProjectionChannelStatsSchema,
   type ApplyProjectionBatchInput,
   type ApplyProjectionBatchResult,
+  type AcceptTextReplyInput,
+  type AcceptTextReplyResult,
   type ApplyReplayPageInput,
   type ArchiveReplayPage,
   type ConversationSummary,
+  type ConversationOwner,
   type ConversationPageResult,
   type GetProjectionConversationInput,
   type ListProjectionChannelStatsInput,
@@ -55,6 +65,9 @@ import {
   type MessageSearchPageResult,
   type MessageSearchResult,
   type MessagePageResult,
+  type Command,
+  type ResolveConversationOwnerInput,
+  type OutboundDispatch,
   type ProjectionChannelStat,
   type ProjectionChange,
   type ProjectionChangePage,
@@ -85,6 +98,7 @@ import {
   type PreparedCheckpointMutation,
   type PreparedProjectionEvent,
 } from "./projector";
+import { canonicalObservedAt } from "./projector-common";
 import { runProjectionMigrations } from "./schema";
 import {
   decodeConversationCursor,
@@ -280,6 +294,51 @@ type MessageSearchAttachmentQueryRow = {
   sha256: string | null;
 };
 
+type ConversationOwnerRow = {
+  identity_id: string;
+  account_id: string;
+  connection_id: string;
+  platform: string;
+  deleted_at?: string | null;
+};
+
+type OutboundDispatchRow = {
+  id: string;
+  command_id: string;
+  message_id: string;
+  event_id: string;
+  tenant_id: string;
+  actor_principal_id: string;
+  actor_identity_id: string;
+  resource_identity_id: string;
+  account_id: string;
+  connection_id: string;
+  conversation_id: string;
+  platform: string;
+  idempotency_key: string;
+  body_digest: string;
+  body: string;
+  delivery_mode: "direct" | "paced";
+  status: "pending" | "wakeup_failed" | "dispatching" | "dispatched";
+  created_at: string;
+  updated_at: string;
+};
+
+type OutboundCommandRow = {
+  id: string;
+  identity_id: string;
+  account_id: string;
+  connection_id: string;
+  conversation_id: string;
+  platform: string;
+  operation: "message.send";
+  delivery_mode: "direct" | "paced";
+  status: Command["status"];
+  failure_code: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type ConversationExistsRow = { id: string };
 
 type ProjectionChangeQueryRow = {
@@ -301,9 +360,10 @@ type ChangeFloorQueryRow = { discarded_through_sequence: number };
 const REPLAY_CHECKPOINT_KIND = "r2_manifest_cursor";
 
 /**
- * All rows in these tables are derived from the immutable archive or live
- * events. A rebuild removes them as one transaction while retaining the
- * tenant binding, schema, and lifecycle history tables.
+ * These receive-side rows are derived from the immutable archive or live
+ * events. The outbound dispatch ledger is authoritative acceptance state and
+ * deliberately survives a rebuild; its message and command views are
+ * reconstituted after replay.
  */
 const DERIVED_PROJECTION_TABLES = [
   "resource_tombstones",
@@ -1107,6 +1167,218 @@ const mapMessageSearchPage = (
     items,
     next_cursor: nextCursor,
   });
+};
+
+const readOutboundDispatchByKey = (
+  storage: DurableObjectStorage,
+  idempotencyKey: string,
+): OutboundDispatchRow | undefined =>
+  storage.sql
+    .exec<OutboundDispatchRow>(
+      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, created_at, updated_at FROM outbound_dispatches WHERE idempotency_key = ? LIMIT 1",
+      idempotencyKey,
+    )
+    .toArray()[0];
+
+const readOutboundCommand = (
+  storage: DurableObjectStorage,
+  commandId: string,
+): OutboundCommandRow | undefined =>
+  storage.sql
+    .exec<OutboundCommandRow>(
+      "SELECT id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at FROM commands WHERE id = ? LIMIT 1",
+      commandId,
+    )
+    .toArray()[0];
+
+const readOutboundMessage = (
+  storage: DurableObjectStorage,
+  messageId: string,
+): MessageQueryRow | undefined =>
+  storage.sql
+    .exec<MessageQueryRow>(
+      "SELECT id, identity_id, account_id, connection_id, conversation_id, direction, sender_participant_id, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at, current_event_id FROM messages WHERE id = ? LIMIT 1",
+      messageId,
+    )
+    .toArray()[0];
+
+const mapOutboundDispatch = (row: OutboundDispatchRow): OutboundDispatch =>
+  OutboundDispatchSchema.parse({
+    id: row.id,
+    tenant_id: row.tenant_id,
+    command_id: row.command_id,
+    message_id: row.message_id,
+    event_id: row.event_id,
+    actor_principal_id: row.actor_principal_id,
+    actor_identity_id: row.actor_identity_id,
+    resource_identity_id: row.resource_identity_id,
+    account_id: row.account_id,
+    connection_id: row.connection_id,
+    conversation_id: row.conversation_id,
+    idempotency_key: row.idempotency_key,
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
+
+const mapOutboundCommand = (
+  tenantId: string,
+  row: OutboundCommandRow,
+  dispatch: OutboundDispatchRow,
+): Command =>
+  CommandSchema.parse({
+    id: row.id,
+    tenant_id: tenantId,
+    identity_id: row.identity_id,
+    conversation_id: row.conversation_id,
+    operation: row.operation,
+    delivery_mode: row.delivery_mode,
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    ...(row.failure_code === null ? {} : { failure_code: row.failure_code }),
+    account_id: row.account_id,
+    connection_id: row.connection_id,
+    message_id: dispatch.message_id,
+    event_id: dispatch.event_id,
+    dispatch_id: dispatch.id,
+    actor_principal_id: dispatch.actor_principal_id,
+    actor_identity_id: dispatch.actor_identity_id,
+  });
+
+const mapOutboundMessage = (tenantId: string, row: MessageQueryRow) =>
+  MessageSchema.parse({
+    id: row.id,
+    tenant_id: tenantId,
+    identity_id: row.identity_id,
+    account_id: row.account_id,
+    connection_id: row.connection_id,
+    conversation_id: row.conversation_id,
+    event_id: row.current_event_id,
+    sender_participant_id: row.sender_participant_id,
+    direction: row.direction,
+    sender_label: row.deleted_at === null ? row.sender_label : "Deleted sender",
+    body: row.deleted_at === null ? row.body : "",
+    occurred_at: row.occurred_at,
+    delivery_status: row.delivery_status,
+    attachment_count: row.deleted_at === null ? row.attachment_count : 0,
+  });
+
+/**
+ * Rebuilds discard receive-side rows, but accepted outbound work is already
+ * authoritative. Restore its message and command views from the ledger before
+ * the rebuild becomes readable again.
+ */
+const restoreOutboundProjectionRows = (
+  storage: DurableObjectStorage,
+  tenantId: string,
+): void => {
+  const ledgerRows = storage.sql
+    .exec<OutboundDispatchRow>(
+      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, created_at, updated_at FROM outbound_dispatches WHERE tenant_id = ? ORDER BY created_at ASC, id ASC",
+      tenantId,
+    )
+    .toArray();
+  const touchedConversations = new Set<string>();
+
+  for (const row of ledgerRows) {
+    const owner = storage.sql
+      .exec<ConversationOwnerRow>(
+        "SELECT identity_id, account_id, connection_id, platform, deleted_at FROM conversations WHERE id = ? LIMIT 1",
+        row.conversation_id,
+      )
+      .toArray()[0];
+    if (
+      owner === undefined ||
+      owner.identity_id !== row.resource_identity_id ||
+      owner.account_id !== row.account_id ||
+      owner.connection_id !== row.connection_id ||
+      owner.platform !== row.platform
+    ) {
+      throw projectionError("projection_conflict");
+    }
+
+    const tombstone = storage.sql
+      .exec<{
+        occurred_at: string;
+        reason_code: string | null;
+        observed_ms: number;
+        tombstone_event_id: string;
+      }>(
+        "SELECT occurred_at, reason_code, observed_ms, tombstone_event_id FROM resource_tombstones WHERE (resource_type = 'message' AND resource_id = ?) OR (resource_type = 'conversation' AND resource_id = ?) ORDER BY observed_ms DESC, tombstone_event_id COLLATE BINARY DESC LIMIT 1",
+        row.message_id,
+        row.conversation_id,
+      )
+      .toArray()[0];
+
+    const existingMessage = readOutboundMessage(storage, row.message_id);
+    if (existingMessage === undefined) {
+      const occurredMs = parseStoredMilliseconds(row.created_at);
+      storage.sql.exec(
+        "INSERT INTO messages (id, identity_id, account_id, connection_id, conversation_id, platform, direction, sender_participant_id, sender_label, body, reply_to_message_id, delivery_status, unread, local_read_at, occurred_at, occurred_ms, observed_at, current_observed_ms, current_event_id, matrix_room_id, matrix_event_id, remote_message_id, edited_at, deleted_at, deletion_reason, attachment_count, delivery_failure_code, delivery_observed_ms, delivery_event_id) VALUES (?, ?, ?, ?, ?, ?, 'outbound', NULL, ?, ?, NULL, 'accepted', 0, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, 0, NULL, NULL, NULL)",
+        row.message_id,
+        row.resource_identity_id,
+        row.account_id,
+        row.connection_id,
+        row.conversation_id,
+        row.platform,
+        tombstone === undefined ? "Communicator" : "Deleted sender",
+        tombstone === undefined ? row.body : "",
+        tombstone === undefined ? row.created_at : tombstone.occurred_at,
+        tombstone === undefined
+          ? occurredMs
+          : parseStoredMilliseconds(tombstone.occurred_at),
+        tombstone === undefined
+          ? row.created_at
+          : canonicalObservedAt(tombstone.observed_ms),
+        tombstone === undefined ? occurredMs : tombstone.observed_ms,
+        tombstone === undefined ? row.event_id : tombstone.tombstone_event_id,
+        tombstone?.occurred_at ?? null,
+        tombstone?.reason_code ?? null,
+      );
+    } else if (
+      existingMessage.identity_id !== row.resource_identity_id ||
+      existingMessage.account_id !== row.account_id ||
+      existingMessage.connection_id !== row.connection_id ||
+      existingMessage.conversation_id !== row.conversation_id ||
+      existingMessage.direction !== "outbound"
+    ) {
+      throw projectionError("projection_conflict");
+    }
+
+    const existingCommand = readOutboundCommand(storage, row.command_id);
+    if (existingCommand === undefined) {
+      const observedMs = parseStoredMilliseconds(row.created_at);
+      storage.sql.exec(
+        "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, 'accepted', NULL, ?, ?, ?, ?)",
+        row.command_id,
+        row.actor_identity_id,
+        row.account_id,
+        row.connection_id,
+        row.conversation_id,
+        row.platform,
+        row.delivery_mode,
+        row.created_at,
+        row.updated_at,
+        observedMs,
+        row.event_id,
+      );
+    } else if (
+      existingCommand.identity_id !== row.actor_identity_id ||
+      existingCommand.account_id !== row.account_id ||
+      existingCommand.connection_id !== row.connection_id ||
+      existingCommand.conversation_id !== row.conversation_id ||
+      existingCommand.platform !== row.platform ||
+      existingCommand.operation !== "message.send" ||
+      existingCommand.delivery_mode !== row.delivery_mode
+    ) {
+      throw projectionError("projection_conflict");
+    }
+
+    touchedConversations.add(row.conversation_id);
+  }
+
+  recomputeConversationSummaries(storage.sql, touchedConversations);
 };
 
 const readChangePage = (
@@ -2049,6 +2321,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           throw projectionError("projection_rebuild_mismatch");
         }
 
+        restoreOutboundProjectionRows(this.ctx.storage, parsed.tenant_id);
+
         this.ctx.storage.sql.exec(
           "INSERT INTO completed_rebuilds (rebuild_id, generation, completed_at) VALUES (?, ?, ?)",
           parsed.rebuild_id,
@@ -2325,6 +2599,279 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         connections,
       });
       return applied.result;
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /**
+   * Resolve ownership without exposing the conversation body. The API uses
+   * this narrow lookup to check an account grant before accepting a reply for
+   * an agent whose identity differs from the account's resource identity.
+   */
+  async resolveConversationOwner(
+    input: ResolveConversationOwnerInput,
+  ): Promise<ConversationOwner | null> {
+    try {
+      const parsed = parseProjectionInput(
+        ResolveConversationOwnerInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const row = this.ctx.storage.sql
+        .exec<ConversationOwnerRow>(
+          "SELECT identity_id, account_id, connection_id, platform FROM conversations WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+          parsed.conversation_id,
+        )
+        .toArray()[0];
+      if (row === undefined) return null;
+      return ConversationOwnerSchema.parse({
+        tenant_id: parsed.tenant_id,
+        conversation_id: parsed.conversation_id,
+        identity_id: row.identity_id,
+        account_id: row.account_id,
+        connection_id: row.connection_id,
+        platform: row.platform,
+      });
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /**
+   * Accept one text reply into the tenant-local outbound ledger. The caller
+   * resolves directory grants before entering this RPC; this method remains
+   * responsible for binding the request to the immutable conversation owner
+   * and for making the message, command, and dispatch rows one transaction.
+   */
+  async acceptTextReply(
+    input: AcceptTextReplyInput,
+  ): Promise<AcceptTextReplyResult> {
+    try {
+      const parsed = parseProjectionInput(AcceptTextReplyInputSchema, input);
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const owner = this.ctx.storage.sql
+        .exec<ConversationOwnerRow>(
+          "SELECT identity_id, account_id, connection_id, platform FROM conversations WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+          parsed.conversation_id,
+        )
+        .toArray()[0];
+      if (owner === undefined) throw projectionError("projection_forbidden");
+      if (
+        parsed.account_id !== undefined &&
+        parsed.account_id !== owner.account_id
+      ) {
+        throw projectionError("projection_conflict");
+      }
+
+      const binding = this.ctx.storage.sql
+        .exec<ProjectionConnectionBinding>(
+          "SELECT account_id, connection_id, identity_id, platform FROM connection_bindings WHERE account_id = ? LIMIT 1",
+          owner.account_id,
+        )
+        .toArray()[0];
+      if (
+        binding === undefined ||
+        binding.connection_id !== owner.connection_id ||
+        binding.identity_id !== owner.identity_id ||
+        binding.platform !== owner.platform
+      ) {
+        throw projectionError("projection_conflict");
+      }
+
+      const bodyDigest = await sha256Hex(
+        new TextEncoder().encode(
+          canonicalJsonStringify({
+            actor_principal_id: parsed.actor_principal_id,
+            actor_identity_id: parsed.actor_identity_id,
+            conversation_id: parsed.conversation_id,
+            account_id: owner.account_id,
+            body: parsed.body,
+            delivery_mode: parsed.delivery_mode,
+          }),
+        ),
+      );
+      const requestDigest = await sha256Hex(
+        new TextEncoder().encode(
+          canonicalJsonStringify({
+            body_digest: bodyDigest,
+            idempotency_key: parsed.idempotency_key,
+          }),
+        ),
+      );
+      const commandId = `command_outbound_${requestDigest.slice(0, 48)}`;
+      const messageId = `message_outbound_${requestDigest.slice(0, 48)}`;
+      const eventId = `event_outbound_${requestDigest.slice(0, 48)}`;
+      const dispatchId = `dispatch_outbound_${requestDigest.slice(0, 48)}`;
+      const occurredMs = parseStoredMilliseconds(parsed.accepted_at);
+
+      const result = this.ctx.storage.transactionSync(() => {
+        // Hashing happens outside the synchronous transaction. Re-read every
+        // mutable projection boundary after hashing so a rebuild, deletion,
+        // or rebinding that completes while hashing cannot turn stale owner
+        // data into an accepted outbound row.
+        const transactionMeta = readProjectionMeta(this.ctx.storage);
+        if (transactionMeta === undefined) {
+          throw projectionError("projection_not_found");
+        }
+        requireStoredTenant(transactionMeta, parsed.tenant_id);
+        this.#requireReadyState(transactionMeta);
+
+        const transactionOwner = this.ctx.storage.sql
+          .exec<ConversationOwnerRow>(
+            "SELECT identity_id, account_id, connection_id, platform FROM conversations WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+            parsed.conversation_id,
+          )
+          .toArray()[0];
+        if (transactionOwner === undefined) {
+          throw projectionError("projection_forbidden");
+        }
+        if (
+          parsed.account_id !== undefined &&
+          parsed.account_id !== transactionOwner.account_id
+        ) {
+          throw projectionError("projection_conflict");
+        }
+        if (
+          transactionOwner.identity_id !== owner.identity_id ||
+          transactionOwner.account_id !== owner.account_id ||
+          transactionOwner.connection_id !== owner.connection_id ||
+          transactionOwner.platform !== owner.platform
+        ) {
+          throw projectionError("projection_conflict");
+        }
+
+        const transactionBinding = this.ctx.storage.sql
+          .exec<ProjectionConnectionBinding>(
+            "SELECT account_id, connection_id, identity_id, platform FROM connection_bindings WHERE account_id = ? LIMIT 1",
+            transactionOwner.account_id,
+          )
+          .toArray()[0];
+        if (
+          transactionBinding === undefined ||
+          transactionBinding.connection_id !== transactionOwner.connection_id ||
+          transactionBinding.identity_id !== transactionOwner.identity_id ||
+          transactionBinding.platform !== transactionOwner.platform
+        ) {
+          throw projectionError("projection_conflict");
+        }
+
+        const current = readOutboundDispatchByKey(
+          this.ctx.storage,
+          parsed.idempotency_key,
+        );
+        if (current !== undefined) {
+          if (
+            current.body_digest !== bodyDigest ||
+            current.actor_principal_id !== parsed.actor_principal_id ||
+            current.actor_identity_id !== parsed.actor_identity_id ||
+            current.conversation_id !== parsed.conversation_id ||
+            current.account_id !== owner.account_id ||
+            current.delivery_mode !== parsed.delivery_mode
+          ) {
+            throw projectionError("projection_conflict");
+          }
+          const command = readOutboundCommand(
+            this.ctx.storage,
+            current.command_id,
+          );
+          const message = readOutboundMessage(
+            this.ctx.storage,
+            current.message_id,
+          );
+          if (command === undefined || message === undefined) {
+            throw projectionError("projection_conflict");
+          }
+          return AcceptTextReplyResultSchema.parse({
+            command: mapOutboundCommand(parsed.tenant_id, command, current),
+            message: mapOutboundMessage(parsed.tenant_id, message),
+            dispatch: mapOutboundDispatch(current),
+            replayed: true,
+          });
+        }
+
+        this.ctx.storage.sql.exec(
+          "INSERT INTO messages (id, identity_id, account_id, connection_id, conversation_id, platform, direction, sender_participant_id, sender_label, body, reply_to_message_id, delivery_status, unread, local_read_at, occurred_at, occurred_ms, observed_at, current_observed_ms, current_event_id, matrix_room_id, matrix_event_id, remote_message_id, edited_at, deleted_at, deletion_reason, attachment_count, delivery_failure_code, delivery_observed_ms, delivery_event_id) VALUES (?, ?, ?, ?, ?, ?, 'outbound', NULL, 'Communicator', ?, NULL, 'accepted', 0, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL)",
+          messageId,
+          owner.identity_id,
+          owner.account_id,
+          owner.connection_id,
+          parsed.conversation_id,
+          owner.platform,
+          parsed.body,
+          parsed.accepted_at,
+          occurredMs,
+          parsed.accepted_at,
+          occurredMs,
+          eventId,
+        );
+        this.ctx.storage.sql.exec(
+          "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, 'accepted', NULL, ?, ?, ?, ?)",
+          commandId,
+          parsed.actor_identity_id,
+          owner.account_id,
+          owner.connection_id,
+          parsed.conversation_id,
+          owner.platform,
+          parsed.delivery_mode,
+          parsed.accepted_at,
+          parsed.accepted_at,
+          occurredMs,
+          eventId,
+        );
+        this.ctx.storage.sql.exec(
+          "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+          dispatchId,
+          commandId,
+          messageId,
+          eventId,
+          parsed.tenant_id,
+          parsed.actor_principal_id,
+          parsed.actor_identity_id,
+          owner.identity_id,
+          owner.account_id,
+          owner.connection_id,
+          parsed.conversation_id,
+          owner.platform,
+          parsed.idempotency_key,
+          bodyDigest,
+          parsed.body,
+          parsed.delivery_mode,
+          parsed.accepted_at,
+          parsed.accepted_at,
+        );
+        recomputeConversationSummaries(
+          this.ctx.storage.sql,
+          new Set([parsed.conversation_id]),
+        );
+        const dispatch = readOutboundDispatchByKey(
+          this.ctx.storage,
+          parsed.idempotency_key,
+        );
+        const command = readOutboundCommand(this.ctx.storage, commandId);
+        const message = readOutboundMessage(this.ctx.storage, messageId);
+        if (
+          dispatch === undefined ||
+          command === undefined ||
+          message === undefined
+        ) {
+          throw projectionError("projection_conflict");
+        }
+        return AcceptTextReplyResultSchema.parse({
+          command: mapOutboundCommand(parsed.tenant_id, command, dispatch),
+          message: mapOutboundMessage(parsed.tenant_id, message),
+          dispatch: mapOutboundDispatch(dispatch),
+          replayed: false,
+        });
+      });
+      return structuredClone(result);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }

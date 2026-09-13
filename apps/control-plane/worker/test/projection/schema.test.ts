@@ -19,6 +19,8 @@ const migrationName = "initial_tenant_projection";
 const migrationAppliedAt = "2026-09-07T00:00:00.000Z";
 const identitySequenceMigrationName = "identity_local_projection_sequences";
 const identitySequenceMigrationAppliedAt = "2026-09-10T00:00:00.000Z";
+const durableOutboundMigrationName = "durable_outbound_acceptance";
+const durableOutboundMigrationAppliedAt = "2026-09-13T00:00:00.000Z";
 const applicationTableNames = [
   "projection_meta",
   "connection_bindings",
@@ -34,6 +36,7 @@ const applicationTableNames = [
   "typing_states",
   "attachments",
   "commands",
+  "outbound_dispatches",
   "message_delivery_updates",
   "event_tombstones",
   "resource_tombstones",
@@ -315,6 +318,27 @@ const expectedColumns: Record<
     ["last_observed_ms", "INTEGER", 1, 0, null],
     ["last_event_id", "TEXT", 1, 0, null],
   ],
+  outbound_dispatches: [
+    ["id", "TEXT", 1, 1, null],
+    ["command_id", "TEXT", 1, 0, null],
+    ["message_id", "TEXT", 1, 0, null],
+    ["event_id", "TEXT", 1, 0, null],
+    ["tenant_id", "TEXT", 1, 0, null],
+    ["actor_principal_id", "TEXT", 1, 0, null],
+    ["actor_identity_id", "TEXT", 1, 0, null],
+    ["resource_identity_id", "TEXT", 1, 0, null],
+    ["account_id", "TEXT", 1, 0, null],
+    ["connection_id", "TEXT", 1, 0, null],
+    ["conversation_id", "TEXT", 1, 0, null],
+    ["platform", "TEXT", 1, 0, null],
+    ["idempotency_key", "TEXT", 1, 0, null],
+    ["body_digest", "TEXT", 1, 0, null],
+    ["body", "TEXT", 1, 0, null],
+    ["delivery_mode", "TEXT", 1, 0, null],
+    ["status", "TEXT", 1, 0, null],
+    ["created_at", "TEXT", 1, 0, null],
+    ["updated_at", "TEXT", 1, 0, null],
+  ],
   message_delivery_updates: [
     ["message_id", "TEXT", 1, 1, null],
     ["identity_id", "TEXT", 1, 0, null],
@@ -440,6 +464,11 @@ const expectedChecks: Record<string, string[]> = {
     "CHECK(delivery_mode IN ('direct','paced'))",
     "CHECK(status IN ('accepted','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed'))",
   ],
+  outbound_dispatches: [
+    "CHECK(length(body_digest) = 64)",
+    "CHECK(delivery_mode IN ('direct','paced'))",
+    "CHECK(status IN ('pending','wakeup_failed','dispatching','dispatched'))",
+  ],
   message_delivery_updates: [
     "CHECK(delivery_status IN ('unknown','accepted','sent','delivered','read','failed'))",
   ],
@@ -489,6 +518,8 @@ const expectedIndexes = [
   "idx_delivery_message_order",
   "idx_delivery_conversation_owner",
   "idx_commands_conversation_owner",
+  "idx_outbound_dispatches_account_conversation",
+  "idx_outbound_dispatches_actor_created",
   "idx_event_tombstones_conversation_owner",
   "idx_applied_events_order",
   "idx_projection_changes_identity_sequence",
@@ -547,6 +578,10 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_delivery_conversation_owner ON message_delivery_updates(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_commands_conversation_owner:
     "CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)",
+  idx_outbound_dispatches_account_conversation:
+    "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+  idx_outbound_dispatches_actor_created:
+    "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
   idx_event_tombstones_conversation_owner:
     "CREATE INDEX idx_event_tombstones_conversation_owner ON event_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_applied_events_order:
@@ -624,7 +659,7 @@ describe("tenant projection SQLite schema", () => {
     expect(tableObjects.map((row) => row.name).sort()).toEqual(
       Object.keys(expectedColumns).sort(),
     );
-    expect(tableObjects).toHaveLength(22);
+    expect(tableObjects).toHaveLength(23);
 
     for (const [table, columns] of Object.entries(expectedColumns)) {
       const rows = catalog.tableInfo[table] as Array<{
@@ -658,7 +693,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(31);
+    expect(indexNames).toHaveLength(33);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -701,6 +736,11 @@ describe("tenant projection SQLite schema", () => {
         version: 2,
         name: identitySequenceMigrationName,
         applied_at: identitySequenceMigrationAppliedAt,
+      },
+      {
+        version: 3,
+        name: durableOutboundMigrationName,
+        applied_at: durableOutboundMigrationAppliedAt,
       },
     ]);
     expect(
@@ -1108,7 +1148,7 @@ describe("tenant projection SQLite schema", () => {
       const schemaBefore = schemaSnapshot();
       state.storage.sql.exec(
         "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        3,
+        4,
         "future_projection_schema",
         migrationAppliedAt,
       );
@@ -1291,7 +1331,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 2,
+      schema_generation: 3,
       state: "ready",
       generation: 1,
       rebuild_id: null,
