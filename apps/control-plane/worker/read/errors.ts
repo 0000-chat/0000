@@ -9,11 +9,13 @@ import {
 
 export type ReadErrorCode =
   | "invalid_request"
+  | "forbidden"
   | "not_found"
   | "service_unavailable";
 
 const SAFE_MESSAGES: Record<ReadErrorCode, string> = {
   invalid_request: "Invalid request",
+  forbidden: "Forbidden",
   not_found: "Resource not found",
   service_unavailable: "Service unavailable",
 };
@@ -107,16 +109,18 @@ export const mapReadError = (error: unknown): ReadError => {
 export const readErrorResponse = (
   error: unknown,
 ): {
-  status: 400 | 404 | 503;
+  status: 400 | 403 | 404 | 503;
   body: ApiErrorResponse;
 } => {
   const mapped = mapReadError(error);
   const status =
     mapped.code === "invalid_request"
       ? 400
-      : mapped.code === "not_found"
-        ? 404
-        : 503;
+      : mapped.code === "forbidden"
+        ? 403
+        : mapped.code === "not_found"
+          ? 404
+          : 503;
   const body = ApiErrorResponseSchema.parse({
     error: {
       code: mapped.code,

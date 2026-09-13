@@ -29,6 +29,11 @@ const applicationTables = [
   "control_event_outbox",
   "audit_events",
   "realtime_tickets",
+  "oauth_clients",
+  "oauth_client_installations",
+  "oauth_authorization_transactions",
+  "oauth_authorization_codes",
+  "oauth_upstream_login_transactions",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -93,6 +98,11 @@ async function dropControlDirectorySchema(db: D1Database) {
     "audit_events",
     "control_event_outbox",
     "directory_mutations",
+    "oauth_authorization_codes",
+    "oauth_upstream_login_transactions",
+    "oauth_authorization_transactions",
+    "oauth_client_installations",
+    "oauth_clients",
     "break_glass_grants",
     "revoked_tokens",
     "connection_capabilities",

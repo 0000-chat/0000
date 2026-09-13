@@ -13,6 +13,7 @@ carries only a pointer to a committed R2 batch.
 - [Control Directory local runbook](docs/runbooks/control-directory-local.md)
 - [R2 archive local runbook](docs/runbooks/r2-archive-local.md)
 - [Tenant projection local runbook](docs/runbooks/tenant-projection-local.md)
+- [OAuth remote MCP deployment runbook](docs/runbooks/oauth-remote-mcp.md)
 
 ## Local setup and checks
 

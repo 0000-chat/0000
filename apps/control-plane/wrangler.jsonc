@@ -6,7 +6,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/internal/*"]
+    "run_worker_first": [
+      "/api/*",
+      "/internal/*",
+      "/oauth/*",
+      "/.well-known/*",
+      "/mcp"
+    ]
   },
   "exports": {
     "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" }
@@ -63,7 +69,18 @@
     "COMMUNICATOR_INGRESS_ENABLED": "false",
     "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
     "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
-    "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
+    "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json",
+    "COMMUNICATOR_OAUTH_ISSUER": "https://communicator.local.invalid/",
+    "COMMUNICATOR_OAUTH_RESOURCE": "https://communicator.local.invalid/mcp",
+    "COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS": "900",
+    "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL": "https://auth.local.invalid/authorize",
+    "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID": "communicator-local",
+    "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI": "https://communicator.local.invalid/oauth/callback",
+    "COMMUNICATOR_OAUTH_HUMAN_SCOPE": "openid profile",
+    "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL": "https://auth.local.invalid/token",
+    "COMMUNICATOR_OAUTH_HUMAN_ISSUER": "https://auth.local.invalid/",
+    "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": "communicator-api",
+    "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
   },
   "env": {
     "staging": {
@@ -88,7 +105,18 @@
         "COMMUNICATOR_INGRESS_ENABLED": "false",
         "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
         "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
-        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json",
+        "COMMUNICATOR_OAUTH_ISSUER": "https://communicator-staging.local.invalid/",
+        "COMMUNICATOR_OAUTH_RESOURCE": "https://communicator-staging.local.invalid/mcp",
+        "COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS": "900",
+        "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL": "https://auth.local.invalid/authorize",
+        "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID": "communicator-staging",
+        "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI": "https://communicator-staging.local.invalid/oauth/callback",
+        "COMMUNICATOR_OAUTH_HUMAN_SCOPE": "openid profile",
+        "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL": "https://auth.local.invalid/token",
+        "COMMUNICATOR_OAUTH_HUMAN_ISSUER": "https://auth.local.invalid/",
+        "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": "communicator-api-staging",
+        "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
       },
       "durable_objects": {
         "bindings": [
@@ -143,7 +171,18 @@
         "COMMUNICATOR_INGRESS_ENABLED": "false",
         "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
         "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
-        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json",
+        "COMMUNICATOR_OAUTH_ISSUER": "https://communicator-production.local.invalid/",
+        "COMMUNICATOR_OAUTH_RESOURCE": "https://communicator-production.local.invalid/mcp",
+        "COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS": "900",
+        "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL": "https://auth.local.invalid/authorize",
+        "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID": "communicator-production",
+        "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI": "https://communicator-production.local.invalid/oauth/callback",
+        "COMMUNICATOR_OAUTH_HUMAN_SCOPE": "openid profile",
+        "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL": "https://auth.local.invalid/token",
+        "COMMUNICATOR_OAUTH_HUMAN_ISSUER": "https://auth.local.invalid/",
+        "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": "communicator-api-production",
+        "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL": "https://auth.local.invalid/.well-known/jwks.json"
       },
       "durable_objects": {
         "bindings": [

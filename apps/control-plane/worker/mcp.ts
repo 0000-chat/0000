@@ -1,0 +1,349 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { CommunicatorIdSchema } from "@communicator/contracts";
+import type { Context } from "hono";
+import { z } from "zod/v4";
+import type { AuthorizationVariables } from "./auth/middleware";
+import {
+  isAdministratorSession,
+  toGrantedProjectionReadAuthorization,
+} from "./read/authorization";
+import {
+  getConversation,
+  listChannels,
+  listConnections,
+  listConversations,
+  listIdentities,
+  listMessages,
+  type GetConversationInput,
+  type ListConversationsInput,
+  type ListMessagesInput,
+  type ReadHandlerContext,
+} from "./read/handlers";
+import { ReadError, readErrorResponse } from "./read/errors";
+import { listConnectedAccounts } from "./control-directory/grants";
+
+type McpContext = Context<{
+  Bindings: Cloudflare.Env;
+  Variables: AuthorizationVariables;
+}>;
+
+const boundedId = CommunicatorIdSchema.max(128);
+const optionalId = boundedId.optional();
+const optionalCursor = z.string().min(1).max(2_048).optional();
+const optionalLimit = z.number().int().min(1).max(100).optional();
+
+const listConnectionsInput = { identity_id: boundedId };
+const listChannelsInput = { identity_id: boundedId };
+const listAccountsInput = {
+  identity_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
+};
+const listConversationsInput = {
+  identity_id: boundedId,
+  account_id: optionalId,
+  channel_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
+};
+const getConversationInput = {
+  identity_id: boundedId,
+  conversation_id: boundedId,
+  account_id: optionalId,
+};
+const listMessagesInput = {
+  identity_id: boundedId,
+  conversation_id: boundedId,
+  account_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
+};
+
+const contextForRead = (context: McpContext): ReadHandlerContext => ({
+  env: context.env,
+  authorization: context.get("authorization"),
+  delegated: context.get("delegated"),
+});
+
+const requireDelegatedGrant = async (
+  context: ReadHandlerContext,
+  identityId: string,
+): Promise<void> => {
+  if (!context.delegated) return;
+  // Every delegated identity starts with identity grants only. Account reads
+  // become available only after an explicit conversation.read account grant.
+  await toGrantedProjectionReadAuthorization(
+    context.env,
+    context.authorization,
+    identityId,
+    true,
+  );
+};
+
+const errorResult = (error: unknown) => {
+  const mapped = readErrorResponse(error);
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: JSON.stringify(mapped.body) }],
+  };
+};
+
+const toolResult = (value: unknown) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(value) }],
+  // MCP structuredContent is an object. Preserve the API payload in the text
+  // block and use an items envelope for the three list endpoints that return
+  // arrays.
+  structuredContent: (Array.isArray(value)
+    ? { items: value }
+    : value) as Record<string, unknown>,
+});
+
+const withReadErrors = async (operation: () => Promise<unknown>) => {
+  try {
+    return toolResult(await operation());
+  } catch (error) {
+    return errorResult(error);
+  }
+};
+
+const listAccounts = async (
+  context: ReadHandlerContext,
+  input: {
+    identity_id: string | undefined;
+    cursor: string | undefined;
+    limit: number | undefined;
+  },
+) => {
+  const targetIdentityId =
+    input.identity_id ?? context.authorization.identities[0]?.identity_id;
+  if (targetIdentityId === undefined) {
+    return { items: [], next_cursor: null };
+  }
+  await requireDelegatedGrant(context, targetIdentityId);
+
+  const administrator = isAdministratorSession(context.authorization);
+  if (!administrator && input.identity_id !== undefined) {
+    const ownsIdentity = context.authorization.identities.some(
+      (identity) => identity.identity_id === input.identity_id,
+    );
+    if (!ownsIdentity) throw new ReadError("forbidden");
+  }
+
+  const database = context.env.CONTROL_DB;
+  if (database === undefined || typeof database.withSession !== "function") {
+    throw new ReadError("service_unavailable");
+  }
+  try {
+    return await listConnectedAccounts(database.withSession("first-primary"), {
+      tenantId: context.authorization.tenant.id,
+      ...(administrator && input.identity_id !== undefined
+        ? { identityId: input.identity_id }
+        : {}),
+      ...(!administrator
+        ? {
+            grantMembershipId: context.authorization.membership.id,
+            grantIdentityId: targetIdentityId,
+          }
+        : {}),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    });
+  } catch (error) {
+    throw new ReadError("service_unavailable", error);
+  }
+};
+
+const registerTools = (
+  server: McpServer,
+  context: ReadHandlerContext,
+): void => {
+  server.registerTool(
+    "list_identities",
+    {
+      description: "List identities authorized for this tenant",
+    },
+    () => withReadErrors(() => listIdentities(context)),
+  );
+
+  server.registerTool(
+    "list_accounts",
+    {
+      description: "List paginated connected accounts granted to an identity",
+      inputSchema: listAccountsInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        listAccounts(context, {
+          identity_id: input.identity_id,
+          cursor: input.cursor,
+          limit: input.limit,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "list_connections",
+    {
+      description: "List connection summaries owned by an identity",
+      inputSchema: listConnectionsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        return listConnections(context, input);
+      }),
+  );
+
+  server.registerTool(
+    "list_channels",
+    {
+      description: "List channel summaries owned by an identity",
+      inputSchema: listChannelsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        return listChannels(context, input);
+      }),
+  );
+
+  server.registerTool(
+    "list_conversations",
+    {
+      description: "List stored conversations for an identity or account",
+      inputSchema: listConversationsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: ListConversationsInput = {
+          identity_id: input.identity_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+          ...(input.channel_id === undefined
+            ? {}
+            : { channel_id: input.channel_id }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        };
+        return listConversations(context, value);
+      }),
+  );
+
+  server.registerTool(
+    "get_conversation",
+    {
+      description: "Read one stored conversation",
+      inputSchema: getConversationInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: GetConversationInput = {
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+        };
+        return getConversation(context, value);
+      }),
+  );
+
+  server.registerTool(
+    "list_messages",
+    {
+      description: "Read paginated stored messages",
+      inputSchema: listMessagesInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: ListMessagesInput = {
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        };
+        return listMessages(context, value);
+      }),
+  );
+};
+
+const validMcpRequestHeaders = (request: Request): boolean => {
+  const origin = request.headers.get("Origin");
+  if (origin === null) return true;
+  try {
+    return origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Handle one stateless MCP request using the official SDK transport. A new
+ * server/transport is intentionally created per request because the Worker
+ * instance is not a durable session store; the SDK still validates the full
+ * initialize/tools/call protocol and request headers.
+ */
+export async function handleMcpRequest(context: McpContext): Promise<Response> {
+  if (!validMcpRequestHeaders(context.req.raw)) {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Invalid Origin header" },
+        id: null,
+      }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  const server = new McpServer({ name: "communicator", version: "1.0.0" });
+  registerTools(server, contextForRead(context));
+  const requestUrl = new URL(context.req.url);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    allowedOrigins: [requestUrl.origin],
+    enableDnsRebindingProtection: true,
+  });
+  try {
+    await server.connect(transport);
+    const response = await transport.handleRequest(context.req.raw);
+    await transport.close();
+    await server.close();
+    return response;
+  } catch {
+    await transport.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+}
+
+export function handleMcpGet(context: McpContext): Response {
+  if (!validMcpRequestHeaders(context.req.raw)) {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Invalid Origin header" },
+        id: null,
+      }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  return context.body(null, 405, {
+    Allow: "POST",
+    "Cache-Control": "no-store",
+  });
+}

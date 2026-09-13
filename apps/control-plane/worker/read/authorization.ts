@@ -62,6 +62,7 @@ export async function toGrantedProjectionReadAuthorization(
   env: Cloudflare.Env,
   session: SessionResponse,
   identityId: string,
+  delegated = false,
 ): Promise<ProjectionAuthorizationContext> {
   const base = toProjectionReadAuthorization(session, identityId);
   // Tenant administrators are explicitly authorized to inspect their own
@@ -83,12 +84,16 @@ export async function toGrantedProjectionReadAuthorization(
   } catch (error) {
     throw new ReadError("service_unavailable", error);
   }
-  return ProjectionAuthorizationContextSchema.parse({
+  const authorization = ProjectionAuthorizationContextSchema.parse({
     ...base,
     allowed_account_ids: scope.allowedAccountIds,
     allowed_all_account_ids: scope.allowedAllAccountIds,
     allowed_conversation_ids: scope.allowedConversationIds,
   });
+  if (delegated && authorization.allowed_account_ids?.length === 0) {
+    throw new ReadError("forbidden");
+  }
+  return authorization;
 }
 
 /** Resolve the projection identity owned by an explicit connected account. */
@@ -97,6 +102,7 @@ export async function toGrantedAccountReadAuthorization(
   session: SessionResponse,
   targetIdentityId: string,
   accountId: string,
+  delegated = false,
 ): Promise<{
   authorization: ProjectionAuthorizationContext;
   resourceIdentityId: string;
@@ -173,7 +179,7 @@ export async function toGrantedAccountReadAuthorization(
             accountId,
           );
     if (!administrator && !scope.allowedAccountIds.includes(accountId)) {
-      throw new ReadError("not_found");
+      throw new ReadError(delegated ? "forbidden" : "not_found");
     }
     return {
       resourceIdentityId: account.identity_id,
