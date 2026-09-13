@@ -61,6 +61,23 @@ rewrite, or assume completion of an existing issue. A worker may proceed in a
 later wave only when its blocking contract is present in the aggregate or the
 worker records a concrete blocked state.
 
+## Current frontier checkpoint
+
+T01/#12 feature behavior is accepted and integrated at aggregate commit
+`c86c9b0`, with the focused grants/read/socket, UI, TypeScript/Vite, and
+repository checks recorded in the worker ledger. The full Worker suite still
+exits with a reproducible Vitest/workerd teardown error after 591 passing
+tests. That is a crosscutting aggregate PR-readiness blocker; it does not
+reopen the #12 feature gate or block implementation of its independent child
+contracts.
+
+T02/#13 and T24/#14 were therefore dispatched independently from aggregate
+checkpoint `cf6b50f` (OAuth worker branch `codex/implement-oauth-13`; linking
+worker checkout is being provisioned). Their own implementation and acceptance
+evidence remain pending. Reserve migrations `0006_oauth` and `0007_linking` for
+those workers; do not claim either migration or child ticket complete from the
+dispatch alone.
+
 ## Merge and release rules
 
 - Keep every worker in its own worktree and branch. Merge at most one worker
