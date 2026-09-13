@@ -16,6 +16,13 @@ preserves the migrated application history and the PR's relationship to the
 default branch. No default-branch merge, production deployment, live account,
 or real-message acceptance is part of this aggregate task.
 
+Execution authorization: the user explicitly resumed implementation of the
+entire specification #11 ticket graph for this session. That instruction
+overrides the earlier publication pause and the repository's one-ticket/session
+planning note for this aggregate. Workers should execute the approved ticket
+scope without re-requesting that authorization; live client/account proof and
+deployment remain separately gated by the acceptance criteria below.
+
 ## Dependency order
 
 Workers should take one vertical ticket at a time and publish a branch and
