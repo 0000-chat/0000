@@ -29,10 +29,11 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 
 | Ticket | Scope | Initial state |
 | --- | --- | --- |
-| #5 | Gateway health | worker active; dirty handoff |
-| #9 | Runtime | blocked by #5 |
+| #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
+| #9 | Runtime | implementing on `codex/implement-runtime-9` in `/tmp/communicator-implementation/worker-9/0000-communicator`; health dependency merged |
 | #11 | Agent messaging specification | aggregate parent / planned |
-| #12–#36 | T01–T25 child tickets | planned; dependencies in aggregate plan |
+| #12 | T01 account grants | implementing on `codex/implement-grants-12` in `/tmp/0000-communicator-worker-12`; dirty handoff |
+| #13–#36 | T02–T25 child tickets | planned; dependencies in aggregate plan |
 
 Architecture decision #7 is tracked at
 [`decision-07-connection-status.md`](decision-07-connection-status.md). It is
@@ -46,3 +47,17 @@ the full worker branch as aggregate merge commit `c16c12a`. The focused
 canonical-basename `./scripts/check` also passed. The protected original dirty
 health worktree remains separate and was not staged, cleaned, or merged from
 directly.
+
+## Coordination artifacts
+
+The pinned WhatsApp bridge contract is copied verbatim at
+[`pinned-whatsapp-linking-contract.md`](pinned-whatsapp-linking-contract.md)
+(source and aggregate SHA-256:
+`25094f2361042bad9af2d8f61bd633ea0f6fbcc4ee6049e73a08d276c804654b`). It is
+research evidence for T24, not live-account proof. The OAuth constraints for
+T02 are recorded in [`auth-preflight.md`](auth-preflight.md).
+
+Issue state remains intentionally open while the aggregate draft PR is in
+progress. Readiness is recorded here by dependency and worker evidence; an
+open GitHub issue or a future `Closes` reference is not treated as proof that
+the ticket is complete.
