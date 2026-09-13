@@ -36,6 +36,7 @@ export type AccountGrantTargetPage = z.infer<
 export const AccountGrantOperationScopeSchema = z.enum([
   "conversation.read",
   "conversation.create",
+  "group.create",
   "message.send",
   "webhook.manage",
 ]);

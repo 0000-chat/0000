@@ -13,6 +13,7 @@ import {
   ContactSearchRequestSchema,
   ContactResolveRequestSchema,
   CreateDirectChatRequestSchema,
+  GroupCreateRequestSchema,
   type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
@@ -67,6 +68,8 @@ import {
   type ContactServiceContext,
 } from "./contacts/service";
 import { registerRemovalMcpTools } from "./removals/mcp";
+import { GroupRepositoryError } from "./groups/repository";
+import { createGroup, type GroupRouteServices } from "./groups/service";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -203,6 +206,23 @@ const createDirectChatInput = {
   candidate_revision: z.string().regex(/^[0-9a-f]{64}$/u),
   idempotency_key: z.string().trim().min(1).max(200),
 };
+const createGroupInput = {
+  identity_id: CommunicatorIdSchema.max(128),
+  account_id: CommunicatorIdSchema.max(128),
+  name: z.string().trim().min(1).max(100),
+  participants: z
+    .array(
+      z
+        .object({
+          contact_id: CommunicatorIdSchema.max(128),
+          candidate_revision: z.string().regex(/^[0-9a-f]{64}$/u),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(128),
+  idempotency_key: z.string().trim().min(1).max(200),
+};
 
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
   env: context.env,
@@ -294,6 +314,23 @@ const errorResult = (error: unknown) => {
       ],
     };
   }
+  if (error instanceof GroupRepositoryError) {
+    const code =
+      error.code === "group_invalid" || error.code === "group_conflict"
+        ? "invalid_request"
+        : error.code === "group_not_found"
+          ? "not_found"
+          : "service_unavailable";
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ error: { code, message: error.message } }),
+        },
+      ],
+    };
+  }
   const mapped = readErrorResponse(error);
   return {
     isError: true,
@@ -371,6 +408,7 @@ const registerTools = (
   context: ReadHandlerContext,
   outboundServices: OutboundAcceptanceServices,
   contactServices: ContactRouteServices,
+  groupServices: GroupRouteServices,
 ): void => {
   registerRemovalMcpTools(server, {
     env: context.env,
@@ -568,6 +606,23 @@ const registerTools = (
           contextForContacts(context),
           CreateDirectChatRequestSchema.parse(input),
           contactServices,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "create_group",
+    {
+      description:
+        "Create a group through one explicit account using resolved contacts",
+      inputSchema: createGroupInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        createGroup(
+          contextForContacts(context),
+          GroupCreateRequestSchema.parse(input),
+          groupServices,
         ),
       ),
   );
@@ -838,6 +893,7 @@ export async function handleMcpRequest(
   context: McpContext,
   outboundServices: OutboundAcceptanceServices = {},
   contactServices: ContactRouteServices = {},
+  groupServices: GroupRouteServices = {},
 ): Promise<Response> {
   if (!validMcpRequestHeaders(context.req.raw)) {
     return new Response(
@@ -856,6 +912,7 @@ export async function handleMcpRequest(
     contextForRead(context),
     outboundServices,
     contactServices,
+    groupServices,
   );
   const requestUrl = new URL(context.req.url);
   const transport = new WebStandardStreamableHTTPServerTransport({

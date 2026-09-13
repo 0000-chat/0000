@@ -40,6 +40,9 @@ const INVALID_REQUEST: &str = "invalid_request";
 const CONTACT_MISSING_STORE: &str = "contact_registry_unavailable";
 const CONTACT_SCOPE_MISMATCH: &str = "contact_scope_mismatch";
 const CONTACT_UNCERTAIN: &str = "contact_creation_uncertain";
+const GROUP_MISSING_STORE: &str = "group_registry_unavailable";
+const GROUP_SCOPE_MISMATCH: &str = "group_scope_mismatch";
+const GROUP_UNCERTAIN: &str = "group_creation_uncertain";
 const OUTBOUND_TRANSACTION_CONFLICT: &str = "outbound_transaction_conflict";
 const OUTBOUND_SCOPE_MISMATCH: &str = "outbound_scope_mismatch";
 const OUTBOUND_UNCERTAIN: &str = "outbound_delivery_uncertain";
@@ -342,6 +345,48 @@ impl WhatsAppProvisioningClient {
         Ok(value)
     }
 
+    /// Create one WhatsApp group through bridgev2's pinned
+    /// `create_group/{type}` route. The body intentionally follows the
+    /// provider schema: participants are provider IDs and the requested name
+    /// is nested under `name.name`.
+    pub async fn create_group(
+        &self,
+        provider_login_id: &str,
+        name: &str,
+        participants: &[String],
+    ) -> Result<Value, ProvisioningFailure> {
+        if name.trim().is_empty()
+            || name.len() > 100
+            || participants.is_empty()
+            || participants.len() > 128
+            || participants.iter().any(|value| {
+                value.is_empty()
+                    || value.len() > MAX_ID_BYTES
+                    || value.chars().any(char::is_whitespace)
+            })
+        {
+            return Err(ProvisioningFailure::InvalidRequest);
+        }
+        let (status, value) = self
+            .request_raw(
+                Method::POST,
+                &format!("{PROVISIONING_ROOT}/create_group/group"),
+                &[("login_id", provider_login_id)],
+                Some(&json!({
+                    "participants": participants,
+                    "name": { "name": name }
+                })),
+            )
+            .await?;
+        if status == StatusCode::NOT_IMPLEMENTED || status == StatusCode::METHOD_NOT_ALLOWED {
+            return Err(ProvisioningFailure::ProvisioningUnsupported);
+        }
+        if !status.is_success() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        Ok(value)
+    }
+
     /// Start a QR login.  The adapter first checks the pinned connector's
     /// advertised flows, then starts the exact `start/qr` process.
     pub async fn start_qr(&self) -> Result<ProvisioningStart, ProvisioningFailure> {
@@ -551,6 +596,55 @@ fn direct_chat_payload(value: Value) -> Result<DirectChatPayload, ProvisioningFa
     })
 }
 
+fn created_group_payload(value: Value) -> Result<(String, String), ProvisioningFailure> {
+    let provider_group_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_ID_BYTES)
+        .ok_or(ProvisioningFailure::ProviderError)?
+        .to_owned();
+    let matrix_room_id = value
+        .get("mxid")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("matrix_room_id").and_then(Value::as_str))
+        .filter(|value| !value.is_empty() && value.len() <= MAX_ID_BYTES)
+        .ok_or(ProvisioningFailure::ProviderError)?
+        .to_owned();
+    Ok((provider_group_id, matrix_room_id))
+}
+
+fn group_response(request: &GroupRequest, provider_group_id: &str, matrix_room_id: &str) -> Value {
+    let observed_at = Utc::now().to_rfc3339();
+    json!({
+        "id": provider_group_id,
+        "provider_group_id": provider_group_id,
+        "mxid": matrix_room_id,
+        "matrix_room_id": matrix_room_id,
+        "name": request.name,
+        "participants": request.participants,
+        "participant_provider_ids": request.participants,
+        "tenant_id": request.tenant_id,
+        "identity_id": request.identity_id,
+        "account_id": request.account_id,
+        "connection_id": request.connection_id,
+        "operation_id": request.operation_id,
+        "conversation_id": request.conversation_id,
+        "evidence": {
+            "source": "provider",
+            "evidence_id": request.operation_id,
+            "observed_at": observed_at,
+            "operation_id": request.operation_id,
+            "account_id": request.account_id,
+            "connection_id": request.connection_id,
+            "provider_group_id": provider_group_id,
+            "matrix_room_id": matrix_room_id,
+            "participant_provider_ids": request.participants,
+            "status": "confirmed",
+            "reason": null
+        }
+    })
+}
+
 fn contact_chat_response(request: &ContactRequest, matrix_room_id: &str, status: &str) -> Value {
     let provider_id = request.provider_id.as_deref().unwrap_or_default();
     let conversation_id = request.conversation_id.as_deref().unwrap_or_default();
@@ -578,6 +672,18 @@ fn contact_chat_response(request: &ContactRequest, matrix_room_id: &str, status:
 }
 
 fn contact_failure_response(error: ProvisioningFailure) -> (u16, Vec<u8>) {
+    let status = match error {
+        ProvisioningFailure::InvalidRequest => 400,
+        ProvisioningFailure::ProvisioningUnsupported => 501,
+        ProvisioningFailure::ProvisioningDisabled => 403,
+        ProvisioningFailure::ProviderUnavailable
+        | ProvisioningFailure::ProviderError
+        | ProvisioningFailure::IdentityMismatch => 502,
+    };
+    response(status, json!({ "error": error.code() }))
+}
+
+fn group_failure_response(error: ProvisioningFailure) -> (u16, Vec<u8>) {
     let status = match error {
         ProvisioningFailure::InvalidRequest => 400,
         ProvisioningFailure::ProvisioningUnsupported => 501,
@@ -723,6 +829,55 @@ impl ContactRequest {
             || !valid_resource_id(&self.identity_id)
             || !valid_resource_id(&self.operation_id)
             || !valid_provider_login_id(&self.route.provider_login_id)
+            || DateTime::parse_from_rfc3339(&self.session_generation).is_err()
+            || self.route.gateway_route_id != route.gateway_route_id
+            || self.route.bridge_instance_id != route.bridge_instance_id
+            || self.route.matrix_user_id != route.matrix_user_id
+            || self.route.matrix_room_namespace != route.matrix_room_namespace
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupRequest {
+    schema_version: u8,
+    tenant_id: String,
+    account_id: String,
+    connection_id: String,
+    identity_id: String,
+    provider: Provider,
+    session_generation: String,
+    route: ContactRouteRequest,
+    operation_id: String,
+    conversation_id: String,
+    name: String,
+    participants: Vec<String>,
+}
+
+impl GroupRequest {
+    fn validate(&self, route: &GatewayRouteMetadata) -> Result<(), &'static str> {
+        if self.schema_version != 1
+            || self.provider != Provider::Whatsapp
+            || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.account_id)
+            || !valid_resource_id(&self.connection_id)
+            || !valid_resource_id(&self.identity_id)
+            || !valid_resource_id(&self.operation_id)
+            || !valid_resource_id(&self.conversation_id)
+            || !valid_provider_login_id(&self.route.provider_login_id)
+            || self.name.trim().is_empty()
+            || self.name.len() > 100
+            || self.participants.is_empty()
+            || self.participants.len() > 128
+            || self.participants.iter().any(|value| {
+                value.is_empty()
+                    || value.len() > MAX_ID_BYTES
+                    || value.chars().any(char::is_whitespace)
+            })
             || DateTime::parse_from_rfc3339(&self.session_generation).is_err()
             || self.route.gateway_route_id != route.gateway_route_id
             || self.route.bridge_instance_id != route.bridge_instance_id
@@ -948,6 +1103,16 @@ impl ProvisioningGatewayServer {
             }
             return self.outbound_text(parsed, idempotency_key).await;
         }
+        if request.path == "/v1/groups/create" {
+            let parsed = match serde_json::from_slice::<GroupRequest>(&request.body) {
+                Ok(parsed) => parsed,
+                Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            if let Err(error) = parsed.validate(&self.route) {
+                return response(400, json!({ "error": error }));
+            }
+            return self.group_create(parsed).await;
+        }
         if request.path == "/v1/contacts/search"
             || request.path.starts_with("/v1/contacts/resolve/")
             || request.path == "/v1/conversations/direct"
@@ -1002,6 +1167,64 @@ impl ProvisioningGatewayServer {
             },
             Err(error) => contact_failure_response(error),
         }
+    }
+
+    async fn group_create(&self, request: GroupRequest) -> (u16, Vec<u8>) {
+        let Some(store_handle) = self.outbound_store.as_ref() else {
+            return response(503, json!({ "error": GROUP_MISSING_STORE }));
+        };
+        let provider_value = match self
+            .client
+            .create_group(
+                &request.route.provider_login_id,
+                &request.name,
+                &request.participants,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return group_failure_response(error),
+        };
+        let (provider_group_id, matrix_room_id) = match created_group_payload(provider_value) {
+            Ok(value) => value,
+            Err(error) => return group_failure_response(error),
+        };
+        let created_at = Utc
+            .timestamp_millis_opt(Utc::now().timestamp_millis())
+            .single()
+            .unwrap_or_else(Utc::now);
+        let binding_id = deterministic_binding_id(
+            &request.tenant_id,
+            &request.account_id,
+            &request.conversation_id,
+        );
+        let binding = match crate::registry::NewRoomBinding::new_with_session_generation(
+            binding_id,
+            matrix_room_id.clone(),
+            request.tenant_id.clone(),
+            request.identity_id.clone(),
+            request.connection_id.clone(),
+            request.account_id.clone(),
+            Provider::Whatsapp,
+            self.route.gateway_route_id.clone(),
+            request.conversation_id.clone(),
+            self.route.matrix_user_id.clone(),
+            request.session_generation.clone(),
+            created_at,
+        ) {
+            Ok(binding) => binding,
+            Err(_) => return response(502, json!({ "error": GROUP_UNCERTAIN })),
+        };
+        {
+            let mut store = store_handle.lock().await;
+            if store.append_room_binding(binding).is_err() {
+                return response(502, json!({ "error": GROUP_SCOPE_MISMATCH }));
+            }
+        }
+        response(
+            200,
+            group_response(&request, &provider_group_id, &matrix_room_id),
+        )
     }
 
     async fn contact_resolve(&self, request: ContactRequest, identifier: &str) -> (u16, Vec<u8>) {
@@ -2033,6 +2256,133 @@ mod tests {
             requests
                 .iter()
                 .all(|request| !request.url.query_pairs().any(|(name, _)| name == "user_id"))
+        );
+    }
+
+    #[tokio::test]
+    async fn group_route_uses_pinned_create_group_schema_and_persists_bound_room() {
+        let bridge = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/create_group/group"
+            )))
+            .and(matchers::query_param("login_id", "login-group"))
+            .and(matchers::header(
+                "authorization",
+                format!("Bearer {BRIDGE_SECRET}"),
+            ))
+            .and(matchers::body_json(json!({
+                "participants": ["contact-one", "contact-two"],
+                "name": { "name": "Operations" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "group-provider-1",
+                "mxid": "!group-1:example.test"
+            })))
+            .mount(&bridge)
+            .await;
+
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let store = Store::open(
+            &database,
+            Keyring::new([0x67; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::new(SharedHistoryTransport {
+                calls: AtomicUsize::new(0),
+                event_count: 0,
+            }),
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history);
+        let request = HttpRequest {
+            path: "/v1/groups/create".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("request-group-create".to_owned()),
+            idempotency_key: Some("group-create-idempotency".to_owned()),
+            body: serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant_id": "tenant_group",
+                "account_id": "account_group",
+                "connection_id": "connection_group",
+                "identity_id": "identity_group",
+                "provider": "whatsapp",
+                "session_generation": "2026-09-14T00:00:00.000Z",
+                "route": {
+                    "gateway_route_id": "gateway_route_whatsapp",
+                    "bridge_instance_id": "whatsapp-primary",
+                    "matrix_user_id": MATRIX_USER,
+                    "matrix_room_namespace": "communicator.0000.gold",
+                    "provider_login_id": "login-group"
+                },
+                "operation_id": "group_create_one",
+                "conversation_id": "conversation_group_one",
+                "name": "Operations",
+                "participants": ["contact-one", "contact-two"]
+            }))
+            .expect("request JSON"),
+        };
+        let (status, bytes) = server.handle_request(request).await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).expect("group response JSON");
+        assert_eq!(body["provider_group_id"], "group-provider-1");
+        assert_eq!(body["matrix_room_id"], "!group-1:example.test");
+        assert_eq!(body["conversation_id"], "conversation_group_one");
+        assert_eq!(body["account_id"], "account_group");
+        assert_eq!(body["evidence"]["source"], "provider");
+        assert_eq!(body["evidence"]["operation_id"], "group_create_one");
+        assert_eq!(
+            body["evidence"]["participant_provider_ids"],
+            json!(["contact-one", "contact-two"])
+        );
+        let binding = {
+            let store = server
+                .outbound_store
+                .as_ref()
+                .expect("outbound store")
+                .lock()
+                .await;
+            store
+                .active_room_binding_for_outbound(
+                    "tenant_group",
+                    "account_group",
+                    "connection_group",
+                    "identity_group",
+                    Provider::Whatsapp,
+                    "conversation_group_one",
+                )
+                .expect("binding lookup")
+                .expect("persisted group binding")
+        };
+        assert_eq!(binding.matrix_room_id(), "!group-1:example.test");
+        assert_eq!(
+            binding.session_generation(),
+            Some("2026-09-14T00:00:00.000Z")
+        );
+        let requests = bridge.received_requests().await.expect("bridge requests");
+        assert_eq!(requests.len(), 1, "provider request count: {requests:?}");
+        assert_eq!(
+            requests[0]
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "login_id"),
+            Some(("login_id".into(), "login-group".into()))
         );
     }
 
