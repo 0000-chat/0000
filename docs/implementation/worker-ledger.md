@@ -6,7 +6,7 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/0000-communicator-aggregate` | `codex/implement-agent-messaging` | `9d6684eac906de7a2024d397dc1057edc32f4795` | Planning baseline committed; ledger changes pending this commit. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `ae19135df426e2a713aebd5030dcccd9f043cc13` | Planning baseline, plan, authorization, and draft-PR metadata committed; clean before this coordination update. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty with the same two health files; awaiting worker handoff/commit. |
 | Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Clean at migration head; implementation not yet committed. |
@@ -33,3 +33,7 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | #9 | Runtime | blocked by #5 |
 | #11 | Agent messaging specification | aggregate parent / planned |
 | #12–#36 | T01–T25 child tickets | planned; dependencies in aggregate plan |
+
+Architecture decision #7 is tracked at
+[`decision-07-connection-status.md`](decision-07-connection-status.md). It is
+not a #7 issue closure or acceptance claim.

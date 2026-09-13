@@ -3,7 +3,7 @@
 Snapshot: 2026-09-13 (Pacific/Auckland)
 
 The aggregate branch is `codex/implement-agent-messaging` in
-`/tmp/0000-communicator-aggregate`. It starts at migration/PR #6 head
+`/tmp/communicator-implementation/aggregate/0000-communicator`. It starts at migration/PR #6 head
 `0a9455de0b4569fa63ee755888b0f7abb2fe67ea`. The approved planning baseline is
 `9d6684eac906de7a2024d397dc1057edc32f4795`, which copies only the planning
 paths requested by the implementation session.
@@ -22,6 +22,11 @@ overrides the earlier publication pause and the repository's one-ticket/session
 planning note for this aggregate. Workers should execute the approved ticket
 scope without re-requesting that authorization; live client/account proof and
 deployment remain separately gated by the acceptance criteria below.
+
+Architecture decision #7 is recorded in
+[`decision-07-connection-status.md`](decision-07-connection-status.md). It is
+an implementation direction, not a closed ticket: worker #15 must still make
+the freshness policy concrete, and the actual pin API remains unverified.
 
 ## Dependency order
 
@@ -78,10 +83,18 @@ worker records a concrete blocked state.
 
 ## Validation baseline
 
-From the canonical migration root (`/home/ubuntu/0000-full/repos/0000-communicator`),
-`./scripts/check` passed with the pre-existing planning edits. Running the
-same script from the required aggregate path reports `invalid product
-metadata` because the script compares the metadata name `0000-communicator`
-with the worktree directory name `0000-communicator-aggregate`; this is a
-path-name check limitation, not a planning-file failure. `git diff --check`
-passed for the aggregate baseline.
+From the canonical migration root
+(`/home/ubuntu/0000-full/repos/0000-communicator`), `./scripts/check` passed
+with the pre-existing planning edits. After relocating the clean aggregate to
+`/tmp/communicator-implementation/aggregate/0000-communicator`, the same
+`./scripts/check` passed there too; the basename now matches
+`0000-product.json`. `git diff --check` passed for the aggregate baseline.
+
+Recovery note: the bounded status sweep initially failed because `/tmp` was
+full. The hypothesis was an inactive generated cache, so the intact 3.4 GB
+`/tmp/cargo-target` tree was moved to
+`/home/ubuntu/0000-full/repos/0000-communicator/node_modules/.cache/tmp-recovery/cargo-target`
+and `/tmp/cargo-target` was symlinked to that location. `df` then reported
+3.4 GB free on `/tmp` and sandboxed status/check commands worked again. No
+source worktree, dirty branch, or root `.target-health/` cache was copied,
+staged, or deleted.
