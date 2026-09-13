@@ -2,6 +2,7 @@ import {
   AccountGrantSchema,
   AccountGrantOperationScopeSchema,
   AccountGrantPageSchema,
+  AccountGrantTargetPageSchema,
   ConnectedAccountPageSchema,
   ConnectedAccountSchema,
   MAX_GRANT_CHAT_IDS,
@@ -11,6 +12,7 @@ import {
   type AccountGrant,
   type AccountGrantOperationScope,
   type AccountGrantPage,
+  type AccountGrantTargetPage,
   type AccountGrantChatScope,
   type AccountGrantStatus,
   type ConnectedAccount,
@@ -103,8 +105,6 @@ type AccountReadGrantRow = {
 };
 
 export type AccountReadScope = {
-  /** false is a legacy/internal caller; true fails closed when no grant exists. */
-  enforced: boolean;
   allowedAccountIds: string[];
   allowedAllAccountIds: string[];
   allowedConversationIds: string[];
@@ -116,6 +116,12 @@ export type ListAccountGrantsInput = {
   identityId?: string;
   accountId?: string;
   status?: AccountGrantStatus;
+  cursor?: string;
+  limit?: number;
+};
+
+export type ListAccountGrantTargetsInput = {
+  tenantId: string;
   cursor?: string;
   limit?: number;
 };
@@ -310,6 +316,83 @@ const grantRowsQuery = `
   WHERE g.tenant_id = ?
 `;
 
+type AccountGrantTargetRow = {
+  membership_id: string;
+  principal_id: string;
+  principal_type: string;
+  principal_display_name: string;
+  role: string;
+  identity_id: string;
+  identity_kind: string;
+  identity_display_name: string;
+};
+
+const parseTargetCursor = (cursor: string): [string, string] => {
+  const separator = cursor.indexOf("|");
+  if (separator <= 0 || separator === cursor.length - 1) {
+    throw grantError("grant_invalid");
+  }
+  return [cursor.slice(0, separator), cursor.slice(separator + 1)];
+};
+
+export async function listAccountGrantTargets(
+  db: D1DatabaseSession,
+  input: ListAccountGrantTargetsInput,
+): Promise<AccountGrantTargetPage> {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), MAX_GRANT_PAGE_SIZE);
+  const conditions = [
+    "m.tenant_id = ?",
+    "m.status = 'active'",
+    "t.status = 'active'",
+    "p.status = 'active'",
+    "p.revoked_at IS NULL",
+    "i.status = 'active'",
+    "((p.principal_type IN ('human', 'operator') AND i.identity_kind = 'human') OR (p.principal_type = 'agent' AND i.identity_kind = 'agent'))",
+    "EXISTS (SELECT 1 FROM identity_grants AS ig WHERE ig.tenant_id = m.tenant_id AND ig.membership_id = m.id AND ig.identity_id = i.id)",
+  ];
+  const bindings: (string | number)[] = [input.tenantId];
+  if (input.cursor !== undefined) {
+    const [membershipId, identityId] = parseTargetCursor(input.cursor);
+    conditions.push("(m.id > ? OR (m.id = ? AND i.id > ?))");
+    bindings.push(membershipId, membershipId, identityId);
+  }
+  bindings.push(limit + 1);
+  try {
+    const result = await db.prepare(
+      `SELECT m.id AS membership_id, p.id AS principal_id, p.principal_type, p.display_name AS principal_display_name, m.role, i.id AS identity_id, i.identity_kind, i.display_name AS identity_display_name
+       FROM memberships AS m
+       JOIN tenants AS t ON t.id = m.tenant_id
+       JOIN principals AS p ON p.id = m.principal_id
+       JOIN identity_grants AS g ON g.tenant_id = m.tenant_id AND g.membership_id = m.id
+       JOIN identities AS i ON i.tenant_id = g.tenant_id AND i.id = g.identity_id
+       WHERE ${conditions.join(" AND ")}
+       GROUP BY m.id, p.id, p.principal_type, p.display_name, m.role, i.id, i.identity_kind, i.display_name
+       ORDER BY m.id ASC, i.id ASC
+       LIMIT ?`,
+    ).bind(...bindings).all<AccountGrantTargetRow>();
+    const visible = result.results.slice(0, limit).map((row) => ({
+      membership_id: row.membership_id,
+      principal_id: row.principal_id,
+      principal_type: row.principal_type,
+      principal_display_name: row.principal_display_name,
+      role: row.role,
+      identity_id: row.identity_id,
+      identity_kind: row.identity_kind,
+      identity_display_name: row.identity_display_name,
+    }));
+    const last = visible.at(-1);
+    return AccountGrantTargetPageSchema.parse({
+      items: visible,
+      next_cursor: result.results.length > limit && last
+        ? `${last.membership_id}|${last.identity_id}`
+        : null,
+    });
+  } catch (error) {
+    if (error instanceof GrantRepositoryError) throw error;
+    throw grantError("grant_unavailable", error);
+  }
+}
+
 export async function listAccountGrants(
   db: D1DatabaseSession,
   input: ListAccountGrantsInput,
@@ -473,6 +556,35 @@ export async function createAccountGrant(
 ): Promise<AccountGrant> {
   const chatIds = validateChatScope(input.chatScope, input.chatIds);
   try {
+    const target = await db.prepare(
+      `SELECT 1 AS eligible
+       FROM memberships AS m
+       JOIN principals AS p ON p.id = m.principal_id
+       JOIN identities AS i ON i.tenant_id = m.tenant_id AND i.id = ?
+       WHERE m.tenant_id = ?
+         AND m.id = ?
+         AND m.status = 'active'
+         AND p.status = 'active'
+         AND p.revoked_at IS NULL
+         AND i.status = 'active'
+         AND ((p.principal_type IN ('human', 'operator') AND i.identity_kind = 'human') OR (p.principal_type = 'agent' AND i.identity_kind = 'agent'))
+         AND EXISTS (SELECT 1 FROM identity_grants AS ig WHERE ig.tenant_id = m.tenant_id AND ig.membership_id = m.id AND ig.identity_id = i.id)
+       LIMIT 1`,
+    ).bind(input.identityId, input.tenantId, input.membershipId).first<{ eligible: number }>();
+    if (target === null) throw grantError("grant_not_found");
+
+    const account = await db.prepare(
+      `SELECT 1 AS eligible
+       FROM connection_accounts AS ca
+       JOIN connections AS c ON c.id = ca.connection_id AND c.tenant_id = ?
+       WHERE ca.account_id = ? AND ca.status = 'active'
+       LIMIT 1`,
+    ).bind(input.tenantId, input.accountId).first<{ eligible: number }>();
+    // Keep account binding failures as mutation conflicts. The account may
+    // exist in another tenant, and exposing that distinction as a not-found
+    // response would change the established cross-tenant mutation contract.
+    if (account === null) throw new Error("account binding is not valid");
+
     const existing = await db.prepare(
       "SELECT id FROM account_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND account_id = ? AND operation_scope = ? LIMIT 1",
     ).bind(
@@ -613,7 +725,6 @@ export async function resolveAccountReadScope(
       if (row.chat_id !== null) chats.add(row.chat_id);
     }
     return {
-      enforced: true,
       allowedAccountIds: [...allowed].sort(),
       allowedAllAccountIds: [...all].sort(),
       allowedConversationIds: [...chats].sort(),

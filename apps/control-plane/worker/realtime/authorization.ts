@@ -63,7 +63,7 @@ export const getRealtimeAuthorizationErrorCause = (
  */
 export async function realtimeReadScopeSupported(
   db: D1DatabaseSession,
-  authorization: Pick<AuthorizedRealtimeRequest, "tenant_id" | "principal_id" | "membership_id" | "subscriptions">,
+  authorization: Pick<RealtimeUpgradeContext, "tenant_id" | "principal_id" | "membership_id" | "subscriptions">,
 ): Promise<boolean> {
   const identityIds = [...new Set(authorization.subscriptions.map(
     (subscription) => subscription.identity_id,
@@ -220,6 +220,25 @@ export async function revalidateRealtimeAuthorization(
     identityIds.every((identityId) => grantedIdentityIds.has(identityId)) &&
     await realtimeReadScopeSupported(db, parsed.data)
   );
+}
+
+/** Revalidate an already-open hibernated socket before delivering new data. */
+export async function revalidateRealtimeSocketAuthorization(
+  db: D1DatabaseSession,
+  authorization: Pick<RealtimeUpgradeContext, "tenant_id" | "principal_id" | "subscriptions">
+    & { readonly membership_id?: string | undefined },
+): Promise<boolean> {
+  if (authorization.membership_id === undefined) return false;
+  return revalidateRealtimeAuthorization(db, {
+    schema_version: 1,
+    tenant_id: authorization.tenant_id,
+    principal_id: authorization.principal_id,
+    membership_id: authorization.membership_id,
+    subscriptions: authorization.subscriptions,
+    resume: [],
+    issued_at: new Date(0).toISOString(),
+    expires_at: new Date(1_000).toISOString(),
+  });
 }
 
 export const hasCurrentRealtimeAuthorization = revalidateRealtimeAuthorization;

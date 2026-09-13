@@ -115,6 +115,7 @@ import {
   type RealtimeSocketAttachment,
   type RealtimeUpgradeContext,
 } from "../realtime/contracts";
+import { revalidateRealtimeSocketAuthorization } from "../realtime/authorization";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -1185,15 +1186,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         });
       }
 
-      const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
-      const validSockets: WebSocket[] = [];
-      for (const socket of sockets) {
-        if (tryParseRealtimeAttachment(socket) === null) {
-          this.#closeSocket(socket, 1008, "invalid realtime attachment");
-          continue;
-        }
-        validSockets.push(socket);
-      }
+      // Existing sockets are revalidated before replay delivery and on every
+      // broadcast/alarm. A fresh upgrade without replay only needs a bounded
+      // attachment parse, so a tenant with many sockets does not turn each
+      // new upgrade into an O(n²) directory read.
+      const validSockets = context.resume.length > 0
+        ? await this.#revalidateRealtimeSockets()
+        : this.#validSocketsForAdmission();
       const activeTenantSocketCount = validSockets.length;
       if (
         activeTenantSocketCount >= MAX_REALTIME_SOCKETS_PER_TENANT ||
@@ -1217,6 +1216,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         schema_version: 1,
         tenant_id: context.tenant_id,
         principal_id: context.principal_id,
+        membership_id: context.membership_id,
         subscriptions: context.subscriptions,
         positions,
         lease_expires_at: connectionExpiresAt,
@@ -1346,7 +1346,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   async alarm(): Promise<void> {
     const now = Date.now();
     const remaining: WebSocket[] = [];
-    const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
+    const sockets = await this.#revalidateRealtimeSockets();
     const activeTenantSocketCount = Math.min(
       MAX_REALTIME_SOCKETS_PER_TENANT,
       sockets.length,
@@ -1392,6 +1392,59 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       MAX_REALTIME_SOCKETS_PER_TENANT,
       this.ctx.getWebSockets(REALTIME_SOCKET_TAG).length,
     );
+  }
+
+  #validSocketsForAdmission(): WebSocket[] {
+    const valid: WebSocket[] = [];
+    for (const socket of this.ctx.getWebSockets(REALTIME_SOCKET_TAG)) {
+      if (tryParseRealtimeAttachment(socket) === null) {
+        this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      valid.push(socket);
+    }
+    return valid;
+  }
+
+  async #revalidateRealtimeSockets(): Promise<WebSocket[]> {
+    const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
+    const database = this.env.CONTROL_DB;
+    if (database === undefined || typeof database.withSession !== "function") {
+      for (const socket of sockets) {
+        this.#closeSocket(socket, 1008, "realtime authorization unavailable");
+      }
+      return [];
+    }
+
+    let db: D1DatabaseSession;
+    try {
+      db = database.withSession("first-primary");
+    } catch {
+      for (const socket of sockets) {
+        this.#closeSocket(socket, 1008, "realtime authorization unavailable");
+      }
+      return [];
+    }
+
+    const valid: WebSocket[] = [];
+    for (const socket of sockets) {
+      const attachment = tryParseRealtimeAttachment(socket);
+      if (attachment === null) {
+        this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      try {
+        if (!(await revalidateRealtimeSocketAuthorization(db, attachment))) {
+          this.#closeSocket(socket, 1008, "realtime authorization revoked");
+          continue;
+        }
+      } catch {
+        this.#closeSocket(socket, 1008, "realtime authorization unavailable");
+        continue;
+      }
+      valid.push(socket);
+    }
+    return valid;
   }
 
   #emitSocketOutcome(
@@ -1535,7 +1588,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       this.#requireReadyState(meta);
 
       const prepared = await prepareProjectionBatch(parsed);
-      return this.#applyPreparedBatch({
+      const applied = await this.#applyPreparedBatch({
         tenantId: prepared.tenantId,
         mode: "live",
         rebuildId: null,
@@ -1544,6 +1597,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         inputEventCount: prepared.inputEventCount,
         connections: prepared.connections,
       });
+      return applied.result;
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -1953,7 +2007,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         updatedAt: pageGreatest?.event.observed_at ?? meta.rebuild_started_at ?? meta.updated_at,
       };
 
-      return this.#applyPreparedBatch({
+      const applied = await this.#applyPreparedBatch({
         tenantId: parsed.tenant_id,
         mode: "replay",
         rebuildId: parsed.rebuild_id,
@@ -1962,6 +2016,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         inputEventCount,
         connections,
       });
+      return applied.result;
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -2142,9 +2197,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   }
 
   /** The sole owner of every multi-table live or replay projection transaction. */
-  #applyPreparedBatch(
+  async #applyPreparedBatch(
     input: ApplyPreparedBatchInput,
-  ): ApplyProjectionBatchResult {
+  ): Promise<AppliedPreparedBatch> {
     try {
       const applied = this.ctx.storage.transactionSync<AppliedPreparedBatch>(() => {
         const meta = readProjectionMeta(this.ctx.storage);
@@ -2269,8 +2324,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       });
       if (input.mode === "live" && applied.changes.length > 0) {
         try {
+          const sockets = await this.#revalidateRealtimeSockets();
           broadcastRealtimeChanges(
-            this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+            sockets,
             input.tenantId,
             applied.changes,
           );
@@ -2278,7 +2334,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           // A live notification failure must never change the durable result.
         }
       }
-      return applied.result;
+      return applied;
     } catch (error) {
       if (error instanceof ProjectionError) throw error;
       throw projectionError("projection_unavailable", error);

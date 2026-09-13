@@ -35,6 +35,8 @@ import { realtimeTicketRoute } from "./routes/realtime";
 import {
   accountsRoute,
   accountsHandler,
+  grantTargetsRoute,
+  grantTargetsHandler,
   createGrantRoute,
   createGrantHandler,
   createPermissionRequestRoute,
@@ -157,6 +159,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/connections", productAuthorization);
   app.use("/api/v1/accounts", productAuthorization);
   app.use("/api/v1/accounts/*", productAuthorization);
+  app.use("/api/v1/grant-targets", productAuthorization);
   app.use("/api/v1/grants", productAuthorization);
   app.use("/api/v1/grants/*", productAuthorization);
   app.use("/api/v1/permission-requests", productAuthorization);
@@ -176,6 +179,7 @@ export function createApp(services: AppServices = {}) {
   app.openapi(messagesRoute, messagesHandler);
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);
+  app.openapi(grantTargetsRoute, grantTargetsHandler);
   app.openapi(grantsRoute, grantsHandler);
   app.openapi(createGrantRoute, createGrantHandler);
   app.openapi(updateGrantRoute, updateGrantHandler);

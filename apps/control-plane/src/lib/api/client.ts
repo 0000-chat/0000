@@ -6,6 +6,7 @@ import {
   AccountGrantMutationSchema,
   AccountGrantPageSchema,
   AccountGrantSchema,
+  AccountGrantTargetPageSchema,
   AccountGrantUpdateSchema,
   ConnectedAccountPageSchema,
   PermissionRequestCreateSchema,
@@ -20,6 +21,8 @@ import {
   SessionResponseSchema,
   type Command,
   type AccountGrant,
+  type AccountGrantPage,
+  type AccountGrantTargetPage,
   type AccountGrantMutation,
   type AccountGrantUpdate,
   type ConnectedAccountPage,
@@ -113,15 +116,27 @@ export class ApiClient {
     );
   }
 
-  getConnectedAccounts(identityId?: string): Promise<ConnectedAccountPage> {
-    const search = identityId === undefined
-      ? ""
-      : `?identity_id=${encodeURIComponent(identityId)}`;
-    return this.request(`/api/v1/accounts${search}`, ConnectedAccountPageSchema);
+  getConnectedAccounts(
+    identityId?: string,
+    cursor?: string,
+    limit = 50,
+  ): Promise<ConnectedAccountPage> {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (identityId !== undefined) search.set("identity_id", identityId);
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(`/api/v1/accounts?${search}`, ConnectedAccountPageSchema);
   }
 
-  getAccountGrants(): Promise<z.infer<typeof AccountGrantPageSchema>> {
-    return this.request("/api/v1/grants", AccountGrantPageSchema);
+  getAccountGrants(cursor?: string, limit = 50): Promise<AccountGrantPage> {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(`/api/v1/grants?${search}`, AccountGrantPageSchema);
+  }
+
+  getGrantTargets(cursor?: string, limit = 50): Promise<AccountGrantTargetPage> {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(`/api/v1/grant-targets?${search}`, AccountGrantTargetPageSchema);
   }
 
   createAccountGrant(input: AccountGrantMutation): Promise<AccountGrant> {
@@ -173,6 +188,20 @@ export class ApiClient {
     if (cursor !== undefined) search.set("cursor", cursor);
     return this.request(
       `/api/v1/identities/${encodeURIComponent(identityId)}/conversations?${search}`,
+      ConversationPageResultSchema,
+    );
+  }
+
+  getAccountConversations(
+    accountId: string,
+    identityId: string,
+    cursor?: string,
+    limit = 50,
+  ): Promise<ConversationPageResult> {
+    const search = new URLSearchParams({ identity_id: identityId, limit: String(limit) });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/accounts/${encodeURIComponent(accountId)}/conversations?${search}`,
       ConversationPageResultSchema,
     );
   }

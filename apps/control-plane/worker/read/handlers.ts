@@ -20,6 +20,7 @@ import { listConnectionsForIdentity } from "../control-directory/read-repository
 import type { TenantProjectionDO } from "../projection/tenant-projection";
 import {
   requireAuthorizedIdentity,
+  toGrantedAccountReadAuthorization,
   toGrantedProjectionReadAuthorization,
 } from "./authorization";
 import { mapReadError, ReadError } from "./errors";
@@ -282,22 +283,35 @@ export async function listConversations(
   input: ListConversationsInput,
 ): Promise<ConversationPageResult> {
   return withReadErrors(async () => {
-    requireAuthorizedIdentity(
-      context.authorization,
-      input.identity_id,
-      "conversation.read",
-    );
-    const authorization = await toGrantedProjectionReadAuthorization(
-      context.env,
-      context.authorization,
-      input.identity_id,
-    );
+    let resourceIdentityId = input.identity_id;
+    let authorization;
+    if (input.account_id !== undefined) {
+      const resolved = await toGrantedAccountReadAuthorization(
+        context.env,
+        context.authorization,
+        input.identity_id,
+        input.account_id,
+      );
+      resourceIdentityId = resolved.resourceIdentityId;
+      authorization = resolved.authorization;
+    } else {
+      requireAuthorizedIdentity(
+        context.authorization,
+        input.identity_id,
+        "conversation.read",
+      );
+      authorization = await toGrantedProjectionReadAuthorization(
+        context.env,
+        context.authorization,
+        input.identity_id,
+      );
+    }
     validateAccountFilter(input.account_id, authorization);
-    await validateChannelFilter(context, input.identity_id, input.channel_id, authorization);
+    await validateChannelFilter(context, resourceIdentityId, input.channel_id, authorization);
     const projectionInput = {
       schema_version: 1 as const,
       tenant_id: context.authorization.tenant.id,
-      identity_id: input.identity_id,
+      identity_id: resourceIdentityId,
       ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
       connection_id: input.channel_id ?? null,
       ...(input.limit === undefined ? {} : { page_size: input.limit }),
@@ -314,21 +328,34 @@ export async function getConversation(
   input: GetConversationInput,
 ): Promise<ConversationSummary> {
   return withReadErrors(async () => {
-    requireAuthorizedIdentity(
-      context.authorization,
-      input.identity_id,
-      "conversation.read",
-    );
-    const authorization = await toGrantedProjectionReadAuthorization(
-      context.env,
-      context.authorization,
-      input.identity_id,
-    );
+    let resourceIdentityId = input.identity_id;
+    let authorization;
+    if (input.account_id !== undefined) {
+      const resolved = await toGrantedAccountReadAuthorization(
+        context.env,
+        context.authorization,
+        input.identity_id,
+        input.account_id,
+      );
+      resourceIdentityId = resolved.resourceIdentityId;
+      authorization = resolved.authorization;
+    } else {
+      requireAuthorizedIdentity(
+        context.authorization,
+        input.identity_id,
+        "conversation.read",
+      );
+      authorization = await toGrantedProjectionReadAuthorization(
+        context.env,
+        context.authorization,
+        input.identity_id,
+      );
+    }
     validateAccountFilter(input.account_id, authorization);
     const conversation = await projection(context).getConversation({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
-      identity_id: input.identity_id,
+      identity_id: resourceIdentityId,
       conversation_id: input.conversation_id,
       ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
       authorization,
@@ -343,21 +370,34 @@ export async function listMessages(
   input: ListMessagesInput,
 ): Promise<MessagePageResult> {
   return withReadErrors(async () => {
-    requireAuthorizedIdentity(
-      context.authorization,
-      input.identity_id,
-      "conversation.read",
-    );
-    const authorization = await toGrantedProjectionReadAuthorization(
-      context.env,
-      context.authorization,
-      input.identity_id,
-    );
+    let resourceIdentityId = input.identity_id;
+    let authorization;
+    if (input.account_id !== undefined) {
+      const resolved = await toGrantedAccountReadAuthorization(
+        context.env,
+        context.authorization,
+        input.identity_id,
+        input.account_id,
+      );
+      resourceIdentityId = resolved.resourceIdentityId;
+      authorization = resolved.authorization;
+    } else {
+      requireAuthorizedIdentity(
+        context.authorization,
+        input.identity_id,
+        "conversation.read",
+      );
+      authorization = await toGrantedProjectionReadAuthorization(
+        context.env,
+        context.authorization,
+        input.identity_id,
+      );
+    }
     validateAccountFilter(input.account_id, authorization);
     const page = await projection(context).listMessages({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
-      identity_id: input.identity_id,
+      identity_id: resourceIdentityId,
       conversation_id: input.conversation_id,
       ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
       ...(input.limit === undefined ? {} : { page_size: input.limit }),

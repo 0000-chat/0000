@@ -1,9 +1,30 @@
 import { z } from "zod";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 import { ProviderSchema } from "./connection";
+import { IdentityKindSchema } from "./identity";
+import { MembershipRoleSchema, PrincipalTypeSchema } from "./authorization";
 
 export const MAX_GRANT_PAGE_SIZE = 100;
 export const MAX_GRANT_CHAT_IDS = 10_000;
+
+/** An active tenant membership and identity pair an administrator may target. */
+export const AccountGrantTargetSchema = z.object({
+  membership_id: CommunicatorIdSchema,
+  principal_id: CommunicatorIdSchema,
+  principal_type: PrincipalTypeSchema,
+  principal_display_name: z.string().min(1).max(100),
+  role: MembershipRoleSchema,
+  identity_id: CommunicatorIdSchema,
+  identity_kind: IdentityKindSchema,
+  identity_display_name: z.string().min(1).max(100),
+}).strict();
+export type AccountGrantTarget = z.infer<typeof AccountGrantTargetSchema>;
+
+export const AccountGrantTargetPageSchema = z.object({
+  items: z.array(AccountGrantTargetSchema),
+  next_cursor: z.string().min(1).max(2_048).nullable(),
+}).strict();
+export type AccountGrantTargetPage = z.infer<typeof AccountGrantTargetPageSchema>;
 
 /** A grant's operation is intentionally independent from its resource scope. */
 export const AccountGrantOperationScopeSchema = z.enum([

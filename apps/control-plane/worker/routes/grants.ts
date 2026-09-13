@@ -3,6 +3,7 @@ import {
   AccountGrantMutationSchema,
   AccountGrantPageSchema,
   AccountGrantSchema,
+  AccountGrantTargetPageSchema,
   AccountGrantUpdateSchema,
   ApiErrorResponseSchema,
   ConnectedAccountPageSchema,
@@ -23,6 +24,7 @@ import {
   createPermissionRequest,
   GrantRepositoryError,
   listAccountGrants,
+  listAccountGrantTargets,
   listConnectedAccounts,
   listPermissionRequests,
   revokeAccountGrant,
@@ -58,6 +60,10 @@ const grantQuery = z.object({
 }).strict();
 const accountQuery = z.object({
   identity_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
+}).strict();
+const targetQuery = z.object({
   cursor: optionalCursor,
   limit: optionalLimit,
 }).strict();
@@ -123,6 +129,14 @@ export const accountsRoute = createRoute({
   security: [{ bearerAuth: [] }],
   request: { query: accountQuery },
   responses: grantResponses(ConnectedAccountPageSchema, "Paginated connected accounts"),
+});
+
+export const grantTargetsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/grant-targets",
+  security: [{ bearerAuth: [] }],
+  request: { query: targetQuery },
+  responses: grantResponses(AccountGrantTargetPageSchema, "Eligible account grant targets"),
 });
 
 export const permissionRequestsRoute = createRoute({
@@ -272,24 +286,45 @@ export const accountsHandler: Handler<GrantRouteEnv, string, { out: { query: { i
     if (!admin && query.identity_id !== undefined && !ownIdentity(context, query.identity_id)) {
       return publicError(context, 403, "forbidden", "An agent may inspect only its own accounts");
     }
-    const visibleIdentityId = query.identity_id ?? context.get("authorization").identities[0]?.identity_id;
-    if (!admin && visibleIdentityId === undefined) {
+    const targetIdentityId = query.identity_id ?? context.get("authorization").identities[0]?.identity_id;
+    if (!admin && targetIdentityId === undefined) {
       return context.json({ items: [], next_cursor: null }, 200);
     }
-    const accountScope = admin || visibleIdentityId === undefined
+    const accountScope = admin || targetIdentityId === undefined
       ? undefined
       : await resolveAccountReadScope(
         context.env.CONTROL_DB.withSession("first-primary"),
         context.get("authorization").tenant.id,
         context.get("authorization").membership.id,
-        visibleIdentityId,
+        targetIdentityId,
       );
     return context.json(await listConnectedAccounts(
       context.env.CONTROL_DB.withSession("first-primary"),
       {
         tenantId: context.get("authorization").tenant.id,
-        ...(visibleIdentityId === undefined ? {} : { identityId: visibleIdentityId }),
+        // A delegated identity may be granted a human-owned account. Once
+        // the account scope is resolved, filtering again by the target
+        // identity would hide the very account the grant authorizes.
+        ...(admin && query.identity_id !== undefined ? { identityId: query.identity_id } : {}),
         ...(accountScope === undefined ? {} : { accountIds: accountScope.allowedAccountIds }),
+        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+      },
+    ), 200);
+  } catch (error) {
+    return grantFailure(context, error);
+  }
+};
+
+export const grantTargetsHandler: Handler<GrantRouteEnv, string, { out: { query: { cursor?: string; limit?: number } } }> = async (context) => {
+  const denied = requireAdministrator(context);
+  if (denied) return denied;
+  try {
+    const query = context.req.valid("query");
+    return context.json(await listAccountGrantTargets(
+      context.env.CONTROL_DB.withSession("first-primary"),
+      {
+        tenantId: context.get("authorization").tenant.id,
         ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
         ...(query.limit === undefined ? {} : { limit: query.limit }),
       },

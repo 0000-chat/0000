@@ -24,6 +24,7 @@ import {
 import { RealtimeSocketTelemetryEventSchema } from "../../realtime/telemetry";
 import type { RealtimeUpgradeContext } from "../../realtime/contracts";
 import type { TenantProjectionDO } from "../../projection/tenant-projection";
+import { clearDirectory } from "../support/directory-fixtures";
 
 const TENANT = "tenant_socket_tests";
 const INTERNAL_CONTEXT_HEADER = "X-Communicator-Realtime-Context";
@@ -153,6 +154,51 @@ const initialize = async (
   stub: DurableObjectStub<TenantProjectionDO>,
   tenant_id = TENANT,
 ): Promise<void> => {
+  const database = env.CONTROL_DB as D1Database;
+  await clearDirectory(database);
+  const timestamp = "2026-09-10T00:00:00.000Z";
+  const capacityRows: D1PreparedStatement[] = [];
+  if (tenant_id === "tenant_socket_tenant_capacity") {
+    for (let index = 0; index <= 256; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      capacityRows.push(
+        database.prepare(
+          "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'human', ?, 'active', ?, ?)",
+        ).bind(`principal_capacity_${suffix}`, "https://issuer.example/", `capacity-${tenant_id}-${suffix}`, `Capacity ${suffix}`, timestamp, timestamp),
+        database.prepare(
+          "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'owner', 'active', ?, ?)",
+        ).bind(`membership_capacity_${suffix}`, tenant_id, `principal_capacity_${suffix}`, timestamp, timestamp),
+        database.prepare(
+          "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, 'identity_human', 'conversation.read', ?)",
+        ).bind(tenant_id, `membership_capacity_${suffix}`, timestamp),
+      );
+    }
+  }
+  await database.batch([
+    database.prepare(
+      "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)",
+    ).bind(tenant_id, tenant_id, tenant_id, timestamp, timestamp),
+    database.prepare(
+      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'human', ?, 'active', ?, ?)",
+    ).bind("principal_human", "https://issuer.example/", `human-${tenant_id}`, "Human", timestamp, timestamp),
+    database.prepare(
+      "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'owner', 'active', ?, ?)",
+    ).bind("membership_human", tenant_id, "principal_human", timestamp, timestamp),
+    database.prepare(
+      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, 'human', ?, 'active', ?, ?)",
+    ).bind("identity_human", tenant_id, "Human", timestamp, timestamp),
+    database.prepare(
+      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, 'agent', ?, 'active', ?, ?)",
+    ).bind("identity_agent", tenant_id, "Agent", timestamp, timestamp),
+    database.prepare(
+      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, 'human', ?, 'active', ?, ?)",
+    ).bind("identity_unmatched", tenant_id, "Unmatched", timestamp, timestamp),
+    ...["identity_human", "identity_agent", "identity_unmatched"].map((identity_id) =>
+      database.prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, 'conversation.read', ?)",
+      ).bind(tenant_id, "membership_human", identity_id, timestamp)),
+    ...capacityRows,
+  ]);
   await stub.initialize({
     schema_version: 1,
     tenant_id,
@@ -674,6 +720,30 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     }
   });
 
+  it("closes an open socket when its current identity grant is revoked before broadcast", async () => {
+    const tenant = "tenant_socket_revalidation_revoked";
+    const stub = realtimeStub(tenant);
+    await initialize(stub, tenant);
+    const { socket } = await connectRealtimeSocket(
+      stub,
+      contextForTenant(tenant, ["identity_human"]),
+    );
+    const collector = startSocketFrameCollector(socket);
+    const closed = waitForClosed(socket);
+
+    await (env.CONTROL_DB as D1Database).prepare(
+      "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND operation_scope = 'conversation.read'",
+    ).bind(tenant, "membership_human", "identity_human").run();
+    await stub.applyBatch(applyInput(
+      [event("identity_human", 1, undefined, tenant)],
+      ["identity_human"],
+      tenant,
+    ));
+
+    expect(await closed).toBe(1008);
+    expect(await waitForSocketQuiet(collector)).toEqual([]);
+  });
+
   it("does not advance an identity sequence or broadcast on a duplicate retry", async () => {
     const tenant = "tenant_socket_duplicate_live";
     const stub = realtimeStub(tenant);
@@ -1105,6 +1175,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         schema_version: 1,
         tenant_id: tenant,
         principal_id: "principal_human",
+        membership_id: "membership_human",
         subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
         positions: [{ identity_id: "identity_human", generation: 1, sequence: 0 }],
         lease_expires_at: new Date(Date.now() - 1_000).toISOString(),
@@ -1114,6 +1185,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         schema_version: 1,
         tenant_id: tenant,
         principal_id: "principal_human",
+        membership_id: "membership_human",
         subscriptions: [{ identity_id: "identity_agent", families: ["projection"] }],
         positions: [{ identity_id: "identity_agent", generation: 1, sequence: 0 }],
         lease_expires_at: remainingExpiry,
