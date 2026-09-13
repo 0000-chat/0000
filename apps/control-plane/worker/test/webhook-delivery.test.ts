@@ -13,6 +13,7 @@ import {
   type WebhookProjection,
 } from "../webhooks/delivery";
 import { recordRemoval } from "../removals/ledger";
+import { recordRemovalWithSuppression } from "../removals/service";
 import {
   clearDirectory,
   seedAccountAccess,
@@ -189,7 +190,7 @@ const deliveryRow = async (id: string) =>
     `SELECT id, status, destination_version, source_revision, http_status,
             error_code, payload_json, cancellation_reason, first_pending_at,
             retry_deadline, attempt_count, next_attempt_at, last_response_body,
-            uncertain_at, uncertainty_reason
+            uncertain_at, uncertainty_reason, provider_request_started_at
      FROM webhook_deliveries WHERE id = ?`,
   )
     .bind(id)
@@ -209,6 +210,7 @@ const deliveryRow = async (id: string) =>
       last_response_body: string | null;
       uncertain_at: string | null;
       uncertainty_reason: string | null;
+      provider_request_started_at: string | null;
     }>();
 
 beforeEach(async () => {
@@ -929,6 +931,238 @@ describe("durable incoming webhook delivery", () => {
       status: "cancelled",
       cancellation_reason: "destination_version_mismatch",
     });
+  });
+
+  it("does not call a receiver when removal wins before the durable lease", async () => {
+    await insertSubscription(
+      subscription({ id: "webhook_removal_before_claim" }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_removal_before_claim")],
+      now: () => fixedNow,
+    });
+
+    let enterClaimBarrier!: () => void;
+    let releaseClaimBarrier!: () => void;
+    const claimBarrierEntered = new Promise<void>((resolve) => {
+      enterClaimBarrier = resolve;
+    });
+    const claimBarrierRelease = new Promise<void>((resolve) => {
+      releaseClaimBarrier = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        beforeClaim: async () => {
+          enterClaimBarrier();
+          await claimBarrierRelease;
+        },
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await claimBarrierEntered;
+    await recordRemovalWithSuppression(
+      workerEnv.CONTROL_DB.withSession("first-primary"),
+      {
+        tenant_id: "tenant_pilot",
+        resource_type: "message",
+        resource_id: "message_incoming_1",
+        content_generation: "message_incoming_1",
+        account_id: "account_human",
+        conversation_id: "conversation_one",
+        source_event_id: "event_removal_before_claim",
+        source_object_key: null,
+        reason: "requested",
+        removed_at: fixedNow.toISOString(),
+      },
+      fixedNow,
+    );
+    releaseClaimBarrier();
+    await delivery;
+
+    expect(fetchCount).toBe(0);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "source_removed",
+      provider_request_started_at: null,
+    });
+  });
+
+  it("records removal after provider request entry as uncertain without retry", async () => {
+    await insertSubscription(subscription({ id: "webhook_removal_in_flight" }));
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_removal_in_flight")],
+      now: () => fixedNow,
+    });
+
+    let enterFetch!: () => void;
+    let releaseFetch!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => {
+      enterFetch = resolve;
+    });
+    const fetchRelease = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => {
+          fetchCount += 1;
+          enterFetch();
+          await fetchRelease;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await fetchEntered;
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "leased",
+      provider_request_started_at: fixedNow.toISOString(),
+    });
+    await recordRemoval(workerEnv.CONTROL_DB, {
+      tenant_id: "tenant_pilot",
+      resource_type: "message",
+      resource_id: "message_incoming_1",
+      content_generation: "message_incoming_1",
+      account_id: "account_human",
+      conversation_id: "conversation_one",
+      source_event_id: "event_removal_in_flight",
+      source_object_key: null,
+      reason: "requested",
+      removed_at: fixedNow.toISOString(),
+    });
+    releaseFetch();
+    await delivery;
+
+    expect(fetchCount).toBe(1);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "uncertain",
+      http_status: 202,
+      error_code: "delivery_uncertain",
+      uncertainty_reason: "source_removed_in_flight",
+      provider_request_started_at: fixedNow.toISOString(),
+    });
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => new Date(fixedNow.getTime() + 60 * 60 * 1_000),
+          fetch: async () => {
+            fetchCount += 1;
+            return new Response(null, { status: 202 });
+          },
+        },
+      }),
+    ).resolves.toEqual({ scanned: 0, attempted: 0 });
+    expect(fetchCount).toBe(1);
+  });
+
+  it("marks an expired in-flight lease uncertain instead of resending", async () => {
+    await insertSubscription(subscription({ id: "webhook_expired_in_flight" }));
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_expired_in_flight")],
+      now: () => fixedNow,
+    });
+
+    let enterFetch!: () => void;
+    let releaseFetch!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => {
+      enterFetch = resolve;
+    });
+    const fetchRelease = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => {
+          fetchCount += 1;
+          enterFetch();
+          await fetchRelease;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await fetchEntered;
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "leased",
+      provider_request_started_at: fixedNow.toISOString(),
+    });
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE webhook_deliveries SET lease_expires_at = ? WHERE id = ?",
+    )
+      .bind(new Date(fixedNow.getTime() - 1).toISOString(), id)
+      .run();
+
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => fixedNow,
+          fetch: async () => {
+            fetchCount += 1;
+            return new Response(null, { status: 202 });
+          },
+        },
+      }),
+    ).resolves.toEqual({ scanned: 1, attempted: 1 });
+    expect(fetchCount).toBe(1);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "uncertain",
+      error_code: "delivery_uncertain",
+      uncertainty_reason: "delivery_lease_expired_in_flight",
+      provider_request_started_at: fixedNow.toISOString(),
+    });
+
+    releaseFetch();
+    await delivery;
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "uncertain",
+      uncertainty_reason: "delivery_lease_expired_in_flight",
+    });
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => new Date(fixedNow.getTime() + 60 * 60 * 1_000),
+          fetch: async () => {
+            fetchCount += 1;
+            return new Response(null, { status: 202 });
+          },
+        },
+      }),
+    ).resolves.toEqual({ scanned: 0, attempted: 0 });
+    expect(fetchCount).toBe(1);
   });
 
   it("keeps a 4xx response retryable until the fixed deadline", async () => {

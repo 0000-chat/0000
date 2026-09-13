@@ -12,6 +12,7 @@ import {
   type WebhookRemovalDeliveryPayload,
   type WebhookMessage,
   type WebhookSubscription,
+  type RemovalAuthority,
 } from "@communicator/contracts";
 import { sha256Hex } from "../archive/codec";
 import { issueAttachmentGrant } from "../attachments/grants";
@@ -73,6 +74,8 @@ type DeliveryRow = {
   cancellation_reason: string | null;
   lease_id: string | null;
   lease_expires_at: string | null;
+  removal_epoch: number;
+  provider_request_started_at: string | null;
   last_attempt_at: string | null;
   delivered_at: string | null;
   http_status: number | null;
@@ -122,13 +125,20 @@ export type WebhookDeliveryServices = {
   resolveCredential?: WebhookCredentialResolver | undefined;
   credentialStore?: WebhookCredentialStore | undefined;
   httpTimeoutMs?: number | undefined;
+  /** Test-only seam for a removal race immediately before the durable lease. */
+  beforeClaim?: ((deliveryId: string) => Promise<void>) | undefined;
   /** Test-only seam for revocation/edit races immediately before HTTP. */
   beforeFetch?: ((deliveryId: string) => Promise<void>) | undefined;
 };
 
 export type WebhookRetryTickServices = Pick<
   WebhookDeliveryServices,
-  "now" | "fetch" | "resolveCredential" | "credentialStore" | "beforeFetch"
+  | "now"
+  | "fetch"
+  | "resolveCredential"
+  | "credentialStore"
+  | "beforeClaim"
+  | "beforeFetch"
 >;
 
 export type WebhookRetryTickResult = {
@@ -213,11 +223,73 @@ type Candidate = {
   deliveryId: string;
 };
 
-const databaseSession = (database: D1Database): D1DatabaseSession => {
-  if (typeof database.withSession !== "function") {
-    throw new Error("webhook delivery database unavailable");
+const databaseSession = (
+  database: D1Database | D1DatabaseSession,
+): D1DatabaseSession => {
+  if ("withSession" in database && typeof database.withSession === "function") {
+    return database.withSession("first-primary");
   }
-  return database.withSession("first-primary");
+  return database as D1DatabaseSession;
+};
+
+/**
+ * Apply removal suppression to work that has not crossed the provider-request
+ * boundary.  A row with a durable provider start marker is deliberately left
+ * leased so its worker can classify the external result as uncertain after it
+ * observes the advanced removal epoch.  The retention caller must use this
+ * helper after recording authority; a broad status-only update would erase
+ * that in-flight evidence.
+ */
+export const cancelWebhookDeliveriesForRemoval = async (
+  database: D1Database | D1DatabaseSession,
+  authority: Pick<
+    RemovalAuthority,
+    | "tenant_id"
+    | "resource_type"
+    | "resource_id"
+    | "account_id"
+    | "conversation_id"
+  >,
+  now = new Date(),
+): Promise<void> => {
+  if (
+    authority.resource_type !== "message" &&
+    authority.resource_type !== "conversation"
+  ) {
+    return;
+  }
+  const sourceColumn =
+    authority.resource_type === "message"
+      ? "source_message_id"
+      : "source_conversation_id";
+  const db = databaseSession(database);
+  await db
+    .prepare(
+      `UPDATE webhook_deliveries
+       SET status = 'cancelled', cancelled_at = ?,
+           cancellation_reason = 'source_removed', lease_id = NULL,
+           lease_expires_at = NULL, next_attempt_at = NULL,
+           payload_json = NULL, manual_retry_at = NULL,
+           uncertain_at = NULL, uncertainty_reason = NULL,
+           provider_request_started_at = NULL
+       WHERE tenant_id = ? AND ${sourceColumn} = ?
+         AND (
+           status = 'pending' OR
+           (status = 'leased' AND provider_request_started_at IS NULL)
+         )
+         AND (? IS NULL OR source_account_id = ?)
+         AND (? IS NULL OR source_conversation_id = ?)`,
+    )
+    .bind(
+      now.toISOString(),
+      authority.tenant_id,
+      authority.resource_id,
+      authority.account_id,
+      authority.account_id,
+      authority.conversation_id,
+      authority.conversation_id,
+    )
+    .run();
 };
 
 const nowFor = (services: WebhookDeliveryServices): Date => {
@@ -594,6 +666,7 @@ const previouslyDeliveredDestinationVersion = async (
 const insertDeliveryRows = async (
   database: D1Database,
   candidates: readonly Candidate[],
+  removalEpoch: number,
   now: string,
 ): Promise<void> => {
   for (
@@ -614,10 +687,10 @@ const insertDeliveryRows = async (
               next_attempt_at, cancelled_at, cancellation_reason, lease_id,
               lease_expires_at, last_attempt_at, delivered_at, http_status,
               error_code, payload_json, last_response_body, manual_retry_at,
-              uncertain_at, uncertainty_reason)
+              uncertain_at, uncertainty_reason, removal_epoch)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0,
                      ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                     NULL, NULL, NULL, NULL)`,
+                     NULL, NULL, NULL, NULL, ?)`,
           )
           .bind(
             candidate.deliveryId,
@@ -634,6 +707,7 @@ const insertDeliveryRows = async (
             now,
             retryDeadlineFor(now),
             now,
+            removalEpoch,
           ),
       ),
     );
@@ -738,6 +812,7 @@ const insertRemovalDeliveryRows = async (
   authority: RemovalAuthorityRow,
   subscriptions: readonly WebhookSubscription[],
   rows: readonly DeliveredSourceRow[],
+  removalEpoch: number,
   now: string,
 ): Promise<string[]> => {
   const candidates: Array<{
@@ -798,10 +873,10 @@ const insertRemovalDeliveryRows = async (
             next_attempt_at, cancelled_at, cancellation_reason, lease_id,
             lease_expires_at, last_attempt_at, delivered_at, http_status,
             error_code, payload_json, last_response_body, manual_retry_at,
-            uncertain_at, uncertainty_reason)
+            uncertain_at, uncertainty_reason, removal_epoch)
            VALUES (?, ?, ?, ?, 'message.deleted', ?, ?, ?, ?, ?, ?, 'pending',
                    ?, ?, 0, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                   NULL, NULL, NULL, NULL, NULL, NULL)`,
+                   NULL, NULL, NULL, NULL, NULL, NULL, ?)`,
         )
         .bind(
           candidate.id,
@@ -817,6 +892,7 @@ const insertRemovalDeliveryRows = async (
           now,
           retryDeadline,
           now,
+          removalEpoch,
         ),
     ),
   );
@@ -882,6 +958,7 @@ export const reconcileWebhookRemovalDeliveries = async (input: {
         authority,
         subscriptions,
         deliveredRows,
+        await readTenantDeletionEpoch(input.database, authority.tenant_id),
         now.toISOString(),
       )),
     );
@@ -901,7 +978,8 @@ const readDelivery = async (
               source_conversation_id, source_revision, destination_version,
               status, first_pending_at, retry_deadline, attempt_count,
               next_attempt_at, cancelled_at, cancellation_reason, lease_id,
-              lease_expires_at, last_attempt_at, delivered_at, http_status,
+              lease_expires_at, removal_epoch, provider_request_started_at,
+              last_attempt_at, delivered_at, http_status,
               error_code, payload_json, last_response_body, manual_retry_at,
               uncertain_at, uncertainty_reason
        FROM webhook_deliveries
@@ -926,15 +1004,30 @@ const claimDelivery = async (
   await database
     .prepare(
       `UPDATE webhook_deliveries
+       SET status = 'uncertain', uncertain_at = ?,
+           uncertainty_reason = 'delivery_lease_expired_in_flight',
+           delivered_at = NULL, next_attempt_at = NULL,
+           error_code = 'delivery_uncertain', lease_id = NULL,
+           lease_expires_at = NULL, manual_retry_at = NULL
+       WHERE tenant_id = ? AND id = ? AND status = 'leased'
+         AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+         AND provider_request_started_at IS NOT NULL`,
+    )
+    .bind(nowIso, tenantId, deliveryId, nowIso)
+    .run();
+  await database
+    .prepare(
+      `UPDATE webhook_deliveries
        SET status = 'failed', error_code = 'retry_deadline_exceeded',
            next_attempt_at = NULL, lease_id = NULL, lease_expires_at = NULL,
-           manual_retry_at = NULL
+           manual_retry_at = NULL, provider_request_started_at = NULL
        WHERE tenant_id = ? AND id = ?
          AND retry_deadline <= ? AND manual_retry_at IS NULL
          AND (
            status = 'pending'
            OR (status = 'leased' AND lease_expires_at IS NOT NULL
-               AND lease_expires_at <= ?)
+               AND lease_expires_at <= ?
+               AND provider_request_started_at IS NULL)
          )`,
     )
     .bind(tenantId, deliveryId, nowIso, nowIso)
@@ -944,7 +1037,16 @@ const claimDelivery = async (
       `UPDATE webhook_deliveries
        SET status = 'leased', lease_id = ?, lease_expires_at = ?,
            last_attempt_at = ?, attempt_count = attempt_count + 1,
-           next_attempt_at = NULL, manual_retry_at = NULL
+           next_attempt_at = NULL, manual_retry_at = NULL,
+           provider_request_started_at = NULL,
+           removal_epoch = COALESCE(
+             (
+               SELECT MAX(authority.deletion_epoch)
+               FROM removal_authority AS authority
+               WHERE authority.tenant_id = webhook_deliveries.tenant_id
+             ),
+             0
+           )
        WHERE tenant_id = ? AND id = ?
          AND (
            (
@@ -955,6 +1057,7 @@ const claimDelivery = async (
            OR (
              status = 'leased' AND lease_expires_at IS NOT NULL
              AND lease_expires_at <= ? AND retry_deadline > ?
+             AND provider_request_started_at IS NULL
            )
          )`,
     )
@@ -999,7 +1102,7 @@ const cancelDelivery = async (
        SET status = 'cancelled', cancelled_at = ?, cancellation_reason = ?,
            lease_id = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
            payload_json = NULL, manual_retry_at = NULL, uncertain_at = NULL,
-           uncertainty_reason = NULL
+           uncertainty_reason = NULL, provider_request_started_at = NULL
        WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
     )
     .bind(now, reason, tenantId, deliveryId, leaseId)
@@ -1024,7 +1127,8 @@ const finishSuccessfulDelivery = async (
        SET status = 'delivered', delivered_at = ?, http_status = ?,
            error_code = NULL, payload_json = ?, last_response_body = ?,
            lease_id = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
-           manual_retry_at = NULL, uncertain_at = NULL, uncertainty_reason = NULL
+           manual_retry_at = NULL, uncertain_at = NULL, uncertainty_reason = NULL,
+           provider_request_started_at = NULL
        WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
     )
     .bind(
@@ -1072,7 +1176,8 @@ const finishFailedDelivery = async (
            delivered_at = NULL, http_status = ?, error_code = ?,
            payload_json = ?, last_response_body = ?, lease_id = NULL,
            lease_expires_at = NULL, manual_retry_at = NULL,
-           uncertain_at = NULL, uncertainty_reason = NULL
+           uncertain_at = NULL, uncertainty_reason = NULL,
+           provider_request_started_at = NULL
        WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
     )
     .bind(
@@ -1133,6 +1238,50 @@ const finishUncertainDelivery = async (
       input.leaseId,
     )
     .run();
+};
+
+/**
+ * Atomically cross the durable provider-I/O boundary.  The epoch comparison
+ * is in the same UPDATE as the provider-start marker, so a removal committed
+ * before this claim cannot be followed by an HTTP request.
+ */
+const claimProviderRequest = async (
+  database: D1Database,
+  input: {
+    tenantId: string;
+    deliveryId: string;
+    leaseId: string;
+    now: string;
+    expectedRemovalEpoch: number;
+  },
+): Promise<boolean> => {
+  const result = await database
+    .prepare(
+      `UPDATE webhook_deliveries
+       SET provider_request_started_at = ?, removal_epoch = ?
+       WHERE tenant_id = ? AND id = ? AND status = 'leased'
+         AND lease_id = ? AND provider_request_started_at IS NULL
+         AND lease_expires_at IS NOT NULL AND lease_expires_at > ?
+         AND ? = COALESCE(
+           (
+             SELECT MAX(authority.deletion_epoch)
+             FROM removal_authority AS authority
+             WHERE authority.tenant_id = webhook_deliveries.tenant_id
+           ),
+           0
+         )`,
+    )
+    .bind(
+      input.now,
+      input.expectedRemovalEpoch,
+      input.tenantId,
+      input.deliveryId,
+      input.leaseId,
+      input.now,
+      input.expectedRemovalEpoch,
+    )
+    .run();
+  return (result.meta.changes ?? 0) === 1;
 };
 
 const projectionAuthorization = (
@@ -1535,12 +1684,14 @@ const deliverOne = async (
   services: WebhookDeliveryServices,
 ): Promise<void> => {
   const now = nowFor(services);
+  await services.beforeClaim?.(deliveryId);
   const claim = await claimDelivery(database, tenantId, deliveryId, now);
   if (claim.busy) throw new Error("webhook delivery lease is active");
   const lease = claim.lease;
   if (lease === null) return;
   const db = databaseSession(database);
-  let removalEpoch = await readTenantDeletionEpoch(database, tenantId);
+  let removalEpoch = lease.removal_epoch;
+  let providerRequestStarted = false;
   let payloadJson: string | null = null;
   const authorizationMatches = async (
     subscription: WebhookSubscription | null,
@@ -1601,6 +1752,18 @@ const deliverOne = async (
     return { changed, authority };
   };
 
+  const removalUncertaintyReason = (): string =>
+    isWebhookRemovalDelivery(lease.event_type)
+      ? "removal_epoch_advanced_in_flight"
+      : "source_removed_in_flight";
+
+  const removalBecameUncertain = (fence: {
+    changed: boolean;
+    authority: Awaited<ReturnType<typeof removalForDelivery>>;
+  }): boolean =>
+    fence.changed ||
+    (!isWebhookRemovalDelivery(lease.event_type) && fence.authority !== null);
+
   const initialRemoval = await removalFence();
   if (
     (isWebhookRemovalDelivery(lease.event_type) &&
@@ -1621,6 +1784,37 @@ const deliverOne = async (
     httpStatus: number | null,
     responseBody: string | null,
   ): Promise<void> => {
+    if (providerRequestStarted) {
+      let removal: Awaited<ReturnType<typeof removalFence>>;
+      try {
+        removal = await removalFence();
+      } catch {
+        await finishUncertainDelivery(database, {
+          tenantId,
+          deliveryId,
+          leaseId: lease.lease_id,
+          now: nowFor(services).toISOString(),
+          httpStatus,
+          reason: "removal_fence_unavailable_in_flight",
+          payloadJson,
+          responseBody,
+        });
+        return;
+      }
+      if (removalBecameUncertain(removal)) {
+        await finishUncertainDelivery(database, {
+          tenantId,
+          deliveryId,
+          leaseId: lease.lease_id,
+          now: nowFor(services).toISOString(),
+          httpStatus,
+          reason: removalUncertaintyReason(),
+          payloadJson,
+          responseBody,
+        });
+        return;
+      }
+    }
     const latest = await currentSubscription(
       db,
       tenantId,
@@ -1877,6 +2071,38 @@ const deliverOne = async (
       return;
     }
 
+    providerRequestStarted = await claimProviderRequest(database, {
+      tenantId,
+      deliveryId,
+      leaseId: lease.lease_id,
+      now: nowFor(services).toISOString(),
+      expectedRemovalEpoch: removalEpoch,
+    });
+    if (!providerRequestStarted) {
+      const removal = await removalFence();
+      if (
+        (isWebhookRemovalDelivery(lease.event_type) &&
+          removal.authority === null) ||
+        (!isWebhookRemovalDelivery(lease.event_type) &&
+          removal.authority !== null)
+      ) {
+        await cancelForRemoval(
+          isWebhookRemovalDelivery(lease.event_type)
+            ? "source_removal_authority_unavailable"
+            : "source_removed",
+        );
+      } else if (removal.changed) {
+        providerRequestStarted = await claimProviderRequest(database, {
+          tenantId,
+          deliveryId,
+          leaseId: lease.lease_id,
+          now: nowFor(services).toISOString(),
+          expectedRemovalEpoch: removalEpoch,
+        });
+      }
+      if (!providerRequestStarted) return;
+    }
+
     const response = await fetchWithTimeout(
       services.fetch ?? fetch,
       activeFinalSubscription.destination.url,
@@ -1898,6 +2124,35 @@ const deliverOne = async (
       httpTimeoutFor(services),
     );
     const outcomeNow = nowFor(services);
+    let afterResponseRemoval: Awaited<ReturnType<typeof removalFence>>;
+    try {
+      afterResponseRemoval = await removalFence();
+    } catch {
+      await finishUncertainDelivery(database, {
+        tenantId,
+        deliveryId,
+        leaseId: lease.lease_id,
+        now: outcomeNow.toISOString(),
+        httpStatus: response.status,
+        reason: "removal_fence_unavailable_in_flight",
+        payloadJson,
+        responseBody,
+      });
+      return;
+    }
+    if (removalBecameUncertain(afterResponseRemoval)) {
+      await finishUncertainDelivery(database, {
+        tenantId,
+        deliveryId,
+        leaseId: lease.lease_id,
+        now: outcomeNow.toISOString(),
+        httpStatus: response.status,
+        reason: removalUncertaintyReason(),
+        payloadJson,
+        responseBody,
+      });
+      return;
+    }
     const afterResponse = await currentSubscription(
       db,
       tenantId,
@@ -2016,7 +2271,16 @@ export const fanOutIncomingWebhookDeliveries = async (input: {
     }
   }
   if (candidates.length === 0) return [];
-  await insertDeliveryRows(input.database, candidates, now.toISOString());
+  const removalEpoch = await readTenantDeletionEpoch(
+    input.database,
+    input.tenantId,
+  );
+  await insertDeliveryRows(
+    input.database,
+    candidates,
+    removalEpoch,
+    now.toISOString(),
+  );
   return [...new Set(candidates.map((candidate) => candidate.deliveryId))];
 };
 
