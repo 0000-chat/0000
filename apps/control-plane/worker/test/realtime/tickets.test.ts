@@ -17,7 +17,11 @@ import {
   digestRealtimeTicket,
   generateRealtimeTicket,
 } from "../../realtime/token";
-import { clearDirectory, seedDirectory } from "../support/directory-fixtures";
+import {
+  clearDirectory,
+  seedAccountAccess,
+  seedDirectory,
+} from "../support/directory-fixtures";
 
 const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 const now = new Date("2026-09-10T10:00:00.000Z");
@@ -55,6 +59,33 @@ const ticketRequest = {
 
 const authorizedRequest = () =>
   authorizeRealtimeRequest(humanSession, ticketRequest);
+
+const agentSession: SessionResponse = {
+  tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },
+  principal: { id: "principal_agent", type: "agent", display_name: "Agent" },
+  membership: { id: "membership_agent", role: "member" },
+  identities: [
+    {
+      identity_id: "identity_agent",
+      kind: "agent",
+      display_name: "Agent",
+      scopes: ["conversation.read", "connection.read"],
+    },
+  ],
+};
+
+const agentRequest = {
+  schema_version: 1 as const,
+  subscriptions: [
+    {
+      identity_id: "identity_agent",
+      families: ["projection" as const],
+    },
+  ],
+};
+
+const authorizedAgentRequest = () =>
+  authorizeRealtimeRequest(agentSession, agentRequest);
 
 beforeEach(async () => {
   await clearDirectory(env.CONTROL_DB);
@@ -306,6 +337,48 @@ describe("digest-only realtime ticket storage", () => {
       ).toBeNull();
     },
   );
+
+  it("rejects a legacy delegated ticket after its account grant is revoked", async () => {
+    await seedAccountAccess(env.CONTROL_DB);
+    const issued = await issueRealtimeTicket(
+      env.CONTROL_DB,
+      authorizedAgentRequest(),
+      now,
+    );
+    await env.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(timestamp, timestamp, "grant_fixture_agent")
+      .run();
+
+    expect(
+      await consumeRealtimeTicket(
+        env.CONTROL_DB,
+        issued.ticket,
+        new Date(now.getTime() + 1_000),
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps an explicit tenant-admin ticket valid when account rows exist", async () => {
+    await seedAccountAccess(env.CONTROL_DB);
+    const issued = await issueRealtimeTicket(
+      env.CONTROL_DB,
+      authorizedRequest(),
+      now,
+    );
+    expect(
+      await consumeRealtimeTicket(
+        env.CONTROL_DB,
+        issued.ticket,
+        new Date(now.getTime() + 1_000),
+      ),
+    ).toMatchObject({
+      tenant_id: "tenant_pilot",
+      principal_id: "principal_human",
+      membership_id: "membership_human",
+    });
+  });
 
   it("fails closed for malformed stored JSON and wrong tenant references", async () => {
     const malformed = await issueRealtimeTicket(

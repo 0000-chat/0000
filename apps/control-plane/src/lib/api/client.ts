@@ -3,6 +3,14 @@ import {
   ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
+  AccountGrantMutationSchema,
+  AccountGrantPageSchema,
+  AccountGrantSchema,
+  AccountGrantTargetPageSchema,
+  AccountGrantUpdateSchema,
+  ConnectedAccountPageSchema,
+  PermissionRequestCreateSchema,
+  PermissionRequestSchema,
   ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
@@ -12,6 +20,14 @@ import {
   RealtimeTicketResponseSchema,
   SessionResponseSchema,
   type Command,
+  type AccountGrant,
+  type AccountGrantPage,
+  type AccountGrantTargetPage,
+  type AccountGrantMutation,
+  type AccountGrantUpdate,
+  type ConnectedAccountPage,
+  type PermissionRequestCreate,
+  type PermissionRequest,
   type ChannelSummary,
   type Connection,
   type ConversationPageResult,
@@ -121,6 +137,89 @@ export class ApiClient {
     );
   }
 
+  getConnectedAccounts(
+    identityId?: string,
+    cursor?: string,
+    limit = 50,
+  ): Promise<ConnectedAccountPage> {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (identityId !== undefined) search.set("identity_id", identityId);
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/accounts?${search}`,
+      ConnectedAccountPageSchema,
+    );
+  }
+
+  getAccountGrants(cursor?: string, limit = 50): Promise<AccountGrantPage> {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(`/api/v1/grants?${search}`, AccountGrantPageSchema);
+  }
+
+  getGrantTargets(
+    cursor?: string,
+    limit = 50,
+  ): Promise<AccountGrantTargetPage> {
+    const search = new URLSearchParams({ limit: String(limit) });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/grant-targets?${search}`,
+      AccountGrantTargetPageSchema,
+    );
+  }
+
+  createAccountGrant(input: AccountGrantMutation): Promise<AccountGrant> {
+    return this.request("/api/v1/grants", AccountGrantSchema, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(AccountGrantMutationSchema.parse(input)),
+    });
+  }
+
+  updateAccountGrant(
+    grantId: string,
+    input: AccountGrantUpdate,
+  ): Promise<AccountGrant> {
+    return this.request(
+      `/api/v1/grants/${encodeURIComponent(grantId)}`,
+      AccountGrantSchema,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(AccountGrantUpdateSchema.parse(input)),
+      },
+    );
+  }
+
+  revokeAccountGrant(
+    grantId: string,
+    idempotencyKey: string,
+  ): Promise<AccountGrant> {
+    return this.request(
+      `/api/v1/grants/${encodeURIComponent(grantId)}`,
+      AccountGrantSchema,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
+    );
+  }
+
+  createPermissionRequest(
+    input: PermissionRequestCreate,
+  ): Promise<PermissionRequest> {
+    return this.request(
+      "/api/v1/permission-requests",
+      PermissionRequestSchema,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(PermissionRequestCreateSchema.parse(input)),
+      },
+    );
+  }
+
   getChannels(identityId: string): Promise<ChannelSummary[]> {
     return this.request(
       `/api/v1/identities/${encodeURIComponent(identityId)}/channels`,
@@ -139,6 +238,23 @@ export class ApiClient {
     if (cursor !== undefined) search.set("cursor", cursor);
     return this.request(
       `/api/v1/identities/${encodeURIComponent(identityId)}/conversations?${search}`,
+      ConversationPageResultSchema,
+    );
+  }
+
+  getAccountConversations(
+    accountId: string,
+    identityId: string,
+    cursor?: string,
+    limit = 50,
+  ): Promise<ConversationPageResult> {
+    const search = new URLSearchParams({
+      identity_id: identityId,
+      limit: String(limit),
+    });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/accounts/${encodeURIComponent(accountId)}/conversations?${search}`,
       ConversationPageResultSchema,
     );
   }

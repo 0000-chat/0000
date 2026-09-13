@@ -172,6 +172,29 @@ export async function seedIngestionFixture(
       ),
     db
       .prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'human', ?, 'active', ?, ?)",
+      )
+      .bind(
+        `principal_reader_${suffix}`,
+        fixture.issuer,
+        `reader_${suffix}`,
+        "Reader",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'owner', 'active', ?, ?)",
+      )
+      .bind(
+        `membership_reader_${suffix}`,
+        fixture.tenantId,
+        `principal_reader_${suffix}`,
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
         "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       )
       .bind(
@@ -207,6 +230,16 @@ export async function seedIngestionFixture(
         "Other inbox",
         "active",
         timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, 'conversation.read', ?)",
+      )
+      .bind(
+        fixture.tenantId,
+        `membership_reader_${suffix}`,
+        fixture.identities.human,
         timestamp,
       ),
     db

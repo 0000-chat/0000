@@ -195,6 +195,8 @@ const RealtimeSocketAttachmentObjectSchema = z
     schema_version: z.literal(1),
     tenant_id: RealtimeIdSchema,
     principal_id: RealtimeIdSchema,
+    /** Bound membership needed to revalidate a hibernated socket. */
+    membership_id: RealtimeIdSchema.optional(),
     subscriptions: RealtimeSubscriptionArraySchema,
     positions: RealtimePositionArraySchema,
     lease_expires_at: RealtimeTimestampSchema,

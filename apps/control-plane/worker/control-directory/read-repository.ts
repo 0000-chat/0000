@@ -8,6 +8,7 @@ import {
 
 export type DirectoryConnection = Connection & {
   sort_position: number;
+  account_id?: string;
 };
 
 export type DirectoryReadErrorCode =
@@ -65,6 +66,7 @@ type ConnectionReadRow = {
   attention_code: string | null;
   sort_position: number;
   capability: string | null;
+  account_id: string | null;
 };
 
 const CONNECTION_READ_QUERY = `
@@ -79,7 +81,9 @@ const CONNECTION_READ_QUERY = `
       c.last_synced_at,
       c.attention_code,
       c.sort_position
+      , ca.account_id
     FROM connections AS c
+    LEFT JOIN connection_accounts AS ca ON ca.connection_id = c.id AND ca.status = 'active'
     WHERE c.tenant_id = ? AND c.identity_id = ?
     ORDER BY c.sort_position ASC, c.id ASC
     LIMIT ?
@@ -94,6 +98,7 @@ const CONNECTION_READ_QUERY = `
     c.last_synced_at,
     c.attention_code,
     c.sort_position,
+    c.account_id,
     cc.capability
   FROM bounded_connections AS c
   LEFT JOIN connection_capabilities AS cc
@@ -135,7 +140,8 @@ const mapConnectionRows = (
       row.status !== group.row.status ||
       row.last_synced_at !== group.row.last_synced_at ||
       row.attention_code !== group.row.attention_code ||
-      row.sort_position !== group.row.sort_position
+      row.sort_position !== group.row.sort_position ||
+      row.account_id !== group.row.account_id
     ) {
       throw directoryReadError("read_directory_invalid");
     }
@@ -166,7 +172,11 @@ const mapConnectionRows = (
           ? {}
           : { attention_code: row.attention_code }),
       });
-      return { ...connection, sort_position: row.sort_position };
+      return {
+        ...connection,
+        sort_position: row.sort_position,
+        ...(row.account_id === null ? {} : { account_id: row.account_id }),
+      };
     } catch (error) {
       throw directoryReadError("read_directory_invalid", error);
     }

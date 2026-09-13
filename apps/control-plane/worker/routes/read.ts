@@ -63,6 +63,7 @@ const optionalLimit = () =>
 const connectionQuery = z.object({ identity_id: queryId() }).strict();
 const conversationQuery = z
   .object({
+    account_id: optionalQueryId(),
     channel_id: optionalQueryId(),
     cursor: optionalCursor(),
     limit: optionalLimit(),
@@ -71,6 +72,7 @@ const conversationQuery = z
 const messageQuery = z
   .object({
     identity_id: queryId(),
+    account_id: optionalQueryId(),
     cursor: optionalCursor(),
     limit: optionalLimit(),
   })
@@ -133,10 +135,31 @@ export const conversationRoute = createRoute({
         conversation_id: boundedId,
       })
       .strict(),
+    query: z.object({ account_id: optionalQueryId() }).strict(),
   },
   responses: readResponses(
     ConversationSummarySchema,
     "One authorized conversation",
+  ),
+});
+
+export const accountConversationsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/accounts/{account_id}/conversations",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ account_id: boundedId }).strict(),
+    query: z
+      .object({
+        identity_id: queryId(),
+        cursor: optionalCursor(),
+        limit: optionalLimit(),
+      })
+      .strict(),
+  },
+  responses: readResponses(
+    ConversationPageResultSchema,
+    "Seek-paginated conversations for one authorized account",
   ),
 });
 
@@ -231,11 +254,19 @@ export const conversationsHandler: Handler<
 export const conversationHandler: Handler<
   ReadRouteEnv,
   string,
-  { out: { param: { identity_id: string; conversation_id: string } } }
+  {
+    out: {
+      param: { identity_id: string; conversation_id: string };
+      query: { account_id?: string };
+    };
+  }
 > = async (context) => {
   try {
     return context.json(
-      await getConversation(readContext(context), context.req.valid("param")),
+      await getConversation(readContext(context), {
+        ...context.req.valid("param"),
+        ...context.req.valid("query"),
+      }),
       200,
     );
   } catch (error) {
@@ -251,6 +282,24 @@ export const messagesHandler: Handler<
   try {
     return context.json(
       await listMessages(readContext(context), {
+        ...context.req.valid("param"),
+        ...context.req.valid("query"),
+      }),
+      200,
+    );
+  } catch (error) {
+    return failureResponse(context, error);
+  }
+};
+
+export const accountConversationsHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { param: { account_id: string }; query: ListConversationsInput } }
+> = async (context) => {
+  try {
+    return context.json(
+      await listConversations(readContext(context), {
         ...context.req.valid("param"),
         ...context.req.valid("query"),
       }),

@@ -26,6 +26,8 @@ export const MAX_PROJECTION_CURSOR_CHARS = 2_048;
 export const MAX_PROJECTION_CHECKPOINT_VALUE_CHARS = 4_096;
 export const MAX_PROJECTION_CHANGES = 10_000;
 export const MAX_IDENTITY_CONNECTIONS = 64;
+/** A grant may span more than the legacy identity connection display bound. */
+export const MAX_AUTHORIZATION_SCOPE_IDS = 10_000;
 
 const PROTOTYPE_SENSITIVE_KEYS = new Set([
   "__proto__",
@@ -207,6 +209,21 @@ const ProjectionAuthorizationContextObjectSchema = strictObject({
     CanonicalResourceIdSchema,
     MAX_PROJECTION_BATCH_EVENTS,
   ),
+  // These fields are optional for the projection's internal/replay callers and
+  // preserve the legacy identity-only contract. Product reads include them
+  // whenever account/chat grants are enforced.
+  allowed_account_ids: strictArray(
+    CanonicalResourceIdSchema,
+    MAX_AUTHORIZATION_SCOPE_IDS,
+  ).optional(),
+  allowed_all_account_ids: strictArray(
+    CanonicalResourceIdSchema,
+    MAX_AUTHORIZATION_SCOPE_IDS,
+  ).optional(),
+  allowed_conversation_ids: strictArray(
+    CanonicalResourceIdSchema,
+    MAX_AUTHORIZATION_SCOPE_IDS,
+  ).optional(),
   scopes: strictArray(ProjectionScopeSchema, 5, 1),
 }).superRefine((value, context) => {
   if (!hasStrictlyIncreasingValues(value.allowed_identity_ids)) {
@@ -222,6 +239,20 @@ const ProjectionAuthorizationContextObjectSchema = strictObject({
       path: ["scopes"],
       message: "Projection scopes must be sorted and unique",
     });
+  }
+  for (const key of [
+    "allowed_account_ids",
+    "allowed_all_account_ids",
+    "allowed_conversation_ids",
+  ] as const) {
+    const values = value[key];
+    if (values !== undefined && !hasStrictlyIncreasingValues(values)) {
+      context.addIssue({
+        code: "custom",
+        path: [key],
+        message: "Authorization IDs must be sorted and unique",
+      });
+    }
   }
 });
 
@@ -248,6 +279,7 @@ export const GetProjectionConversationInputSchema = strictObject({
   tenant_id: CanonicalResourceIdSchema,
   identity_id: CanonicalResourceIdSchema,
   conversation_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema.optional(),
   authorization: ProjectionAuthorizationContextSchema,
 });
 
@@ -693,6 +725,7 @@ export const ListProjectionConversationsInputSchema = strictObject({
   schema_version: z.literal(1),
   tenant_id: CanonicalResourceIdSchema,
   identity_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema.optional(),
   connection_id: CanonicalResourceIdSchema.nullable(),
   page_size: z
     .number()
@@ -714,6 +747,7 @@ export const ListProjectionMessagesInputSchema = strictObject({
   tenant_id: CanonicalResourceIdSchema,
   identity_id: CanonicalResourceIdSchema,
   conversation_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema.optional(),
   page_size: z
     .number()
     .int()

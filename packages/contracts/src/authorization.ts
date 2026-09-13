@@ -67,6 +67,7 @@ export const ApiErrorResponseSchema = z
         code: z.enum([
           "unauthenticated",
           "invalid_request",
+          "forbidden",
           "not_found",
           "tenant_selection_required",
           "service_unavailable",

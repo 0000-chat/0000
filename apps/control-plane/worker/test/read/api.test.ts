@@ -1,9 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import {
   ApiErrorResponseSchema,
+  AccountGrantSchema,
   IdentitySchema,
   ConnectionSchema,
   ChannelSummarySchema,
+  ConnectedAccountPageSchema,
   ConversationPageResultSchema,
   ConversationSummarySchema,
   MessagePageResultSchema,
@@ -20,7 +22,11 @@ import {
   event,
   initialize,
 } from "../projection/projector-test-support";
-import { clearDirectory, seedDirectory } from "../support/directory-fixtures";
+import {
+  clearDirectory,
+  seedAccountAccess,
+  seedDirectory,
+} from "../support/directory-fixtures";
 import {
   requireAuthorizedIdentity,
   toProjectionReadAuthorization,
@@ -55,12 +61,17 @@ const createTestApp = () =>
 const request = async (
   path: string,
   token = "human-token",
-  app = createTestApp(),
+  init: RequestInit = {},
 ) =>
-  app.request(
+  createTestApp().request(
     `http://example.test${path}`,
     {
-      headers: { Authorization: `Bearer ${token}` },
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...init.headers,
+      },
     },
     workerEnv,
   );
@@ -289,6 +300,7 @@ describe("authenticated live read API", () => {
   beforeEach(async () => {
     await clearDirectory(workerEnv.CONTROL_DB);
     await seedDirectory(workerEnv.CONTROL_DB);
+    await seedAccountAccess(workerEnv.CONTROL_DB);
   });
 
   it("returns only identities from the authenticated session and tenant-filtered connections", async () => {
@@ -393,6 +405,108 @@ describe("authenticated live read API", () => {
       "message_human_one",
     ]);
     expect(firstMessagePage.next_cursor).toBeNull();
+  });
+
+  it("maps a delegated identity to a human-owned account for list, detail, and messages", async () => {
+    await readFixtures();
+    const beforeAccounts = await request(
+      "/api/v1/accounts?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(beforeAccounts.status).toBe(200);
+    expect(
+      ConnectedAccountPageSchema.parse(await beforeAccounts.json()).items.map(
+        (item) => item.account_id,
+      ),
+    ).toEqual(["account_agent"]);
+    const beforeGrantRead = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(beforeGrantRead.status).toBe(404);
+
+    const createGrant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify({
+        membership_id: "membership_agent",
+        identity_id: "identity_agent",
+        account_id: "account_human",
+        operation_scope: "conversation.read",
+        chat_scope: "all_chats",
+        chat_ids: [],
+        idempotency_key: `cross-owner-${crypto.randomUUID()}`,
+      }),
+    });
+    expect(createGrant.status).toBe(201);
+    const grant = AccountGrantSchema.parse(await createGrant.json());
+    expect(grant).toMatchObject({
+      membership_id: "membership_agent",
+      identity_id: "identity_agent",
+      account_id: "account_human",
+      chat_scope: "all_chats",
+    });
+
+    const accountsResponse = await request(
+      "/api/v1/accounts?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(accountsResponse.status).toBe(200);
+    expect(
+      ConnectedAccountPageSchema.parse(await accountsResponse.json()).items.map(
+        (item) => item.account_id,
+      ),
+    ).toEqual(["account_agent", "account_human"]);
+
+    const listResponse = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(listResponse.status).toBe(200);
+    expect(
+      ConversationPageResultSchema.parse(await listResponse.json()).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual(["conversation_human_one", "conversation_human_two"]);
+
+    const detailResponse = await request(
+      "/api/v1/identities/identity_agent/conversations/conversation_human_one?account_id=account_human",
+      "agent-token",
+    );
+    expect(detailResponse.status).toBe(200);
+    expect(
+      ConversationSummarySchema.parse(await detailResponse.json()).id,
+    ).toBe("conversation_human_one");
+
+    const messagesResponse = await request(
+      "/api/v1/conversations/conversation_human_one/messages?identity_id=identity_agent&account_id=account_human",
+      "agent-token",
+    );
+    expect(messagesResponse.status).toBe(200);
+    expect(
+      MessagePageResultSchema.parse(await messagesResponse.json()).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual(["message_human_one"]);
+
+    const revokeGrant = await request(
+      `/api/v1/grants/${grant.id}`,
+      "human-token",
+      {
+        method: "DELETE",
+        headers: {
+          "Idempotency-Key": `cross-owner-revoke-${crypto.randomUUID()}`,
+        },
+      },
+    );
+    expect(revokeGrant.status).toBe(200);
+    expect(AccountGrantSchema.parse(await revokeGrant.json()).status).toBe(
+      "revoked",
+    );
+    const afterRevoke = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(afterRevoke.status).toBe(404);
   });
 
   it("maps a channel filter to the trusted projection connection", async () => {

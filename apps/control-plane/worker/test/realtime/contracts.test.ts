@@ -242,7 +242,7 @@ describe("internal realtime contracts", () => {
         ...baseAttachment,
         membership_id: "membership_human",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       RealtimeSocketAttachmentSchema.safeParse({
         ...baseAttachment,

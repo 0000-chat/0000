@@ -3,6 +3,10 @@ import { z } from "zod";
 import {
   CommunicatorIdSchema,
   DeliveryModeSchema,
+  AccountGrantMutationSchema,
+  AccountGrantPageSchema,
+  AccountGrantSchema,
+  AccountGrantUpdateSchema,
   MAX_PROJECTION_CURSOR_CHARS,
   MAX_PROJECTION_PAGE_SIZE,
   MessagePageResultSchema,
@@ -62,6 +66,26 @@ const boundedLimit = z.coerce
   .min(1)
   .max(MAX_PROJECTION_PAGE_SIZE);
 
+function pageByCursor<T>(
+  items: readonly T[],
+  cursor: string | undefined,
+  limit: number | undefined,
+  key: (item: T) => string,
+) {
+  const pageSize = limit ?? 2;
+  const start =
+    cursor === undefined ? 0 : items.findIndex((item) => key(item) > cursor);
+  const offset = start < 0 ? items.length : start;
+  const visible = items.slice(offset, offset + pageSize);
+  return {
+    items: visible,
+    next_cursor:
+      offset + pageSize < items.length && visible.length > 0
+        ? key(visible[visible.length - 1]!)
+        : null,
+  };
+}
+
 function hasOnlyQueryKeys(search: URLSearchParams, allowed: readonly string[]) {
   const allowedKeys = new Set(allowed);
   for (const key of search.keys()) {
@@ -89,6 +113,81 @@ export const handlers = [
   http.get("*/api/v1/session", () =>
     HttpResponse.json(simulatedStore.session()),
   ),
+
+  http.get("*/api/v1/accounts", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["identity_id", "cursor", "limit"]))
+      return errorResponse(400, "invalid_request");
+    const identityId = search.get("identity_id") ?? undefined;
+    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+    if (cursor === null || limit === null)
+      return errorResponse(400, "invalid_request");
+    const items = simulatedStore.connectedAccounts(identityId);
+    return HttpResponse.json(
+      pageByCursor(items, cursor, limit, (item) => item.account_id),
+    );
+  }),
+
+  http.get("*/api/v1/grant-targets", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["cursor", "limit"]))
+      return errorResponse(400, "invalid_request");
+    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+    if (cursor === null || limit === null)
+      return errorResponse(400, "invalid_request");
+    const items = simulatedStore.grantTargets();
+    return HttpResponse.json(
+      pageByCursor(
+        items,
+        cursor,
+        limit,
+        (item) => `${item.membership_id}|${item.identity_id}`,
+      ),
+    );
+  }),
+
+  http.get("*/api/v1/grants", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["cursor", "limit"]))
+      return errorResponse(400, "invalid_request");
+    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+    if (cursor === null || limit === null)
+      return errorResponse(400, "invalid_request");
+    const page = pageByCursor(
+      simulatedStore.accountGrants(),
+      cursor,
+      limit,
+      (item) => item.id,
+    );
+    return HttpResponse.json(AccountGrantPageSchema.parse(page));
+  }),
+
+  http.post("*/api/v1/grants", async ({ request }) => {
+    const parsed = AccountGrantMutationSchema.safeParse(await request.json());
+    if (!parsed.success) return errorResponse(400, "invalid_request");
+    const grant = simulatedStore.createAccountGrant(parsed.data);
+    return grant
+      ? HttpResponse.json(AccountGrantSchema.parse(grant), { status: 201 })
+      : errorResponse(404, "not_found");
+  }),
+
+  http.patch("*/api/v1/grants/:grantId", async ({ request, params }) => {
+    const parsed = AccountGrantUpdateSchema.safeParse(await request.json());
+    if (!parsed.success) return errorResponse(400, "invalid_request");
+    const grant = simulatedStore.updateAccountGrant(
+      String(params.grantId),
+      parsed.data,
+    );
+    return grant ? HttpResponse.json(grant) : errorResponse(404, "not_found");
+  }),
+
+  http.delete("*/api/v1/grants/:grantId", ({ params }) => {
+    const grant = simulatedStore.revokeAccountGrant(String(params.grantId));
+    return grant ? HttpResponse.json(grant) : errorResponse(404, "not_found");
+  }),
 
   http.get("*/api/v1/identities", () =>
     HttpResponse.json(simulatedStore.identities()),
@@ -147,6 +246,30 @@ export const handlers = [
       return result.ok
         ? HttpResponse.json(result.page)
         : errorResponse(400, "invalid_request");
+    },
+  ),
+
+  http.get(
+    "*/api/v1/accounts/:accountId/conversations",
+    ({ request, params }) => {
+      const accountId = String(params.accountId);
+      const search = new URL(request.url).searchParams;
+      if (!hasOnlyQueryKeys(search, ["identity_id", "cursor", "limit"]))
+        return errorResponse(400, "invalid_request");
+      const identityId = parseSingleQueryValue(
+        search,
+        "identity_id",
+        boundedId,
+      );
+      const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+      const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+      if (!identityId || cursor === null || limit === null)
+        return errorResponse(400, "invalid_request");
+      const page = simulatedStore.accountConversations(accountId, identityId, {
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(limit === undefined ? {} : { limit }),
+      });
+      return page ? HttpResponse.json(page) : errorResponse(404, "not_found");
     },
   ),
 

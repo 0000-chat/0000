@@ -317,6 +317,78 @@ export async function seedDirectory(db: D1Database): Promise<void> {
   ]);
 }
 
+/** Seed the account registry and durable grants used by stored-read fixtures. */
+export async function seedAccountAccess(db: D1Database): Promise<void> {
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "gateway_route_human",
+        "principal_operator",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "gateway_route_agent",
+        "principal_operator",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "account_human",
+        "connection_human_whatsapp",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "account_agent",
+        "connection_agent_whatsapp",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
+      )
+      .bind(
+        "grant_fixture_human",
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "account_human",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
+      )
+      .bind(
+        "grant_fixture_agent",
+        "tenant_pilot",
+        "membership_agent",
+        "identity_agent",
+        "account_agent",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+  ]);
+}
+
 export async function clearDirectory(db: D1Database): Promise<void> {
   // Ingestion history is intentionally append-only in production. Tests need
   // an isolated database between cases, so temporarily remove only the
@@ -337,6 +409,9 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM audit_events"),
     db.prepare("DELETE FROM control_event_outbox"),
     db.prepare("DELETE FROM directory_mutations"),
+    db.prepare("DELETE FROM permission_requests"),
+    db.prepare("DELETE FROM account_grant_chats"),
+    db.prepare("DELETE FROM account_grants"),
     db.prepare("DELETE FROM break_glass_grants"),
     db.prepare("DELETE FROM revoked_tokens"),
     db.prepare("DELETE FROM connection_accounts"),

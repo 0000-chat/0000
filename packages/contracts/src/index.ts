@@ -11,3 +11,4 @@ export * from "./canonical-event";
 export * from "./archive";
 export * from "./projection";
 export * from "./ingestion";
+export * from "./grants";

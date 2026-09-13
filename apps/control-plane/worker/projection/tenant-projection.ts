@@ -114,6 +114,7 @@ import {
   type RealtimeSocketAttachment,
   type RealtimeUpgradeContext,
 } from "../realtime/contracts";
+import { revalidateRealtimeSocketAuthorization } from "../realtime/authorization";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -215,12 +216,14 @@ type ProjectionSchemaGenerationRow = { schema_generation: number | null };
 type ConversationQueryRow = {
   id: string;
   identity_id: string;
+  account_id: string;
   connection_id: string;
   title: string;
   last_message_preview: string;
   last_activity_at: string;
   last_activity_ms: number;
   unread_count: number;
+  last_event_id: string;
 };
 
 type ChannelStatQueryRow = {
@@ -232,6 +235,7 @@ type ChannelStatQueryRow = {
 type MessageQueryRow = {
   id: string;
   identity_id: string;
+  account_id: string;
   connection_id: string;
   conversation_id: string;
   direction: "inbound" | "outbound";
@@ -248,6 +252,8 @@ type MessageQueryRow = {
     | "failed";
   attachment_count: number;
   deleted_at: string | null;
+  current_event_id: string;
+  sender_participant_id: string | null;
 };
 
 type ConversationExistsRow = { id: string };
@@ -367,6 +373,60 @@ const requireIdentityAuthorization = (
   if (!authorization.allowed_identity_ids.includes(identityId)) {
     throw projectionError("projection_forbidden");
   }
+};
+
+type ProjectionScopeFilter = {
+  readonly sql: string;
+  readonly bindings: readonly string[];
+};
+
+/**
+ * Turn the server-resolved account/chat grant into a parameterized SQLite
+ * predicate. Omitted account fields retain the projection's legacy internal
+ * identity-only contract; an explicit empty list fails closed.
+ */
+const accountScopeFilter = (
+  authorization: ProjectionAuthorizationContext,
+  accountColumn: string,
+  conversationColumn: string,
+  accountId?: string,
+): ProjectionScopeFilter => {
+  const accountFilter =
+    accountId === undefined
+      ? { sql: "", bindings: [] as string[] }
+      : { sql: ` AND ${accountColumn} = ?`, bindings: [accountId] };
+  const accountIds = authorization.allowed_account_ids;
+  if (accountIds === undefined) return accountFilter;
+
+  const allAccountIds = authorization.allowed_all_account_ids ?? [];
+  const selectedAccountIds = accountIds.filter(
+    (accountId) => !allAccountIds.includes(accountId),
+  );
+  const conversationIds = authorization.allowed_conversation_ids ?? [];
+  const clauses: string[] = [];
+  const bindings: string[] = [];
+  if (allAccountIds.length > 0) {
+    clauses.push(
+      `${accountColumn} IN (${allAccountIds.map(() => "?").join(",")})`,
+    );
+    bindings.push(...allAccountIds);
+  }
+  if (selectedAccountIds.length > 0 && conversationIds.length > 0) {
+    clauses.push(
+      `(${accountColumn} IN (${selectedAccountIds.map(() => "?").join(",")}) AND ${conversationColumn} IN (${conversationIds.map(() => "?").join(",")}))`,
+    );
+    bindings.push(...selectedAccountIds, ...conversationIds);
+  }
+  if (clauses.length === 0) {
+    return {
+      sql: `${accountFilter.sql} AND 1 = 0`,
+      bindings: accountFilter.bindings,
+    };
+  }
+  return {
+    sql: `${accountFilter.sql} AND (${clauses.join(" OR ")})`,
+    bindings: [...accountFilter.bindings, ...bindings],
+  };
 };
 
 const requireStoredTenant = (
@@ -575,7 +635,9 @@ const mapConversationSummary = (
     id: row.id,
     tenant_id: tenantId,
     identity_id: row.identity_id,
+    account_id: row.account_id,
     connection_id: row.connection_id,
+    event_id: row.last_event_id,
     title: row.title,
     last_message_preview: row.last_message_preview,
     last_activity_at: row.last_activity_at,
@@ -620,21 +682,29 @@ const readConversationRows = (
           generation,
         });
   const limit = pageSize + 1;
+  const scope = accountScopeFilter(
+    input.authorization,
+    "account_id",
+    "id",
+    input.account_id,
+  );
 
   if (input.connection_id === null) {
     if (cursor === undefined) {
       return storage.sql
         .exec<ConversationQueryRow>(
-          "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND deleted_at IS NULL ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+          `SELECT id, identity_id, account_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count, last_event_id FROM conversations WHERE identity_id = ? AND deleted_at IS NULL${scope.sql} ORDER BY last_activity_ms DESC, id ASC LIMIT ?`,
           input.identity_id,
+          ...scope.bindings,
           limit,
         )
         .toArray();
     }
     return storage.sql
       .exec<ConversationQueryRow>(
-        "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND deleted_at IS NULL AND (last_activity_ms < ? OR (last_activity_ms = ? AND id > ?)) ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+        `SELECT id, identity_id, account_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count, last_event_id FROM conversations WHERE identity_id = ? AND deleted_at IS NULL${scope.sql} AND (last_activity_ms < ? OR (last_activity_ms = ? AND id > ?)) ORDER BY last_activity_ms DESC, id ASC LIMIT ?`,
         input.identity_id,
+        ...scope.bindings,
         cursor.last_activity_ms,
         cursor.last_activity_ms,
         cursor.last_id,
@@ -646,18 +716,20 @@ const readConversationRows = (
   if (cursor === undefined) {
     return storage.sql
       .exec<ConversationQueryRow>(
-        "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND connection_id = ? AND deleted_at IS NULL ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+        `SELECT id, identity_id, account_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count, last_event_id FROM conversations WHERE identity_id = ? AND connection_id = ? AND deleted_at IS NULL${scope.sql} ORDER BY last_activity_ms DESC, id ASC LIMIT ?`,
         input.identity_id,
         input.connection_id,
+        ...scope.bindings,
         limit,
       )
       .toArray();
   }
   return storage.sql
     .exec<ConversationQueryRow>(
-      "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE identity_id = ? AND connection_id = ? AND deleted_at IS NULL AND (last_activity_ms < ? OR (last_activity_ms = ? AND id > ?)) ORDER BY last_activity_ms DESC, id ASC LIMIT ?",
+      `SELECT id, identity_id, account_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count, last_event_id FROM conversations WHERE identity_id = ? AND connection_id = ? AND deleted_at IS NULL${scope.sql} AND (last_activity_ms < ? OR (last_activity_ms = ? AND id > ?)) ORDER BY last_activity_ms DESC, id ASC LIMIT ?`,
       input.identity_id,
       input.connection_id,
+      ...scope.bindings,
       cursor.last_activity_ms,
       cursor.last_activity_ms,
       cursor.last_id,
@@ -684,7 +756,9 @@ const mapConversationPage = (
       id: row.id,
       tenant_id: tenantId,
       identity_id: row.identity_id,
+      account_id: row.account_id,
       connection_id: row.connection_id,
+      event_id: row.last_event_id,
       title: row.title,
       last_message_preview: row.last_message_preview,
       last_activity_at: row.last_activity_at,
@@ -724,21 +798,29 @@ const readMessageRows = (
           generation,
         });
   const limit = pageSize + 1;
+  const scope = accountScopeFilter(
+    input.authorization,
+    "account_id",
+    "conversation_id",
+    input.account_id,
+  );
   if (cursor === undefined) {
     return storage.sql
       .exec<MessageQueryRow>(
-        "SELECT id, identity_id, connection_id, conversation_id, direction, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at FROM messages WHERE identity_id = ? AND conversation_id = ? ORDER BY occurred_ms DESC, id ASC LIMIT ?",
+        `SELECT id, identity_id, account_id, connection_id, conversation_id, direction, sender_participant_id, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at, current_event_id FROM messages WHERE identity_id = ? AND conversation_id = ?${scope.sql} ORDER BY occurred_ms DESC, id ASC LIMIT ?`,
         input.identity_id,
         input.conversation_id,
+        ...scope.bindings,
         limit,
       )
       .toArray();
   }
   return storage.sql
     .exec<MessageQueryRow>(
-      "SELECT id, identity_id, connection_id, conversation_id, direction, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at FROM messages WHERE identity_id = ? AND conversation_id = ? AND (occurred_ms < ? OR (occurred_ms = ? AND id > ?)) ORDER BY occurred_ms DESC, id ASC LIMIT ?",
+      `SELECT id, identity_id, account_id, connection_id, conversation_id, direction, sender_participant_id, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at, current_event_id FROM messages WHERE identity_id = ? AND conversation_id = ?${scope.sql} AND (occurred_ms < ? OR (occurred_ms = ? AND id > ?)) ORDER BY occurred_ms DESC, id ASC LIMIT ?`,
       input.identity_id,
       input.conversation_id,
+      ...scope.bindings,
       cursor.last_occurred_ms,
       cursor.last_occurred_ms,
       cursor.last_id,
@@ -766,8 +848,11 @@ const mapMessagePage = (
       id: row.id,
       tenant_id: tenantId,
       identity_id: row.identity_id,
+      account_id: row.account_id,
       connection_id: row.connection_id,
       conversation_id: row.conversation_id,
+      event_id: row.current_event_id,
+      sender_participant_id: row.sender_participant_id,
       direction: row.direction,
       sender_label: redacted ? "Deleted sender" : row.sender_label,
       body: redacted ? "" : row.body,
@@ -1139,15 +1224,14 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         });
       }
 
-      const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
-      const validSockets: WebSocket[] = [];
-      for (const socket of sockets) {
-        if (tryParseRealtimeAttachment(socket) === null) {
-          this.#closeSocket(socket, 1008, "invalid realtime attachment");
-          continue;
-        }
-        validSockets.push(socket);
-      }
+      // Existing sockets are revalidated before replay delivery and on every
+      // broadcast/alarm. A fresh upgrade without replay only needs a bounded
+      // attachment parse, so a tenant with many sockets does not turn each
+      // new upgrade into an O(n²) directory read.
+      const validSockets =
+        context.resume.length > 0
+          ? await this.#revalidateRealtimeSockets()
+          : this.#validSocketsForAdmission();
       const activeTenantSocketCount = validSockets.length;
       if (
         activeTenantSocketCount >= MAX_REALTIME_SOCKETS_PER_TENANT ||
@@ -1171,6 +1255,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         schema_version: 1,
         tenant_id: context.tenant_id,
         principal_id: context.principal_id,
+        membership_id: context.membership_id,
         subscriptions: context.subscriptions,
         positions,
         lease_expires_at: connectionExpiresAt,
@@ -1300,7 +1385,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   async alarm(): Promise<void> {
     const now = Date.now();
     const remaining: WebSocket[] = [];
-    const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
+    const sockets = await this.#revalidateRealtimeSockets();
     const activeTenantSocketCount = Math.min(
       MAX_REALTIME_SOCKETS_PER_TENANT,
       sockets.length,
@@ -1346,6 +1431,59 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       MAX_REALTIME_SOCKETS_PER_TENANT,
       this.ctx.getWebSockets(REALTIME_SOCKET_TAG).length,
     );
+  }
+
+  #validSocketsForAdmission(): WebSocket[] {
+    const valid: WebSocket[] = [];
+    for (const socket of this.ctx.getWebSockets(REALTIME_SOCKET_TAG)) {
+      if (tryParseRealtimeAttachment(socket) === null) {
+        this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      valid.push(socket);
+    }
+    return valid;
+  }
+
+  async #revalidateRealtimeSockets(): Promise<WebSocket[]> {
+    const sockets = this.ctx.getWebSockets(REALTIME_SOCKET_TAG);
+    const database = this.env.CONTROL_DB;
+    if (database === undefined || typeof database.withSession !== "function") {
+      for (const socket of sockets) {
+        this.#closeSocket(socket, 1008, "realtime authorization unavailable");
+      }
+      return [];
+    }
+
+    let db: D1DatabaseSession;
+    try {
+      db = database.withSession("first-primary");
+    } catch {
+      for (const socket of sockets) {
+        this.#closeSocket(socket, 1008, "realtime authorization unavailable");
+      }
+      return [];
+    }
+
+    const valid: WebSocket[] = [];
+    for (const socket of sockets) {
+      const attachment = tryParseRealtimeAttachment(socket);
+      if (attachment === null) {
+        this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      try {
+        if (!(await revalidateRealtimeSocketAuthorization(db, attachment))) {
+          this.#closeSocket(socket, 1008, "realtime authorization revoked");
+          continue;
+        }
+      } catch {
+        this.#closeSocket(socket, 1008, "realtime authorization unavailable");
+        continue;
+      }
+      valid.push(socket);
+    }
+    return valid;
   }
 
   #emitSocketOutcome(
@@ -1495,7 +1633,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       this.#requireReadyState(meta);
 
       const prepared = await prepareProjectionBatch(parsed);
-      return this.#applyPreparedBatch({
+      const applied = await this.#applyPreparedBatch({
         tenantId: prepared.tenantId,
         mode: "live",
         rebuildId: null,
@@ -1504,6 +1642,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         inputEventCount: prepared.inputEventCount,
         connections: prepared.connections,
       });
+      return applied.result;
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -1945,7 +2084,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           meta.updated_at,
       };
 
-      return this.#applyPreparedBatch({
+      const applied = await this.#applyPreparedBatch({
         tenantId: parsed.tenant_id,
         mode: "replay",
         rebuildId: parsed.rebuild_id,
@@ -1954,6 +2093,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         inputEventCount,
         connections,
       });
+      return applied.result;
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -2012,11 +2152,18 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       requireStoredTenant(meta, parsed.tenant_id);
       this.#requireReadyState(meta);
 
+      const scope = accountScopeFilter(
+        parsed.authorization,
+        "account_id",
+        "id",
+        parsed.account_id,
+      );
       const row = this.ctx.storage.sql
         .exec<ConversationQueryRow>(
-          "SELECT id, identity_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count FROM conversations WHERE id = ? AND identity_id = ? AND deleted_at IS NULL LIMIT 1",
+          `SELECT id, identity_id, account_id, connection_id, title, last_message_preview, last_activity_at, last_activity_ms, unread_count, last_event_id FROM conversations WHERE id = ? AND identity_id = ? AND deleted_at IS NULL${scope.sql} LIMIT 1`,
           parsed.conversation_id,
           parsed.identity_id,
+          ...scope.bindings,
         )
         .toArray()[0];
       const result =
@@ -2051,11 +2198,23 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       requireStoredTenant(meta, parsed.tenant_id);
       this.#requireReadyState(meta);
 
+      const scope = accountScopeFilter(
+        parsed.authorization,
+        "conversations.account_id",
+        "conversations.id",
+      );
+      const channelScope = accountScopeFilter(
+        parsed.authorization,
+        "conversations.account_id",
+        "conversations.id",
+      );
       const rows = this.ctx.storage.sql
         .exec<ChannelStatQueryRow>(
-          "WITH channel_stats AS (SELECT connection_id, SUM(unread_count) AS unread_count, MAX(last_activity_ms) AS last_activity_ms FROM conversations WHERE identity_id = ? AND deleted_at IS NULL GROUP BY connection_id) SELECT channel_stats.connection_id, channel_stats.unread_count, (SELECT conversations.last_activity_at FROM conversations WHERE conversations.identity_id = ? AND conversations.connection_id = channel_stats.connection_id AND conversations.deleted_at IS NULL AND conversations.last_activity_ms = channel_stats.last_activity_ms ORDER BY conversations.id ASC LIMIT 1) AS last_activity_at FROM channel_stats ORDER BY channel_stats.connection_id ASC LIMIT 65",
+          `WITH channel_stats AS (SELECT connection_id, SUM(unread_count) AS unread_count, MAX(last_activity_ms) AS last_activity_ms FROM conversations WHERE identity_id = ? AND deleted_at IS NULL${scope.sql} GROUP BY connection_id) SELECT channel_stats.connection_id, channel_stats.unread_count, (SELECT conversations.last_activity_at FROM conversations WHERE conversations.identity_id = ? AND conversations.connection_id = channel_stats.connection_id AND conversations.deleted_at IS NULL AND conversations.last_activity_ms = channel_stats.last_activity_ms${channelScope.sql} ORDER BY conversations.id ASC LIMIT 1) AS last_activity_at FROM channel_stats ORDER BY channel_stats.connection_id ASC LIMIT 10001`,
           parsed.identity_id,
+          ...scope.bindings,
           parsed.identity_id,
+          ...channelScope.bindings,
         )
         .toArray();
       return structuredClone(mapChannelStats(rows));
@@ -2089,9 +2248,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       // revealing whether another identity owns the conversation ID.
       const conversation = this.ctx.storage.sql
         .exec<ConversationExistsRow>(
-          "SELECT id FROM conversations WHERE id = ? AND identity_id = ? AND deleted_at IS NULL",
+          `SELECT id FROM conversations WHERE id = ? AND identity_id = ? AND deleted_at IS NULL${accountScopeFilter(parsed.authorization, "account_id", "id", parsed.account_id).sql}`,
           parsed.conversation_id,
           parsed.identity_id,
+          ...accountScopeFilter(
+            parsed.authorization,
+            "account_id",
+            "id",
+            parsed.account_id,
+          ).bindings,
         )
         .toArray()[0];
       if (conversation === undefined) {
@@ -2134,9 +2299,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   }
 
   /** The sole owner of every multi-table live or replay projection transaction. */
-  #applyPreparedBatch(
+  async #applyPreparedBatch(
     input: ApplyPreparedBatchInput,
-  ): ApplyProjectionBatchResult {
+  ): Promise<AppliedPreparedBatch> {
     try {
       const applied = this.ctx.storage.transactionSync<AppliedPreparedBatch>(
         () => {
@@ -2272,16 +2437,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       );
       if (input.mode === "live" && applied.changes.length > 0) {
         try {
-          broadcastRealtimeChanges(
-            this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
-            input.tenantId,
-            applied.changes,
-          );
+          const sockets = await this.#revalidateRealtimeSockets();
+          broadcastRealtimeChanges(sockets, input.tenantId, applied.changes);
         } catch {
           // A live notification failure must never change the durable result.
         }
       }
-      return applied.result;
+      return applied;
     } catch (error) {
       if (error instanceof ProjectionError) throw error;
       throw projectionError("projection_unavailable", error);
