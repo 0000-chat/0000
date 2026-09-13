@@ -128,6 +128,28 @@ fn assert_no_protected_values(output: &Output) {
     }
 }
 
+fn assert_success(output: &Output) {
+    if output.status.success() {
+        return;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_codes = stderr
+        .lines()
+        .filter(|line| {
+            !line.is_empty()
+                && line.len() <= 128
+                && line
+                    .bytes()
+                    .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+        })
+        .collect::<Vec<_>>();
+    panic!(
+        "admin command failed: status={:?}, stderr_codes={stderr_codes:?}",
+        output.status.code()
+    );
+}
+
 fn parse_stdout_json(output: &Output) -> Value {
     let (stdout, stderr) = output_text(output);
     assert!(stderr.is_empty());
@@ -147,8 +169,8 @@ fn registry_add_accepts_protected_json_and_returns_only_a_synthetic_id() {
 
     let output = run(&command_args("add", &database, &key_file, Some(&input)));
 
-    assert!(output.status.success());
     assert_no_protected_values(&output);
+    assert_success(&output);
     let result = parse_stdout_json(&output);
     let binding_id = result["binding_id"].as_str().expect("binding ID output");
     assert!(binding_id.starts_with("binding_"));
@@ -177,8 +199,8 @@ fn registry_add_accepts_json_from_non_tty_stdin() {
 
     let output = run_with_stdin(&args, FIXTURE.as_bytes());
 
-    assert!(output.status.success());
     assert_no_protected_values(&output);
+    assert_success(&output);
     assert!(
         parse_stdout_json(&output)["binding_id"]
             .as_str()
