@@ -6,10 +6,11 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `d72dd70` | Health #5 and runtime #9 merged serially; focused runtime/health tests passed; main tooling gate is restored and remains red on recorded baseline findings; grants #12 remains held. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `e4b8ede` | Health #5, runtime #9, and tooling baseline merged serially; focused suites and restored `scripts/check` pass; grants #12 remains held. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
+| Tooling baseline | `/tmp/communicator-implementation/tooling-baseline/0000-communicator` | `codex/communicator-tooling-baseline` | `8dcd2acfa396a6ff8a1223d699b9aa7a5e910f47` | Clean source branch merged as aggregate commit `e4b8ede`; 191 authored files mechanically formatted, 46 Oxlint warnings fixed minimally, and three generated artifacts excluded from Biome. |
 | Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `f9e16b` | Clean checkpoint preserved but held: UI and realtime acceptance blockers remain; implementer resumed a bounded follow-up. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
@@ -70,14 +71,23 @@ scaffold-only metadata rule was not retained because it contradicts the
 imported application handoff.
 
 Focused post-merge Rust verification passed the binary behavior test (1/1)
-and healthcheck suite (24/24). The application-only portion of the check
-passed. The restored full `./scripts/check` is intentionally pending tooling
-reconciliation: Oxlint exits 1 on 46 existing warnings (no lint errors), and
-Biome exits 1 after checking the exact tracked set of 232 files: 1 `.js`, 22
-`.json`, 1 `.jsonc`, 153 `.ts`, and 55 `.tsx` files, with 193 formatting
-diagnostics. The set follows `biome.json` includes and excludes generated,
-cache, dependency, build, coverage, target, vendor, and Wrangler directories.
-No whole-tree formatting or unrelated source cleanup was applied.
+and healthcheck suite (24/24). The tooling baseline then reconciled the
+imported source with the pinned formatter and linter. The restored full
+`./scripts/check` passes: Biome checked 229 files after excluding the exact
+generated MSW service worker, route tree, and Wrangler worker-configuration
+artifacts, and Oxlint reported no warnings. No unrelated source cleanup was
+applied.
+
+## Tooling baseline merge evidence
+
+The clean worker branch `codex/communicator-tooling-baseline` at
+`8dcd2acfa396a6ff8a1223d699b9aa7a5e910f47` was merged as `e4b8ede`. The
+representative auth, control-directory, realtime, and contract edits were
+reviewed as formatter/unused-warning cleanup; the three Biome exclusions are
+generated artifacts rather than source paths. Verification passed with 40
+worker test files and 580 tests, 18 UI test files and 107 tests,
+`pnpm --filter @communicator/control-plane check` (TypeScript plus both Vite
+builds), and `cargo fmt --all --check`.
 
 ## Grants recovery checkpoint
 
