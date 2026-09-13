@@ -405,9 +405,7 @@ describe("account-scoped grant API", () => {
     const { client, transport } = await connectMcpClient(app, "agent-token");
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toContain(
-        "send_text_reply",
-      );
+      expect(tools.tools.map((tool) => tool.name)).toContain("send_text_reply");
 
       const idempotencyKey = `mcp-send-${crypto.randomUUID()}`;
       const input = {
@@ -513,6 +511,23 @@ describe("account-scoped grant API", () => {
     expect(create.status).toBe(201);
 
     const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    type TableCounts = {
+      dispatches: number;
+      commands: number;
+      messages: number;
+    };
+    const tableCounts = async (): Promise<TableCounts> =>
+      (
+        await rows<TableCounts>(
+          projection,
+          "SELECT (SELECT COUNT(*) FROM outbound_dispatches) AS dispatches, (SELECT COUNT(*) FROM commands) AS commands, (SELECT COUNT(*) FROM messages) AS messages",
+        )
+      )[0]!;
+    const plusAcceptance = (counts: TableCounts): TableCounts => ({
+      dispatches: counts.dispatches + 1,
+      commands: counts.commands + 1,
+      messages: counts.messages + 1,
+    });
     const rowsFor = (idempotencyKey: string) =>
       rows<{
         id: string;
@@ -524,10 +539,7 @@ describe("account-scoped grant API", () => {
         "SELECT id, command_id, message_id, status FROM outbound_dispatches WHERE idempotency_key = ?",
         idempotencyKey,
       );
-    const send = (
-      app: ReturnType<typeof createApp>,
-      idempotencyKey: string,
-    ) =>
+    const send = (app: ReturnType<typeof createApp>, idempotencyKey: string) =>
       requestForApp(
         app,
         "/api/v1/conversations/conversation_human_one/messages",
@@ -575,6 +587,7 @@ describe("account-scoped grant API", () => {
 
     for (const crashCase of crashCases) {
       const idempotencyKey = `crash-${crashCase.name}-${crypto.randomUUID()}`;
+      const beforeFailure = await tableCounts();
       const failed = await send(
         createTestApp({ outboundAcceptance: crashCase.services }),
         idempotencyKey,
@@ -584,6 +597,11 @@ describe("account-scoped grant API", () => {
       expect(afterFailure).toHaveLength(
         crashCase.persistedAfterFailure ? 1 : 0,
       );
+      expect(await tableCounts()).toEqual(
+        crashCase.persistedAfterFailure
+          ? plusAcceptance(beforeFailure)
+          : beforeFailure,
+      );
 
       const retry = await send(createTestApp(), idempotencyKey);
       expect(retry.status).toBe(202);
@@ -592,6 +610,14 @@ describe("account-scoped grant API", () => {
       expect(afterRetry).toHaveLength(1);
       expect(retryCommand.id).toBe(afterRetry[0]!.command_id);
       expect(afterRetry[0]!.status).toBe("pending");
+      expect(await tableCounts()).toEqual(plusAcceptance(beforeFailure));
+      if (afterFailure[0] !== undefined) {
+        expect(afterRetry[0]).toMatchObject({
+          id: afterFailure[0].id,
+          command_id: afterFailure[0].command_id,
+          message_id: afterFailure[0].message_id,
+        });
+      }
 
       const replay = await send(createTestApp(), idempotencyKey);
       expect(replay.status).toBe(202);
@@ -603,6 +629,7 @@ describe("account-scoped grant API", () => {
 
     let wakeCalls = 0;
     const wakeFailureKey = `wake-failure-${crypto.randomUUID()}`;
+    const beforeWakeFailure = await tableCounts();
     const wakeFailure = await send(
       createTestApp({
         outboundAcceptance: {
@@ -621,6 +648,235 @@ describe("account-scoped grant API", () => {
     expect(wakeRows).toHaveLength(1);
     expect(wakeRows[0]!.command_id).toBe(wakeCommand.id);
     expect(wakeRows[0]!.status).toBe("pending");
+    expect(await tableCounts()).toEqual(plusAcceptance(beforeWakeFailure));
+  });
+
+  it("rejects invalid text acceptance without partial rows and accepts a disconnected account", async () => {
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    type TableCounts = {
+      dispatches: number;
+      commands: number;
+      messages: number;
+    };
+    const tableCounts = async (): Promise<TableCounts> =>
+      (
+        await rows<TableCounts>(
+          projection,
+          "SELECT (SELECT COUNT(*) FROM outbound_dispatches) AS dispatches, (SELECT COUNT(*) FROM commands) AS commands, (SELECT COUNT(*) FROM messages) AS messages",
+        )
+      )[0]!;
+    const plusAcceptance = (counts: TableCounts): TableCounts => ({
+      dispatches: counts.dispatches + 1,
+      commands: counts.commands + 1,
+      messages: counts.messages + 1,
+    });
+    const send = (input: {
+      key: string;
+      token?: string;
+      identityId?: string;
+      conversationId?: string;
+      accountId?: string;
+      body?: string;
+      extra?: Record<string, unknown>;
+    }) => {
+      const payload = Object.assign(
+        {
+          identity_id: input.identityId ?? "identity_agent",
+          body: input.body ?? "Stable outbound body",
+          delivery_mode: "direct",
+          ...(input.accountId === undefined
+            ? {}
+            : { account_id: input.accountId }),
+        },
+        input.extra,
+      );
+      return requestForApp(
+        createTestApp(),
+        `/api/v1/conversations/${input.conversationId ?? "conversation_human_one"}/messages`,
+        input.token ?? "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": input.key },
+          body: JSON.stringify(payload),
+        },
+      );
+    };
+    const rejectWithoutRows = async (
+      response: Response,
+      status: number,
+      code: string,
+      before: TableCounts,
+    ) => {
+      expect(response.status).toBe(status);
+      expect(
+        ApiErrorResponseSchema.parse(await response.json()).error.code,
+      ).toBe(code);
+      expect(await tableCounts()).toEqual(before);
+    };
+    const createSendGrant = async (
+      identityId: string,
+      membershipId: string,
+    ) => {
+      const response = await request("/api/v1/grants", "human-token", {
+        method: "POST",
+        body: JSON.stringify(
+          grantBody({
+            membership_id: membershipId,
+            identity_id: identityId,
+            operation_scope: "message.send",
+            chat_scope: "all_chats",
+            chat_ids: [],
+            idempotency_key: `rejection-send-grant-${identityId}-${crypto.randomUUID()}`,
+          }),
+        ),
+      });
+      expect(response.status).toBe(201);
+      return AccountGrantSchema.parse(await response.json());
+    };
+
+    let before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: `ungranted-${crypto.randomUUID()}` }),
+      403,
+      "forbidden",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `unknown-account-${crypto.randomUUID()}`,
+        accountId: "account_unknown",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `ungranted-account-${crypto.randomUUID()}`,
+        accountId: "account_agent",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    const agentGrant = await createSendGrant(
+      "identity_agent",
+      "membership_agent",
+    );
+    const acceptedKey = `rejection-valid-${crypto.randomUUID()}`;
+    before = await tableCounts();
+    const accepted = await send({ key: acceptedKey });
+    expect(accepted.status).toBe(202);
+    const acceptedCommand = (await accepted.json()) as { id: string };
+    expect(acceptedCommand.id).toBeTruthy();
+    expect(await tableCounts()).toEqual(plusAcceptance(before));
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: acceptedKey, body: "Changed payload" }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: acceptedKey,
+        conversationId: "conversation_human_two",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: acceptedKey, accountId: "account_agent" }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    await createSendGrant("identity_human", "membership_human");
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: acceptedKey,
+        token: "human-token",
+        identityId: "identity_human",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    const revoke = await request(
+      `/api/v1/grants/${agentGrant.id}`,
+      "human-token",
+      {
+        method: "DELETE",
+        headers: {
+          "Idempotency-Key": `rejection-revoke-${crypto.randomUUID()}`,
+        },
+      },
+    );
+    expect(revoke.status).toBe(200);
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: `revoked-${crypto.randomUUID()}` }),
+      403,
+      "forbidden",
+      before,
+    );
+
+    await createSendGrant("identity_agent", "membership_agent");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const disconnectedKey = `disconnected-${crypto.randomUUID()}`;
+    before = await tableCounts();
+    const disconnected = await send({ key: disconnectedKey });
+    expect(disconnected.status).toBe(202);
+    const disconnectedCommand = (await disconnected.json()) as { id: string };
+    expect(disconnectedCommand.id).toBeTruthy();
+    expect(await tableCounts()).toEqual(plusAcceptance(before));
+    expect(
+      await rows<{ status: string }>(
+        projection,
+        "SELECT status FROM outbound_dispatches WHERE idempotency_key = ?",
+        disconnectedKey,
+      ),
+    ).toEqual([{ status: "pending" }]);
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `empty-body-${crypto.randomUUID()}`,
+        body: "",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `attachments-${crypto.randomUUID()}`,
+        extra: { attachments: [{ name: "blocked.txt" }] },
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
   });
 
   it("denies an agent grant, cross-account reads, and cross-tenant account binding", async () => {
@@ -1061,7 +1317,11 @@ describe("account-scoped grant API", () => {
       "invalid_request",
     );
 
-    const dispatchRows = await rows<{ id: string; message_id: string; command_id: string }>(
+    const dispatchRows = await rows<{
+      id: string;
+      message_id: string;
+      command_id: string;
+    }>(
       workerEnv.TENANT_PROJECTION.getByName(tenantId),
       "SELECT id, message_id, command_id FROM outbound_dispatches WHERE idempotency_key IN (?, ?) ORDER BY idempotency_key",
       firstKey,
@@ -1086,7 +1346,7 @@ describe("account-scoped grant API", () => {
     ).toHaveLength(2);
 
     const revoke = await request(
-      `/api/v1/grants/${(await grantResponse.clone().json() as { id: string }).id}`,
+      `/api/v1/grants/${((await grantResponse.clone().json()) as { id: string }).id}`,
       "human-token",
       {
         method: "DELETE",
@@ -1096,7 +1356,9 @@ describe("account-scoped grant API", () => {
     expect(revoke.status).toBe(200);
     const afterRevoke = await request(conversationPath, "agent-token", {
       method: "POST",
-      headers: { "Idempotency-Key": `reply-after-revoke-${crypto.randomUUID()}` },
+      headers: {
+        "Idempotency-Key": `reply-after-revoke-${crypto.randomUUID()}`,
+      },
       body: JSON.stringify({
         identity_id: "identity_agent",
         body: "must be denied",
@@ -1122,11 +1384,7 @@ describe("account-scoped grant API", () => {
     await projection.applyBatch({
       schema_version: 1,
       tenant_id: tenantId,
-      authorization: auth(
-        ["projection.write"],
-        ["identity_human"],
-        tenantId,
-      ),
+      authorization: auth(["projection.write"], ["identity_human"], tenantId),
       mode: "live",
       rebuild_id: null,
       connections: [

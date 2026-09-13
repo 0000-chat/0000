@@ -49,7 +49,10 @@ export const textReplyRoute = createRoute({
     401: { description: "Authentication required", content: errorContent },
     403: { description: "Send grant required", content: errorContent },
     404: { description: "Conversation not found", content: errorContent },
-    503: { description: "Outbound acceptance unavailable", content: errorContent },
+    503: {
+      description: "Outbound acceptance unavailable",
+      content: errorContent,
+    },
   },
 });
 
@@ -61,37 +64,39 @@ const outboundFailure = (
   return context.json(result.body, result.status);
 };
 
-export const textReplyHandler = (
-  services: OutboundAcceptanceServices = {},
-): Handler<
-  OutboundRouteEnv,
-  string,
-  {
-    out: {
-      param: { conversation_id: string };
-      header: { "idempotency-key": string };
-      json: TextReplyBody;
-    };
-  }
-> => async (context) => {
-  try {
-    const body = context.req.valid("json");
-    const params = context.req.valid("param");
-    const header = context.req.valid("header");
-    const accepted = await acceptTextReply(
-      {
-        env: context.env,
-        authorization: context.get("authorization"),
-      },
-      {
-        ...body,
-        conversation_id: params.conversation_id,
-      },
-      header["idempotency-key"],
-      services,
-    );
-    return context.json(accepted.command, 202);
-  } catch (error) {
-    return outboundFailure(context, error);
-  }
-};
+export const textReplyHandler =
+  (
+    services: OutboundAcceptanceServices = {},
+  ): Handler<
+    OutboundRouteEnv,
+    string,
+    {
+      out: {
+        param: { conversation_id: string };
+        header: { "idempotency-key": string };
+        json: TextReplyBody;
+      };
+    }
+  > =>
+  async (context) => {
+    try {
+      const body = context.req.valid("json");
+      const params = context.req.valid("param");
+      const header = context.req.valid("header");
+      const accepted = await acceptTextReply(
+        {
+          env: context.env,
+          authorization: context.get("authorization"),
+        },
+        {
+          ...body,
+          conversation_id: params.conversation_id,
+        },
+        header["idempotency-key"],
+        services,
+      );
+      return context.json(accepted.command, 202);
+    } catch (error) {
+      return outboundFailure(context, error);
+    }
+  };

@@ -318,7 +318,7 @@ export function createApp(services: AppServices = {}) {
     oauthServices.signAccessToken = services.signOAuthAccessToken;
   registerOAuthRoutes(app, oauthServices);
   const outboundAcceptanceServices: OutboundAcceptanceServices = {
-    ...(services.outboundAcceptance ?? {}),
+    ...services.outboundAcceptance,
     ...(services.wakeDispatch === undefined
       ? {}
       : { wakeDispatch: services.wakeDispatch }),
@@ -359,10 +359,7 @@ export function createApp(services: AppServices = {}) {
   app.openapi(conversationsRoute, conversationsHandler);
   app.openapi(conversationRoute, conversationHandler);
   app.openapi(messagesRoute, messagesHandler);
-  app.openapi(
-    textReplyRoute,
-    textReplyHandler(outboundAcceptanceServices),
-  );
+  app.openapi(textReplyRoute, textReplyHandler(outboundAcceptanceServices));
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);
   app.openapi(grantTargetsRoute, grantTargetsHandler);

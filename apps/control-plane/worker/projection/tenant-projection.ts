@@ -1015,10 +1015,7 @@ const mapOutboundCommand = (
     actor_identity_id: dispatch.actor_identity_id,
   });
 
-const mapOutboundMessage = (
-  tenantId: string,
-  row: MessageQueryRow,
-) =>
+const mapOutboundMessage = (tenantId: string, row: MessageQueryRow) =>
   MessageSchema.parse({
     id: row.id,
     tenant_id: tenantId,
@@ -1100,7 +1097,9 @@ const restoreOutboundProjectionRows = (
         tombstone === undefined
           ? occurredMs
           : parseStoredMilliseconds(tombstone.occurred_at),
-        tombstone === undefined ? row.created_at : canonicalObservedAt(tombstone.observed_ms),
+        tombstone === undefined
+          ? row.created_at
+          : canonicalObservedAt(tombstone.observed_ms),
         tombstone === undefined ? occurredMs : tombstone.observed_ms,
         tombstone === undefined ? row.event_id : tombstone.tombstone_event_id,
         tombstone?.occurred_at ?? null,
@@ -2483,6 +2482,56 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       const occurredMs = parseStoredMilliseconds(parsed.accepted_at);
 
       const result = this.ctx.storage.transactionSync(() => {
+        // Hashing happens outside the synchronous transaction. Re-read every
+        // mutable projection boundary after hashing so a rebuild, deletion,
+        // or rebinding that completes while hashing cannot turn stale owner
+        // data into an accepted outbound row.
+        const transactionMeta = readProjectionMeta(this.ctx.storage);
+        if (transactionMeta === undefined) {
+          throw projectionError("projection_not_found");
+        }
+        requireStoredTenant(transactionMeta, parsed.tenant_id);
+        this.#requireReadyState(transactionMeta);
+
+        const transactionOwner = this.ctx.storage.sql
+          .exec<ConversationOwnerRow>(
+            "SELECT identity_id, account_id, connection_id, platform FROM conversations WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+            parsed.conversation_id,
+          )
+          .toArray()[0];
+        if (transactionOwner === undefined) {
+          throw projectionError("projection_forbidden");
+        }
+        if (
+          parsed.account_id !== undefined &&
+          parsed.account_id !== transactionOwner.account_id
+        ) {
+          throw projectionError("projection_conflict");
+        }
+        if (
+          transactionOwner.identity_id !== owner.identity_id ||
+          transactionOwner.account_id !== owner.account_id ||
+          transactionOwner.connection_id !== owner.connection_id ||
+          transactionOwner.platform !== owner.platform
+        ) {
+          throw projectionError("projection_conflict");
+        }
+
+        const transactionBinding = this.ctx.storage.sql
+          .exec<ProjectionConnectionBinding>(
+            "SELECT account_id, connection_id, identity_id, platform FROM connection_bindings WHERE account_id = ? LIMIT 1",
+            transactionOwner.account_id,
+          )
+          .toArray()[0];
+        if (
+          transactionBinding === undefined ||
+          transactionBinding.connection_id !== transactionOwner.connection_id ||
+          transactionBinding.identity_id !== transactionOwner.identity_id ||
+          transactionBinding.platform !== transactionOwner.platform
+        ) {
+          throw projectionError("projection_conflict");
+        }
+
         const current = readOutboundDispatchByKey(
           this.ctx.storage,
           parsed.idempotency_key,
@@ -2577,7 +2626,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         );
         const command = readOutboundCommand(this.ctx.storage, commandId);
         const message = readOutboundMessage(this.ctx.storage, messageId);
-        if (dispatch === undefined || command === undefined || message === undefined) {
+        if (
+          dispatch === undefined ||
+          command === undefined ||
+          message === undefined
+        ) {
           throw projectionError("projection_conflict");
         }
         return AcceptTextReplyResultSchema.parse({

@@ -613,6 +613,11 @@ describe("tenant projection full-domain convergence proof", () => {
         name: "identity_local_projection_sequences",
         applied_at: "2026-09-10T00:00:00.000Z",
       },
+      {
+        version: 3,
+        name: "durable_outbound_acceptance",
+        applied_at: "2026-09-13T00:00:00.000Z",
+      },
     ]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);
