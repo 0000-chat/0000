@@ -7,7 +7,7 @@ coordination state.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `b42ff168c5ca198f7c5e49f44d456100cdfdb0c5` | Health #5, runtime #9, tooling baseline, #12 feature behavior, #13 OAuth/MCP, #14 linking, #17 search, and #25 webhook configuration merged serially. #25 source `145a1206f98387efc1edb3c75b2572087ca553ef` was clean; focused webhook/auth/schema/search/realtime, control-plane TypeScript/Vite, and pinned `scripts/check` pass. Draft PR remains WIP; no live delivery/account/deployment proof claimed. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `f9a2290534728feb2629ce2461dfe8d80f57fd7b` | Health #5, runtime #9, tooling baseline, #12 feature behavior, #13 OAuth/MCP, #14 linking, #17 search, #25 webhook configuration, and the atomic cutover follow-up merged serially. Focused cutover 5/5, control-plane TypeScript/Vite, and pinned `scripts/check` pass. Draft PR remains WIP; no live delivery/account/deployment proof claimed. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
@@ -18,7 +18,7 @@ coordination state.
 | History worker (#15) | `/tmp/communicator-implementation/worker-15/0000-communicator` | `codex/implement-history-15` | `87695a5` base | Active from the verified #14 aggregate; migration `0011_history` is conditional per worker handoff. No completion claim. |
 | Search worker (#17) | `/tmp/communicator-implementation/worker-17/0000-communicator` | `codex/implement-search-17` | `52e161dcbba6c290b040b00dc4b0f072c9ea768e` | Clean source merged as aggregate `9de7a756e0b24dadc4489e2257a17d2a96b34849`; worker full suite 42 files/595 tests and aggregate focused search/auth/linking 7 files/66 tests pass. No new migration was required. |
 | Durable acceptance worker (#18) | `/tmp/communicator-implementation/worker-18/0000-communicator` | `codex/implement-durable-acceptance-18` | `775db36` phase 1 | Active bounded phase; grants/schema 22 tests, TypeScript, and diff pass. Final MCP/invalid/crash matrix remains pending; do not merge the phase-1 checkpoint. |
-| Webhook/config worker (#25) | `/tmp/communicator-implementation/worker-25/0000-communicator` | `codex/implement-webhook-config-25` | `145a1206f98387efc1edb3c75b2572087ca553ef` | Clean source merged as aggregate `b42ff168c5ca198f7c5e49f44d456100cdfdb0c5`; full Worker 43 files/597 tests, realtime 16, migration 20, TypeScript/build, and `scripts/check` 245 files pass. Migration `0010_webhook_subscriptions` is included; credential references remain opaque deployment metadata and later delivery must owner-scope them. |
+| Webhook/config worker (#25) | `/tmp/communicator-implementation/worker-25/0000-communicator` | `codex/implement-webhook-config-25` | `145a1206f98387efc1edb3c75b2572087ca553ef` | Clean source merged as aggregate `b42ff168c5ca198f7c5e49f44d456100cdfdb0c5`; full Worker 43 files/597 tests, realtime 16, migration 20, TypeScript/build, and `scripts/check` 245 files pass. Migration `0010_webhook_subscriptions` is included; credential references remain opaque deployment metadata and later delivery must owner-scope them. Atomic cutover follow-up `008ddfc49ae6f98774524925541a43c63b9b445e` is merged as aggregate `f9a22905`; focused webhook 5/5 passes. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
@@ -55,12 +55,12 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | --- | --- | --- |
 | #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
 | #9 | Runtime | verified and merged as `f681496`; issue remains open until aggregate PR merge |
-| #11 | Agent messaging specification | aggregate parent active; #12 feature behavior, #13 OAuth/MCP, #14 linking, #17 search, and #25 webhook configuration are integrated through `b42ff168`. #15 is active with review findings held; #18 remains phased. Issues remain open until the draft PR merges. |
+| #11 | Agent messaging specification | aggregate parent active; #12 feature behavior, #13 OAuth/MCP, #14 linking, #17 search, and #25 webhook configuration plus its atomic cutover follow-up are integrated through `f9a22905`. #15 is active with review findings held; #18 remains phased. Issues remain open until the draft PR merges. |
 | #12 | T01 account grants | feature behavior accepted and integrated at aggregate `c86c9b0` from `codex/implement-grants-12` at `823642f`; fresh default and diagnostic Worker runs pass 41/591, while the prior teardown remains an observed shutdown flake with no root-cause-fix claim; issue remains open |
 | #13/#14 | T02 OAuth and T24 WhatsApp linking | #13 verified and merged as aggregate `83a6c3f`; #14 verified and merged as aggregate `87695a5d` from clean `7fde338`, with delayed-D1 coverage limitation recorded. Real phone/deployment proof is pending later authorized acceptance; issues remain open |
 | #15 | T03 history import | active on `codex/implement-history-15` from aggregate `87695a5d`; migration `0011_history` conditional; no acceptance claim yet |
 | #17 | T05 scoped search/context | verified and merged as aggregate `9de7a756` from clean `52e161d`; focused aggregate search/auth/linking 7 files/66 tests, control-plane build, and `scripts/check` 251 files pass; issue remains open |
-| #18/#25 | T06 durable acceptance / T13 webhook configuration | #18 phase-1 checkpoint `775db36` remains held for one MCP parity/replay test and final matrix; #25 verified and merged as aggregate `b42ff168` from clean `145a120`, with opaque credential metadata and later owner-scoped delivery still required; issues remain open |
+| #18/#25 | T06 durable acceptance / T13 webhook configuration | #18 phase-1 checkpoint `775db36` remains held for one MCP parity/replay test and final matrix; #25 verified and merged as aggregate `b42ff168`, with atomic cutover follow-up `f9a22905` passing 5/5, opaque credential metadata, and later owner-scoped delivery still required; issues remain open |
 | #16/#19–#36 | Remaining child tickets | planned or dependency-held; dependencies in aggregate plan |
 
 Architecture decision #7 is tracked at
@@ -399,7 +399,7 @@ production deployment, or live account proof is claimed.
 The parent dispatched #15 history from the verified #14 aggregate
 `87695a5d`, and #18 durable acceptance plus #25 webhook/configuration from the
 earlier verified OAuth base `83a6c3f`. #17 search is integrated at aggregate
-`9de7a756`, and #25 is integrated at `b42ff168` pending its isolated atomic
+`9de7a756`, and #25 is integrated at `f9a22905` including its isolated atomic
 cutover follow-up. Migration `0010_webhook_subscriptions` is now integrated;
 `0009_acceptance` remains conditional on #18. #15 owns conditional migration
 `0011_history`; no migration is added merely to fill numbers.
@@ -467,11 +467,15 @@ Durable acceptance #18 phase-1 commit `775db36` remains held. Grants/schema
 is pending. The worker is narrowed to one MCP parity/replay test and a tested
 commit before the remaining matrix; no phase-1 merge is claimed.
 
-## #25 atomic cutover follow-up hold
+## #25 atomic cutover follow-up evidence
 
-Independent review found that the merged webhook cutover path reads the
-current version and then writes `version + 1` without a compare-and-swap
-condition. Concurrent cutovers could therefore assign the same version to
-different destinations. The original worker is addressing this in an isolated
-bounded follow-up with a concurrent regression; the aggregate source remains
-unchanged until that tested commit is returned.
+Independent review found that the initial webhook cutover path read the current
+version and then wrote `version + 1` without serialization. Concurrent
+cutovers could therefore assign the same version to different destinations.
+Follow-up commit `008ddfc49ae6f98774524925541a43c63b9b445e` was merged as
+aggregate `f9a2290534728feb2629ce2461dfe8d80f57fd7b`. The focused aggregate
+webhook regression passes 5/5, including unique concurrent versions, same-key
+idempotent retry, atomic audit/outbox behavior, and revoke guards. The
+control-plane TypeScript/Vite check and pinned `scripts/check` 255-file gate
+also pass. Credential metadata remains opaque and later delivery remains
+owner-scoped work; no live delivery or deployment is claimed.

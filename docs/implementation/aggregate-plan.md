@@ -79,11 +79,13 @@ guards passed their focused evidence. Delayed-D1 injection coverage remains
 limited, and real phone/deployment proof is intentionally not claimed. T05/#17
 search is integrated as aggregate commit `9de7a756` from clean worker commit
 `52e161d`; its focused compatibility and repository checks pass. T13/#25
-webhook configuration is now integrated as aggregate commit `b42ff168` from
-clean worker commit `145a120`; its focused webhook/auth/schema/search/realtime
-checks and repository gates pass. T03/#15 is active from `87695a5d` with
-review findings held, and #18 remains in a bounded phase. Do not claim any
-child complete from dispatch alone.
+webhook configuration is integrated as aggregate commit `b42ff168` from clean
+worker commit `145a120`; its focused webhook/auth/schema/search/realtime checks
+and repository gates pass. The verified atomic cutover follow-up is now
+integrated as aggregate commit `f9a22905`, with focused webhook 5/5,
+control-plane, and repository gates passing. T03/#15 is active from
+`87695a5d` with review findings held, and #18 remains in a bounded phase. Do
+not claim any child complete from dispatch alone.
 
 Migration `0006_oauth` is integrated for #13, `0007_linking` for #14, and
 `0010_webhook_subscriptions` for #25. #17 search required no new migration.
@@ -91,20 +93,16 @@ Reserve `0009_acceptance` only if #18 requires it; do not add migrations merely
 to fill numbers. #15 owns conditional migration `0011_history` from its active
 worker handoff.
 
-The aggregate merge commit is `b42ff168c5ca198f7c5e49f44d456100cdfdb0c5`.
-The source #25 worker was clean at
-`145a1206f98387efc1edb3c75b2572087ca553ef`. Aggregate webhook/auth/schema/
-search/realtime compatibility, control-plane TypeScript and both Vite builds,
-and the pinned `scripts/check` gate pass. The draft PR remains work in
-progress; no default-branch merge, production deployment, live webhook
-delivery, or live account proof occurred.
-
-Post-merge review found a compare-and-swap gap in webhook cutover versioning:
-concurrent updates can assign the same next version to different destinations.
-The original #25 worker owns an isolated tested follow-up; aggregate source is
-held unchanged until that commit returns. #15 history remains held for its
-range-termination, gateway-endpoint, and total-coverage findings, and #18
-remains held for its final MCP/invalid/crash matrix.
+The aggregate merge commit is `f9a2290534728feb2629ce2461dfe8d80f57fd7b`.
+The #25 source worker was clean at `145a1206f98387efc1edb3c75b2572087ca553ef`,
+with atomic cutover follow-up `008ddfc49ae6f98774524925541a43c63b9b445e`.
+Aggregate webhook/auth/schema/search/realtime compatibility, the cutover
+regression, control-plane TypeScript and both Vite builds, and the pinned
+`scripts/check` gate pass. The draft PR remains work in progress; no
+default-branch merge, production deployment, live webhook delivery, or live
+account proof occurred. #15 history remains held for its range-termination,
+gateway-endpoint, and total-coverage findings, and #18 remains held for its
+final MCP/invalid/crash matrix.
 
 ## Merge and release rules
 
