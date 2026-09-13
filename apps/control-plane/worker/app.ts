@@ -225,14 +225,18 @@ export function createApp(services: AppServices = {}) {
   const linkingServices: LinkingServices = {};
   if (services.createConnectionGateway !== undefined)
     linkingServices.createConnectionGateway = services.createConnectionGateway;
-  if (services.linkingNow !== undefined) linkingServices.now = services.linkingNow;
+  if (services.linkingNow !== undefined)
+    linkingServices.now = services.linkingNow;
   app.openapi(linkSessionStartRoute, createLinkSessionHandler(linkingServices));
   app.openapi(linkSessionGetRoute, getLinkSessionHandler);
   app.openapi(
     linkSessionActionRoute,
     createLinkSessionActionHandler(linkingServices),
   );
-  app.openapi(linkSessionCancelRoute, createCancelLinkSessionHandler(linkingServices));
+  app.openapi(
+    linkSessionCancelRoute,
+    createCancelLinkSessionHandler(linkingServices),
+  );
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",

@@ -24,7 +24,7 @@ import {
   type LinkSessionOwner,
   type LinkSessionState,
 } from "./session";
-import { commitLinkedAccount, LinkingRepositoryError } from "./repository";
+import { LinkingRepositoryError } from "./repository";
 
 type LinkingRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -54,13 +54,24 @@ export const linkSessionStartRoute = createRoute({
     headers: z
       .object({ "idempotency-key": z.string().trim().min(8).max(200) })
       .passthrough(),
-    body: { content: { "application/json": { schema: LinkSessionStartSchema } } },
+    body: {
+      content: { "application/json": { schema: LinkSessionStartSchema } },
+    },
   },
   responses: {
-    200: { description: "Existing link session", content: { "application/json": { schema: LinkSessionSchema } } },
-    201: { description: "Started link session", content: { "application/json": { schema: LinkSessionSchema } } },
+    200: {
+      description: "Existing link session",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
+    201: {
+      description: "Started link session",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
     400: { description: "Invalid link request", content: errorContent },
-    403: { description: "Administrator permission required", content: errorContent },
+    403: {
+      description: "Administrator permission required",
+      content: errorContent,
+    },
     409: { description: "Link session conflict", content: errorContent },
     503: { description: "Link provider unavailable", content: errorContent },
   },
@@ -72,7 +83,10 @@ export const linkSessionGetRoute = createRoute({
   security: [{ bearerAuth: [] }],
   request: { params: z.object({ link_session_id: boundedId }).strict() },
   responses: {
-    200: { description: "Link session status", content: { "application/json": { schema: LinkSessionSchema } } },
+    200: {
+      description: "Link session status",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
     403: { description: "Link session owner required", content: errorContent },
     404: { description: "Link session not found", content: errorContent },
   },
@@ -87,10 +101,17 @@ export const linkSessionActionRoute = createRoute({
     headers: z
       .object({ "idempotency-key": z.string().trim().min(8).max(200) })
       .passthrough(),
-    body: { content: { "application/json": { schema: LinkSessionActionRequestSchema } } },
+    body: {
+      content: {
+        "application/json": { schema: LinkSessionActionRequestSchema },
+      },
+    },
   },
   responses: {
-    200: { description: "Link session action result", content: { "application/json": { schema: LinkSessionSchema } } },
+    200: {
+      description: "Link session action result",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
     400: { description: "Invalid link action", content: errorContent },
     403: { description: "Link session owner required", content: errorContent },
     404: { description: "Link session not found", content: errorContent },
@@ -110,7 +131,10 @@ export const linkSessionCancelRoute = createRoute({
       .passthrough(),
   },
   responses: {
-    200: { description: "Cancelled link session", content: { "application/json": { schema: LinkSessionSchema } } },
+    200: {
+      description: "Cancelled link session",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
     403: { description: "Link session owner required", content: errorContent },
     404: { description: "Link session not found", content: errorContent },
     409: { description: "Link session conflict", content: errorContent },
@@ -138,7 +162,9 @@ const errorResponse = (
 ): Response => {
   if (error instanceof LinkingRouteError) {
     return context.json(
-      ApiErrorResponseSchema.parse({ error: { code: error.code, message: error.message } }),
+      ApiErrorResponseSchema.parse({
+        error: { code: error.code, message: error.message },
+      }),
       error.status,
     );
   }
@@ -163,7 +189,10 @@ const errorResponse = (
     if (error.code === "duplicate_provider_identity") {
       return context.json(
         ApiErrorResponseSchema.parse({
-          error: { code: "invalid_request", message: "Provider account requires relinking" },
+          error: {
+            code: "invalid_request",
+            message: "Provider account requires relinking",
+          },
         }),
         409,
       );
@@ -171,7 +200,10 @@ const errorResponse = (
     return context.json(
       ApiErrorResponseSchema.parse({
         error: {
-          code: error.code === "invalid_link" ? "invalid_request" : "service_unavailable",
+          code:
+            error.code === "invalid_link"
+              ? "invalid_request"
+              : "service_unavailable",
           message: error.message,
         },
       }),
@@ -180,18 +212,26 @@ const errorResponse = (
   }
   return context.json(
     ApiErrorResponseSchema.parse({
-      error: { code: "service_unavailable", message: "Link service unavailable" },
+      error: {
+        code: "service_unavailable",
+        message: "Link service unavailable",
+      },
     }),
     503,
   );
 };
 
-const asBindings = (env: Cloudflare.Env): LinkingBindings => env as LinkingBindings;
+const asBindings = (env: Cloudflare.Env): LinkingBindings =>
+  env as LinkingBindings;
 
 const sessionStub = (env: Cloudflare.Env, sessionId: string) => {
   const namespace = asBindings(env).LINK_SESSIONS;
   if (!namespace || typeof namespace.idFromName !== "function")
-    throw new LinkingRouteError(503, "service_unavailable", "Link session service unavailable");
+    throw new LinkingRouteError(
+      503,
+      "service_unavailable",
+      "Link session service unavailable",
+    );
   return namespace.get(namespace.idFromName(sessionId));
 };
 
@@ -199,6 +239,12 @@ type SessionCommandResponse = {
   state: LinkSessionState;
   previous_gateway_ref?: string | null;
   created: boolean;
+  commit_error?:
+    | "authorization_required"
+    | "invalid_link"
+    | "duplicate_provider_identity"
+    | "link_conflict"
+    | "link_unavailable";
 };
 
 async function command(
@@ -214,7 +260,11 @@ async function command(
   try {
     body = await response.json();
   } catch {
-    throw new LinkingRouteError(503, "service_unavailable", "Link session service unavailable");
+    throw new LinkingRouteError(
+      503,
+      "service_unavailable",
+      "Link session service unavailable",
+    );
   }
   if (!response.ok) {
     const code =
@@ -224,17 +274,34 @@ async function command(
     if (code === "not_found")
       throw new LinkingRouteError(404, "not_found", "Link session not found");
     if (code === "stale_session")
-      throw new LinkingRouteError(409, "invalid_request", "Link session is stale");
+      throw new LinkingRouteError(
+        409,
+        "invalid_request",
+        "Link session is stale",
+      );
     if (code === "terminal_session")
-      throw new LinkingRouteError(409, "invalid_request", "Link session is already complete");
-    throw new LinkingRouteError(503, "service_unavailable", "Link session service unavailable");
+      throw new LinkingRouteError(
+        409,
+        "invalid_request",
+        "Link session is already complete",
+      );
+    throw new LinkingRouteError(
+      503,
+      "service_unavailable",
+      "Link session service unavailable",
+    );
   }
   return body as SessionCommandResponse;
 }
 
 const sha256Hex = async (value: string): Promise<string> => {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
 };
 
 const ownerFor = (state: LinkSessionState): LinkSessionOwner => ({
@@ -255,7 +322,10 @@ const gatewayOwnerFor = (state: LinkSessionState): GatewayOwner => ({
   generation: state.generation,
 });
 
-const publicSession = (state: LinkSessionState, qr: string | null = null): LinkSession =>
+const publicSession = (
+  state: LinkSessionState,
+  qr: string | null = null,
+): LinkSession =>
   LinkSessionSchema.parse({
     id: state.id,
     identity_id: state.target_identity_id,
@@ -278,23 +348,30 @@ const requireLinkAdministrator = (
 ): void => {
   const authorization = context.get("authorization");
   const administrator =
-    (authorization.principal.type === "human" || authorization.principal.type === "operator") &&
-    (authorization.membership.role === "owner" || authorization.membership.role === "admin");
-  const target = authorization.identities.find((identity) => identity.identity_id === identityId);
-  if (!administrator || !target || target.kind !== "human" || !target.scopes.includes("connection.manage")) {
-    throw new LinkingRouteError(403, "forbidden", "Administrator connection management is required");
+    (authorization.principal.type === "human" ||
+      authorization.principal.type === "operator") &&
+    (authorization.membership.role === "owner" ||
+      authorization.membership.role === "admin");
+  const target = authorization.identities.find(
+    (identity) => identity.identity_id === identityId,
+  );
+  if (
+    !administrator ||
+    !target ||
+    target.kind !== "human" ||
+    !target.scopes.includes("connection.manage")
+  ) {
+    throw new LinkingRouteError(
+      403,
+      "forbidden",
+      "Administrator connection management is required",
+    );
   }
 };
 
-const runtimeSecret = (env: Cloudflare.Env): string => {
-  const runtimeEnv = env as Cloudflare.Env & { LINKING_IDENTITY_HMAC_SECRET?: string };
-  const value = runtimeEnv.LINKING_IDENTITY_HMAC_SECRET;
-  if (value && value.length >= 16) return value;
-  if (env.COMMUNICATOR_ENV === "development") return "development-linking-hmac-secret";
-  throw new LinkingRouteError(503, "service_unavailable", "Link identity verification is unavailable");
-};
-
-const providerErrorCode = (result: GatewayPollResult): "expired" | "provider_error" =>
+const providerErrorCode = (
+  result: GatewayPollResult,
+): "expired" | "provider_error" =>
   result.status === "expired" ? "expired" : "provider_error";
 
 async function cancelPrevious(
@@ -305,7 +382,10 @@ async function cancelPrevious(
 ): Promise<void> {
   if (!gatewayRef) return;
   try {
-    await gateway.cancel({ ...gatewayOwnerFor({ ...state, generation }), gateway_ref: gatewayRef });
+    await gateway.cancel({
+      ...gatewayOwnerFor({ ...state, generation }),
+      gateway_ref: gatewayRef,
+    });
   } catch {
     // The new generation is authoritative even when cleanup is temporarily unavailable.
   }
@@ -328,7 +408,10 @@ async function startProvider(
       status: "failed",
       action: "none",
       action_expires_at: null,
-      error_code: error instanceof ConnectionGatewayError ? error.code : "provider_unavailable",
+      error_code:
+        error instanceof ConnectionGatewayError
+          ? error.code
+          : "provider_unavailable",
     });
     throw error;
   }
@@ -342,23 +425,40 @@ async function startProvider(
   return { state: stored.state, qr: result.qr };
 }
 
-const getState = async (env: Cloudflare.Env, sessionId: string): Promise<LinkSessionState> =>
+const getState = async (
+  env: Cloudflare.Env,
+  sessionId: string,
+): Promise<LinkSessionState> =>
   (await command(env, sessionId, { command: "read" })).state;
 
 export const createLinkSessionHandler =
   (services: LinkingServices = {}): LinkingHandler =>
   async (context) => {
     try {
-      const { identity_id: identityId } = context.req.valid("param") as { identity_id: string };
+      const { identity_id: identityId } = context.req.valid("param") as {
+        identity_id: string;
+      };
       const body = context.req.valid("json") as LinkSessionStart;
       const idempotencyKey = context.req.header("Idempotency-Key");
       if (!idempotencyKey)
-        throw new LinkingRouteError(400, "invalid_request", "Idempotency-Key is required");
+        throw new LinkingRouteError(
+          400,
+          "invalid_request",
+          "Idempotency-Key is required",
+        );
       requireLinkAdministrator(context, identityId);
       if (body.confirmed_identity_id !== identityId)
-        throw new LinkingRouteError(400, "invalid_request", "The selected identity must be confirmed");
+        throw new LinkingRouteError(
+          400,
+          "invalid_request",
+          "The selected identity must be confirmed",
+        );
       if (body.provider !== "whatsapp")
-        throw new LinkingRouteError(400, "invalid_request", "This provider is not enabled for QR linking");
+        throw new LinkingRouteError(
+          400,
+          "invalid_request",
+          "This provider is not enabled for QR linking",
+        );
       const authorization = context.get("authorization");
       const sessionDigest = await sha256Hex(
         `${authorization.tenant.id}\0${identityId}\0${body.provider}\0${idempotencyKey}`,
@@ -376,7 +476,9 @@ export const createLinkSessionHandler =
         generation: 1,
         status: "created",
         action: "none",
-        expires_at: new Date(createdAt.getTime() + LINK_SESSION_TTL_MS).toISOString(),
+        expires_at: new Date(
+          createdAt.getTime() + LINK_SESSION_TTL_MS,
+        ).toISOString(),
         action_expires_at: null,
         gateway_ref: null,
         connection_id: null,
@@ -387,8 +489,12 @@ export const createLinkSessionHandler =
         created_at: createdAt.toISOString(),
         updated_at: createdAt.toISOString(),
       };
-      const created = await command(context.env, sessionId, { command: "create", state: initial });
-      if (!created.created) return context.json(publicSession(created.state), 200);
+      const created = await command(context.env, sessionId, {
+        command: "create",
+        state: initial,
+      });
+      if (!created.created)
+        return context.json(publicSession(created.state), 200);
       const started = await startProvider(context.env, services, created.state);
       return context.json(publicSession(started.state, started.qr), 201);
     } catch (error) {
@@ -408,14 +514,23 @@ const authorizedState = async (
     state.actor_principal_id !== authorization.principal.id ||
     state.membership_id !== authorization.membership.id
   )
-    throw new LinkingRouteError(403, "forbidden", "Link session owner required");
+    throw new LinkingRouteError(
+      403,
+      "forbidden",
+      "Link session owner required",
+    );
   return state;
 };
 
 export const getLinkSessionHandler: LinkingHandler = async (context) => {
   try {
-    const { link_session_id: sessionId } = context.req.valid("param") as { link_session_id: string };
-    return context.json(publicSession(await authorizedState(context, sessionId)), 200);
+    const { link_session_id: sessionId } = context.req.valid("param") as {
+      link_session_id: string;
+    };
+    return context.json(
+      publicSession(await authorizedState(context, sessionId)),
+      200,
+    );
   } catch (error) {
     return errorResponse(context, error);
   }
@@ -425,23 +540,44 @@ export const createLinkSessionActionHandler =
   (services: LinkingServices = {}): LinkingHandler =>
   async (context) => {
     try {
-      const { link_session_id: sessionId } = context.req.valid("param") as { link_session_id: string };
+      const { link_session_id: sessionId } = context.req.valid("param") as {
+        link_session_id: string;
+      };
       const body = context.req.valid("json") as LinkSessionActionRequest;
       const state = await authorizedState(context, sessionId);
-      const gateway = (services.createConnectionGateway ?? gatewayFromEnv)(context.env);
+      const gateway = (services.createConnectionGateway ?? gatewayFromEnv)(
+        context.env,
+      );
       if (body.generation !== state.generation)
-        throw new LinkingRouteError(409, "invalid_request", "Link session is stale");
+        throw new LinkingRouteError(
+          409,
+          "invalid_request",
+          "Link session is stale",
+        );
       if (body.action === "refresh") {
         const refreshed = await command(context.env, sessionId, {
           command: "refresh",
           owner: ownerFor(state),
           generation: state.generation,
         });
-        await cancelPrevious(gateway, state, refreshed.previous_gateway_ref, state.generation);
-        const started = await startProvider(context.env, services, refreshed.state);
+        await cancelPrevious(
+          gateway,
+          state,
+          refreshed.previous_gateway_ref,
+          state.generation,
+        );
+        const started = await startProvider(
+          context.env,
+          services,
+          refreshed.state,
+        );
         return context.json(publicSession(started.state, started.qr), 200);
       }
-      if (state.status === "connected" || state.status === "relink_required" || state.status === "reconciliation_required")
+      if (
+        state.status === "connected" ||
+        state.status === "relink_required" ||
+        state.status === "reconciliation_required"
+      )
         return context.json(publicSession(state), 200);
       const begun = await command(context.env, sessionId, {
         command: "begin",
@@ -449,7 +585,11 @@ export const createLinkSessionActionHandler =
         generation: body.generation,
       });
       if (!begun.state.gateway_ref)
-        throw new LinkingRouteError(503, "service_unavailable", "Link provider session is unavailable");
+        throw new LinkingRouteError(
+          503,
+          "service_unavailable",
+          "Link provider session is unavailable",
+        );
       const result = await gateway.poll({
         ...gatewayOwnerFor(begun.state),
         gateway_ref: begun.state.gateway_ref,
@@ -480,46 +620,30 @@ export const createLinkSessionActionHandler =
       }
       const identity = result.provider_identity;
       if (!identity.user_login_id || identity.user_login_id.length > 256)
-        throw new LinkingRouteError(409, "invalid_request", "Provider identity could not be verified");
-      let committed;
-      try {
-        committed = await commitLinkedAccount({
-          db: context.env.CONTROL_DB,
-          sessionId,
-          tenantId: begun.state.tenant_id,
-          actorPrincipalId: begun.state.actor_principal_id,
-          targetIdentityId: begun.state.target_identity_id,
-          provider: begun.state.provider,
-          providerIdentity: identity,
-          identityHashSecret: runtimeSecret(context.env),
-          occurredAt: (services.now ?? (() => new Date()))().toISOString(),
-        });
-      } catch (error) {
-        const reconciled = await command(context.env, sessionId, {
-          command: "finish",
-          owner: ownerFor(begun.state),
-          generation: body.generation,
-          status: "reconciliation_required",
-          error_code: "reconciliation_required",
-          connection_id: null,
-          account_id: null,
-          provider_label: null,
-        });
-        if (error instanceof LinkingRepositoryError && error.code === "duplicate_provider_identity")
-          return context.json(publicSession(reconciled.state), 200);
-        throw error;
-      }
-      const finished = await command(context.env, sessionId, {
-        command: "finish",
+        throw new LinkingRouteError(
+          409,
+          "invalid_request",
+          "Provider identity could not be verified",
+        );
+      // Re-check the caller before the serialized DO commit. The repository
+      // repeats this check against current D1 rows inside the same boundary.
+      requireLinkAdministrator(context, begun.state.target_identity_id);
+      const committed = await command(context.env, sessionId, {
+        command: "commit",
         owner: ownerFor(begun.state),
         generation: body.generation,
-        status: committed.kind === "duplicate" ? "relink_required" : "connected",
-        error_code: committed.kind === "duplicate" ? "relink_required" : null,
-        connection_id: committed.connection_id,
-        account_id: committed.account_id,
-        provider_label: committed.account?.display_label ?? null,
+        provider_identity: identity,
+        occurred_at: (services.now ?? (() => new Date()))().toISOString(),
       });
-      return context.json(publicSession(finished.state), 200);
+      if (committed.commit_error === "authorization_required")
+        throw new LinkingRouteError(
+          403,
+          "forbidden",
+          "Administrator connection management is required",
+        );
+      if (committed.commit_error)
+        throw new LinkingRepositoryError(committed.commit_error);
+      return context.json(publicSession(committed.state), 200);
     } catch (error) {
       return errorResponse(context, error);
     }
@@ -528,19 +652,28 @@ export const createLinkSessionActionHandler =
 export const createCancelLinkSessionHandler =
   (services: LinkingServices = {}): LinkingHandler =>
   async (context) => {
-  try {
-    const { link_session_id: sessionId } = context.req.valid("param") as { link_session_id: string };
-    const state = await authorizedState(context, sessionId);
-    const gateway = (services.createConnectionGateway ?? gatewayFromEnv)(context.env);
-    const invalidated = await command(context.env, sessionId, {
-      command: "invalidate",
-      owner: ownerFor(state),
-      generation: state.generation,
-      status: "cancelled",
-    });
-    await cancelPrevious(gateway, state, invalidated.previous_gateway_ref, state.generation);
-    return context.json(publicSession(invalidated.state), 200);
-  } catch (error) {
-    return errorResponse(context, error);
-  }
-};
+    try {
+      const { link_session_id: sessionId } = context.req.valid("param") as {
+        link_session_id: string;
+      };
+      const state = await authorizedState(context, sessionId);
+      const gateway = (services.createConnectionGateway ?? gatewayFromEnv)(
+        context.env,
+      );
+      const invalidated = await command(context.env, sessionId, {
+        command: "invalidate",
+        owner: ownerFor(state),
+        generation: state.generation,
+        status: "cancelled",
+      });
+      await cancelPrevious(
+        gateway,
+        state,
+        invalidated.previous_gateway_ref,
+        state.generation,
+      );
+      return context.json(publicSession(invalidated.state), 200);
+    } catch (error) {
+      return errorResponse(context, error);
+    }
+  };

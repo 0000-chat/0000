@@ -14,8 +14,8 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
-      ,{ "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
+      { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" },
+      { "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
     ]
   },
   "observability": { "enabled": true },
@@ -65,7 +65,8 @@
     "COMMUNICATOR_INGRESS_ENABLED": "false",
     "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
     "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
-    "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
+    "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json",
+    "CONNECTION_GATEWAY_URL": "https://matrix-gateway.internal.example.invalid"
   },
   "env": {
     "staging": {
@@ -90,7 +91,8 @@
         "COMMUNICATOR_INGRESS_ENABLED": "false",
         "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
         "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
-        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json",
+        "CONNECTION_GATEWAY_URL": "https://matrix-gateway.internal.example.invalid"
       },
       "durable_objects": {
         "bindings": [
@@ -146,7 +148,8 @@
         "COMMUNICATOR_INGRESS_ENABLED": "false",
         "COMMUNICATOR_INGESTION_OIDC_ISSUER": "https://ingestion-auth.local.invalid/",
         "COMMUNICATOR_INGESTION_OIDC_AUDIENCE": "communicator-ingestion",
-        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json"
+        "COMMUNICATOR_INGESTION_OIDC_JWKS_URL": "https://ingestion-auth.local.invalid/.well-known/jwks.json",
+        "CONNECTION_GATEWAY_URL": "https://matrix-gateway.internal.example.invalid"
       },
       "durable_objects": {
         "bindings": [

@@ -1,7 +1,4 @@
-import {
-  ProviderSchema,
-  type Provider,
-} from "@communicator/contracts";
+import { ProviderSchema, type Provider } from "@communicator/contracts";
 
 export type GatewayOwner = {
   session_id: string;
@@ -56,7 +53,9 @@ export type GatewayPollResult =
 
 export interface ConnectionGateway {
   start(owner: GatewayOwner): Promise<GatewayStartResult>;
-  poll(owner: GatewayOwner & { gateway_ref: string }): Promise<GatewayPollResult>;
+  poll(
+    owner: GatewayOwner & { gateway_ref: string },
+  ): Promise<GatewayPollResult>;
   cancel(owner: GatewayOwner & { gateway_ref: string }): Promise<void>;
 }
 
@@ -157,7 +156,8 @@ const parsePoll = (value: unknown): GatewayPollResult => {
       },
     };
   }
-  if (result.status === "expired") return { status: "expired", error_code: "expired" };
+  if (result.status === "expired")
+    return { status: "expired", error_code: "expired" };
   if (result.status === "failed") {
     const code = result.error_code;
     if (
@@ -193,11 +193,31 @@ export class HttpConnectionGateway implements ConnectionGateway {
     private readonly sharedSecret: string,
     private readonly fetcher: typeof fetch = globalThis.fetch,
   ) {
-    if (!baseUrl || !sharedSecret) throw new ConnectionGatewayError("provider_unavailable");
+    if (!baseUrl || sharedSecret.length < 16)
+      throw new ConnectionGatewayError("provider_unavailable");
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
-  private async request<T>(path: string, body: unknown, parse: (value: unknown) => T): Promise<T> {
+  private async request<T>(
+    path: string,
+    body: unknown,
+    parse: (value: unknown) => T,
+  ): Promise<T> {
+    const requestId = crypto.randomUUID();
+    const requestBody =
+      typeof body === "object" && body !== null
+        ? (body as { session_id?: unknown; generation?: unknown })
+        : {};
+    const sessionId =
+      typeof requestBody.session_id === "string"
+        ? requestBody.session_id
+        : requestId;
+    const generation =
+      Number.isSafeInteger(requestBody.generation) &&
+      Number(requestBody.generation) > 0
+        ? String(requestBody.generation)
+        : "request";
+    const operation = path.split("/").at(-1) ?? "request";
     let response: Response;
     try {
       response = await this.fetcher(`${this.baseUrl}${path}`, {
@@ -206,6 +226,8 @@ export class HttpConnectionGateway implements ConnectionGateway {
           authorization: `Bearer ${this.sharedSecret}`,
           "content-type": "application/json",
           "cache-control": "no-store",
+          "x-request-id": requestId,
+          "idempotency-key": `link-${sessionId}-${generation}-${operation}`,
         },
         body: JSON.stringify(body),
       });
@@ -213,10 +235,14 @@ export class HttpConnectionGateway implements ConnectionGateway {
       throw new ConnectionGatewayError("provider_unavailable");
     }
     if (response.status === 401 || response.status === 403)
-      throw new ConnectionGatewayError("provisioning_disabled", response.status);
+      throw new ConnectionGatewayError(
+        "provisioning_disabled",
+        response.status,
+      );
     if (response.status >= 500)
       throw new ConnectionGatewayError("provider_unavailable", response.status);
-    if (!response.ok) throw new ConnectionGatewayError("provider_error", response.status);
+    if (!response.ok)
+      throw new ConnectionGatewayError("provider_error", response.status);
     let value: unknown;
     try {
       value = await response.json();
@@ -231,7 +257,9 @@ export class HttpConnectionGateway implements ConnectionGateway {
     return this.request("/v1/link-sessions/start", owner, parseStart);
   }
 
-  poll(owner: GatewayOwner & { gateway_ref: string }): Promise<GatewayPollResult> {
+  poll(
+    owner: GatewayOwner & { gateway_ref: string },
+  ): Promise<GatewayPollResult> {
     validateOwner(owner);
     if (!isString(owner.gateway_ref))
       return Promise.reject(new ConnectionGatewayError("provider_error"));

@@ -203,21 +203,26 @@ permission. The shared secret belongs in the gateway's protected secret file;
 it must never enter `LinkSessionDO`, D1, the browser, API/MCP responses, logs,
 or a test fixture.
 
-The current renderer hardcodes `provisioning.shared_secret: disable` and
-`allow_matrix_auth: false` at
-`scripts/render-whatsapp-config.py:50-54`, and current validation reports
-`whatsapp_provisioning=DISABLED`. The bridge supports enabling the API with a
-non-disabled secret according to the pinned mautrix-go auth code, but the
-renderer currently has no secret-file input. Treat enabling it as a separate
-controlled configuration seam; do not claim that the checked-in deployment
-can link until that seam and private route are implemented and verified.
+The renderer keeps `provisioning.shared_secret: disable` and
+`allow_matrix_auth: false` by default. A deployment may enable the API only by
+passing `--provisioning-secret-file` for a protected, mode-0600 secret file;
+the WhatsApp runtime initializer forwards that option only when the protected
+file exists. The companion Matrix gateway provisioning service reads its two
+protected secrets at process start and listens on the configured private
+address. The checked-in validation remains disabled-by-default; enabling the
+private service still requires the controlled HTTP and sacrificial-account
+proof gates below.
 
 Cloudflare-to-gateway calls need a dedicated service identity, authenticated
 transport, bounded timeout, request ID, and idempotency key. The gateway must
 authorize every request against the supplied session ID, tenant, identity,
 provider, generation, and selected bridge instance. A private network location
 alone is insufficient. The public Caddy configuration must not proxy either
-the bridge provisioning base path or the gateway admin path.
+the bridge provisioning base path or the gateway admin path. The Worker keeps
+`CONNECTION_GATEWAY_URL` as a non-secret Wrangler variable and reads
+`CONNECTION_GATEWAY_TOKEN` plus `LINKING_IDENTITY_HMAC_SECRET` from secret
+bindings; configure those values only through the protected deployment
+procedure.
 
 ## Identity verification and directory commit
 

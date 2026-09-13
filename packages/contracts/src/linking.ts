@@ -14,11 +14,7 @@ export const LinkSessionStatusSchema = z.enum([
   "reconciliation_required",
 ]);
 
-export const LinkSessionActionSchema = z.enum([
-  "scan_qr",
-  "wait",
-  "none",
-]);
+export const LinkSessionActionSchema = z.enum(["scan_qr", "wait", "none"]);
 
 export const LinkSessionErrorCodeSchema = z.enum([
   "provider_unavailable",

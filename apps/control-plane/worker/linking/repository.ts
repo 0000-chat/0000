@@ -11,6 +11,7 @@ export type CommitLinkedAccountInput = {
   sessionId: string;
   tenantId: string;
   actorPrincipalId: string;
+  membershipId: string;
   targetIdentityId: string;
   provider: Provider;
   providerIdentity: {
@@ -30,12 +31,14 @@ export type CommitLinkedAccountResult = {
 };
 
 export type LinkingRepositoryErrorCode =
+  | "authorization_required"
   | "invalid_link"
   | "duplicate_provider_identity"
   | "link_conflict"
   | "link_unavailable";
 
 const messages: Record<LinkingRepositoryErrorCode, string> = {
+  authorization_required: "Administrator connection management is required",
   invalid_link: "Invalid account link",
   duplicate_provider_identity: "This provider account is already connected",
   link_conflict: "Account link could not be committed",
@@ -92,8 +95,12 @@ async function hmacHex(secret: string, value: string): Promise<string> {
   ).join("");
 }
 
-const normalizeProviderIdentity = (provider: Provider, value: string): string => {
-  if (!ProviderSchema.safeParse(provider).success) throw new LinkingRepositoryError("invalid_link");
+const normalizeProviderIdentity = (
+  provider: Provider,
+  value: string,
+): string => {
+  if (!ProviderSchema.safeParse(provider).success)
+    throw new LinkingRepositoryError("invalid_link");
   const normalized = value.trim().toLowerCase();
   if (!normalized || normalized.length > 256 || /\s/.test(normalized))
     throw new LinkingRepositoryError("invalid_link");
@@ -143,6 +150,41 @@ export async function commitLinkedAccount(
   );
   const db = input.db;
   try {
+    // This is intentionally inside the same serialized finalization command
+    // as the directory mutation. A role, membership, or target grant revoked
+    // while the provider poll was in flight cannot complete a link.
+    const administrator = await db
+      .prepare(
+        `SELECT 1 AS valid
+         FROM principals AS p
+         JOIN memberships AS m
+           ON m.tenant_id = ? AND m.id = ? AND m.principal_id = p.id
+         JOIN identities AS i
+           ON i.tenant_id = m.tenant_id AND i.id = ?
+         JOIN identity_grants AS g
+           ON g.tenant_id = m.tenant_id
+          AND g.membership_id = m.id
+          AND g.identity_id = i.id
+          AND g.operation_scope = 'connection.manage'
+         WHERE p.id = ?
+           AND p.principal_type IN ('human', 'operator')
+           AND p.status = 'active'
+           AND m.status = 'active'
+           AND m.role IN ('owner', 'admin')
+           AND i.identity_kind = 'human'
+           AND i.status = 'active'
+         LIMIT 1`,
+      )
+      .bind(
+        input.tenantId,
+        input.membershipId,
+        input.targetIdentityId,
+        input.actorPrincipalId,
+      )
+      .first<{ valid: number }>();
+    if (!administrator)
+      throw new LinkingRepositoryError("authorization_required");
+
     const existingSession = await getExistingSessionCommit(db, input);
     if (existingSession) return existingSession;
 

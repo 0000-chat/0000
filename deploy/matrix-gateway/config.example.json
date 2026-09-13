@@ -12,5 +12,15 @@
   "state_key_file": "/etc/communicator/matrix-gateway/secrets/state-key",
   "oauth_client_secret_file": "/etc/communicator/matrix-gateway/secrets/oauth-client-secret",
   "request_timeout_secs": 10,
-  "sync_timeout_secs": 30
+  "sync_timeout_secs": 30,
+  "provisioning": {
+    "listen_addr": "127.0.0.1:8787",
+    "bridge_url": "https://whatsapp.internal.example.invalid",
+    "bridge_shared_secret_file": "/etc/communicator/matrix-gateway/secrets/whatsapp-provisioning",
+    "gateway_shared_secret_file": "/etc/communicator/matrix-gateway/secrets/linking-gateway",
+    "matrix_user_id": "@communicator:synapse",
+    "gateway_route_id": "gateway_route_whatsapp",
+    "bridge_instance_id": "whatsapp-primary",
+    "matrix_room_namespace": "communicator.0000.gold"
+  }
 }

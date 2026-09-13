@@ -13,7 +13,7 @@ matrix-sdk-crypto = { version = "=0.18.0", default-features = false }
 matrix-sdk-sqlite = { version = "=0.18.0", default-features = false }
 matrix-sdk-test = "=0.18.0"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
-ruma = "=0.16.0"
+ruma = { version = "=0.16.0", features = ["client-api-s"] }
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"

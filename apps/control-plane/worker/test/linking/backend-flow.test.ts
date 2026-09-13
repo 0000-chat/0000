@@ -16,10 +16,9 @@ const timestamp = "2026-09-13T00:00:00.000Z";
 beforeEach(async () => {
   await clearDirectory(workerEnv.CONTROL_DB);
   await seedDirectory(workerEnv.CONTROL_DB);
-  await workerEnv.CONTROL_DB
-    .prepare(
-      "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
-    )
+  await workerEnv.CONTROL_DB.prepare(
+    "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+  )
     .bind("gateway_route_link", "principal_operator", timestamp, timestamp)
     .run();
 });
@@ -85,21 +84,28 @@ describe("administrator WhatsApp linking", () => {
       createTokenVerifier: () => ({
         verify: async (token: string): Promise<VerifiedSubject> => {
           if (token === "human-token")
-            return { issuer: "https://issuer.example/", subject: "human-subject" };
+            return {
+              issuer: "https://issuer.example/",
+              subject: "human-subject",
+            };
           throw new Error("invalid token");
         },
       }),
     });
 
-    const started = await request(app, "/api/v1/identities/identity_human/link-sessions", {
-      method: "POST",
-      headers: { "Idempotency-Key": "link-flow-001" },
-      body: JSON.stringify({
-        provider: "whatsapp",
-        method: "qr",
-        confirmed_identity_id: "identity_human",
-      }),
-    });
+    const started = await request(
+      app,
+      "/api/v1/identities/identity_human/link-sessions",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "link-flow-001" },
+        body: JSON.stringify({
+          provider: "whatsapp",
+          method: "qr",
+          confirmed_identity_id: "identity_human",
+        }),
+      },
+    );
     expect(started.status).toBe(201);
     const challenge = LinkSessionSchema.parse(await started.json());
     expect(challenge.status).toBe("awaiting_user");
@@ -126,7 +132,10 @@ describe("administrator WhatsApp linking", () => {
       {
         method: "POST",
         headers: { "Idempotency-Key": "link-flow-poll-001" },
-        body: JSON.stringify({ generation: challenge.generation, action: "poll" }),
+        body: JSON.stringify({
+          generation: challenge.generation,
+          action: "poll",
+        }),
       },
     );
     expect(completed.status).toBe(200);
@@ -136,16 +145,16 @@ describe("administrator WhatsApp linking", () => {
     expect(result.account_id).toMatch(/^account_/);
     expect(calls).toEqual(["start:1", "poll:1"]);
 
-    const created = await workerEnv.CONTROL_DB
-      .prepare(
-        "SELECT c.id, ca.account_id FROM connections AS c JOIN connection_accounts AS ca ON ca.connection_id = c.id WHERE c.identity_id = ? AND c.id <> ?",
-      )
+    const created = await workerEnv.CONTROL_DB.prepare(
+      "SELECT c.id, ca.account_id FROM connections AS c JOIN connection_accounts AS ca ON ca.connection_id = c.id WHERE c.identity_id = ? AND c.id <> ?",
+    )
       .bind("identity_human", "connection_human_whatsapp")
       .all<{ id: string; account_id: string }>();
     expect(created.results).toHaveLength(1);
     expect(created.results[0]?.account_id).toBe(result.account_id);
-    const grants = await workerEnv.CONTROL_DB
-      .prepare("SELECT COUNT(*) AS count FROM identity_grants WHERE identity_id = ?")
+    const grants = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM identity_grants WHERE identity_id = ?",
+    )
       .bind("identity_human")
       .first<{ count: number }>();
     expect(grants?.count).toBe(6);

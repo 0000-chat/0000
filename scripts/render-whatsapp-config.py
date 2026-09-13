@@ -48,7 +48,7 @@ relay:
   default_relays: []
 
 provisioning:
-  shared_secret: disable
+  shared_secret: {provisioning_shared_secret}
   allow_matrix_auth: false
   debug_endpoints: false
   enable_session_transfers: false
@@ -131,11 +131,27 @@ def read_existing_pickle_key(path: pathlib.Path) -> str:
     return "generate"
 
 
+def read_provisioning_secret(path: pathlib.Path | None) -> str:
+    if path is None:
+        return "disable"
+    if not path.is_file():
+        raise SystemExit("provisioning secret file is missing")
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise SystemExit("provisioning secret file permissions are too broad")
+    value = path.read_text().strip()
+    if not value:
+        raise SystemExit("provisioning secret file is empty")
+    if len(value) < 16 or len(value) > 4096:
+        raise SystemExit("provisioning secret has invalid length")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-password-file", type=pathlib.Path, required=True)
     parser.add_argument("--registration", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--provisioning-secret-file", type=pathlib.Path)
     args = parser.parse_args()
 
     password_path = args.db_password_file
@@ -148,6 +164,7 @@ def main() -> int:
         raise SystemExit("database password file is empty")
     tokens = read_registration_tokens(args.registration)
     pickle_key = read_existing_pickle_key(args.output)
+    provisioning_shared_secret = read_provisioning_secret(args.provisioning_secret_file)
 
     database_uri = (
         "postgres://whatsapp_bridge:"
@@ -159,6 +176,11 @@ def main() -> int:
         as_token=json.dumps(tokens["as_token"]),
         hs_token=json.dumps(tokens["hs_token"]),
         pickle_key=json.dumps(pickle_key),
+        provisioning_shared_secret=(
+            "disable"
+            if provisioning_shared_secret == "disable"
+            else json.dumps(provisioning_shared_secret)
+        ),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(

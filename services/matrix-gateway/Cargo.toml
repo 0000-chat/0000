@@ -32,6 +32,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+url.workspace = true
 uuid = { version = "=1.26.0", features = ["v4"] }
 zeroize = "=1.9.0"
 
