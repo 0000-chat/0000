@@ -1604,7 +1604,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 5,
+      schema_generation: 6,
       state: "ready",
       generation: 1,
       rebuild_id: null,
