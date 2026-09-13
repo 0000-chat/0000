@@ -48,6 +48,9 @@ const applicationTables = [
   "history_import_events",
   "removal_authority",
   "removal_expiry_schedule",
+  "group_creation_operations",
+  "group_creation_access_grants",
+  "group_creation_webhook_evaluations",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -112,6 +115,9 @@ async function dropControlDirectorySchema(db: D1Database) {
     "attachment_download_grants",
     "direct_chat_creation_operations",
     "contact_resolution_candidates",
+    "group_creation_webhook_evaluations",
+    "group_creation_access_grants",
+    "group_creation_operations",
     "audit_events",
     "control_event_outbox",
     "directory_mutations",

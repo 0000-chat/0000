@@ -158,6 +158,8 @@ import {
   createContactHandlers,
 } from "./routes/contacts";
 import type { ContactRouteServices } from "./contacts/service";
+import { createGroupRoute, createGroupHandler } from "./routes/groups";
+import type { GroupRouteServices } from "./groups/service";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -203,6 +205,7 @@ export type AppServices = {
   createAttachmentProvider?: AttachmentRouteServices["createProvider"];
   attachmentNow?: AttachmentRouteServices["now"];
   contactServices?: ContactRouteServices;
+  groupServices?: GroupRouteServices;
 };
 
 export function createApp(services: AppServices = {}) {
@@ -435,6 +438,8 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/contacts/*", productAuthorization);
   app.use("/api/v1/conversations", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
+  app.use("/api/v1/groups", productAuthorization);
+  app.use("/api/v1/groups/*", productAuthorization);
   app.use("/api/v1/commands/*", productAuthorization);
   app.use("/api/v1/commands", productAuthorization);
   app.use("/api/v1/identities/*/link-sessions", productAuthorization);
@@ -460,6 +465,7 @@ export function createApp(services: AppServices = {}) {
       context,
       outboundAcceptanceServices,
       services.contactServices,
+      services.groupServices,
     ),
   );
   app.get("/mcp", handleMcpGet);
@@ -569,6 +575,7 @@ export function createApp(services: AppServices = {}) {
   app.openapi(contactsRoute, contactHandlers.contacts);
   app.openapi(resolveContactRoute, contactHandlers.resolve);
   app.openapi(createDirectChatRoute, contactHandlers.create);
+  app.openapi(createGroupRoute, createGroupHandler(services.groupServices));
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",

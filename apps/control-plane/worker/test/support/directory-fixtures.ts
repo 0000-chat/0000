@@ -406,6 +406,9 @@ export async function clearDirectory(db: D1Database): Promise<void> {
   }
 
   await db.batch([
+    db.prepare("DELETE FROM group_creation_webhook_evaluations"),
+    db.prepare("DELETE FROM group_creation_access_grants"),
+    db.prepare("DELETE FROM group_creation_operations"),
     db.prepare("DELETE FROM direct_chat_creation_operations"),
     db.prepare("DELETE FROM contact_resolution_candidates"),
     db.prepare("DELETE FROM webhook_deliveries"),
