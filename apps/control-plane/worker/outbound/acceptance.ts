@@ -4,6 +4,7 @@ import {
   type OutboundDispatch,
   OutboundDecisionResultSchema,
   type OutboundDecisionResult,
+  type Command,
   type SessionResponse,
   type TextReplyRequest,
   TextReplyRequestSchema,
@@ -32,11 +33,7 @@ export type OutboundAcceptanceServices = {
 };
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
-const USABLE_CONNECTION_STATUSES = new Set([
-  "connected",
-  "syncing",
-  "ready",
-]);
+const USABLE_CONNECTION_STATUSES = new Set(["connected", "syncing", "ready"]);
 
 const requireSendIdentity = (
   session: SessionResponse,
@@ -174,10 +171,6 @@ export async function acceptTextReply(
   return accepted;
 }
 
-const requireHumanAdministrator = (session: SessionResponse): void => {
-  if (!isAdministratorSession(session)) throw new ReadError("forbidden");
-};
-
 const acceptanceNow = (services: OutboundAcceptanceServices): string =>
   (services.now === undefined ? new Date() : services.now()).toISOString();
 
@@ -204,6 +197,26 @@ export async function reconcileOutboundCommand(
   }
 }
 
+export async function listOutboundCommands(
+  context: OutboundAcceptanceContext,
+): Promise<Command[]> {
+  if (!isAdministratorSession(context.authorization)) {
+    throw new ReadError("forbidden");
+  }
+  const projection = getTenantProjection(
+    context.env,
+    context.authorization.tenant.id,
+  );
+  try {
+    return await projection.listOutboundCommands({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+    });
+  } catch (error) {
+    throw mapReadError(error);
+  }
+}
+
 export async function decideOutboundCommand(
   context: OutboundAcceptanceContext,
   commandId: string,
@@ -211,11 +224,45 @@ export async function decideOutboundCommand(
   idempotencyKey: string,
   services: OutboundAcceptanceServices = {},
 ): Promise<OutboundDecisionResult> {
-  requireHumanAdministrator(context.authorization);
+  const current = await reconcileOutboundCommand(context, commandId, services);
+  const administrator = isAdministratorSession(context.authorization);
   const identity = context.authorization.identities.find((candidate) =>
     candidate.scopes.includes("message.send"),
   );
-  if (identity === undefined) throw new ReadError("forbidden");
+  if (!administrator) {
+    // A delegated agent may cancel its own pre-dispatch work when its
+    // account/chat send grant is still active. Confirmation after the
+    // deadline remains an explicit human administrator action.
+    if (
+      decision !== "cancel" ||
+      context.authorization.principal.type !== "agent" ||
+      identity === undefined
+    ) {
+      throw new ReadError("forbidden");
+    }
+    const database = context.env.CONTROL_DB;
+    if (database === undefined || typeof database.withSession !== "function") {
+      throw new ReadError("service_unavailable");
+    }
+    let granted = false;
+    try {
+      granted = await hasAccountOperationGrant(
+        database.withSession("first-primary"),
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+        identity.identity_id,
+        current.dispatch.account_id,
+        current.dispatch.conversation_id,
+        "message.send",
+      );
+    } catch (error) {
+      throw mapReadError(error);
+    }
+    if (!granted) throw new ReadError("forbidden");
+  }
+  const actorIdentity =
+    identity?.identity_id ?? context.authorization.identities[0]?.identity_id;
+  if (actorIdentity === undefined) throw new ReadError("forbidden");
   const projection = getTenantProjection(
     context.env,
     context.authorization.tenant.id,
@@ -229,7 +276,7 @@ export async function decideOutboundCommand(
         decision,
         idempotency_key: idempotencyKey,
         actor_principal_id: context.authorization.principal.id,
-        actor_identity_id: identity.identity_id,
+        actor_identity_id: actorIdentity,
         decided_at: acceptanceNow(services),
       }),
     );

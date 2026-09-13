@@ -40,6 +40,10 @@ import {
   textReplyHandler,
   reconcileOutboundRoute,
   reconcileOutboundHandler,
+  outboundStatusRoute,
+  outboundStatusHandler,
+  outboundCommandsRoute,
+  outboundCommandsHandler,
   confirmOutboundRoute,
   confirmOutboundHandler,
   cancelOutboundRoute,
@@ -381,6 +385,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/permission-requests", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
   app.use("/api/v1/commands/*", productAuthorization);
+  app.use("/api/v1/commands", productAuthorization);
   app.use("/api/v1/identities/*/link-sessions", productAuthorization);
   app.use("/api/v1/link-sessions/*", productAuthorization);
   app.use("/api/v1/search/*", productAuthorization);
@@ -411,6 +416,11 @@ export function createApp(services: AppServices = {}) {
     reconcileOutboundRoute,
     reconcileOutboundHandler(outboundAcceptanceServices),
   );
+  app.openapi(
+    outboundStatusRoute,
+    outboundStatusHandler(outboundAcceptanceServices),
+  );
+  app.openapi(outboundCommandsRoute, outboundCommandsHandler());
   app.openapi(
     confirmOutboundRoute,
     confirmOutboundHandler(outboundAcceptanceServices),

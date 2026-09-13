@@ -21,6 +21,8 @@ const identitySequenceMigrationName = "identity_local_projection_sequences";
 const identitySequenceMigrationAppliedAt = "2026-09-10T00:00:00.000Z";
 const durableOutboundMigrationName = "durable_outbound_acceptance";
 const durableOutboundMigrationAppliedAt = "2026-09-13T00:00:00.000Z";
+const offlineOutboundMigrationName = "offline_outbound_confirmation";
+const offlineOutboundMigrationAppliedAt = "2026-09-14T00:00:00.000Z";
 const applicationTableNames = [
   "projection_meta",
   "connection_bindings",
@@ -37,6 +39,7 @@ const applicationTableNames = [
   "attachments",
   "commands",
   "outbound_dispatches",
+  "outbound_command_decisions",
   "message_delivery_updates",
   "event_tombstones",
   "resource_tombstones",
@@ -336,8 +339,24 @@ const expectedColumns: Record<
     ["body", "TEXT", 1, 0, null],
     ["delivery_mode", "TEXT", 1, 0, null],
     ["status", "TEXT", 1, 0, null],
+    ["confirmation_due_at", "TEXT", 0, 0, null],
+    ["confirmation_decision", "TEXT", 0, 0, null],
+    ["confirmation_actor_principal_id", "TEXT", 0, 0, null],
+    ["confirmation_actor_identity_id", "TEXT", 0, 0, null],
+    ["confirmation_decided_at", "TEXT", 0, 0, null],
     ["created_at", "TEXT", 1, 0, null],
     ["updated_at", "TEXT", 1, 0, null],
+  ],
+  outbound_command_decisions: [
+    ["id", "TEXT", 1, 1, null],
+    ["tenant_id", "TEXT", 1, 0, null],
+    ["command_id", "TEXT", 1, 0, null],
+    ["dispatch_id", "TEXT", 1, 0, null],
+    ["decision", "TEXT", 1, 0, null],
+    ["idempotency_key", "TEXT", 1, 0, null],
+    ["actor_principal_id", "TEXT", 1, 0, null],
+    ["actor_identity_id", "TEXT", 1, 0, null],
+    ["decided_at", "TEXT", 1, 0, null],
   ],
   message_delivery_updates: [
     ["message_id", "TEXT", 1, 1, null],
@@ -462,13 +481,15 @@ const expectedChecks: Record<string, string[]> = {
   commands: [
     "CHECK(operation = 'message.send')",
     "CHECK(delivery_mode IN ('direct','paced'))",
-    "CHECK(status IN ('accepted','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed'))",
+    "CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed'))",
   ],
   outbound_dispatches: [
     "CHECK(length(body_digest) = 64)",
     "CHECK(delivery_mode IN ('direct','paced'))",
-    "CHECK(status IN ('pending','wakeup_failed','dispatching','dispatched'))",
+    "CHECK(status IN ('pending','waiting_for_connection','confirmation_required','wakeup_failed','dispatching','dispatched','cancelled'))",
+    "CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel'))",
   ],
+  outbound_command_decisions: ["CHECK(decision IN ('confirm','cancel'))"],
   message_delivery_updates: [
     "CHECK(delivery_status IN ('unknown','accepted','sent','delivered','read','failed'))",
   ],
@@ -520,6 +541,7 @@ const expectedIndexes = [
   "idx_commands_conversation_owner",
   "idx_outbound_dispatches_account_conversation",
   "idx_outbound_dispatches_actor_created",
+  "idx_outbound_command_decisions_tenant_decided",
   "idx_event_tombstones_conversation_owner",
   "idx_applied_events_order",
   "idx_projection_changes_identity_sequence",
@@ -582,6 +604,8 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
   idx_outbound_dispatches_actor_created:
     "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+  idx_outbound_command_decisions_tenant_decided:
+    "CREATE INDEX idx_outbound_command_decisions_tenant_decided ON outbound_command_decisions(tenant_id, decided_at, command_id)",
   idx_event_tombstones_conversation_owner:
     "CREATE INDEX idx_event_tombstones_conversation_owner ON event_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_applied_events_order:
@@ -659,7 +683,7 @@ describe("tenant projection SQLite schema", () => {
     expect(tableObjects.map((row) => row.name).sort()).toEqual(
       Object.keys(expectedColumns).sort(),
     );
-    expect(tableObjects).toHaveLength(23);
+    expect(tableObjects).toHaveLength(24);
 
     for (const [table, columns] of Object.entries(expectedColumns)) {
       const rows = catalog.tableInfo[table] as Array<{
@@ -693,7 +717,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(33);
+    expect(indexNames).toHaveLength(34);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -741,6 +765,11 @@ describe("tenant projection SQLite schema", () => {
         version: 3,
         name: durableOutboundMigrationName,
         applied_at: durableOutboundMigrationAppliedAt,
+      },
+      {
+        version: 4,
+        name: offlineOutboundMigrationName,
+        applied_at: offlineOutboundMigrationAppliedAt,
       },
     ]);
     expect(
@@ -1148,7 +1177,7 @@ describe("tenant projection SQLite schema", () => {
       const schemaBefore = schemaSnapshot();
       state.storage.sql.exec(
         "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        4,
+        5,
         "future_projection_schema",
         migrationAppliedAt,
       );
@@ -1331,7 +1360,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 3,
+      schema_generation: 4,
       state: "ready",
       generation: 1,
       rebuild_id: null,

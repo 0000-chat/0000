@@ -13,6 +13,7 @@ import type { IngestionAuthorizationVariables } from "../auth/ingestion-middlewa
 import {
   acceptTextReply,
   decideOutboundCommand,
+  listOutboundCommands,
   reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "../outbound/acceptance";
@@ -123,9 +124,35 @@ const commandRouteResponse = {
   503: { description: "Projection unavailable", content: errorContent },
 };
 
+export const outboundCommandsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/commands",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "Administrator outbound command status",
+      content: { "application/json": { schema: CommandSchema.array() } },
+    },
+    401: { description: "Authentication required", content: errorContent },
+    403: {
+      description: "Administrator permission required",
+      content: errorContent,
+    },
+    503: { description: "Projection unavailable", content: errorContent },
+  },
+});
+
 export const reconcileOutboundRoute = createRoute({
   method: "post",
   path: "/api/v1/commands/{command_id}/reconcile",
+  security: [{ bearerAuth: [] }],
+  request: { params: commandPath },
+  responses: commandRouteResponse,
+});
+
+export const outboundStatusRoute = createRoute({
+  method: "get",
+  path: "/api/v1/commands/{command_id}",
   security: [{ bearerAuth: [] }],
   request: { params: commandPath },
   responses: commandRouteResponse,
@@ -178,6 +205,21 @@ export const reconcileOutboundHandler =
     }
   };
 
+export const outboundStatusHandler = reconcileOutboundHandler;
+
+export const outboundCommandsHandler =
+  (): Handler<OutboundRouteEnv, string> => async (context) => {
+    try {
+      const commands = await listOutboundCommands({
+        env: context.env,
+        authorization: context.get("authorization"),
+      });
+      return context.json(commands, 200);
+    } catch (error) {
+      return outboundFailure(context, error);
+    }
+  };
+
 type DecisionHandler = Handler<
   CommandRouteEnv,
   string,
@@ -211,10 +253,10 @@ const decisionHandler =
     }
   };
 
-export const confirmOutboundHandler =
-  (services: OutboundAcceptanceServices = {}): DecisionHandler =>
-  decisionHandler("confirm", services);
+export const confirmOutboundHandler = (
+  services: OutboundAcceptanceServices = {},
+): DecisionHandler => decisionHandler("confirm", services);
 
-export const cancelOutboundHandler =
-  (services: OutboundAcceptanceServices = {}): DecisionHandler =>
-  decisionHandler("cancel", services);
+export const cancelOutboundHandler = (
+  services: OutboundAcceptanceServices = {},
+): DecisionHandler => decisionHandler("cancel", services);

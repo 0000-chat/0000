@@ -430,8 +430,8 @@ const durableOutboundAcceptanceMigration: ProjectionMigration = Object.freeze({
  * command table is rebuilt here because SQLite cannot alter a CHECK constraint;
  * all existing rows are copied verbatim before the old table is removed.
  */
-const offlineOutboundConfirmationMigration: ProjectionMigration =
-  Object.freeze({
+const offlineOutboundConfirmationMigration: ProjectionMigration = Object.freeze(
+  {
     version: 4,
     name: "offline_outbound_confirmation",
     appliedAt: "2026-09-14T00:00:00.000Z",
@@ -504,7 +504,8 @@ const offlineOutboundConfirmationMigration: ProjectionMigration =
 ) STRICT`,
       "CREATE INDEX idx_outbound_command_decisions_tenant_decided ON outbound_command_decisions(tenant_id, decided_at, command_id)",
     ],
-  });
+  },
+);
 
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =

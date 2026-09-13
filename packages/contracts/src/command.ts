@@ -149,6 +149,13 @@ export const OutboundReconcileInputSchema = z
   })
   .strict();
 
+export const ListOutboundCommandsInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+  })
+  .strict();
+
 export const OutboundDecisionResultSchema = z
   .object({
     command: CommandSchema,
@@ -186,6 +193,9 @@ export type AcceptTextReplyResult = z.infer<typeof AcceptTextReplyResultSchema>;
 export type OutboundDecisionInput = z.infer<typeof OutboundDecisionInputSchema>;
 export type OutboundReconcileInput = z.infer<
   typeof OutboundReconcileInputSchema
+>;
+export type ListOutboundCommandsInput = z.infer<
+  typeof ListOutboundCommandsInputSchema
 >;
 export type OutboundDecisionResult = z.infer<
   typeof OutboundDecisionResultSchema

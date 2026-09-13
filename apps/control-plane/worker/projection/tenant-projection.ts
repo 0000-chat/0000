@@ -4,6 +4,7 @@ import {
   OutboundDecisionInputSchema,
   OutboundDecisionResultSchema,
   OutboundReconcileInputSchema,
+  ListOutboundCommandsInputSchema,
   ApplyProjectionBatchInputSchema,
   ApplyReplayPageInputSchema,
   compareOpaqueEventIds,
@@ -74,6 +75,7 @@ import {
   type OutboundDecisionInput,
   type OutboundDecisionResult,
   type OutboundReconcileInput,
+  type ListOutboundCommandsInput,
   type ProjectionChannelStat,
   type ProjectionChange,
   type ProjectionChangePage,
@@ -1278,8 +1280,7 @@ const mapOutboundDispatch = (row: OutboundDispatchRow): OutboundDispatch =>
     ...(row.confirmation_actor_principal_id === null
       ? {}
       : {
-          confirmation_actor_principal_id:
-            row.confirmation_actor_principal_id,
+          confirmation_actor_principal_id: row.confirmation_actor_principal_id,
         }),
     ...(row.confirmation_actor_identity_id === null
       ? {}
@@ -1981,8 +1982,98 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     this.#closeSocket(socket, 1011, "realtime socket error");
   }
 
+  async #processOutboundAlarm(now: number): Promise<void> {
+    const rows = this.ctx.storage.sql
+      .exec<OutboundDispatchRow>(
+        "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE status = 'waiting_for_connection' ORDER BY confirmation_due_at ASC, id ASC",
+      )
+      .toArray();
+    for (const row of rows) {
+      const available = await this.#connectionAvailable(
+        row.tenant_id,
+        row.connection_id,
+      );
+      this.ctx.storage.transactionSync(() => {
+        const current = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          row.command_id,
+        );
+        const command = current
+          ? readOutboundCommand(this.ctx.storage, current.command_id)
+          : undefined;
+        if (
+          current === undefined ||
+          command === undefined ||
+          current.status !== "waiting_for_connection"
+        ) {
+          return;
+        }
+        let nextDispatchStatus: OutboundDispatchRow["status"] = current.status;
+        let nextCommandStatus = command.status;
+        if (current.confirmation_decision === "confirm" && available) {
+          nextDispatchStatus = "pending";
+          nextCommandStatus = "accepted";
+        } else if (current.confirmation_decision === null) {
+          const dueMs =
+            current.confirmation_due_at === null
+              ? Number.NaN
+              : Date.parse(current.confirmation_due_at);
+          if (Number.isSafeInteger(dueMs) && now >= dueMs) {
+            nextDispatchStatus = "confirmation_required";
+            nextCommandStatus = "confirmation_required";
+          } else if (available) {
+            nextDispatchStatus = "pending";
+            nextCommandStatus = "accepted";
+          }
+        }
+        if (nextDispatchStatus === current.status) return;
+        const updatedAt = new Date(now).toISOString();
+        this.ctx.storage.sql.exec(
+          "UPDATE outbound_dispatches SET status = ?, updated_at = ? WHERE id = ? AND status = 'waiting_for_connection'",
+          nextDispatchStatus,
+          updatedAt,
+          current.id,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE commands SET status = ?, updated_at = ? WHERE id = ?",
+          nextCommandStatus,
+          updatedAt,
+          command.id,
+        );
+      });
+    }
+  }
+
+  #nextOutboundAlarm(): number | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ confirmation_due_at: string | null }>(
+        "SELECT confirmation_due_at FROM outbound_dispatches WHERE status = 'waiting_for_connection' AND confirmation_due_at IS NOT NULL ORDER BY confirmation_due_at ASC LIMIT 1",
+      )
+      .toArray();
+    const due = rows[0]?.confirmation_due_at;
+    if (due === undefined || due === null) return null;
+    const dueMs = Date.parse(due);
+    return Number.isSafeInteger(dueMs) ? dueMs : null;
+  }
+
+  async #scheduleCombinedAlarm(
+    sockets: readonly WebSocket[] = this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+  ): Promise<void> {
+    const socketExpiry = nextSocketExpiry(sockets);
+    const outboundExpiry = this.#nextOutboundAlarm();
+    const candidates = [socketExpiry, outboundExpiry].filter(
+      (value): value is number => value !== null,
+    );
+    if (candidates.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.min(...candidates));
+  }
+
   async alarm(): Promise<void> {
     const now = Date.now();
+    await this.#processOutboundAlarm(now);
     const remaining: WebSocket[] = [];
     const sockets = await this.#revalidateRealtimeSockets();
     const activeTenantSocketCount = Math.min(
@@ -2017,12 +2108,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       remaining.push(socket);
     }
 
-    const nextExpiry = nextSocketExpiry(remaining);
-    if (nextExpiry === null) {
-      await this.ctx.storage.deleteAlarm();
-    } else {
-      await this.ctx.storage.setAlarm(nextExpiry);
-    }
+    await this.#scheduleCombinedAlarm(remaining);
   }
 
   #activeTenantSocketCount(): number {
@@ -2118,14 +2204,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   }
 
   async #scheduleRealtimeSocketAlarm(): Promise<void> {
-    const nextExpiry = nextSocketExpiry(
-      this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
-    );
-    if (nextExpiry === null) {
-      await this.ctx.storage.deleteAlarm();
-      return;
-    }
-    await this.ctx.storage.setAlarm(nextExpiry);
+    await this.#scheduleCombinedAlarm();
   }
 
   #persistSocketPosition(
@@ -2807,8 +2886,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       const eventId = `event_outbound_${requestDigest.slice(0, 48)}`;
       const dispatchId = `dispatch_outbound_${requestDigest.slice(0, 48)}`;
       const occurredMs = parseStoredMilliseconds(parsed.accepted_at);
-      const initialDispatchStatus =
-        parsed.initial_dispatch_status ?? "pending";
+      const initialDispatchStatus = parsed.initial_dispatch_status ?? "pending";
       const initialCommandStatus =
         initialDispatchStatus === "waiting_for_connection"
           ? "waiting_for_connection"
@@ -2977,6 +3055,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           replayed: false,
         });
       });
+      if (result.dispatch.status === "waiting_for_connection") {
+        await this.#scheduleCombinedAlarm();
+      }
       return structuredClone(result);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
@@ -3046,25 +3127,23 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
 
         let nextDispatchStatus = dispatch.status;
         let nextCommandStatus = command.status;
-        if (
-          dispatch.status === "waiting_for_connection" &&
-          dispatch.confirmation_due_at !== null
-        ) {
-          const dueMs = Date.parse(dispatch.confirmation_due_at);
-          if (Number.isSafeInteger(dueMs) && nowMs >= dueMs) {
-            nextDispatchStatus = "confirmation_required";
-            nextCommandStatus = "confirmation_required";
-          } else if (available && dispatch.confirmation_decision === null) {
+        if (dispatch.status === "waiting_for_connection") {
+          if (dispatch.confirmation_decision === "confirm" && available) {
             nextDispatchStatus = "pending";
             nextCommandStatus = "accepted";
+          } else if (dispatch.confirmation_decision === null) {
+            const dueMs =
+              dispatch.confirmation_due_at === null
+                ? Number.NaN
+                : Date.parse(dispatch.confirmation_due_at);
+            if (Number.isSafeInteger(dueMs) && nowMs >= dueMs) {
+              nextDispatchStatus = "confirmation_required";
+              nextCommandStatus = "confirmation_required";
+            } else if (available) {
+              nextDispatchStatus = "pending";
+              nextCommandStatus = "accepted";
+            }
           }
-        } else if (
-          dispatch.status === "waiting_for_connection" &&
-          available &&
-          dispatch.confirmation_decision === "confirm"
-        ) {
-          nextDispatchStatus = "pending";
-          nextCommandStatus = "accepted";
         }
 
         if (
@@ -3249,6 +3328,40 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         });
       });
       return structuredClone(result);
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listOutboundCommands(
+    input: ListOutboundCommandsInput,
+  ): Promise<Command[]> {
+    try {
+      const parsed = parseProjectionInput(
+        ListOutboundCommandsInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const dispatches = this.ctx.storage.sql
+        .exec<OutboundDispatchRow>(
+          "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE tenant_id = ? ORDER BY created_at DESC, id DESC",
+          parsed.tenant_id,
+        )
+        .toArray();
+      return structuredClone(
+        dispatches.flatMap((dispatch) => {
+          const command = readOutboundCommand(
+            this.ctx.storage,
+            dispatch.command_id,
+          );
+          return command === undefined
+            ? []
+            : [mapOutboundCommand(parsed.tenant_id, command, dispatch)];
+        }),
+      );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }

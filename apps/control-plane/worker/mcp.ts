@@ -48,6 +48,8 @@ import {
 } from "./control-directory/webhooks";
 import {
   acceptTextReply,
+  decideOutboundCommand,
+  reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "./outbound/acceptance";
 
@@ -158,6 +160,11 @@ const sendTextReplyInput = {
   delivery_mode: DeliveryModeSchema,
   idempotency_key: z.string().trim().min(1).max(200),
   attachments: z.array(z.unknown()).max(0).optional(),
+};
+const outboundCommandInput = { command_id: boundedId };
+const cancelTextReplyInput = {
+  command_id: boundedId,
+  idempotency_key: z.string().trim().min(1).max(200),
 };
 
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
@@ -584,6 +591,48 @@ const registerTools = (
           input.chat_id ?? null,
         );
       }),
+  );
+
+  server.registerTool(
+    "get_text_reply_status",
+    {
+      description:
+        "Inspect the durable state of a saved text reply and reconcile connection waiting",
+      inputSchema: outboundCommandInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        reconcileOutboundCommand(
+          {
+            env: context.env,
+            authorization: context.authorization,
+          },
+          input.command_id,
+          outboundServices,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "cancel_text_reply",
+    {
+      description:
+        "Cancel a saved text reply before adapter dispatch when the account grant allows it",
+      inputSchema: cancelTextReplyInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        decideOutboundCommand(
+          {
+            env: context.env,
+            authorization: context.authorization,
+          },
+          input.command_id,
+          "cancel",
+          input.idempotency_key,
+          outboundServices,
+        ),
+      ),
   );
 
   server.registerTool(
