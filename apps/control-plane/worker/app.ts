@@ -101,6 +101,14 @@ import {
   retryWebhookDeliveryRoute,
   retryWebhookDeliveryHandler,
 } from "./routes/webhooks";
+import {
+  removalStatusRoute,
+  removalStatusHandler,
+  recordRemovalRoute,
+  recordRemovalHandler,
+  scheduleRemovalExpiryRoute,
+  scheduleRemovalExpiryHandler,
+} from "./routes/removals";
 import { ReadError, readErrorResponse } from "./read/errors";
 import {
   registerOAuthRoutes,
@@ -435,6 +443,8 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/webhook-subscriptions", productAuthorization);
   app.use("/api/v1/webhook-subscriptions/*", productAuthorization);
   app.use("/api/v1/webhook-deliveries/*", productAuthorization);
+  app.use("/api/v1/removals", productAuthorization);
+  app.use("/api/v1/removal-expiries", productAuthorization);
   app.use("/api/v1/history-imports/*", productAuthorization);
   app.use("/api/v1/attachments/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
@@ -531,6 +541,9 @@ export function createApp(services: AppServices = {}) {
   );
   app.openapi(webhookDeliveryRoute, webhookDeliveryHandler);
   app.openapi(retryWebhookDeliveryRoute, retryWebhookDeliveryHandler);
+  app.openapi(removalStatusRoute, removalStatusHandler);
+  app.openapi(recordRemovalRoute, recordRemovalHandler);
+  app.openapi(scheduleRemovalExpiryRoute, scheduleRemovalExpiryHandler);
   const historyServices: HistoryRouteServices = {};
   if (services.createHistoryImportProvider !== undefined)
     historyServices.createProvider = services.createHistoryImportProvider;

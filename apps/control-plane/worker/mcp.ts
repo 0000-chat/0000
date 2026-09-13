@@ -66,6 +66,7 @@ import {
   type ContactRouteServices,
   type ContactServiceContext,
 } from "./contacts/service";
+import { registerRemovalMcpTools } from "./removals/mcp";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -371,6 +372,11 @@ const registerTools = (
   outboundServices: OutboundAcceptanceServices,
   contactServices: ContactRouteServices,
 ): void => {
+  registerRemovalMcpTools(server, {
+    env: context.env,
+    authorization: context.authorization,
+  });
+
   server.registerTool(
     "list_identities",
     {

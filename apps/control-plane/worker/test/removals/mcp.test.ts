@@ -10,6 +10,8 @@ import {
   ScheduleRemovalExpiryInputSchema,
 } from "../../../../../packages/contracts/src/removals";
 import { beforeEach, describe, expect, it } from "vitest";
+import { createApp } from "../../app";
+import type { VerifiedSubject } from "../../auth/oidc";
 import type { AuthorizationVariables } from "../../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../../auth/ingestion-middleware";
 import {
@@ -102,6 +104,52 @@ const apiRequest = async (
     workerEnv,
   );
 
+const createSharedApp = () =>
+  createApp({
+    createTokenVerifier: () => ({
+      verify: async (token: string): Promise<VerifiedSubject> => {
+        if (token === "human-token") {
+          return {
+            issuer: "https://issuer.example/",
+            subject: "human-subject",
+          };
+        }
+        if (token === "agent-token") {
+          return {
+            issuer: "https://issuer.example/",
+            subject: "agent-subject",
+            token_id: "agent-token-id",
+          };
+        }
+        throw new Error("invalid test token");
+      },
+    }),
+    createOAuthAccessTokenVerifier: () => ({
+      verify: async () => {
+        throw new Error("not an OAuth installation token");
+      },
+    }),
+  });
+
+const sharedApiRequest = async (
+  app: ReturnType<typeof createApp>,
+  token: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> =>
+  app.request(
+    `https://communicator.example${path}`,
+    {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...init.headers,
+      },
+    },
+    workerEnv,
+  );
+
 const countRows = async (
   table: "removal_authority" | "removal_expiry_schedule",
 ) =>
@@ -172,6 +220,41 @@ const connectMcp = async (authorization: SessionResponse): Promise<TestMcp> => {
       await client.close();
       await serverTransport.close();
       await server.close();
+    },
+  };
+};
+
+const connectSharedMcp = async (
+  app: ReturnType<typeof createApp>,
+  token: string,
+): Promise<TestMcp> => {
+  const client = new Client({
+    name: "shared-removal-test-client",
+    version: "1",
+  });
+  const transport = new StreamableHTTPClientTransport(
+    new URL("https://communicator.example/mcp"),
+    {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Origin: "https://communicator.example",
+        },
+      },
+      fetch: async (input, init) => {
+        const url = input instanceof URL ? input.href : input.toString();
+        return app.request(url, init, workerEnv);
+      },
+    },
+  );
+  await client.connect(
+    transport as unknown as Parameters<Client["connect"]>[0],
+  );
+  return {
+    client,
+    close: async () => {
+      await client.close();
+      await transport.close();
     },
   };
 };
@@ -279,6 +362,62 @@ describe("removal administrator API and MCP boundaries", () => {
     );
     await expect(countRows("removal_expiry_schedule")).resolves.toBe(
       beforeSchedules,
+    );
+  });
+
+  it("registers the removal routes on the shared app authorization boundary", async () => {
+    const app = createSharedApp();
+    const unauthenticated = await app.request(
+      "https://communicator.example/api/v1/removals",
+      {},
+      workerEnv,
+    );
+    expect(unauthenticated.status).toBe(401);
+
+    const allowed = await sharedApiRequest(
+      app,
+      "human-token",
+      "/api/v1/removals",
+      {
+        method: "POST",
+        body: JSON.stringify(
+          recordInput({ resource_id: "message_shared_api" }),
+        ),
+      },
+    );
+    expect(allowed.status).toBe(201);
+
+    const status = await sharedApiRequest(
+      app,
+      "human-token",
+      "/api/v1/removals",
+    );
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      tenant_id: tenantId,
+      incomplete: [
+        expect.objectContaining({ resource_id: "message_shared_api" }),
+      ],
+    });
+
+    const beforeAuthorities = await countRows("removal_authority");
+    const crossTenant = await sharedApiRequest(
+      app,
+      "human-token",
+      "/api/v1/removals",
+      {
+        method: "POST",
+        body: JSON.stringify(
+          recordInput({
+            tenant_id: otherTenantId,
+            resource_id: "message_shared_cross_tenant",
+          }),
+        ),
+      },
+    );
+    expect(crossTenant.status).toBe(403);
+    await expect(countRows("removal_authority")).resolves.toBe(
+      beforeAuthorities,
     );
   });
 
@@ -397,6 +536,82 @@ describe("removal administrator API and MCP boundaries", () => {
     await expect(countRows("removal_expiry_schedule")).resolves.toBe(
       beforeSchedules,
     );
+  });
+
+  it("registers removal tools through the shared MCP transport and keeps auth boundaries", async () => {
+    const app = createSharedApp();
+    const initializeRequest = {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/event-stream",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "unauthorized-removal-test", version: "1" },
+        },
+      }),
+    };
+    const unauthenticated = await app.request(
+      "https://communicator.example/mcp",
+      initializeRequest,
+      workerEnv,
+    );
+    expect(unauthenticated.status).toBe(401);
+
+    const human = await connectSharedMcp(app, "human-token");
+    try {
+      const tools = await human.client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toEqual(
+        expect.arrayContaining([
+          "get_removal_status",
+          "record_removal",
+          "schedule_removal_expiry",
+        ]),
+      );
+      const allowed = await human.client.callTool({
+        name: "record_removal",
+        arguments: recordInput({ resource_id: "message_shared_mcp" }),
+      });
+      expect(allowed.isError).not.toBe(true);
+
+      const beforeAuthorities = await countRows("removal_authority");
+      const crossTenant = await human.client.callTool({
+        name: "record_removal",
+        arguments: recordInput({
+          tenant_id: otherTenantId,
+          resource_id: "message_shared_mcp_cross_tenant",
+        }),
+      });
+      expect(crossTenant.isError).toBe(true);
+      expect(text(crossTenant)).toContain('"code":"forbidden"');
+      await expect(countRows("removal_authority")).resolves.toBe(
+        beforeAuthorities,
+      );
+    } finally {
+      await human.close();
+    }
+
+    const agent = await connectSharedMcp(app, "agent-token");
+    try {
+      const beforeAuthorities = await countRows("removal_authority");
+      const denied = await agent.client.callTool({
+        name: "record_removal",
+        arguments: recordInput({ resource_id: "message_shared_mcp_agent" }),
+      });
+      expect(denied.isError).toBe(true);
+      expect(text(denied)).toContain('"code":"forbidden"');
+      await expect(countRows("removal_authority")).resolves.toBe(
+        beforeAuthorities,
+      );
+    } finally {
+      await agent.close();
+    }
   });
 
   it("keeps the shared input schemas strict at the isolated boundary", () => {

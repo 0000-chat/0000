@@ -18,3 +18,4 @@ export * from "./webhooks";
 export * from "./history";
 export * from "./attachments";
 export * from "./contacts";
+export * from "./removals";
