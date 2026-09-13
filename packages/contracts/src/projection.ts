@@ -751,6 +751,7 @@ export const ListProjectionMessagesInputSchema = strictObject({
   tenant_id: CanonicalResourceIdSchema,
   identity_id: CanonicalResourceIdSchema,
   conversation_id: CanonicalResourceIdSchema,
+  message_id: CanonicalResourceIdSchema.optional(),
   account_id: CanonicalResourceIdSchema.optional(),
   page_size: z
     .number()

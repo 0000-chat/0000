@@ -6,6 +6,7 @@ export const Route = createRootRoute({
   validateSearch: z.object({
     identity: z.string().optional(),
     channel: z.string().optional(),
+    message: z.string().optional(),
   }),
   component: AppShell,
 });

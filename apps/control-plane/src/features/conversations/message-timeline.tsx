@@ -31,15 +31,21 @@ function deliveryLabel(status: Message["delivery_status"]) {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-export function MessageTimeline({ messages }: { messages: Message[] }) {
+export function MessageTimeline({
+  messages,
+  selectedMessageId,
+}: {
+  messages: Message[];
+  selectedMessageId?: string;
+}) {
   return (
     <ol aria-label="Message timeline" className="grid gap-3 p-4">
       {messages.map((message) => (
         <li
           key={message.id}
-          className={
-            message.direction === "outbound" ? "text-right" : "text-left"
-          }
+          id={message.id}
+          aria-current={message.id === selectedMessageId ? "true" : undefined}
+          className={`${message.direction === "outbound" ? "text-right" : "text-left"} ${message.id === selectedMessageId ? "rounded-2xl ring-2 ring-primary ring-offset-2" : ""}`}
         >
           <article className="inline-block max-w-[min(42rem,100%)] rounded-2xl border bg-card px-3.5 py-2.5 text-left">
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

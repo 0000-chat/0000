@@ -93,10 +93,7 @@ export function transitionOutboundLifecycle(
   }
 
   const nowMilliseconds = parseMilliseconds(input.now);
-  const dueAt =
-    input.confirmationDueAt === null
-      ? null
-      : originalDueAt(input);
+  const dueAt = input.confirmationDueAt === null ? null : originalDueAt(input);
 
   if (
     input.confirmationDecision === "cancel" &&
@@ -134,7 +131,10 @@ export function transitionOutboundLifecycle(
   if (currentStatus === "confirmation_required") {
     return {
       dispatchStatus: currentStatus,
-      commandStatus: commandStatusForDispatch(input.commandStatus, currentStatus),
+      commandStatus: commandStatusForDispatch(
+        input.commandStatus,
+        currentStatus,
+      ),
       confirmationDueAt: dueAt ?? originalDueAt(input),
     };
   }

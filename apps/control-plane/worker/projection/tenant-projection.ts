@@ -921,6 +921,17 @@ const readMessageRows = (
     "conversation_id",
     input.account_id,
   );
+  if (input.message_id !== undefined) {
+    return storage.sql
+      .exec<MessageQueryRow>(
+        `SELECT id, identity_id, account_id, connection_id, conversation_id, direction, sender_participant_id, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at, current_event_id FROM messages WHERE identity_id = ? AND conversation_id = ? AND id = ?${scope.sql} LIMIT 1`,
+        input.identity_id,
+        input.conversation_id,
+        input.message_id,
+        ...scope.bindings,
+      )
+      .toArray();
+  }
   if (cursor === undefined) {
     return storage.sql
       .exec<MessageQueryRow>(
@@ -1049,7 +1060,6 @@ const readMessageSearchRows = (
     predicates.push(scope.sql.replace(/^ AND /u, ""));
     bindings.push(...scope.bindings);
   }
-
   if (input.conversation_id !== undefined) {
     predicates.push("messages.conversation_id = ?");
     bindings.push(input.conversation_id);
@@ -1309,6 +1319,7 @@ const mapOutboundCommand = (
     ...(row.failure_code === null ? {} : { failure_code: row.failure_code }),
     account_id: row.account_id,
     connection_id: row.connection_id,
+    resource_identity_id: dispatch.resource_identity_id,
     message_id: dispatch.message_id,
     event_id: dispatch.event_id,
     dispatch_id: dispatch.id,

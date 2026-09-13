@@ -29,6 +29,10 @@ const sendMessageSchema = z
   })
   .strict();
 
+const commandDecisionSchema = z
+  .object({ idempotency_key: z.string().trim().min(1).max(200) })
+  .strict();
+
 const simulatedMessageEventSchema = z
   .object({
     tenant_id: CommunicatorIdSchema,
@@ -361,7 +365,14 @@ export const handlers = [
         return errorResponse(400, "invalid_request");
       }
       const search = new URL(request.url).searchParams;
-      if (!hasOnlyQueryKeys(search, ["identity_id", "cursor", "limit"])) {
+      if (
+        !hasOnlyQueryKeys(search, [
+          "identity_id",
+          "message_id",
+          "cursor",
+          "limit",
+        ])
+      ) {
         return errorResponse(400, "invalid_request");
       }
       const identityId = parseSingleQueryValue(
@@ -369,9 +380,15 @@ export const handlers = [
         "identity_id",
         boundedId,
       );
+      const messageId = parseSingleQueryValue(search, "message_id", boundedId);
       const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
       const limit = parseSingleQueryValue(search, "limit", boundedLimit);
-      if (!identityId || cursor === null || limit === null) {
+      if (
+        !identityId ||
+        messageId === null ||
+        cursor === null ||
+        limit === null
+      ) {
         return errorResponse(400, "invalid_request");
       }
       const messageMode = simulatedStore.selectedMessageMode();
@@ -389,6 +406,7 @@ export const handlers = [
             : {}
           : { limit: messageMode === "pages" ? Math.min(limit, 2) : limit }),
         ...(cursor === undefined ? {} : { cursor }),
+        ...(messageId === undefined ? {} : { messageId }),
       });
       return page
         ? HttpResponse.json(MessagePageResultSchema.parse(page))
@@ -398,9 +416,54 @@ export const handlers = [
 
   http.get("*/api/v1/commands", ({ request }) => {
     const identityId = new URL(request.url).searchParams.get("identity_id");
-    if (!identityId) return errorResponse(400, "invalid_request");
-    return HttpResponse.json(simulatedStore.commands(identityId));
+    return HttpResponse.json(
+      simulatedStore.commands(identityId === null ? undefined : identityId),
+    );
   }),
+
+  http.post(
+    "*/api/v1/commands/:commandId/:decision",
+    async ({ request, params }) => {
+      const decision = String(params.decision);
+      if (decision !== "confirm" && decision !== "cancel") {
+        return errorResponse(400, "invalid_request");
+      }
+      const parsed = commandDecisionSchema.safeParse(await request.json());
+      if (!parsed.success) return errorResponse(400, "invalid_request");
+      const command = simulatedStore.decideCommand(
+        String(params.commandId),
+        decision,
+      );
+      if (!command) return errorResponse(404, "not_found");
+      return HttpResponse.json({
+        command,
+        dispatch: {
+          id: `dispatch_${command.id}`,
+          tenant_id: command.tenant_id,
+          command_id: command.id,
+          message_id: command.message_id ?? `message_${command.id}`,
+          event_id: command.event_id ?? `event_${command.id}`,
+          actor_principal_id: command.actor_principal_id ?? "principal_pilot",
+          actor_identity_id: command.actor_identity_id ?? command.identity_id,
+          resource_identity_id: command.identity_id,
+          account_id: command.account_id ?? "account_simulated",
+          connection_id: command.connection_id ?? "connection_simulated",
+          conversation_id: command.conversation_id,
+          idempotency_key: parsed.data.idempotency_key,
+          status: decision === "cancel" ? "cancelled" : "pending",
+          created_at: command.created_at,
+          updated_at: command.updated_at,
+          confirmation_decision: decision,
+          confirmation_actor_principal_id:
+            command.confirmation_actor_principal_id,
+          confirmation_actor_identity_id:
+            command.confirmation_actor_identity_id,
+          confirmation_decided_at: command.confirmation_decided_at,
+        },
+        replayed: false,
+      });
+    },
+  ),
 
   http.post(
     "*/api/v1/conversations/:conversationId/messages",

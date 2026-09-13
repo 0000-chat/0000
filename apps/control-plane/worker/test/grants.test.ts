@@ -1782,6 +1782,161 @@ describe("account-scoped grant API", () => {
         confirmation_due_at: "2026-09-14T05:00:00.000Z",
       },
     ]);
+
+    const currentMeta = await rows<{ generation: number }>(
+      projection,
+      "SELECT generation FROM projection_meta WHERE singleton = 1",
+    );
+    const rebuildId = `rebuild_offline_decision_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rebuildAuthorization = auth(
+      ["projection.rebuild"],
+      ["identity_human"],
+      tenantId,
+    );
+    await projection.beginRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      expected_generation: currentMeta[0]!.generation,
+      started_at: "2026-09-14T05:00:01.000Z",
+      authorization: rebuildAuthorization,
+    });
+    const replayEvent = event(
+      `event_offline_rebuild_${crypto.randomUUID().replaceAll("-", "")}`,
+      { title: "Granted conversation", archived: false, muted: false },
+      "conversation.updated",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-14T05:00:01.000Z",
+        observed_at: "2026-09-14T05:00:01.000Z",
+      },
+    );
+    await projection.applyReplayPage({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      source_cursor: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      page: {
+        schema_version: 1,
+        replay_mode: "projection_only",
+        tenant_id: tenantId,
+        manifests: [
+          {
+            schema_version: 1,
+            tenant_id: tenantId,
+            batch_id: "batch_offline_rebuild",
+            data_key: `events/${tenantId}/2026/09/14/05/batch_offline_rebuild.jsonl.gz`,
+            compression: "gzip",
+            content_type: "application/x-ndjson",
+            event_count: 1,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            canonical_sha256: "0".repeat(64),
+            data_etag: "etag-offline-rebuild",
+            first_event_id: replayEvent.event_id,
+            last_event_id: replayEvent.event_id,
+            first_observed_at: replayEvent.observed_at,
+            last_observed_at: replayEvent.observed_at,
+            archived_at: "2026-09-14T05:00:01.000Z",
+            producer: {
+              service: "communicator-control-plane",
+              version: "offline-rebuild-test/1",
+            },
+            source_checkpoint: null,
+          },
+        ],
+        events: [replayEvent],
+        next_cursor: null,
+      },
+      authorization: rebuildAuthorization,
+    });
+    await projection.completeRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      terminal_cursor: null,
+      completed_at: "2026-09-14T05:00:02.000Z",
+      authorization: rebuildAuthorization,
+    });
+
+    expect(
+      await rows<{
+        decision: string;
+        actor_principal_id: string;
+        actor_identity_id: string;
+        decided_at: string;
+      }>(
+        projection,
+        "SELECT decision, actor_principal_id, actor_identity_id, decided_at FROM outbound_command_decisions WHERE command_id = ?",
+        waitingCommand.id,
+      ),
+    ).toEqual([
+      {
+        decision: "cancel",
+        actor_principal_id: "principal_human",
+        actor_identity_id: "identity_human",
+        decided_at: "2026-09-14T04:00:00.000Z",
+      },
+    ]);
+    expect(
+      await rows<{ status: string; confirmation_decision: string | null }>(
+        projection,
+        "SELECT status, confirmation_decision FROM outbound_dispatches WHERE idempotency_key = ?",
+        waitingKey,
+      ),
+    ).toEqual([{ status: "cancelled", confirmation_decision: "cancel" }]);
+    expect(
+      await rows<{ status: string; confirmation_decision: string | null }>(
+        projection,
+        "SELECT status, confirmation_decision FROM outbound_dispatches WHERE idempotency_key = ?",
+        reconnectKey,
+      ),
+    ).toEqual([
+      { status: "confirmation_required", confirmation_decision: null },
+    ]);
+    expect(
+      await rows<{ count: number }>(
+        projection,
+        "SELECT COUNT(*) AS count FROM outbound_dispatches WHERE idempotency_key = ?",
+        waitingKey,
+      ),
+    ).toEqual([{ count: 1 }]);
+    const rebuiltAdminCommands = await requestForApp(
+      app,
+      "/api/v1/commands",
+      "human-token",
+      { method: "GET" },
+    );
+    expect(rebuiltAdminCommands.status).toBe(200);
+    const rebuiltCommands = (await rebuiltAdminCommands.json()) as Array<{
+      id: string;
+      status: string;
+      confirmation_decision?: string;
+      confirmation_actor_principal_id?: string;
+      confirmation_decided_at?: string;
+    }>;
+    expect(
+      rebuiltCommands.find((command) => command.id === waitingCommand.id),
+    ).toMatchObject({
+      status: "cancelled",
+      confirmation_decision: "cancel",
+      confirmation_actor_principal_id: "principal_human",
+      confirmation_decided_at: "2026-09-14T04:00:00.000Z",
+    });
+    expect(
+      rebuiltCommands.find((command) => command.id === reconnectCommand.id),
+    ).toMatchObject({ status: "confirmation_required" });
   });
 
   it("promotes a waiting command from the durable alarm and keeps stale confirmation human-only", async () => {
@@ -2049,9 +2204,11 @@ describe("account-scoped grant API", () => {
         confirmation_due_at: "2040-01-01T06:00:00.000Z",
       },
     ]);
-    expect(await runInDurableObject(projection, (_instance, state) =>
-      state.storage.getAlarm(),
-    )).toBe(Date.parse("2040-01-01T06:00:00.000Z"));
+    expect(
+      await runInDurableObject(projection, (_instance, state) =>
+        state.storage.getAlarm(),
+      ),
+    ).toBe(Date.parse("2040-01-01T06:00:00.000Z"));
   });
 
   it("allows a granted agent to cancel before dispatch, then blocks cancellation after grant revocation", async () => {

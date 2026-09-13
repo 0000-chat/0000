@@ -511,7 +511,7 @@ export class SimulatedStore {
   messages(
     conversationId: string,
     identityId: string,
-    options: { limit?: number; cursor?: string } = {},
+    options: { limit?: number; cursor?: string; messageId?: string } = {},
   ): MessagePageResult | null {
     const conversation = this.state.conversations.find(
       (item) => item.id === conversationId && item.identity_id === identityId,
@@ -523,24 +523,46 @@ export class SimulatedStore {
       )
     )
       return null;
-    const result = paginateMessages(
-      this.state.messages.filter(
-        (item) =>
-          item.conversation_id === conversationId &&
-          item.identity_id === identityId,
-      ),
-      options,
+    const messages = this.state.messages.filter(
+      (item) =>
+        item.conversation_id === conversationId &&
+        item.identity_id === identityId &&
+        (options.messageId === undefined || item.id === options.messageId),
     );
+    const result = paginateMessages(messages, options);
     return result.ok ? clone(result.page) : null;
   }
 
-  commands(identityId: string): Command[] {
-    return clone([
-      ...this.state.commands.filter((item) => item.identity_id === identityId),
-      ...Array.from(this.idempotency.values()).filter(
-        (item) => item.identity_id === identityId,
-      ),
-    ]);
+  commands(identityId?: string): Command[] {
+    const commands = [
+      ...this.state.commands,
+      ...Array.from(this.idempotency.values()),
+    ];
+    return clone(
+      identityId === undefined
+        ? commands
+        : commands.filter((item) => item.identity_id === identityId),
+    );
+  }
+
+  decideCommand(
+    commandId: string,
+    decision: "confirm" | "cancel",
+  ): Command | null {
+    const command = [
+      ...this.state.commands,
+      ...Array.from(this.idempotency.values()),
+    ].find((item) => item.id === commandId);
+    if (!command) return null;
+    Object.assign(command, {
+      status: decision === "cancel" ? "cancelled" : "accepted",
+      updated_at: "2026-08-29T00:00:00.000Z",
+      confirmation_decision: decision,
+      confirmation_actor_principal_id: "principal_pilot",
+      confirmation_actor_identity_id: "identity_human",
+      confirmation_decided_at: "2026-08-29T00:00:00.000Z",
+    });
+    return clone(command);
   }
 
   commandForMessage({

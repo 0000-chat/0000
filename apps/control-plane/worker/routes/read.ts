@@ -77,6 +77,7 @@ const conversationQuery = z
 const messageQuery = z
   .object({
     identity_id: queryId(),
+    message_id: optionalQueryId(),
     account_id: optionalQueryId(),
     cursor: optionalCursor(),
     limit: optionalLimit(),

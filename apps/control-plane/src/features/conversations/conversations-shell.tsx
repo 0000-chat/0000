@@ -44,6 +44,7 @@ export function ConversationsShell({
   } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
   const selectedChannelId = search.channel;
+  const selectedMessageId = search.message;
   const channelsQuery = useQuery({
     queryKey: queryKeys.channels(identityId),
     queryFn: () => apiClient.getChannels(identityId),
@@ -436,6 +437,7 @@ export function ConversationsShell({
               channel={activeThread.channel}
               conversation={activeThread.conversation}
               {...(selectedChannelId ? { selectedChannelId } : {})}
+              {...(selectedMessageId ? { selectedMessageId } : {})}
             />
           )}
           {!conversationId && (

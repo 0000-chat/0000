@@ -406,6 +406,27 @@ describe("authenticated live read API", () => {
       "message_human_one",
     ]);
     expect(firstMessagePage.next_cursor).toBeNull();
+
+    const exactMessageResponse = await request(
+      "/api/v1/conversations/conversation_human_one/messages?identity_id=identity_human&message_id=message_human_one&limit=1",
+    );
+    const exactMessagePage = MessagePageResultSchema.parse(
+      await exactMessageResponse.json(),
+    );
+    expect(exactMessageResponse.status).toBe(200);
+    expect(exactMessagePage).toMatchObject({
+      items: [{ id: "message_human_one", body: "human message body" }],
+      next_cursor: null,
+    });
+
+    const wrongConversationResponse = await request(
+      "/api/v1/conversations/conversation_human_two/messages?identity_id=identity_human&message_id=message_human_one&limit=1",
+    );
+    const wrongConversationPage = MessagePageResultSchema.parse(
+      await wrongConversationResponse.json(),
+    );
+    expect(wrongConversationResponse.status).toBe(200);
+    expect(wrongConversationPage).toEqual({ items: [], next_cursor: null });
   });
 
   it("maps a delegated identity to a human-owned account for list, detail, and messages", async () => {

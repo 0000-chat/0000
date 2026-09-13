@@ -173,15 +173,22 @@ describe("Communicator API client", () => {
     }, "https://communicator.test");
 
     await expect(
-      client.getMessages("conversation/a", "identity/a", "cursor /?&", 2),
+      client.getMessages(
+        "conversation/a",
+        "identity/a",
+        "cursor /?&",
+        2,
+        "message/a",
+      ),
     ).resolves.toEqual(page);
     expect(urls).toEqual([
-      "https://communicator.test/api/v1/conversations/conversation%2Fa/messages?identity_id=identity%2Fa&limit=2&cursor=cursor+%2F%3F%26",
+      "https://communicator.test/api/v1/conversations/conversation%2Fa/messages?identity_id=identity%2Fa&limit=2&cursor=cursor+%2F%3F%26&message_id=message%2Fa",
     ]);
     const parsed = new URL(urls[0]!);
     expect(parsed.searchParams.getAll("identity_id")).toHaveLength(1);
     expect(parsed.searchParams.getAll("limit")).toHaveLength(1);
     expect(parsed.searchParams.getAll("cursor")).toHaveLength(1);
+    expect(parsed.searchParams.getAll("message_id")).toHaveLength(1);
   });
 
   it("turns malformed successful response bodies into a generic bad gateway error", async () => {

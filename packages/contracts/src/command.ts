@@ -36,6 +36,7 @@ export const CommandSchema = z
     /** Present on commands accepted by the durable outbound ledger. */
     account_id: CommunicatorIdSchema.optional(),
     connection_id: CommunicatorIdSchema.optional(),
+    resource_identity_id: CommunicatorIdSchema.optional(),
     message_id: CommunicatorIdSchema.optional(),
     event_id: CommunicatorIdSchema.optional(),
     dispatch_id: CommunicatorIdSchema.optional(),
