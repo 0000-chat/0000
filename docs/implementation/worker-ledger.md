@@ -6,11 +6,11 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `910933f` | Health #5 and runtime #9 merged serially; focused runtime/health tests and `scripts/check` passed; grants #12 remains unmerged pending a bounded authorization fix. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `b7a1060` | Health #5 and runtime #9 merged serially; focused runtime/health tests and `scripts/check` passed; grants #12 remains held pending acceptance fixes. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
-| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Paused with source preserved: dirty implementation handoff and bounded realtime authorization fix pending final regressions/commit. |
+| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `f9e16b` | Clean checkpoint preserved but held: UI and realtime acceptance blockers remain; implementer resumed a bounded follow-up. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
@@ -33,7 +33,7 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
 | #9 | Runtime | verified and merged as `f681496`; issue remains open until aggregate PR merge |
 | #11 | Agent messaging specification | aggregate parent / planned |
-| #12 | T01 account grants | paused on `codex/implement-grants-12` in `/tmp/0000-communicator-worker-12`; source preserved while final authorization regression evidence is collected |
+| #12 | T01 account grants | held at clean checkpoint `f9e16b` on `codex/implement-grants-12`; source preserved while UI/realtime acceptance fixes and regression evidence are collected |
 | #13–#36 | T02–T25 child tickets | planned; dependencies in aggregate plan |
 
 Architecture decision #7 is tracked at
@@ -90,3 +90,18 @@ subscriptions while preserving the proper human-admin path. The working
 hypothesis is a legacy-compatibility fallback bypass; the attempted fix removes
 that implicit fallback and must add focused retired/no-account and revocation
 regressions before commit. This checkpoint does not claim #12 complete.
+
+## Grants acceptance hold
+
+Independent UI review and the parent review hold checkpoint `f9e16b` despite
+its clean worktree and prior test reports. The UI still targets the signed-in
+owner instead of the selected agent, its MSW store does not persist created
+grants, pagination is absent, selected chat IDs cannot be discovered through
+the UI, and query errors are not shown. These are acceptance blockers, not
+aggregate merge conflicts.
+
+The realtime old-socket-normal-revalidation claim also remains unproven: the
+helper is covered, but the actual tenant-socket path needs inspection and
+regressions. The implementer is resuming the bounded fix and new UI behavior
+tests. Keep `f9e16b` preserved; do not merge #12 until those findings have
+accepted evidence.
