@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { CommunicatorIdSchema } from "@communicator/contracts";
+import {
+  CommunicatorIdSchema,
+  MessageSearchDirectionSchema,
+} from "@communicator/contracts";
 import type { Context } from "hono";
 import { z } from "zod/v4";
 import type { AuthorizationVariables } from "./auth/middleware";
@@ -15,9 +18,11 @@ import {
   listConversations,
   listIdentities,
   listMessages,
+  searchMessages,
   type GetConversationInput,
   type ListConversationsInput,
   type ListMessagesInput,
+  type SearchMessagesInput,
   type ReadHandlerContext,
 } from "./read/handlers";
 import { ReadError, readErrorResponse } from "./read/errors";
@@ -56,6 +61,18 @@ const listMessagesInput = {
   identity_id: boundedId,
   conversation_id: boundedId,
   account_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
+};
+const searchMessagesInput = {
+  identity_id: boundedId,
+  account_id: optionalId,
+  conversation_id: optionalId,
+  text: z.string().trim().min(1).max(200).optional(),
+  contact: z.string().trim().min(1).max(100).optional(),
+  from: z.string().max(64).optional(),
+  to: z.string().max(64).optional(),
+  direction: MessageSearchDirectionSchema.optional(),
   cursor: optionalCursor,
   limit: optionalLimit,
 };
@@ -271,6 +288,37 @@ const registerTools = (
           ...(input.limit === undefined ? {} : { limit: input.limit }),
         };
         return listMessages(context, value);
+      }),
+  );
+
+  server.registerTool(
+    "search_messages",
+    {
+      description: "Search stored messages within granted accounts and chats",
+      inputSchema: searchMessagesInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: SearchMessagesInput = {
+          identity_id: input.identity_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+          ...(input.conversation_id === undefined
+            ? {}
+            : { conversation_id: input.conversation_id }),
+          ...(input.text === undefined ? {} : { text: input.text }),
+          ...(input.contact === undefined ? {} : { contact: input.contact }),
+          ...(input.from === undefined ? {} : { from: input.from }),
+          ...(input.to === undefined ? {} : { to: input.to }),
+          ...(input.direction === undefined
+            ? {}
+            : { direction: input.direction }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        };
+        return searchMessages(context, value);
       }),
   );
 };

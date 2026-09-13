@@ -12,7 +12,10 @@ import {
   MAX_PROJECTION_BATCH_EVENTS,
   ListProjectionChangesInputSchema,
   ListProjectionConversationsInputSchema,
+  ListProjectionMessageSearchInputSchema,
   ListProjectionMessagesInputSchema,
+  MessageSearchPageResultSchema,
+  MessageSearchResultSchema,
   MessagePageResultSchema,
   MAX_IDENTITY_CONNECTIONS,
   MAX_PROJECTION_PAGE_SIZE,
@@ -47,7 +50,10 @@ import {
   InitializeProjectionInputSchema,
   type ListProjectionChangesInput,
   type ListProjectionConversationsInput,
+  type ListProjectionMessageSearchInput,
   type ListProjectionMessagesInput,
+  type MessageSearchPageResult,
+  type MessageSearchResult,
   type MessagePageResult,
   type ProjectionChannelStat,
   type ProjectionChange,
@@ -83,8 +89,11 @@ import { runProjectionMigrations } from "./schema";
 import {
   decodeConversationCursor,
   decodeMessageCursor,
+  decodeMessageSearchCursor,
   encodeConversationCursor,
   encodeMessageCursor,
+  encodeMessageSearchCursor,
+  type MessageSearchCursorContext,
 } from "./cursor";
 import {
   REALTIME_CONTEXT_HEADER,
@@ -254,6 +263,21 @@ type MessageQueryRow = {
   deleted_at: string | null;
   current_event_id: string;
   sender_participant_id: string | null;
+};
+
+type MessageSearchQueryRow = MessageQueryRow & {
+  contact_id: string | null;
+  edited_at: string | null;
+  deletion_reason: string | null;
+};
+
+type MessageSearchAttachmentQueryRow = {
+  id: string;
+  message_id: string;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
 };
 
 type ConversationExistsRow = { id: string };
@@ -876,6 +900,213 @@ const mapMessagePage = (
         })
       : null;
   return MessagePageResultSchema.parse({ items, next_cursor: nextCursor });
+};
+
+const escapeSearchLikeTerm = (term: string): string =>
+  term.replace(/[\\%_]/gu, (character) => `\\${character}`);
+
+const messageSearchTerms = (text: string | undefined): string[] =>
+  text === undefined
+    ? []
+    : text
+        .split(/\s+/u)
+        .map((term) => term.toLocaleLowerCase())
+        .filter((term) => term.length > 0);
+
+const searchCursorContext = (
+  input: ListProjectionMessageSearchInput,
+  generation: number,
+): MessageSearchCursorContext => ({
+  tenant_id: input.tenant_id,
+  identity_id: input.identity_id,
+  account_id: input.account_id ?? null,
+  conversation_id: input.conversation_id ?? null,
+  text: input.text ?? null,
+  contact: input.contact ?? null,
+  from: input.from ?? null,
+  to: input.to ?? null,
+  direction: input.direction ?? null,
+  generation,
+});
+
+const readMessageSearchRows = (
+  storage: DurableObjectStorage,
+  input: ListProjectionMessageSearchInput,
+  generation: number,
+): MessageSearchQueryRow[] => {
+  const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
+  const cursor =
+    input.cursor === undefined
+      ? undefined
+      : decodeMessageSearchCursor(
+          input.cursor,
+          searchCursorContext(input, generation),
+        );
+  const predicates = ["messages.identity_id = ?"];
+  const bindings: Array<string | number> = [input.identity_id];
+  const selectBindings: Array<string | number> = [];
+  let contactSelection = "messages.sender_participant_id AS contact_id";
+  const scope = accountScopeFilter(
+    input.authorization,
+    "messages.account_id",
+    "messages.conversation_id",
+    input.account_id,
+  );
+  if (scope.sql.length > 0) {
+    predicates.push(scope.sql.replace(/^ AND /u, ""));
+    bindings.push(...scope.bindings);
+  }
+
+  if (input.conversation_id !== undefined) {
+    predicates.push("messages.conversation_id = ?");
+    bindings.push(input.conversation_id);
+  }
+  for (const term of messageSearchTerms(input.text)) {
+    predicates.push("LOWER(messages.body) LIKE ? ESCAPE '\\'");
+    bindings.push(`%${escapeSearchLikeTerm(term)}%`);
+  }
+  if (input.contact !== undefined) {
+    const pattern = `%${escapeSearchLikeTerm(input.contact.toLocaleLowerCase())}%`;
+    contactSelection =
+      "COALESCE(messages.sender_participant_id, (SELECT search_contact.id FROM participants AS search_contact WHERE search_contact.identity_id = messages.identity_id AND search_contact.account_id = messages.account_id AND search_contact.connection_id = messages.connection_id AND search_contact.conversation_id = messages.conversation_id AND search_contact.deleted_at IS NULL AND (LOWER(search_contact.display_name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(search_contact.remote_id, '')) LIKE ? ESCAPE '\\') ORDER BY search_contact.id ASC LIMIT 1)) AS contact_id";
+    selectBindings.push(pattern, pattern);
+    predicates.push(
+      "(LOWER(messages.sender_label) LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM participants AS search_participant WHERE search_participant.identity_id = messages.identity_id AND search_participant.account_id = messages.account_id AND search_participant.connection_id = messages.connection_id AND search_participant.conversation_id = messages.conversation_id AND search_participant.deleted_at IS NULL AND (LOWER(search_participant.display_name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(search_participant.remote_id, '')) LIKE ? ESCAPE '\\')))",
+    );
+    bindings.push(pattern, pattern, pattern);
+  }
+  if (input.from !== undefined) {
+    predicates.push("messages.occurred_ms >= ?");
+    bindings.push(parseStoredMilliseconds(input.from));
+  }
+  if (input.to !== undefined) {
+    predicates.push("messages.occurred_ms <= ?");
+    bindings.push(parseStoredMilliseconds(input.to));
+  }
+  if (input.direction !== undefined) {
+    predicates.push("messages.direction = ?");
+    bindings.push(input.direction);
+  }
+  if (cursor !== undefined) {
+    predicates.push(
+      "(messages.occurred_ms < ? OR (messages.occurred_ms = ? AND messages.id > ?))",
+    );
+    bindings.push(
+      cursor.last_occurred_ms,
+      cursor.last_occurred_ms,
+      cursor.last_id,
+    );
+  }
+
+  return storage.sql
+    .exec<MessageSearchQueryRow>(
+      `SELECT messages.id, messages.identity_id, messages.account_id, messages.connection_id, messages.conversation_id, messages.direction, messages.sender_label, messages.body, messages.occurred_at, messages.occurred_ms, messages.delivery_status, messages.attachment_count, messages.deleted_at, messages.current_event_id, ${contactSelection}, messages.edited_at, messages.deletion_reason FROM messages WHERE ${predicates.join(" AND ")} ORDER BY messages.occurred_ms DESC, messages.id ASC LIMIT ?`,
+      ...selectBindings,
+      ...bindings,
+      pageSize + 1,
+    )
+    .toArray();
+};
+
+const readMessageSearchAttachments = (
+  storage: DurableObjectStorage,
+  rows: readonly MessageSearchQueryRow[],
+): Map<string, MessageSearchAttachmentQueryRow[]> => {
+  const messageIds = rows.map((row) => row.id);
+  const attachmentsByMessage = new Map<
+    string,
+    MessageSearchAttachmentQueryRow[]
+  >();
+  if (messageIds.length === 0) return attachmentsByMessage;
+
+  const attachments = storage.sql
+    .exec<MessageSearchAttachmentQueryRow>(
+      `SELECT attachments.id, attachments.message_id, attachments.file_name, attachments.mime_type, attachments.size_bytes, attachments.sha256 FROM attachments JOIN messages ON messages.id = attachments.message_id AND messages.identity_id = attachments.identity_id AND messages.account_id = attachments.account_id AND messages.connection_id = attachments.connection_id AND messages.conversation_id = attachments.conversation_id WHERE attachments.message_id IN (${messageIds.map(() => "?").join(",")}) AND attachments.deleted_at IS NULL ORDER BY attachments.message_id ASC, attachments.id ASC`,
+      ...messageIds,
+    )
+    .toArray();
+  for (const attachment of attachments) {
+    const current = attachmentsByMessage.get(attachment.message_id) ?? [];
+    current.push(attachment);
+    if (current.length > 500) {
+      throw projectionError("projection_too_large");
+    }
+    attachmentsByMessage.set(attachment.message_id, current);
+  }
+  return attachmentsByMessage;
+};
+
+const mapMessageSearchPage = (
+  tenantId: string,
+  generation: number,
+  input: ListProjectionMessageSearchInput,
+  rows: readonly MessageSearchQueryRow[],
+  attachmentsByMessage: ReadonlyMap<
+    string,
+    readonly MessageSearchAttachmentQueryRow[]
+  >,
+): MessageSearchPageResult => {
+  const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
+  const hasNext = rows.length > pageSize;
+  const visibleRows = rows.slice(0, pageSize);
+  const items: MessageSearchResult[] = visibleRows.map((row) => {
+    const occurredMs = parseStoredMilliseconds(row.occurred_at);
+    if (occurredMs !== row.occurred_ms) {
+      throw new Error("projection message occurrence tuple is inconsistent");
+    }
+    const removed = row.deleted_at !== null;
+    if (row.edited_at !== null) parseStoredMilliseconds(row.edited_at);
+    if (row.deleted_at !== null) parseStoredMilliseconds(row.deleted_at);
+    if (!isSafeNonnegativeInteger(row.attachment_count)) {
+      throw new Error("projection message attachment count is invalid");
+    }
+    const attachments = removed
+      ? []
+      : (attachmentsByMessage.get(row.id) ?? []).map((attachment) => ({
+          id: attachment.id,
+          file_name: attachment.file_name,
+          mime_type: attachment.mime_type,
+          size_bytes: attachment.size_bytes,
+          sha256: attachment.sha256,
+        }));
+    return MessageSearchResultSchema.parse({
+      id: row.id,
+      tenant_id: tenantId,
+      identity_id: row.identity_id,
+      account_id: row.account_id,
+      connection_id: row.connection_id,
+      conversation_id: row.conversation_id,
+      contact_id: removed ? null : row.contact_id,
+      event_id: row.current_event_id,
+      revision: row.current_event_id,
+      direction: row.direction,
+      sender_label: removed ? "Deleted sender" : row.sender_label,
+      body: removed ? "" : row.body,
+      occurred_at: row.occurred_at,
+      edited_at: removed ? null : row.edited_at,
+      attachment_count: removed ? 0 : row.attachment_count,
+      attachments,
+      removed,
+      removed_at: row.deleted_at,
+      removal_reason: row.deletion_reason,
+      delivery_status: row.delivery_status,
+    });
+  });
+  const last = visibleRows.at(-1);
+  const nextCursor =
+    hasNext && last !== undefined
+      ? encodeMessageSearchCursor({
+          schema_version: 1,
+          query_kind: "projection.message_search",
+          ...searchCursorContext(input, generation),
+          last_occurred_ms: parseStoredMilliseconds(last.occurred_at),
+          last_id: last.id,
+        })
+      : null;
+  return MessageSearchPageResultSchema.parse({
+    items,
+    next_cursor: nextCursor,
+  });
 };
 
 const readChangePage = (
@@ -2266,6 +2497,49 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       const rows = readMessageRows(this.ctx.storage, parsed, meta.generation);
       return structuredClone(
         mapMessagePage(parsed.tenant_id, meta.generation, parsed, rows),
+      );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async searchMessages(
+    input: ListProjectionMessageSearchInput,
+  ): Promise<MessageSearchPageResult> {
+    try {
+      const parsed = parseProjectionInput(
+        ListProjectionMessageSearchInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const rows = readMessageSearchRows(
+        this.ctx.storage,
+        parsed,
+        meta.generation,
+      );
+      const attachmentsByMessage = readMessageSearchAttachments(
+        this.ctx.storage,
+        rows,
+      );
+      return structuredClone(
+        mapMessageSearchPage(
+          parsed.tenant_id,
+          meta.generation,
+          parsed,
+          rows,
+          attachmentsByMessage,
+        ),
       );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");

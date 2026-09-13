@@ -11,6 +11,8 @@ import {
   MAX_PROJECTION_CURSOR_CHARS,
   MAX_PROJECTION_PAGE_SIZE,
   MessagePageResultSchema,
+  MessageSearchDirectionSchema,
+  MessageSearchPageResultSchema,
 } from "@communicator/contracts";
 import type { Context, Handler, Input } from "hono";
 import type { AuthorizationVariables } from "../auth/middleware";
@@ -22,9 +24,11 @@ import {
   listConversations,
   listIdentities,
   listMessages,
+  searchMessages,
   type ListConnectionsInput,
   type ListConversationsInput,
   type ListMessagesInput,
+  type SearchMessagesInput,
   type ReadHandlerContext,
 } from "../read/handlers";
 import { readErrorResponse } from "../read/errors";
@@ -74,6 +78,20 @@ const messageQuery = z
   .object({
     identity_id: queryId(),
     account_id: optionalQueryId(),
+    cursor: optionalCursor(),
+    limit: optionalLimit(),
+  })
+  .strict();
+const messageSearchQuery = z
+  .object({
+    identity_id: queryId(),
+    account_id: optionalQueryId(),
+    conversation_id: optionalQueryId(),
+    text: singleString(z.string().trim().min(1).max(200).optional()),
+    contact: singleString(z.string().trim().min(1).max(100).optional()),
+    from: singleString(z.string().max(64).optional()),
+    to: singleString(z.string().max(64).optional()),
+    direction: singleString(MessageSearchDirectionSchema.optional()),
     cursor: optionalCursor(),
     limit: optionalLimit(),
   })
@@ -173,6 +191,17 @@ export const messagesRoute = createRoute({
     query: messageQuery,
   },
   responses: readResponses(MessagePageResultSchema, "Seek-paginated messages"),
+});
+
+export const searchMessagesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/search/messages",
+  security: [{ bearerAuth: [] }],
+  request: { query: messageSearchQuery },
+  responses: readResponses(
+    MessageSearchPageResultSchema,
+    "Seek-paginated stored message search results",
+  ),
 });
 
 type ReadRouteEnv = {
@@ -287,6 +316,21 @@ export const messagesHandler: Handler<
         ...context.req.valid("param"),
         ...context.req.valid("query"),
       }),
+      200,
+    );
+  } catch (error) {
+    return failureResponse(context, error);
+  }
+};
+
+export const searchMessagesHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { query: SearchMessagesInput } }
+> = async (context) => {
+  try {
+    return context.json(
+      await searchMessages(readContext(context), context.req.valid("query")),
       200,
     );
   } catch (error) {
