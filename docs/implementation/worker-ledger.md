@@ -41,6 +41,14 @@ Architecture decision #7 is tracked at
 [`decision-07-connection-status.md`](decision-07-connection-status.md). It is
 not a #7 issue closure or acceptance claim.
 
+## Ticket reporting rule
+
+Every meaningful merge or recovery checkpoint must update the affected GitHub
+ticket with its branch, commit, validation evidence, and remaining blockers.
+Frontier changes also update #11 and the map. Issues remain open until the
+aggregate PR merges, and failed acceptance is never marked complete; unchanged
+status does not receive routine duplicate comments.
+
 ## Health merge evidence
 
 Worker #5 source `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` was merged with
