@@ -1,4 +1,5 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { applyD1Migrations, env, runInDurableObject } from "cloudflare:test";
+import type { D1Migration } from "@cloudflare/vitest-plugin";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
@@ -10,10 +11,14 @@ import {
   ConversationPageResultSchema,
   OutboundDecisionResultSchema,
   OutboundEvidenceRecordSchema,
+  SessionResponseSchema,
 } from "@communicator/contracts";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppServices } from "../app";
-import type { OutboundAcceptanceServices } from "../outbound/acceptance";
+import {
+  reconcileTrustedOutboundEvidence,
+  type OutboundAcceptanceServices,
+} from "../outbound/acceptance";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   auth,
@@ -25,6 +30,10 @@ import {
 import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
 
 const workerEnv = env as typeof env & { CONTROL_DB: D1Database };
+const migrationEnv = env as typeof env & {
+  CONTROL_DB: D1Database;
+  TEST_MIGRATIONS: D1Migration[];
+};
 const tenantId = "tenant_pilot";
 
 const createTestApp = (services: AppServices = {}) =>
@@ -78,6 +87,21 @@ const request = async (
   token = "human-token",
   init: RequestInit = {},
 ) => requestForApp(createTestApp(), path, token, init);
+
+const trustedReconcile = async (
+  app: ReturnType<typeof createApp>,
+  commandId: string,
+  evidence: Parameters<typeof reconcileTrustedOutboundEvidence>[3],
+) => {
+  const session = await requestForApp(app, "/api/v1/session", "human-token");
+  const authorization = SessionResponseSchema.parse(await session.json());
+  return reconcileTrustedOutboundEvidence(
+    { env: workerEnv, authorization },
+    commandId,
+    { now: () => new Date("2050-01-01T00:00:00.000Z") },
+    evidence,
+  );
+};
 
 const connectMcpClient = async (
   app: ReturnType<typeof createApp>,
@@ -194,6 +218,7 @@ async function insertAccounts() {
 }
 
 async function projectReadFixtures() {
+  await applyD1Migrations(migrationEnv.CONTROL_DB, migrationEnv.TEST_MIGRATIONS);
   const stub = workerEnv.TENANT_PROJECTION.getByName(tenantId);
   await initialize(tenantId);
   await runInDurableObject(stub, async (_instance, state) => {
@@ -2417,6 +2442,147 @@ describe("account-scoped grant API", () => {
     expect(cleanup.status).toBe(200);
   });
 
+  it("rejects caller evidence while preserving trusted adapter reconciliation", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `evidence-boundary-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    let dispatchCount = 0;
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => {
+          dispatchCount += 1;
+          if (dispatchCount === 1) {
+            return {
+              type: "evidence" as const,
+              source: "provider" as const,
+              status: "delivered" as const,
+              evidence_id: "provider-trusted-delivery-1",
+              provider_message_id: "provider-message-trusted-1",
+              observed_at: "2050-01-01T00:00:01.000Z",
+            };
+          }
+          return {
+            type: "uncertain" as const,
+            reason: "provider_timeout_after_acceptance",
+          };
+        },
+      },
+    });
+
+    const send = (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Exercise the trusted evidence boundary",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const trustedResponse = await send(
+      `evidence-boundary-trusted-${crypto.randomUUID()}`,
+    );
+    expect(trustedResponse.status).toBe(202);
+    const trustedCommand = CommandSchema.parse(await trustedResponse.json());
+    expect(trustedCommand).toMatchObject({
+      status: "delivered",
+      provider_stage: "delivered",
+    });
+
+    const uncertainResponse = await send(
+      `evidence-boundary-uncertain-${crypto.randomUUID()}`,
+    );
+    expect(uncertainResponse.status).toBe(202);
+    const uncertainCommand = CommandSchema.parse(
+      await uncertainResponse.json(),
+    );
+    expect(uncertainCommand).toMatchObject({
+      status: "delivery_uncertain",
+      provider_stage: "unknown",
+      chat_paused: true,
+    });
+
+    const forgedEvidence = await requestForApp(
+      app,
+      `/api/v1/commands/${uncertainCommand.id}/evidence`,
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: 1,
+          tenant_id: tenantId,
+          command_id: uncertainCommand.id,
+          source: "provider",
+          evidence_id: "provider-forged-delivery-1",
+          transaction_id: uncertainCommand.transaction_id,
+          request_digest: uncertainCommand.request_digest,
+          account_id: uncertainCommand.account_id,
+          conversation_id: uncertainCommand.conversation_id,
+          generation: uncertainCommand.projection_generation ?? 1,
+          status: "delivered",
+          observed_at: "2050-01-01T00:00:02.000Z",
+          provider_message_id: "provider-message-forged-1",
+        }),
+      },
+    );
+    expect(forgedEvidence.status).toBe(403);
+
+    const status = await requestForApp(
+      app,
+      `/api/v1/commands/${uncertainCommand.id}`,
+      "agent-token",
+    );
+    expect(status.status).toBe(200);
+    expect(
+      OutboundDecisionResultSchema.parse(await status.json()).command,
+    ).toMatchObject({
+      id: uncertainCommand.id,
+      status: "delivery_uncertain",
+      provider_stage: "unknown",
+      chat_paused: true,
+    });
+
+    const trustedEvidenceList = await requestForApp(
+      app,
+      `/api/v1/commands/${trustedCommand.id}/evidence`,
+      "human-token",
+    );
+    expect(trustedEvidenceList.status).toBe(200);
+    expect(
+      OutboundEvidenceRecordSchema.array().parse(
+        await trustedEvidenceList.json(),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "provider",
+          status: "delivered",
+          evidence_id: "provider-trusted-delivery-1",
+          provider_message_id: "provider-message-trusted-1",
+        }),
+      ]),
+    );
+  });
+
   it("correlates evidence and records a deliberate resend without unpausing another chat", async () => {
     const grantResponse = await request("/api/v1/grants", "human-token", {
       method: "POST",
@@ -2481,46 +2647,6 @@ describe("account-scoped grant API", () => {
       observed_at: "2050-01-01T00:00:01.000Z",
       remote_echo_id: "matrix-remote-uncertain-1",
     };
-    const wrongChat = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          ...evidence,
-          conversation_id: "conversation_human_two",
-        }),
-      },
-    );
-    expect(wrongChat.status).toBe(400);
-
-    const staleGeneration = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          ...evidence,
-          evidence_id: "matrix-stale-generation-1",
-          generation: generation + 1,
-        }),
-      },
-    );
-    expect(staleGeneration.status).toBe(400);
-
-    const matrixDelivered = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      {
-        method: "POST",
-        body: JSON.stringify({ ...evidence, status: "delivered" }),
-      },
-    );
-    expect(matrixDelivered.status).toBe(400);
-
     const paused = await send(
       "conversation_human_one",
       `uncertain-paused-${crypto.randomUUID()}`,
@@ -2552,16 +2678,7 @@ describe("account-scoped grant API", () => {
     expect(resendResult.command.id).not.toBe(command.id);
     expect(resendResult.command.resend_of_command_id).toBe(command.id);
 
-    const matrix = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      { method: "POST", body: JSON.stringify(evidence) },
-    );
-    expect(matrix.status).toBe(200);
-    const matrixResult = OutboundDecisionResultSchema.parse(
-      await matrix.json(),
-    );
+    const matrixResult = await trustedReconcile(app, command.id, evidence);
     expect(matrixResult.command).toMatchObject({
       id: command.id,
       status: "matrix_confirmed",
@@ -2571,13 +2688,8 @@ describe("account-scoped grant API", () => {
     });
     expect(matrixResult.dispatch.status).toBe("dispatched");
 
-    const duplicate = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      { method: "POST", body: JSON.stringify(evidence) },
-    );
-    expect(duplicate.status).toBe(200);
+    const duplicate = await trustedReconcile(app, command.id, evidence);
+    expect(duplicate.command.id).toBe(command.id);
 
     const resumedChat = await send(
       "conversation_human_one",
@@ -2703,33 +2815,21 @@ describe("account-scoped grant API", () => {
     const nextMessage = await send();
     expect(nextMessage.status).toBe(202);
 
-    const lateEvidence = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          schema_version: 1,
-          tenant_id: tenantId,
-          command_id: command.id,
-          source: "provider",
-          evidence_id: "provider-late-accepted-1",
-          transaction_id: command.transaction_id,
-          request_digest: command.request_digest,
-          account_id: command.account_id,
-          conversation_id: command.conversation_id,
-          generation,
-          status: "accepted",
-          observed_at: "2050-01-01T00:00:02.000Z",
-          reason: "provider accepted before response was lost",
-        }),
-      },
-    );
-    expect(lateEvidence.status).toBe(200);
-    const lateResult = OutboundDecisionResultSchema.parse(
-      await lateEvidence.json(),
-    );
+    const lateResult = await trustedReconcile(app, command.id, {
+      schema_version: 1,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "provider",
+      evidence_id: "provider-late-accepted-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation,
+      status: "accepted",
+      observed_at: "2050-01-01T00:00:02.000Z",
+      reason: "provider accepted before response was lost",
+    });
     expect(lateResult).toMatchObject({
       command: {
         id: command.id,
@@ -2741,33 +2841,21 @@ describe("account-scoped grant API", () => {
       dispatch: { status: "delivery_uncertain", chat_paused: false },
     });
 
-    const outOfOrderUncertain = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          schema_version: 1,
-          tenant_id: tenantId,
-          command_id: command.id,
-          source: "provider",
-          evidence_id: "provider-out-of-order-uncertain-1",
-          transaction_id: command.transaction_id,
-          request_digest: command.request_digest,
-          account_id: command.account_id,
-          conversation_id: command.conversation_id,
-          generation,
-          status: "uncertain",
-          observed_at: "2050-01-01T00:00:01.000Z",
-          reason: "late uncertain callback",
-        }),
-      },
-    );
-    expect(outOfOrderUncertain.status).toBe(200);
-    const outOfOrderResult = OutboundDecisionResultSchema.parse(
-      await outOfOrderUncertain.json(),
-    );
+    const outOfOrderResult = await trustedReconcile(app, command.id, {
+      schema_version: 1,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "provider",
+      evidence_id: "provider-out-of-order-uncertain-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation,
+      status: "uncertain",
+      observed_at: "2050-01-01T00:00:01.000Z",
+      reason: "late uncertain callback",
+    });
     expect(outOfOrderResult).toMatchObject({
       command: {
         id: command.id,
@@ -2859,30 +2947,21 @@ describe("account-scoped grant API", () => {
     );
     expect(continuation.status).toBe(200);
 
-    const evidence = await requestForApp(
-      app,
-      `/api/v1/commands/${command.id}/evidence`,
-      "human-token",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          schema_version: 1,
-          tenant_id: tenantId,
-          command_id: command.id,
-          source: "provider",
-          evidence_id: "provider-rebuild-accepted-1",
-          transaction_id: command.transaction_id,
-          request_digest: command.request_digest,
-          account_id: command.account_id,
-          conversation_id: command.conversation_id,
-          generation: command.projection_generation ?? 1,
-          status: "accepted",
-          observed_at: "2050-01-01T00:00:01.000Z",
-          reason: "provider accepted before rebuild",
-        }),
-      },
-    );
-    expect(evidence.status).toBe(200);
+    await trustedReconcile(app, command.id, {
+      schema_version: 1,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "provider",
+      evidence_id: "provider-rebuild-accepted-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation: command.projection_generation ?? 1,
+      status: "accepted",
+      observed_at: "2050-01-01T00:00:01.000Z",
+      reason: "provider accepted before rebuild",
+    });
 
     const evidenceList = await requestForApp(
       app,

@@ -20,7 +20,7 @@ import {
   reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "../outbound/acceptance";
-import { readErrorResponse, mapReadError } from "../read/errors";
+import { ReadError, readErrorResponse, mapReadError } from "../read/errors";
 
 type OutboundRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -274,9 +274,7 @@ export const reconcileOutboundHandler =
   };
 
 export const evidenceOutboundHandler =
-  (
-    services: OutboundAcceptanceServices = {},
-  ): Handler<
+  (_services: OutboundAcceptanceServices = {}): Handler<
     CommandRouteEnv,
     string,
     {
@@ -286,24 +284,8 @@ export const evidenceOutboundHandler =
       };
     }
   > =>
-  async (context) => {
-    try {
-      const params = context.req.valid("param");
-      const body = context.req.valid("json");
-      const result = await reconcileOutboundCommand(
-        {
-          env: context.env,
-          authorization: context.get("authorization"),
-        },
-        params.command_id,
-        services,
-        body,
-      );
-      return context.json(result, 200);
-    } catch (error) {
-      return outboundFailure(context, error);
-    }
-  };
+  async (context) =>
+    outboundFailure(context, new ReadError("forbidden"));
 
 export const evidenceListOutboundHandler =
   (): Handler<

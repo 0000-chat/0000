@@ -228,6 +228,7 @@ export async function acceptTextReply(
           accepted.command.id,
           claimed,
           configuredAdapter,
+          services,
           now,
         );
         return {
@@ -284,6 +285,7 @@ const dispatchClaimedOutbound = async (
   commandId: string,
   claimed: OutboundDispatch,
   adapter: DispatchAdapter,
+  services: OutboundAcceptanceServices,
   now: string,
 ): Promise<OutboundDecisionResult> => {
   const projection = getTenantProjection(
@@ -350,16 +352,48 @@ const dispatchClaimedOutbound = async (
         );
   let reconciled: OutboundDecisionResult | undefined;
   for (const evidence of effectiveEvidences) {
-    reconciled = await projection.reconcileOutbound({
-      schema_version: 1,
-      tenant_id: context.authorization.tenant.id,
-      command_id: commandId,
-      now,
+    reconciled = await reconcileTrustedOutboundEvidence(
+      context,
+      commandId,
+      services,
       evidence,
-    });
+    );
   }
   if (reconciled === undefined) throw new ReadError("service_unavailable");
   return reconciled;
+};
+
+/**
+ * Apply evidence produced by the private outbound adapter boundary.
+ *
+ * This helper is intentionally kept separate from the public status
+ * reconciler.  REST and MCP callers may observe a command, or make an
+ * explicit administrator decision, but they cannot submit a provider outcome
+ * that the projection would treat as authoritative evidence.
+ */
+export const reconcileTrustedOutboundEvidence = async (
+  context: OutboundAcceptanceContext,
+  commandId: string,
+  services: OutboundAcceptanceServices,
+  evidence: OutboundEvidenceInput,
+): Promise<OutboundDecisionResult> => {
+  const projection = getTenantProjection(
+    context.env,
+    context.authorization.tenant.id,
+  );
+  try {
+    return OutboundDecisionResultSchema.parse(
+      await projection.reconcileOutbound({
+        schema_version: 1,
+        tenant_id: context.authorization.tenant.id,
+        command_id: commandId,
+        now: acceptanceNow(services),
+        evidence,
+      }),
+    );
+  } catch (error) {
+    throw mapReadError(error);
+  }
 };
 
 const adapterResultEvidence = (
@@ -425,7 +459,6 @@ export async function reconcileOutboundCommand(
   context: OutboundAcceptanceContext,
   commandId: string,
   services: OutboundAcceptanceServices = {},
-  evidence?: OutboundEvidenceInput,
 ): Promise<OutboundDecisionResult> {
   const projection = getTenantProjection(
     context.env,
@@ -438,7 +471,6 @@ export async function reconcileOutboundCommand(
         tenant_id: context.authorization.tenant.id,
         command_id: commandId,
         now: acceptanceNow(services),
-        ...(evidence === undefined ? {} : { evidence }),
       }),
     );
   } catch (error) {
@@ -574,6 +606,7 @@ export async function decideOutboundCommand(
           commandId,
           claimed,
           adapter,
+          services,
           now,
         );
         return {
