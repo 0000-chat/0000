@@ -12,6 +12,7 @@ import type { IngestionAuthorizationVariables } from "../auth/ingestion-middlewa
 import {
   authorizeRealtimeRequest,
   RealtimeAuthorizationError,
+  realtimeReadScopeSupported,
 } from "./authorization";
 import { parseRealtimeUpgradeContext } from "./contracts";
 import {
@@ -40,6 +41,7 @@ type PublicErrorStatus = 400 | 401 | 404 | 503;
 const PUBLIC_ERROR_MESSAGES: Record<PublicErrorCode, string> = {
   unauthenticated: "Authentication required",
   invalid_request: "Invalid request",
+  forbidden: "Forbidden",
   not_found: "Resource not found",
   tenant_selection_required: "Select an authorized tenant",
   service_unavailable: "Service unavailable",
@@ -113,6 +115,11 @@ export const realtimeTicketHandler: Handler<
       context.get("authorization"),
       request,
     );
+    const supported = await realtimeReadScopeSupported(
+      context.env.CONTROL_DB.withSession("first-primary"),
+      authorization,
+    );
+    if (!supported) throw new RealtimeAuthorizationError("not_found");
     const issued = await issueRealtimeTicket(
       context.env.CONTROL_DB,
       authorization,

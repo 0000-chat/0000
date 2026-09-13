@@ -3,6 +3,8 @@ import { z } from "zod";
 import {
   CommunicatorIdSchema,
   DeliveryModeSchema,
+  AccountGrantMutationSchema,
+  AccountGrantUpdateSchema,
   MAX_PROJECTION_CURSOR_CHARS,
   MAX_PROJECTION_PAGE_SIZE,
   MessagePageResultSchema,
@@ -75,6 +77,105 @@ export const handlers = [
   http.get("*/api/v1/health", () => passthrough()),
 
   http.get("*/api/v1/session", () => HttpResponse.json(simulatedStore.session())),
+
+  http.get("*/api/v1/accounts", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["identity_id"])) return errorResponse(400, "invalid_request");
+    const identityId = search.get("identity_id");
+    const items = simulatedStore
+      .identities()
+      .flatMap((identity) => identityId !== null && identity.id !== identityId
+        ? []
+        : simulatedStore.connections(identity.id).map((connection) => ({
+          account_id: `account_${connection.id}`,
+          tenant_id: connection.tenant_id,
+          connection_id: connection.id,
+          identity_id: connection.identity_id,
+          provider: connection.provider,
+          display_label: connection.display_label,
+          status: connection.status,
+          created_at: "2026-08-29T00:00:00.000Z",
+          updated_at: connection.last_synced_at ?? "2026-08-29T00:00:00.000Z",
+        })));
+    return HttpResponse.json({ items, next_cursor: null });
+  }),
+
+  http.get("*/api/v1/grants", () => HttpResponse.json({ items: [], next_cursor: null })),
+
+  http.post("*/api/v1/grants", async ({ request }) => {
+    const parsed = AccountGrantMutationSchema.safeParse(await request.json());
+    if (!parsed.success) return errorResponse(400, "invalid_request");
+    const account = simulatedStore.identities().flatMap((identity) => simulatedStore.connections(identity.id)).map((connection) => ({
+      account_id: `account_${connection.id}`,
+      tenant_id: connection.tenant_id,
+      connection_id: connection.id,
+      provider: connection.provider,
+      display_label: connection.display_label,
+    })).find((item) => item.account_id === parsed.data.account_id);
+    if (!account) return errorResponse(404, "not_found");
+    const identity = simulatedStore.identities().find((item) => item.id === parsed.data.identity_id);
+    if (!identity) return errorResponse(404, "not_found");
+    return HttpResponse.json({
+      id: `grant_${crypto.randomUUID()}`,
+      tenant_id: account.tenant_id,
+      membership_id: parsed.data.membership_id,
+      identity_id: parsed.data.identity_id,
+      identity_display_name: identity.display_name,
+      account_id: account.account_id,
+      connection_id: account.connection_id,
+      provider: account.provider,
+      account_label: account.display_label,
+      operation_scope: parsed.data.operation_scope,
+      chat_scope: parsed.data.chat_scope,
+      chat_ids: parsed.data.chat_ids,
+      status: "active",
+      created_at: "2026-08-29T00:00:00.000Z",
+      updated_at: "2026-08-29T00:00:00.000Z",
+      revoked_at: null,
+    }, { status: 201 });
+  }),
+
+  http.patch("*/api/v1/grants/:grantId", async ({ request, params }) => {
+    const parsed = AccountGrantUpdateSchema.safeParse(await request.json());
+    if (!parsed.success) return errorResponse(400, "invalid_request");
+    return HttpResponse.json({
+      id: String(params.grantId),
+      tenant_id: "tenant_pilot",
+      membership_id: "membership_pilot",
+      identity_id: "identity_human",
+      identity_display_name: "Human",
+      account_id: "account_connection_human_whatsapp",
+      connection_id: "connection_human_whatsapp",
+      provider: "whatsapp",
+      account_label: "Personal WhatsApp",
+      operation_scope: parsed.data.operation_scope,
+      chat_scope: parsed.data.chat_scope,
+      chat_ids: parsed.data.chat_ids,
+      status: "active",
+      created_at: "2026-08-29T00:00:00.000Z",
+      updated_at: "2026-08-29T00:00:00.000Z",
+      revoked_at: null,
+    });
+  }),
+
+  http.delete("*/api/v1/grants/:grantId", ({ params }) => HttpResponse.json({
+    id: String(params.grantId),
+    tenant_id: "tenant_pilot",
+    membership_id: "membership_pilot",
+    identity_id: "identity_human",
+    identity_display_name: "Human",
+    account_id: "account_connection_human_whatsapp",
+    connection_id: "connection_human_whatsapp",
+    provider: "whatsapp",
+    account_label: "Personal WhatsApp",
+    operation_scope: "conversation.read",
+    chat_scope: "all_chats",
+    chat_ids: [],
+    status: "revoked",
+    created_at: "2026-08-29T00:00:00.000Z",
+    updated_at: "2026-08-29T00:00:00.000Z",
+    revoked_at: "2026-08-29T00:00:00.000Z",
+  })),
 
   http.get("*/api/v1/identities", () =>
     HttpResponse.json(simulatedStore.identities())),

@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../app";
 import type { VerifiedSubject } from "../../auth/oidc";
 import { digestRealtimeTicket } from "../../realtime/token";
-import { clearDirectory, seedDirectory } from "../support/directory-fixtures";
+import { clearDirectory, seedAccountAccess, seedDirectory } from "../support/directory-fixtures";
 
 const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 const humanRequest: RealtimeTicketRequest = {
@@ -213,8 +213,7 @@ describe("POST /api/v1/realtime/tickets", () => {
       createTokenVerifier: () => ({
         verify: async (): Promise<VerifiedSubject> => ({
           issuer: "https://issuer.example/",
-          subject: "agent-subject",
-          token_id: "agent-token-id",
+          subject: "human-subject",
         }),
       }),
       createAccessTokenVerifier: () => ({ verify: accessVerify }),
@@ -227,7 +226,7 @@ describe("POST /api/v1/realtime/tickets", () => {
           "Cf-Access-Jwt-Assertion": "access.header.payload",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(agentRequest),
+        body: JSON.stringify(humanRequest),
       },
       requestEnvironment(),
     );
@@ -605,34 +604,39 @@ describe("GET /api/v1/realtime", () => {
     expect(doError.text).not.toContain(digest);
   });
 
-  it("keeps Human and Agent ticket contexts isolated", async () => {
+  it("keeps tenant-admin realtime and denies delegated agent realtime", async () => {
     const human = await issuedTicket(humanRequest, "http://example.test/api/v1/realtime/tickets", {
       Authorization: "Bearer human-token",
     });
-    const agent = await issuedTicket(agentRequest, "http://example.test/api/v1/realtime/tickets", {
-      Authorization: "Bearer agent-token",
-    });
+    const agent = await issueTicket(agentRequest, {}, requestEnvironment(), "Bearer agent-token");
+    await expectApiError(agent, 404);
     const calls: ProjectionCall[] = [];
     await upgrade(human.ticket, { requestEnv: projectionEnvironment(calls) });
-    await upgrade(agent.ticket, { requestEnv: projectionEnvironment(calls) });
 
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     const humanContext = JSON.parse(
       calls[0]!.request.headers.get("X-Communicator-Realtime-Context") ?? "null",
-    ) as Record<string, unknown>;
-    const agentContext = JSON.parse(
-      calls[1]!.request.headers.get("X-Communicator-Realtime-Context") ?? "null",
     ) as Record<string, unknown>;
     expect(humanContext).toMatchObject({
       principal_id: "principal_human",
       subscriptions: humanRequest.subscriptions,
     });
-    expect(agentContext).toMatchObject({
-      principal_id: "principal_agent",
-      subscriptions: agentRequest.subscriptions,
-    });
     expect(JSON.stringify(humanContext)).not.toContain("identity_agent");
-    expect(JSON.stringify(agentContext)).not.toContain("identity_human");
+  });
+
+  it("does not infer delegated realtime access from empty or retired account rows", async () => {
+    const emptyRegistry = await issueTicket(agentRequest, {}, requestEnvironment(), "Bearer agent-token");
+    await expectApiError(emptyRegistry, 404);
+
+    await seedAccountAccess(env.CONTROL_DB);
+    await env.CONTROL_DB.prepare(
+      "UPDATE connection_accounts SET status = 'retired', retired_at = ? WHERE account_id = ?",
+    ).bind("2026-09-07T04:00:00.000Z", "account_agent").run();
+    const retiredRegistry = await issueTicket(agentRequest, {}, requestEnvironment(), "Bearer agent-token");
+    await expectApiError(retiredRegistry, 404);
+
+    const tenantAdmin = await issueTicket(humanRequest);
+    expect(tenantAdmin.status).toBe(201);
   });
 
   it("does not attach product authorization middleware to the upgrade path", async () => {

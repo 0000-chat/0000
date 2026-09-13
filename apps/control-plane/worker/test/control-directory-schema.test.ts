@@ -20,6 +20,9 @@ const applicationTables = [
   "connection_routes",
   "gateway_routes",
   "connection_accounts",
+  "account_grants",
+  "account_grant_chats",
+  "permission_requests",
   "break_glass_grants",
   "revoked_tokens",
   "directory_mutations",
@@ -76,6 +79,9 @@ async function dropControlDirectorySchema(db: D1Database) {
     "connection_capabilities",
     "connection_routes",
     "connection_accounts",
+    "account_grant_chats",
+    "account_grants",
+    "permission_requests",
     "realtime_tickets",
     "connections",
     "identity_grants",
@@ -110,6 +116,7 @@ describe("control directory schema", () => {
       "0002_ingestion_routing.sql",
       "0003_connection_read_metadata.sql",
       "0004_realtime_tickets.sql",
+      "0005_account_grants.sql",
     ]));
     expect(migrations.results.findIndex((row) => row.name === "0002_ingestion_routing.sql"))
       .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0001_control_directory.sql"));
@@ -117,6 +124,8 @@ describe("control directory schema", () => {
       .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0002_ingestion_routing.sql"));
     expect(migrations.results.findIndex((row) => row.name === "0004_realtime_tickets.sql"))
       .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0003_connection_read_metadata.sql"));
+    expect(migrations.results.findIndex((row) => row.name === "0005_account_grants.sql"))
+      .toBeGreaterThan(migrations.results.findIndex((row) => row.name === "0004_realtime_tickets.sql"));
     const legacyTables = await env.CONTROL_DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connection_routes'",
     ).all<{ name: string }>();

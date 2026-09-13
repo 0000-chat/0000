@@ -12,12 +12,16 @@ import {
   type ConversationSummary,
   type Identity,
   type MessagePageResult,
+  type ProjectionAuthorizationContext,
   type SessionResponse,
 } from "@communicator/contracts";
 import type { DirectoryConnection } from "../control-directory/read-repository";
 import { listConnectionsForIdentity } from "../control-directory/read-repository";
 import type { TenantProjectionDO } from "../projection/tenant-projection";
-import { requireAuthorizedIdentity, toProjectionReadAuthorization } from "./authorization";
+import {
+  requireAuthorizedIdentity,
+  toGrantedProjectionReadAuthorization,
+} from "./authorization";
 import { mapReadError, ReadError } from "./errors";
 
 export type ReadHandlerContext = {
@@ -35,6 +39,7 @@ export type ListChannelsInput = {
 
 export type ListConversationsInput = {
   identity_id: string;
+  account_id?: string;
   channel_id?: string;
   cursor?: string;
   limit?: number;
@@ -43,11 +48,13 @@ export type ListConversationsInput = {
 export type GetConversationInput = {
   identity_id: string;
   conversation_id: string;
+  account_id?: string;
 };
 
 export type ListMessagesInput = {
   identity_id: string;
   conversation_id: string;
+  account_id?: string;
   cursor?: string;
   limit?: number;
 };
@@ -91,8 +98,19 @@ const withReadErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
   }
 };
 
-const publicConnection = ({ sort_position: _sortPosition, ...connection }: DirectoryConnection): Connection =>
+const publicConnection = ({ sort_position: _sortPosition, account_id: _accountId, ...connection }: DirectoryConnection): Connection =>
   ConnectionSchema.parse(connection);
+
+const filterGrantedConnections = (
+  connections: readonly DirectoryConnection[],
+  authorization: ProjectionAuthorizationContext,
+): DirectoryConnection[] => {
+  const allowed = authorization.allowed_account_ids;
+  if (allowed === undefined) return [...connections];
+  return connections.filter((connection) =>
+    connection.account_id !== undefined && allowed.includes(connection.account_id),
+  );
+};
 
 const listDirectoryConnections = async (
   context: ReadHandlerContext,
@@ -132,7 +150,15 @@ export async function listConnections(
       input.identity_id,
       "connection.read",
     );
-    const connections = await listDirectoryConnections(context, input.identity_id);
+    const authorization = await toGrantedProjectionReadAuthorization(
+      context.env,
+      context.authorization,
+      input.identity_id,
+    );
+    const connections = filterGrantedConnections(
+      await listDirectoryConnections(context, input.identity_id),
+      authorization,
+    );
     return ConnectionSchema.array().max(MAX_IDENTITY_CONNECTIONS).parse(
       connections.map(publicConnection),
     );
@@ -201,15 +227,20 @@ export async function listChannels(
       input.identity_id,
       "connection.read",
     );
-    const connections = await listDirectoryConnections(context, input.identity_id);
+    const authorization = await toGrantedProjectionReadAuthorization(
+      context.env,
+      context.authorization,
+      input.identity_id,
+    );
+    const connections = filterGrantedConnections(
+      await listDirectoryConnections(context, input.identity_id),
+      authorization,
+    );
     const stats = await projection(context).listChannelStats({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
       identity_id: input.identity_id,
-      authorization: toProjectionReadAuthorization(
-        context.authorization,
-        input.identity_id,
-      ),
+      authorization,
     });
     return channelRows(connections, stats);
   });
@@ -219,10 +250,29 @@ const validateChannelFilter = async (
   context: ReadHandlerContext,
   identityId: string,
   channelId: string | undefined,
+  authorization: ProjectionAuthorizationContext,
 ): Promise<void> => {
   if (channelId === undefined) return;
   const connections = await listDirectoryConnections(context, identityId);
-  if (!connections.some((connection) => connection.id === channelId)) {
+  const connection = connections.find((candidate) => candidate.id === channelId);
+  if (connection === undefined) {
+    throw new ReadError("not_found");
+  }
+  if (
+    authorization.allowed_account_ids !== undefined &&
+    (connection.account_id === undefined || !authorization.allowed_account_ids.includes(connection.account_id))
+  ) {
+    throw new ReadError("not_found");
+  }
+};
+
+const validateAccountFilter = (
+  accountId: string | undefined,
+  authorization: ProjectionAuthorizationContext,
+): void => {
+  if (accountId === undefined) return;
+  const allowed = authorization.allowed_account_ids;
+  if (allowed !== undefined && !allowed.includes(accountId)) {
     throw new ReadError("not_found");
   }
 };
@@ -237,18 +287,22 @@ export async function listConversations(
       input.identity_id,
       "conversation.read",
     );
-    await validateChannelFilter(context, input.identity_id, input.channel_id);
+    const authorization = await toGrantedProjectionReadAuthorization(
+      context.env,
+      context.authorization,
+      input.identity_id,
+    );
+    validateAccountFilter(input.account_id, authorization);
+    await validateChannelFilter(context, input.identity_id, input.channel_id, authorization);
     const projectionInput = {
       schema_version: 1 as const,
       tenant_id: context.authorization.tenant.id,
       identity_id: input.identity_id,
+      ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
       connection_id: input.channel_id ?? null,
       ...(input.limit === undefined ? {} : { page_size: input.limit }),
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-      authorization: toProjectionReadAuthorization(
-        context.authorization,
-        input.identity_id,
-      ),
+      authorization,
     };
     const page = await projection(context).listConversations(projectionInput);
     return ConversationPageResultSchema.parse(structuredClone(page));
@@ -265,15 +319,19 @@ export async function getConversation(
       input.identity_id,
       "conversation.read",
     );
+    const authorization = await toGrantedProjectionReadAuthorization(
+      context.env,
+      context.authorization,
+      input.identity_id,
+    );
+    validateAccountFilter(input.account_id, authorization);
     const conversation = await projection(context).getConversation({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
       identity_id: input.identity_id,
       conversation_id: input.conversation_id,
-      authorization: toProjectionReadAuthorization(
-        context.authorization,
-        input.identity_id,
-      ),
+      ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
+      authorization,
     });
     if (conversation === null) throw new ReadError("not_found");
     return ConversationSummarySchema.parse(structuredClone(conversation));
@@ -290,17 +348,21 @@ export async function listMessages(
       input.identity_id,
       "conversation.read",
     );
+    const authorization = await toGrantedProjectionReadAuthorization(
+      context.env,
+      context.authorization,
+      input.identity_id,
+    );
+    validateAccountFilter(input.account_id, authorization);
     const page = await projection(context).listMessages({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
       identity_id: input.identity_id,
       conversation_id: input.conversation_id,
+      ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
       ...(input.limit === undefined ? {} : { page_size: input.limit }),
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-      authorization: toProjectionReadAuthorization(
-        context.authorization,
-        input.identity_id,
-      ),
+      authorization,
     });
     return MessagePageResultSchema.parse(structuredClone(page));
   });

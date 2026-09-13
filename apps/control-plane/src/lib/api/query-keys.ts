@@ -1,6 +1,8 @@
 export const queryKeys = {
   session: ["session"] as const,
   connections: (identityId: string) => ["connections", identityId] as const,
+  connectedAccounts: (identityId: string) => ["connected-accounts", identityId] as const,
+  accountGrants: ["account-grants"] as const,
   channels: (identityId: string) => ["channels", identityId] as const,
   conversations: (identityId: string, channelId?: string) =>
     ["conversations", identityId, channelId ?? "all"] as const,

@@ -3,6 +3,13 @@ import {
   ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
+  AccountGrantMutationSchema,
+  AccountGrantPageSchema,
+  AccountGrantSchema,
+  AccountGrantUpdateSchema,
+  ConnectedAccountPageSchema,
+  PermissionRequestCreateSchema,
+  PermissionRequestSchema,
   ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
@@ -12,6 +19,12 @@ import {
   RealtimeTicketResponseSchema,
   SessionResponseSchema,
   type Command,
+  type AccountGrant,
+  type AccountGrantMutation,
+  type AccountGrantUpdate,
+  type ConnectedAccountPage,
+  type PermissionRequestCreate,
+  type PermissionRequest,
   type ChannelSummary,
   type Connection,
   type ConversationPageResult,
@@ -98,6 +111,48 @@ export class ApiClient {
       `/api/v1/connections?identity_id=${encodeURIComponent(identityId)}`,
       ConnectionSchema.array().max(MAX_IDENTITY_CONNECTIONS),
     );
+  }
+
+  getConnectedAccounts(identityId?: string): Promise<ConnectedAccountPage> {
+    const search = identityId === undefined
+      ? ""
+      : `?identity_id=${encodeURIComponent(identityId)}`;
+    return this.request(`/api/v1/accounts${search}`, ConnectedAccountPageSchema);
+  }
+
+  getAccountGrants(): Promise<z.infer<typeof AccountGrantPageSchema>> {
+    return this.request("/api/v1/grants", AccountGrantPageSchema);
+  }
+
+  createAccountGrant(input: AccountGrantMutation): Promise<AccountGrant> {
+    return this.request("/api/v1/grants", AccountGrantSchema, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(AccountGrantMutationSchema.parse(input)),
+    });
+  }
+
+  updateAccountGrant(grantId: string, input: AccountGrantUpdate): Promise<AccountGrant> {
+    return this.request(`/api/v1/grants/${encodeURIComponent(grantId)}`, AccountGrantSchema, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(AccountGrantUpdateSchema.parse(input)),
+    });
+  }
+
+  revokeAccountGrant(grantId: string, idempotencyKey: string): Promise<AccountGrant> {
+    return this.request(`/api/v1/grants/${encodeURIComponent(grantId)}`, AccountGrantSchema, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
+  }
+
+  createPermissionRequest(input: PermissionRequestCreate): Promise<PermissionRequest> {
+    return this.request("/api/v1/permission-requests", PermissionRequestSchema, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(PermissionRequestCreateSchema.parse(input)),
+    });
   }
 
   getChannels(identityId: string): Promise<ChannelSummary[]> {

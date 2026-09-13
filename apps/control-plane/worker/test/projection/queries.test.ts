@@ -332,7 +332,9 @@ describe("tenant projection query RPCs", () => {
         id: "conversation_shell",
         tenant_id: tenant,
         identity_id: "identity_a",
+        account_id: "account_a",
         connection_id: "connection_a",
+        event_id: "event_queries_shell",
         title: "Shell",
         last_message_preview: "",
         last_activity_at: shellEvent.occurred_at,
@@ -340,7 +342,9 @@ describe("tenant projection query RPCs", () => {
       },
     ]);
     expect(Object.keys(page.items[0]!).sort()).toEqual([
+      "account_id",
       "connection_id",
+      "event_id",
       "id",
       "identity_id",
       "last_activity_at",
@@ -734,16 +738,19 @@ describe("tenant projection query RPCs", () => {
       sender_label: "Sender",
     });
     expect(Object.keys(page.items[0]!).sort()).toEqual([
+      "account_id",
       "attachment_count",
       "body",
       "connection_id",
       "conversation_id",
       "delivery_status",
       "direction",
+      "event_id",
       "id",
       "identity_id",
       "occurred_at",
       "sender_label",
+      "sender_participant_id",
       "tenant_id",
     ]);
     expect(page.next_cursor).not.toBeNull();

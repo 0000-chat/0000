@@ -20,7 +20,7 @@ import {
   event,
   initialize,
 } from "../projection/projector-test-support";
-import { clearDirectory, seedDirectory } from "../support/directory-fixtures";
+import { clearDirectory, seedAccountAccess, seedDirectory } from "../support/directory-fixtures";
 import {
   requireAuthorizedIdentity,
   toProjectionReadAuthorization,
@@ -262,6 +262,7 @@ describe("authenticated live read API", () => {
   beforeEach(async () => {
     await clearDirectory(workerEnv.CONTROL_DB);
     await seedDirectory(workerEnv.CONTROL_DB);
+    await seedAccountAccess(workerEnv.CONTROL_DB);
   });
 
   it("returns only identities from the authenticated session and tenant-filtered connections", async () => {

@@ -111,7 +111,11 @@ const ConversationSummaryObjectSchema = z.object({
   id: CommunicatorIdSchema,
   tenant_id: CommunicatorIdSchema,
   identity_id: CommunicatorIdSchema,
+  /** Connected-account ownership is returned on every stored read. */
+  account_id: CommunicatorIdSchema.optional(),
   connection_id: CommunicatorIdSchema,
+  /** The latest stable source event that produced this summary. */
+  event_id: z.string().min(1).max(1_024).optional(),
   title: z.string().min(1).max(200),
   last_message_preview: z.string().max(280),
   last_activity_at: TimestampSchema,
@@ -144,8 +148,13 @@ const MessageObjectSchema = z.object({
   id: CommunicatorIdSchema,
   tenant_id: CommunicatorIdSchema,
   identity_id: CommunicatorIdSchema,
+  /** Connected-account ownership is returned on every stored read. */
+  account_id: CommunicatorIdSchema.optional(),
   connection_id: CommunicatorIdSchema,
   conversation_id: CommunicatorIdSchema,
+  /** Stable source event and sender/contact identifiers when available. */
+  event_id: z.string().min(1).max(1_024).optional(),
+  sender_participant_id: CommunicatorIdSchema.nullable().optional(),
   direction: z.enum(["inbound", "outbound"]),
   sender_label: z.string().min(1).max(100),
   body: z.string().max(20_000),

@@ -27,9 +27,27 @@ import {
   identitiesHandler,
   messagesRoute,
   messagesHandler,
+  accountConversationsRoute,
+  accountConversationsHandler,
 } from "./routes/read";
 import { sessionRoute } from "./routes/session";
 import { realtimeTicketRoute } from "./routes/realtime";
+import {
+  accountsRoute,
+  accountsHandler,
+  createGrantRoute,
+  createGrantHandler,
+  createPermissionRequestRoute,
+  createPermissionRequestHandler,
+  grantsRoute,
+  grantsHandler,
+  permissionRequestsRoute,
+  permissionRequestsHandler,
+  revokeGrantRoute,
+  revokeGrantHandler,
+  updateGrantRoute,
+  updateGrantHandler,
+} from "./routes/grants";
 import {
   realtimeTicketHandler,
   realtimeUpgradeHandler,
@@ -137,6 +155,11 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/identities", productAuthorization);
   app.use("/api/v1/identities/*", productAuthorization);
   app.use("/api/v1/connections", productAuthorization);
+  app.use("/api/v1/accounts", productAuthorization);
+  app.use("/api/v1/accounts/*", productAuthorization);
+  app.use("/api/v1/grants", productAuthorization);
+  app.use("/api/v1/grants/*", productAuthorization);
+  app.use("/api/v1/permission-requests", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
   app.openapi(sessionRoute, (context) => context.json(
     SessionResponseSchema.parse(context.get("authorization")),
@@ -151,6 +174,14 @@ export function createApp(services: AppServices = {}) {
   app.openapi(conversationsRoute, conversationsHandler);
   app.openapi(conversationRoute, conversationHandler);
   app.openapi(messagesRoute, messagesHandler);
+  app.openapi(accountConversationsRoute, accountConversationsHandler);
+  app.openapi(accountsRoute, accountsHandler);
+  app.openapi(grantsRoute, grantsHandler);
+  app.openapi(createGrantRoute, createGrantHandler);
+  app.openapi(updateGrantRoute, updateGrantHandler);
+  app.openapi(revokeGrantRoute, revokeGrantHandler);
+  app.openapi(permissionRequestsRoute, permissionRequestsHandler);
+  app.openapi(createPermissionRequestRoute, createPermissionRequestHandler);
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",
