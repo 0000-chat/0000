@@ -207,6 +207,7 @@ fn opens_brand_new_database_with_exact_v1_schema_and_pragmas() {
     assert_eq!(
         schema_objects(&path, "table"),
         vec![
+            "attachment_descriptors",
             "backfill_jobs",
             "gateway_state",
             "matrix_crypto_outbox",

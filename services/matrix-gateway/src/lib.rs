@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod attachments;
 pub mod batch;
 pub mod canonical;
 pub mod config;

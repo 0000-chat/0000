@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use zeroize::Zeroize;
 
 use crate::{
+    matrix::MatrixMediaDescriptor,
     model::{
         self, AttachmentObservedPayload, CanonicalEvent, CanonicalEventSource, CanonicalEventType,
         CanonicalPayload, ConversationUpdatedPayload, DeliveryStatus, Direction,
@@ -190,6 +191,7 @@ pub struct MatrixAttachment {
     mime_type: Option<String>,
     size_bytes: Option<u64>,
     sha256: Option<String>,
+    media: Option<MatrixMediaDescriptor>,
 }
 
 impl MatrixAttachment {
@@ -205,7 +207,36 @@ impl MatrixAttachment {
             mime_type,
             size_bytes,
             sha256,
+            media: None,
         }
+    }
+
+    /// Attach the private Matrix media descriptor captured from the source
+    /// event. It is retained only until the service seals it in the store.
+    pub(crate) fn with_media_descriptor(mut self, media: MatrixMediaDescriptor) -> Self {
+        self.media = Some(media);
+        self
+    }
+
+    /// Return the private source descriptor, if the event included one.
+    pub(crate) fn media_descriptor(&self) -> Option<&MatrixMediaDescriptor> {
+        self.media.as_ref()
+    }
+
+    pub(crate) fn file_name(&self) -> Option<&str> {
+        self.file_name.as_deref()
+    }
+
+    pub(crate) fn mime_type(&self) -> Option<&str> {
+        self.mime_type.as_deref()
+    }
+
+    pub(crate) const fn size_bytes(&self) -> Option<u64> {
+        self.size_bytes
+    }
+
+    pub(crate) fn sha256(&self) -> Option<&str> {
+        self.sha256.as_deref()
     }
 }
 
@@ -229,6 +260,20 @@ pub struct MatrixMessage {
     attachments: Vec<MatrixAttachment>,
     remote_message_id: Option<String>,
     source: CanonicalEventSource,
+}
+
+impl MatrixMessage {
+    /// Return the original Matrix event identifier used for stable attachment
+    /// identity and revision derivation.
+    pub(crate) fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    /// Return private source attachment metadata before normalization consumes
+    /// this message.
+    pub(crate) fn attachments(&self) -> &[MatrixAttachment] {
+        &self.attachments
+    }
 }
 
 impl MatrixMessage {

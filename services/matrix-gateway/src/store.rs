@@ -112,6 +112,11 @@ pub const STORE_ROOM_BINDING_DUPLICATE_ROOM: &str = "store_room_binding_duplicat
 pub const STORE_ROOM_BINDING_DUPLICATE_ID: &str = "store_room_binding_duplicate_id";
 /// Stable error returned for invalid or corrupt room-binding state.
 pub const STORE_ROOM_BINDING_INVALID: &str = "store_room_binding_invalid";
+/// Stable error returned for malformed or conflicting attachment descriptors.
+pub const STORE_ATTACHMENT_INVALID: &str = "store_attachment_invalid";
+/// Stable error returned when one attachment revision is rebound to different
+/// protected Matrix media metadata.
+pub const STORE_ATTACHMENT_CONFLICT: &str = "store_attachment_conflict";
 
 /// Stable error returned when bootstrap state does not exist yet.
 pub const STORE_NOT_BOOTSTRAPPED: &str = "store_not_bootstrapped";
@@ -174,6 +179,11 @@ CREATE TABLE room_bindings(
 );
 CREATE UNIQUE INDEX one_active_room ON room_bindings(room_lookup)
   WHERE status='active';
+CREATE TABLE attachment_descriptors(
+  attachment_lookup BLOB PRIMARY KEY,
+  payload_cipher BLOB NOT NULL, payload_nonce BLOB NOT NULL,
+  key_version INTEGER NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE room_progress(
   room_lookup BLOB PRIMARY KEY,
   anchor_event_cipher BLOB NOT NULL, anchor_event_nonce BLOB NOT NULL,
@@ -284,6 +294,17 @@ CREATE TABLE matrix_crypto_outbox(
 CREATE UNIQUE INDEX one_unresolved_crypto_request
   ON matrix_crypto_outbox((1))
   WHERE state IN ('pending','response_received','quarantined');
+"#;
+
+// Schema version 1 stores created before the attachment boundary did not
+// contain this additive table. Keep the version stable and install the table
+// before the exact schema-object check below.
+const ATTACHMENT_DESCRIPTOR_MIGRATION_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS attachment_descriptors(
+  attachment_lookup BLOB PRIMARY KEY,
+  payload_cipher BLOB NOT NULL, payload_nonce BLOB NOT NULL,
+  key_version INTEGER NOT NULL, updated_at TEXT NOT NULL
+);
 "#;
 
 /// The SQLite settings applied to the private state connection.
@@ -549,6 +570,8 @@ const SYNC_INBOX_ID_BYTES: usize = "inbox_".len() + 64;
 const SYNC_INBOX_STATE_MAX_BYTES: usize = "sdk_processed".len();
 const SYNC_TIMESTAMP_MAX_BYTES: usize = 64;
 const SYNC_TERMINAL_CODE_MAX_BYTES: usize = 64;
+const ATTACHMENT_DESCRIPTOR_MAX_BYTES: usize = 32 * 1024;
+const ATTACHMENT_DESCRIPTOR_FIELD_COUNT: usize = 9;
 const SYNC_NONCE_BYTES: usize = 24;
 const CRYPTO_ROW_ID_BYTES: usize = "crypto_".len() + 64;
 const CRYPTO_REQUEST_KIND_MAX_BYTES: usize = MATRIX_CRYPTO_REQUEST_KIND.len();
@@ -2407,6 +2430,137 @@ impl Store {
         Ok(matches.pop())
     }
 
+    /// Persist one source media descriptor behind the gateway keyring.
+    ///
+    /// The lookup tuple is deliberately wider than the room binding: a
+    /// descriptor is addressable only by the complete authority, conversation,
+    /// message, attachment, revision, and provider tuple. Replays of the same
+    /// event are idempotent; a different descriptor for that revision fails
+    /// closed as a conflict.
+    pub(crate) fn upsert_attachment_descriptor(
+        &mut self,
+        fields: &[&str],
+        payload: &[u8],
+    ) -> Result<(), SafeError> {
+        let lookup = attachment_descriptor_lookup(&self.keyring, fields)?;
+        if payload.is_empty() || payload.len() > ATTACHMENT_DESCRIPTOR_MAX_BYTES {
+            return Err(attachment_invalid());
+        }
+        let row_id = attachment_descriptor_row_id(&lookup);
+        let sealed = self
+            .keyring
+            .seal("attachment_descriptors", &row_id, "payload", payload)
+            .map_err(|_| attachment_invalid())?;
+        let updated_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| attachment_invalid())?;
+        let existing = transaction
+            .query_row(
+                "SELECT payload_cipher, payload_nonce, key_version
+                 FROM attachment_descriptors WHERE attachment_lookup = ?1",
+                params![lookup.as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| attachment_invalid())?;
+        if let Some((ciphertext, nonce, key_version)) = existing {
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| attachment_invalid())?;
+            let key_version = u32::try_from(key_version).map_err(|_| attachment_invalid())?;
+            let stored = keyring
+                .open(
+                    "attachment_descriptors",
+                    &row_id,
+                    "payload",
+                    &Sealed {
+                        nonce,
+                        ciphertext,
+                        key_version,
+                    },
+                )
+                .map_err(|_| attachment_invalid())?;
+            if stored.as_slice() != payload {
+                return Err(attachment_conflict());
+            }
+            transaction.commit().map_err(|_| attachment_invalid())?;
+            return Ok(());
+        }
+        let inserted = transaction
+            .execute(
+                "INSERT INTO attachment_descriptors
+                 (attachment_lookup, payload_cipher, payload_nonce, key_version, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    lookup.as_slice(),
+                    sealed.ciphertext.as_slice(),
+                    sealed.nonce.as_slice(),
+                    i64::from(sealed.key_version),
+                    updated_at,
+                ],
+            )
+            .map_err(|_| attachment_invalid())?;
+        if inserted != 1 {
+            return Err(attachment_invalid());
+        }
+        transaction.commit().map_err(|_| attachment_invalid())?;
+        Ok(())
+    }
+
+    /// Load one sealed source descriptor by the complete authority tuple.
+    pub(crate) fn load_attachment_descriptor(
+        &self,
+        fields: &[&str],
+    ) -> Result<Option<SecretBytes>, SafeError> {
+        let lookup = attachment_descriptor_lookup(&self.keyring, fields)?;
+        let row = self
+            .connection
+            .query_row(
+                "SELECT payload_cipher, payload_nonce, key_version
+                 FROM attachment_descriptors WHERE attachment_lookup = ?1",
+                params![lookup.as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| attachment_invalid())?;
+        let Some((ciphertext, nonce, key_version)) = row else {
+            return Ok(None);
+        };
+        let nonce: [u8; 24] = nonce.try_into().map_err(|_| attachment_invalid())?;
+        let key_version = u32::try_from(key_version).map_err(|_| attachment_invalid())?;
+        let row_id = attachment_descriptor_row_id(&lookup);
+        let plaintext = self
+            .keyring
+            .open(
+                "attachment_descriptors",
+                &row_id,
+                "payload",
+                &Sealed {
+                    nonce,
+                    ciphertext,
+                    key_version,
+                },
+            )
+            .map_err(|_| attachment_invalid())?;
+        if plaintext.len() > ATTACHMENT_DESCRIPTOR_MAX_BYTES {
+            return Err(attachment_invalid());
+        }
+        Ok(Some(SecretBytes::new(plaintext.as_slice().to_vec())))
+    }
+
     /// Derive an opaque, authority-bound cursor for one Matrix history page.
     ///
     /// The Matrix token is supplied only to the keyed digest and is never
@@ -2435,6 +2589,27 @@ impl Store {
 
 fn room_binding_invalid() -> SafeError {
     SafeError::new(STORE_ROOM_BINDING_INVALID)
+}
+
+fn attachment_invalid() -> SafeError {
+    SafeError::new(STORE_ATTACHMENT_INVALID)
+}
+
+fn attachment_conflict() -> SafeError {
+    SafeError::new(STORE_ATTACHMENT_CONFLICT)
+}
+
+fn attachment_descriptor_lookup(keyring: &Keyring, fields: &[&str]) -> Result<[u8; 32], SafeError> {
+    if fields.len() != ATTACHMENT_DESCRIPTOR_FIELD_COUNT {
+        return Err(attachment_invalid());
+    }
+    keyring
+        .lookup_digest("attachment-descriptor-v1", fields)
+        .map_err(|_| attachment_invalid())
+}
+
+fn attachment_descriptor_row_id(lookup: &[u8; 32]) -> String {
+    format!("attachment_{}", lowercase_hex(lookup))
 }
 
 fn store_already_bootstrapped() -> SafeError {
@@ -4379,6 +4554,9 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Stor
     }
 
     validate_schema_version(connection)?;
+    connection
+        .execute_batch(ATTACHMENT_DESCRIPTOR_MIGRATION_SQL)
+        .map_err(|_| StoreError::new(STORE_SCHEMA_INITIALIZE))?;
     validate_schema_objects(connection)
 }
 

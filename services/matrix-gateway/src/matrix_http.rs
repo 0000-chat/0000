@@ -1,6 +1,8 @@
 use std::{borrow::Cow, fmt, str, time::Duration};
 
+use aes::Aes256;
 use async_trait::async_trait;
+use ctr::cipher::{KeyIvInit, StreamCipher};
 use futures_util::StreamExt;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use reqwest::{Client, RequestBuilder, Url, redirect::Policy};
@@ -15,7 +17,7 @@ use ruma::api::{
 };
 use ruma::{OwnedRoomId, UInt};
 use sha2::Digest;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     crypto_outbox::{
@@ -23,9 +25,12 @@ use crate::{
         RawMatrixResponse, validate_canonical_request_bytes,
     },
     matrix::{
-        FetchedMatrixSync, MATRIX_HISTORY_UNAVAILABLE, MATRIX_RESPONSE_EMPTY,
+        FetchedMatrixMedia, FetchedMatrixSync, MATRIX_HISTORY_UNAVAILABLE, MATRIX_MEDIA_EMPTY,
+        MATRIX_MEDIA_INVALID, MATRIX_MEDIA_MISSING, MATRIX_MEDIA_REJECTED, MATRIX_MEDIA_TIMEOUT,
+        MATRIX_MEDIA_TOO_LARGE, MATRIX_MEDIA_UNAVAILABLE, MATRIX_RESPONSE_EMPTY,
         MATRIX_RESPONSE_INVALID, MATRIX_RESPONSE_TOO_LARGE, MATRIX_TRANSPORT_FAILED,
-        MATRIX_TRANSPORT_INVALID, MatrixTransport, RawBackfillPage, validate_raw_event_room,
+        MATRIX_TRANSPORT_INVALID, MAX_MEDIA_BYTES, MatrixMediaDescriptor, MatrixTransport,
+        RawBackfillPage, validate_raw_event_room,
     },
     secret::{SafeError, SecretBytes},
     store::STORE_CRYPTO_TOO_LARGE,
@@ -275,6 +280,110 @@ impl ReqwestMatrixTransport {
         let body = read_bounded_body(response, MAX_HISTORY_RESPONSE_BYTES).await?;
         parse_backfill_response(&body, room_id)
     }
+
+    fn media_request(
+        &self,
+        descriptor: &MatrixMediaDescriptor,
+    ) -> Result<RequestBuilder, SafeError> {
+        if !valid_matrix_server_name(&descriptor.server_name)
+            || !valid_matrix_media_id(&descriptor.media_id)
+        {
+            return Err(SafeError::new(MATRIX_MEDIA_INVALID));
+        }
+        let mut url = self.homeserver_url.clone();
+        url.set_path(&format!(
+            "/_matrix/client/v1/media/download/{}/{}",
+            descriptor.server_name, descriptor.media_id
+        ));
+        url.set_query(None);
+        url.set_fragment(None);
+        let authorization = bearer_header(&self.access_token)?;
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, authorization);
+        Ok(self
+            .client
+            .get(url)
+            .headers(headers)
+            .timeout(self.request_timeout))
+    }
+
+    async fn fetch_media_bytes(
+        &self,
+        descriptor: &MatrixMediaDescriptor,
+    ) -> Result<FetchedMatrixMedia, SafeError> {
+        let response = self
+            .media_request(descriptor)?
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    SafeError::new(MATRIX_MEDIA_TIMEOUT)
+                } else {
+                    SafeError::new(MATRIX_MEDIA_UNAVAILABLE)
+                }
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(SafeError::new(MATRIX_MEDIA_REJECTED));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+            return Err(SafeError::new(MATRIX_MEDIA_MISSING));
+        }
+        if status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+        {
+            return Err(SafeError::new(MATRIX_MEDIA_TIMEOUT));
+        }
+        if !status.is_success() {
+            return Err(SafeError::new(MATRIX_MEDIA_UNAVAILABLE));
+        }
+        let response_mime = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(normalize_media_mime);
+        let body =
+            read_bounded_body(response, MAX_MEDIA_BYTES)
+                .await
+                .map_err(|error| match error.code() {
+                    MATRIX_RESPONSE_TOO_LARGE => SafeError::new(MATRIX_MEDIA_TOO_LARGE),
+                    MATRIX_RESPONSE_EMPTY => SafeError::new(MATRIX_MEDIA_EMPTY),
+                    MATRIX_TRANSPORT_FAILED => SafeError::new(MATRIX_MEDIA_UNAVAILABLE),
+                    _ => SafeError::new(MATRIX_MEDIA_INVALID),
+                })?;
+        let mut body = Zeroizing::new(body);
+        if let Some(encrypted) = descriptor.encrypted.as_ref() {
+            if encrypted.algorithm != "A256CTR"
+                || encrypted.key.len() != 32
+                || encrypted.iv.len() != 16
+            {
+                return Err(SafeError::new(MATRIX_MEDIA_INVALID));
+            }
+            let expected_ciphertext = decode_matrix_base64(&encrypted.ciphertext_sha256)
+                .ok_or_else(|| SafeError::new(MATRIX_MEDIA_INVALID))?;
+            let actual_ciphertext: [u8; 32] = sha2::Sha256::digest(body.as_slice()).into();
+            if expected_ciphertext.as_slice() != actual_ciphertext {
+                return Err(SafeError::new(MATRIX_MEDIA_INVALID));
+            }
+            let mut cipher =
+                ctr::Ctr128BE::<Aes256>::new_from_slices(&encrypted.key, &encrypted.iv)
+                    .map_err(|_| SafeError::new(MATRIX_MEDIA_INVALID))?;
+            cipher.apply_keystream(&mut body);
+        } else if let Some(expected) = descriptor.source_sha256.as_deref() {
+            let expected = decode_matrix_sha256(expected)
+                .ok_or_else(|| SafeError::new(MATRIX_MEDIA_INVALID))?;
+            let actual: [u8; 32] = sha2::Sha256::digest(body.as_slice()).into();
+            if expected != actual {
+                return Err(SafeError::new(MATRIX_MEDIA_INVALID));
+            }
+        }
+        let mime_type = descriptor
+            .mime_type
+            .clone()
+            .or(response_mime)
+            .ok_or_else(|| SafeError::new(MATRIX_MEDIA_INVALID))?;
+        FetchedMatrixMedia::new(std::mem::take(&mut *body), mime_type)
+    }
 }
 
 impl fmt::Debug for ReqwestMatrixTransport {
@@ -309,6 +418,13 @@ impl MatrixTransport for ReqwestMatrixTransport {
         limit: u64,
     ) -> Result<RawBackfillPage, SafeError> {
         self.fetch_backfill_page(room_id, from, limit).await
+    }
+
+    async fn fetch_media(
+        &self,
+        descriptor: &MatrixMediaDescriptor,
+    ) -> Result<FetchedMatrixMedia, SafeError> {
+        self.fetch_media_bytes(descriptor).await
     }
 
     async fn send_crypto(
@@ -361,6 +477,72 @@ fn parse_homeserver_url(value: &str, allow_loopback_http: bool) -> Result<Url, S
         url.set_path("/");
     }
     Ok(url)
+}
+
+fn valid_matrix_server_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+        })
+}
+
+fn valid_matrix_media_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'=' | b'-' | b'~')
+        })
+}
+
+fn valid_hex_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn decode_matrix_sha256(value: &str) -> Option<[u8; 32]> {
+    if valid_hex_hash(value) {
+        let mut digest = [0_u8; 32];
+        for (index, slot) in digest.iter_mut().enumerate() {
+            let offset = index * 2;
+            *slot = u8::from_str_radix(&value[offset..offset + 2], 16).ok()?;
+        }
+        return Some(digest);
+    }
+    decode_matrix_base64(value)?.try_into().ok()
+}
+
+fn normalize_media_mime(value: &str) -> Option<String> {
+    let value = value.split(';').next()?.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || !value.contains('/')
+        || value.contains(char::is_whitespace)
+        || value.bytes().any(|byte| !byte.is_ascii())
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn decode_matrix_base64(value: &str) -> Option<Vec<u8>> {
+    use base64::{
+        Engine as _,
+        engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
+    };
+    if value.is_empty()
+        || value.len() > 4096
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .or_else(|_| URL_SAFE.decode(value))
+        .or_else(|_| STANDARD.decode(value))
+        .ok()
 }
 
 /// Validate the origin used by bootstrap with the same parser as the concrete
@@ -523,7 +705,10 @@ fn validate_keys_query_response(body: &[u8]) -> Result<(), SafeError> {
 mod transport_tests {
     use std::time::Duration;
 
+    use aes::Aes256;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use chrono::{TimeZone, Utc};
+    use ctr::cipher::{KeyIvInit, StreamCipher};
     use matrix_sdk_test::SyncResponseBuilder;
     use ruma::api::OutgoingResponse;
     use sha2::{Digest, Sha256};
@@ -535,9 +720,11 @@ mod transport_tests {
             ExactMatrixRequest, MAX_MATRIX_CRYPTO_RESPONSE_BYTES, PendingMatrixRequest,
         },
         matrix::{
-            MATRIX_RESPONSE_EMPTY, MATRIX_RESPONSE_INVALID, MATRIX_RESPONSE_TOO_LARGE,
-            MATRIX_TRANSPORT_FAILED, MATRIX_TRANSPORT_INVALID, MAX_SYNC_RESPONSE_BYTES,
-            MatrixTransport,
+            EncryptedMediaDescriptor, MATRIX_MEDIA_EMPTY, MATRIX_MEDIA_INVALID,
+            MATRIX_MEDIA_MISSING, MATRIX_MEDIA_REJECTED, MATRIX_MEDIA_TIMEOUT,
+            MATRIX_MEDIA_TOO_LARGE, MATRIX_RESPONSE_EMPTY, MATRIX_RESPONSE_INVALID,
+            MATRIX_RESPONSE_TOO_LARGE, MATRIX_TRANSPORT_FAILED, MATRIX_TRANSPORT_INVALID,
+            MAX_MEDIA_BYTES, MAX_SYNC_RESPONSE_BYTES, MatrixMediaDescriptor, MatrixTransport,
         },
         secret::{SafeError, SecretBytes},
     };
@@ -568,6 +755,279 @@ mod transport_tests {
             assert!(!error.to_string().contains(canary));
         }
         assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[tokio::test]
+    async fn media_fetch_uses_original_mxc_target_and_pinned_authenticated_origin() {
+        let server = MockServer::start().await;
+        let body = b"fixture media bytes";
+        let digest = Sha256::digest(body);
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path(
+                "/_matrix/client/v1/media/download/matrix.example/media123",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"media-application-token", 1024).expect("token"),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("loopback transport");
+        let descriptor = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "media123".to_owned(),
+            mime_type: Some("image/png".to_owned()),
+            source_sha256: Some(digest),
+            encrypted: None,
+        };
+        let media = transport.fetch_media(&descriptor).await.expect("media");
+        let (bytes, mime_type) = media.into_parts();
+        assert_eq!(bytes.as_bytes(), body);
+        assert_eq!(mime_type, "image/png");
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer media-application-token")
+        );
+        assert!(requests[0].url.query_pairs().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn media_fetch_verifies_matrix_base64_source_hash() {
+        let server = MockServer::start().await;
+        let body = b"base64 matrix hash fixture";
+        let source_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(body));
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path(
+                "/_matrix/client/v1/media/download/matrix.example/base64hash",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"base64-media-token", 1024).expect("token"),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("loopback transport");
+        let descriptor = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "base64hash".to_owned(),
+            mime_type: Some("application/octet-stream".to_owned()),
+            source_sha256: Some(source_hash),
+            encrypted: None,
+        };
+        let media = transport.fetch_media(&descriptor).await.expect("media");
+        let (bytes, _) = media.into_parts();
+        assert_eq!(bytes.as_bytes(), body);
+    }
+
+    #[tokio::test]
+    async fn media_fetch_decrypts_and_checks_matrix_a256ctr_ciphertext() {
+        let server = MockServer::start().await;
+        let key = [7_u8; 32];
+        let iv = [9_u8; 16];
+        let plaintext = b"encrypted fixture bytes";
+        let mut ciphertext = plaintext.to_vec();
+        let mut cipher = ctr::Ctr128BE::<Aes256>::new_from_slices(&key, &iv).expect("cipher");
+        cipher.apply_keystream(&mut ciphertext);
+        let ciphertext_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(&ciphertext));
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path(
+                "/_matrix/client/v1/media/download/matrix.example/encrypted123",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(ciphertext),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"encrypted-media-token", 1024).expect("token"),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("loopback transport");
+        let descriptor = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "encrypted123".to_owned(),
+            mime_type: Some("audio/ogg".to_owned()),
+            source_sha256: None,
+            encrypted: Some(EncryptedMediaDescriptor {
+                algorithm: "A256CTR".to_owned(),
+                key: key.to_vec(),
+                iv: iv.to_vec(),
+                ciphertext_sha256: ciphertext_hash,
+            }),
+        };
+        let media = transport
+            .fetch_media(&descriptor)
+            .await
+            .expect("decrypted media");
+        let (bytes, mime_type) = media.into_parts();
+        assert_eq!(bytes.as_bytes(), plaintext);
+        assert_eq!(mime_type, "audio/ogg");
+    }
+
+    #[tokio::test]
+    async fn media_fetch_rejects_ciphertext_hash_mismatch_without_plaintext() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"ciphertext"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"encrypted-media-token", 1024).expect("token"),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("loopback transport");
+        let descriptor = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "encrypted123".to_owned(),
+            mime_type: Some("audio/ogg".to_owned()),
+            source_sha256: None,
+            encrypted: Some(EncryptedMediaDescriptor {
+                algorithm: "A256CTR".to_owned(),
+                key: vec![7; 32],
+                iv: vec![9; 16],
+                ciphertext_sha256: URL_SAFE_NO_PAD.encode([0_u8; 32]),
+            }),
+        };
+        let error = transport
+            .fetch_media(&descriptor)
+            .await
+            .expect_err("hash mismatch");
+        assert_eq!(error.code(), MATRIX_MEDIA_INVALID);
+    }
+
+    #[tokio::test]
+    async fn media_fetch_maps_missing_rejected_timeout_empty_and_oversize() {
+        let cases = [
+            (404, None, MATRIX_MEDIA_MISSING),
+            (403, None, MATRIX_MEDIA_REJECTED),
+            (200, Some(Vec::new()), MATRIX_MEDIA_EMPTY),
+        ];
+        for (status, body, expected) in cases {
+            let server = MockServer::start().await;
+            let mut response = ResponseTemplate::new(status);
+            if let Some(body) = body {
+                response = response.set_body_bytes(body);
+            }
+            Mock::given(matchers::method("GET"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let transport = ReqwestMatrixTransport::new_for_test(
+                &server.uri(),
+                SecretBytes::from_text(b"media-error-token", 1024).expect("token"),
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+            )
+            .expect("loopback transport");
+            let descriptor = MatrixMediaDescriptor {
+                server_name: "matrix.example".to_owned(),
+                media_id: "errorcase".to_owned(),
+                mime_type: Some("application/octet-stream".to_owned()),
+                source_sha256: None,
+                encrypted: None,
+            };
+            let error = transport
+                .fetch_media(&descriptor)
+                .await
+                .expect_err("media error must be classified");
+            assert_eq!(error.code(), expected);
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![b'x'; MAX_MEDIA_BYTES + 1]),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"media-limit-token", 1024).expect("token"),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .expect("loopback transport");
+        let descriptor = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "oversize".to_owned(),
+            mime_type: Some("application/octet-stream".to_owned()),
+            source_sha256: None,
+            encrypted: None,
+        };
+        let error = transport
+            .fetch_media(&descriptor)
+            .await
+            .expect_err("oversized media must fail closed");
+        assert_eq!(error.code(), MATRIX_MEDIA_TOO_LARGE);
+
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_bytes(b"late media"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let transport = ReqwestMatrixTransport::new_for_test(
+            &server.uri(),
+            SecretBytes::from_text(b"media-timeout-token", 1024).expect("token"),
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        )
+        .expect("loopback transport");
+        let descriptor = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "timeout".to_owned(),
+            mime_type: Some("application/octet-stream".to_owned()),
+            source_sha256: None,
+            encrypted: None,
+        };
+        let error = transport
+            .fetch_media(&descriptor)
+            .await
+            .expect_err("media timeout must fail closed");
+        assert_eq!(error.code(), MATRIX_MEDIA_TIMEOUT);
     }
 
     #[tokio::test]
