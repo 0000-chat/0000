@@ -289,12 +289,13 @@ export async function commitLinkedAccount(
         .bind(accountId, connectionId, input.occurredAt, input.occurredAt),
       db
         .prepare(
-          "INSERT INTO connection_provider_identities (tenant_id, provider, identity_key, connection_id, link_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO connection_provider_identities (tenant_id, provider, identity_key, provider_login_id, connection_id, link_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           input.tenantId,
           provider.data,
           identityKey,
+          normalized,
           connectionId,
           input.sessionId,
           input.occurredAt,

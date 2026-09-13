@@ -39,6 +39,7 @@ export type MembershipStatusChange = {
 
 const operationScopeOrder: OperationScope[] = [
   "conversation.read",
+  "conversation.create",
   "message.send",
   "message.mutate",
   "receipt.send",

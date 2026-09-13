@@ -21,6 +21,8 @@ const applicationTables = [
   "gateway_routes",
   "connection_accounts",
   "connection_provider_identities",
+  "contact_resolution_candidates",
+  "direct_chat_creation_operations",
   "account_grants",
   "account_grant_chats",
   "attachment_download_grants",
@@ -106,6 +108,8 @@ async function dropControlDirectorySchema(db: D1Database) {
 
   for (const table of [
     "attachment_download_grants",
+    "direct_chat_creation_operations",
+    "contact_resolution_candidates",
     "audit_events",
     "control_event_outbox",
     "directory_mutations",

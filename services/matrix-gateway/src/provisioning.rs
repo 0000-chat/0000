@@ -7,10 +7,11 @@
 
 use std::{collections::HashMap, fmt, net::SocketAddr, sync::Arc, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use reqwest::{Client, Method, StatusCode, Url, redirect::Policy};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -33,8 +34,12 @@ const MAX_ID_BYTES: usize = 512;
 const PROVIDER_ERROR: &str = "provider_error";
 const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 const PROVISIONING_DISABLED: &str = "provisioning_disabled";
+const PROVISIONING_UNSUPPORTED: &str = "provisioning_unsupported";
 const IDENTITY_MISMATCH: &str = "identity_mismatch";
 const INVALID_REQUEST: &str = "invalid_request";
+const CONTACT_MISSING_STORE: &str = "contact_registry_unavailable";
+const CONTACT_SCOPE_MISMATCH: &str = "contact_scope_mismatch";
+const CONTACT_UNCERTAIN: &str = "contact_creation_uncertain";
 const OUTBOUND_TRANSACTION_CONFLICT: &str = "outbound_transaction_conflict";
 const OUTBOUND_SCOPE_MISMATCH: &str = "outbound_scope_mismatch";
 const OUTBOUND_UNCERTAIN: &str = "outbound_delivery_uncertain";
@@ -46,6 +51,7 @@ pub enum ProvisioningFailure {
     ProviderError,
     ProviderUnavailable,
     ProvisioningDisabled,
+    ProvisioningUnsupported,
     IdentityMismatch,
     InvalidRequest,
 }
@@ -56,6 +62,7 @@ impl ProvisioningFailure {
             Self::ProviderError => PROVIDER_ERROR,
             Self::ProviderUnavailable => PROVIDER_UNAVAILABLE,
             Self::ProvisioningDisabled => PROVISIONING_DISABLED,
+            Self::ProvisioningUnsupported => PROVISIONING_UNSUPPORTED,
             Self::IdentityMismatch => IDENTITY_MISMATCH,
             Self::InvalidRequest => INVALID_REQUEST,
         }
@@ -197,6 +204,20 @@ impl WhatsAppProvisioningClient {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<Value, ProvisioningFailure> {
+        let (status, value) = self.request_raw(method, path, query, None).await?;
+        if !status.is_success() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        Ok(value)
+    }
+
+    async fn request_raw(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> Result<(StatusCode, Value), ProvisioningFailure> {
         let mut url = self.route_url(path)?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -204,10 +225,17 @@ impl WhatsAppProvisioningClient {
                 pairs.append_pair(name, value);
             }
         }
-        let response = self
+        let mut request = self
             .client
             .request(method, url)
-            .bearer_auth(self.shared_secret.as_str())
+            .bearer_auth(self.shared_secret.as_str());
+        if let Some(body) = body {
+            let bytes = serde_json::to_vec(body).map_err(|_| ProvisioningFailure::ProviderError)?;
+            request = request
+                .header("content-type", "application/json")
+                .body(bytes);
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| ProvisioningFailure::ProviderUnavailable)?;
@@ -216,10 +244,102 @@ impl WhatsAppProvisioningClient {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ProvisioningFailure::ProvisioningDisabled);
         }
+        let value =
+            serde_json::from_slice(&body).map_err(|_| ProvisioningFailure::ProviderError)?;
+        Ok((status, value))
+    }
+
+    /// Search provider users through the pinned provisioning endpoint. A
+    /// missing endpoint is an explicit unsupported capability, so the Worker
+    /// can report that state instead of fabricating a contact.
+    pub async fn search_users(
+        &self,
+        provider_login_id: &str,
+        query: &str,
+    ) -> Result<Value, ProvisioningFailure> {
+        if query.trim().is_empty() || query.len() > 200 {
+            return Err(ProvisioningFailure::InvalidRequest);
+        }
+        let (status, value) = self
+            .request_raw(
+                Method::POST,
+                &format!("{PROVISIONING_ROOT}/search_users"),
+                &[("login_id", provider_login_id)],
+                Some(&json!({ "query": query })),
+            )
+            .await?;
+        if status == StatusCode::NOT_FOUND
+            || status == StatusCode::NOT_IMPLEMENTED
+            || status == StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Err(ProvisioningFailure::ProvisioningUnsupported);
+        }
         if !status.is_success() {
             return Err(ProvisioningFailure::ProviderError);
         }
-        serde_json::from_slice(&body).map_err(|_| ProvisioningFailure::ProviderError)
+        Ok(value)
+    }
+
+    /// Resolve one explicit provider identifier. A 404 is preserved as an
+    /// unresolved result so the private gateway never turns it into a mock
+    /// success.
+    pub async fn resolve_identifier(
+        &self,
+        provider_login_id: &str,
+        identifier: &str,
+    ) -> Result<Option<Value>, ProvisioningFailure> {
+        if identifier.is_empty() || identifier.len() > MAX_ID_BYTES {
+            return Err(ProvisioningFailure::InvalidRequest);
+        }
+        let (status, value) = self
+            .request_raw(
+                Method::GET,
+                &format!(
+                    "{PROVISIONING_ROOT}/resolve_identifier/{}",
+                    encode_path(identifier)
+                ),
+                &[("login_id", provider_login_id)],
+                None,
+            )
+            .await?;
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if status == StatusCode::NOT_IMPLEMENTED || status == StatusCode::METHOD_NOT_ALLOWED {
+            return Err(ProvisioningFailure::ProvisioningUnsupported);
+        }
+        if !status.is_success() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        Ok(Some(value))
+    }
+
+    /// Ask the bridge to create the one-to-one room for one already resolved
+    /// provider identifier. The returned object is validated by the gateway
+    /// handler before any room binding is persisted.
+    pub async fn create_dm(
+        &self,
+        provider_login_id: &str,
+        identifier: &str,
+    ) -> Result<Value, ProvisioningFailure> {
+        if identifier.is_empty() || identifier.len() > MAX_ID_BYTES {
+            return Err(ProvisioningFailure::InvalidRequest);
+        }
+        let (status, value) = self
+            .request_raw(
+                Method::POST,
+                &format!("{PROVISIONING_ROOT}/create_dm/{}", encode_path(identifier)),
+                &[("login_id", provider_login_id)],
+                None,
+            )
+            .await?;
+        if status == StatusCode::NOT_IMPLEMENTED || status == StatusCode::METHOD_NOT_ALLOWED {
+            return Err(ProvisioningFailure::ProvisioningUnsupported);
+        }
+        if !status.is_success() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        Ok(value)
     }
 
     /// Start a QR login.  The adapter first checks the pinned connector's
@@ -338,6 +458,137 @@ fn encode_path(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+fn decode_path_suffix(path: &str, prefix: &str) -> Option<String> {
+    let encoded = path.strip_prefix(prefix)?;
+    if encoded.is_empty() {
+        return None;
+    }
+    url::form_urlencoded::parse(format!("value={encoded}").as_bytes())
+        .next()
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty() && value.len() <= MAX_ID_BYTES)
+}
+
+fn deterministic_binding_id(tenant_id: &str, account_id: &str, conversation_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(tenant_id.as_bytes());
+    digest.update([0]);
+    digest.update(account_id.as_bytes());
+    digest.update([0]);
+    digest.update(conversation_id.as_bytes());
+    let encoded = digest.finalize();
+    format!(
+        "binding_{}",
+        encoded
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+#[derive(Clone, Debug)]
+struct DirectChatPayload {
+    provider_id: String,
+    matrix_room_id: String,
+}
+
+fn provider_identifier(value: &Value) -> Result<String, ProvisioningFailure> {
+    let provider_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_ID_BYTES)
+        .ok_or(ProvisioningFailure::ProviderError)?;
+    Ok(provider_id.to_owned())
+}
+
+fn resolved_contact_payload(value: Value) -> Result<Value, ProvisioningFailure> {
+    let _ = provider_identifier(&value)?;
+    Ok(value)
+}
+
+fn search_results_payload(value: Value, operation_id: &str) -> Result<Value, ProvisioningFailure> {
+    let results = value
+        .get("results")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| value.as_array().cloned())
+        .ok_or(ProvisioningFailure::ProviderError)?;
+    if results.len() > 100 {
+        return Err(ProvisioningFailure::ProviderError);
+    }
+    for result in &results {
+        let _ = provider_identifier(result)?;
+    }
+    Ok(json!({
+        "results": results,
+        "evidence": {
+            "source": "bridge",
+            "operation": "search",
+            "evidence_id": operation_id,
+            "observed_at": Utc::now().to_rfc3339(),
+            "status": "confirmed",
+            "reason": null
+        }
+    }))
+}
+
+fn direct_chat_payload(value: Value) -> Result<DirectChatPayload, ProvisioningFailure> {
+    let provider_id = provider_identifier(&value)?;
+    let matrix_room_id = value
+        .get("dm_room_mxid")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("matrix_room_id").and_then(Value::as_str))
+        .filter(|value| !value.is_empty() && value.len() <= MAX_ID_BYTES)
+        .ok_or(ProvisioningFailure::ProviderError)?
+        .to_owned();
+    if value.get("mxid").and_then(Value::as_str).is_none() {
+        return Err(ProvisioningFailure::ProviderError);
+    }
+    Ok(DirectChatPayload {
+        provider_id,
+        matrix_room_id,
+    })
+}
+
+fn contact_chat_response(request: &ContactRequest, matrix_room_id: &str, status: &str) -> Value {
+    let provider_id = request.provider_id.as_deref().unwrap_or_default();
+    let conversation_id = request.conversation_id.as_deref().unwrap_or_default();
+    json!({
+        "id": provider_id,
+        "name": provider_id,
+        "identifiers": [provider_id],
+        "tenant_id": request.tenant_id,
+        "identity_id": request.identity_id,
+        "account_id": request.account_id,
+        "connection_id": request.connection_id,
+        "conversation_id": conversation_id,
+        "session_generation": request.session_generation,
+        "matrix_room_id": matrix_room_id,
+        "status": status,
+        "evidence": {
+            "source": "bridge",
+            "operation": "create_dm",
+            "evidence_id": request.operation_id,
+            "observed_at": Utc::now().to_rfc3339(),
+            "status": status,
+            "reason": null
+        }
+    })
+}
+
+fn contact_failure_response(error: ProvisioningFailure) -> (u16, Vec<u8>) {
+    let status = match error {
+        ProvisioningFailure::InvalidRequest => 400,
+        ProvisioningFailure::ProvisioningUnsupported => 501,
+        ProvisioningFailure::ProvisioningDisabled => 403,
+        ProvisioningFailure::ProviderUnavailable
+        | ProvisioningFailure::ProviderError
+        | ProvisioningFailure::IdentityMismatch => 502,
+    };
+    response(status, json!({ "error": error.code() }))
+}
+
 fn string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
     names
         .iter()
@@ -437,6 +688,55 @@ struct OutboundRouteRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ContactRouteRequest {
+    gateway_route_id: String,
+    bridge_instance_id: String,
+    matrix_user_id: String,
+    matrix_room_namespace: String,
+    provider_login_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContactRequest {
+    schema_version: u8,
+    tenant_id: String,
+    account_id: String,
+    connection_id: String,
+    identity_id: String,
+    provider: Provider,
+    session_generation: String,
+    route: ContactRouteRequest,
+    operation_id: String,
+    query: Option<String>,
+    provider_id: Option<String>,
+    conversation_id: Option<String>,
+}
+
+impl ContactRequest {
+    fn validate(&self, route: &GatewayRouteMetadata) -> Result<(), &'static str> {
+        if self.schema_version != 1
+            || self.provider != Provider::Whatsapp
+            || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.account_id)
+            || !valid_resource_id(&self.connection_id)
+            || !valid_resource_id(&self.identity_id)
+            || !valid_resource_id(&self.operation_id)
+            || !valid_provider_login_id(&self.route.provider_login_id)
+            || DateTime::parse_from_rfc3339(&self.session_generation).is_err()
+            || self.route.gateway_route_id != route.gateway_route_id
+            || self.route.bridge_instance_id != route.bridge_instance_id
+            || self.route.matrix_user_id != route.matrix_user_id
+            || self.route.matrix_room_namespace != route.matrix_room_namespace
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutboundTextRequest {
     schema_version: u8,
     tenant_id: String,
@@ -485,6 +785,10 @@ impl OutboundTextRequest {
 
 fn valid_resource_id(value: &str) -> bool {
     crate::model::valid_resource_id(value)
+}
+
+fn valid_provider_login_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_ID_BYTES && !value.chars().any(char::is_whitespace)
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -644,6 +948,29 @@ impl ProvisioningGatewayServer {
             }
             return self.outbound_text(parsed, idempotency_key).await;
         }
+        if request.path == "/v1/contacts/search"
+            || request.path.starts_with("/v1/contacts/resolve/")
+            || request.path == "/v1/conversations/direct"
+        {
+            let parsed = match serde_json::from_slice::<ContactRequest>(&request.body) {
+                Ok(parsed) => parsed,
+                Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            if let Err(error) = parsed.validate(&self.route) {
+                return response(400, json!({ "error": error }));
+            }
+            if request.path == "/v1/contacts/search" {
+                return self.contact_search(parsed).await;
+            }
+            if request.path == "/v1/conversations/direct" {
+                return self.contact_create(parsed).await;
+            }
+            let Some(identifier) = decode_path_suffix(&request.path, "/v1/contacts/resolve/")
+            else {
+                return response(400, json!({ "error": INVALID_REQUEST }));
+            };
+            return self.contact_resolve(parsed, &identifier).await;
+        }
         let parsed = match serde_json::from_slice::<GatewayRequest>(&request.body) {
             Ok(parsed) => parsed,
             Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
@@ -658,6 +985,157 @@ impl ProvisioningGatewayServer {
             "/v1/link-sessions/cancel" => self.cancel(parsed, owner).await,
             _ => response(404, json!({ "error": "not_found" })),
         }
+    }
+
+    async fn contact_search(&self, request: ContactRequest) -> (u16, Vec<u8>) {
+        let Some(query) = request.query.as_deref() else {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        };
+        match self
+            .client
+            .search_users(&request.route.provider_login_id, query)
+            .await
+        {
+            Ok(value) => match search_results_payload(value, &request.operation_id) {
+                Ok(payload) => response(200, payload),
+                Err(error) => contact_failure_response(error),
+            },
+            Err(error) => contact_failure_response(error),
+        }
+    }
+
+    async fn contact_resolve(&self, request: ContactRequest, identifier: &str) -> (u16, Vec<u8>) {
+        match self
+            .client
+            .resolve_identifier(&request.route.provider_login_id, identifier)
+            .await
+        {
+            Ok(Some(value)) => match resolved_contact_payload(value) {
+                Ok(payload) => response(200, payload),
+                Err(error) => contact_failure_response(error),
+            },
+            Ok(None) => response(404, json!({ "error": "unresolved" })),
+            Err(error) => contact_failure_response(error),
+        }
+    }
+
+    async fn contact_create(&self, request: ContactRequest) -> (u16, Vec<u8>) {
+        let Some(provider_id) = request.provider_id.as_deref() else {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        };
+        let Some(conversation_id) = request.conversation_id.as_deref() else {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        };
+        let Some(store_handle) = self.outbound_store.as_ref() else {
+            return response(503, json!({ "error": CONTACT_MISSING_STORE }));
+        };
+
+        let existing_room = {
+            let store = store_handle.lock().await;
+            match store.active_room_binding_for_outbound(
+                &request.tenant_id,
+                &request.account_id,
+                &request.connection_id,
+                &request.identity_id,
+                Provider::Whatsapp,
+                conversation_id,
+            ) {
+                Ok(binding) => binding.map(|binding| binding.matrix_room_id().to_owned()),
+                Err(_) => return response(503, json!({ "error": CONTACT_SCOPE_MISMATCH })),
+            }
+        };
+        if let Some(matrix_room_id) = existing_room {
+            match self
+                .client
+                .resolve_identifier(&request.route.provider_login_id, provider_id)
+                .await
+            {
+                Ok(Some(value)) => match provider_identifier(&value) {
+                    Ok(resolved_id) if resolved_id == provider_id => {}
+                    Ok(_) => {
+                        return response(409, json!({ "error": CONTACT_SCOPE_MISMATCH }));
+                    }
+                    Err(error) => return contact_failure_response(error),
+                },
+                Ok(None) => return response(404, json!({ "error": "unresolved" })),
+                Err(error) => return contact_failure_response(error),
+            }
+            return response(
+                200,
+                contact_chat_response(&request, matrix_room_id.as_str(), "already_exists"),
+            );
+        }
+
+        let provider_value = match self
+            .client
+            .create_dm(&request.route.provider_login_id, provider_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return contact_failure_response(error),
+        };
+        let resolved = match direct_chat_payload(provider_value) {
+            Ok(value) => value,
+            Err(error) => return contact_failure_response(error),
+        };
+        if resolved.provider_id != provider_id {
+            return response(409, json!({ "error": CONTACT_SCOPE_MISMATCH }));
+        }
+
+        let created_at = Utc
+            .timestamp_millis_opt(Utc::now().timestamp_millis())
+            .single()
+            .unwrap_or_else(Utc::now);
+        let binding_id =
+            deterministic_binding_id(&request.tenant_id, &request.account_id, conversation_id);
+        let binding = match crate::registry::NewRoomBinding::new_with_session_generation(
+            binding_id,
+            resolved.matrix_room_id.clone(),
+            request.tenant_id.clone(),
+            request.identity_id.clone(),
+            request.connection_id.clone(),
+            request.account_id.clone(),
+            Provider::Whatsapp,
+            self.route.gateway_route_id.clone(),
+            conversation_id.to_owned(),
+            self.route.matrix_user_id.clone(),
+            request.session_generation.clone(),
+            created_at,
+        ) {
+            Ok(binding) => binding,
+            Err(_) => return response(502, json!({ "error": CONTACT_UNCERTAIN })),
+        };
+        {
+            let mut store = store_handle.lock().await;
+            if store.append_room_binding(binding).is_err() {
+                let existing = store
+                    .active_room_binding_for_outbound(
+                        &request.tenant_id,
+                        &request.account_id,
+                        &request.connection_id,
+                        &request.identity_id,
+                        Provider::Whatsapp,
+                        conversation_id,
+                    )
+                    .ok()
+                    .flatten();
+                if let Some(existing) = existing {
+                    return response(
+                        200,
+                        contact_chat_response(
+                            &request,
+                            existing.matrix_room_id(),
+                            "already_exists",
+                        ),
+                    );
+                }
+                return response(502, json!({ "error": CONTACT_UNCERTAIN }));
+            }
+        }
+        response(
+            200,
+            contact_chat_response(&request, &resolved.matrix_room_id, "created"),
+        )
     }
 
     async fn start(&self, owner: GatewayOwner) -> (u16, Vec<u8>) {
@@ -1355,6 +1833,207 @@ mod tests {
         assert!(!serialized.contains("txn-1"));
         assert!(!serialized.contains(BRIDGE_SECRET));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn contact_routes_use_selected_login_and_replay_exact_bound_account() {
+        let bridge = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!("{PROVISIONING_ROOT}/search_users")))
+            .and(matchers::query_param("login_id", "login-two"))
+            .and(matchers::header(
+                "authorization",
+                format!("Bearer {BRIDGE_SECRET}"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "contact-two",
+                    "name": "Two",
+                    "identifiers": ["+15550000002", "contact-two@lid"]
+                }]
+            })))
+            .mount(&bridge)
+            .await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/create_dm/contact-two"
+            )))
+            .and(matchers::query_param("login_id", "login-two"))
+            .and(matchers::header(
+                "authorization",
+                format!("Bearer {BRIDGE_SECRET}"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "contact-two",
+                "mxid": "@contact-two:example.test",
+                "dm_room_mxid": "!contact-two:example.test"
+            })))
+            .mount(&bridge)
+            .await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/resolve_identifier/contact-two"
+            )))
+            .and(matchers::query_param("login_id", "login-two"))
+            .and(matchers::header(
+                "authorization",
+                format!("Bearer {BRIDGE_SECRET}"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "contact-two",
+                "name": "Two",
+                "identifiers": ["+15550000002", "contact-two@lid"]
+            })))
+            .mount(&bridge)
+            .await;
+
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let store = Store::open(
+            &database,
+            Keyring::new([0x66; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::new(SharedHistoryTransport {
+                calls: AtomicUsize::new(0),
+                event_count: 0,
+            }),
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history);
+        let session_generation = "2026-09-14T00:00:00.000Z";
+        let request = |path: &str, idempotency_key: &str, body: Value| HttpRequest {
+            path: path.to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some(format!("request-{idempotency_key}")),
+            idempotency_key: Some(idempotency_key.to_owned()),
+            body: serde_json::to_vec(&body).expect("request JSON"),
+        };
+        let route_body = json!({
+            "gateway_route_id": "gateway_route_whatsapp",
+            "bridge_instance_id": "whatsapp-primary",
+            "matrix_user_id": MATRIX_USER,
+            "matrix_room_namespace": "communicator.0000.gold",
+            "provider_login_id": "login-two"
+        });
+        let search_body = json!({
+            "schema_version": 1,
+            "tenant_id": "tenant_contact",
+            "account_id": "account_two",
+            "connection_id": "connection_two",
+            "identity_id": "identity_contact",
+            "provider": "whatsapp",
+            "session_generation": session_generation,
+            "route": route_body,
+            "operation_id": "contact_search_two",
+            "query": "Two"
+        });
+        let (search_status, search_bytes) = server
+            .handle_request(request(
+                "/v1/contacts/search",
+                "contact-search-idempotency",
+                search_body,
+            ))
+            .await;
+        assert_eq!(search_status, 200);
+        let search_response: Value =
+            serde_json::from_slice(&search_bytes).expect("search response JSON");
+        assert_eq!(search_response["results"][0]["id"], "contact-two");
+
+        let create_body = json!({
+            "schema_version": 1,
+            "tenant_id": "tenant_contact",
+            "account_id": "account_two",
+            "connection_id": "connection_two",
+            "identity_id": "identity_contact",
+            "provider": "whatsapp",
+            "session_generation": session_generation,
+            "route": route_body,
+            "operation_id": "contact_create_two",
+            "provider_id": "contact-two",
+            "conversation_id": "conversation_contact_two"
+        });
+        let (created_status, created_bytes) = server
+            .handle_request(request(
+                "/v1/conversations/direct",
+                "contact-create-idempotency",
+                create_body.clone(),
+            ))
+            .await;
+        assert_eq!(created_status, 200);
+        let created: Value = serde_json::from_slice(&created_bytes).expect("created response JSON");
+        assert_eq!(created["status"], "created");
+        assert_eq!(created["account_id"], "account_two");
+        assert_eq!(created["connection_id"], "connection_two");
+        assert_eq!(created["identity_id"], "identity_contact");
+        assert_eq!(created["conversation_id"], "conversation_contact_two");
+        assert_eq!(created["id"], "contact-two");
+
+        let binding = {
+            let store = server
+                .outbound_store
+                .as_ref()
+                .expect("outbound store")
+                .lock()
+                .await;
+            store
+                .active_room_binding_for_outbound(
+                    "tenant_contact",
+                    "account_two",
+                    "connection_two",
+                    "identity_contact",
+                    Provider::Whatsapp,
+                    "conversation_contact_two",
+                )
+                .expect("binding lookup")
+                .expect("persisted binding")
+        };
+        assert_eq!(binding.matrix_room_id(), "!contact-two:example.test");
+        assert_eq!(binding.session_generation(), Some(session_generation));
+
+        let (duplicate_status, duplicate_bytes) = server
+            .handle_request(request(
+                "/v1/conversations/direct",
+                "contact-create-replay",
+                create_body,
+            ))
+            .await;
+        assert_eq!(duplicate_status, 200);
+        let duplicate: Value =
+            serde_json::from_slice(&duplicate_bytes).expect("duplicate response JSON");
+        assert_eq!(duplicate["status"], "already_exists");
+        assert_eq!(duplicate["account_id"], "account_two");
+        assert_eq!(duplicate["conversation_id"], "conversation_contact_two");
+        assert_eq!(duplicate["id"], "contact-two");
+
+        let requests = bridge.received_requests().await.expect("bridge requests");
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|request| {
+            request
+                .url
+                .query_pairs()
+                .any(|(name, value)| name == "login_id" && value == "login-two")
+        }));
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.query_pairs().any(|(name, _)| name == "user_id"))
+        );
     }
 
     struct BlockingOutboundSender {

@@ -139,6 +139,13 @@ import {
   createAttachmentHandlers,
   type AttachmentRouteServices,
 } from "./attachments/routes";
+import {
+  contactsRoute,
+  resolveContactRoute,
+  createDirectChatRoute,
+  createContactHandlers,
+} from "./routes/contacts";
+import type { ContactRouteServices } from "./contacts/service";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -183,6 +190,7 @@ export type AppServices = {
   applyHistoryEvents?: HistoryRouteServices["applyEvents"];
   createAttachmentProvider?: AttachmentRouteServices["createProvider"];
   attachmentNow?: AttachmentRouteServices["now"];
+  contactServices?: ContactRouteServices;
 };
 
 export function createApp(services: AppServices = {}) {
@@ -411,6 +419,9 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/grants", productAuthorization);
   app.use("/api/v1/grants/*", productAuthorization);
   app.use("/api/v1/permission-requests", productAuthorization);
+  app.use("/api/v1/contacts", productAuthorization);
+  app.use("/api/v1/contacts/*", productAuthorization);
+  app.use("/api/v1/conversations", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
   app.use("/api/v1/commands/*", productAuthorization);
   app.use("/api/v1/commands", productAuthorization);
@@ -430,7 +441,11 @@ export function createApp(services: AppServices = {}) {
   app.openapi(realtimeTicketRoute, realtimeTicketHandler);
   app.get("/api/v1/realtime", realtimeUpgradeHandler);
   app.post("/mcp", (context) =>
-    handleMcpRequest(context, outboundAcceptanceServices),
+    handleMcpRequest(
+      context,
+      outboundAcceptanceServices,
+      services.contactServices,
+    ),
   );
   app.get("/mcp", handleMcpGet);
 
@@ -530,6 +545,10 @@ export function createApp(services: AppServices = {}) {
   const attachmentHandlers = createAttachmentHandlers(attachmentServices);
   app.openapi(attachmentDownloadRoute, attachmentHandlers.download);
   app.openapi(attachmentMetadataRoute, attachmentHandlers.metadata);
+  const contactHandlers = createContactHandlers(services.contactServices);
+  app.openapi(contactsRoute, contactHandlers.contacts);
+  app.openapi(resolveContactRoute, contactHandlers.resolve);
+  app.openapi(createDirectChatRoute, contactHandlers.create);
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",
