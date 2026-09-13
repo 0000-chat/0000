@@ -14,10 +14,17 @@ expected = {
     ".github/workflows/quality.yml",
     ".githooks/pre-commit",
     ".gitignore",
+    ".oxlintrc.json",
     "0000-product.json",
     "AGENTS.md",
     "README.md",
+    "biome.json",
     "docs/README.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "docs/agents/triage-labels.md",
+    "package.json",
+    "pnpm-lock.yaml",
     "scripts/check",
 }
 tracked = set(subprocess.check_output(["git", "ls-files"], text=True).splitlines())
@@ -34,5 +41,7 @@ readme = (root / "README.md").read_text(encoding="utf-8")
 if "`0000-gateway` aims" not in readme or "No hard dependency" not in readme:
     raise SystemExit("README must state the gateway purpose and dependency status")
 PY
+pnpm run lint
+pnpm run format:check
 git diff --check
 echo "0000-gateway scaffold checks passed"

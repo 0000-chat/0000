@@ -18,3 +18,9 @@ It is not responsible for owning product data, making product decisions,
 providing communication channels, or defining the hosted user experience.
 
 No hard dependency on another 0000 service is confirmed.
+
+Install the pinned development tooling with `pnpm install --frozen-lockfile`.
+`pnpm lint` runs Oxlint correctness checks and `pnpm format:check` verifies
+Biome formatting without changing files. Use `pnpm lint:fix` or `pnpm format`
+when an intentional local fix is needed. `./scripts/check` runs the
+nonmutating checks used by CI.
