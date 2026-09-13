@@ -11,6 +11,7 @@ export const PrincipalTypeSchema = z.enum([
 export const MembershipRoleSchema = z.enum(["owner", "admin", "member"]);
 export const OperationScopeSchema = z.enum([
   "conversation.read",
+  "conversation.create",
   "message.send",
   "message.mutate",
   "receipt.send",

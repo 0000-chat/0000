@@ -164,6 +164,43 @@ export async function hasAccountOperationGrant(
   }
 }
 
+/** Check an account-wide operation grant before a resource exists. */
+export async function hasAccountOperationGrantForAccount(
+  db: D1DatabaseSession,
+  tenantId: string,
+  membershipId: string,
+  identityId: string,
+  accountId: string,
+  operationScope: AccountGrantOperationScope,
+): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT 1 AS granted
+           FROM account_grants AS g
+           JOIN connections AS c
+             ON c.tenant_id = g.tenant_id
+           JOIN connection_accounts AS ca
+             ON ca.connection_id = c.id
+            AND ca.account_id = g.account_id
+            AND ca.status = 'active'
+          WHERE g.tenant_id = ?
+            AND g.membership_id = ?
+            AND g.identity_id = ?
+            AND g.account_id = ?
+            AND g.operation_scope = ?
+            AND g.chat_scope = 'all_chats'
+            AND g.status = 'active'
+          LIMIT 1`,
+      )
+      .bind(tenantId, membershipId, identityId, accountId, operationScope)
+      .first<{ granted: number }>();
+    return row !== null;
+  } catch (error) {
+    throw grantError("grant_unavailable", error);
+  }
+}
+
 export type ListAccountGrantsInput = {
   tenantId: string;
   membershipId?: string;

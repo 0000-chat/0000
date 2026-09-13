@@ -10,6 +10,9 @@ import {
   WebhookSubscriptionCutoverSchema,
   WebhookSubscriptionUpdateSchema,
   WebhookSubscriptionRevokeSchema,
+  ContactSearchRequestSchema,
+  ContactResolveRequestSchema,
+  CreateDirectChatRequestSchema,
   type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
@@ -55,6 +58,14 @@ import {
   reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "./outbound/acceptance";
+import { ContactRepositoryError } from "./contacts/repository";
+import {
+  createDirectChat,
+  resolveContact,
+  searchContacts,
+  type ContactRouteServices,
+  type ContactServiceContext,
+} from "./contacts/service";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -174,11 +185,36 @@ const cancelTextReplyInput = {
   command_id: boundedId,
   idempotency_key: z.string().trim().min(1).max(200),
 };
+const contactSearchInput = {
+  identity_id: CommunicatorIdSchema.max(128),
+  account_id: CommunicatorIdSchema.max(128),
+  query: z.string().trim().min(1).max(200),
+};
+const contactResolveInput = {
+  identity_id: CommunicatorIdSchema.max(128),
+  account_id: CommunicatorIdSchema.max(128),
+  phone: z.string().trim().min(1).max(32),
+};
+const createDirectChatInput = {
+  identity_id: CommunicatorIdSchema.max(128),
+  account_id: CommunicatorIdSchema.max(128),
+  contact_id: CommunicatorIdSchema.max(128),
+  candidate_revision: z.string().regex(/^[0-9a-f]{64}$/u),
+  idempotency_key: z.string().trim().min(1).max(200),
+};
 
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
   env: context.env,
   authorization: context.get("authorization"),
   delegated: context.get("delegated"),
+});
+
+const contextForContacts = (
+  context: ReadHandlerContext,
+): ContactServiceContext => ({
+  env: context.env,
+  authorization: context.authorization,
+  ...(context.delegated === undefined ? {} : { delegated: context.delegated }),
 });
 
 const webhookActorFor = (context: ReadHandlerContext): WebhookActor => ({
@@ -230,6 +266,23 @@ const errorResult = (error: unknown) => {
             : error.code === "webhook_conflict"
               ? "invalid_request"
               : "service_unavailable";
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ error: { code, message: error.message } }),
+        },
+      ],
+    };
+  }
+  if (error instanceof ContactRepositoryError) {
+    const code =
+      error.code === "contact_invalid" || error.code === "contact_conflict"
+        ? "invalid_request"
+        : error.code === "contact_not_found"
+          ? "not_found"
+          : "service_unavailable";
     return {
       isError: true,
       content: [
@@ -316,6 +369,7 @@ const registerTools = (
   server: McpServer,
   context: ReadHandlerContext,
   outboundServices: OutboundAcceptanceServices,
+  contactServices: ContactRouteServices,
 ): void => {
   server.registerTool(
     "list_identities",
@@ -462,6 +516,54 @@ const registerTools = (
         };
         return searchMessages(context, value);
       }),
+  );
+
+  server.registerTool(
+    "search_contacts",
+    {
+      description: "Search account contacts without selecting a recipient",
+      inputSchema: contactSearchInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        searchContacts(
+          contextForContacts(context),
+          ContactSearchRequestSchema.parse(input),
+          contactServices,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "resolve_contact",
+    {
+      description: "Resolve a phone number through one selected account",
+      inputSchema: contactResolveInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        resolveContact(
+          contextForContacts(context),
+          ContactResolveRequestSchema.parse(input),
+          contactServices,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "create_direct_chat",
+    {
+      description: "Create one direct chat from an explicit account contact",
+      inputSchema: createDirectChatInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        createDirectChat(
+          contextForContacts(context),
+          CreateDirectChatRequestSchema.parse(input),
+          contactServices,
+        ),
+      ),
   );
 
   server.registerTool(
@@ -729,6 +831,7 @@ const validMcpRequestHeaders = (request: Request): boolean => {
 export async function handleMcpRequest(
   context: McpContext,
   outboundServices: OutboundAcceptanceServices = {},
+  contactServices: ContactRouteServices = {},
 ): Promise<Response> {
   if (!validMcpRequestHeaders(context.req.raw)) {
     return new Response(
@@ -742,7 +845,12 @@ export async function handleMcpRequest(
   }
 
   const server = new McpServer({ name: "communicator", version: "1.0.0" });
-  registerTools(server, contextForRead(context), outboundServices);
+  registerTools(
+    server,
+    contextForRead(context),
+    outboundServices,
+    contactServices,
+  );
   const requestUrl = new URL(context.req.url);
   const transport = new WebStandardStreamableHTTPServerTransport({
     enableJsonResponse: true,

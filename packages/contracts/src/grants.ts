@@ -35,6 +35,7 @@ export type AccountGrantTargetPage = z.infer<
 /** A grant's operation is intentionally independent from its resource scope. */
 export const AccountGrantOperationScopeSchema = z.enum([
   "conversation.read",
+  "conversation.create",
   "message.send",
   "webhook.manage",
 ]);
