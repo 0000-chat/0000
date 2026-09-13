@@ -21,6 +21,7 @@ import {
   getDetail,
   listCapabilities,
   listImports,
+  HistoryRepositoryError,
 } from "./repository";
 import {
   historyProviderFromEnv,
@@ -174,6 +175,18 @@ const responseError = (
   );
 
 const errorResponse = (context: HistoryRouteContext, error: unknown) => {
+  if (error instanceof HistoryRepositoryError) {
+    switch (error.code) {
+      case "history_invalid":
+        return responseError(context, 400, "invalid_request", "Invalid history import");
+      case "history_not_found":
+        return responseError(context, 404, "not_found", "History import not found");
+      case "history_conflict":
+        return responseError(context, 409, "invalid_request", "History import conflict");
+      default:
+        return responseError(context, 503, "service_unavailable", "History import unavailable");
+    }
+  }
   if (error instanceof HistoryServiceError) {
     switch (error.code) {
       case "history_invalid":

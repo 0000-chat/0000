@@ -639,6 +639,10 @@ const createService = (
           continue;
         }
         newEvents.push(event);
+        // A provider may repeat an event within one page. Treat the first
+        // occurrence as the page's checkpoint candidate so it cannot be
+        // applied or counted twice before the D1 hash row is written.
+        existingHashes.set(event.event_id, hash);
         hashes.push({
           import_id: item.import_id,
           range_id: range.range_id,

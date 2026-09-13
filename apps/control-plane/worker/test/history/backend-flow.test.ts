@@ -12,6 +12,7 @@ import type {
   HistoryProviderAdvanceResult,
   HistoryProviderStartResult,
 } from "../../history/provider";
+import type { HistoryRouteServices } from "../../history/routes";
 import {
   auth,
   bindingFor,
@@ -106,6 +107,11 @@ const startResult: HistoryProviderStartResult = {
   error_code: null,
 };
 
+const singleRangeStartResult: HistoryProviderStartResult = {
+  ...startResult,
+  ranges: [startResult.ranges[0]!],
+};
+
 const createProvider = (calls: string[]): HistoryImportProvider => ({
   start: async () => startResult,
   advance: async ({ range_id }): Promise<HistoryProviderAdvanceResult> => {
@@ -129,40 +135,86 @@ const createProvider = (calls: string[]): HistoryImportProvider => ({
   },
 });
 
-const createTestApp = (provider: HistoryImportProvider) =>
+const createSinglePageProvider = (
+  calls: string[],
+  events: readonly ProjectionEventEnvelope[],
+): HistoryImportProvider => ({
+  start: async () => singleRangeStartResult,
+  advance: async ({ range_id }): Promise<HistoryProviderAdvanceResult> => {
+    calls.push(range_id);
+    return {
+      status: "completed",
+      events,
+      next_cursor: null,
+      gap_code: null,
+      error_code: null,
+    };
+  },
+});
+
+const createTestApp = (
+  provider: HistoryImportProvider,
+  applyEvents?: HistoryRouteServices["applyEvents"],
+) =>
   createApp({
     createTokenVerifier: () => ({
       verify: async (token: string): Promise<VerifiedSubject> => {
-        if (token === "human-token") {
+        if (token === "human-token")
+          return { issuer: "https://issuer.example/", subject: "human-subject" };
+        if (token === "agent-token")
           return {
             issuer: "https://issuer.example/",
-            subject: "human-subject",
+            subject: "agent-subject",
+            token_id: "agent-token-id",
           };
-        }
         throw new Error("invalid test token");
       },
     }),
     createHistoryImportProvider: () => provider,
     historyNow: () => new Date("2026-09-03T00:00:10.000Z"),
+    ...(applyEvents === undefined ? {} : { applyHistoryEvents: applyEvents }),
   });
 
 const request = (
   app: ReturnType<typeof createApp>,
   path: string,
   init: RequestInit = {},
+  token = "human-token",
 ) =>
   app.request(
     `https://example.test${path}`,
     {
       ...init,
       headers: {
-        Authorization: "Bearer human-token",
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         ...init.headers,
       },
     },
     workerEnv,
   );
+
+const startImport = async (
+  app: ReturnType<typeof createApp>,
+  idempotencyKey: string,
+) => {
+  const response = await request(
+    app,
+    `/api/v1/accounts/${accountId}/history-imports`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({
+        identity_id: identityId,
+        start_at: rangeStart,
+        end_at: rangeEnd,
+        max_events: 50,
+      }),
+    },
+  );
+  expect(response.status).toBe(200);
+  return HistoryImportDetailSchema.parse(await response.json());
+};
 
 async function seedLiveProjection(): Promise<void> {
   const stub = await initialize(tenantId);
@@ -282,5 +334,164 @@ describe("history import production route", () => {
       firstRange?.range_id,
       secondRange?.range_id,
     ]);
+  });
+
+  it("denies an agent and keeps a human identity bound to its account", async () => {
+    const provider = createSinglePageProvider([], []);
+    const app = createTestApp(provider);
+    const agentResponse = await request(
+      app,
+      `/api/v1/accounts/${accountId}/history-imports`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "history-agent-001" },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          start_at: rangeStart,
+          end_at: rangeEnd,
+          max_events: 50,
+        }),
+      },
+      "agent-token",
+    );
+    expect(agentResponse.status).toBe(403);
+
+    const crossAccountResponse = await request(
+      app,
+      "/api/v1/accounts/account_agent/history-imports",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "history-cross-001" },
+        body: JSON.stringify({
+          identity_id: identityId,
+          start_at: rangeStart,
+          end_at: rangeEnd,
+          max_events: 50,
+        }),
+      },
+    );
+    expect(crossAccountResponse.status).toBe(404);
+  });
+
+  it("deduplicates repeated events within one provider page", async () => {
+    const calls: string[] = [];
+    const applied: ProjectionEventEnvelope[] = [];
+    const app = createTestApp(
+      createSinglePageProvider(calls, [importedEvent, importedEvent]),
+      async (input) => {
+        applied.push(...input.events);
+      },
+    );
+    const initial = await startImport(app, "history-duplicate-001");
+    const range = initial.ranges[0];
+    expect(range).toBeDefined();
+    const response = await request(
+      app,
+      `/api/v1/history-imports/${initial.import.import_id}/advance`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          identity_id: identityId,
+          range_id: range?.range_id,
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    const detail = HistoryImportDetailSchema.parse(await response.json());
+    expect(detail.import.status).toBe("completed");
+    expect(detail.import.event_count).toBe(1);
+    expect(applied.map((event) => event.event_id)).toEqual([
+      importedEvent.event_id,
+    ]);
+    expect(calls).toEqual([range?.range_id]);
+    const hashes = await workerEnv.CONTROL_DB.prepare(
+      "SELECT source_event_id FROM history_import_events WHERE import_id = ?",
+    )
+      .bind(initial.import.import_id)
+      .all<{ source_event_id: string }>();
+    expect(hashes.results).toEqual([
+      { source_event_id: importedEvent.event_id },
+    ]);
+  });
+
+  it("resumes after projection apply succeeds before the D1 checkpoint write", async () => {
+    const calls: string[] = [];
+    let applyCalls = 0;
+    const app = createTestApp(
+      createSinglePageProvider(calls, [importedEvent]),
+      async (input) => {
+        const projection = input.env.TENANT_PROJECTION.getByName(
+          input.tenantId,
+        );
+        await projection.applyBatch({
+          schema_version: 1,
+          tenant_id: input.tenantId,
+          authorization: auth(
+            ["projection.write"],
+            [input.identityId],
+            input.tenantId,
+          ),
+          mode: "live",
+          rebuild_id: null,
+          connections: [
+            bindingFor(input.accountId, connectionId, input.identityId),
+          ],
+          events: [...input.events],
+          checkpoint: null,
+        });
+        applyCalls += 1;
+        if (applyCalls === 1) throw new Error("simulated checkpoint crash");
+      },
+    );
+    const initial = await startImport(app, "history-resume-001");
+    const range = initial.ranges[0];
+    expect(range).toBeDefined();
+
+    const advance = async () =>
+      request(
+        app,
+        `/api/v1/history-imports/${initial.import.import_id}/advance`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            identity_id: identityId,
+            range_id: range?.range_id,
+          }),
+        },
+      );
+    const crashed = await advance();
+    expect(crashed.status).toBe(200);
+    const retryable = HistoryImportDetailSchema.parse(await crashed.json());
+    expect(retryable.import.status).toBe("active");
+    expect(retryable.import.last_error_code).toBe("provider_error");
+    expect(retryable.import.event_count).toBe(0);
+
+    const resumed = await advance();
+    expect(resumed.status).toBe(200);
+    const completed = HistoryImportDetailSchema.parse(await resumed.json());
+    expect(completed.import.status).toBe("completed");
+    expect(completed.import.event_count).toBe(1);
+    expect(applyCalls).toBe(2);
+    expect(calls).toEqual([range?.range_id, range?.range_id]);
+
+    const hashes = await workerEnv.CONTROL_DB.prepare(
+      "SELECT source_event_id FROM history_import_events WHERE import_id = ?",
+    )
+      .bind(initial.import.import_id)
+      .all<{ source_event_id: string }>();
+    expect(hashes.results).toEqual([
+      { source_event_id: importedEvent.event_id },
+    ]);
+    const projectionRows = await runInDurableObject(
+      workerEnv.TENANT_PROJECTION.getByName(tenantId),
+      async (_instance, state) =>
+        state.storage.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM messages WHERE id = ?",
+            "history_message",
+          )
+          .toArray(),
+    );
+    expect(projectionRows).toEqual([{ count: 1 }]);
   });
 });
