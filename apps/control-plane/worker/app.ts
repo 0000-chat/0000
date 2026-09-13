@@ -55,6 +55,17 @@ import {
   realtimeUpgradeHandler,
 } from "./realtime/handlers";
 import { ReadError, readErrorResponse } from "./read/errors";
+import {
+  createCancelLinkSessionHandler,
+  createLinkSessionActionHandler,
+  createLinkSessionHandler,
+  getLinkSessionHandler,
+  linkSessionActionRoute,
+  linkSessionCancelRoute,
+  linkSessionGetRoute,
+  linkSessionStartRoute,
+  type LinkingServices,
+} from "./linking/routes";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -71,6 +82,8 @@ export type AppServices = {
   createAccessTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createIngestionTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   sendIngestionQueue?: IngestionQueueSender;
+  createConnectionGateway?: LinkingServices["createConnectionGateway"];
+  linkingNow?: LinkingServices["now"];
 };
 
 export function createApp(services: AppServices = {}) {
@@ -183,6 +196,8 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/grants/*", productAuthorization);
   app.use("/api/v1/permission-requests", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
+  app.use("/api/v1/identities/*/link-sessions", productAuthorization);
+  app.use("/api/v1/link-sessions/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -207,6 +222,17 @@ export function createApp(services: AppServices = {}) {
   app.openapi(revokeGrantRoute, revokeGrantHandler);
   app.openapi(permissionRequestsRoute, permissionRequestsHandler);
   app.openapi(createPermissionRequestRoute, createPermissionRequestHandler);
+  const linkingServices: LinkingServices = {};
+  if (services.createConnectionGateway !== undefined)
+    linkingServices.createConnectionGateway = services.createConnectionGateway;
+  if (services.linkingNow !== undefined) linkingServices.now = services.linkingNow;
+  app.openapi(linkSessionStartRoute, createLinkSessionHandler(linkingServices));
+  app.openapi(linkSessionGetRoute, getLinkSessionHandler);
+  app.openapi(
+    linkSessionActionRoute,
+    createLinkSessionActionHandler(linkingServices),
+  );
+  app.openapi(linkSessionCancelRoute, createCancelLinkSessionHandler(linkingServices));
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",

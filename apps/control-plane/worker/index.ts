@@ -10,3 +10,4 @@ export default worker;
 export { createApp } from "./app";
 export type { AppServices } from "./app";
 export { TenantProjectionDO } from "./projection/tenant-projection";
+export { LinkSessionDO } from "./linking/session";

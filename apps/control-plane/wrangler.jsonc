@@ -9,11 +9,13 @@
     "run_worker_first": ["/api/*", "/internal/*"]
   },
   "exports": {
-    "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" }
+    "TenantProjectionDO": { "type": "durable-object", "storage": "sqlite" },
+    "LinkSessionDO": { "type": "durable-object", "storage": "sqlite" }
   },
   "durable_objects": {
     "bindings": [
       { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+      ,{ "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
     ]
   },
   "observability": { "enabled": true },
@@ -92,7 +94,8 @@
       },
       "durable_objects": {
         "bindings": [
-          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" },
+          { "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
         ]
       },
       "r2_buckets": [
@@ -147,7 +150,8 @@
       },
       "durable_objects": {
         "bindings": [
-          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" }
+          { "name": "TENANT_PROJECTION", "class_name": "TenantProjectionDO" },
+          { "name": "LINK_SESSIONS", "class_name": "LinkSessionDO" }
         ]
       },
       "r2_buckets": [
