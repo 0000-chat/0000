@@ -22,6 +22,7 @@ import {
 import type { DirectoryConnection } from "../control-directory/read-repository";
 import { listConnectionsForIdentity } from "../control-directory/read-repository";
 import type { TenantProjectionDO } from "../projection/tenant-projection";
+import { historyCoverage } from "../history/repository";
 import {
   requireAuthorizedIdentity,
   toGrantedAccountReadAuthorization,
@@ -436,7 +437,19 @@ export async function listMessages(
       );
     }
     validateAccountFilter(input.account_id, authorization);
-    const page = await projection(context).listMessages({
+    const projectionStub = projection(context);
+    const conversation = await projectionStub.getConversation({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      identity_id: resourceIdentityId,
+      conversation_id: input.conversation_id,
+      ...(input.account_id === undefined
+        ? {}
+        : { account_id: input.account_id }),
+      authorization,
+    });
+    if (conversation === null) throw new ReadError("not_found");
+    const page = await projectionStub.listMessages({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
       identity_id: resourceIdentityId,
@@ -451,7 +464,38 @@ export async function listMessages(
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
       authorization,
     });
-    return MessagePageResultSchema.parse(structuredClone(page));
+    const parsedPage = MessagePageResultSchema.parse(structuredClone(page));
+    const accountId = conversation.account_id;
+    let hasMessages = parsedPage.items.length > 0;
+    if (!hasMessages) {
+      // Coverage describes the conversation, not the requested page. A seek
+      // cursor can legitimately land after the final row, so probe the first
+      // row before calling an existing chat empty.
+      const coverageProbe = await projectionStub.listMessages({
+        schema_version: 1,
+        tenant_id: context.authorization.tenant.id,
+        identity_id: resourceIdentityId,
+        conversation_id: input.conversation_id,
+        ...(input.account_id === undefined
+          ? {}
+          : { account_id: input.account_id }),
+        page_size: 1,
+        authorization,
+      });
+      hasMessages =
+        MessagePageResultSchema.parse(structuredClone(coverageProbe)).items
+          .length > 0;
+    }
+    if (accountId === undefined) return parsedPage;
+    return MessagePageResultSchema.parse({
+      ...parsedPage,
+      history: await historyCoverage(
+        context.env.CONTROL_DB,
+        context.authorization.tenant.id,
+        accountId,
+        hasMessages,
+      ),
+    });
   });
 }
 

@@ -13,6 +13,7 @@ import type {
   ConversationPageResult,
 } from "@communicator/contracts";
 import { ConnectionCard } from "./connection-card";
+import { HistoryImportPanel } from "./history-import-panel";
 import { useIdentityContext } from "@/components/identity/identity-switcher";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
@@ -529,7 +530,7 @@ export function ConnectionsPage() {
       apiClient.getConnectedAccounts(
         undefined,
         typeof pageParam === "string" ? pageParam : undefined,
-        2,
+        3,
       ),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor,
@@ -680,6 +681,15 @@ export function ConnectionsPage() {
                 queryKey: queryKeys.accountGrants,
               });
             }}
+          />
+          <HistoryImportPanel
+            accounts={accounts.filter(
+              (account) => account.identity_id === activeIdentity?.id,
+            )}
+            accountsHasNextPage={accountsQuery.hasNextPage}
+            accountsFetchingNextPage={accountsQuery.isFetchingNextPage}
+            onLoadMoreAccounts={() => void accountsQuery.fetchNextPage()}
+            session={session}
           />
         </>
       )}

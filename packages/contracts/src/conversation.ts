@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
+import { HistoryCoverageSchema } from "./history";
 
 const snapshotStrictObjectInput = (input: unknown): unknown => {
   try {
@@ -182,6 +183,7 @@ const MessagePageResultObjectSchema = z
   .object({
     items: z.preprocess(snapshotStrictArrayInput, z.array(MessageSchema)),
     next_cursor: z.string().min(1).max(2_048).nullable(),
+    history: HistoryCoverageSchema.optional(),
   })
   .strict();
 

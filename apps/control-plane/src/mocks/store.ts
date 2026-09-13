@@ -7,12 +7,17 @@ import type {
   ChannelSummary,
   Connection,
   ConversationSummary,
+  HistoryImportAdvanceRequest,
+  HistoryImportDetail,
+  HistoryImportRange,
+  HistoryImportStartRequest,
   Identity,
   LinkSession,
   LinkSessionActionRequest,
   LinkSessionStart,
   MessagePageResult,
   OperationScope,
+  ProviderCapability,
   SessionResponse,
 } from "@communicator/contracts";
 import {
@@ -58,6 +63,9 @@ export class SimulatedStore {
   private linkActionDelayMs = 0;
   private linkActionExpiryMs = 60_000;
   private resetAt = this.state.fixture_reset_at;
+  private historyImports = new Map<string, HistoryImportDetail[]>();
+  private historyIdempotency = new Map<string, HistoryImportDetail>();
+  private historyCounter = 0;
 
   reset(
     scenario: SimulatedScenario = "ready",
@@ -76,6 +84,349 @@ export class SimulatedStore {
     this.linkActionDelayMs = 0;
     this.linkActionExpiryMs = 60_000;
     this.resetAt = new Date().toISOString();
+    this.historyImports.clear();
+    this.historyIdempotency.clear();
+    this.historyCounter = 0;
+    this.seedHistoryImports();
+  }
+
+  private seedHistoryImports() {
+    for (const account of this.connectedAccounts()) {
+      const now = "2026-08-29T00:00:00.000Z";
+      const range = (
+        rangeId: string,
+        startAt: string,
+        endAt: string,
+        status: HistoryImportRange["status"],
+        options: Pick<
+          HistoryImportRange,
+          "event_count" | "gap_code" | "error_code" | "completed_at"
+        >,
+      ): HistoryImportRange => ({
+        range_id: rangeId,
+        import_id: "import_seed_history",
+        account_id: account.account_id,
+        start_at: startAt,
+        end_at: endAt,
+        status,
+        attempt_count: status === "failed" ? 3 : 0,
+        event_count: options.event_count,
+        source_cursor: null,
+        gap_code: options.gap_code,
+        error_code: options.error_code,
+        updated_at: now,
+        created_at: now,
+        completed_at: options.completed_at,
+      });
+
+      const seeded =
+        account.account_id === "account_connection_agent_whatsapp" ||
+        account.account_id === "account_connection_human_messenger"
+          ? {
+              import_id:
+                account.account_id === "account_connection_agent_whatsapp"
+                  ? "import_agent_partial"
+                  : "import_messenger_partial",
+              status: "partial" as const,
+              ranges: [
+                range(
+                  account.account_id === "account_connection_agent_whatsapp"
+                    ? "range_agent_partial"
+                    : "range_messenger_partial",
+                  "2026-08-01T00:00:00.000Z",
+                  "2026-08-15T00:00:00.000Z",
+                  "partial",
+                  {
+                    event_count: 12,
+                    gap_code: "provider_gap",
+                    error_code: null,
+                    completed_at: now,
+                  },
+                ),
+              ],
+              event_count: 12,
+              completed_range_count: 0,
+              total_range_count: 1,
+              gap_count: 1,
+              last_error_code: null,
+              completed_at: now,
+            }
+          : account.account_id === "account_connection_human_telegram"
+            ? {
+                import_id: "import_telegram_failed",
+                status: "failed" as const,
+                ranges: [
+                  range(
+                    "range_telegram_failed",
+                    "2026-08-01T00:00:00.000Z",
+                    "2026-08-15T00:00:00.000Z",
+                    "failed",
+                    {
+                      event_count: 0,
+                      gap_code: null,
+                      error_code: "bounded_retry_exhausted",
+                      completed_at: now,
+                    },
+                  ),
+                ],
+                event_count: 0,
+                completed_range_count: 0,
+                total_range_count: 1,
+                gap_count: 1,
+                last_error_code: "bounded_retry_exhausted" as const,
+                completed_at: now,
+              }
+            : account.account_id === "account_connection_human_whatsapp"
+              ? {
+                  import_id: "import_whatsapp_empty",
+                  status: "completed" as const,
+                  ranges: [
+                    range(
+                      "range_telegram_empty",
+                      "2026-08-01T00:00:00.000Z",
+                      "2026-08-15T00:00:00.000Z",
+                      "completed",
+                      {
+                        event_count: 0,
+                        gap_code: null,
+                        error_code: null,
+                        completed_at: now,
+                      },
+                    ),
+                  ],
+                  event_count: 0,
+                  completed_range_count: 1,
+                  total_range_count: 1,
+                  gap_count: 0,
+                  last_error_code: null,
+                  completed_at: now,
+                }
+              : null;
+
+      if (seeded === null) {
+        this.historyImports.set(account.account_id, []);
+        continue;
+      }
+      const detail: HistoryImportDetail = {
+        import: {
+          import_id: seeded.import_id,
+          tenant_id: account.tenant_id,
+          account_id: account.account_id,
+          connection_id: account.connection_id,
+          identity_id: account.identity_id,
+          provider: account.provider,
+          status: seeded.status,
+          availability:
+            seeded.status === "failed" ? "unavailable" : "available",
+          requested_start_at: "2026-08-01T00:00:00.000Z",
+          requested_end_at: "2026-08-15T00:00:00.000Z",
+          source_start_at: "2026-08-01T00:00:00.000Z",
+          source_end_at: "2026-08-15T00:00:00.000Z",
+          max_events: 500,
+          event_count: seeded.event_count,
+          completed_range_count: seeded.completed_range_count,
+          total_range_count: seeded.total_range_count,
+          gap_count: seeded.gap_count,
+          attempt_count: seeded.status === "failed" ? 3 : 0,
+          max_attempts: 3,
+          last_error_code: seeded.last_error_code,
+          started_at: now,
+          updated_at: now,
+          completed_at: seeded.completed_at,
+        },
+        ranges: seeded.ranges.map((item) => ({
+          ...item,
+          import_id: seeded.import_id,
+        })),
+        capabilities: this.historyCapabilities(account.account_id),
+      };
+      this.historyImports.set(account.account_id, [detail]);
+    }
+  }
+
+  historyCapabilities(accountId: string): ProviderCapability[] {
+    const account = this.connectedAccounts().find(
+      (candidate) => candidate.account_id === accountId,
+    );
+    if (!account) return [];
+    const now = "2026-08-29T00:00:00.000Z";
+    const capabilities: ProviderCapability["capability"][] = [
+      "history.import",
+      "media.read",
+      "contact.lookup",
+      "group.manage",
+      "receipt.read",
+    ];
+    return capabilities.map((capability) => ({
+      tenant_id: account.tenant_id,
+      account_id: account.account_id,
+      connection_id: account.connection_id,
+      identity_id: account.identity_id,
+      provider: account.provider,
+      capability,
+      status: capability === "history.import" ? "conditional" : "unverified",
+      freshness: capability === "history.import" ? "fresh" : "unknown",
+      provider_version: "simulated-provider-1",
+      proof_source: "controlled provider fixture",
+      provider_evidence: {
+        provider_version: "simulated-provider-1",
+        proof_source: "controlled provider fixture",
+        summary:
+          capability === "history.import"
+            ? "The configured adapter reports bounded resumable history support."
+            : "No deployment proof is recorded for this capability.",
+        observed_at: now,
+      },
+      product_claim:
+        capability === "history.import"
+          ? "History imports remain conditional on the configured provider runtime."
+          : "The capability is not proven for this account.",
+      observed_at: now,
+      updated_at: now,
+    }));
+  }
+
+  historyImportPage(accountId: string, identityId: string) {
+    const account = this.connectedAccounts().find(
+      (candidate) =>
+        candidate.account_id === accountId &&
+        candidate.identity_id === identityId,
+    );
+    if (!account) return null;
+    return clone(this.historyImports.get(accountId) ?? []);
+  }
+
+  historyImport(
+    importId: string,
+    identityId: string,
+  ): HistoryImportDetail | null {
+    for (const details of this.historyImports.values()) {
+      const detail = details.find(
+        (candidate) =>
+          candidate.import.import_id === importId &&
+          candidate.import.identity_id === identityId,
+      );
+      if (detail) return clone(detail);
+    }
+    return null;
+  }
+
+  startHistoryImport(
+    accountId: string,
+    input: HistoryImportStartRequest,
+    idempotencyKey: string,
+  ): HistoryImportDetail | null {
+    const account = this.connectedAccounts().find(
+      (candidate) =>
+        candidate.account_id === accountId &&
+        candidate.identity_id === input.identity_id,
+    );
+    if (!account) return null;
+    const prior = this.historyIdempotency.get(`${accountId}:${idempotencyKey}`);
+    if (prior) return clone(prior);
+    this.historyCounter += 1;
+    const now = new Date().toISOString();
+    const importId = `import_ui_${this.historyCounter}`;
+    const rangeId = `range_ui_${this.historyCounter}`;
+    const detail: HistoryImportDetail = {
+      import: {
+        import_id: importId,
+        tenant_id: account.tenant_id,
+        account_id: account.account_id,
+        connection_id: account.connection_id,
+        identity_id: account.identity_id,
+        provider: account.provider,
+        status: "active",
+        availability: "available",
+        requested_start_at: input.start_at,
+        requested_end_at: input.end_at,
+        source_start_at: input.start_at,
+        source_end_at: input.end_at,
+        max_events: input.max_events,
+        event_count: 0,
+        completed_range_count: 0,
+        total_range_count: 1,
+        gap_count: 0,
+        attempt_count: 0,
+        max_attempts: 3,
+        last_error_code: null,
+        started_at: now,
+        updated_at: now,
+        completed_at: null,
+      },
+      ranges: [
+        {
+          range_id: rangeId,
+          import_id: importId,
+          account_id: account.account_id,
+          start_at: input.start_at,
+          end_at: input.end_at,
+          status: "active",
+          attempt_count: 0,
+          event_count: 0,
+          source_cursor: null,
+          gap_code: null,
+          error_code: null,
+          created_at: now,
+          updated_at: now,
+          completed_at: null,
+        },
+      ],
+      capabilities: this.historyCapabilities(accountId),
+    };
+    const existing = this.historyImports.get(accountId) ?? [];
+    this.historyImports.set(accountId, [detail, ...existing]);
+    this.historyIdempotency.set(`${accountId}:${idempotencyKey}`, detail);
+    return clone(detail);
+  }
+
+  advanceHistoryImport(
+    importId: string,
+    input: HistoryImportAdvanceRequest,
+  ): HistoryImportDetail | null {
+    for (const [accountId, details] of this.historyImports.entries()) {
+      const detail = details.find(
+        (candidate) =>
+          candidate.import.import_id === importId &&
+          candidate.import.identity_id === input.identity_id,
+      );
+      if (!detail) continue;
+      const range =
+        (input.range_id
+          ? detail.ranges.find(
+              (candidate) => candidate.range_id === input.range_id,
+            )
+          : detail.ranges.find(
+              (candidate) =>
+                candidate.status === "active" || candidate.status === "pending",
+            )) ?? null;
+      if (!range || (range.status !== "active" && range.status !== "pending"))
+        return clone(detail);
+      const now = new Date().toISOString();
+      range.status = "completed";
+      range.event_count = 4;
+      range.updated_at = now;
+      range.completed_at = now;
+      detail.import.status = "completed";
+      detail.import.event_count = detail.ranges.reduce(
+        (count, candidate) => count + candidate.event_count,
+        0,
+      );
+      detail.import.completed_range_count = detail.ranges.filter(
+        (candidate) => candidate.status === "completed",
+      ).length;
+      detail.import.gap_count = detail.ranges.filter(
+        (candidate) =>
+          candidate.status === "gap" ||
+          candidate.status === "partial" ||
+          candidate.status === "failed",
+      ).length;
+      detail.import.updated_at = now;
+      detail.import.completed_at = now;
+      this.historyImports.set(accountId, details);
+      return clone(detail);
+    }
+    return null;
   }
 
   session(): SessionResponse {

@@ -39,6 +39,10 @@ const applicationTables = [
   "webhook_subscription_account_rules",
   "webhook_subscription_chat_rules",
   "webhook_deliveries",
+  "provider_capability_records",
+  "history_imports",
+  "history_import_ranges",
+  "history_import_events",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -112,6 +116,10 @@ async function dropControlDirectorySchema(db: D1Database) {
     "webhook_subscription_chat_rules",
     "webhook_subscription_account_rules",
     "webhook_subscriptions",
+    "history_import_events",
+    "history_import_ranges",
+    "history_imports",
+    "provider_capability_records",
     "break_glass_grants",
     "revoked_tokens",
     "connection_capabilities",
