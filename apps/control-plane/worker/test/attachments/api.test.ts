@@ -310,6 +310,86 @@ describe("authenticated attachment reads", () => {
     });
   });
 
+  it("keeps a raw attachment deferred until gateway verification supplies plaintext metadata", async () => {
+    await seedProjection({ sha256: null, r2_key: null });
+    const provider: AttachmentProvider = {
+      read: vi.fn(async (input) => ({
+        status: "available" as const,
+        bytes,
+        mime_type: input.expected_mime_type ?? "application/octet-stream",
+        sha256: input.expected_sha256 ?? (await sha256Hex(bytes)),
+      })),
+    };
+    const app = createTestApp(provider);
+
+    const pendingResponse = await request(
+      app,
+      `/api/v1/attachments/${attachmentId}?identity_id=${identityId}`,
+    );
+    expect(pendingResponse.status).toBe(200);
+    expect(await pendingResponse.json()).toMatchObject({
+      attachment_id: attachmentId,
+      availability: "unavailable",
+      download_grant: null,
+      download_grant_expires_at: null,
+    });
+    expect(provider.read).not.toHaveBeenCalled();
+
+    const resolvedSha256 = await sha256Hex(bytes);
+    await applyAttachmentEvent(
+      event(
+        "event_attachment_gateway_resolved",
+        {
+          attachment_id: attachmentId,
+          message_id: messageId,
+          file_name: "resolved.png",
+          mime_type: "image/png",
+          size_bytes: bytes.byteLength,
+          sha256: resolvedSha256,
+          r2_key: `media/${tenantId}/${resolvedSha256}`,
+          expires_at: null,
+        },
+        "attachment.observed",
+        {
+          tenant_id: tenantId,
+          identity_id: identityId,
+          account_id: accountId,
+          conversation_id: conversationId,
+          occurred_at: "2026-09-07T02:30:00.000Z",
+          observed_at: "2026-09-07T02:30:01.000Z",
+        },
+      ),
+    );
+
+    const metadataResponse = await request(
+      app,
+      `/api/v1/attachments/${attachmentId}?identity_id=${identityId}`,
+    );
+    const metadata = AttachmentMetadataSchema.parse(
+      await metadataResponse.json(),
+    );
+    expect(metadata).toMatchObject({
+      attachment_id: attachmentId,
+      file_name: "resolved.png",
+      sha256: resolvedSha256,
+      availability: "available",
+      download_grant: expect.any(String),
+    });
+
+    const downloadResponse = await request(
+      app,
+      `/api/v1/attachments/${attachmentId}/download?download_grant=${encodeURIComponent(metadata.download_grant ?? "")}`,
+    );
+    expect(downloadResponse.status).toBe(200);
+    expect(new Uint8Array(await downloadResponse.arrayBuffer())).toEqual(bytes);
+    expect(provider.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_key: `media/${tenantId}/${resolvedSha256}`,
+        expected_sha256: resolvedSha256,
+      }),
+    );
+  });
+
   it("returns a stable unavailable result when the provider rejects media", async () => {
     await seedProjection();
     const provider: AttachmentProvider = {
