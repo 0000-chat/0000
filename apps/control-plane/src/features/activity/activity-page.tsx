@@ -4,7 +4,10 @@ import { Button } from "@/components/ui/button";
 import { apiClient, isDefinitiveRequestRejection } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { CommandTimeline } from "./command-timeline";
-import type { ConfirmationDecision } from "@communicator/contracts";
+import type {
+  ConfirmationDecision,
+  OutboundAction,
+} from "@communicator/contracts";
 
 export function ActivityPage() {
   const queryClient = useQueryClient();
@@ -27,14 +30,17 @@ export function ActivityPage() {
     mutationFn: ({
       commandId,
       decision,
+      duplicateRiskAcknowledged,
     }: {
       commandId: string;
-      decision: ConfirmationDecision;
+      decision: ConfirmationDecision | OutboundAction;
+      duplicateRiskAcknowledged?: boolean;
     }) =>
       apiClient.decideCommand(
         commandId,
         decision,
         `activity-${commandId}-${decision}`,
+        duplicateRiskAcknowledged,
       ),
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -118,7 +124,11 @@ export function ActivityPage() {
           canDecide
           isDeciding={decisionMutation.isPending}
           onDecision={(commandId, decision) =>
-            decisionMutation.mutate({ commandId, decision })
+            decisionMutation.mutate({
+              commandId,
+              decision,
+              duplicateRiskAcknowledged: decision === "resend",
+            })
           }
         />
       )}

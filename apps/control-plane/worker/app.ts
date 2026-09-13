@@ -42,12 +42,18 @@ import {
   reconcileOutboundHandler,
   outboundStatusRoute,
   outboundStatusHandler,
+  outboundEvidenceRoute,
+  evidenceOutboundHandler,
   outboundCommandsRoute,
   outboundCommandsHandler,
   confirmOutboundRoute,
   confirmOutboundHandler,
   cancelOutboundRoute,
   cancelOutboundHandler,
+  continueOutboundRoute,
+  continueOutboundHandler,
+  resendOutboundRoute,
+  resendOutboundHandler,
 } from "./routes/outbound";
 import type { OutboundDispatch } from "@communicator/contracts";
 import type { OutboundAcceptanceServices } from "./outbound/acceptance";
@@ -420,6 +426,10 @@ export function createApp(services: AppServices = {}) {
     outboundStatusRoute,
     outboundStatusHandler(outboundAcceptanceServices),
   );
+  app.openapi(
+    outboundEvidenceRoute,
+    evidenceOutboundHandler(outboundAcceptanceServices),
+  );
   app.openapi(outboundCommandsRoute, outboundCommandsHandler());
   app.openapi(
     confirmOutboundRoute,
@@ -428,6 +438,14 @@ export function createApp(services: AppServices = {}) {
   app.openapi(
     cancelOutboundRoute,
     cancelOutboundHandler(outboundAcceptanceServices),
+  );
+  app.openapi(
+    continueOutboundRoute,
+    continueOutboundHandler(outboundAcceptanceServices),
+  );
+  app.openapi(
+    resendOutboundRoute,
+    resendOutboundHandler(outboundAcceptanceServices),
   );
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);

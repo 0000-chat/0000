@@ -507,6 +507,132 @@ const offlineOutboundConfirmationMigration: ProjectionMigration = Object.freeze(
   },
 );
 
+/**
+ * Uncertainty reconciliation adds a stable transaction identity, lease
+ * evidence, and human action journal to the outbound ledger. Existing rows
+ * are backfilled from their immutable dispatch id and request digest so a
+ * schema upgrade never makes an accepted command unreadable.
+ */
+const uncertaintyReconciliationMigration: ProjectionMigration = Object.freeze({
+  version: 5,
+  name: "uncertainty_reconciliation",
+  appliedAt: "2026-09-14T00:30:00.000Z",
+  statements: [
+    "DROP INDEX IF EXISTS idx_commands_conversation_owner",
+    "ALTER TABLE commands RENAME TO commands_v4",
+    `CREATE TABLE commands (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation = 'message.send'),
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','delivery_uncertain','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed')),
+  failure_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL
+) STRICT`,
+    "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) SELECT id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id FROM commands_v4",
+    "DROP TABLE commands_v4",
+    "CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)",
+    "DROP INDEX IF EXISTS idx_outbound_dispatches_account_conversation",
+    "DROP INDEX IF EXISTS idx_outbound_dispatches_actor_created",
+    "ALTER TABLE outbound_dispatches RENAME TO outbound_dispatches_v4",
+    `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','waiting_for_connection','confirmation_required','delivery_uncertain','wakeup_failed','dispatching','dispatched','cancelled')),
+  transaction_id TEXT NOT NULL,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  dispatch_lease_id TEXT,
+  dispatch_lease_expires_at TEXT,
+  uncertainty_reason TEXT,
+  uncertain_at TEXT,
+  projection_generation INTEGER NOT NULL DEFAULT 1 CHECK(projection_generation >= 1),
+  matrix_stage TEXT NOT NULL DEFAULT 'unknown' CHECK(matrix_stage IN ('unknown','confirmed','accepted','delivered')),
+  bridge_stage TEXT NOT NULL DEFAULT 'unknown' CHECK(bridge_stage IN ('unknown','confirmed','accepted','delivered')),
+  provider_stage TEXT NOT NULL DEFAULT 'unknown' CHECK(provider_stage IN ('unknown','confirmed','accepted','delivered')),
+  last_evidence_at TEXT,
+  chat_paused INTEGER NOT NULL DEFAULT 0 CHECK(chat_paused IN (0,1)),
+  duplicate_risk INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_risk IN (0,1)),
+  resend_of_command_id TEXT,
+  last_action TEXT CHECK(last_action IS NULL OR last_action IN ('cancel','continue','resend')),
+  last_action_actor_principal_id TEXT,
+  last_action_at TEXT,
+  confirmation_due_at TEXT,
+  confirmation_decision TEXT CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel')),
+  confirmation_actor_principal_id TEXT,
+  confirmation_actor_identity_id TEXT,
+  confirmation_decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key),
+  UNIQUE(transaction_id)
+) STRICT`,
+    "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, CASE WHEN status = 'dispatching' THEN 'delivery_uncertain' ELSE status END, 'transaction_outbound_' || id, body_digest, NULL, NULL, CASE WHEN status = 'dispatching' THEN 'legacy_dispatch_lease_expired' ELSE NULL END, CASE WHEN status = 'dispatching' THEN updated_at ELSE NULL END, COALESCE((SELECT generation FROM projection_meta WHERE singleton = 1), 1), 'unknown', 'unknown', 'unknown', NULL, CASE WHEN status IN ('delivery_uncertain','dispatching') THEN 1 ELSE 0 END, 0, NULL, NULL, NULL, NULL, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches_v4",
+    "DROP TABLE outbound_dispatches_v4",
+    "UPDATE commands SET status = 'delivery_uncertain', updated_at = (SELECT uncertain_at FROM outbound_dispatches WHERE outbound_dispatches.command_id = commands.id) WHERE id IN (SELECT command_id FROM outbound_dispatches WHERE status = 'delivery_uncertain') AND status NOT IN ('cancelled','delivered')",
+    "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+    "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+    "CREATE INDEX idx_outbound_dispatches_transaction ON outbound_dispatches(tenant_id, transaction_id, request_digest)",
+    `CREATE TABLE outbound_evidence (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  command_id TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('matrix','bridge','provider','refresh')),
+  evidence_id TEXT NOT NULL,
+  transaction_id TEXT NOT NULL,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  account_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  status TEXT NOT NULL CHECK(status IN ('confirmed','accepted','delivered','uncertain')),
+  observed_at TEXT NOT NULL,
+  provider_operation_id TEXT,
+  provider_message_id TEXT,
+  remote_echo_id TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(command_id, source, evidence_id)
+) STRICT`,
+    "CREATE INDEX idx_outbound_evidence_command_observed ON outbound_evidence(tenant_id, command_id, observed_at, id)",
+    `CREATE TABLE outbound_actions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  original_command_id TEXT NOT NULL,
+  new_command_id TEXT,
+  action TEXT NOT NULL CHECK(action IN ('cancel','continue','resend')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  duplicate_risk_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_risk_acknowledged IN (0,1)),
+  action_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(original_command_id, idempotency_key)
+) STRICT`,
+    "CREATE INDEX idx_outbound_actions_command_at ON outbound_actions(tenant_id, original_command_id, action_at, id)",
+  ],
+});
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
   Object.freeze([
@@ -514,6 +640,7 @@ export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
     identityLocalProjectionSequencesMigration,
     durableOutboundAcceptanceMigration,
     offlineOutboundConfirmationMigration,
+    uncertaintyReconciliationMigration,
   ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */

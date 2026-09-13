@@ -2,6 +2,9 @@ import {
   AcceptTextReplyInputSchema,
   type AcceptTextReplyResult,
   type OutboundDispatch,
+  type OutboundEvidenceInput,
+  type OutboundEvidenceSource,
+  type OutboundEvidenceStatus,
   OutboundDecisionResultSchema,
   type OutboundDecisionResult,
   type Command,
@@ -30,7 +33,28 @@ export type OutboundAcceptanceServices = {
   beforeWakeup?: (dispatch: OutboundDispatch) => void | Promise<void>;
   /** Wake a controlled adapter after the durable transaction commits. */
   wakeDispatch?: (dispatch: OutboundDispatch) => Promise<void>;
+  /** Controlled adapter boundary, reached only after a durable lease claim. */
+  dispatchOutbound?: (
+    dispatch: OutboundDispatch,
+  ) => Promise<OutboundAdapterResult>;
 };
+
+export type OutboundAdapterResult =
+  | {
+      type: "uncertain";
+      reason: string;
+      evidence_id?: string;
+    }
+  | {
+      type: "evidence";
+      source: OutboundEvidenceSource;
+      status: OutboundEvidenceStatus;
+      evidence_id: string;
+      reason?: string;
+      provider_operation_id?: string;
+      provider_message_id?: string;
+      remote_echo_id?: string;
+    };
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
 const USABLE_CONNECTION_STATUSES = new Set(["connected", "syncing", "ready"]);
@@ -152,13 +176,57 @@ export async function acceptTextReply(
     }
     if (
       accepted.dispatch.status === "pending" &&
+      services.dispatchOutbound !== undefined
+    ) {
+      const now = acceptanceNow(services);
+      const leaseExpiresAt = new Date(Date.parse(now) + 30_000).toISOString();
+      const claimed = await projection.claimOutboundDispatch({
+        tenant_id: context.authorization.tenant.id,
+        command_id: accepted.command.id,
+        lease_id: `lease_${accepted.dispatch.transaction_id}_${Date.parse(now)}`,
+        lease_expires_at: leaseExpiresAt,
+        now,
+      });
+      if (claimed.status === "dispatching") {
+        let adapterResult: OutboundAdapterResult;
+        try {
+          adapterResult = await services.dispatchOutbound(claimed);
+        } catch (error) {
+          adapterResult = {
+            type: "uncertain",
+            reason:
+              error instanceof Error ? "adapter_error" : "adapter_timeout",
+          };
+        }
+        const reconciled = await projection.reconcileOutbound({
+          schema_version: 1,
+          tenant_id: context.authorization.tenant.id,
+          command_id: accepted.command.id,
+          now,
+          evidence: adapterResultEvidence(
+            adapterResult,
+            context,
+            accepted.command.id,
+            claimed,
+            now,
+          ),
+        });
+        return {
+          ...accepted,
+          command: reconciled.command,
+          dispatch: reconciled.dispatch,
+        };
+      }
+    } else if (
+      accepted.dispatch.status === "pending" &&
       services.beforeWakeup !== undefined
     ) {
       await services.beforeWakeup(accepted.dispatch);
     }
     if (
       accepted.dispatch.status === "pending" &&
-      services.wakeDispatch !== undefined
+      services.wakeDispatch !== undefined &&
+      services.dispatchOutbound === undefined
     ) {
       try {
         await services.wakeDispatch(accepted.dispatch);
@@ -174,10 +242,61 @@ export async function acceptTextReply(
 const acceptanceNow = (services: OutboundAcceptanceServices): string =>
   (services.now === undefined ? new Date() : services.now()).toISOString();
 
+const adapterResultEvidence = (
+  result: OutboundAdapterResult,
+  context: OutboundAcceptanceContext,
+  commandId: string,
+  dispatch: OutboundDispatch,
+  observedAt: string,
+): OutboundEvidenceInput => {
+  if (result.type === "uncertain") {
+    return {
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      command_id: commandId,
+      source: "provider",
+      evidence_id: result.evidence_id ?? `uncertain_${dispatch.transaction_id}`,
+      transaction_id: dispatch.transaction_id,
+      request_digest: dispatch.request_digest,
+      account_id: dispatch.account_id,
+      conversation_id: dispatch.conversation_id,
+      generation: dispatch.projection_generation ?? 1,
+      status: "uncertain",
+      observed_at: observedAt,
+      reason: result.reason,
+    };
+  }
+  return {
+    schema_version: 1,
+    tenant_id: context.authorization.tenant.id,
+    command_id: commandId,
+    source: result.source,
+    evidence_id: result.evidence_id,
+    transaction_id: dispatch.transaction_id,
+    request_digest: dispatch.request_digest,
+    account_id: dispatch.account_id,
+    conversation_id: dispatch.conversation_id,
+    generation: dispatch.projection_generation ?? 1,
+    status: result.status,
+    observed_at: observedAt,
+    ...(result.provider_operation_id === undefined
+      ? {}
+      : { provider_operation_id: result.provider_operation_id }),
+    ...(result.provider_message_id === undefined
+      ? {}
+      : { provider_message_id: result.provider_message_id }),
+    ...(result.remote_echo_id === undefined
+      ? {}
+      : { remote_echo_id: result.remote_echo_id }),
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+  };
+};
+
 export async function reconcileOutboundCommand(
   context: OutboundAcceptanceContext,
   commandId: string,
   services: OutboundAcceptanceServices = {},
+  evidence?: OutboundEvidenceInput,
 ): Promise<OutboundDecisionResult> {
   const projection = getTenantProjection(
     context.env,
@@ -190,6 +309,7 @@ export async function reconcileOutboundCommand(
         tenant_id: context.authorization.tenant.id,
         command_id: commandId,
         now: acceptanceNow(services),
+        ...(evidence === undefined ? {} : { evidence }),
       }),
     );
   } catch (error) {
@@ -220,9 +340,10 @@ export async function listOutboundCommands(
 export async function decideOutboundCommand(
   context: OutboundAcceptanceContext,
   commandId: string,
-  decision: "confirm" | "cancel",
+  decision: "confirm" | "cancel" | "continue" | "resend",
   idempotencyKey: string,
   services: OutboundAcceptanceServices = {},
+  duplicateRiskAcknowledged = false,
 ): Promise<OutboundDecisionResult> {
   const current = await reconcileOutboundCommand(context, commandId, services);
   const administrator = isAdministratorSession(context.authorization);
@@ -278,6 +399,7 @@ export async function decideOutboundCommand(
         actor_principal_id: context.authorization.principal.id,
         actor_identity_id: actorIdentity,
         decided_at: acceptanceNow(services),
+        duplicate_risk_acknowledged: duplicateRiskAcknowledged,
       }),
     );
   } catch (error) {

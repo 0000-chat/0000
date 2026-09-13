@@ -5,10 +5,34 @@ import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 
 export const DeliveryModeSchema = z.enum(["direct", "paced"]);
 
+export const OutboundEvidenceSourceSchema = z.enum([
+  "matrix",
+  "bridge",
+  "provider",
+  "refresh",
+]);
+
+export const OutboundEvidenceStatusSchema = z.enum([
+  "confirmed",
+  "accepted",
+  "delivered",
+  "uncertain",
+]);
+
+export const OutboundActionSchema = z.enum(["cancel", "continue", "resend"]);
+
+export const OutboundStageSchema = z.enum([
+  "unknown",
+  "confirmed",
+  "accepted",
+  "delivered",
+]);
+
 export const CommandStatusSchema = z.enum([
   "accepted",
   "waiting_for_connection",
   "confirmation_required",
+  "delivery_uncertain",
   "scheduled",
   "reading",
   "typing",
@@ -40,6 +64,26 @@ export const CommandSchema = z
     message_id: CommunicatorIdSchema.optional(),
     event_id: CommunicatorIdSchema.optional(),
     dispatch_id: CommunicatorIdSchema.optional(),
+    transaction_id: CommunicatorIdSchema.optional(),
+    request_digest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    dispatch_lease_id: CommunicatorIdSchema.optional(),
+    dispatch_lease_expires_at: TimestampSchema.optional(),
+    projection_generation: z.number().int().positive().optional(),
+    uncertainty_reason: z.string().max(200).optional(),
+    uncertain_at: TimestampSchema.optional(),
+    matrix_stage: OutboundStageSchema.optional(),
+    bridge_stage: OutboundStageSchema.optional(),
+    provider_stage: OutboundStageSchema.optional(),
+    last_evidence_at: TimestampSchema.optional(),
+    chat_paused: z.boolean().optional(),
+    duplicate_risk: z.boolean().optional(),
+    resend_of_command_id: CommunicatorIdSchema.optional(),
+    last_action: OutboundActionSchema.optional(),
+    last_action_actor_principal_id: CommunicatorIdSchema.optional(),
+    last_action_at: TimestampSchema.optional(),
     actor_principal_id: CommunicatorIdSchema.optional(),
     actor_identity_id: CommunicatorIdSchema.optional(),
     confirmation_due_at: TimestampSchema.optional(),
@@ -54,6 +98,7 @@ export const OutboundDispatchStatusSchema = z.enum([
   "pending",
   "waiting_for_connection",
   "confirmation_required",
+  "delivery_uncertain",
   "wakeup_failed",
   "dispatching",
   "dispatched",
@@ -77,6 +122,23 @@ export const OutboundDispatchSchema = z
     conversation_id: CommunicatorIdSchema,
     idempotency_key: z.string().min(1).max(200),
     status: OutboundDispatchStatusSchema,
+    transaction_id: CommunicatorIdSchema,
+    request_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    dispatch_lease_id: CommunicatorIdSchema.nullable().optional(),
+    dispatch_lease_expires_at: TimestampSchema.nullable().optional(),
+    uncertainty_reason: z.string().max(200).nullable().optional(),
+    uncertain_at: TimestampSchema.nullable().optional(),
+    projection_generation: z.number().int().positive().optional(),
+    matrix_stage: OutboundStageSchema.optional(),
+    bridge_stage: OutboundStageSchema.optional(),
+    provider_stage: OutboundStageSchema.optional(),
+    last_evidence_at: TimestampSchema.nullable().optional(),
+    chat_paused: z.boolean().optional(),
+    duplicate_risk: z.boolean().optional(),
+    resend_of_command_id: CommunicatorIdSchema.nullable().optional(),
+    last_action: OutboundActionSchema.optional(),
+    last_action_actor_principal_id: CommunicatorIdSchema.optional(),
+    last_action_at: TimestampSchema.optional(),
     created_at: TimestampSchema,
     updated_at: TimestampSchema,
     confirmation_due_at: TimestampSchema.nullable().optional(),
@@ -131,14 +193,48 @@ export const OutboundDecisionInputSchema = z
     schema_version: z.literal(1),
     tenant_id: CommunicatorIdSchema,
     command_id: CommunicatorIdSchema,
-    decision: ConfirmationDecisionSchema,
+    decision: z.enum(["confirm", "cancel", "continue", "resend"]),
     idempotency_key: z.string().trim().min(1).max(200),
     actor_principal_id: CommunicatorIdSchema,
     actor_identity_id: CommunicatorIdSchema,
     decided_at: TimestampSchema,
     connection_available: z.boolean().optional(),
+    duplicate_risk_acknowledged: z.boolean().optional(),
   })
   .strict();
+
+export const OutboundEvidenceInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    source: OutboundEvidenceSourceSchema,
+    evidence_id: z.string().trim().min(1).max(200),
+    transaction_id: CommunicatorIdSchema,
+    request_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    account_id: CommunicatorIdSchema,
+    conversation_id: CommunicatorIdSchema,
+    generation: z.number().int().positive(),
+    status: OutboundEvidenceStatusSchema,
+    observed_at: TimestampSchema,
+    provider_operation_id: z.string().trim().min(1).max(200).optional(),
+    provider_message_id: z.string().trim().min(1).max(200).optional(),
+    remote_echo_id: z.string().trim().min(1).max(200).optional(),
+    reason: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      (value.source === "matrix" || value.source === "bridge") &&
+      value.status === "delivered"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: "Matrix and bridge evidence cannot claim provider delivery",
+      });
+    }
+  });
 
 export const OutboundReconcileInputSchema = z
   .object({
@@ -147,6 +243,7 @@ export const OutboundReconcileInputSchema = z
     command_id: CommunicatorIdSchema,
     now: TimestampSchema,
     connection_available: z.boolean().optional(),
+    evidence: OutboundEvidenceInputSchema.optional(),
   })
   .strict();
 
@@ -162,6 +259,8 @@ export const OutboundDecisionResultSchema = z
     command: CommandSchema,
     dispatch: OutboundDispatchSchema,
     replayed: z.boolean(),
+    action: OutboundActionSchema.optional(),
+    duplicate_risk: z.boolean().optional(),
   })
   .strict();
 
@@ -202,6 +301,15 @@ export type OutboundDecisionResult = z.infer<
   typeof OutboundDecisionResultSchema
 >;
 export type ConfirmationDecision = z.infer<typeof ConfirmationDecisionSchema>;
+export type OutboundEvidenceSource = z.infer<
+  typeof OutboundEvidenceSourceSchema
+>;
+export type OutboundEvidenceStatus = z.infer<
+  typeof OutboundEvidenceStatusSchema
+>;
+export type OutboundAction = z.infer<typeof OutboundActionSchema>;
+export type OutboundStage = z.infer<typeof OutboundStageSchema>;
+export type OutboundEvidenceInput = z.infer<typeof OutboundEvidenceInputSchema>;
 export type ResolveConversationOwnerInput = z.infer<
   typeof ResolveConversationOwnerInputSchema
 >;

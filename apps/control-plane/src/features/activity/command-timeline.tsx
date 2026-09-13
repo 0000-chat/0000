@@ -3,12 +3,14 @@ import type {
   Command,
   CommandStatus,
   ConfirmationDecision,
+  OutboundAction,
 } from "@communicator/contracts";
 
 const phaseLabels: Record<CommandStatus, string> = {
   accepted: "Accepted",
   waiting_for_connection: "Waiting for connection",
   confirmation_required: "Confirmation required",
+  delivery_uncertain: "Delivery uncertain",
   scheduled: "Scheduled",
   reading: "Reading",
   typing: "Typing",
@@ -43,7 +45,10 @@ export function CommandTimeline({
   identityLabels?: ReadonlyMap<string, string>;
   canDecide?: boolean;
   isDeciding?: boolean;
-  onDecision?: (commandId: string, decision: ConfirmationDecision) => void;
+  onDecision?: (
+    commandId: string,
+    decision: ConfirmationDecision | OutboundAction,
+  ) => void;
 }) {
   return (
     <ol aria-label="Command activity" className="grid gap-4">
@@ -117,6 +122,40 @@ export function CommandTimeline({
                 {command.delivery_mode === "paced" ? "Human-paced" : "Direct"}
               </dd>
             </div>
+            {command.transaction_id && (
+              <div>
+                <dt className="text-muted-foreground">Transaction</dt>
+                <dd className="break-all font-medium">
+                  {command.transaction_id}
+                </dd>
+              </div>
+            )}
+            {command.request_digest && (
+              <div>
+                <dt className="text-muted-foreground">Request digest</dt>
+                <dd className="break-all font-medium">
+                  {command.request_digest}
+                </dd>
+              </div>
+            )}
+            {command.matrix_stage && (
+              <div>
+                <dt className="text-muted-foreground">Matrix confirmation</dt>
+                <dd className="font-medium">{command.matrix_stage}</dd>
+              </div>
+            )}
+            {command.bridge_stage && (
+              <div>
+                <dt className="text-muted-foreground">Bridge acceptance</dt>
+                <dd className="font-medium">{command.bridge_stage}</dd>
+              </div>
+            )}
+            {command.provider_stage && (
+              <div>
+                <dt className="text-muted-foreground">Provider evidence</dt>
+                <dd className="font-medium">{command.provider_stage}</dd>
+              </div>
+            )}
             <div>
               <dt className="text-muted-foreground">Original save</dt>
               <dd className="font-medium">
@@ -166,6 +205,36 @@ export function CommandTimeline({
                 </dd>
               </div>
             )}
+            {command.last_action && (
+              <div>
+                <dt className="text-muted-foreground">Human action</dt>
+                <dd className="font-medium">{command.last_action}</dd>
+              </div>
+            )}
+            {command.last_action_actor_principal_id && (
+              <div>
+                <dt className="text-muted-foreground">Action actor</dt>
+                <dd className="font-medium">
+                  {command.last_action_actor_principal_id}
+                </dd>
+              </div>
+            )}
+            {command.last_action_at && (
+              <div>
+                <dt className="text-muted-foreground">Action time</dt>
+                <dd className="font-medium">
+                  {formatTimestamp(command.last_action_at)}
+                </dd>
+              </div>
+            )}
+            {command.duplicate_risk && (
+              <div className="sm:col-span-2 lg:col-span-3">
+                <dt className="text-muted-foreground">Duplicate risk</dt>
+                <dd className="font-medium text-orange-700">
+                  A deliberate resend may create a duplicate message.
+                </dd>
+              </div>
+            )}
           </dl>
           {command.status === "waiting_for_connection" && (
             <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm">
@@ -177,6 +246,24 @@ export function CommandTimeline({
             <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm">
               Confirmation is required before this saved command can continue.
             </p>
+          )}
+          {command.status === "delivery_uncertain" && (
+            <div className="mt-3 rounded-md border border-orange-500/40 bg-orange-500/10 p-3 text-sm">
+              <p>
+                Delivery is uncertain. Matrix and bridge evidence describe
+                acceptance stages; provider evidence is required before this is
+                shown as delivered.
+              </p>
+              {command.uncertainty_reason && (
+                <p className="mt-1">Reason: {command.uncertainty_reason}</p>
+              )}
+              {command.chat_paused && (
+                <p className="mt-1 font-medium">
+                  New sends in this conversation are paused until a human
+                  chooses an action.
+                </p>
+              )}
+            </div>
           )}
           {command.status === "cancelled" &&
             command.confirmation_decision === "cancel" && (
@@ -211,6 +298,36 @@ export function CommandTimeline({
                 >
                   Cancel dispatch
                 </Button>
+              )}
+              {command.status === "delivery_uncertain" && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    disabled={isDeciding}
+                    onClick={() => onDecision(command.id, "cancel")}
+                  >
+                    Cancel uncertain send
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={isDeciding}
+                    onClick={() => onDecision(command.id, "continue")}
+                  >
+                    Continue chat
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={isDeciding}
+                    onClick={() => onDecision(command.id, "resend")}
+                  >
+                    Deliberate resend (duplicate risk)
+                  </Button>
+                </>
               )}
             </div>
           )}

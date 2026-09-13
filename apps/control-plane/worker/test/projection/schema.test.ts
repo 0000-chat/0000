@@ -23,6 +23,8 @@ const durableOutboundMigrationName = "durable_outbound_acceptance";
 const durableOutboundMigrationAppliedAt = "2026-09-13T00:00:00.000Z";
 const offlineOutboundMigrationName = "offline_outbound_confirmation";
 const offlineOutboundMigrationAppliedAt = "2026-09-14T00:00:00.000Z";
+const uncertaintyReconciliationMigrationName = "uncertainty_reconciliation";
+const uncertaintyReconciliationMigrationAppliedAt = "2026-09-14T00:30:00.000Z";
 const applicationTableNames = [
   "projection_meta",
   "connection_bindings",
@@ -40,6 +42,8 @@ const applicationTableNames = [
   "commands",
   "outbound_dispatches",
   "outbound_command_decisions",
+  "outbound_evidence",
+  "outbound_actions",
   "message_delivery_updates",
   "event_tombstones",
   "resource_tombstones",
@@ -339,6 +343,23 @@ const expectedColumns: Record<
     ["body", "TEXT", 1, 0, null],
     ["delivery_mode", "TEXT", 1, 0, null],
     ["status", "TEXT", 1, 0, null],
+    ["transaction_id", "TEXT", 1, 0, null],
+    ["request_digest", "TEXT", 1, 0, null],
+    ["dispatch_lease_id", "TEXT", 0, 0, null],
+    ["dispatch_lease_expires_at", "TEXT", 0, 0, null],
+    ["uncertainty_reason", "TEXT", 0, 0, null],
+    ["uncertain_at", "TEXT", 0, 0, null],
+    ["projection_generation", "INTEGER", 1, 0, "1"],
+    ["matrix_stage", "TEXT", 1, 0, "'unknown'"],
+    ["bridge_stage", "TEXT", 1, 0, "'unknown'"],
+    ["provider_stage", "TEXT", 1, 0, "'unknown'"],
+    ["last_evidence_at", "TEXT", 0, 0, null],
+    ["chat_paused", "INTEGER", 1, 0, "0"],
+    ["duplicate_risk", "INTEGER", 1, 0, "0"],
+    ["resend_of_command_id", "TEXT", 0, 0, null],
+    ["last_action", "TEXT", 0, 0, null],
+    ["last_action_actor_principal_id", "TEXT", 0, 0, null],
+    ["last_action_at", "TEXT", 0, 0, null],
     ["confirmation_due_at", "TEXT", 0, 0, null],
     ["confirmation_decision", "TEXT", 0, 0, null],
     ["confirmation_actor_principal_id", "TEXT", 0, 0, null],
@@ -346,6 +367,39 @@ const expectedColumns: Record<
     ["confirmation_decided_at", "TEXT", 0, 0, null],
     ["created_at", "TEXT", 1, 0, null],
     ["updated_at", "TEXT", 1, 0, null],
+  ],
+  outbound_evidence: [
+    ["id", "TEXT", 1, 1, null],
+    ["tenant_id", "TEXT", 1, 0, null],
+    ["command_id", "TEXT", 1, 0, null],
+    ["dispatch_id", "TEXT", 1, 0, null],
+    ["source", "TEXT", 1, 0, null],
+    ["evidence_id", "TEXT", 1, 0, null],
+    ["transaction_id", "TEXT", 1, 0, null],
+    ["request_digest", "TEXT", 1, 0, null],
+    ["account_id", "TEXT", 1, 0, null],
+    ["conversation_id", "TEXT", 1, 0, null],
+    ["generation", "INTEGER", 1, 0, null],
+    ["status", "TEXT", 1, 0, null],
+    ["observed_at", "TEXT", 1, 0, null],
+    ["provider_operation_id", "TEXT", 0, 0, null],
+    ["provider_message_id", "TEXT", 0, 0, null],
+    ["remote_echo_id", "TEXT", 0, 0, null],
+    ["reason", "TEXT", 0, 0, null],
+    ["created_at", "TEXT", 1, 0, null],
+  ],
+  outbound_actions: [
+    ["id", "TEXT", 1, 1, null],
+    ["tenant_id", "TEXT", 1, 0, null],
+    ["original_command_id", "TEXT", 1, 0, null],
+    ["new_command_id", "TEXT", 0, 0, null],
+    ["action", "TEXT", 1, 0, null],
+    ["idempotency_key", "TEXT", 1, 0, null],
+    ["actor_principal_id", "TEXT", 1, 0, null],
+    ["actor_identity_id", "TEXT", 1, 0, null],
+    ["duplicate_risk_acknowledged", "INTEGER", 1, 0, "0"],
+    ["action_at", "TEXT", 1, 0, null],
+    ["created_at", "TEXT", 1, 0, null],
   ],
   outbound_command_decisions: [
     ["id", "TEXT", 1, 1, null],
@@ -481,13 +535,31 @@ const expectedChecks: Record<string, string[]> = {
   commands: [
     "CHECK(operation = 'message.send')",
     "CHECK(delivery_mode IN ('direct','paced'))",
-    "CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed'))",
+    "CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','delivery_uncertain','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed'))",
   ],
   outbound_dispatches: [
     "CHECK(length(body_digest) = 64)",
+    "CHECK(length(request_digest) = 64)",
     "CHECK(delivery_mode IN ('direct','paced'))",
-    "CHECK(status IN ('pending','waiting_for_connection','confirmation_required','wakeup_failed','dispatching','dispatched','cancelled'))",
+    "CHECK(status IN ('pending','waiting_for_connection','confirmation_required','delivery_uncertain','wakeup_failed','dispatching','dispatched','cancelled'))",
+    "CHECK(projection_generation >= 1)",
+    "CHECK(matrix_stage IN ('unknown','confirmed','accepted','delivered'))",
+    "CHECK(bridge_stage IN ('unknown','confirmed','accepted','delivered'))",
+    "CHECK(provider_stage IN ('unknown','confirmed','accepted','delivered'))",
+    "CHECK(chat_paused IN (0,1))",
+    "CHECK(duplicate_risk IN (0,1))",
+    "CHECK(last_action IS NULL OR last_action IN ('cancel','continue','resend'))",
     "CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel'))",
+  ],
+  outbound_evidence: [
+    "CHECK(source IN ('matrix','bridge','provider','refresh'))",
+    "CHECK(length(request_digest) = 64)",
+    "CHECK(generation >= 1)",
+    "CHECK(status IN ('confirmed','accepted','delivered','uncertain'))",
+  ],
+  outbound_actions: [
+    "CHECK(action IN ('cancel','continue','resend'))",
+    "CHECK(duplicate_risk_acknowledged IN (0,1))",
   ],
   outbound_command_decisions: ["CHECK(decision IN ('confirm','cancel'))"],
   message_delivery_updates: [
@@ -542,6 +614,9 @@ const expectedIndexes = [
   "idx_outbound_dispatches_account_conversation",
   "idx_outbound_dispatches_actor_created",
   "idx_outbound_command_decisions_tenant_decided",
+  "idx_outbound_dispatches_transaction",
+  "idx_outbound_evidence_command_observed",
+  "idx_outbound_actions_command_at",
   "idx_event_tombstones_conversation_owner",
   "idx_applied_events_order",
   "idx_projection_changes_identity_sequence",
@@ -606,6 +681,12 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
   idx_outbound_command_decisions_tenant_decided:
     "CREATE INDEX idx_outbound_command_decisions_tenant_decided ON outbound_command_decisions(tenant_id, decided_at, command_id)",
+  idx_outbound_dispatches_transaction:
+    "CREATE INDEX idx_outbound_dispatches_transaction ON outbound_dispatches(tenant_id, transaction_id, request_digest)",
+  idx_outbound_evidence_command_observed:
+    "CREATE INDEX idx_outbound_evidence_command_observed ON outbound_evidence(tenant_id, command_id, observed_at, id)",
+  idx_outbound_actions_command_at:
+    "CREATE INDEX idx_outbound_actions_command_at ON outbound_actions(tenant_id, original_command_id, action_at, id)",
   idx_event_tombstones_conversation_owner:
     "CREATE INDEX idx_event_tombstones_conversation_owner ON event_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_applied_events_order:
@@ -683,7 +764,7 @@ describe("tenant projection SQLite schema", () => {
     expect(tableObjects.map((row) => row.name).sort()).toEqual(
       Object.keys(expectedColumns).sort(),
     );
-    expect(tableObjects).toHaveLength(24);
+    expect(tableObjects).toHaveLength(26);
 
     for (const [table, columns] of Object.entries(expectedColumns)) {
       const rows = catalog.tableInfo[table] as Array<{
@@ -717,7 +798,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(34);
+    expect(indexNames).toHaveLength(37);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -771,6 +852,11 @@ describe("tenant projection SQLite schema", () => {
         name: offlineOutboundMigrationName,
         applied_at: offlineOutboundMigrationAppliedAt,
       },
+      {
+        version: 5,
+        name: uncertaintyReconciliationMigrationName,
+        applied_at: uncertaintyReconciliationMigrationAppliedAt,
+      },
     ]);
     expect(
       PROJECTION_MIGRATIONS.map(({ version, name, appliedAt }) => ({
@@ -789,6 +875,153 @@ describe("tenant projection SQLite schema", () => {
         .toArray(),
     );
     expect(second).toEqual(first);
+  });
+
+  it("backfills a pre-v5 dispatching row without resetting generation or confirmation evidence", async () => {
+    const stub = env.TENANT_PROJECTION.getByName(
+      "tenant_schema_uncertainty_backfill",
+    );
+    const result = await runInDurableObject(stub, async (_instance, state) => {
+      const createdAt = "2049-01-01T00:00:00.000Z";
+      const updatedAt = "2049-01-01T00:05:00.000Z";
+      const dueAt = "2049-01-01T04:00:00.000Z";
+      state.storage.sql.exec(
+        "DELETE FROM _sql_schema_migrations WHERE version = 5",
+      );
+      state.storage.sql.exec(
+        "DROP INDEX IF EXISTS idx_outbound_dispatches_transaction",
+      );
+      state.storage.sql.exec("DROP TABLE IF EXISTS outbound_evidence");
+      state.storage.sql.exec("DROP TABLE IF EXISTS outbound_actions");
+      state.storage.sql.exec("DROP TABLE IF EXISTS outbound_dispatches");
+      state.storage.sql.exec(
+        `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','waiting_for_connection','confirmation_required','wakeup_failed','dispatching','dispatched','cancelled')),
+  confirmation_due_at TEXT,
+  confirmation_decision TEXT CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel')),
+  confirmation_actor_principal_id TEXT,
+  confirmation_actor_identity_id TEXT,
+  confirmation_decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key)
+) STRICT`,
+      );
+      state.storage.sql.exec(
+        "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+      );
+      state.storage.sql.exec(
+        "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO projection_meta (singleton, tenant_id, state, generation, initialized_at, updated_at) VALUES (1, ?, 'ready', ?, ?, ?)",
+        "tenant_schema_uncertainty_backfill",
+        7,
+        createdAt,
+        updatedAt,
+      );
+      state.storage.sql.exec(
+        "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', 'direct', 'accepted', NULL, ?, ?, ?, ?)",
+        "command_legacy_dispatching",
+        "identity_legacy",
+        "account_legacy",
+        "connection_legacy",
+        "conversation_legacy",
+        "whatsapp",
+        createdAt,
+        updatedAt,
+        2493072000000,
+        "event_legacy_dispatching",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'direct', 'dispatching', ?, 'cancel', ?, ?, ?, ?, ?)",
+        "dispatch_legacy_dispatching",
+        "command_legacy_dispatching",
+        "message_legacy_dispatching",
+        "event_legacy_dispatching",
+        "tenant_schema_uncertainty_backfill",
+        "principal_legacy",
+        "identity_legacy",
+        "identity_legacy",
+        "account_legacy",
+        "connection_legacy",
+        "conversation_legacy",
+        "whatsapp",
+        "legacy-dispatch-key",
+        "a".repeat(64),
+        "Legacy body",
+        dueAt,
+        "principal_decider",
+        "identity_decider",
+        updatedAt,
+        createdAt,
+        updatedAt,
+      );
+
+      runProjectionMigrations(state.storage);
+      return {
+        dispatch: state.storage.sql
+          .exec<{
+            status: string;
+            transaction_id: string;
+            request_digest: string;
+            projection_generation: number;
+            uncertainty_reason: string | null;
+            uncertain_at: string | null;
+            chat_paused: number;
+            confirmation_due_at: string | null;
+            confirmation_decision: string | null;
+            confirmation_actor_principal_id: string | null;
+            confirmation_actor_identity_id: string | null;
+            confirmation_decided_at: string | null;
+          }>(
+            "SELECT status, transaction_id, request_digest, projection_generation, uncertainty_reason, uncertain_at, chat_paused, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at FROM outbound_dispatches WHERE id = ?",
+            "dispatch_legacy_dispatching",
+          )
+          .toArray()[0],
+        command: state.storage.sql
+          .exec<{ status: string; updated_at: string }>(
+            "SELECT status, updated_at FROM commands WHERE id = ?",
+            "command_legacy_dispatching",
+          )
+          .toArray()[0],
+      };
+    });
+
+    expect(result.dispatch).toEqual({
+      status: "delivery_uncertain",
+      transaction_id: "transaction_outbound_dispatch_legacy_dispatching",
+      request_digest: "a".repeat(64),
+      projection_generation: 7,
+      uncertainty_reason: "legacy_dispatch_lease_expired",
+      uncertain_at: "2049-01-01T00:05:00.000Z",
+      chat_paused: 1,
+      confirmation_due_at: "2049-01-01T04:00:00.000Z",
+      confirmation_decision: "cancel",
+      confirmation_actor_principal_id: "principal_decider",
+      confirmation_actor_identity_id: "identity_decider",
+      confirmation_decided_at: "2049-01-01T00:05:00.000Z",
+    });
+    expect(result.command).toEqual({
+      status: "delivery_uncertain",
+      updated_at: "2049-01-01T00:05:00.000Z",
+    });
   });
 
   it("migrates interleaved version-one changes without altering global order or projection data", async () => {
@@ -1177,7 +1410,7 @@ describe("tenant projection SQLite schema", () => {
       const schemaBefore = schemaSnapshot();
       state.storage.sql.exec(
         "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        5,
+        PROJECTION_MIGRATIONS[PROJECTION_MIGRATIONS.length - 1]!.version + 1,
         "future_projection_schema",
         migrationAppliedAt,
       );
@@ -1360,7 +1593,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 4,
+      schema_generation: 5,
       state: "ready",
       generation: 1,
       rebuild_id: null,

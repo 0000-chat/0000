@@ -315,6 +315,8 @@ const projectionFailureCode = (error: ProjectionError): ConsumerFailureCode => {
       return "unavailable";
     case "projection_forbidden":
       return "forbidden";
+    case "projection_chat_paused":
+      return "conflict";
     case "projection_conflict":
     case "projection_tenant_mismatch":
     case "projection_rebuild_failed":
