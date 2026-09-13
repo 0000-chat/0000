@@ -19,6 +19,7 @@ import {
   reconcileTrustedOutboundEvidence,
   type OutboundAcceptanceServices,
 } from "../outbound/acceptance";
+import { recordRemovalWithSuppression } from "../removals/service";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   auth,
@@ -2584,6 +2585,257 @@ describe("account-scoped grant API", () => {
         }),
       ]),
     );
+  });
+
+  it("suppresses provider dispatch when authoritative removal precedes it", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `outbound-removal-boundary-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    let now = new Date("2050-01-01T00:00:00.000Z");
+    let providerCalls = 0;
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => now,
+        beforeCommit: async () => {
+          await recordRemovalWithSuppression(workerEnv.CONTROL_DB, {
+            tenant_id: tenantId,
+            resource_type: "conversation",
+            resource_id: "conversation_human_one",
+            content_generation: "conversation_human_one",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            source_event_id: "outbound-removal-boundary",
+            source_object_key: null,
+            reason: "requested",
+            removed_at: "2050-01-01T00:00:00.000Z",
+          });
+        },
+        dispatchOutbound: async () => {
+          providerCalls += 1;
+          return {
+            type: "evidence" as const,
+            source: "provider" as const,
+            status: "delivered" as const,
+            evidence_id: "should-not-reach-provider",
+            observed_at: "2050-01-01T00:00:01.000Z",
+          };
+        },
+      },
+    });
+
+    try {
+      const response = await requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": `removed-${crypto.randomUUID()}` },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "This body must not reach a provider",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+      expect(response.status).toBe(202);
+      const command = CommandSchema.parse(await response.json());
+      expect(providerCalls).toBe(0);
+      expect(command).toMatchObject({
+        status: "failed",
+        failure_code: "deleted_message",
+      });
+
+      const status = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}`,
+        "human-token",
+      );
+      expect(status.status).toBe(200);
+      expect(
+        OutboundDecisionResultSchema.parse(await status.json()),
+      ).toMatchObject({
+        command: {
+          id: command.id,
+          status: "cancelled",
+          failure_code: "deleted_message",
+        },
+        dispatch: { status: "cancelled" },
+      });
+    } finally {
+      await workerEnv.CONTROL_DB.prepare(
+        "DELETE FROM removal_authority WHERE source_event_id = ?",
+      )
+        .bind("outbound-removal-boundary")
+        .run();
+    }
+  });
+
+  it("suppresses a queued message after authoritative message removal", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `queued-removal-boundary-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2050-01-01T00:00:00.000Z");
+    let providerCalls = 0;
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => now,
+        dispatchOutbound: async () => {
+          providerCalls += 1;
+          return {
+            type: "evidence" as const,
+            source: "provider" as const,
+            status: "delivered" as const,
+            evidence_id: "should-not-reach-queued-provider",
+            observed_at: "2050-01-01T00:00:01.000Z",
+          };
+        },
+      },
+    });
+
+    const queued = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_one/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": `queued-${crypto.randomUUID()}` },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "Queue this body before its message is removed",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(queued.status).toBe(202);
+    const command = CommandSchema.parse(await queued.json());
+    expect(command).toMatchObject({ status: "waiting_for_connection" });
+    expect(command.message_id).toEqual(expect.any(String));
+
+    try {
+      await recordRemovalWithSuppression(workerEnv.CONTROL_DB, {
+        tenant_id: tenantId,
+        resource_type: "message",
+        resource_id: command.message_id!,
+        content_generation: command.message_id!,
+        account_id: command.account_id!,
+        conversation_id: command.conversation_id,
+        source_event_id: "queued-message-removal-boundary",
+        source_object_key: null,
+        reason: "requested",
+        removed_at: "2050-01-01T00:00:00.000Z",
+      });
+
+      now = new Date("2050-05-01T00:00:00.000Z");
+      const due = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}/reconcile`,
+        "agent-token",
+        { method: "POST" },
+      );
+      expect(due.status).toBe(200);
+      expect(
+        OutboundDecisionResultSchema.parse(await due.json()).dispatch,
+      ).toMatchObject({ status: "confirmation_required" });
+
+      await workerEnv.CONTROL_DB.prepare(
+        "UPDATE connections SET status = 'ready' WHERE id = ?",
+      )
+        .bind("connection_human_whatsapp")
+        .run();
+      const reconnected = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}/reconcile`,
+        "agent-token",
+        { method: "POST" },
+      );
+      expect(reconnected.status).toBe(200);
+      expect(
+        OutboundDecisionResultSchema.parse(await reconnected.json()).dispatch,
+      ).toMatchObject({ status: "confirmation_required" });
+
+      const confirmed = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}/confirm`,
+        "human-token",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            idempotency_key: `queued-removal-confirm-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      expect(confirmed.status).toBe(200);
+      expect(providerCalls).toBe(0);
+      expect(
+        OutboundDecisionResultSchema.parse(await confirmed.json()),
+      ).toMatchObject({
+        command: {
+          id: command.id,
+          status: "failed",
+          failure_code: "deleted_message",
+        },
+        dispatch: { status: "cancelled" },
+      });
+    } finally {
+      await workerEnv.CONTROL_DB.prepare(
+        "DELETE FROM removal_authority WHERE source_event_id = ?",
+      )
+        .bind("queued-message-removal-boundary")
+        .run();
+    }
+
+    const unrelated = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_two/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": `queued-unrelated-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "An unrelated chat remains deliverable",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(unrelated.status).toBe(202);
+    expect(CommandSchema.parse(await unrelated.json())).toMatchObject({
+      status: "delivered",
+    });
+    expect(providerCalls).toBe(1);
   });
 
   it("correlates evidence and records a deliberate resend without unpausing another chat", async () => {

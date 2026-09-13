@@ -17,6 +17,7 @@ import { getTenantProjection } from "../projection/routing";
 import { hasAccountOperationGrant } from "../control-directory/grants";
 import { mapReadError, ReadError } from "../read/errors";
 import { isAdministratorSession } from "../read/authorization";
+import { readAuthorizedMessageRemoval } from "../removals/service";
 import { defaultWhatsAppTextAdapter } from "./whatsapp-adapter";
 
 export type OutboundAcceptanceContext = {
@@ -280,6 +281,42 @@ type DispatchAdapter = (
   payload: OutboundDispatchPayload,
 ) => Promise<OutboundAdapterResult>;
 
+const outboundRemoval = async (
+  context: OutboundAcceptanceContext,
+  dispatch: OutboundDispatch,
+) => {
+  const database = context.env.CONTROL_DB;
+  if (database === undefined || typeof database.withSession !== "function") {
+    throw new ReadError("service_unavailable");
+  }
+  try {
+    return await readAuthorizedMessageRemoval(database, {
+      tenantId: context.authorization.tenant.id,
+      messageId: dispatch.message_id,
+      accountId: dispatch.account_id,
+      conversationId: dispatch.conversation_id,
+    });
+  } catch (error) {
+    throw mapReadError(error);
+  }
+};
+
+const failRemovedOutbound = (
+  projection: ReturnType<typeof getTenantProjection>,
+  context: OutboundAcceptanceContext,
+  commandId: string,
+  claimed: OutboundDispatch,
+  now: string,
+) =>
+  projection.failOutboundDispatch({
+    schema_version: 1,
+    tenant_id: context.authorization.tenant.id,
+    command_id: commandId,
+    lease_id: claimed.dispatch_lease_id ?? "",
+    now,
+    failure_code: "deleted_message",
+  });
+
 const dispatchClaimedOutbound = async (
   context: OutboundAcceptanceContext,
   commandId: string,
@@ -292,6 +329,9 @@ const dispatchClaimedOutbound = async (
     context.env,
     context.authorization.tenant.id,
   );
+  if ((await outboundRemoval(context, claimed)) !== null) {
+    return failRemovedOutbound(projection, context, commandId, claimed, now);
+  }
   let payload: OutboundDispatchPayload;
   try {
     payload = await projection.getOutboundDispatchPayload({
@@ -310,6 +350,9 @@ const dispatchClaimedOutbound = async (
       now,
       failure_code: "deleted_message",
     });
+  }
+  if ((await outboundRemoval(context, claimed)) !== null) {
+    return failRemovedOutbound(projection, context, commandId, claimed, now);
   }
   let adapterResult: OutboundAdapterResult;
   try {
