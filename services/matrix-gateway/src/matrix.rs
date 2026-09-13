@@ -65,6 +65,92 @@ pub use crate::config::MAX_SYNC_RESPONSE_BYTES;
 
 /// Stable error returned when a Matrix history page cannot be fetched.
 pub const MATRIX_HISTORY_UNAVAILABLE: &str = "matrix_history_unavailable";
+/// Stable error returned when the private Matrix media descriptor is invalid.
+pub const MATRIX_MEDIA_INVALID: &str = "matrix_media_invalid";
+/// Stable error returned when a Matrix media object is absent.
+pub const MATRIX_MEDIA_MISSING: &str = "matrix_media_missing";
+/// Stable error returned when Matrix rejects the media request.
+pub const MATRIX_MEDIA_REJECTED: &str = "matrix_media_rejected";
+/// Stable error returned when a Matrix media request times out.
+pub const MATRIX_MEDIA_TIMEOUT: &str = "matrix_media_timeout";
+/// Stable error returned when Matrix cannot serve media.
+pub const MATRIX_MEDIA_UNAVAILABLE: &str = "matrix_media_unavailable";
+/// Stable error returned when a Matrix media response is too large.
+pub const MATRIX_MEDIA_TOO_LARGE: &str = "matrix_media_too_large";
+/// Stable error returned when Matrix returns no media bytes.
+pub const MATRIX_MEDIA_EMPTY: &str = "matrix_media_empty";
+/// Maximum bytes accepted by the private attachment boundary.
+pub const MAX_MEDIA_BYTES: usize = 8 * 1024 * 1024;
+
+/// Encrypted Matrix-file metadata retained behind the gateway boundary.
+///
+/// The key and IV are only ever serialized into the encrypted gateway store
+/// and are never part of a canonical event or an HTTP response.
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EncryptedMediaDescriptor {
+    pub(crate) algorithm: String,
+    pub(crate) key: Vec<u8>,
+    pub(crate) iv: Vec<u8>,
+    pub(crate) ciphertext_sha256: String,
+}
+
+impl Drop for EncryptedMediaDescriptor {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
+}
+
+/// The original Matrix media target retained for one attachment revision.
+///
+/// `server_name` and `media_id` come from the event's `mxc://` URI. The
+/// transport pins the HTTP origin separately, so this value cannot introduce
+/// an arbitrary upstream URL.
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MatrixMediaDescriptor {
+    pub(crate) server_name: String,
+    pub(crate) media_id: String,
+    pub(crate) mime_type: Option<String>,
+    pub(crate) source_sha256: Option<String>,
+    pub(crate) encrypted: Option<EncryptedMediaDescriptor>,
+}
+
+impl fmt::Debug for MatrixMediaDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MatrixMediaDescriptor([REDACTED])")
+    }
+}
+
+/// Bounded bytes and content type returned by the Matrix media transport.
+pub struct FetchedMatrixMedia {
+    bytes: SecretBytes,
+    mime_type: String,
+}
+
+impl fmt::Debug for FetchedMatrixMedia {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FetchedMatrixMedia([REDACTED])")
+    }
+}
+
+impl FetchedMatrixMedia {
+    pub(crate) fn new(bytes: Vec<u8>, mime_type: String) -> Result<Self, SafeError> {
+        if bytes.is_empty() {
+            return Err(SafeError::new(MATRIX_MEDIA_EMPTY));
+        }
+        if bytes.len() > MAX_MEDIA_BYTES {
+            return Err(SafeError::new(MATRIX_MEDIA_TOO_LARGE));
+        }
+        Ok(Self {
+            bytes: SecretBytes::new(bytes),
+            mime_type,
+        })
+    }
+
+    pub(crate) fn into_parts(self) -> (SecretBytes, String) {
+        (self.bytes, self.mime_type)
+    }
+}
 
 /// A bounded raw response from Matrix's room-message pagination endpoint.
 ///
@@ -1333,6 +1419,17 @@ impl fmt::Display for RestartCryptoAck {
 #[async_trait]
 pub trait MatrixTransport: Send + Sync {
     async fn fetch_sync(&self, since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError>;
+
+    /// Fetch and, when required, decrypt one protected Matrix media object.
+    /// The descriptor is produced from an authenticated room event; callers
+    /// cannot provide an arbitrary URL or Matrix media ID.
+    async fn fetch_media(
+        &self,
+        descriptor: &MatrixMediaDescriptor,
+    ) -> Result<FetchedMatrixMedia, SafeError> {
+        let _ = descriptor;
+        Err(SafeError::new(MATRIX_MEDIA_UNAVAILABLE))
+    }
 
     /// Fetch one bounded backward room-history page.
     ///

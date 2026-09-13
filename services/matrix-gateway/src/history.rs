@@ -18,6 +18,7 @@ use tokio::{
 };
 
 use crate::{
+    attachments::AttachmentGateway,
     batch::{self, BackfillCheckpoint, WindowSource},
     canonical,
     ledger::{BackfillState, NewBackfillJob, STORE_BACKFILL_NOT_READY},
@@ -32,7 +33,13 @@ use crate::{
 const MAX_ID_BYTES: usize = 512;
 const MAX_RANGE_ID_BYTES: usize = 128;
 const MAX_PAGE_EVENTS: u64 = 500;
-const PAGE_LIMIT: u64 = MAX_PAGE_EVENTS;
+// One Matrix message can project its message event plus one metadata event
+// and one verified-resolution event per attachment. Keep the source page
+// below the public canonical event bound even at the normalizer's maximum;
+// this avoids retrying an unchanged cursor after projection expands a page.
+const MAX_NORMALIZED_EVENTS_PER_SOURCE_EVENT: u64 =
+    1 + (2 * crate::normalize::MAX_MESSAGE_ATTACHMENTS as u64);
+const PAGE_LIMIT: u64 = MAX_PAGE_EVENTS / MAX_NORMALIZED_EVENTS_PER_SOURCE_EVENT;
 const HISTORY_PROVIDER_ERROR: &str = "provider_error";
 const HISTORY_MALFORMED_RANGE: &str = "malformed_range";
 const HISTORY_CONFLICT: &str = "history_conflict";
@@ -101,6 +108,7 @@ pub struct HistoryGatewayServer {
     store: Arc<Mutex<Store>>,
     transport: Arc<dyn MatrixTransport>,
     gateway_token: String,
+    attachments: AttachmentGateway,
 }
 
 impl fmt::Debug for HistoryGatewayServer {
@@ -120,10 +128,13 @@ impl HistoryGatewayServer {
         if gateway_token.len() < 16 {
             return Err(SafeError::new(HISTORY_PROVIDER_ERROR));
         }
+        let store = Arc::new(Mutex::new(store));
+        let attachments = AttachmentGateway::new(Arc::clone(&store), Arc::clone(&transport));
         Ok(Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             transport,
             gateway_token,
+            attachments,
         })
     }
 
@@ -164,6 +175,7 @@ impl HistoryGatewayServer {
         match request.path.as_str() {
             "/v1/history-imports/start" => self.start(request.body).await,
             "/v1/history-imports/advance" => self.advance(request.body).await,
+            "/v1/attachments/read" => self.attachments.handle_request(request.body).await,
             _ => response(404, json!({ "error": "not_found" })),
         }
     }
@@ -407,7 +419,7 @@ impl HistoryGatewayServer {
         }
         let checkpoint_digest =
             format!("sha256:{}", canonical::sha256_hex(page.start().as_bytes()));
-        let routed = match normalize_backfill_events(
+        let (routed, mut descriptors) = match normalize_backfill_events(
             &seed_events,
             &timeline_events,
             binding.matrix_room_id(),
@@ -423,25 +435,36 @@ impl HistoryGatewayServer {
             parse_utc_millis(&request.owner.start_at).expect("validated history start timestamp");
         let end_at =
             parse_utc_millis(&request.owner.end_at).expect("validated history end timestamp");
-        let routed = routed
+        let mut routed = routed
             .into_iter()
             .filter(|value| {
                 parse_utc_millis(&value.event.occurred_at)
                     .is_some_and(|occurred_at| occurred_at >= start_at && occurred_at < end_at)
             })
             .collect::<Vec<_>>();
+        let emitted_attachment_ids = routed
+            .iter()
+            .filter_map(|value| match &value.event().payload {
+                crate::model::CanonicalPayload::AttachmentObserved(payload) => {
+                    Some(payload.attachment_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        descriptors
+            .retain(|descriptor| emitted_attachment_ids.contains(descriptor.attachment_id()));
+        if let Err(error) = crate::attachments::resolve_media_metadata(
+            self.transport.as_ref(),
+            &mut routed,
+            &mut descriptors,
+        )
+        .await
+        {
+            return history_partial_response(error.code());
+        }
         if routed.len() > MAX_PAGE_EVENTS as usize {
             return response(502, json!({ "error": HISTORY_PROVIDER_ERROR }));
         }
-        let events = match routed
-            .iter()
-            .map(|value| serde_json::to_value(value.event()))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(value) => value,
-            Err(_) => return history_partial_response(HISTORY_PROVIDER_ERROR),
-        };
-
         let batch_ordinal = {
             let mut store = self.store.lock().await;
             match store.backfill_batch_count(&request.owner.import_id) {
@@ -465,6 +488,23 @@ impl HistoryGatewayServer {
                 Ok(window) => window,
                 Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
             };
+        if window.quarantined_count() != 0 {
+            return response(503, json!({ "error": HISTORY_PROVIDER_ERROR }));
+        }
+        // Return the exact ordering that was checkpointed. The initial
+        // projection order can differ from the deterministic batch order;
+        // replaying from the stored batch must therefore produce identical
+        // event bytes after a lost response.
+        let events = match window
+            .batches
+            .iter()
+            .flat_map(|batch| batch.events.iter())
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(value) => value,
+            Err(_) => return history_partial_response(HISTORY_PROVIDER_ERROR),
+        };
         let accepted_events = match stored
             .accepted_events()
             .checked_add(u64::try_from(routed.len()).unwrap_or(u64::MAX))
@@ -502,6 +542,16 @@ impl HistoryGatewayServer {
                 Ok(value) => Some(SecretBytes::new(value)),
                 Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
             };
+            for descriptor in &descriptors {
+                let fields = descriptor.lookup_fields();
+                let payload = match descriptor.to_json() {
+                    Ok(value) => value,
+                    Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
+                };
+                if let Err(error) = store.upsert_attachment_descriptor(&fields, &payload) {
+                    return response(503, json!({ "error": error.code() }));
+                }
+            }
             if let Err(error) = store.checkpoint_backfill_page(
                 &request.owner.import_id,
                 pagination.as_ref(),
@@ -538,6 +588,10 @@ impl Clone for HistoryGatewayServer {
             store: Arc::clone(&self.store),
             transport: Arc::clone(&self.transport),
             gateway_token: self.gateway_token.clone(),
+            attachments: AttachmentGateway::new(
+                Arc::clone(&self.store),
+                Arc::clone(&self.transport),
+            ),
         }
     }
 }
@@ -615,7 +669,7 @@ fn utc_now() -> DateTime<Utc> {
 mod tests {
     use std::{
         os::unix::fs::PermissionsExt,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
@@ -626,7 +680,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::Keyring,
-        matrix::{FetchedMatrixSync, RawBackfillPage},
+        matrix::{FetchedMatrixMedia, FetchedMatrixSync, MatrixMediaDescriptor, RawBackfillPage},
         provisioning::HttpRequest,
         registry::NewRoomBinding,
     };
@@ -635,6 +689,17 @@ mod tests {
         calls: AtomicUsize,
         nonempty: bool,
         encrypted: bool,
+    }
+
+    const HISTORY_MEDIA_BYTES: &[u8] = b"history media bytes";
+
+    struct AttachmentHistoryTransport {
+        calls: AtomicUsize,
+        media_calls: AtomicUsize,
+        requested_limit: AtomicU64,
+        attachment_messages: usize,
+        force_terminal_empty: bool,
+        unavailable: bool,
     }
 
     #[async_trait]
@@ -681,6 +746,102 @@ mod tests {
                 chunk,
                 Vec::new(),
             )
+        }
+
+        async fn send_crypto(
+            &self,
+            _request: &crate::crypto_outbox::PendingMatrixRequest,
+        ) -> Result<crate::crypto_outbox::RawMatrixResponse, SafeError> {
+            Err(SafeError::new(HISTORY_PROVIDER_ERROR))
+        }
+    }
+
+    #[async_trait]
+    impl MatrixTransport for AttachmentHistoryTransport {
+        async fn fetch_sync(&self, _since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError> {
+            Err(SafeError::new(HISTORY_PROVIDER_ERROR))
+        }
+
+        async fn backfill_page(
+            &self,
+            _room_id: &str,
+            from: Option<&SecretBytes>,
+            limit: u64,
+        ) -> Result<RawBackfillPage, SafeError> {
+            self.requested_limit.store(limit, Ordering::SeqCst);
+            let _call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let offset = from
+                .map(|value| {
+                    let value = String::from_utf8(value.as_bytes().to_vec()).expect("cursor UTF-8");
+                    value
+                        .strip_prefix("matrix-attachment-offset-")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .expect("attachment cursor offset")
+                })
+                .unwrap_or(0);
+            let limit = usize::try_from(limit).expect("bounded page limit");
+            let end_offset = offset.saturating_add(limit).min(self.attachment_messages);
+            let mut chunk = Vec::with_capacity(end_offset.saturating_sub(offset) + 1);
+            for index in offset..end_offset {
+                chunk.push(
+                    Raw::<AnyTimelineEvent>::from_json_string(
+                        json!({
+                            "event_id": format!("$history-attachment-{index}:example.test"),
+                            "origin_server_ts": 1_767_225_600_000_i64 + (index as i64 * 1_000),
+                            "sender": "@owner:example.test",
+                            "type": "m.room.message",
+                            "room_id": "!history:example.test",
+                            "content": {
+                                "msgtype": "m.image",
+                                "body": format!("photo-{index}.png"),
+                                "url": "mxc://matrix.example/media123",
+                                "info": {
+                                    "mimetype": "image/png",
+                                    "size": HISTORY_MEDIA_BYTES.len(),
+                                }
+                            }
+                        })
+                        .to_string(),
+                    )
+                    .expect("history attachment raw event"),
+                );
+            }
+            if offset == 0 {
+                chunk.push(
+                    Raw::<AnyTimelineEvent>::from_json_string(
+                        json!({
+                            "event_id": "$history-ordinary:example.test",
+                            "origin_server_ts": 1_767_225_601_000_i64,
+                            "sender": "@owner:example.test",
+                            "type": "m.room.message",
+                            "room_id": "!history:example.test",
+                            "content": {"msgtype": "m.text", "body": "ordinary history message"}
+                        })
+                        .to_string(),
+                    )
+                    .expect("history ordinary raw event"),
+                );
+            }
+            let has_more = end_offset < self.attachment_messages;
+            let terminal_empty = self.force_terminal_empty && !has_more && offset < end_offset;
+            let end = (has_more || terminal_empty)
+                .then(|| format!("matrix-attachment-offset-{end_offset}"));
+            let start = format!("matrix-attachment-offset-{offset}");
+            RawBackfillPage::new(start, end, chunk, Vec::new())
+        }
+
+        async fn fetch_media(
+            &self,
+            descriptor: &MatrixMediaDescriptor,
+        ) -> Result<FetchedMatrixMedia, SafeError> {
+            self.media_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(descriptor.server_name, "matrix.example");
+            assert_eq!(descriptor.media_id, "media123");
+            if self.unavailable {
+                Err(SafeError::new(crate::matrix::MATRIX_MEDIA_MISSING))
+            } else {
+                FetchedMatrixMedia::new(HISTORY_MEDIA_BYTES.to_vec(), "image/png".to_owned())
+            }
         }
 
         async fn send_crypto(
@@ -782,6 +943,68 @@ mod tests {
         )
         .expect("history server");
         (server, transport, directory)
+    }
+
+    async fn server_with_transport(
+        transport: Arc<dyn MatrixTransport>,
+    ) -> (HistoryGatewayServer, tempfile::TempDir) {
+        let directory = tempdir().expect("state directory");
+        let path = directory.path().join("gateway.sqlite");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let mut store = Store::open(&path, Keyring::new([0x11; 32], 1).expect("test keyring"))
+            .expect("open store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new(
+                    "binding_0123456789abcdef0123456789abcdef",
+                    "!history:example.test",
+                    "tenant_demo",
+                    "identity_demo",
+                    "connection_demo",
+                    "account_demo",
+                    Provider::Whatsapp,
+                    "route_demo",
+                    "conversation_demo",
+                    "@owner:example.test",
+                    binding_time(),
+                )
+                .expect("binding"),
+            )
+            .expect("append binding");
+        let server = HistoryGatewayServer::new(store, transport, "history-gateway-secret")
+            .expect("history server");
+        (server, directory)
+    }
+
+    fn attachment_read_request(
+        event: &Value,
+        media_key: &str,
+        expected_sha256: Option<&str>,
+    ) -> HttpRequest {
+        let payload = &event["payload"];
+        let body = json!({
+            "tenant_id": "tenant_demo",
+            "account_id": "account_demo",
+            "connection_id": "connection_demo",
+            "identity_id": "identity_demo",
+            "conversation_id": "conversation_demo",
+            "message_id": payload["message_id"],
+            "attachment_id": payload["attachment_id"],
+            "revision": event["event_id"],
+            "provider": "whatsapp",
+            "media_key": media_key,
+            "expected_size_bytes": payload["size_bytes"],
+            "expected_sha256": expected_sha256,
+            "expected_mime_type": payload["mime_type"],
+        });
+        HttpRequest {
+            path: "/v1/attachments/read".to_owned(),
+            authorization: Some("history-gateway-secret".to_owned()),
+            request_id: Some("attachment-read-request".to_owned()),
+            idempotency_key: Some("attachment-read-idempotency".to_owned()),
+            body: serde_json::to_vec(&body).expect("attachment request JSON"),
+        }
     }
 
     #[tokio::test]
@@ -895,6 +1118,279 @@ mod tests {
         assert_eq!(second["events"].as_array().map(Vec::len), Some(0));
         assert_eq!(second["next_cursor"], Value::Null);
         assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn normal_history_ingestion_emits_raw_and_verified_attachment_revisions() {
+        let transport = Arc::new(AttachmentHistoryTransport {
+            calls: AtomicUsize::new(0),
+            media_calls: AtomicUsize::new(0),
+            requested_limit: AtomicU64::new(0),
+            attachment_messages: 1,
+            force_terminal_empty: true,
+            unavailable: false,
+        });
+        let (server, _directory) =
+            server_with_transport(Arc::clone(&transport) as Arc<dyn MatrixTransport>).await;
+        let owner = owner();
+        let started = server
+            .handle_request(request("/v1/history-imports/start", &owner, None))
+            .await;
+        assert_eq!(started.0, 200, "{}", String::from_utf8_lossy(&started.1));
+
+        let first = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(first.0, 200, "{}", String::from_utf8_lossy(&first.1));
+        let first: Value = serde_json::from_slice(&first.1).expect("attachment advance JSON");
+        assert_eq!(first["status"], "active");
+        let events = first["events"].as_array().expect("history events");
+        assert_eq!(events.len(), 4);
+        assert_eq!(transport.requested_limit.load(Ordering::SeqCst), PAGE_LIMIT);
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["payload"]["body"] == "ordinary history message" })
+        );
+        let raw = events
+            .iter()
+            .find(|event| {
+                event["payload"]["attachment_id"].is_string()
+                    && event["payload"]["r2_key"].is_null()
+            })
+            .expect("raw metadata-only attachment event");
+        assert!(raw["payload"]["sha256"].is_null());
+        let resolved = events
+            .iter()
+            .find(|event| {
+                event["payload"]["attachment_id"].is_string()
+                    && event["payload"]["r2_key"].is_string()
+            })
+            .expect("verified attachment revision");
+        assert_eq!(resolved["event_source"], "backfill");
+        assert_eq!(resolved["payload"]["mime_type"], "image/png");
+        assert_eq!(resolved["payload"]["size_bytes"], HISTORY_MEDIA_BYTES.len());
+        let digest = crate::canonical::sha256_hex(HISTORY_MEDIA_BYTES);
+        assert_eq!(resolved["payload"]["sha256"], digest);
+        assert_eq!(
+            resolved["payload"]["r2_key"],
+            format!("media/tenant_demo/{digest}")
+        );
+        assert_ne!(raw["event_id"], resolved["event_id"]);
+
+        let media_key = resolved["payload"]["r2_key"]
+            .as_str()
+            .expect("resolved media key");
+        let read = server
+            .handle_request(attachment_read_request(
+                resolved,
+                media_key,
+                resolved["payload"]["sha256"].as_str(),
+            ))
+            .await;
+        assert_eq!(read.0, 200, "{}", String::from_utf8_lossy(&read.1));
+        let read: Value = serde_json::from_slice(&read.1).expect("attachment read JSON");
+        assert_eq!(read["status"], "available");
+        assert_eq!(read["mime_type"], "image/png");
+        assert_eq!(read["size_bytes"], HISTORY_MEDIA_BYTES.len());
+        assert_eq!(read["sha256"], resolved["payload"]["sha256"]);
+        assert_eq!(transport.media_calls.load(Ordering::SeqCst), 2);
+
+        let public_cursor = first["next_cursor"].as_str().expect("history cursor");
+        let retry = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(retry.0, 200, "{}", String::from_utf8_lossy(&retry.1));
+        let retry: Value = serde_json::from_slice(&retry.1).expect("history retry JSON");
+        assert_eq!(retry["events"], first["events"]);
+        assert_eq!(retry["next_cursor"], public_cursor);
+        assert_eq!(transport.media_calls.load(Ordering::SeqCst), 2);
+
+        let second = server
+            .handle_request(request(
+                "/v1/history-imports/advance",
+                &owner,
+                Some(public_cursor),
+            ))
+            .await;
+        assert_eq!(second.0, 200, "{}", String::from_utf8_lossy(&second.1));
+        let second: Value = serde_json::from_slice(&second.1).expect("terminal JSON");
+        assert_eq!(second["status"], "completed");
+        assert_eq!(second["events"].as_array().map(Vec::len), Some(0));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn unavailable_attachment_does_not_block_ordinary_history_progress() {
+        let transport = Arc::new(AttachmentHistoryTransport {
+            calls: AtomicUsize::new(0),
+            media_calls: AtomicUsize::new(0),
+            requested_limit: AtomicU64::new(0),
+            attachment_messages: 1,
+            force_terminal_empty: true,
+            unavailable: true,
+        });
+        let (server, _directory) =
+            server_with_transport(Arc::clone(&transport) as Arc<dyn MatrixTransport>).await;
+        let owner = owner();
+        let started = server
+            .handle_request(request("/v1/history-imports/start", &owner, None))
+            .await;
+        assert_eq!(started.0, 200, "{}", String::from_utf8_lossy(&started.1));
+
+        let first = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(first.0, 200, "{}", String::from_utf8_lossy(&first.1));
+        let first: Value = serde_json::from_slice(&first.1).expect("unavailable advance JSON");
+        assert_eq!(first["status"], "active");
+        let events = first["events"].as_array().expect("history events");
+        assert_eq!(events.len(), 3);
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["payload"]["body"] == "ordinary history message" })
+        );
+        let raw = events
+            .iter()
+            .find(|event| event["payload"]["attachment_id"].is_string())
+            .expect("unavailable raw attachment event");
+        assert!(raw["payload"]["r2_key"].is_null());
+        assert!(events.iter().all(|event| {
+            event["payload"]["r2_key"].is_null() || !event["payload"]["attachment_id"].is_string()
+        }));
+        assert_eq!(transport.requested_limit.load(Ordering::SeqCst), PAGE_LIMIT);
+
+        // The descriptor is retained for a safe unavailable response, but no
+        // verified media key is emitted and no bytes cross the boundary.
+        let arbitrary_key = format!("media/tenant_demo/{}", "a".repeat(64));
+        let read = server
+            .handle_request(attachment_read_request(raw, &arbitrary_key, None))
+            .await;
+        assert_eq!(read.0, 200, "{}", String::from_utf8_lossy(&read.1));
+        let read: Value = serde_json::from_slice(&read.1).expect("unavailable read JSON");
+        assert_eq!(read["status"], "unavailable");
+        assert_eq!(read["reason"], "missing");
+        assert!(read["bytes_base64"].is_null());
+        assert_eq!(transport.media_calls.load(Ordering::SeqCst), 2);
+
+        let public_cursor = first["next_cursor"].as_str().expect("history cursor");
+        let second = server
+            .handle_request(request(
+                "/v1/history-imports/advance",
+                &owner,
+                Some(public_cursor),
+            ))
+            .await;
+        assert_eq!(second.0, 200, "{}", String::from_utf8_lossy(&second.1));
+        let second: Value = serde_json::from_slice(&second.1).expect("terminal JSON");
+        assert_eq!(second["status"], "completed");
+        assert_eq!(second["events"].as_array().map(Vec::len), Some(0));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn attachment_heavy_history_page_stays_within_canonical_event_bound() {
+        let transport = Arc::new(AttachmentHistoryTransport {
+            calls: AtomicUsize::new(0),
+            media_calls: AtomicUsize::new(0),
+            requested_limit: AtomicU64::new(0),
+            attachment_messages: 167,
+            force_terminal_empty: false,
+            unavailable: false,
+        });
+        let (server, _directory) =
+            server_with_transport(Arc::clone(&transport) as Arc<dyn MatrixTransport>).await;
+        let mut owner = owner();
+        owner.max_events = 1_000;
+        let started = server
+            .handle_request(request("/v1/history-imports/start", &owner, None))
+            .await;
+        assert_eq!(started.0, 200, "{}", String::from_utf8_lossy(&started.1));
+
+        let first = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(first.0, 200, "{}", String::from_utf8_lossy(&first.1));
+        let first: Value = serde_json::from_slice(&first.1).expect("heavy advance JSON");
+        assert_eq!(first["status"], "active");
+        let events = first["events"].as_array().expect("heavy history events");
+        assert_eq!(events.len(), 7);
+        assert!(events.len() <= MAX_PAGE_EVENTS as usize);
+        assert_eq!(transport.requested_limit.load(Ordering::SeqCst), PAGE_LIMIT);
+        assert_eq!(PAGE_LIMIT, 2);
+        assert_eq!(transport.media_calls.load(Ordering::SeqCst), 2);
+
+        let retry = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(retry.0, 200, "{}", String::from_utf8_lossy(&retry.1));
+        let retry: Value = serde_json::from_slice(&retry.1).expect("heavy retry JSON");
+        assert_eq!(retry["events"], first["events"]);
+        assert_eq!(retry["next_cursor"], first["next_cursor"]);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.media_calls.load(Ordering::SeqCst), 2);
+
+        let mut collected = events.to_vec();
+        let mut public_cursor = first["next_cursor"]
+            .as_str()
+            .expect("heavy history cursor")
+            .to_owned();
+        loop {
+            let page = server
+                .handle_request(request(
+                    "/v1/history-imports/advance",
+                    &owner,
+                    Some(&public_cursor),
+                ))
+                .await;
+            assert_eq!(page.0, 200, "{}", String::from_utf8_lossy(&page.1));
+            let page: Value = serde_json::from_slice(&page.1).expect("heavy page JSON");
+            let page_events = page["events"].as_array().expect("heavy page events");
+            assert!(page_events.len() <= MAX_PAGE_EVENTS as usize);
+            collected.extend(page_events.iter().cloned());
+            if page["status"] == "completed" {
+                assert_eq!(page["next_cursor"], Value::Null);
+                break;
+            }
+            assert_eq!(page["status"], "active");
+            public_cursor = page["next_cursor"]
+                .as_str()
+                .expect("next heavy history cursor")
+                .to_owned();
+        }
+        assert_eq!(collected.len(), 502);
+        assert_eq!(
+            collected
+                .iter()
+                .filter(|event| event["payload"]["body"]
+                    .as_str()
+                    .is_some_and(|body| body.starts_with("photo-")))
+                .count(),
+            167
+        );
+        assert_eq!(
+            collected
+                .iter()
+                .filter(|event| {
+                    event["payload"]["attachment_id"].is_string()
+                        && event["payload"]["r2_key"].is_null()
+                })
+                .count(),
+            167
+        );
+        assert_eq!(
+            collected
+                .iter()
+                .filter(|event| {
+                    event["payload"]["attachment_id"].is_string()
+                        && event["payload"]["r2_key"].is_string()
+                })
+                .count(),
+            167
+        );
+        assert_eq!(transport.media_calls.load(Ordering::SeqCst), 167);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 84);
     }
 
     #[tokio::test]

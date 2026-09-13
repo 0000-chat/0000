@@ -8,19 +8,26 @@
 use std::{collections::BTreeMap, fmt, str, time::Duration as StdDuration};
 
 use async_trait::async_trait;
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, TimeZone, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::{
+    attachments::{self, AttachmentDescriptor},
     batch::{self, RoutedEvent, WindowSource},
     ingestion::BatchSink,
     ledger::{FinalizeOutcome, NewLiveGapJob, NewLiveWindow, RoomEphemeralCandidate},
     matrix::{
-        MATRIX_CRYPTO_ACK_UNRECOVERABLE, MATRIX_CRYPTO_KIND_NOT_ALLOWED,
+        EncryptedMediaDescriptor, MATRIX_CRYPTO_ACK_UNRECOVERABLE, MATRIX_CRYPTO_KIND_NOT_ALLOWED,
         MATRIX_CRYPTO_MAINTENANCE_REQUIRED, MATRIX_RESPONSE_INVALID, MATRIX_RESPONSE_TOO_LARGE,
-        MATRIX_ROOM_MEMBERSHIP_INVALID, MATRIX_SDK_FAILED, MatrixProcessor, MatrixTransport,
-        ObservedMatrixEvent as SdkObservedMatrixEvent, ProcessedSync, RestartCryptoAck,
+        MATRIX_ROOM_MEMBERSHIP_INVALID, MATRIX_SDK_FAILED, MatrixMediaDescriptor, MatrixProcessor,
+        MatrixTransport, ObservedMatrixEvent as SdkObservedMatrixEvent, ProcessedSync,
+        RestartCryptoAck,
     },
     model::CanonicalEventSource,
     normalize::{
@@ -680,7 +687,8 @@ where
         now: DateTime<Utc>,
         processed: &ProcessedSync,
     ) -> Result<Option<ServiceAction>, SafeError> {
-        let (routed, ignored_count, typing) = self.project_observations(processed, inbox, now)?;
+        let (mut routed, ignored_count, typing, mut descriptors) =
+            self.project_observations(processed, inbox, now)?;
         let window_id = self
             .store
             .live_window_id_for_inbox(inbox.inbox_id().as_str())
@@ -738,6 +746,8 @@ where
             return Ok(Some(ServiceAction::PreparedLiveWindow));
         }
 
+        attachments::resolve_media_metadata(&self.transport, &mut routed, &mut descriptors).await?;
+
         let window = batch::build_window(
             WindowSource::live(inbox.next_token().as_bytes()),
             archived_at,
@@ -747,6 +757,7 @@ where
         if window.quarantined_count() != 0 {
             return Err(SafeError::new(SERVICE_PROJECTION_BLOCKED));
         }
+        self.persist_attachment_descriptors(descriptors)?;
         self.store
             .create_collecting_live_window(
                 inbox.inbox_id().as_str(),
@@ -792,7 +803,15 @@ where
         processed: &ProcessedSync,
         inbox: &crate::store_types::RawSyncInbox,
         observed_at: DateTime<Utc>,
-    ) -> Result<(Vec<RoutedEvent>, u64, Vec<TypingCandidate>), SafeError> {
+    ) -> Result<
+        (
+            Vec<RoutedEvent>,
+            u64,
+            Vec<TypingCandidate>,
+            Vec<AttachmentDescriptor>,
+        ),
+        SafeError,
+    > {
         let raw = serde_json::from_slice::<Value>(inbox.response().as_bytes())
             .map_err(|_| SafeError::new(MATRIX_MALFORMED_EVENT))?;
         if !raw.is_object() {
@@ -866,6 +885,7 @@ where
         let mut routed = Vec::new();
         let mut ignored_count = 0_u64;
         let mut typing = Vec::new();
+        let mut descriptors = Vec::new();
         for (event, room_id, lookup) in parsed {
             let binding = bindings
                 .get(&lookup)
@@ -890,8 +910,15 @@ where
                 if let Some(value) = converted.typing {
                     typing.push(value);
                 }
+                let source_descriptors = match &converted.event {
+                    NormalizedMatrixEvent::Message(message) => {
+                        attachments::descriptors_for_message(binding, message)?
+                    }
+                    _ => Vec::new(),
+                };
                 match normalize::normalize(converted.event, binding, &known, observed_at) {
                     NormalizeOutcome::Events(events) => {
+                        descriptors.extend(source_descriptors);
                         for event in events {
                             routed.push(RoutedEvent::new(binding.gateway_route_id(), event));
                         }
@@ -911,7 +938,21 @@ where
                 }
             }
         }
-        Ok((routed, ignored_count, typing))
+        Ok((routed, ignored_count, typing, descriptors))
+    }
+
+    fn persist_attachment_descriptors(
+        &mut self,
+        descriptors: Vec<AttachmentDescriptor>,
+    ) -> Result<(), SafeError> {
+        for descriptor in descriptors {
+            let fields = descriptor.lookup_fields();
+            let payload = descriptor.to_json()?;
+            self.store
+                .upsert_attachment_descriptor(&fields, &payload)
+                .map_err(|error| SafeError::new(error.code()))?;
+        }
+        Ok(())
     }
 
     async fn deliver_ingestion_batch(
@@ -1160,13 +1201,14 @@ pub(crate) fn normalize_backfill_events(
     binding: &crate::registry::RoomBinding,
     checkpoint_digest: &str,
     observed_at: DateTime<Utc>,
-) -> Result<Vec<RoutedEvent>, SafeError> {
+) -> Result<(Vec<RoutedEvent>, Vec<AttachmentDescriptor>), SafeError> {
     let mut known = KnownRelations::new();
     for event in seed_events.iter().chain(events) {
         seed_known_relations(event, room_id, binding, &mut known);
     }
     let typing_snapshots = BTreeMap::new();
     let mut routed = Vec::new();
+    let mut descriptors = Vec::new();
     for event in events {
         for converted in convert_sdk_event(
             event,
@@ -1177,8 +1219,15 @@ pub(crate) fn normalize_backfill_events(
             observed_at,
             CanonicalEventSource::Backfill,
         )? {
+            let source_descriptors = match &converted.event {
+                NormalizedMatrixEvent::Message(message) => {
+                    attachments::descriptors_for_message(binding, message)?
+                }
+                _ => Vec::new(),
+            };
             match normalize::normalize(converted.event, binding, &known, observed_at) {
                 NormalizeOutcome::Events(events) => {
+                    descriptors.extend(source_descriptors);
                     routed.extend(
                         events
                             .into_iter()
@@ -1198,7 +1247,7 @@ pub(crate) fn normalize_backfill_events(
             }
         }
     }
-    Ok(routed)
+    Ok((routed, descriptors))
 }
 
 fn raw_has_non_joined_rooms(bytes: &[u8]) -> bool {
@@ -1581,19 +1630,185 @@ fn parse_attachments(content: &Value) -> Vec<MatrixAttachment> {
         .and_then(|info| info.get("size"))
         .or_else(|| content.get("size"))
         .and_then(Value::as_u64);
-    let sha256 = file
+    let source_sha256 = file
         .get("hashes")
         .and_then(|hashes| hashes.get("sha256"))
         .or_else(|| content.get("sha256"))
+        .or_else(|| {
+            content
+                .get("info")
+                .and_then(|info| info.get("hashes"))
+                .and_then(|hashes| hashes.get("sha256"))
+        })
         .and_then(Value::as_str)
         .map(str::to_owned);
-    if file_name.is_none() && mime_type.is_none() && size_bytes.is_none() && sha256.is_none() {
+    let media = parse_matrix_media_descriptor(
+        file,
+        content,
+        mime_type.as_deref(),
+        source_sha256.as_deref(),
+    );
+    let sha256 = media
+        .as_ref()
+        .filter(|value| value.encrypted.is_none())
+        .and_then(|_| source_sha256.as_deref().and_then(canonical_matrix_sha256));
+    if file_name.is_none()
+        && mime_type.is_none()
+        && size_bytes.is_none()
+        && sha256.is_none()
+        && media.is_none()
+    {
         Vec::new()
     } else {
-        vec![MatrixAttachment::new(
-            file_name, mime_type, size_bytes, sha256,
-        )]
+        let attachment = MatrixAttachment::new(file_name, mime_type, size_bytes, sha256);
+        match media {
+            Some(media) => vec![attachment.with_media_descriptor(media)],
+            None => vec![attachment],
+        }
     }
+}
+
+fn parse_matrix_media_descriptor(
+    file: &Value,
+    content: &Value,
+    mime_type: Option<&str>,
+    source_sha256: Option<&str>,
+) -> Option<MatrixMediaDescriptor> {
+    let media_uri = file
+        .get("url")
+        .or_else(|| content.get("url"))
+        .and_then(Value::as_str)?;
+    let (server_name, media_id) = parse_mxc_uri(media_uri)?;
+    let encrypted = match file.get("key").or_else(|| content.get("key")) {
+        None => None,
+        Some(key_value) => {
+            let key_object = key_value.as_object()?;
+            let algorithm = key_object.get("alg").and_then(Value::as_str)?;
+            if algorithm != "A256CTR" {
+                return None;
+            }
+            let key = decode_matrix_base64(key_object.get("k")?.as_str()?)?;
+            if key.len() != 32 {
+                return None;
+            }
+            let iv = decode_matrix_base64(
+                file.get("iv")
+                    .or_else(|| content.get("iv"))
+                    .and_then(Value::as_str)?,
+            )?;
+            if iv.len() != 16 {
+                return None;
+            }
+            let ciphertext_sha256 = file
+                .get("hashes")
+                .and_then(|hashes| hashes.get("sha256"))
+                .or_else(|| {
+                    content
+                        .get("hashes")
+                        .and_then(|hashes| hashes.get("sha256"))
+                })
+                .or_else(|| {
+                    content
+                        .get("info")
+                        .and_then(|info| info.get("hashes"))
+                        .and_then(|hashes| hashes.get("sha256"))
+                })
+                .and_then(Value::as_str)?;
+            let ciphertext_hash = decode_matrix_base64(ciphertext_sha256)?;
+            if ciphertext_hash.len() != 32 {
+                return None;
+            }
+            Some(EncryptedMediaDescriptor {
+                algorithm: algorithm.to_owned(),
+                key,
+                iv,
+                ciphertext_sha256: ciphertext_sha256.to_owned(),
+            })
+        }
+    };
+    Some(MatrixMediaDescriptor {
+        server_name,
+        media_id,
+        mime_type: mime_type.map(str::to_owned),
+        source_sha256: source_sha256.map(str::to_owned),
+        encrypted,
+    })
+}
+
+fn parse_mxc_uri(value: &str) -> Option<(String, String)> {
+    let uri = Url::parse(value).ok()?;
+    if uri.scheme() != "mxc"
+        || uri.username() != ""
+        || uri.password().is_some()
+        || uri.query().is_some()
+        || uri.fragment().is_some()
+    {
+        return None;
+    }
+    let host = uri.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    let server_name = match uri.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    if !valid_matrix_server_name(&server_name) {
+        return None;
+    }
+    let mut segments = uri.path_segments()?;
+    let media_id = segments.next()?;
+    if segments.next().is_some() || !valid_matrix_media_id(media_id) {
+        return None;
+    }
+    Some((server_name, media_id.to_owned()))
+}
+
+fn valid_matrix_server_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+        })
+}
+
+fn valid_matrix_media_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'=' | b'-' | b'~')
+        })
+}
+
+fn decode_matrix_base64(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .or_else(|_| URL_SAFE.decode(value))
+        .or_else(|_| STANDARD.decode(value))
+        .ok()
+}
+
+fn canonical_matrix_sha256(value: &str) -> Option<String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Some(value.to_owned());
+    }
+    let bytes = decode_matrix_base64(value)?;
+    (bytes.len() == 32).then(|| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    })
 }
 
 fn now_before_expiry(now: DateTime<Utc>, observed_at: DateTime<Utc>) -> bool {
@@ -1664,5 +1879,77 @@ mod tests {
             select_next_wait_deadline(now, None, None, Some(timestamp(-1))),
             None
         );
+    }
+
+    #[test]
+    fn attachment_parser_retains_original_mxc_and_projects_matrix_hash() {
+        let body = b"matrix fixture bytes";
+        let matrix_hash = STANDARD.encode(Sha256::digest(body));
+        let matrix_hash_for_json = matrix_hash.clone();
+        let attachments = parse_attachments(&serde_json::json!({
+            "url": "mxc://matrix.example/media123",
+            "filename": "fixture.bin",
+            "info": {
+                "mimetype": "application/octet-stream",
+                "size": body.len(),
+                "hashes": { "sha256": matrix_hash_for_json },
+            },
+        }));
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].sha256(),
+            Some(
+                canonical_matrix_sha256(&STANDARD.encode(Sha256::digest(body)),)
+                    .expect("canonical hash")
+                    .as_str()
+            )
+        );
+        let media = attachments[0]
+            .media_descriptor()
+            .expect("source descriptor");
+        assert_eq!(media.server_name, "matrix.example");
+        assert_eq!(media.media_id, "media123");
+        assert_eq!(media.source_sha256.as_deref(), Some(matrix_hash.as_str()));
+    }
+
+    #[test]
+    fn attachment_parser_drops_malformed_encrypted_descriptor_before_persistence() {
+        let attachments = parse_attachments(&serde_json::json!({
+            "file": {
+                "url": "mxc://matrix.example/encrypted123",
+                "key": { "alg": "A256GCM", "k": "bad" },
+                "iv": "bad",
+                "hashes": { "sha256": "bad" },
+            },
+            "filename": "fixture.bin",
+            "mimetype": "application/octet-stream",
+            "size": 12,
+        }));
+        assert_eq!(attachments.len(), 1);
+        assert!(attachments[0].media_descriptor().is_none());
+    }
+
+    #[test]
+    fn attachment_parser_keeps_encrypted_ciphertext_hash_private() {
+        let attachments = parse_attachments(&serde_json::json!({
+            "file": {
+                "url": "mxc://matrix.example/encrypted123",
+                "key": {
+                    "alg": "A256CTR",
+                    "k": STANDARD.encode([7_u8; 32]),
+                },
+                "iv": STANDARD.encode([9_u8; 16]),
+                "hashes": { "sha256": STANDARD.encode([1_u8; 32]) },
+            },
+            "filename": "fixture.bin",
+            "mimetype": "application/octet-stream",
+            "size": 12,
+        }));
+        assert_eq!(attachments.len(), 1);
+        assert!(attachments[0].sha256().is_none());
+        let media = attachments[0]
+            .media_descriptor()
+            .expect("encrypted descriptor");
+        assert!(media.encrypted.is_some());
     }
 }

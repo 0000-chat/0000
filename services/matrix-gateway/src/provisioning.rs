@@ -513,7 +513,9 @@ impl ProvisioningGatewayServer {
     }
 
     async fn handle_request(&self, request: HttpRequest) -> (u16, Vec<u8>) {
-        if request.path.starts_with("/v1/history-imports/") {
+        if request.path.starts_with("/v1/history-imports/")
+            || request.path == "/v1/attachments/read"
+        {
             return match &self.history {
                 Some(history) => history.handle_request(request).await,
                 None => response(404, json!({ "error": "not_found" })),
@@ -783,6 +785,7 @@ mod tests {
 
     use super::*;
     use async_trait::async_trait;
+    use base64::Engine as _;
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use tempfile::tempdir;
@@ -790,10 +793,19 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
     use crate::{
+        attachments::AttachmentDescriptor,
+        batch::RoutedEvent,
         crypto::Keyring,
         crypto_outbox::{PendingMatrixRequest, RawMatrixResponse},
         history::HistoryGatewayServer,
-        matrix::{FetchedMatrixSync, MatrixTransport, RawBackfillPage},
+        matrix::{
+            FetchedMatrixMedia, FetchedMatrixSync, MatrixMediaDescriptor, MatrixTransport,
+            RawBackfillPage,
+        },
+        model::{
+            AttachmentObservedPayload, CanonicalEvent, CanonicalEventSource, CanonicalPayload,
+        },
+        normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
         store::Store,
@@ -1003,9 +1015,270 @@ mod tests {
         task.abort();
     }
 
+    #[tokio::test]
+    async fn shared_listener_reads_only_the_bound_original_mxc_descriptor() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x22; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new(
+                    "binding_0123456789abcdef0123456789abcdef",
+                    "!attachment:example.test",
+                    "tenant_demo",
+                    "identity_demo",
+                    "connection_demo",
+                    "account_demo",
+                    crate::model::Provider::Whatsapp,
+                    "route_demo",
+                    "conversation_demo",
+                    "@owner:example.test",
+                    Utc.timestamp_millis_opt(1_700_000_000_000)
+                        .single()
+                        .expect("valid binding timestamp"),
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+        let binding = store
+            .active_room_binding_for_history(
+                "tenant_demo",
+                "account_demo",
+                "connection_demo",
+                "identity_demo",
+                crate::model::Provider::Whatsapp,
+            )
+            .expect("resolve binding")
+            .expect("active binding");
+
+        let body = b"fixture media bytes".to_vec();
+        let digest = crate::canonical::sha256_hex(&body);
+        let media = MatrixMediaDescriptor {
+            server_name: "matrix.example".to_owned(),
+            media_id: "media123".to_owned(),
+            mime_type: Some("image/png".to_owned()),
+            source_sha256: Some(digest.clone()),
+            encrypted: None,
+        };
+        let message = MatrixMessage::new(
+            "!attachment:example.test",
+            "$attachment-message:example.test",
+            "@owner:example.test",
+            "Owner",
+            "photo",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .with_kind(MatrixMessageKind::Image)
+        .with_attachments(vec![
+            MatrixAttachment::new(
+                Some("photo.png".to_owned()),
+                Some("image/png".to_owned()),
+                Some(body.len() as u64),
+                Some(digest.clone()),
+            )
+            .with_media_descriptor(media),
+        ]);
+        let descriptor =
+            AttachmentDescriptor::from_source(&binding, &message, &message.attachments()[0], 0)
+                .expect("descriptor derivation")
+                .expect("source media descriptor");
+
+        let transport = Arc::new(AttachmentTransport {
+            calls: AtomicUsize::new(0),
+            bytes: body.clone(),
+            mime_type: "image/png".to_owned(),
+        });
+        let message_id = crate::model::message_id(
+            "!attachment:example.test",
+            "$attachment-message:example.test",
+        )
+        .expect("message ID");
+        let attachment_id = crate::model::attachment_id(&message_id, 0).expect("attachment ID");
+        let initial_revision = crate::model::durable_event_id(
+            "$attachment-message:example.test",
+            crate::model::CanonicalEventType::AttachmentObserved,
+            0,
+        )
+        .expect("attachment revision");
+        let raw_event = CanonicalEvent::new(
+            initial_revision,
+            CanonicalEventSource::Live,
+            "tenant_demo",
+            "identity_demo",
+            crate::model::Provider::Whatsapp,
+            "account_demo",
+            "conversation_demo",
+            Some("!attachment:example.test".to_owned()),
+            Some("$attachment-message:example.test".to_owned()),
+            None,
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-01T00:00:00.000Z",
+            CanonicalPayload::AttachmentObserved(AttachmentObservedPayload {
+                attachment_id: attachment_id.clone(),
+                message_id: message_id.clone(),
+                file_name: Some("photo.png".to_owned()),
+                mime_type: Some("image/png".to_owned()),
+                size_bytes: Some(body.len() as u64),
+                sha256: Some(digest.clone()),
+                r2_key: None,
+            }),
+        )
+        .expect("raw canonical event");
+        let mut routed = vec![RoutedEvent::new("route_demo", raw_event)];
+        let mut descriptors = vec![descriptor];
+        crate::attachments::resolve_media_metadata(
+            transport.as_ref(),
+            &mut routed,
+            &mut descriptors,
+        )
+        .await
+        .expect("resolve source media");
+        assert_eq!(routed.len(), 2);
+        let descriptor = descriptors.pop().expect("resolved descriptor");
+        let fields = descriptor.lookup_fields();
+        let descriptor_revision = fields[7].to_owned();
+        let payload = descriptor.to_json().expect("descriptor JSON");
+        store
+            .upsert_attachment_descriptor(&fields, &payload)
+            .expect("persist descriptor");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::clone(&transport) as Arc<dyn MatrixTransport>,
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        let task = tokio::spawn(server.serve(listener));
+        let http = Client::builder().no_proxy().build().expect("HTTP client");
+        let request = json!({
+            "tenant_id": "tenant_demo",
+            "account_id": "account_demo",
+            "connection_id": "connection_demo",
+            "identity_id": "identity_demo",
+            "conversation_id": "conversation_demo",
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "revision": descriptor_revision,
+            "provider": "whatsapp",
+            "media_key": format!("media/tenant_demo/{digest}"),
+            "expected_size_bytes": body.len(),
+            "expected_sha256": digest,
+            "expected_mime_type": "image/png",
+        });
+        let unauthorized = http
+            .post(format!("http://{address}/v1/attachments/read"))
+            .bearer_auth("wrong-gateway-secret")
+            .header("x-request-id", "attachment-unauthorized")
+            .header("idempotency-key", "attachment-unauthorized")
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&request).expect("request JSON"))
+            .send()
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        let response = http
+            .post(format!("http://{address}/v1/attachments/read"))
+            .bearer_auth(GATEWAY_SECRET)
+            .header("x-request-id", "attachment-read")
+            .header("idempotency-key", "attachment-read")
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&request).expect("request JSON"))
+            .send()
+            .await
+            .expect("attachment response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body: Value =
+            serde_json::from_slice(&response.bytes().await.expect("attachment body"))
+                .expect("attachment JSON");
+        assert_eq!(response_body["status"], "available");
+        assert_eq!(response_body["mime_type"], "image/png");
+        assert_eq!(response_body["sha256"], request["expected_sha256"]);
+        assert_eq!(response_body["size_bytes"], request["expected_size_bytes"]);
+        assert_eq!(
+            response_body["bytes_base64"],
+            base64::engine::general_purpose::STANDARD.encode(&body)
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+
+        let mut wrong_scope = request.clone();
+        wrong_scope["message_id"] = Value::String("message_other".to_owned());
+        let missing = http
+            .post(format!("http://{address}/v1/attachments/read"))
+            .bearer_auth(GATEWAY_SECRET)
+            .header("x-request-id", "attachment-wrong-message")
+            .header("idempotency-key", "attachment-wrong-message")
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&wrong_scope).expect("request JSON"))
+            .send()
+            .await
+            .expect("wrong scope response");
+        assert_eq!(missing.status(), StatusCode::OK);
+        let missing_body: Value =
+            serde_json::from_slice(&missing.bytes().await.expect("missing body"))
+                .expect("missing JSON");
+        assert_eq!(missing_body["status"], "unavailable");
+        assert_eq!(missing_body["reason"], "missing");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
     struct SharedHistoryTransport {
         calls: AtomicUsize,
         event_count: usize,
+    }
+
+    struct AttachmentTransport {
+        calls: AtomicUsize,
+        bytes: Vec<u8>,
+        mime_type: String,
+    }
+
+    #[async_trait]
+    impl MatrixTransport for AttachmentTransport {
+        async fn fetch_sync(&self, _since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError> {
+            Err(SafeError::new("attachment_test_unexpected_sync"))
+        }
+
+        async fn fetch_media(
+            &self,
+            descriptor: &MatrixMediaDescriptor,
+        ) -> Result<FetchedMatrixMedia, SafeError> {
+            assert_eq!(descriptor.server_name, "matrix.example");
+            assert_eq!(descriptor.media_id, "media123");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            FetchedMatrixMedia::new(self.bytes.clone(), self.mime_type.clone())
+        }
+
+        async fn send_crypto(
+            &self,
+            _request: &PendingMatrixRequest,
+        ) -> Result<RawMatrixResponse, SafeError> {
+            Err(SafeError::new("attachment_test_unexpected_crypto"))
+        }
     }
 
     #[async_trait]
