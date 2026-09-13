@@ -239,9 +239,42 @@ export const WebhookDeliveryStatusSchema = z.enum([
   "leased",
   "delivered",
   "failed",
+  "uncertain",
   "cancelled",
 ]);
 export type WebhookDeliveryStatus = z.infer<typeof WebhookDeliveryStatusSchema>;
+
+export const WebhookDeliverySchema = z
+  .object({
+    id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    subscription_id: CommunicatorIdSchema,
+    source_event_id: z.string().min(1).max(1_024),
+    source_message_id: CommunicatorIdSchema.nullable(),
+    destination_version: z.number().int().positive(),
+    status: WebhookDeliveryStatusSchema,
+    first_pending_at: TimestampSchema,
+    retry_deadline: TimestampSchema,
+    attempt_count: z.number().int().nonnegative(),
+    next_attempt_at: TimestampSchema.nullable(),
+    last_attempt_at: TimestampSchema.nullable(),
+    delivered_at: TimestampSchema.nullable(),
+    http_status: z.number().int().min(100).max(599).nullable(),
+    error_code: z.string().min(1).max(128).nullable(),
+    last_response_body: z.string().max(8_192).nullable(),
+    cancellation_reason: z.string().min(1).max(128).nullable(),
+    uncertain_at: TimestampSchema.nullable(),
+    uncertainty_reason: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type WebhookDelivery = z.infer<typeof WebhookDeliverySchema>;
+
+export const WebhookDeliveryRetrySchema = z
+  .object({
+    idempotency_key: z.string().trim().min(1).max(200),
+  })
+  .strict();
+export type WebhookDeliveryRetry = z.infer<typeof WebhookDeliveryRetrySchema>;
 
 const WebhookAttachmentReferenceSchema = z
   .object({

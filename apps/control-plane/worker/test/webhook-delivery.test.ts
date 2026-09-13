@@ -9,6 +9,7 @@ import {
   createWebhookCredentialResolver,
   deliverIncomingWebhookBatch,
   fanOutIncomingWebhookDeliveries,
+  runWebhookRetryTick,
   type WebhookProjection,
 } from "../webhooks/delivery";
 import {
@@ -184,7 +185,11 @@ const projectionFor = (
 
 const deliveryRow = async (id: string) =>
   workerEnv.CONTROL_DB.prepare(
-    "SELECT id, status, destination_version, source_revision, http_status, error_code, payload_json, cancellation_reason FROM webhook_deliveries WHERE id = ?",
+    `SELECT id, status, destination_version, source_revision, http_status,
+            error_code, payload_json, cancellation_reason, first_pending_at,
+            retry_deadline, attempt_count, next_attempt_at, last_response_body,
+            uncertain_at, uncertainty_reason
+     FROM webhook_deliveries WHERE id = ?`,
   )
     .bind(id)
     .first<{
@@ -196,6 +201,13 @@ const deliveryRow = async (id: string) =>
       error_code: string | null;
       payload_json: string | null;
       cancellation_reason: string | null;
+      first_pending_at: string;
+      retry_deadline: string;
+      attempt_count: number;
+      next_attempt_at: string | null;
+      last_response_body: string | null;
+      uncertain_at: string | null;
+      uncertainty_reason: string | null;
     }>();
 
 beforeEach(async () => {
@@ -614,9 +626,54 @@ describe("durable incoming webhook delivery", () => {
       },
     });
     expect(await deliveryRow(id ?? "")).toMatchObject({
-      status: "failed",
+      status: "pending",
       http_status: 503,
       error_code: "http_503",
+      first_pending_at: fixedNow.toISOString(),
+      retry_deadline: new Date(
+        fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+      ).toISOString(),
+      attempt_count: 1,
+    });
+
+    const retryNow = new Date(fixedNow.getTime() + 1_000);
+    let retryFetchCount = 0;
+    const retryServices = {
+      now: () => retryNow,
+      fetch: async () => {
+        retryFetchCount += 1;
+        return new Response(null, { status: 503 });
+      },
+    };
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: retryServices,
+      }),
+    ).resolves.toEqual({ scanned: 1, attempted: 1 });
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: retryServices,
+      }),
+    ).resolves.toEqual({ scanned: 0, attempted: 0 });
+    expect(retryFetchCount).toBe(1);
+
+    const tick = await runWebhookRetryTick({
+      database: workerEnv.CONTROL_DB,
+      projectionForTenant: () => projectionFor(),
+      services: {
+        now: () => new Date(fixedNow.getTime() + 24 * 60 * 60 * 1_000),
+      },
+    });
+    expect(tick).toEqual({ scanned: 1, attempted: 1 });
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "failed",
+      error_code: "retry_deadline_exceeded",
+      next_attempt_at: null,
+      attempt_count: 2,
     });
 
     const [busyId] = await fanOutIncomingWebhookDeliveries({
@@ -663,5 +720,244 @@ describe("durable incoming webhook delivery", () => {
       status: "delivered",
       http_status: 200,
     });
+  });
+
+  it("bounds endpoint and response-body stalls while independent destinations continue", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_endpoint_timeout",
+        destinationUrl: "https://hooks.example.test/endpoint-timeout",
+      }),
+    );
+    await insertSubscription(
+      subscription({
+        id: "webhook_body_timeout",
+        destinationUrl: "https://hooks.example.test/body-timeout",
+      }),
+    );
+    await insertSubscription(
+      subscription({
+        id: "webhook_oversized_body",
+        destinationUrl: "https://hooks.example.test/oversized-body",
+      }),
+    );
+    await insertSubscription(
+      subscription({
+        id: "webhook_healthy_after_stalls",
+        destinationUrl: "https://hooks.example.test/healthy-after-stalls",
+      }),
+    );
+    const ids = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_stalled_destinations")],
+      now: () => fixedNow,
+    });
+    expect(ids).toHaveLength(4);
+
+    const stalledBody = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+    });
+    const oversizedBody = new Uint8Array(16_384).fill(65);
+    const requests: string[] = [];
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: ids,
+      services: {
+        now: () => fixedNow,
+        httpTimeoutMs: 5,
+        fetch: async (input) => {
+          const url = String(input);
+          requests.push(url);
+          if (url.endsWith("/endpoint-timeout")) {
+            return new Promise<Response>(() => undefined);
+          }
+          if (url.endsWith("/body-timeout")) {
+            return new Response(stalledBody, { status: 503 });
+          }
+          if (url.endsWith("/oversized-body")) {
+            return new Response(oversizedBody, { status: 503 });
+          }
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    expect(requests).toEqual([
+      "https://hooks.example.test/body-timeout",
+      "https://hooks.example.test/endpoint-timeout",
+      "https://hooks.example.test/healthy-after-stalls",
+      "https://hooks.example.test/oversized-body",
+    ]);
+    const rows = await workerEnv.CONTROL_DB.prepare(
+      `SELECT ws.id AS subscription_id, wd.status, wd.error_code,
+              length(wd.last_response_body) AS response_size
+       FROM webhook_deliveries AS wd
+       JOIN webhook_subscriptions AS ws
+         ON ws.id = wd.subscription_id
+       ORDER BY ws.id`,
+    ).all<{
+      subscription_id: string;
+      status: string;
+      error_code: string | null;
+      response_size: number | null;
+    }>();
+    expect(rows.results).toEqual([
+      {
+        subscription_id: "webhook_body_timeout",
+        status: "pending",
+        error_code: "http_503",
+        response_size: null,
+      },
+      {
+        subscription_id: "webhook_endpoint_timeout",
+        status: "pending",
+        error_code: "delivery_unavailable",
+        response_size: null,
+      },
+      {
+        subscription_id: "webhook_healthy_after_stalls",
+        status: "delivered",
+        error_code: null,
+        response_size: null,
+      },
+      {
+        subscription_id: "webhook_oversized_body",
+        status: "pending",
+        error_code: "http_503",
+        response_size: 8_192,
+      },
+    ]);
+  });
+
+  it("keeps a 4xx response retryable until the fixed deadline", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_client_failure",
+        destinationUrl: "https://hooks.example.test/client-failure",
+      }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_client_failure")],
+      now: () => fixedNow,
+    });
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => new Response("rate limited", { status: 429 }),
+      },
+    });
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "pending",
+      http_status: 429,
+      error_code: "http_429",
+      first_pending_at: fixedNow.toISOString(),
+      retry_deadline: new Date(
+        fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+      ).toISOString(),
+      attempt_count: 1,
+      last_response_body: "rate limited",
+    });
+
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => new Date(fixedNow.getTime() + 24 * 60 * 60 * 1_000),
+        },
+      }),
+    ).resolves.toEqual({ scanned: 1, attempted: 1 });
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "failed",
+      error_code: "retry_deadline_exceeded",
+      attempt_count: 1,
+      first_pending_at: fixedNow.toISOString(),
+      last_response_body: "rate limited",
+    });
+  });
+
+  it("records an in-flight cutover as uncertain without resending to the replacement", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_inflight_cutover",
+        destinationUrl: "https://hooks.example.test/inflight-old",
+      }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_inflight_cutover")],
+      now: () => fixedNow,
+    });
+    let enteredFetch!: () => void;
+    let releaseFetch!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => {
+      enteredFetch = resolve;
+    });
+    const fetchRelease = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => {
+          fetchCount += 1;
+          enteredFetch();
+          await fetchRelease;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    await fetchEntered;
+    await workerEnv.CONTROL_DB.prepare(
+      `UPDATE webhook_subscriptions
+       SET destination_url = ?, destination_version = destination_version + 1,
+           updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        "https://hooks.example.test/inflight-new",
+        fixedNow.toISOString(),
+        "webhook_inflight_cutover",
+      )
+      .run();
+    releaseFetch();
+    await delivery;
+
+    expect(fetchCount).toBe(1);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "uncertain",
+      http_status: 202,
+      error_code: "delivery_uncertain",
+      uncertainty_reason: "destination_version_changed_in_flight",
+    });
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => new Date(fixedNow.getTime() + 60 * 60 * 1_000),
+          fetch: async () => {
+            fetchCount += 1;
+            return new Response(null, { status: 202 });
+          },
+        },
+      }),
+    ).resolves.toEqual({ scanned: 0, attempted: 0 });
+    expect(fetchCount).toBe(1);
   });
 });

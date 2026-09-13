@@ -5,6 +5,7 @@ import {
   DeliveryModeSchema,
   MessageSearchDirectionSchema,
   WebhookEventFilterSchema,
+  WebhookDeliveryRetrySchema,
   WebhookSubscriptionCreateSchema,
   WebhookSubscriptionCutoverSchema,
   WebhookSubscriptionUpdateSchema,
@@ -42,6 +43,8 @@ import {
   evaluateWebhookSubscription,
   listWebhookSubscriptionPage,
   revokeWebhookSubscription,
+  authorizeWebhookDeliveryInspection,
+  retryWebhookDelivery,
   updateWebhookSubscription,
   WebhookRepositoryError,
   type WebhookActor,
@@ -151,6 +154,11 @@ const webhookEvaluateInput = {
   subscription_id: boundedId,
   account_id: boundedId,
   chat_id: boundedId.nullable().optional(),
+};
+const webhookDeliveryInput = { delivery_id: boundedId };
+const webhookDeliveryRetryInput = {
+  delivery_id: boundedId,
+  idempotency_key: z.string().trim().min(1).max(200),
 };
 const sendTextReplyInput = {
   identity_id: boundedId,
@@ -591,6 +599,42 @@ const registerTools = (
           input.chat_id ?? null,
         );
       }),
+  );
+
+  server.registerTool(
+    "get_webhook_delivery",
+    {
+      description: "Inspect one webhook delivery and its durable retry state",
+      inputSchema: webhookDeliveryInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        authorizeWebhookDeliveryInspection(
+          webhookDatabase(context).withSession("first-primary"),
+          webhookActorFor(context),
+          input.delivery_id,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "retry_webhook_delivery",
+    {
+      description: "Request an authorized retry of a failed webhook delivery",
+      inputSchema: webhookDeliveryRetryInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        retryWebhookDelivery(
+          webhookDatabase(context),
+          webhookActorFor(context),
+          input.delivery_id,
+          WebhookDeliveryRetrySchema.parse({
+            idempotency_key: input.idempotency_key,
+          }).idempotency_key,
+          new Date().toISOString(),
+        ),
+      ),
   );
 
   server.registerTool(

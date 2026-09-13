@@ -1,7 +1,10 @@
 import { env } from "cloudflare:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { WebhookSubscriptionSchema } from "@communicator/contracts";
+import {
+  WebhookDeliverySchema,
+  WebhookSubscriptionSchema,
+} from "@communicator/contracts";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app";
 import type { VerifiedSubject } from "../auth/oidc";
@@ -230,10 +233,16 @@ describe("webhook subscription production entrypoints", () => {
     };
     const first = await create("webhook-independent-one", false);
     const second = await create("webhook-independent-two", true);
+    const retryDeadline = new Date(
+      fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+    ).toISOString();
 
     await workerEnv.CONTROL_DB.batch([
       workerEnv.CONTROL_DB.prepare(
-        "INSERT INTO webhook_deliveries (id, tenant_id, subscription_id, source_event_id, destination_version, status, first_pending_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+        `INSERT INTO webhook_deliveries
+         (id, tenant_id, subscription_id, source_event_id, destination_version,
+          status, first_pending_at, retry_deadline)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
       ).bind(
         "delivery_first",
         "tenant_pilot",
@@ -241,9 +250,13 @@ describe("webhook subscription production entrypoints", () => {
         "source-one",
         1,
         "2026-09-13T00:00:00.000Z",
+        retryDeadline,
       ),
       workerEnv.CONTROL_DB.prepare(
-        "INSERT INTO webhook_deliveries (id, tenant_id, subscription_id, source_event_id, destination_version, status, first_pending_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+        `INSERT INTO webhook_deliveries
+         (id, tenant_id, subscription_id, source_event_id, destination_version,
+          status, first_pending_at, retry_deadline)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
       ).bind(
         "delivery_second",
         "tenant_pilot",
@@ -251,6 +264,7 @@ describe("webhook subscription production entrypoints", () => {
         "source-two",
         1,
         "2026-09-13T00:00:00.000Z",
+        retryDeadline,
       ),
     ]);
 
@@ -320,6 +334,204 @@ describe("webhook subscription production entrypoints", () => {
     expect(((await secondInspection.json()) as { status: string }).status).toBe(
       "active",
     );
+  });
+
+  it("exposes authorized manual retry through API and MCP with stable age and cutover fencing", async () => {
+    const create = async (key: string, path: string) => {
+      const response = await request("/api/v1/webhook-subscriptions", {
+        method: "POST",
+        body: JSON.stringify({
+          destination: { url: `https://hooks.example.test/${path}` },
+          idempotency_key: key,
+        }),
+      });
+      expect(response.status).toBe(201);
+      return WebhookSubscriptionSchema.parse(await response.json());
+    };
+    const apiSubscription = await create(
+      "webhook-manual-api-create",
+      "manual-api",
+    );
+    const mcpSubscription = await create(
+      "webhook-manual-mcp-create",
+      "manual-mcp",
+    );
+    const cutoverSubscription = await create(
+      "webhook-manual-cutover-create",
+      "manual-cutover-old",
+    );
+    const firstPendingAt = fixedNow.toISOString();
+    const retryDeadline = new Date(
+      fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    const insertFailedDelivery = async (
+      id: string,
+      subscriptionId: string,
+    ): Promise<void> => {
+      await workerEnv.CONTROL_DB.prepare(
+        `INSERT INTO webhook_deliveries
+         (id, tenant_id, subscription_id, source_event_id, destination_version,
+          status, first_pending_at, retry_deadline, attempt_count, http_status,
+          error_code)
+         VALUES (?, ?, ?, ?, 1, 'failed', ?, ?, 3, 503, 'http_503')`,
+      )
+        .bind(
+          id,
+          "tenant_pilot",
+          subscriptionId,
+          `${id}_source`,
+          firstPendingAt,
+          retryDeadline,
+        )
+        .run();
+    };
+    await insertFailedDelivery("delivery_manual_api", apiSubscription.id);
+    await insertFailedDelivery("delivery_manual_mcp", mcpSubscription.id);
+    await insertFailedDelivery(
+      "delivery_manual_cutover",
+      cutoverSubscription.id,
+    );
+
+    const inspection = await request(
+      "/api/v1/webhook-deliveries/delivery_manual_api",
+    );
+    expect(inspection.status).toBe(200);
+    expect(WebhookDeliverySchema.parse(await inspection.json())).toMatchObject({
+      id: "delivery_manual_api",
+      status: "failed",
+      attempt_count: 3,
+      first_pending_at: firstPendingAt,
+      retry_deadline: retryDeadline,
+    });
+
+    const retry = await request(
+      "/api/v1/webhook-deliveries/delivery_manual_api/retry",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: "webhook-manual-api-retry" }),
+      },
+    );
+    expect(retry.status).toBe(200);
+    const retried = WebhookDeliverySchema.parse(await retry.json());
+    expect(retried).toMatchObject({
+      id: "delivery_manual_api",
+      status: "pending",
+      destination_version: 1,
+      first_pending_at: firstPendingAt,
+      retry_deadline: retryDeadline,
+      attempt_count: 3,
+      error_code: "manual_retry_requested",
+    });
+    expect(retried.next_attempt_at).not.toBeNull();
+
+    const duplicateRetry = await request(
+      "/api/v1/webhook-deliveries/delivery_manual_api/retry",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: "webhook-manual-api-retry" }),
+      },
+    );
+    expect(duplicateRetry.status).toBe(200);
+    expect(WebhookDeliverySchema.parse(await duplicateRetry.json())).toEqual(
+      retried,
+    );
+    const audit = await workerEnv.CONTROL_DB.prepare(
+      `SELECT actor_principal_id, action, target_type, target_id
+       FROM audit_events
+       WHERE target_id = ? AND action = 'webhook.delivery.retry'`,
+    )
+      .bind("delivery_manual_api")
+      .all<{
+        actor_principal_id: string;
+        action: string;
+        target_type: string;
+        target_id: string;
+      }>();
+    expect(audit.results).toEqual([
+      {
+        actor_principal_id: "principal_human",
+        action: "webhook.delivery.retry",
+        target_type: "webhook_delivery",
+        target_id: "delivery_manual_api",
+      },
+    ]);
+
+    const agentDenied = await request(
+      "/api/v1/webhook-deliveries/delivery_manual_mcp/retry",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: "webhook-agent-retry" }),
+      },
+      "agent-token",
+    );
+    expect(agentDenied.status).toBe(403);
+
+    const mcpTransport = new StreamableHTTPClientTransport(
+      new URL("http://example.test/mcp"),
+      {
+        requestInit: {
+          headers: { Authorization: "Bearer human-token" },
+        },
+        fetch: async (input, init) => {
+          const url = input instanceof URL ? input.href : input.toString();
+          return app.request(url, init, workerEnv);
+        },
+      },
+    );
+    const mcp = new Client({ name: "webhook-retry-test", version: "1.0.0" });
+    await mcp.connect(
+      mcpTransport as unknown as Parameters<Client["connect"]>[0],
+    );
+    const mcpRetry = await mcp.callTool({
+      name: "retry_webhook_delivery",
+      arguments: {
+        delivery_id: "delivery_manual_mcp",
+        idempotency_key: "webhook-manual-mcp-retry",
+      },
+    });
+    expect(mcpRetry.isError).not.toBe(true);
+    const mcpPayload = mcpRetry as unknown as {
+      structuredContent?: { id?: string; status?: string };
+    };
+    expect(mcpPayload.structuredContent).toMatchObject({
+      id: "delivery_manual_mcp",
+      status: "pending",
+    });
+    const mcpGet = await mcp.callTool({
+      name: "get_webhook_delivery",
+      arguments: { delivery_id: "delivery_manual_mcp" },
+    });
+    expect(mcpGet.isError).not.toBe(true);
+    await mcp.close();
+
+    const cutover = await request(
+      `/api/v1/webhook-subscriptions/${cutoverSubscription.id}/cutover`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          destination: { url: "https://hooks.example.test/manual-cutover-new" },
+          idempotency_key: "webhook-manual-cutover",
+        }),
+      },
+    );
+    expect(cutover.status).toBe(200);
+    const fencedRetry = await request(
+      "/api/v1/webhook-deliveries/delivery_manual_cutover/retry",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: "webhook-manual-cutover-retry",
+        }),
+      },
+    );
+    expect(fencedRetry.status).toBe(409);
+    await expect(
+      workerEnv.CONTROL_DB.prepare(
+        "SELECT destination_version, status FROM webhook_deliveries WHERE id = ?",
+      )
+        .bind("delivery_manual_cutover")
+        .first<{ destination_version: number; status: string }>(),
+    ).resolves.toEqual({ destination_version: 1, status: "failed" });
   });
 
   it("allocates unique versions for concurrent cutovers and keeps same-key retries idempotent", async () => {
