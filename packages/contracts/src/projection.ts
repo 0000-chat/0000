@@ -17,6 +17,10 @@ import {
   DeliveryStatusSchema,
 } from "./conversation";
 import { TimestampSchema } from "./ids";
+import {
+  MessageSearchDirectionSchema,
+  validateMessageSearchDatesAndTerms,
+} from "./search";
 
 export const MAX_PROJECTION_BATCH_EVENTS = 500;
 export const MAX_PROJECTION_BATCH_BYTES = 4 * 1024 * 1024;
@@ -761,6 +765,32 @@ export const ListProjectionMessagesInputSchema = strictObject({
 
 export type ListProjectionMessagesInput = z.infer<
   typeof ListProjectionMessagesInputSchema
+>;
+
+export const ListProjectionMessageSearchInputSchema = strictObject({
+  schema_version: z.literal(1),
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema.optional(),
+  conversation_id: CanonicalResourceIdSchema.optional(),
+  text: z.string().trim().min(1).max(200).optional(),
+  contact: z.string().trim().min(1).max(100).optional(),
+  from: BoundedTimestampSchema.optional(),
+  to: BoundedTimestampSchema.optional(),
+  direction: MessageSearchDirectionSchema.optional(),
+  page_size: z
+    .number()
+    .int()
+    .safe()
+    .min(1)
+    .max(MAX_PROJECTION_PAGE_SIZE)
+    .optional(),
+  cursor: QueryCursorSchema.optional(),
+  authorization: ProjectionAuthorizationContextSchema,
+}).superRefine(validateMessageSearchDatesAndTerms);
+
+export type ListProjectionMessageSearchInput = z.infer<
+  typeof ListProjectionMessageSearchInputSchema
 >;
 
 export const ListProjectionChangesInputSchema = strictObject({

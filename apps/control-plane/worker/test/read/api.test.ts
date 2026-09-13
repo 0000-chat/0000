@@ -9,6 +9,7 @@ import {
   ConversationPageResultSchema,
   ConversationSummarySchema,
   MessagePageResultSchema,
+  MessageSearchPageResultSchema,
   type ProjectionEventEnvelope,
   type SessionResponse,
 } from "@communicator/contracts";
@@ -521,6 +522,259 @@ describe("authenticated live read API", () => {
       "connection_human_whatsapp",
       "connection_human_whatsapp",
     ]);
+  });
+
+  it("searches stored messages with composed filters, bounded cursors, and tombstones", async () => {
+    const stub = await readFixtures();
+    await stub.applyBatch({
+      schema_version: 1,
+      tenant_id: tenantId,
+      authorization: auth(
+        ["projection.write"],
+        ["identity_agent", "identity_human"],
+        tenantId,
+      ),
+      mode: "live",
+      rebuild_id: null,
+      connections: [
+        bindingFor(
+          "account_agent",
+          "connection_agent_whatsapp",
+          "identity_agent",
+        ),
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      events: [
+        readEvent(
+          "event_search_contact",
+          {
+            participant_id: "participant_search_contact",
+            display_name: "Shared Contact",
+            remote_id: "shared-contact",
+            avatar_url: null,
+          },
+          "participant.updated",
+          {
+            identity_id: "identity_human",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            occurred_at: "2026-09-07T07:00:00.000Z",
+            observed_at: "2026-09-07T07:00:01.000Z",
+          },
+        ),
+        readEvent(
+          "event_search_first",
+          {
+            message_id: "message_search_first",
+            direction: "inbound",
+            sender_participant_id: "participant_search_contact",
+            sender_label: "Shared Contact",
+            body: "alpha first",
+            reply_to_message_id: null,
+            delivery_status: "delivered",
+            unread: true,
+          },
+          "message.created",
+          {
+            identity_id: "identity_human",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            occurred_at: "2026-09-07T08:00:00.000Z",
+            observed_at: "2026-09-07T08:00:01.000Z",
+          },
+        ),
+        readEvent(
+          "event_search_second",
+          {
+            message_id: "message_search_second",
+            direction: "outbound",
+            sender_participant_id: null,
+            sender_label: "Human owner",
+            body: "beta reply",
+            reply_to_message_id: null,
+            delivery_status: "sent",
+            unread: false,
+          },
+          "message.created",
+          {
+            identity_id: "identity_human",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            occurred_at: "2026-09-07T09:00:00.000Z",
+            observed_at: "2026-09-07T09:00:01.000Z",
+          },
+        ),
+        readEvent(
+          "event_search_deleted",
+          {
+            message_id: "message_search_deleted",
+            direction: "inbound",
+            sender_participant_id: "participant_search_contact",
+            sender_label: "Shared Contact",
+            body: "secret old text",
+            reply_to_message_id: null,
+            delivery_status: "delivered",
+            unread: false,
+          },
+          "message.created",
+          {
+            identity_id: "identity_human",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            occurred_at: "2026-09-07T10:00:00.000Z",
+            observed_at: "2026-09-07T10:00:01.000Z",
+          },
+        ),
+        deletionTombstone(
+          "event_search_deleted_tombstone",
+          "message",
+          "message_search_deleted",
+          {
+            tenant_id: tenantId,
+            identity_id: "identity_human",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            occurred_at: "2026-09-07T11:00:00.000Z",
+            observed_at: "2026-09-07T11:00:01.000Z",
+          },
+        ),
+        readEvent(
+          "event_search_other_contact",
+          {
+            participant_id: "participant_search_other_contact",
+            display_name: "Shared Contact",
+            remote_id: "other-shared-contact",
+            avatar_url: null,
+          },
+          "participant.updated",
+          {
+            identity_id: "identity_agent",
+            account_id: "account_agent",
+            conversation_id: "conversation_agent_one",
+            occurred_at: "2026-09-07T12:00:00.000Z",
+            observed_at: "2026-09-07T12:00:01.000Z",
+          },
+        ),
+        readEvent(
+          "event_search_other_message",
+          {
+            message_id: "message_search_other",
+            direction: "inbound",
+            sender_participant_id: "participant_search_other_contact",
+            sender_label: "Shared Contact",
+            body: "other account body",
+            reply_to_message_id: null,
+            delivery_status: "delivered",
+            unread: true,
+          },
+          "message.created",
+          {
+            identity_id: "identity_agent",
+            account_id: "account_agent",
+            conversation_id: "conversation_agent_one",
+            occurred_at: "2026-09-07T13:00:00.000Z",
+            observed_at: "2026-09-07T13:00:01.000Z",
+          },
+        ),
+      ],
+      checkpoint: null,
+    });
+
+    const empty = await request(
+      "/api/v1/search/messages?identity_id=identity_human&text=missing",
+    );
+    expect(empty.status).toBe(200);
+    expect(MessageSearchPageResultSchema.parse(await empty.json())).toEqual({
+      items: [],
+      next_cursor: null,
+    });
+
+    const composed = await request(
+      "/api/v1/search/messages?identity_id=identity_human&account_id=account_human&conversation_id=conversation_human_one&contact=Shared%20Contact&direction=outbound&from=2026-09-07T08:00:00.000Z&to=2026-09-07T10:00:00.000Z",
+    );
+    expect(composed.status).toBe(200);
+    const composedPage = MessageSearchPageResultSchema.parse(
+      await composed.json(),
+    );
+    expect(composedPage.items.map((item) => item.id)).toEqual([
+      "message_search_second",
+    ]);
+    expect(composedPage.items[0]).toMatchObject({
+      account_id: "account_human",
+      conversation_id: "conversation_human_one",
+      contact_id: "participant_search_contact",
+      revision: "event_search_second",
+      removed: false,
+      attachments: [],
+    });
+
+    const crossAccountContact = await request(
+      "/api/v1/search/messages?identity_id=identity_agent&account_id=account_agent&contact=Shared%20Contact",
+      "agent-token",
+    );
+    expect(crossAccountContact.status).toBe(200);
+    expect(
+      MessageSearchPageResultSchema.parse(
+        await crossAccountContact.json(),
+      ).items.map((item) => item.id),
+    ).toEqual(["message_search_other", "message_agent_one"]);
+
+    const first = await request(
+      "/api/v1/search/messages?identity_id=identity_human&account_id=account_human&limit=1",
+    );
+    const firstPage = MessageSearchPageResultSchema.parse(await first.json());
+    expect(first.status).toBe(200);
+    expect(firstPage.next_cursor).toEqual(expect.any(String));
+    const reused = await request(
+      `/api/v1/search/messages?identity_id=identity_human&account_id=account_human&text=alpha&cursor=${encodeURIComponent(firstPage.next_cursor!)}`,
+    );
+    await expectErrorResponse(reused, 400);
+
+    // A rebuild generation change is the projection's established cursor
+    // expiry signal; no wall-clock expiry is claimed for opaque seek cursors.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE projection_meta SET generation = generation + 1 WHERE singleton = 1",
+      );
+    });
+    const expired = await request(
+      `/api/v1/search/messages?identity_id=identity_human&account_id=account_human&limit=1&cursor=${encodeURIComponent(firstPage.next_cursor!)}`,
+    );
+    await expectErrorResponse(expired, 400);
+
+    const tombstones = await request(
+      "/api/v1/search/messages?identity_id=identity_human&account_id=account_human&conversation_id=conversation_human_one",
+    );
+    const tombstonePage = MessageSearchPageResultSchema.parse(
+      await tombstones.json(),
+    );
+    expect(tombstones.status).toBe(200);
+    expect(
+      tombstonePage.items.find((item) => item.id === "message_search_deleted"),
+    ).toMatchObject({
+      body: "",
+      removed: true,
+      removed_at: "2026-09-07T11:00:00.000Z",
+      removal_reason: "retention",
+      attachments: [],
+    });
+
+    await expectErrorResponse(
+      await request(
+        "/api/v1/search/messages?identity_id=identity_human&from=not-a-date",
+      ),
+      400,
+    );
+    await expectErrorResponse(
+      await request(
+        "/api/v1/search/messages?identity_id=identity_human&text=alpha%20alpha",
+      ),
+      400,
+    );
   });
 
   it("uses byte-identical not-found responses for identity, missing, deleted, and cross-identity probes", async () => {

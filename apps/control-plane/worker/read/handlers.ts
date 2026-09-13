@@ -6,12 +6,16 @@ import {
   IdentitySchema,
   MAX_IDENTITY_CONNECTIONS,
   MessagePageResultSchema,
+  MessageSearchPageResultSchema,
+  MessageSearchRequestSchema,
   type ChannelSummary,
   type Connection,
   type ConversationPageResult,
   type ConversationSummary,
   type Identity,
   type MessagePageResult,
+  type MessageSearchPageResult,
+  type MessageSearchRequest,
   type ProjectionAuthorizationContext,
   type SessionResponse,
 } from "@communicator/contracts";
@@ -61,9 +65,15 @@ export type ListMessagesInput = {
   limit?: number;
 };
 
+export type SearchMessagesInput = MessageSearchRequest;
+
 type ProjectionReadStub = Pick<
   DurableObjectStub<TenantProjectionDO>,
-  "listChannelStats" | "listConversations" | "getConversation" | "listMessages"
+  | "listChannelStats"
+  | "listConversations"
+  | "getConversation"
+  | "listMessages"
+  | "searchMessages"
 >;
 
 const directorySession = (env: Cloudflare.Env): D1DatabaseSession => {
@@ -438,5 +448,74 @@ export async function listMessages(
       authorization,
     });
     return MessagePageResultSchema.parse(structuredClone(page));
+  });
+}
+
+export async function searchMessages(
+  context: ReadHandlerContext,
+  input: SearchMessagesInput,
+): Promise<MessageSearchPageResult> {
+  return withReadErrors(async () => {
+    let parsedInput: MessageSearchRequest;
+    try {
+      parsedInput = MessageSearchRequestSchema.parse(input);
+    } catch (error) {
+      throw new ReadError("invalid_request", error);
+    }
+
+    let resourceIdentityId = parsedInput.identity_id;
+    let authorization: ProjectionAuthorizationContext;
+    if (parsedInput.account_id !== undefined) {
+      const resolved = await toGrantedAccountReadAuthorization(
+        context.env,
+        context.authorization,
+        parsedInput.identity_id,
+        parsedInput.account_id,
+        context.delegated,
+      );
+      resourceIdentityId = resolved.resourceIdentityId;
+      authorization = resolved.authorization;
+    } else {
+      requireAuthorizedIdentity(
+        context.authorization,
+        parsedInput.identity_id,
+        "conversation.read",
+      );
+      authorization = await toGrantedProjectionReadAuthorization(
+        context.env,
+        context.authorization,
+        parsedInput.identity_id,
+        context.delegated,
+      );
+    }
+    validateAccountFilter(parsedInput.account_id, authorization);
+    const page = await projection(context).searchMessages({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      identity_id: resourceIdentityId,
+      ...(parsedInput.account_id === undefined
+        ? {}
+        : { account_id: parsedInput.account_id }),
+      ...(parsedInput.conversation_id === undefined
+        ? {}
+        : { conversation_id: parsedInput.conversation_id }),
+      ...(parsedInput.text === undefined ? {} : { text: parsedInput.text }),
+      ...(parsedInput.contact === undefined
+        ? {}
+        : { contact: parsedInput.contact }),
+      ...(parsedInput.from === undefined ? {} : { from: parsedInput.from }),
+      ...(parsedInput.to === undefined ? {} : { to: parsedInput.to }),
+      ...(parsedInput.direction === undefined
+        ? {}
+        : { direction: parsedInput.direction }),
+      ...(parsedInput.limit === undefined
+        ? {}
+        : { page_size: parsedInput.limit }),
+      ...(parsedInput.cursor === undefined
+        ? {}
+        : { cursor: parsedInput.cursor }),
+      authorization,
+    });
+    return MessageSearchPageResultSchema.parse(structuredClone(page));
   });
 }

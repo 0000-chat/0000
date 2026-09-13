@@ -1,8 +1,10 @@
 import {
   ConversationCursorSchema,
   MAX_PROJECTION_CURSOR_CHARS,
+  MessageSearchCursorSchema,
   MessageCursorSchema,
   type ConversationCursor,
+  type MessageSearchCursor,
   type MessageCursor,
 } from "@communicator/contracts";
 import { canonicalJsonStringify } from "../archive/canonical-json";
@@ -22,6 +24,19 @@ export type MessageCursorContext = {
   readonly tenant_id: string;
   readonly identity_id: string;
   readonly conversation_id: string;
+  readonly generation: number;
+};
+
+export type MessageSearchCursorContext = {
+  readonly tenant_id: string;
+  readonly identity_id: string;
+  readonly account_id: string | null;
+  readonly conversation_id: string | null;
+  readonly text: string | null;
+  readonly contact: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly direction: "inbound" | "outbound" | null;
   readonly generation: number;
 };
 
@@ -216,7 +231,10 @@ const containsDuplicateObjectKey = (json: string): boolean => {
 
 const payloadBytes = (
   payload: unknown,
-  schema: typeof ConversationCursorSchema | typeof MessageCursorSchema,
+  schema:
+    | typeof ConversationCursorSchema
+    | typeof MessageCursorSchema
+    | typeof MessageSearchCursorSchema,
 ): Uint8Array => {
   let parsed: { success: true; data: unknown } | { success: false };
   try {
@@ -234,7 +252,10 @@ const payloadBytes = (
 
 const encodePayload = (
   payload: unknown,
-  schema: typeof ConversationCursorSchema | typeof MessageCursorSchema,
+  schema:
+    | typeof ConversationCursorSchema
+    | typeof MessageCursorSchema
+    | typeof MessageSearchCursorSchema,
 ): string => {
   const encoded = encodeBase64Url(payloadBytes(payload, schema));
   if (encoded.length > MAX_PROJECTION_CURSOR_CHARS) {
@@ -245,7 +266,10 @@ const encodePayload = (
 
 const decodePayload = <T>(
   cursor: unknown,
-  schema: typeof ConversationCursorSchema | typeof MessageCursorSchema,
+  schema:
+    | typeof ConversationCursorSchema
+    | typeof MessageCursorSchema
+    | typeof MessageSearchCursorSchema,
 ): T => {
   if (typeof cursor !== "string" || cursor.length === 0) {
     throw projectionError("projection_invalid");
@@ -318,6 +342,30 @@ const validateMessageContext = (
   if (
     cursor.identity_id !== expected.identity_id ||
     cursor.conversation_id !== expected.conversation_id ||
+    cursor.generation !== expected.generation
+  ) {
+    throw projectionError("projection_conflict");
+  }
+};
+
+const validateMessageSearchContext = (
+  cursor: MessageSearchCursor,
+  expected: MessageSearchCursorContext,
+): void => {
+  // Search cursors are generation-bound. A projection rebuild advances the
+  // generation, which expires every cursor from the prior stored view.
+  if (cursor.tenant_id !== expected.tenant_id) {
+    throw projectionError("projection_tenant_mismatch");
+  }
+  if (
+    cursor.identity_id !== expected.identity_id ||
+    cursor.account_id !== expected.account_id ||
+    cursor.conversation_id !== expected.conversation_id ||
+    cursor.text !== expected.text ||
+    cursor.contact !== expected.contact ||
+    cursor.from !== expected.from ||
+    cursor.to !== expected.to ||
+    cursor.direction !== expected.direction ||
     cursor.generation !== expected.generation
   ) {
     throw projectionError("projection_conflict");
@@ -398,5 +446,20 @@ export function decodeMessageCursor(
         : expectedOrTenant;
     validateMessageContext(parsed, expected);
   }
+  return parsed;
+}
+
+export const encodeMessageSearchCursor = (payload: unknown): string =>
+  encodePayload(payload, MessageSearchCursorSchema);
+
+export function decodeMessageSearchCursor(
+  cursor: unknown,
+  expected?: MessageSearchCursorContext,
+): MessageSearchCursor {
+  const parsed = decodePayload<MessageSearchCursor>(
+    cursor,
+    MessageSearchCursorSchema,
+  );
+  if (expected !== undefined) validateMessageSearchContext(parsed, expected);
   return parsed;
 }

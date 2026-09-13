@@ -127,6 +127,68 @@ async function seedProjection(): Promise<void> {
           observed_at: "2026-09-13T00:01:01.000Z",
         },
       ),
+      event(
+        "oauth_read_participant",
+        {
+          participant_id: "participant_oauth_contact",
+          display_name: "OAuth contact",
+          remote_id: "oauth-contact-remote",
+          avatar_url: null,
+        },
+        "participant.updated",
+        {
+          tenant_id: tenantId,
+          identity_id: "identity_human",
+          account_id: "account_human",
+          conversation_id: "conversation_oauth",
+          occurred_at: "2026-09-13T00:02:00.000Z",
+          observed_at: "2026-09-13T00:02:01.000Z",
+        },
+      ),
+      event(
+        "oauth_read_inbound_message",
+        {
+          message_id: "message_oauth_inbound",
+          direction: "inbound",
+          sender_participant_id: "participant_oauth_contact",
+          sender_label: "OAuth contact",
+          body: "stored inbound context",
+          reply_to_message_id: null,
+          delivery_status: "delivered",
+          unread: true,
+        },
+        "message.created",
+        {
+          tenant_id: tenantId,
+          identity_id: "identity_human",
+          account_id: "account_human",
+          conversation_id: "conversation_oauth",
+          occurred_at: "2026-09-13T00:03:00.000Z",
+          observed_at: "2026-09-13T00:03:01.000Z",
+        },
+      ),
+      event(
+        "oauth_read_outbound_message",
+        {
+          message_id: "message_oauth_outbound",
+          direction: "outbound",
+          sender_participant_id: null,
+          sender_label: "Human owner",
+          body: "reply stored for OAuth contact",
+          reply_to_message_id: null,
+          delivery_status: "sent",
+          unread: false,
+        },
+        "message.created",
+        {
+          tenant_id: tenantId,
+          identity_id: "identity_human",
+          account_id: "account_human",
+          conversation_id: "conversation_oauth",
+          occurred_at: "2026-09-13T00:04:00.000Z",
+          observed_at: "2026-09-13T00:04:01.000Z",
+        },
+      ),
     ],
     checkpoint: null,
   });
@@ -776,6 +838,39 @@ describe("OAuth authorization code and shared MCP read boundary", () => {
         (item) => item.id,
       ),
     );
+    const searchArguments = {
+      identity_id: installation?.identity_id,
+      account_id: "account_human",
+      text: "reply",
+      contact: "OAuth contact",
+      direction: "outbound" as const,
+    };
+    const mcpSearch = await client.callTool({
+      name: "search_messages",
+      arguments: searchArguments,
+    });
+    expect(mcpSearch.isError).not.toBe(true);
+    const mcpSearchPage = mcpSearch.structuredContent as {
+      items: Array<Record<string, unknown>>;
+      next_cursor: string | null;
+    };
+    expect(mcpSearchPage.items.map((item) => item.id)).toEqual([
+      "message_oauth_outbound",
+    ]);
+    expect(mcpSearchPage.items[0]?.contact_id).toBe(
+      "participant_oauth_contact",
+    );
+    const apiSearch = await requestApi(
+      app,
+      tokenBody.access_token,
+      `/api/v1/search/messages?identity_id=${installation?.identity_id}&account_id=account_human&text=reply&contact=${encodeURIComponent("OAuth contact")}&direction=outbound`,
+    );
+    expect(apiSearch.status).toBe(200);
+    const apiSearchPage = (await apiSearch.json()) as {
+      items: Array<Record<string, unknown>>;
+      next_cursor: string | null;
+    };
+    expect(apiSearchPage).toEqual(mcpSearchPage);
     const revocableToken = await installationToken();
     const revocableJti = decodeJwt(revocableToken).jti;
     expect(revocableJti).toBeTruthy();

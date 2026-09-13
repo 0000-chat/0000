@@ -28,6 +28,8 @@ import {
   identitiesHandler,
   messagesRoute,
   messagesHandler,
+  searchMessagesRoute,
+  searchMessagesHandler,
   accountConversationsRoute,
   accountConversationsHandler,
 } from "./routes/read";
@@ -342,6 +344,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/conversations/*", productAuthorization);
   app.use("/api/v1/identities/*/link-sessions", productAuthorization);
   app.use("/api/v1/link-sessions/*", productAuthorization);
+  app.use("/api/v1/search/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -359,6 +362,7 @@ export function createApp(services: AppServices = {}) {
   app.openapi(conversationsRoute, conversationsHandler);
   app.openapi(conversationRoute, conversationHandler);
   app.openapi(messagesRoute, messagesHandler);
+  app.openapi(searchMessagesRoute, searchMessagesHandler);
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);
   app.openapi(grantTargetsRoute, grantTargetsHandler);

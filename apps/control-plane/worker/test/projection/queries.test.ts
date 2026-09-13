@@ -1331,6 +1331,7 @@ describe("tenant projection query RPCs", () => {
       "getConversation",
       "listChannelStats",
       "listMessages",
+      "searchMessages",
       "listChanges",
     ]);
 
