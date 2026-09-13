@@ -1,12 +1,15 @@
 import {
   GetWebhookMessageInputSchema,
   ProjectionAuthorizationContextSchema,
+  RemovalAuthoritySchema,
   WebhookDeliveryPayloadSchema,
+  WebhookRemovalDeliveryPayloadSchema,
   WebhookEventFilterSchema,
   type GetWebhookMessageInput,
   type ProjectionEventEnvelope,
   type ProjectionAttachment,
   type WebhookDeliveryPayload,
+  type WebhookRemovalDeliveryPayload,
   type WebhookMessage,
   type WebhookSubscription,
 } from "@communicator/contracts";
@@ -16,6 +19,16 @@ import { hasAccountOperationGrant } from "../control-directory/grants";
 import { getWebhookSubscription } from "../control-directory/webhooks";
 import { readAuthorizedMessageRemoval } from "../removals/service";
 import { readTenantDeletionEpoch } from "../removals/ledger";
+import {
+  isEligibleWebhookSource,
+  isWebhookRemovalDelivery,
+  sourceMessageIdForWebhookEvent,
+  webhookDeliveryEventTypeFor,
+  WEBHOOK_MESSAGE_CREATED,
+  WEBHOOK_MESSAGE_DELETED,
+  WEBHOOK_MESSAGE_EDITED,
+  type WebhookDeliveryEventType,
+} from "./revisions";
 
 const DELIVERY_LEASE_MS = 60_000;
 const MAX_DELIVERY_BATCH = 100;
@@ -32,13 +45,13 @@ const RETRY_BACKOFF_MS = [
 ] as const;
 const MAX_RESPONSE_BODY_BYTES = 8_192;
 const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
-const MESSAGE_CREATED = "message.created";
 
 type DeliveryRow = {
   id: string;
   tenant_id: string;
   subscription_id: string;
   source_event_id: string;
+  event_type: WebhookDeliveryEventType;
   source_message_id: string | null;
   source_identity_id: string | null;
   source_account_id: string | null;
@@ -193,7 +206,9 @@ const resolveStoredCredential = async (
 };
 
 type Candidate = {
-  event: Extract<ProjectionEventEnvelope, { event_type: "message.created" }>;
+  event: ProjectionEventEnvelope;
+  eventType: WebhookDeliveryEventType;
+  sourceMessageId: string;
   subscription: WebhookSubscription;
   deliveryId: string;
 };
@@ -317,25 +332,17 @@ const fetchWithTimeout = async (
   }
 };
 
-const sourceIsEligible = (
-  event: ProjectionEventEnvelope,
-): event is Extract<
-  ProjectionEventEnvelope,
-  { event_type: "message.created" }
-> =>
-  event.event_type === MESSAGE_CREATED &&
-  event.event_source === "live" &&
-  event.payload.direction === "inbound";
-
 const subscriptionAllowsEvent = (
   subscription: WebhookSubscription,
-  event: Extract<ProjectionEventEnvelope, { event_type: "message.created" }>,
+  event: ProjectionEventEnvelope,
 ): boolean => {
+  const deliveryEventType = webhookDeliveryEventTypeFor(event);
+  if (deliveryEventType === null) return false;
   if (
     subscription.status !== "active" ||
     !WebhookEventFilterSchema.parse(
       subscription.event_filter,
-    ).event_types.includes(event.event_type)
+    ).event_types.includes(deliveryEventType)
   ) {
     return false;
   }
@@ -347,6 +354,35 @@ const subscriptionAllowsEvent = (
   if (chatRule !== undefined) return chatRule.enabled;
   const accountRule = subscription.account_rules.find(
     (rule) => rule.account_id === event.account_id,
+  );
+  return accountRule?.enabled ?? subscription.global_enabled;
+};
+
+const subscriptionAllowsStoredDelivery = (
+  subscription: WebhookSubscription,
+  delivery: Pick<
+    DeliveryRow,
+    "event_type" | "source_account_id" | "source_conversation_id"
+  >,
+): boolean => {
+  if (
+    subscription.status !== "active" ||
+    !WebhookEventFilterSchema.parse(
+      subscription.event_filter,
+    ).event_types.includes(delivery.event_type) ||
+    delivery.source_account_id === null ||
+    delivery.source_conversation_id === null
+  ) {
+    return false;
+  }
+  const chatRule = subscription.chat_rules.find(
+    (rule) =>
+      rule.account_id === delivery.source_account_id &&
+      rule.chat_id === delivery.source_conversation_id,
+  );
+  if (chatRule !== undefined) return chatRule.enabled;
+  const accountRule = subscription.account_rules.find(
+    (rule) => rule.account_id === delivery.source_account_id,
   );
   return accountRule?.enabled ?? subscription.global_enabled;
 };
@@ -523,6 +559,38 @@ const readActiveSubscriptions = async (
   );
 };
 
+const previouslyDeliveredDestinationVersion = async (
+  db: D1DatabaseSession,
+  input: {
+    tenantId: string;
+    subscriptionId: string;
+    sourceMessageId: string;
+    accountId: string;
+    conversationId: string;
+  },
+): Promise<number | null> => {
+  const row = await db
+    .prepare(
+      `SELECT destination_version
+       FROM webhook_deliveries
+       WHERE tenant_id = ? AND subscription_id = ?
+         AND source_message_id = ? AND source_account_id = ?
+         AND source_conversation_id = ? AND event_type = 'message.created'
+         AND status = 'delivered'
+       ORDER BY delivered_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .bind(
+      input.tenantId,
+      input.subscriptionId,
+      input.sourceMessageId,
+      input.accountId,
+      input.conversationId,
+    )
+    .first<{ destination_version: number }>();
+  return row?.destination_version ?? null;
+};
+
 const insertDeliveryRows = async (
   database: D1Database,
   candidates: readonly Candidate[],
@@ -540,14 +608,14 @@ const insertDeliveryRows = async (
           .prepare(
             `INSERT OR IGNORE INTO webhook_deliveries
              (id, tenant_id, subscription_id, source_event_id,
-              source_message_id, source_identity_id, source_account_id,
+              event_type, source_message_id, source_identity_id, source_account_id,
               source_conversation_id, source_revision, destination_version,
               status, first_pending_at, retry_deadline, attempt_count,
               next_attempt_at, cancelled_at, cancellation_reason, lease_id,
               lease_expires_at, last_attempt_at, delivered_at, http_status,
               error_code, payload_json, last_response_body, manual_retry_at,
               uncertain_at, uncertainty_reason)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0,
                      ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                      NULL, NULL, NULL, NULL)`,
           )
@@ -556,7 +624,8 @@ const insertDeliveryRows = async (
             candidate.event.tenant_id,
             candidate.subscription.id,
             candidate.event.event_id,
-            candidate.event.payload.message_id,
+            candidate.eventType,
+            candidate.sourceMessageId,
             candidate.event.identity_id,
             candidate.event.account_id,
             candidate.event.conversation_id,
@@ -571,6 +640,255 @@ const insertDeliveryRows = async (
   }
 };
 
+type RemovalAuthorityRow = {
+  id: string;
+  tenant_id: string;
+  resource_type: string;
+  resource_id: string;
+  content_generation: string;
+  account_id: string | null;
+  conversation_id: string | null;
+  source_event_id: string | null;
+  reason: string;
+  removed_at: string;
+};
+
+type DeliveredSourceRow = {
+  subscription_id: string;
+  source_message_id: string | null;
+  source_identity_id: string | null;
+  source_account_id: string | null;
+  source_conversation_id: string | null;
+  destination_version: number;
+  payload_json: string | null;
+};
+
+const authoritySourceEventId = (
+  authority: RemovalAuthorityRow,
+  sourceMessageId: string,
+): string => {
+  const base = authority.source_event_id ?? `removal_${authority.id}`;
+  return authority.resource_type === "message"
+    ? base
+    : `${base}:message:${sourceMessageId}`;
+};
+
+const deliveredRowsForRemovalAuthority = async (
+  database: D1Database,
+  authority: RemovalAuthorityRow,
+): Promise<DeliveredSourceRow[]> => {
+  const sourceFilter =
+    authority.resource_type === "message"
+      ? "source_message_id = ?"
+      : authority.resource_type === "conversation"
+        ? "source_conversation_id = ?"
+        : "source_message_id IS NOT NULL";
+  const rows = await database
+    .prepare(
+      `SELECT subscription_id, source_message_id, source_identity_id,
+              source_account_id, source_conversation_id, destination_version,
+              payload_json
+       FROM webhook_deliveries
+       WHERE tenant_id = ? AND status = 'delivered' AND ${sourceFilter}
+       ORDER BY subscription_id ASC, source_message_id ASC, id ASC`,
+    )
+    .bind(
+      authority.tenant_id,
+      ...(authority.resource_type === "message"
+        ? [authority.resource_id]
+        : authority.resource_type === "conversation"
+          ? [authority.resource_id]
+          : []),
+    )
+    .all<DeliveredSourceRow>();
+  if (authority.resource_type !== "attachment") return rows.results;
+  return rows.results.filter((row) => {
+    if (row.payload_json === null) return false;
+    try {
+      const parsed: unknown = JSON.parse(row.payload_json);
+      const payload = WebhookDeliveryPayloadSchema.safeParse(parsed);
+      return (
+        payload.success &&
+        "attachments" in payload.data &&
+        payload.data.attachments.some(
+          (attachment) => attachment.attachment_id === authority.resource_id,
+        )
+      );
+    } catch {
+      return false;
+    }
+  });
+};
+
+const authorityAppliesToDeliveredRow = (
+  authority: RemovalAuthorityRow,
+  row: DeliveredSourceRow,
+): boolean =>
+  row.source_message_id !== null &&
+  row.source_identity_id !== null &&
+  row.source_account_id !== null &&
+  row.source_conversation_id !== null &&
+  (authority.account_id === null ||
+    authority.account_id === row.source_account_id) &&
+  (authority.conversation_id === null ||
+    authority.conversation_id === row.source_conversation_id);
+
+const insertRemovalDeliveryRows = async (
+  database: D1Database,
+  authority: RemovalAuthorityRow,
+  subscriptions: readonly WebhookSubscription[],
+  rows: readonly DeliveredSourceRow[],
+  now: string,
+): Promise<string[]> => {
+  const candidates: Array<{
+    id: string;
+    subscription: WebhookSubscription;
+    row: DeliveredSourceRow;
+    sourceEventId: string;
+    sourceMessageId: string;
+  }> = [];
+  for (const row of rows) {
+    if (!authorityAppliesToDeliveredRow(authority, row)) continue;
+    const sourceMessageId = row.source_message_id;
+    if (sourceMessageId === null) continue;
+    const subscription = subscriptions.find(
+      (value) => value.id === row.subscription_id,
+    );
+    if (
+      subscription === undefined ||
+      subscription.destination_version !== row.destination_version ||
+      !subscriptionAllowsStoredDelivery(subscription, {
+        event_type: WEBHOOK_MESSAGE_DELETED,
+        source_account_id: row.source_account_id,
+        source_conversation_id: row.source_conversation_id,
+      }) ||
+      !(await currentAuthority(
+        databaseSession(database),
+        subscription,
+        row.source_account_id ?? "",
+        row.source_conversation_id ?? "",
+      ))
+    ) {
+      continue;
+    }
+    const sourceEventId = authoritySourceEventId(authority, sourceMessageId);
+    candidates.push({
+      id: await stableDeliveryId(
+        authority.tenant_id,
+        subscription.id,
+        sourceEventId,
+      ),
+      subscription,
+      row,
+      sourceEventId,
+      sourceMessageId,
+    });
+  }
+  if (candidates.length === 0) return [];
+  const retryDeadline = retryDeadlineFor(now);
+  await database.batch(
+    candidates.map((candidate) =>
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO webhook_deliveries
+           (id, tenant_id, subscription_id, source_event_id, event_type,
+            source_message_id, source_identity_id, source_account_id,
+            source_conversation_id, source_revision, destination_version,
+            status, first_pending_at, retry_deadline, attempt_count,
+            next_attempt_at, cancelled_at, cancellation_reason, lease_id,
+            lease_expires_at, last_attempt_at, delivered_at, http_status,
+            error_code, payload_json, last_response_body, manual_retry_at,
+            uncertain_at, uncertainty_reason)
+           VALUES (?, ?, ?, ?, 'message.deleted', ?, ?, ?, ?, ?, ?, 'pending',
+                   ?, ?, 0, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, NULL, NULL)`,
+        )
+        .bind(
+          candidate.id,
+          authority.tenant_id,
+          candidate.subscription.id,
+          candidate.sourceEventId,
+          candidate.sourceMessageId,
+          candidate.row.source_identity_id,
+          candidate.row.source_account_id,
+          candidate.row.source_conversation_id,
+          authority.source_event_id ?? authority.content_generation,
+          candidate.subscription.destination_version,
+          now,
+          retryDeadline,
+          now,
+        ),
+    ),
+  );
+  return candidates.map((candidate) => candidate.id);
+};
+
+/**
+ * Reconcile durable removal authority with destinations that already received
+ * the message. This covers API/MCP deletes and expiry records that do not
+ * carry a projection deletion event through ingestion.
+ */
+export const reconcileWebhookRemovalDeliveries = async (input: {
+  database: D1Database;
+  tenantId?: string;
+  now?: (() => Date) | undefined;
+}): Promise<string[]> => {
+  const now = input.now?.() ?? new Date();
+  const authorityQuery = input.tenantId
+    ? input.database
+        .prepare(
+          `SELECT id, tenant_id, resource_type, resource_id,
+                  content_generation, account_id, conversation_id,
+                  source_event_id, reason, removed_at
+           FROM removal_authority
+           WHERE tenant_id = ? AND status IN ('active', 'completed', 'failed')
+           ORDER BY removed_at ASC, id ASC`,
+        )
+        .bind(input.tenantId)
+    : input.database.prepare(
+        `SELECT id, tenant_id, resource_type, resource_id,
+                content_generation, account_id, conversation_id,
+                source_event_id, reason, removed_at
+         FROM removal_authority
+         WHERE status IN ('active', 'completed', 'failed')
+         ORDER BY removed_at ASC, id ASC`,
+      );
+  const authorities = await authorityQuery.all<RemovalAuthorityRow>();
+  const subscriptionsByTenant = new Map<string, WebhookSubscription[]>();
+  const ids: string[] = [];
+  for (const authority of authorities.results) {
+    if (
+      authority.resource_type !== "message" &&
+      authority.resource_type !== "conversation" &&
+      authority.resource_type !== "attachment"
+    ) {
+      continue;
+    }
+    let subscriptions = subscriptionsByTenant.get(authority.tenant_id);
+    if (subscriptions === undefined) {
+      subscriptions = await readActiveSubscriptions(
+        databaseSession(input.database),
+        authority.tenant_id,
+      );
+      subscriptionsByTenant.set(authority.tenant_id, subscriptions);
+    }
+    const deliveredRows = await deliveredRowsForRemovalAuthority(
+      input.database,
+      authority,
+    );
+    ids.push(
+      ...(await insertRemovalDeliveryRows(
+        input.database,
+        authority,
+        subscriptions,
+        deliveredRows,
+        now.toISOString(),
+      )),
+    );
+  }
+  return [...new Set(ids)];
+};
+
 const readDelivery = async (
   db: D1DatabaseSession,
   tenantId: string,
@@ -579,7 +897,7 @@ const readDelivery = async (
   const row = await db
     .prepare(
       `SELECT id, tenant_id, subscription_id, source_event_id,
-              source_message_id, source_identity_id, source_account_id,
+              event_type, source_message_id, source_identity_id, source_account_id,
               source_conversation_id, source_revision, destination_version,
               status, first_pending_at, retry_deadline, attempt_count,
               next_attempt_at, cancelled_at, cancellation_reason, lease_id,
@@ -858,6 +1176,8 @@ const payloadFor = async (
   sourceEventId: string,
   message: WebhookMessage,
   now: Date,
+  eventType: typeof WEBHOOK_MESSAGE_CREATED | typeof WEBHOOK_MESSAGE_EDITED,
+  revisionOverride?: string,
 ): Promise<WebhookDeliveryPayload> => {
   if (message.deleted_at !== null || message.direction !== "inbound") {
     throw new Error("webhook message is unavailable");
@@ -889,7 +1209,7 @@ const payloadFor = async (
   );
   return WebhookDeliveryPayloadSchema.parse({
     schema_version: 1,
-    type: MESSAGE_CREATED,
+    type: eventType,
     delivery_id: deliveryId,
     source_event_id: sourceEventId,
     source_message_id: message.message_id,
@@ -897,7 +1217,7 @@ const payloadFor = async (
     identity_id: message.identity_id,
     account_id: message.account_id,
     chat_id: message.conversation_id,
-    revision: message.revision,
+    revision: revisionOverride ?? message.revision,
     timestamp: message.occurred_at,
     sender: {
       participant_id: message.sender_participant_id,
@@ -947,6 +1267,7 @@ const hydrateCurrentPayload = async (
   ) {
     return null;
   }
+  if (isWebhookRemovalDelivery(delivery.event_type)) return null;
   const authorization = projectionAuthorization(
     delivery.tenant_id,
     subscription.owner_principal_id,
@@ -977,6 +1298,12 @@ const hydrateCurrentPayload = async (
     delivery.source_event_id,
     message,
     now,
+    delivery.event_type === WEBHOOK_MESSAGE_EDITED
+      ? WEBHOOK_MESSAGE_EDITED
+      : WEBHOOK_MESSAGE_CREATED,
+    delivery.event_type === WEBHOOK_MESSAGE_EDITED
+      ? (delivery.source_revision ?? undefined)
+      : undefined,
   );
   return { payload, revision: message.revision };
 };
@@ -986,6 +1313,7 @@ const removalForDelivery = async (
   delivery: Pick<
     DeliveryRow,
     | "tenant_id"
+    | "subscription_id"
     | "source_message_id"
     | "source_account_id"
     | "source_conversation_id"
@@ -998,11 +1326,204 @@ const removalForDelivery = async (
   ) {
     return null;
   }
-  return readAuthorizedMessageRemoval(database, {
+  const messageRemoval = await readAuthorizedMessageRemoval(database, {
     tenantId: delivery.tenant_id,
     messageId: delivery.source_message_id,
     accountId: delivery.source_account_id,
     conversationId: delivery.source_conversation_id,
+  });
+  if (messageRemoval !== null) return messageRemoval;
+
+  // Attachment authorities do not replace the message lineage. Match the
+  // removed attachment against the already delivered metadata and return the
+  // authority so the next event remains content-free.
+  const attachmentRows = await database
+    .prepare(
+      `SELECT * FROM removal_authority
+       WHERE tenant_id = ? AND resource_type = 'attachment'
+         AND status IN ('active', 'completed', 'failed')
+         AND (account_id IS NULL OR account_id = ?)
+         AND (conversation_id IS NULL OR conversation_id = ?)
+       ORDER BY removed_at DESC, id DESC`,
+    )
+    .bind(
+      delivery.tenant_id,
+      delivery.source_account_id,
+      delivery.source_conversation_id,
+    )
+    .all<Record<string, unknown>>();
+  if (attachmentRows.results.length === 0) return null;
+  const delivered = await database
+    .prepare(
+      `SELECT payload_json
+       FROM webhook_deliveries
+       WHERE tenant_id = ? AND subscription_id = ?
+         AND source_message_id = ? AND status = 'delivered'
+         AND payload_json IS NOT NULL
+       ORDER BY delivered_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .bind(
+      delivery.tenant_id,
+      delivery.subscription_id,
+      delivery.source_message_id,
+    )
+    .first<{ payload_json: string }>();
+  if (delivered?.payload_json === undefined) return null;
+  let parsedPayload: unknown;
+  try {
+    parsedPayload = JSON.parse(delivered.payload_json);
+  } catch {
+    return null;
+  }
+  const payloadResult = WebhookDeliveryPayloadSchema.safeParse(parsedPayload);
+  if (!payloadResult.success || !("attachments" in payloadResult.data)) {
+    return null;
+  }
+  for (const row of attachmentRows.results) {
+    const authority = RemovalAuthoritySchema.safeParse(row);
+    if (!authority.success) continue;
+    if (
+      payloadResult.data.attachments.some(
+        (attachment) => attachment.attachment_id === authority.data.resource_id,
+      )
+    ) {
+      return authority.data;
+    }
+  }
+  return null;
+};
+
+const removalAttachmentsForDelivery = async (
+  db: D1DatabaseSession,
+  delivery: DeliveryLease,
+  message: WebhookMessage | null,
+): Promise<
+  ReadonlyArray<{
+    attachment_id: string;
+    message_id: string;
+    file_name: string | null;
+    mime_type: string | null;
+    size_bytes: number | null;
+    sha256: string | null;
+    revision: string;
+  }>
+> => {
+  const fromMessage = message?.attachments ?? [];
+  if (fromMessage.length > 0) {
+    return fromMessage.map((attachment) => ({
+      attachment_id: attachment.attachment_id,
+      message_id: attachment.message_id,
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      size_bytes: attachment.size_bytes,
+      sha256: attachment.sha256,
+      revision: attachment.revision,
+    }));
+  }
+  const row = await db
+    .prepare(
+      `SELECT payload_json
+       FROM webhook_deliveries
+       WHERE tenant_id = ? AND subscription_id = ?
+         AND source_message_id = ? AND event_type = 'message.created'
+         AND status = 'delivered' AND payload_json IS NOT NULL
+       ORDER BY delivered_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .bind(
+      delivery.tenant_id,
+      delivery.subscription_id,
+      delivery.source_message_id,
+    )
+    .first<{ payload_json: string }>();
+  if (row?.payload_json === undefined) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.payload_json);
+    const result = WebhookDeliveryPayloadSchema.safeParse(parsed);
+    if (!result.success || !("attachments" in result.data)) return [];
+    return result.data.attachments.map((attachment) => ({
+      attachment_id: attachment.attachment_id,
+      message_id: attachment.message_id,
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      size_bytes: attachment.size_bytes,
+      sha256: attachment.sha256,
+      revision: attachment.revision,
+    }));
+  } catch {
+    return [];
+  }
+};
+
+const removalPayloadFor = async (
+  database: D1Database,
+  db: D1DatabaseSession,
+  projection: WebhookProjection,
+  delivery: DeliveryLease,
+  subscription: WebhookSubscription,
+  authority: NonNullable<Awaited<ReturnType<typeof removalForDelivery>>>,
+): Promise<WebhookRemovalDeliveryPayload> => {
+  if (
+    delivery.source_message_id === null ||
+    delivery.source_identity_id === null ||
+    delivery.source_account_id === null ||
+    delivery.source_conversation_id === null
+  ) {
+    throw new Error("webhook removal source is incomplete");
+  }
+  const authorization = projectionAuthorization(
+    delivery.tenant_id,
+    subscription.owner_principal_id,
+    delivery.source_identity_id,
+  );
+  let message: WebhookMessage | null = null;
+  try {
+    message = await projection.getWebhookMessage(
+      GetWebhookMessageInputSchema.parse({
+        schema_version: 1,
+        tenant_id: delivery.tenant_id,
+        identity_id: delivery.source_identity_id,
+        account_id: delivery.source_account_id,
+        conversation_id: delivery.source_conversation_id,
+        message_id: delivery.source_message_id,
+        authorization,
+      }),
+    );
+  } catch {
+    // The authority remains sufficient to send a content-free event even if
+    // the redacted projection is temporarily unavailable.
+  }
+  const attachmentMetadata = await removalAttachmentsForDelivery(
+    db,
+    delivery,
+    message,
+  );
+  return WebhookRemovalDeliveryPayloadSchema.parse({
+    schema_version: 1,
+    type: "message.deleted",
+    delivery_id: delivery.id,
+    source_event_id: delivery.source_event_id,
+    source_message_id: delivery.source_message_id,
+    tenant_id: delivery.tenant_id,
+    identity_id: delivery.source_identity_id,
+    account_id: delivery.source_account_id,
+    chat_id: delivery.source_conversation_id,
+    revision:
+      delivery.source_revision ??
+      authority.source_event_id ??
+      authority.content_generation,
+    timestamp: authority.removed_at,
+    removed_at: authority.removed_at,
+    removal_reason: authority.reason,
+    content_generation: authority.content_generation,
+    source: {
+      remote_message_id: message?.remote_message_id ?? null,
+      matrix_room_id: message?.matrix_room_id ?? null,
+      matrix_event_id: message?.matrix_event_id ?? null,
+    },
+    text: "",
+    attachments: attachmentMetadata,
   });
 };
 
@@ -1027,6 +1548,7 @@ const deliverOne = async (
   ): Promise<boolean> =>
     subscription !== null &&
     subscription.status === "active" &&
+    subscriptionAllowsStoredDelivery(subscription, lease) &&
     subscription.destination_version === lease.destination_version &&
     subscription.destination.credential_ref === credentialRef &&
     lease.source_account_id !== null &&
@@ -1057,31 +1579,40 @@ const deliverOne = async (
     );
   };
 
-  const cancelForRemoval = async (): Promise<void> => {
+  const cancelForRemoval = async (reason = "source_removed"): Promise<void> => {
     await cancelDelivery(
       database,
       tenantId,
       deliveryId,
       lease.lease_id,
-      "source_removed",
+      reason,
       now.toISOString(),
     );
   };
 
   const removalFence = async (): Promise<{
     changed: boolean;
-    removed: boolean;
+    authority: Awaited<ReturnType<typeof removalForDelivery>>;
   }> => {
     const currentEpoch = await readTenantDeletionEpoch(database, tenantId);
     const authority = await removalForDelivery(database, lease);
     const changed = currentEpoch !== removalEpoch;
     removalEpoch = currentEpoch;
-    return { changed, removed: authority !== null };
+    return { changed, authority };
   };
 
   const initialRemoval = await removalFence();
-  if (initialRemoval.removed) {
-    await cancelForRemoval();
+  if (
+    (isWebhookRemovalDelivery(lease.event_type) &&
+      initialRemoval.authority === null) ||
+    (!isWebhookRemovalDelivery(lease.event_type) &&
+      initialRemoval.authority !== null)
+  ) {
+    await cancelForRemoval(
+      isWebhookRemovalDelivery(lease.event_type)
+        ? "source_removal_authority_unavailable"
+        : "source_removed",
+    );
     return;
   }
 
@@ -1187,48 +1718,8 @@ const deliverOne = async (
       return;
     }
     let activeFinalSubscription = finalSubscription;
-    let hydrated = await hydrateCurrentPayload(
-      database,
-      projection,
-      lease,
-      activeFinalSubscription,
-      now,
-    );
-    if (hydrated === null) {
-      await cancelDelivery(
-        database,
-        tenantId,
-        deliveryId,
-        lease.lease_id,
-        "source_tombstoned_or_unavailable",
-        now.toISOString(),
-      );
-      return;
-    }
-
-    // A removal epoch can advance while the current message and attachment
-    // grants are being prepared. Rehydrate once after any observed advance,
-    // then perform one final scoped authority read immediately before HTTP.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const fence = await removalFence();
-      if (fence.removed) {
-        await cancelForRemoval();
-        return;
-      }
-      if (!fence.changed) break;
-      const refreshedSubscription = await currentSubscription(
-        db,
-        tenantId,
-        lease.subscription_id,
-      );
-      if (
-        refreshedSubscription === null ||
-        !(await authorizationMatches(refreshedSubscription, credentialRef))
-      ) {
-        await cancelFor(refreshedSubscription, credentialRef);
-        return;
-      }
-      activeFinalSubscription = refreshedSubscription;
+    let hydrated: Awaited<ReturnType<typeof hydrateCurrentPayload>> = null;
+    if (!isWebhookRemovalDelivery(lease.event_type)) {
       hydrated = await hydrateCurrentPayload(
         database,
         projection,
@@ -1248,7 +1739,60 @@ const deliverOne = async (
         return;
       }
     }
-    payloadJson = JSON.stringify(hydrated.payload);
+
+    // A removal epoch can advance while the current message and attachment
+    // grants are being prepared. Rehydrate once after any observed advance,
+    // then perform one final scoped authority read immediately before HTTP.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const fence = await removalFence();
+      if (
+        (isWebhookRemovalDelivery(lease.event_type) &&
+          fence.authority === null) ||
+        (!isWebhookRemovalDelivery(lease.event_type) &&
+          fence.authority !== null)
+      ) {
+        await cancelForRemoval(
+          isWebhookRemovalDelivery(lease.event_type)
+            ? "source_removal_authority_unavailable"
+            : "source_removed",
+        );
+        return;
+      }
+      if (!fence.changed) break;
+      const refreshedSubscription = await currentSubscription(
+        db,
+        tenantId,
+        lease.subscription_id,
+      );
+      if (
+        refreshedSubscription === null ||
+        !(await authorizationMatches(refreshedSubscription, credentialRef))
+      ) {
+        await cancelFor(refreshedSubscription, credentialRef);
+        return;
+      }
+      activeFinalSubscription = refreshedSubscription;
+      if (!isWebhookRemovalDelivery(lease.event_type)) {
+        hydrated = await hydrateCurrentPayload(
+          database,
+          projection,
+          lease,
+          activeFinalSubscription,
+          now,
+        );
+        if (hydrated === null) {
+          await cancelDelivery(
+            database,
+            tenantId,
+            deliveryId,
+            lease.lease_id,
+            "source_tombstoned_or_unavailable",
+            now.toISOString(),
+          );
+          return;
+        }
+      }
+    }
 
     const preparedSubscription = await currentSubscription(
       db,
@@ -1264,8 +1808,45 @@ const deliverOne = async (
     }
     activeFinalSubscription = preparedSubscription;
     const finalRemoval = await removalFence();
-    if (finalRemoval.removed) {
-      await cancelForRemoval();
+    if (
+      (isWebhookRemovalDelivery(lease.event_type) &&
+        finalRemoval.authority === null) ||
+      (!isWebhookRemovalDelivery(lease.event_type) &&
+        finalRemoval.authority !== null)
+    ) {
+      await cancelForRemoval(
+        isWebhookRemovalDelivery(lease.event_type)
+          ? "source_removal_authority_unavailable"
+          : "source_removed",
+      );
+      return;
+    }
+    if (isWebhookRemovalDelivery(lease.event_type)) {
+      if (finalRemoval.authority === null) {
+        await cancelForRemoval("source_removal_authority_unavailable");
+        return;
+      }
+      payloadJson = JSON.stringify(
+        await removalPayloadFor(
+          database,
+          db,
+          projection,
+          lease,
+          activeFinalSubscription,
+          finalRemoval.authority,
+        ),
+      );
+    } else if (hydrated !== null) {
+      payloadJson = JSON.stringify(hydrated.payload);
+    } else {
+      await cancelDelivery(
+        database,
+        tenantId,
+        deliveryId,
+        lease.lease_id,
+        "source_tombstoned_or_unavailable",
+        now.toISOString(),
+      );
       return;
     }
     const sendSubscription = await currentSubscription(
@@ -1282,8 +1863,17 @@ const deliverOne = async (
     }
     activeFinalSubscription = sendSubscription;
     const sendRemoval = await removalFence();
-    if (sendRemoval.removed) {
-      await cancelForRemoval();
+    if (
+      (isWebhookRemovalDelivery(lease.event_type) &&
+        sendRemoval.authority === null) ||
+      (!isWebhookRemovalDelivery(lease.event_type) &&
+        sendRemoval.authority !== null)
+    ) {
+      await cancelForRemoval(
+        isWebhookRemovalDelivery(lease.event_type)
+          ? "source_removal_authority_unavailable"
+          : "source_removed",
+      );
       return;
     }
 
@@ -1374,10 +1964,34 @@ export const fanOutIncomingWebhookDeliveries = async (input: {
   const subscriptions = await readActiveSubscriptions(db, input.tenantId);
   const candidates: Candidate[] = [];
   for (const event of input.events) {
-    if (!sourceIsEligible(event) || event.tenant_id !== input.tenantId)
+    const eventType = webhookDeliveryEventTypeFor(event);
+    const sourceMessageId = sourceMessageIdForWebhookEvent(event);
+    if (
+      event.tenant_id !== input.tenantId ||
+      !isEligibleWebhookSource(event) ||
+      eventType === null ||
+      sourceMessageId === null
+    ) {
       continue;
+    }
     for (const subscription of subscriptions) {
       if (!subscriptionAllowsEvent(subscription, event)) continue;
+      if (eventType !== WEBHOOK_MESSAGE_CREATED) {
+        const previousDestinationVersion =
+          await previouslyDeliveredDestinationVersion(db, {
+            tenantId: input.tenantId,
+            subscriptionId: subscription.id,
+            sourceMessageId,
+            accountId: event.account_id,
+            conversationId: event.conversation_id,
+          });
+        if (
+          previousDestinationVersion === null ||
+          previousDestinationVersion !== subscription.destination_version
+        ) {
+          continue;
+        }
+      }
       if (
         !(await currentAuthority(
           db,
@@ -1390,6 +2004,8 @@ export const fanOutIncomingWebhookDeliveries = async (input: {
       }
       candidates.push({
         event,
+        eventType,
+        sourceMessageId,
         subscription,
         deliveryId: await stableDeliveryId(
           input.tenantId,
@@ -1472,6 +2088,10 @@ export const runWebhookRetryTick = async (input: {
 }): Promise<WebhookRetryTickResult> => {
   const services = input.services ?? {};
   const now = nowFor(services);
+  await reconcileWebhookRemovalDeliveries({
+    database: input.database,
+    now: () => now,
+  });
   const due = await dueDeliveryIds(input.database, now.toISOString());
   const byTenant = new Map<string, string[]>();
   for (const row of due) {

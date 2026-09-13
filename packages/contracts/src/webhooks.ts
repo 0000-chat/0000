@@ -297,10 +297,9 @@ export type WebhookAttachmentReference = z.infer<
   typeof WebhookAttachmentReferenceSchema
 >;
 
-export const WebhookDeliveryPayloadSchema = z
+const WebhookDeliveryContentFieldsSchema = z
   .object({
     schema_version: z.literal(1),
-    type: z.literal("message.created"),
     delivery_id: CommunicatorIdSchema,
     source_event_id: z.string().min(1).max(1_024),
     source_message_id: CommunicatorIdSchema,
@@ -327,6 +326,75 @@ export const WebhookDeliveryPayloadSchema = z
     attachments: z.array(WebhookAttachmentReferenceSchema).max(100),
   })
   .strict();
+
+const WebhookCreatedDeliveryPayloadSchema =
+  WebhookDeliveryContentFieldsSchema.extend({
+    type: z.literal("message.created"),
+  });
+
+const WebhookEditedDeliveryPayloadSchema =
+  WebhookDeliveryContentFieldsSchema.extend({
+    type: z.literal("message.edited"),
+  });
+
+const WebhookRemovalAttachmentReferenceSchema = z
+  .object({
+    attachment_id: CommunicatorIdSchema,
+    message_id: CommunicatorIdSchema,
+    file_name: z.string().max(512).nullable(),
+    mime_type: z.string().max(255).nullable(),
+    size_bytes: z.number().int().safe().nonnegative().nullable(),
+    sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable(),
+    revision: z.string().min(1).max(1_024),
+  })
+  .strict();
+export type WebhookRemovalAttachmentReference = z.infer<
+  typeof WebhookRemovalAttachmentReferenceSchema
+>;
+
+const WebhookRemovedDeliveryPayloadSchema = z
+  .object({
+    schema_version: z.literal(1),
+    type: z.literal("message.deleted"),
+    delivery_id: CommunicatorIdSchema,
+    source_event_id: z.string().min(1).max(1_024),
+    source_message_id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    account_id: CommunicatorIdSchema,
+    chat_id: CommunicatorIdSchema,
+    revision: z.string().min(1).max(1_024),
+    timestamp: TimestampSchema,
+    removed_at: TimestampSchema,
+    removal_reason: z.string().min(1).max(128),
+    content_generation: z.string().min(1).max(256),
+    source: z
+      .object({
+        remote_message_id: z.string().min(1).max(1_024).nullable(),
+        matrix_room_id: z.string().min(1).max(1_024).nullable(),
+        matrix_event_id: z.string().min(1).max(1_024).nullable(),
+      })
+      .strict(),
+    // Keep the field shape stable while making a non-empty body impossible.
+    text: z.literal(""),
+    attachments: z.array(WebhookRemovalAttachmentReferenceSchema).max(100),
+  })
+  .strict();
+
+export const WebhookDeliveryPayloadSchema = z.discriminatedUnion("type", [
+  WebhookCreatedDeliveryPayloadSchema,
+  WebhookEditedDeliveryPayloadSchema,
+  WebhookRemovedDeliveryPayloadSchema,
+]);
 export type WebhookDeliveryPayload = z.infer<
   typeof WebhookDeliveryPayloadSchema
+>;
+
+export const WebhookRemovalDeliveryPayloadSchema =
+  WebhookRemovedDeliveryPayloadSchema;
+export type WebhookRemovalDeliveryPayload = z.infer<
+  typeof WebhookRemovedDeliveryPayloadSchema
 >;
