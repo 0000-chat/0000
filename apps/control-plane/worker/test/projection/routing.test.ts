@@ -29,6 +29,10 @@ const config = JSON.parse(configText) as WranglerConfig;
 const bindingName = "TENANT_PROJECTION";
 const className = "TenantProjectionDO";
 const expectedBinding = { name: bindingName, class_name: className };
+const expectedLinkBinding = {
+  name: "LINK_SESSIONS",
+  class_name: "LinkSessionDO",
+};
 
 const validStatusInput: ProjectionStatusInput = {
   schema_version: 1,
@@ -106,7 +110,9 @@ describe("tenant projection routing", () => {
 
   it("keeps the durable object class and binding names exact", () => {
     expect(TenantProjectionDO.name).toBe(className);
-    expect(config.durable_objects).toEqual({ bindings: [expectedBinding] });
+    expect(config.durable_objects).toEqual({
+      bindings: [expectedBinding, expectedLinkBinding],
+    });
   });
 
   it("sanitizes ProjectionError public data without an own cause property", () => {
@@ -183,11 +189,12 @@ describe("tenant projection Wrangler configuration", () => {
   it("declares the SQLite export exactly and repeats the binding per environment", () => {
     expect(config.exports).toEqual({
       [className]: { type: "durable-object", storage: "sqlite" },
+      LinkSessionDO: { type: "durable-object", storage: "sqlite" },
     });
 
     for (const environment of ["staging", "production"] as const) {
       expect(config.env?.[environment]?.durable_objects).toEqual({
-        bindings: [expectedBinding],
+        bindings: [expectedBinding, expectedLinkBinding],
       });
     }
   });

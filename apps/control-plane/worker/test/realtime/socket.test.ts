@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   batchRealtimeChanges,
   sendRealtimeFrame,
+  REALTIME_SOCKET_TAG,
 } from "../../realtime/tenant-sockets";
 import { RealtimeSocketTelemetryEventSchema } from "../../realtime/telemetry";
 import type { RealtimeUpgradeContext } from "../../realtime/contracts";
@@ -367,6 +368,27 @@ const waitForClosed = (socket: WebSocket): Promise<number> =>
     );
   });
 
+const closeSocket = async (
+  stub: DurableObjectStub<TenantProjectionDO>,
+  socket: WebSocket | null | undefined,
+): Promise<void> => {
+  if (socket === null || socket === undefined || socket.readyState === 3) {
+    return;
+  }
+  // The workerd client-side socket does not reliably emit a local close event
+  // after the initiating side calls close(). Close the server-side socket and
+  // observe its authoritative tagged set instead of waiting on that event.
+  socket.close(1000, "test complete");
+  await runInDurableObject(stub, async (_instance, state) => {
+    for (const serverSocket of state.getWebSockets(REALTIME_SOCKET_TAG)) {
+      serverSocket.close(1000, "test complete");
+    }
+  });
+  await runInDurableObject(stub, async (_instance, state) => {
+    expect(state.getWebSockets(REALTIME_SOCKET_TAG)).toHaveLength(0);
+  });
+};
+
 const rows = async <T extends Record<string, SqlStorageValue>>(
   stub: DurableObjectStub<TenantProjectionDO>,
   sql: string,
@@ -415,7 +437,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     );
     expect(response.webSocket).not.toBeNull();
     response.webSocket?.accept();
-    response.webSocket?.close(1000, "test complete");
+    await closeSocket(stub, response.webSocket);
   });
 
   it("emits an accepted outcome through the fallback without private context", async () => {
@@ -471,7 +493,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         expect(serialized).not.toContain(forbidden);
       }
     } finally {
-      response?.webSocket?.close(1000, "test complete");
+      await closeSocket(stub, response?.webSocket);
       info.mockRestore();
     }
   });
@@ -586,7 +608,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         connection_expires_at: expect.any(String),
       },
     ]);
-    response.webSocket?.close(1000, "test complete");
+    await closeSocket(stub, response.webSocket);
   });
 
   it("replays only identity-local retained metadata in sequence order", async () => {
@@ -635,7 +657,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       ],
     });
     expect(JSON.stringify(messages)).not.toContain("event_identity_agent");
-    response.webSocket?.close(1000, "test complete");
+    await closeSocket(stub, response.webSocket);
   });
 
   it("chunks replay frames at the public 100-change limit", async () => {
@@ -707,7 +729,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         reason,
       });
       expect(response.webSocket?.readyState).not.toBe(3);
-      response.webSocket?.close(1000, "test complete");
+      await closeSocket(stub, response.webSocket);
     },
   );
 
@@ -755,7 +777,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       latest_sequence: MAX_REALTIME_REPLAY_CHANGES + 1,
       reason: "replay_too_large",
     });
-    response.webSocket?.close(1000, "test complete");
+    await closeSocket(stub, response.webSocket);
   });
 
   it("chunks exactly 101 retained changes into contiguous 100-change and one-change frames", async () => {
@@ -829,7 +851,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         (_, index) => index + 1,
       ),
     );
-    response.webSocket?.close(1000, "test complete");
+    await closeSocket(stub, response.webSocket);
   });
 
   it("broadcasts one newly persisted live change once to a matching identity socket", async () => {
@@ -918,7 +940,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         ],
       });
     } finally {
-      socket.close(1000, "test complete");
+      await closeSocket(stub, socket);
     }
   });
 
@@ -1004,7 +1026,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       });
       expect(frames).toEqual([]);
     } finally {
-      socket.close(1000, "test complete");
+      await closeSocket(stub, socket);
     }
   });
 
@@ -1066,9 +1088,11 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       });
       expect(projectionFrames(unmatchedMessages)).toEqual([]);
     } finally {
-      human.socket.close(1000, "test complete");
-      agent.socket.close(1000, "test complete");
-      unmatched.socket.close(1000, "test complete");
+      await Promise.all([
+        closeSocket(stub, human.socket),
+        closeSocket(stub, agent.socket),
+        closeSocket(stub, unmatched.socket),
+      ]);
     }
   });
 
@@ -1119,7 +1143,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         ),
       ).toBe(true);
     } finally {
-      socket.close(1000, "test complete");
+      await closeSocket(stub, socket);
     }
   });
 
@@ -1210,9 +1234,9 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         to_sequence: 2,
         changes: [{ sequence: 1, connection_id: "connection_identity_human" }],
       });
-      replayResponse.webSocket?.close(1000, "test complete");
+      await closeSocket(stub, replayResponse.webSocket);
     } finally {
-      if (socket.readyState !== 3) socket.close(1000, "test complete");
+      await closeSocket(stub, socket);
     }
   });
 
@@ -1234,7 +1258,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     });
     socket.send("ping");
     await expect(pong).resolves.toBeUndefined();
-    socket.close(1000, "test complete");
+    await closeSocket(stub, socket);
   });
 
   it("deserializes hibernated attachments before closing only the unsupported message socket", async () => {
@@ -1264,7 +1288,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       expect(rejectedSocket.readyState).toBe(3);
       expect(peerSocket.readyState).not.toBe(3);
     } finally {
-      peerSocket.close(1000, "test complete");
+      await closeSocket(stub, peerSocket);
     }
   });
 
@@ -1307,8 +1331,10 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     expect(rejected.status).toBe(503);
     for (const response of responses) {
       response.webSocket?.accept();
-      response.webSocket?.close(1000, "test complete");
     }
+    await Promise.all(
+      responses.map((response) => closeSocket(stub, response.webSocket)),
+    );
   });
 
   it("accepts 256 distinct principals and rejects the 257th tenant socket with bounded 503", async () => {
@@ -1355,9 +1381,9 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         },
       });
     } finally {
-      for (const socket of acceptedSockets) {
-        socket.close(1000, "test complete");
-      }
+      await Promise.all(
+        acceptedSockets.map((socket) => closeSocket(stub, socket)),
+      );
       info.mockRestore();
     }
   }, 60_000);
@@ -1428,7 +1454,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
 
     expect(await closed).toBe(1008);
     expect(validSocket.readyState).not.toBe(3);
-    validSocket.close(1000, "test complete");
+    await closeSocket(stub, validSocket);
   });
 
   it("closes expired sockets and reschedules the earliest remaining lease", async () => {
@@ -1487,7 +1513,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       expect(await state.storage.getAlarm()).toBe(Date.parse(remainingExpiry));
     });
-    remainingSocket.close(1000, "test complete");
+    await closeSocket(stub, remainingSocket);
   });
 
   it("never exposes forbidden identifiers or content in server frames", async () => {
@@ -1523,7 +1549,7 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     ]) {
       expect(serialized).not.toContain(forbidden);
     }
-    response.webSocket?.close(1000, "test complete");
+    await closeSocket(stub, response.webSocket);
   });
 
   it("sends frames through the strict public schema", () => {

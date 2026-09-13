@@ -47,6 +47,9 @@ export function MessageComposer({
       void queryClient.invalidateQueries({
         queryKey: queryKeys.commands(identityId),
       });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.commands(),
+      });
     },
     onError: (error) => {
       if (isDefinitiveRequestRejection(error)) {

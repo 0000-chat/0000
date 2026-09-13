@@ -60,6 +60,7 @@ export type GetConversationInput = {
 export type ListMessagesInput = {
   identity_id: string;
   conversation_id: string;
+  message_id?: string;
   account_id?: string;
   cursor?: string;
   limit?: number;
@@ -440,6 +441,9 @@ export async function listMessages(
       tenant_id: context.authorization.tenant.id,
       identity_id: resourceIdentityId,
       conversation_id: input.conversation_id,
+      ...(input.message_id === undefined
+        ? {}
+        : { message_id: input.message_id }),
       ...(input.account_id === undefined
         ? {}
         : { account_id: input.account_id }),

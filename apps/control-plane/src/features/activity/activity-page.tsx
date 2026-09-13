@@ -1,39 +1,127 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useIdentityContext } from "@/components/identity/identity-switcher";
-import { apiClient } from "@/lib/api/client";
+import { Button } from "@/components/ui/button";
+import { apiClient, isDefinitiveRequestRejection } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { CommandTimeline } from "./command-timeline";
+import type { ConfirmationDecision } from "@communicator/contracts";
 
 export function ActivityPage() {
-  const { activeIdentity, isLoading: identityLoading } = useIdentityContext();
-  const identityId = activeIdentity?.id ?? "";
-  const { data: commands = [], isLoading } = useQuery({
-    queryKey: queryKeys.commands(identityId),
-    queryFn: () => apiClient.getCommands(identityId),
-    enabled: Boolean(identityId),
+  const queryClient = useQueryClient();
+  const {
+    session,
+    identities,
+    isLoading: identityLoading,
+  } = useIdentityContext();
+  const isAdministrator =
+    (session?.membership.role === "owner" ||
+      session?.membership.role === "admin") &&
+    (session?.principal.type === "human" ||
+      session?.principal.type === "operator");
+  const commandsQuery = useQuery({
+    queryKey: queryKeys.commands(),
+    queryFn: () => apiClient.getCommands(),
+    enabled: isAdministrator,
   });
+  const decisionMutation = useMutation({
+    mutationFn: ({
+      commandId,
+      decision,
+    }: {
+      commandId: string;
+      decision: ConfirmationDecision;
+    }) =>
+      apiClient.decideCommand(
+        commandId,
+        decision,
+        `activity-${commandId}-${decision}`,
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.commands(),
+      });
+    },
+  });
+  const commands = commandsQuery.data ?? [];
+  const identityLabels = new Map(
+    identities.map((identity) => [identity.id, identity.display_name]),
+  );
 
   return (
     <section className="space-y-6">
       <div>
         <p className="text-sm font-medium text-muted-foreground">
-          Identity-scoped command history
+          Administrator delivery review
         </p>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Activity</h1>
         <p className="mt-2 max-w-2xl text-muted-foreground">
-          Follow accepted commands and their delivery phases.
+          Review every saved outbound command and make the explicit human
+          decision required before stale offline delivery can continue.
         </p>
       </div>
-      {(identityLoading || isLoading) && <p role="status">Loading activity…</p>}
-      {!identityLoading && !isLoading && commands.length === 0 && (
-        <p className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-          No commands are available for this identity.
+      {identityLoading && <p role="status">Loading activity…</p>}
+      {!identityLoading && !isAdministrator && (
+        <p role="alert" className="rounded-lg border border-dashed p-6 text-sm">
+          Administrator access is required to review outbound delivery.
         </p>
       )}
-      <CommandTimeline
-        commands={commands}
-        identityLabel={activeIdentity?.display_name ?? "Unavailable"}
-      />
+      {isAdministrator && commandsQuery.isLoading && (
+        <p role="status">Loading activity…</p>
+      )}
+      {isAdministrator && commandsQuery.isError && (
+        <div role="alert" className="space-y-2 text-sm text-destructive">
+          <p>Unable to load administrator delivery activity.</p>
+          <button
+            type="button"
+            className="underline"
+            onClick={() => void commandsQuery.refetch()}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {decisionMutation.isError && (
+        <div
+          role="alert"
+          className="space-y-2 rounded-lg border border-destructive/40 p-3 text-sm text-destructive"
+        >
+          <p>
+            {isDefinitiveRequestRejection(decisionMutation.error)
+              ? "Decision rejected. This command may be stale; refresh the activity list and review its current status."
+              : "The delivery decision could not be saved. Refresh the activity list and try again."}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              decisionMutation.reset();
+              void commandsQuery.refetch();
+            }}
+          >
+            Refresh activity
+          </Button>
+        </div>
+      )}
+      {isAdministrator &&
+        !commandsQuery.isLoading &&
+        !commandsQuery.isError &&
+        commands.length === 0 && (
+          <p className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+            No outbound commands are available for this tenant.
+          </p>
+        )}
+      {isAdministrator && !commandsQuery.isError && (
+        <CommandTimeline
+          commands={commands}
+          identityLabels={identityLabels}
+          canDecide
+          isDeciding={decisionMutation.isPending}
+          onDecision={(commandId, decision) =>
+            decisionMutation.mutate({ commandId, decision })
+          }
+        />
+      )}
     </section>
   );
 }

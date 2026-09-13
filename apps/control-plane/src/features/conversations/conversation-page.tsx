@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useNavigate } from "@tanstack/react-router";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type {
   ChannelSummary,
   ConversationSummary,
@@ -20,6 +20,7 @@ export type ConversationPageProps = {
   channel: ChannelSummary;
   conversation: ConversationSummary;
   selectedChannelId?: string;
+  selectedMessageId?: string;
 };
 
 export function ConversationUnavailable({
@@ -46,6 +47,7 @@ export function ConversationPage({
   channel,
   conversation,
   selectedChannelId,
+  selectedMessageId,
 }: ConversationPageProps) {
   const navigate = useNavigate();
   const isSafe =
@@ -66,6 +68,45 @@ export function ConversationPage({
     getNextPageParam: (page) => page.next_cursor,
     enabled: isSafe,
   });
+  const loadedMessages = messagesQuery.data
+    ? chronologicalMessages(messagesQuery.data.pages)
+    : [];
+  const targetedMessageQuery = useQuery({
+    queryKey: [
+      ...queryKeys.messages(identity.id, conversation.id),
+      "target",
+      selectedMessageId ?? "",
+    ],
+    queryFn: async () => {
+      if (selectedMessageId === undefined) {
+        throw new Error("targeted message query requires a message id");
+      }
+      const page = await apiClient.getMessages(
+        conversation.id,
+        identity.id,
+        undefined,
+        1,
+        selectedMessageId,
+      );
+      return page.items[0] ?? null;
+    },
+    enabled: isSafe && selectedMessageId !== undefined,
+  });
+  const selectedMessage =
+    selectedMessageId !== undefined && targetedMessageQuery.isSuccess
+      ? (targetedMessageQuery.data ?? undefined)
+      : undefined;
+  const messagesWithoutTarget =
+    selectedMessageId === undefined
+      ? loadedMessages
+      : loadedMessages.filter((message) => message.id !== selectedMessageId);
+  const messages = selectedMessage
+    ? [...messagesWithoutTarget, selectedMessage].toSorted(
+        (left, right) =>
+          Date.parse(left.occurred_at) - Date.parse(right.occurred_at) ||
+          left.id.localeCompare(right.id),
+      )
+    : messagesWithoutTarget;
 
   if (!isSafe) return <ConversationUnavailable identityId={identity.id} />;
 
@@ -134,8 +175,36 @@ export function ConversationPage({
             </button>
           </div>
         )}
-        {messagesQuery.data && (
+        {targetedMessageQuery.isLoading && (
+          <p role="status" className="mx-4 mt-4 rounded-md border p-3 text-sm">
+            Loading saved message…
+          </p>
+        )}
+        {targetedMessageQuery.isError && (
+          <p role="alert" className="mx-4 mt-4 rounded-md border p-3 text-sm">
+            The saved message is unavailable or you do not have read access.
+          </p>
+        )}
+        {targetedMessageQuery.isSuccess &&
+          targetedMessageQuery.data === null && (
+            <p
+              role="status"
+              className="mx-4 mt-4 rounded-md border p-3 text-sm"
+            >
+              The saved message is unavailable or was removed from this
+              conversation.
+            </p>
+          )}
+        {(messagesQuery.data || targetedMessageQuery.isSuccess) && (
           <>
+            {selectedMessage?.body === "" && (
+              <p
+                role="status"
+                className="mx-4 mt-4 rounded-md border p-3 text-sm"
+              >
+                The saved message was removed and its content is unavailable.
+              </p>
+            )}
             {messagesQuery.hasNextPage && (
               <div className="p-4 pb-0">
                 <Button
@@ -164,7 +233,8 @@ export function ConversationPage({
               </div>
             )}
             <MessageTimeline
-              messages={chronologicalMessages(messagesQuery.data.pages)}
+              messages={messages}
+              {...(selectedMessageId ? { selectedMessageId } : {})}
             />
           </>
         )}

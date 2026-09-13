@@ -1,6 +1,10 @@
 import {
   AcceptTextReplyInputSchema,
   AcceptTextReplyResultSchema,
+  OutboundDecisionInputSchema,
+  OutboundDecisionResultSchema,
+  OutboundReconcileInputSchema,
+  ListOutboundCommandsInputSchema,
   ApplyProjectionBatchInputSchema,
   ApplyReplayPageInputSchema,
   compareOpaqueEventIds,
@@ -68,6 +72,10 @@ import {
   type Command,
   type ResolveConversationOwnerInput,
   type OutboundDispatch,
+  type OutboundDecisionInput,
+  type OutboundDecisionResult,
+  type OutboundReconcileInput,
+  type ListOutboundCommandsInput,
   type ProjectionChannelStat,
   type ProjectionChange,
   type ProjectionChangePage,
@@ -138,6 +146,7 @@ import {
   type RealtimeUpgradeContext,
 } from "../realtime/contracts";
 import { revalidateRealtimeSocketAuthorization } from "../realtime/authorization";
+import { transitionOutboundLifecycle } from "../outbound/lifecycle";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -319,9 +328,33 @@ type OutboundDispatchRow = {
   body_digest: string;
   body: string;
   delivery_mode: "direct" | "paced";
-  status: "pending" | "wakeup_failed" | "dispatching" | "dispatched";
+  status:
+    | "pending"
+    | "waiting_for_connection"
+    | "confirmation_required"
+    | "wakeup_failed"
+    | "dispatching"
+    | "dispatched"
+    | "cancelled";
+  confirmation_due_at: string | null;
+  confirmation_decision: "confirm" | "cancel" | null;
+  confirmation_actor_principal_id: string | null;
+  confirmation_actor_identity_id: string | null;
+  confirmation_decided_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type OutboundDecisionRow = {
+  id: string;
+  tenant_id: string;
+  command_id: string;
+  dispatch_id: string;
+  decision: "confirm" | "cancel";
+  idempotency_key: string;
+  actor_principal_id: string;
+  actor_identity_id: string;
+  decided_at: string;
 };
 
 type OutboundCommandRow = {
@@ -888,6 +921,17 @@ const readMessageRows = (
     "conversation_id",
     input.account_id,
   );
+  if (input.message_id !== undefined) {
+    return storage.sql
+      .exec<MessageQueryRow>(
+        `SELECT id, identity_id, account_id, connection_id, conversation_id, direction, sender_participant_id, sender_label, body, occurred_at, occurred_ms, delivery_status, attachment_count, deleted_at, current_event_id FROM messages WHERE identity_id = ? AND conversation_id = ? AND id = ?${scope.sql} LIMIT 1`,
+        input.identity_id,
+        input.conversation_id,
+        input.message_id,
+        ...scope.bindings,
+      )
+      .toArray();
+  }
   if (cursor === undefined) {
     return storage.sql
       .exec<MessageQueryRow>(
@@ -1016,7 +1060,6 @@ const readMessageSearchRows = (
     predicates.push(scope.sql.replace(/^ AND /u, ""));
     bindings.push(...scope.bindings);
   }
-
   if (input.conversation_id !== undefined) {
     predicates.push("messages.conversation_id = ?");
     bindings.push(input.conversation_id);
@@ -1175,8 +1218,30 @@ const readOutboundDispatchByKey = (
 ): OutboundDispatchRow | undefined =>
   storage.sql
     .exec<OutboundDispatchRow>(
-      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, created_at, updated_at FROM outbound_dispatches WHERE idempotency_key = ? LIMIT 1",
+      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE idempotency_key = ? LIMIT 1",
       idempotencyKey,
+    )
+    .toArray()[0];
+
+const readOutboundDispatchByCommand = (
+  storage: DurableObjectStorage,
+  commandId: string,
+): OutboundDispatchRow | undefined =>
+  storage.sql
+    .exec<OutboundDispatchRow>(
+      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE command_id = ? LIMIT 1",
+      commandId,
+    )
+    .toArray()[0];
+
+const readOutboundDecisionByCommand = (
+  storage: DurableObjectStorage,
+  commandId: string,
+): OutboundDecisionRow | undefined =>
+  storage.sql
+    .exec<OutboundDecisionRow>(
+      "SELECT id, tenant_id, command_id, dispatch_id, decision, idempotency_key, actor_principal_id, actor_identity_id, decided_at FROM outbound_command_decisions WHERE command_id = ? LIMIT 1",
+      commandId,
     )
     .toArray()[0];
 
@@ -1219,6 +1284,21 @@ const mapOutboundDispatch = (row: OutboundDispatchRow): OutboundDispatch =>
     status: row.status,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    confirmation_due_at: row.confirmation_due_at,
+    ...(row.confirmation_decision === null
+      ? {}
+      : { confirmation_decision: row.confirmation_decision }),
+    ...(row.confirmation_actor_principal_id === null
+      ? {}
+      : {
+          confirmation_actor_principal_id: row.confirmation_actor_principal_id,
+        }),
+    ...(row.confirmation_actor_identity_id === null
+      ? {}
+      : { confirmation_actor_identity_id: row.confirmation_actor_identity_id }),
+    ...(row.confirmation_decided_at === null
+      ? {}
+      : { confirmation_decided_at: row.confirmation_decided_at }),
   });
 
 const mapOutboundCommand = (
@@ -1239,11 +1319,33 @@ const mapOutboundCommand = (
     ...(row.failure_code === null ? {} : { failure_code: row.failure_code }),
     account_id: row.account_id,
     connection_id: row.connection_id,
+    resource_identity_id: dispatch.resource_identity_id,
     message_id: dispatch.message_id,
     event_id: dispatch.event_id,
     dispatch_id: dispatch.id,
     actor_principal_id: dispatch.actor_principal_id,
     actor_identity_id: dispatch.actor_identity_id,
+    ...(dispatch.confirmation_due_at === null
+      ? {}
+      : { confirmation_due_at: dispatch.confirmation_due_at }),
+    ...(dispatch.confirmation_decision === null
+      ? {}
+      : { confirmation_decision: dispatch.confirmation_decision }),
+    ...(dispatch.confirmation_actor_principal_id === null
+      ? {}
+      : {
+          confirmation_actor_principal_id:
+            dispatch.confirmation_actor_principal_id,
+        }),
+    ...(dispatch.confirmation_actor_identity_id === null
+      ? {}
+      : {
+          confirmation_actor_identity_id:
+            dispatch.confirmation_actor_identity_id,
+        }),
+    ...(dispatch.confirmation_decided_at === null
+      ? {}
+      : { confirmation_decided_at: dispatch.confirmation_decided_at }),
   });
 
 const mapOutboundMessage = (tenantId: string, row: MessageQueryRow) =>
@@ -1275,7 +1377,7 @@ const restoreOutboundProjectionRows = (
 ): void => {
   const ledgerRows = storage.sql
     .exec<OutboundDispatchRow>(
-      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, created_at, updated_at FROM outbound_dispatches WHERE tenant_id = ? ORDER BY created_at ASC, id ASC",
+      "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE tenant_id = ? ORDER BY created_at ASC, id ASC",
       tenantId,
     )
     .toArray();
@@ -1349,8 +1451,14 @@ const restoreOutboundProjectionRows = (
     const existingCommand = readOutboundCommand(storage, row.command_id);
     if (existingCommand === undefined) {
       const observedMs = parseStoredMilliseconds(row.created_at);
+      const restoredStatus =
+        row.status === "waiting_for_connection" ||
+        row.status === "confirmation_required" ||
+        row.status === "cancelled"
+          ? row.status
+          : "accepted";
       storage.sql.exec(
-        "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, 'accepted', NULL, ?, ?, ?, ?)",
+        "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, ?, NULL, ?, ?, ?, ?)",
         row.command_id,
         row.actor_identity_id,
         row.account_id,
@@ -1358,6 +1466,7 @@ const restoreOutboundProjectionRows = (
         row.conversation_id,
         row.platform,
         row.delivery_mode,
+        restoredStatus,
         row.created_at,
         row.updated_at,
         observedMs,
@@ -1885,8 +1994,103 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     this.#closeSocket(socket, 1011, "realtime socket error");
   }
 
+  async #processOutboundAlarm(now: number): Promise<void> {
+    const rows = this.ctx.storage.sql
+      .exec<OutboundDispatchRow>(
+        "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE status IN ('waiting_for_connection', 'pending', 'confirmation_required') ORDER BY confirmation_due_at ASC, id ASC",
+      )
+      .toArray();
+    for (const row of rows) {
+      const available = await this.#connectionAvailable(
+        row.tenant_id,
+        row.connection_id,
+      );
+      this.ctx.storage.transactionSync(() => {
+        const current = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          row.command_id,
+        );
+        const command = current
+          ? readOutboundCommand(this.ctx.storage, current.command_id)
+          : undefined;
+        if (
+          current === undefined ||
+          command === undefined ||
+          current.status !== "waiting_for_connection"
+        ) {
+          return;
+        }
+        const transition = transitionOutboundLifecycle({
+          dispatchStatus: current.status,
+          commandStatus: command.status,
+          confirmationDecision: current.confirmation_decision,
+          confirmationDueAt: current.confirmation_due_at,
+          createdAt: current.created_at,
+          now: new Date(now).toISOString(),
+          connectionAvailable: available,
+        });
+        if (
+          transition.dispatchStatus === current.status &&
+          transition.commandStatus === command.status &&
+          transition.confirmationDueAt === current.confirmation_due_at
+        ) {
+          return;
+        }
+        const updatedAt = new Date(now).toISOString();
+        this.ctx.storage.sql.exec(
+          "UPDATE outbound_dispatches SET status = ?, confirmation_due_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+          transition.dispatchStatus,
+          transition.confirmationDueAt,
+          updatedAt,
+          current.id,
+          current.status,
+        );
+        if (transition.commandStatus !== command.status) {
+          this.ctx.storage.sql.exec(
+            "UPDATE commands SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            transition.commandStatus,
+            updatedAt,
+            command.id,
+            command.status,
+          );
+        }
+      });
+    }
+  }
+
+  #nextOutboundAlarm(): number | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ confirmation_due_at: string | null }>(
+        "SELECT confirmation_due_at FROM outbound_dispatches WHERE status IN ('waiting_for_connection', 'pending') AND confirmation_decision IS NULL AND confirmation_due_at IS NOT NULL ORDER BY confirmation_due_at ASC",
+      )
+      .toArray();
+    const now = Date.now();
+    for (const row of rows) {
+      if (row.confirmation_due_at === null) continue;
+      const dueMs = Date.parse(row.confirmation_due_at);
+      if (Number.isSafeInteger(dueMs) && dueMs > now) return dueMs;
+    }
+    return null;
+  }
+
+  async #scheduleCombinedAlarm(
+    sockets: readonly WebSocket[] = this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+  ): Promise<void> {
+    const socketExpiry = nextSocketExpiry(sockets);
+    const outboundExpiry = this.#nextOutboundAlarm();
+    const candidates = [socketExpiry, outboundExpiry].filter(
+      (value): value is number => value !== null,
+    );
+    if (candidates.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.min(...candidates));
+  }
+
   async alarm(): Promise<void> {
     const now = Date.now();
+    await this.#processOutboundAlarm(now);
     const remaining: WebSocket[] = [];
     const sockets = await this.#revalidateRealtimeSockets();
     const activeTenantSocketCount = Math.min(
@@ -1921,12 +2125,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       remaining.push(socket);
     }
 
-    const nextExpiry = nextSocketExpiry(remaining);
-    if (nextExpiry === null) {
-      await this.ctx.storage.deleteAlarm();
-    } else {
-      await this.ctx.storage.setAlarm(nextExpiry);
-    }
+    await this.#scheduleCombinedAlarm(remaining);
   }
 
   #activeTenantSocketCount(): number {
@@ -2022,14 +2221,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   }
 
   async #scheduleRealtimeSocketAlarm(): Promise<void> {
-    const nextExpiry = nextSocketExpiry(
-      this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
-    );
-    if (nextExpiry === null) {
-      await this.ctx.storage.deleteAlarm();
-      return;
-    }
-    await this.ctx.storage.setAlarm(nextExpiry);
+    await this.#scheduleCombinedAlarm();
   }
 
   #persistSocketPosition(
@@ -2711,6 +2903,12 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       const eventId = `event_outbound_${requestDigest.slice(0, 48)}`;
       const dispatchId = `dispatch_outbound_${requestDigest.slice(0, 48)}`;
       const occurredMs = parseStoredMilliseconds(parsed.accepted_at);
+      const initialDispatchStatus = parsed.initial_dispatch_status ?? "pending";
+      const initialCommandStatus =
+        initialDispatchStatus === "waiting_for_connection"
+          ? "waiting_for_connection"
+          : "accepted";
+      const confirmationDueAt = parsed.confirmation_due_at ?? null;
 
       const result = this.ctx.storage.transactionSync(() => {
         // Hashing happens outside the synchronous transaction. Re-read every
@@ -2813,7 +3011,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           eventId,
         );
         this.ctx.storage.sql.exec(
-          "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, 'accepted', NULL, ?, ?, ?, ?)",
+          "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, ?, NULL, ?, ?, ?, ?)",
           commandId,
           parsed.actor_identity_id,
           owner.account_id,
@@ -2821,13 +3019,14 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           parsed.conversation_id,
           owner.platform,
           parsed.delivery_mode,
+          initialCommandStatus,
           parsed.accepted_at,
           parsed.accepted_at,
           occurredMs,
           eventId,
         );
         this.ctx.storage.sql.exec(
-          "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+          "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
           dispatchId,
           commandId,
           messageId,
@@ -2844,6 +3043,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           bodyDigest,
           parsed.body,
           parsed.delivery_mode,
+          initialDispatchStatus,
+          confirmationDueAt,
           parsed.accepted_at,
           parsed.accepted_at,
         );
@@ -2871,7 +3072,303 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           replayed: false,
         });
       });
+      if (result.dispatch.status === "waiting_for_connection") {
+        await this.#scheduleCombinedAlarm();
+      }
       return structuredClone(result);
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async #connectionAvailable(
+    tenantId: string,
+    connectionId: string,
+  ): Promise<boolean> {
+    const database = this.env.CONTROL_DB;
+    if (database === undefined || typeof database.withSession !== "function") {
+      return false;
+    }
+    try {
+      const row = await database
+        .withSession("first-primary")
+        .prepare(
+          "SELECT status FROM connections WHERE tenant_id = ? AND id = ? LIMIT 1",
+        )
+        .bind(tenantId, connectionId)
+        .first<{ status: string }>();
+      return (
+        row !== null &&
+        (row.status === "connected" ||
+          row.status === "syncing" ||
+          row.status === "ready")
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Reconcile a waiting command against the immutable deadline and current
+   * connection state. Repeated calls are harmless and never rewrite
+   * created_at or confirmation_due_at.
+   */
+  async reconcileOutbound(
+    input: OutboundReconcileInput,
+  ): Promise<OutboundDecisionResult> {
+    try {
+      const parsed = parseProjectionInput(OutboundReconcileInputSchema, input);
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const available =
+        parsed.connection_available ??
+        (await this.#connectionAvailable(
+          parsed.tenant_id,
+          readOutboundDispatchByCommand(this.ctx.storage, parsed.command_id)
+            ?.connection_id ?? "",
+        ));
+      const result = this.ctx.storage.transactionSync(() => {
+        const dispatch = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        const command = dispatch
+          ? readOutboundCommand(this.ctx.storage, dispatch.command_id)
+          : undefined;
+        if (dispatch === undefined || command === undefined) {
+          throw projectionError("projection_not_found");
+        }
+
+        const transition = transitionOutboundLifecycle({
+          dispatchStatus: dispatch.status,
+          commandStatus: command.status,
+          confirmationDecision: dispatch.confirmation_decision,
+          confirmationDueAt: dispatch.confirmation_due_at,
+          createdAt: dispatch.created_at,
+          now: parsed.now,
+          connectionAvailable: available,
+        });
+
+        if (
+          transition.dispatchStatus !== dispatch.status ||
+          transition.commandStatus !== command.status ||
+          transition.confirmationDueAt !== dispatch.confirmation_due_at
+        ) {
+          this.ctx.storage.sql.exec(
+            "UPDATE outbound_dispatches SET status = ?, confirmation_due_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+            transition.dispatchStatus,
+            transition.confirmationDueAt,
+            parsed.now,
+            dispatch.id,
+            dispatch.status,
+          );
+          if (transition.commandStatus !== command.status) {
+            this.ctx.storage.sql.exec(
+              "UPDATE commands SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+              transition.commandStatus,
+              parsed.now,
+              command.id,
+              command.status,
+            );
+          }
+        }
+        const updatedDispatch = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        const updatedCommand = readOutboundCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        if (updatedDispatch === undefined || updatedCommand === undefined) {
+          throw projectionError("projection_conflict");
+        }
+        return OutboundDecisionResultSchema.parse({
+          command: mapOutboundCommand(
+            parsed.tenant_id,
+            updatedCommand,
+            updatedDispatch,
+          ),
+          dispatch: mapOutboundDispatch(updatedDispatch),
+          replayed: false,
+        });
+      });
+      return structuredClone(result);
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /**
+   * Persist exactly one human confirmation or cancellation decision. The
+   * decision row is the idempotency record; the dispatch and command status
+   * transition happen in the same SQLite transaction.
+   */
+  async decideOutbound(
+    input: OutboundDecisionInput,
+  ): Promise<OutboundDecisionResult> {
+    try {
+      const parsed = parseProjectionInput(OutboundDecisionInputSchema, input);
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const available =
+        parsed.connection_available ??
+        (await this.#connectionAvailable(
+          parsed.tenant_id,
+          readOutboundDispatchByCommand(this.ctx.storage, parsed.command_id)
+            ?.connection_id ?? "",
+        ));
+      const result = this.ctx.storage.transactionSync(() => {
+        const dispatch = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        const command = dispatch
+          ? readOutboundCommand(this.ctx.storage, dispatch.command_id)
+          : undefined;
+        if (dispatch === undefined || command === undefined) {
+          throw projectionError("projection_not_found");
+        }
+        const existingDecision = readOutboundDecisionByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        if (existingDecision !== undefined) {
+          if (
+            existingDecision.idempotency_key !== parsed.idempotency_key ||
+            existingDecision.decision !== parsed.decision ||
+            existingDecision.actor_principal_id !== parsed.actor_principal_id ||
+            existingDecision.actor_identity_id !== parsed.actor_identity_id
+          ) {
+            throw projectionError("projection_conflict");
+          }
+          return OutboundDecisionResultSchema.parse({
+            command: mapOutboundCommand(parsed.tenant_id, command, dispatch),
+            dispatch: mapOutboundDispatch(dispatch),
+            replayed: true,
+          });
+        }
+
+        const decidedMs = parseStoredMilliseconds(parsed.decided_at);
+        const dueMs =
+          dispatch.confirmation_due_at === null
+            ? Number.NaN
+            : Date.parse(dispatch.confirmation_due_at);
+        if (parsed.decision === "confirm") {
+          const due =
+            dispatch.status === "confirmation_required" ||
+            (dispatch.status === "waiting_for_connection" &&
+              Number.isSafeInteger(dueMs) &&
+              decidedMs >= dueMs);
+          if (!due) throw projectionError("projection_conflict");
+        } else if (
+          dispatch.status !== "waiting_for_connection" &&
+          dispatch.status !== "confirmation_required" &&
+          dispatch.status !== "pending"
+        ) {
+          throw projectionError("projection_conflict");
+        }
+
+        const transition = transitionOutboundLifecycle({
+          dispatchStatus: dispatch.status,
+          commandStatus: command.status,
+          confirmationDecision: parsed.decision,
+          confirmationDueAt: dispatch.confirmation_due_at,
+          createdAt: dispatch.created_at,
+          now: parsed.decided_at,
+          connectionAvailable: available,
+        });
+        const decisionId = `decision_outbound_${parsed.command_id}`;
+        this.ctx.storage.sql.exec(
+          "INSERT INTO outbound_command_decisions (id, tenant_id, command_id, dispatch_id, decision, idempotency_key, actor_principal_id, actor_identity_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          decisionId,
+          parsed.tenant_id,
+          dispatch.command_id,
+          dispatch.id,
+          parsed.decision,
+          parsed.idempotency_key,
+          parsed.actor_principal_id,
+          parsed.actor_identity_id,
+          parsed.decided_at,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE outbound_dispatches SET status = ?, confirmation_due_at = ?, confirmation_decision = ?, confirmation_actor_principal_id = ?, confirmation_actor_identity_id = ?, confirmation_decided_at = ?, updated_at = ? WHERE id = ?",
+          transition.dispatchStatus,
+          transition.confirmationDueAt,
+          parsed.decision,
+          parsed.actor_principal_id,
+          parsed.actor_identity_id,
+          parsed.decided_at,
+          parsed.decided_at,
+          dispatch.id,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE commands SET status = ?, updated_at = ? WHERE id = ?",
+          transition.commandStatus,
+          parsed.decided_at,
+          command.id,
+        );
+        const updatedDispatch = readOutboundDispatchByCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        const updatedCommand = readOutboundCommand(
+          this.ctx.storage,
+          parsed.command_id,
+        );
+        if (updatedDispatch === undefined || updatedCommand === undefined) {
+          throw projectionError("projection_conflict");
+        }
+        return OutboundDecisionResultSchema.parse({
+          command: mapOutboundCommand(
+            parsed.tenant_id,
+            updatedCommand,
+            updatedDispatch,
+          ),
+          dispatch: mapOutboundDispatch(updatedDispatch),
+          replayed: false,
+        });
+      });
+      return structuredClone(result);
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listOutboundCommands(
+    input: ListOutboundCommandsInput,
+  ): Promise<Command[]> {
+    try {
+      const parsed = parseProjectionInput(
+        ListOutboundCommandsInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const dispatches = this.ctx.storage.sql
+        .exec<OutboundDispatchRow>(
+          "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE tenant_id = ? ORDER BY created_at DESC, id DESC",
+          parsed.tenant_id,
+        )
+        .toArray();
+      return structuredClone(
+        dispatches.flatMap((dispatch) => {
+          const command = readOutboundCommand(
+            this.ctx.storage,
+            dispatch.command_id,
+          );
+          return command === undefined
+            ? []
+            : [mapOutboundCommand(parsed.tenant_id, command, dispatch)];
+        }),
+      );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }

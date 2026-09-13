@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
@@ -11,7 +11,7 @@ import { pilotScenario } from "@communicator/test-fixtures";
 describe("conversation journeys", () => {
   it("labels the active thread with identity, provider, and account", async () => {
     renderApp(
-      "/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram",
+      "/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram&message=message_conversation_human_telegram_alex_outbound",
     );
 
     expect(
@@ -19,6 +19,11 @@ describe("conversation journeys", () => {
     ).toBeVisible();
     expect(screen.getByText("Human · telegram · Telegram")).toBeVisible();
     expect(screen.getByText("I sent the outline")).toBeVisible();
+    expect(
+      (
+        await screen.findByText("Thanks — noted for the simulated pilot.")
+      ).closest("li"),
+    ).toHaveAttribute("aria-current", "true");
     expect(
       screen.queryByRole("link", { name: "Back to conversations" }),
     ).not.toBeInTheDocument();
@@ -117,6 +122,89 @@ describe("conversation journeys", () => {
       screen.queryByRole("button", { name: "Load older messages" }),
     ).not.toBeInTheDocument();
     expect(composer).toBeVisible();
+  });
+
+  it("fetches an exact saved message outside the initial page", async () => {
+    const conversationMessages = pilotScenario.messages.filter(
+      (message) =>
+        message.conversation_id === "conversation_human_whatsapp_family",
+    );
+    const newest = conversationMessages[1]!;
+    const oldest = conversationMessages[0]!;
+    const targetedRequests: string[] = [];
+    server.use(
+      http.get(
+        "*/api/v1/conversations/:conversationId/messages",
+        ({ request }) => {
+          const search = new URL(request.url).searchParams;
+          const messageId = search.get("message_id");
+          if (messageId !== null) {
+            targetedRequests.push(messageId);
+            return HttpResponse.json({ items: [oldest], next_cursor: null });
+          }
+          return HttpResponse.json({
+            items: [newest],
+            next_cursor: "older-cursor",
+          });
+        },
+      ),
+    );
+
+    renderApp(
+      `/conversations/conversation_human_whatsapp_family?identity=identity_human&channel=connection_human_whatsapp&message=${oldest.id}`,
+    );
+
+    const timeline = await screen.findByRole("list", {
+      name: "Message timeline",
+    });
+    expect(within(timeline).getByText(oldest.body)).toBeVisible();
+    expect(
+      within(timeline).getByText(oldest.body).closest("li"),
+    ).toHaveAttribute("aria-current", "true");
+    expect(targetedRequests).toEqual([oldest.id]);
+    expect(
+      screen.getByRole("button", { name: "Load older messages" }),
+    ).toBeVisible();
+  });
+
+  it("shows a read denial for an exact saved message", async () => {
+    const conversationMessages = pilotScenario.messages.filter(
+      (message) =>
+        message.conversation_id === "conversation_human_whatsapp_family",
+    );
+    const oldest = conversationMessages[0]!;
+    server.use(
+      http.get(
+        "*/api/v1/conversations/:conversationId/messages",
+        ({ request }) => {
+          const search = new URL(request.url).searchParams;
+          if (search.has("message_id")) {
+            return HttpResponse.json(
+              {
+                error: {
+                  code: "forbidden",
+                  message: "Read access denied",
+                },
+              },
+              { status: 403 },
+            );
+          }
+          return HttpResponse.json({ items: [oldest], next_cursor: null });
+        },
+      ),
+    );
+
+    renderApp(
+      `/conversations/conversation_human_whatsapp_family?identity=identity_human&channel=connection_human_whatsapp&message=${oldest.id}`,
+    );
+
+    expect(
+      await screen.findByText(
+        "The saved message is unavailable or you do not have read access.",
+      ),
+    ).toBeVisible();
+    const timeline = screen.getByRole("list", { name: "Message timeline" });
+    expect(within(timeline).queryByText(oldest.body)).not.toBeInTheDocument();
   });
 
   it("keeps the inbox and timeline scoped to the selected identity", async () => {

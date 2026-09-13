@@ -19,6 +19,7 @@ import {
   LinkSessionStartSchema,
   MAX_IDENTITY_CONNECTIONS,
   MessagePageResultSchema,
+  OutboundDecisionResultSchema,
   RealtimeTicketRequestSchema,
   RealtimeTicketResponseSchema,
   SessionResponseSchema,
@@ -40,6 +41,7 @@ import {
   type LinkSessionActionRequest,
   type LinkSessionStart,
   type MessagePageResult,
+  type ConfirmationDecision,
   type RealtimeTicketRequest,
   type RealtimeTicketResponse,
   type SessionResponse,
@@ -339,22 +341,41 @@ export class ApiClient {
     identityId: string,
     cursor?: string,
     limit = 50,
+    messageId?: string,
   ): Promise<MessagePageResult> {
     const search = new URLSearchParams({
       identity_id: identityId,
       limit: String(limit),
     });
     if (cursor !== undefined) search.set("cursor", cursor);
+    if (messageId !== undefined) search.set("message_id", messageId);
     return this.request(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages?${search}`,
       MessagePageResultSchema,
     );
   }
 
-  getCommands(identityId: string): Promise<Command[]> {
+  getCommands(identityId?: string): Promise<Command[]> {
+    const search =
+      identityId === undefined
+        ? ""
+        : `?identity_id=${encodeURIComponent(identityId)}`;
+    return this.request(`/api/v1/commands${search}`, CommandSchema.array());
+  }
+
+  decideCommand(
+    commandId: string,
+    decision: ConfirmationDecision,
+    idempotencyKey: string,
+  ) {
     return this.request(
-      `/api/v1/commands?identity_id=${encodeURIComponent(identityId)}`,
-      CommandSchema.array(),
+      `/api/v1/commands/${encodeURIComponent(commandId)}/${decision}`,
+      OutboundDecisionResultSchema,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      },
     );
   }
 
