@@ -9,10 +9,7 @@ import {
   TimestampSchema,
   type ArchiveBatchManifest,
 } from "@communicator/contracts";
-import {
-  bytesEqual,
-  canonicalJsonLineBytes,
-} from "./canonical-json";
+import { bytesEqual, canonicalJsonLineBytes } from "./canonical-json";
 import {
   decodeCanonicalJsonl,
   encodeCanonicalEventBatch,
@@ -124,10 +121,12 @@ const metadataKeysEqual = (
     }
     const actualKeys = Object.keys(actual).sort();
     const expectedKeys = Object.keys(expected).sort();
-    if (!bytesEqual(
-      new TextEncoder().encode(actualKeys.join("\u0000")),
-      new TextEncoder().encode(expectedKeys.join("\u0000")),
-    )) {
+    if (
+      !bytesEqual(
+        new TextEncoder().encode(actualKeys.join("\u0000")),
+        new TextEncoder().encode(expectedKeys.join("\u0000")),
+      )
+    ) {
       return false;
     }
     return expectedKeys.every((key) => actual[key] === expected[key]);
@@ -192,7 +191,8 @@ const readR2 = async <T>(operation: () => Promise<T>): Promise<T> => {
 const readObjectBytes = async (object: R2ObjectBody): Promise<Uint8Array> => {
   try {
     const bytes = new Uint8Array(await object.arrayBuffer());
-    if (bytes.byteLength !== object.size) throw archiveError("archive_conflict");
+    if (bytes.byteLength !== object.size)
+      throw archiveError("archive_conflict");
     return bytes;
   } catch (error) {
     if (error instanceof ArchiveError) throw error;
@@ -509,12 +509,20 @@ export const archiveCanonicalEventBatch = async (
       contentType: DATA_CONTENT_TYPE,
       contentEncoding: GZIP_CONTENT_ENCODING,
     },
-    customMetadata: customMetadataFor(tenantId, batchId, encoded.canonicalSha256),
+    customMetadata: customMetadataFor(
+      tenantId,
+      batchId,
+      encoded.canonicalSha256,
+    ),
   };
 
   let dataPut: R2Object | null;
   try {
-    dataPut = await bucket.put(dataKey, encoded.compressed.slice(), dataPutOptions);
+    dataPut = await bucket.put(
+      dataKey,
+      encoded.compressed.slice(),
+      dataPutOptions,
+    );
   } catch (error) {
     throw archiveError("archive_unavailable", error);
   }
@@ -555,7 +563,11 @@ export const archiveCanonicalEventBatch = async (
   const manifestPutOptions: R2PutOptions = {
     onlyIf: { etagDoesNotMatch: "*" },
     httpMetadata: { contentType: MANIFEST_CONTENT_TYPE },
-    customMetadata: customMetadataFor(tenantId, batchId, manifest.canonical_sha256),
+    customMetadata: customMetadataFor(
+      tenantId,
+      batchId,
+      manifest.canonical_sha256,
+    ),
   };
 
   let manifestPut: R2Object | null;

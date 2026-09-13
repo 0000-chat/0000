@@ -8,7 +8,9 @@ export function EnvironmentBanner() {
         className="min-w-0 max-w-[5.5rem] truncate rounded-full border border-amber-300 bg-amber-100 px-2 py-1 text-[10px] font-semibold tracking-wide text-amber-950 sm:max-w-none sm:px-3 sm:text-xs"
         role="status"
       >
-        <span className="block truncate whitespace-nowrap">SIMULATED DATA — no provider actions are performed</span>
+        <span className="block truncate whitespace-nowrap">
+          SIMULATED DATA — no provider actions are performed
+        </span>
       </span>
     );
   }

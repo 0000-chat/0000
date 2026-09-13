@@ -8,33 +8,39 @@ const issuer = "https://issuer.example/";
 const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 
 async function update(sql: string, ...values: string[]) {
-  await env.CONTROL_DB.prepare(sql).bind(...values).run();
+  await env.CONTROL_DB.prepare(sql)
+    .bind(...values)
+    .run();
 }
 
 async function insertServicePrincipal() {
   await env.CONTROL_DB.prepare(
     "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(
-    "principal_service",
-    issuer,
-    "service-subject",
-    "service",
-    "Service",
-    "active",
-    "2026-08-29T00:00:00.000Z",
-    "2026-08-29T00:00:00.000Z",
-  ).run();
+  )
+    .bind(
+      "principal_service",
+      issuer,
+      "service-subject",
+      "service",
+      "Service",
+      "active",
+      "2026-08-29T00:00:00.000Z",
+      "2026-08-29T00:00:00.000Z",
+    )
+    .run();
   await env.CONTROL_DB.prepare(
     "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).bind(
-    "membership_service",
-    "tenant_pilot",
-    "principal_service",
-    "member",
-    "active",
-    "2026-08-29T00:00:00.000Z",
-    "2026-08-29T00:00:00.000Z",
-  ).run();
+  )
+    .bind(
+      "membership_service",
+      "tenant_pilot",
+      "principal_service",
+      "member",
+      "active",
+      "2026-08-29T00:00:00.000Z",
+      "2026-08-29T00:00:00.000Z",
+    )
+    .run();
 }
 
 function failure(result: AuthorizationResult, code: string) {
@@ -57,20 +63,26 @@ describe("resolveAuthorization", () => {
       ok: true,
       context: {
         tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },
-        principal: { id: "principal_human", type: "human", display_name: "Human" },
-        membership: { id: "membership_human", role: "owner" },
-        identities: [{
-          identity_id: "identity_human",
-          kind: "human",
+        principal: {
+          id: "principal_human",
+          type: "human",
           display_name: "Human",
-          scopes: [
-            "conversation.read",
-            "message.send",
-            "receipt.send",
-            "connection.read",
-            "connection.manage",
-          ],
-        }],
+        },
+        membership: { id: "membership_human", role: "owner" },
+        identities: [
+          {
+            identity_id: "identity_human",
+            kind: "human",
+            display_name: "Human",
+            scopes: [
+              "conversation.read",
+              "message.send",
+              "receipt.send",
+              "connection.read",
+              "connection.manage",
+            ],
+          },
+        ],
       },
     });
   });
@@ -86,11 +98,13 @@ describe("resolveAuthorization", () => {
       ok: true,
       context: {
         principal: { id: "principal_agent", type: "agent" },
-        identities: [{
-          identity_id: "identity_agent",
-          kind: "agent",
-          scopes: ["conversation.read", "message.send", "connection.read"],
-        }],
+        identities: [
+          {
+            identity_id: "identity_agent",
+            kind: "agent",
+            scopes: ["conversation.read", "message.send", "connection.read"],
+          },
+        ],
       },
     });
   });
@@ -105,16 +119,22 @@ describe("resolveAuthorization", () => {
       ok: true,
       context: {
         principal: { id: "principal_operator", type: "operator" },
-        identities: [{ identity_id: "identity_human", scopes: ["connection.read"] }],
+        identities: [
+          { identity_id: "identity_human", scopes: ["connection.read"] },
+        ],
       },
     });
   });
 
   it("returns not_found for a tenant hint outside the membership set", async () => {
-    const result = await resolveAuthorization(env.CONTROL_DB, {
-      issuer,
-      subject: "human-subject",
-    }, "tenant_other");
+    const result = await resolveAuthorization(
+      env.CONTROL_DB,
+      {
+        issuer,
+        subject: "human-subject",
+      },
+      "tenant_other",
+    );
     failure(result, "not_found");
   });
 
@@ -123,7 +143,10 @@ describe("resolveAuthorization", () => {
       issuer,
       subject: "human-subject",
     });
-    expect(result).toMatchObject({ ok: true, context: { tenant: { id: "tenant_pilot" } } });
+    expect(result).toMatchObject({
+      ok: true,
+      context: { tenant: { id: "tenant_pilot" } },
+    });
   });
 
   it("requires a tenant hint when multiple active memberships exist", async () => {
@@ -154,35 +177,60 @@ describe("resolveAuthorization", () => {
     failure(result, "tenant_selection_required");
   });
 
-  it.each(["disabled", "revoked"])("returns not_found for a %s principal", async (status) => {
-    await update("UPDATE principals SET status = ? WHERE id = ?", status, "principal_human");
-    const result = await resolveAuthorization(env.CONTROL_DB, {
-      issuer,
-      subject: "human-subject",
-    });
-    failure(result, "not_found");
-  });
+  it.each(["disabled", "revoked"])(
+    "returns not_found for a %s principal",
+    async (status) => {
+      await update(
+        "UPDATE principals SET status = ? WHERE id = ?",
+        status,
+        "principal_human",
+      );
+      const result = await resolveAuthorization(env.CONTROL_DB, {
+        issuer,
+        subject: "human-subject",
+      });
+      failure(result, "not_found");
+    },
+  );
 
-  it.each(["disabled", "revoked"])("returns not_found for a %s tenant", async (status) => {
-    await update("UPDATE tenants SET status = ? WHERE id = ?", status, "tenant_pilot");
-    const result = await resolveAuthorization(env.CONTROL_DB, {
-      issuer,
-      subject: "human-subject",
-    });
-    failure(result, "not_found");
-  });
+  it.each(["disabled", "revoked"])(
+    "returns not_found for a %s tenant",
+    async (status) => {
+      await update(
+        "UPDATE tenants SET status = ? WHERE id = ?",
+        status,
+        "tenant_pilot",
+      );
+      const result = await resolveAuthorization(env.CONTROL_DB, {
+        issuer,
+        subject: "human-subject",
+      });
+      failure(result, "not_found");
+    },
+  );
 
-  it.each(["disabled", "revoked"])("returns not_found for a %s membership", async (status) => {
-    await update("UPDATE memberships SET status = ? WHERE id = ?", status, "membership_human");
-    const result = await resolveAuthorization(env.CONTROL_DB, {
-      issuer,
-      subject: "human-subject",
-    });
-    failure(result, "not_found");
-  });
+  it.each(["disabled", "revoked"])(
+    "returns not_found for a %s membership",
+    async (status) => {
+      await update(
+        "UPDATE memberships SET status = ? WHERE id = ?",
+        status,
+        "membership_human",
+      );
+      const result = await resolveAuthorization(env.CONTROL_DB, {
+        issuer,
+        subject: "human-subject",
+      });
+      failure(result, "not_found");
+    },
+  );
 
   it("omits a disabled identity and its grants", async () => {
-    await update("UPDATE identities SET status = ? WHERE id = ?", "disabled", "identity_human");
+    await update(
+      "UPDATE identities SET status = ? WHERE id = ?",
+      "disabled",
+      "identity_human",
+    );
     const result = await resolveAuthorization(env.CONTROL_DB, {
       issuer,
       subject: "human-subject",
@@ -193,12 +241,18 @@ describe("resolveAuthorization", () => {
   it.each([
     ["agent", "principal_agent", "agent-subject"],
     ["service", "principal_service", "service-subject"],
-  ])("rejects a %s principal token without jti", async (kind, principalId, subject) => {
-    if (kind === "service") await insertServicePrincipal();
-    const result = await resolveAuthorization(env.CONTROL_DB, { issuer, subject });
-    expect(principalId).toMatch(/^principal_/);
-    failure(result, "unauthenticated");
-  });
+  ])(
+    "rejects a %s principal token without jti",
+    async (kind, principalId, subject) => {
+      if (kind === "service") await insertServicePrincipal();
+      const result = await resolveAuthorization(env.CONTROL_DB, {
+        issuer,
+        subject,
+      });
+      expect(principalId).toMatch(/^principal_/);
+      failure(result, "unauthenticated");
+    },
+  );
 
   it("rejects an agent token whose jti has been revoked", async () => {
     await update(

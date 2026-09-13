@@ -14,7 +14,8 @@ export function getTenantProjection(
 
   try {
     const result = CanonicalResourceIdSchema.safeParse(tenantId);
-    if (!result.success) throw projectionError("projection_invalid", result.error);
+    if (!result.success)
+      throw projectionError("projection_invalid", result.error);
     return env.TENANT_PROJECTION.getByName(result.data);
   } catch (error) {
     if (error instanceof ProjectionError) throw error;

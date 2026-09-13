@@ -31,7 +31,9 @@ describe("archive key derivation", () => {
   });
 
   it("derives the tenant list prefix internally", () => {
-    expect(deriveManifestPrefix("tenant_pilot")).toBe("manifests/tenant_pilot/");
+    expect(deriveManifestPrefix("tenant_pilot")).toBe(
+      "manifests/tenant_pilot/",
+    );
   });
 
   it.each([
@@ -41,8 +43,9 @@ describe("archive key derivation", () => {
     ["tenant_pilot", "batch_01/other"],
     ["Tenant_pilot", "batch_01abc"],
   ])("rejects caller-like path input (%s, %s)", (tenantId, batchId) => {
-    expect(() => deriveArchiveKeys(tenantId, batchId, "2026-09-07T01:02:03.000Z"))
-      .toThrowError(ArchiveError);
+    expect(() =>
+      deriveArchiveKeys(tenantId, batchId, "2026-09-07T01:02:03.000Z"),
+    ).toThrowError(ArchiveError);
   });
 
   it("parses only a valid derived key", () => {
@@ -57,7 +60,8 @@ describe("archive key derivation", () => {
       hour: "01",
       batchId: "batch_01abc",
     });
-    expect(parseArchiveKey("events/tenant_pilot/2026/09/07/01/batch_01abc.json"))
-      .toBeNull();
+    expect(
+      parseArchiveKey("events/tenant_pilot/2026/09/07/01/batch_01abc.json"),
+    ).toBeNull();
   });
 });

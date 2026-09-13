@@ -17,7 +17,13 @@ const providerIcons: Partial<Record<Provider, SimpleIconData>> = {
   linkedin: linkedinIcon,
 };
 
-export function ProviderIcon({ provider, className }: { provider: Provider | string; className?: string }) {
+export function ProviderIcon({
+  provider,
+  className,
+}: {
+  provider: Provider | string;
+  className?: string;
+}) {
   const icon = providerIcons[provider as Provider];
   if (!icon) {
     return (

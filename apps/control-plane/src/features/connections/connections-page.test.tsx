@@ -12,7 +12,10 @@ describe("ConnectionsPage", () => {
     expect(await screen.findByText("Personal WhatsApp")).toBeVisible();
     expect(screen.queryByText("Agent WhatsApp")).not.toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText("Active identity"), "identity_agent");
+    await user.selectOptions(
+      screen.getByLabelText("Active identity"),
+      "identity_agent",
+    );
 
     expect(await screen.findByText("Agent WhatsApp")).toBeVisible();
     expect(screen.queryByText("Personal WhatsApp")).not.toBeInTheDocument();
@@ -26,8 +29,10 @@ describe("ConnectionsPage", () => {
     expect(screen.getAllByText("WhatsApp").length).toBeGreaterThan(0);
     expect(screen.getByText("Attention Required")).toBeVisible();
     expect(screen.getAllByText("message.send").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("button", { name: /Simulation only.*Reconnect/i }).every(
-      (button) => (button as HTMLButtonElement).disabled,
-    )).toBe(true);
+    expect(
+      screen
+        .getAllByRole("button", { name: /Simulation only.*Reconnect/i })
+        .every((button) => (button as HTMLButtonElement).disabled),
+    ).toBe(true);
   });
 });

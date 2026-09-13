@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+} from "@tanstack/react-query";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import type { ChannelSummary, ConversationPageResult } from "@communicator/contracts";
+import type {
+  ChannelSummary,
+  ConversationPageResult,
+} from "@communicator/contracts";
 import { useIdentityContext } from "@/components/identity/identity-switcher";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
@@ -21,11 +29,19 @@ import {
 } from "./apply-conversation-event";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
-export function ConversationsShell({ conversationId }: { conversationId?: string }) {
+export function ConversationsShell({
+  conversationId,
+}: {
+  conversationId?: string;
+}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { search } = useLocation();
-  const { session, activeIdentity, isLoading: identityLoading } = useIdentityContext();
+  const {
+    session,
+    activeIdentity,
+    isLoading: identityLoading,
+  } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
   const selectedChannelId = search.channel;
   const channelsQuery = useQuery({
@@ -37,7 +53,9 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
 
   useEffect(() => {
     if (session && identityId) {
-      setPreferredChannelIds(loadChannelOrder(session.principal.id, identityId));
+      setPreferredChannelIds(
+        loadChannelOrder(session.principal.id, identityId),
+      );
     }
   }, [identityId, session]);
 
@@ -49,7 +67,11 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     () => new Map(channels.map((channel) => [channel.id, channel])),
     [channels],
   );
-  const allConversationsQuery = useConversationPages(identityId, undefined, Boolean(identityId));
+  const allConversationsQuery = useConversationPages(
+    identityId,
+    undefined,
+    Boolean(identityId),
+  );
   const selectedConversationsQuery = useConversationPages(
     identityId,
     selectedChannelId,
@@ -60,25 +82,36 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     queryFn: () => apiClient.getConversation(identityId, conversationId ?? ""),
     enabled: Boolean(identityId && conversationId),
   });
-  const conversationsQuery = selectedChannelId ? selectedConversationsQuery : allConversationsQuery;
-  const conversations = conversationsQuery.data?.pages.flatMap((page) => page.items) ?? [];
-  const allUnreadCount = channels.reduce((sum, channel) => sum + channel.unread_count, 0);
-  const selectedChannel = selectedChannelId ? channelsById.get(selectedChannelId) : undefined;
+  const conversationsQuery = selectedChannelId
+    ? selectedConversationsQuery
+    : allConversationsQuery;
+  const conversations =
+    conversationsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const allUnreadCount = channels.reduce(
+    (sum, channel) => sum + channel.unread_count,
+    0,
+  );
+  const selectedChannel = selectedChannelId
+    ? channelsById.get(selectedChannelId)
+    : undefined;
   const activeThread = activeConversationQuery.data
     ? (() => {
-      const channel = channelsById.get(activeConversationQuery.data.connection_id);
-      if (!channel) return null;
-      if (
-        activeConversationQuery.data.identity_id !== activeIdentity?.id
-        || activeConversationQuery.data.connection_id !== channel.id
-        || channel.identity_id !== activeIdentity?.id
-        || activeConversationQuery.data.tenant_id !== channel.tenant_id
-        || (selectedChannelId !== undefined && selectedChannelId !== activeConversationQuery.data.connection_id)
-      ) {
-        return null;
-      }
-      return { channel, conversation: activeConversationQuery.data };
-    })()
+        const channel = channelsById.get(
+          activeConversationQuery.data.connection_id,
+        );
+        if (!channel) return null;
+        if (
+          activeConversationQuery.data.identity_id !== activeIdentity?.id ||
+          activeConversationQuery.data.connection_id !== channel.id ||
+          channel.identity_id !== activeIdentity?.id ||
+          activeConversationQuery.data.tenant_id !== channel.tenant_id ||
+          (selectedChannelId !== undefined &&
+            selectedChannelId !== activeConversationQuery.data.connection_id)
+        ) {
+          return null;
+        }
+        return { channel, conversation: activeConversationQuery.data };
+      })()
     : null;
   const acceptedSequenceRef = useRef(0);
   const channelsRef = useRef(channels);
@@ -106,36 +139,52 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     const unsubscribe = runtimeRealtimeClient.subscribe((event) => {
       const currentScope = activeScopeRef.current;
       if (
-        currentScope.identityId !== subscribedIdentityId
-        || currentScope.tenantId !== tenantId
-        || currentScope.principalId !== principalId
+        currentScope.identityId !== subscribedIdentityId ||
+        currentScope.tenantId !== tenantId ||
+        currentScope.principalId !== principalId
       ) {
         return;
       }
-      const update = prepareConversationEvent({
-        tenantId: currentScope.tenantId,
-        identityId: currentScope.identityId,
-        lastSequence: acceptedSequenceRef.current,
-        channels: channelsRef.current,
-      }, event);
+      const update = prepareConversationEvent(
+        {
+          tenantId: currentScope.tenantId,
+          identityId: currentScope.identityId,
+          lastSequence: acceptedSequenceRef.current,
+          channels: channelsRef.current,
+        },
+        event,
+      );
 
       if (update) {
         acceptedSequenceRef.current = update.acceptedSequence;
 
-        const updateConversationCache = (queryKey: ReturnType<typeof queryKeys.conversations>) => {
+        const updateConversationCache = (
+          queryKey: ReturnType<typeof queryKeys.conversations>,
+        ) => {
           let unsafe = false;
-          queryClient.setQueryData<InfiniteData<ConversationPageResult>>(queryKey, (current) => {
-            if (!current) return current;
-            unsafe = current.pages.length > 1 || current.pages.some((page) => page.next_cursor !== null);
-            if (unsafe) return current;
-            const pages = update.updatePages(current.pages);
-            return pages === current.pages ? current : { ...current, pages: pages ?? current.pages };
-          });
+          queryClient.setQueryData<InfiniteData<ConversationPageResult>>(
+            queryKey,
+            (current) => {
+              if (!current) return current;
+              unsafe =
+                current.pages.length > 1 ||
+                current.pages.some((page) => page.next_cursor !== null);
+              if (unsafe) return current;
+              const pages = update.updatePages(current.pages);
+              return pages === current.pages
+                ? current
+                : { ...current, pages: pages ?? current.pages };
+            },
+          );
           if (unsafe) void queryClient.invalidateQueries({ queryKey });
         };
 
-        updateConversationCache(queryKeys.conversations(subscribedIdentityId, undefined));
-        updateConversationCache(queryKeys.conversations(subscribedIdentityId, update.channelId));
+        updateConversationCache(
+          queryKeys.conversations(subscribedIdentityId, undefined),
+        );
+        updateConversationCache(
+          queryKeys.conversations(subscribedIdentityId, update.channelId),
+        );
         queryClient.setQueryData<ChannelSummary[]>(
           queryKeys.channels(subscribedIdentityId),
           update.updateChannels,
@@ -148,10 +197,14 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
       if (invalidation.invalidateIdentity) {
         if (invalidation.resetRequired) {
           void queryClient.invalidateQueries({
-            predicate: (query) => query.queryKey.includes(invalidation.identityId),
+            predicate: (query) =>
+              query.queryKey.includes(invalidation.identityId),
           });
         } else {
-          invalidateIdentityConversationPrefixes(queryClient, invalidation.identityId);
+          invalidateIdentityConversationPrefixes(
+            queryClient,
+            invalidation.identityId,
+          );
         }
         return;
       }
@@ -169,19 +222,24 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
       }
       for (const conversationId of invalidation.conversationIds) {
         void queryClient.invalidateQueries({
-          queryKey: queryKeys.conversation(invalidation.identityId, conversationId),
+          queryKey: queryKeys.conversation(
+            invalidation.identityId,
+            conversationId,
+          ),
         });
         void queryClient.invalidateQueries({
           queryKey: queryKeys.messages(invalidation.identityId, conversationId),
         });
       }
     });
-    void runtimeRealtimeClient.connect({
-      tenantId,
-      principalId,
-      identityIds: [subscribedIdentityId],
-      families: ["projection"],
-    }).catch(() => undefined);
+    void runtimeRealtimeClient
+      .connect({
+        tenantId,
+        principalId,
+        identityIds: [subscribedIdentityId],
+        families: ["projection"],
+      })
+      .catch(() => undefined);
     return () => {
       unsubscribe();
       runtimeRealtimeClient.close();
@@ -225,7 +283,9 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     return (
       <div role="alert" className="space-y-3">
         <p>Unable to load channels.</p>
-        <Button type="button" onClick={() => void channelsQuery.refetch()}>Retry</Button>
+        <Button type="button" onClick={() => void channelsQuery.refetch()}>
+          Retry
+        </Button>
       </div>
     );
   }
@@ -233,58 +293,94 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
     return <p role="status">No channels are available for this identity.</p>;
   }
 
-  const conversationError = conversationsQuery.isError && conversations.length === 0;
+  const conversationError =
+    conversationsQuery.isError && conversations.length === 0;
   const emptyMessage = selectedChannelId
     ? "No conversations are available for this channel."
     : "No conversations are available.";
 
   return (
-    <section aria-labelledby="conversations-heading" className="flex h-full min-h-0 flex-col overflow-hidden">
-      <h1 id="conversations-heading" className="sr-only">Conversations</h1>
+    <section
+      aria-labelledby="conversations-heading"
+      className="flex h-full min-h-0 flex-col overflow-hidden"
+    >
+      <h1 id="conversations-heading" className="sr-only">
+        Conversations
+      </h1>
       {!conversationId && (
         <div className="shrink-0 border-b p-3 md:hidden">
-          <ChannelSelector label={selectedChannel?.display_label ?? "All"}>{channelNavigation}</ChannelSelector>
+          <ChannelSelector label={selectedChannel?.display_label ?? "All"}>
+            {channelNavigation}
+          </ChannelSelector>
         </div>
       )}
       <div
         data-testid="conversation-workspace"
         className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[15rem_minmax(18rem,22rem)_minmax(0,1fr)]"
       >
-        <aside className="hidden min-h-0 overflow-hidden border-r bg-muted/20 md:block">{channelNavigation}</aside>
+        <aside className="hidden min-h-0 overflow-hidden border-r bg-muted/20 md:block">
+          {channelNavigation}
+        </aside>
         <section
           aria-labelledby="conversation-list-heading"
-          className={conversationId
-            ? "hidden min-h-0 border-r md:flex md:flex-col"
-            : "flex min-h-0 flex-col border-r"}
+          className={
+            conversationId
+              ? "hidden min-h-0 border-r md:flex md:flex-col"
+              : "flex min-h-0 flex-col border-r"
+          }
         >
           <header className="flex min-h-14 shrink-0 items-center justify-between border-b px-4">
             <div className="min-w-0">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 {activeIdentity.display_name}
               </p>
-              <h2 id="conversation-list-heading" className="truncate text-base font-semibold">
+              <h2
+                id="conversation-list-heading"
+                className="truncate text-base font-semibold"
+              >
                 {selectedChannel?.display_label ?? "All conversations"}
               </h2>
             </div>
-            <span className="text-xs text-muted-foreground">{conversations.length}</span>
+            <span className="text-xs text-muted-foreground">
+              {conversations.length}
+            </span>
           </header>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {conversationError && (
-              <div role="alert" className="m-3 space-y-2 border border-destructive/40 p-3 text-sm">
+              <div
+                role="alert"
+                className="m-3 space-y-2 border border-destructive/40 p-3 text-sm"
+              >
                 <p>Unable to load conversations.</p>
-                <Button type="button" size="sm" onClick={() => void conversationsQuery.refetch()}>Retry</Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void conversationsQuery.refetch()}
+                >
+                  Retry
+                </Button>
               </div>
             )}
-            {conversationsQuery.isLoading && <p role="status" className="p-4 text-sm">Loading conversations…</p>}
-            {!conversationsQuery.isLoading && conversations.length === 0 && !conversationError && (
-              <p role="status" className="p-4 text-sm text-muted-foreground">{emptyMessage}</p>
+            {conversationsQuery.isLoading && (
+              <p role="status" className="p-4 text-sm">
+                Loading conversations…
+              </p>
             )}
+            {!conversationsQuery.isLoading &&
+              conversations.length === 0 &&
+              !conversationError && (
+                <p role="status" className="p-4 text-sm text-muted-foreground">
+                  {emptyMessage}
+                </p>
+              )}
             <ConversationList
               conversations={conversations}
               channelsById={channelsById}
               identityId={identityId}
               {...(selectedChannelId ? { selectedChannelId } : {})}
-              {...(conversationId ? { activeConversationId: conversationId } : {})}
+              {...(conversationId
+                ? { activeConversationId: conversationId }
+                : {})}
             />
             {conversationsQuery.hasNextPage && (
               <Button
@@ -294,27 +390,46 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
                 disabled={conversationsQuery.isFetchingNextPage}
                 onClick={() => void conversationsQuery.fetchNextPage()}
               >
-                {conversationsQuery.isFetchingNextPage ? "Loading older conversations…" : "Load older conversations"}
+                {conversationsQuery.isFetchingNextPage
+                  ? "Loading older conversations…"
+                  : "Load older conversations"}
               </Button>
             )}
             {conversationsQuery.isFetchNextPageError && (
-              <div role="alert" className="m-3 space-y-2 border border-destructive/40 p-3 text-sm">
+              <div
+                role="alert"
+                className="m-3 space-y-2 border border-destructive/40 p-3 text-sm"
+              >
                 <p>Unable to load older conversations.</p>
-                <Button type="button" size="sm" onClick={() => void conversationsQuery.fetchNextPage()}>Retry</Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void conversationsQuery.fetchNextPage()}
+                >
+                  Retry
+                </Button>
               </div>
             )}
           </div>
         </section>
         <section
           aria-label="Active conversation"
-          className={conversationId ? "flex min-h-0 min-w-0" : "hidden min-h-0 min-w-0 md:flex"}
+          className={
+            conversationId
+              ? "flex min-h-0 min-w-0"
+              : "hidden min-h-0 min-w-0 md:flex"
+          }
         >
           {conversationId && activeConversationQuery.isLoading && (
-            <p role="status" className="p-6 text-sm text-muted-foreground">Loading conversation…</p>
+            <p role="status" className="p-6 text-sm text-muted-foreground">
+              Loading conversation…
+            </p>
           )}
-          {conversationId && !activeConversationQuery.isLoading && !activeThread && (
-            <ConversationUnavailable identityId={activeIdentity.id} />
-          )}
+          {conversationId &&
+            !activeConversationQuery.isLoading &&
+            !activeThread && (
+              <ConversationUnavailable identityId={activeIdentity.id} />
+            )}
           {conversationId && activeThread && (
             <ConversationPage
               identity={activeIdentity}
@@ -334,10 +449,21 @@ export function ConversationsShell({ conversationId }: { conversationId?: string
   );
 }
 
-function useConversationPages(identityId: string, channelId: string | undefined, enabled: boolean) {
-  return useInfiniteQuery<ConversationPageResult, Error, { pages: ConversationPageResult[]; pageParams: Array<string | null> }, readonly ["conversations", string, string], string | null>({
+function useConversationPages(
+  identityId: string,
+  channelId: string | undefined,
+  enabled: boolean,
+) {
+  return useInfiniteQuery<
+    ConversationPageResult,
+    Error,
+    { pages: ConversationPageResult[]; pageParams: Array<string | null> },
+    readonly ["conversations", string, string],
+    string | null
+  >({
     queryKey: queryKeys.conversations(identityId, channelId),
-    queryFn: ({ pageParam }) => apiClient.getConversations(identityId, channelId, pageParam ?? undefined),
+    queryFn: ({ pageParam }) =>
+      apiClient.getConversations(identityId, channelId, pageParam ?? undefined),
     initialPageParam: null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     enabled,
@@ -348,7 +474,9 @@ function invalidateIdentityConversationPrefixes(
   queryClient: ReturnType<typeof useQueryClient>,
   identityId: string,
 ) {
-  void queryClient.invalidateQueries({ queryKey: queryKeys.channels(identityId) });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.channels(identityId),
+  });
   void queryClient.invalidateQueries({
     queryKey: queryKeys.conversations(identityId, undefined).slice(0, 2),
   });

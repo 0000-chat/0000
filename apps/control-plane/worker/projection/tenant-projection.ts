@@ -20,7 +20,6 @@ import {
   MAX_REALTIME_REPLAY_CHANGES,
   MAX_REALTIME_SOCKETS_PER_PRINCIPAL,
   MAX_REALTIME_SOCKETS_PER_TENANT,
-  REALTIME_CONNECTION_TTL_MS,
   REALTIME_SUBPROTOCOL,
   REALTIME_TICKET_TTL_MS,
   RealtimeConnectedFrameSchema,
@@ -313,10 +312,7 @@ const sameNullableString = (
   right: string | null,
 ): boolean => left === right;
 
-const parseReplayCursor = (
-  cursor: string | null,
-  tenantId: string,
-): void => {
+const parseReplayCursor = (cursor: string | null, tenantId: string): void => {
   if (cursor === null) return;
   try {
     decodeReplayCursor(cursor, tenantId, deriveManifestPrefix(tenantId));
@@ -400,7 +396,8 @@ const readStatusForMeta = (
       "SELECT (SELECT COUNT(*) FROM applied_events) AS applied_event_count, (SELECT COUNT(*) FROM conversations) AS conversation_count, (SELECT COUNT(*) FROM messages) AS message_count, COALESCE((SELECT MAX(latest_sequence) FROM projection_identity_sequences), 0) AS latest_change_sequence",
     )
     .toArray()[0];
-  if (counts === undefined) throw new Error("projection status counts are missing");
+  if (counts === undefined)
+    throw new Error("projection status counts are missing");
 
   const checkpoints = storage.sql
     .exec<ProjectionCheckpointRow>(
@@ -437,7 +434,9 @@ const readStatusForMeta = (
 };
 
 const parseProjectionInput = <T>(
-  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
+  schema: {
+    safeParse(value: unknown): { success: true; data: T } | { success: false };
+  },
   input: unknown,
 ): T => {
   try {
@@ -469,7 +468,10 @@ const hasOversizedApplyEventArray = (input: unknown): boolean => {
       return false;
     }
     const events = eventsDescriptor.value;
-    if (!Array.isArray(events) || Object.getPrototypeOf(events) !== Array.prototype) {
+    if (
+      !Array.isArray(events) ||
+      Object.getPrototypeOf(events) !== Array.prototype
+    ) {
       return false;
     }
     const lengthDescriptor = Object.getOwnPropertyDescriptor(events, "length");
@@ -520,7 +522,10 @@ const hasOversizedReplayEventArray = (input: unknown): boolean => {
       return false;
     }
     const events = eventsDescriptor.value;
-    if (!Array.isArray(events) || Object.getPrototypeOf(events) !== Array.prototype) {
+    if (
+      !Array.isArray(events) ||
+      Object.getPrototypeOf(events) !== Array.prototype
+    ) {
       return false;
     }
     const lengthDescriptor = Object.getOwnPropertyDescriptor(events, "length");
@@ -585,16 +590,18 @@ const mapChannelStats = (
     throw projectionError("projection_too_large");
   }
 
-  return ProjectionChannelStatsSchema.parse(rows.map((row) => {
-    if (!isSafeNonnegativeInteger(row.unread_count)) {
-      throw new Error("projection channel unread count is invalid");
-    }
-    return {
-      connection_id: row.connection_id,
-      unread_count: row.unread_count,
-      last_activity_at: row.last_activity_at,
-    };
-  }));
+  return ProjectionChannelStatsSchema.parse(
+    rows.map((row) => {
+      if (!isSafeNonnegativeInteger(row.unread_count)) {
+        throw new Error("projection channel unread count is invalid");
+      }
+      return {
+        connection_id: row.connection_id,
+        unread_count: row.unread_count,
+        last_activity_at: row.last_activity_at,
+      };
+    }),
+  );
 };
 
 const readConversationRows = (
@@ -603,14 +610,15 @@ const readConversationRows = (
   generation: number,
 ): ConversationQueryRow[] => {
   const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
-  const cursor = input.cursor === undefined
-    ? undefined
-    : decodeConversationCursor(input.cursor, {
-        tenant_id: input.tenant_id,
-        identity_id: input.identity_id,
-        connection_id: input.connection_id,
-        generation,
-      });
+  const cursor =
+    input.cursor === undefined
+      ? undefined
+      : decodeConversationCursor(input.cursor, {
+          tenant_id: input.tenant_id,
+          identity_id: input.identity_id,
+          connection_id: input.connection_id,
+          generation,
+        });
   const limit = pageSize + 1;
 
   if (input.connection_id === null) {
@@ -684,18 +692,19 @@ const mapConversationPage = (
     };
   });
   const last = visibleRows.at(-1);
-  const nextCursor = hasNext && last !== undefined
-    ? encodeConversationCursor({
-        schema_version: 1,
-        query_kind: "projection.conversations",
-        tenant_id: tenantId,
-        identity_id: input.identity_id,
-        connection_id: input.connection_id,
-        generation,
-        last_activity_ms: parseStoredMilliseconds(last.last_activity_at),
-        last_id: last.id,
-      })
-    : null;
+  const nextCursor =
+    hasNext && last !== undefined
+      ? encodeConversationCursor({
+          schema_version: 1,
+          query_kind: "projection.conversations",
+          tenant_id: tenantId,
+          identity_id: input.identity_id,
+          connection_id: input.connection_id,
+          generation,
+          last_activity_ms: parseStoredMilliseconds(last.last_activity_at),
+          last_id: last.id,
+        })
+      : null;
   return ConversationPageResultSchema.parse({ items, next_cursor: nextCursor });
 };
 
@@ -705,14 +714,15 @@ const readMessageRows = (
   generation: number,
 ): MessageQueryRow[] => {
   const pageSize = input.page_size ?? DEFAULT_PROJECTION_PAGE_SIZE;
-  const cursor = input.cursor === undefined
-    ? undefined
-    : decodeMessageCursor(input.cursor, {
-        tenant_id: input.tenant_id,
-        identity_id: input.identity_id,
-        conversation_id: input.conversation_id,
-        generation,
-      });
+  const cursor =
+    input.cursor === undefined
+      ? undefined
+      : decodeMessageCursor(input.cursor, {
+          tenant_id: input.tenant_id,
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          generation,
+        });
   const limit = pageSize + 1;
   if (cursor === undefined) {
     return storage.sql
@@ -767,18 +777,19 @@ const mapMessagePage = (
     };
   });
   const last = visibleRows.at(-1);
-  const nextCursor = hasNext && last !== undefined
-    ? encodeMessageCursor({
-        schema_version: 1,
-        query_kind: "projection.messages",
-        tenant_id: tenantId,
-        identity_id: input.identity_id,
-        conversation_id: input.conversation_id,
-        generation,
-        last_occurred_ms: parseStoredMilliseconds(last.occurred_at),
-        last_id: last.id,
-      })
-    : null;
+  const nextCursor =
+    hasNext && last !== undefined
+      ? encodeMessageCursor({
+          schema_version: 1,
+          query_kind: "projection.messages",
+          tenant_id: tenantId,
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          generation,
+          last_occurred_ms: parseStoredMilliseconds(last.occurred_at),
+          last_id: last.id,
+        })
+      : null;
   return MessagePageResultSchema.parse({ items, next_cursor: nextCursor });
 };
 
@@ -797,7 +808,8 @@ const readChangePage = (
       input.identity_id,
     )
     .toArray()[0];
-  if (latestRow === undefined) throw new Error("projection sequence is missing");
+  if (latestRow === undefined)
+    throw new Error("projection sequence is missing");
 
   const floorRow = storage.sql
     .exec<ChangeFloorQueryRow>(
@@ -847,9 +859,7 @@ type RealtimeFloorRow = { discarded_through_sequence: number };
 type RealtimeReplayAction = {
   readonly identityId: string;
   readonly latestSequence: number;
-  readonly resetReason:
-    | RealtimeResetRequiredFrame["reason"]
-    | null;
+  readonly resetReason: RealtimeResetRequiredFrame["reason"] | null;
   readonly changes: readonly RealtimeProjectionChange[];
 };
 
@@ -860,21 +870,22 @@ const REALTIME_ERROR_MESSAGES = {
 
 const realtimeResponse = (
   code: keyof typeof REALTIME_ERROR_MESSAGES,
-): Response => new Response(
-  JSON.stringify({
-    error: {
-      code,
-      message: REALTIME_ERROR_MESSAGES[code],
+): Response =>
+  new Response(
+    JSON.stringify({
+      error: {
+        code,
+        message: REALTIME_ERROR_MESSAGES[code],
+      },
+    }),
+    {
+      status: code === "invalid_request" ? 400 : 503,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json",
+      },
     },
-  }),
-  {
-    status: code === "invalid_request" ? 400 : 503,
-    headers: {
-      "Cache-Control": "no-store",
-      "Content-Type": "application/json",
-    },
-  },
-);
+  );
 
 const REALTIME_INTERNAL_HEADER_NAMES = new Set([
   "connection",
@@ -999,13 +1010,14 @@ const readRealtimeFloor = (
 
 const changesFromReplayRows = (
   rows: readonly RealtimeReplayRow[],
-): RealtimeProjectionChange[] => rows.map((row) => ({
-  sequence: row.sequence,
-  event_type: row.event_type,
-  connection_id: row.connection_id,
-  conversation_id: row.conversation_id,
-  occurred_at: row.occurred_at,
-}));
+): RealtimeProjectionChange[] =>
+  rows.map((row) => ({
+    sequence: row.sequence,
+    event_type: row.event_type,
+    connection_id: row.connection_id,
+    conversation_id: row.conversation_id,
+    occurred_at: row.occurred_at,
+  }));
 
 export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -1068,8 +1080,14 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           continue;
         }
 
-        const floor = readRealtimeFloor(this.ctx.storage, subscription.identity_id);
-        if (resume.after_sequence < floor || resume.after_sequence > latestSequence) {
+        const floor = readRealtimeFloor(
+          this.ctx.storage,
+          subscription.identity_id,
+        );
+        if (
+          resume.after_sequence < floor ||
+          resume.after_sequence > latestSequence
+        ) {
           replayActions.push({
             identityId: subscription.identity_id,
             latestSequence,
@@ -1344,7 +1362,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         realtimeSocketLoggerFromEnv(this.env),
         subject,
         outcome,
-        Math.max(0, Math.min(MAX_REALTIME_SOCKETS_PER_TENANT, activeTenantSocketCount)),
+        Math.max(
+          0,
+          Math.min(MAX_REALTIME_SOCKETS_PER_TENANT, activeTenantSocketCount),
+        ),
       );
     } catch {
       // Telemetry must never change socket or projection behavior.
@@ -1394,7 +1415,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     return nextAttachment;
   }
 
-  async initialize(input: InitializeProjectionInput): Promise<ProjectionStatus> {
+  async initialize(
+    input: InitializeProjectionInput,
+  ): Promise<ProjectionStatus> {
     try {
       const parsed = parseProjectionInput(
         InitializeProjectionInputSchema,
@@ -1423,7 +1446,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       });
 
       const created = readProjectionMeta(this.ctx.storage);
-      if (created === undefined) throw new Error("projection metadata was not created");
+      if (created === undefined)
+        throw new Error("projection metadata was not created");
       requireStoredTenant(created, parsed.tenant_id);
       return readStatusForMeta(this.ctx.storage, created);
     } catch (error) {
@@ -1540,7 +1564,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         // Re-check lifecycle state inside the transaction so all destructive
         // deletes and metadata changes roll back together on any failure.
         const current = readProjectionMeta(this.ctx.storage);
-        if (current === undefined) throw projectionError("projection_not_found");
+        if (current === undefined)
+          throw projectionError("projection_not_found");
         requireStoredTenant(current, parsed.tenant_id);
         // A duplicate begin can have read the old ready/failed row just
         // before the first caller committed. Treat the now-active identical
@@ -1553,7 +1578,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         ) {
           return;
         }
-        if (current.state !== meta.state || current.generation !== meta.generation) {
+        if (
+          current.state !== meta.state ||
+          current.generation !== meta.generation
+        ) {
           throw projectionError("projection_rebuild_mismatch");
         }
 
@@ -1578,7 +1606,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       }
 
       const started = readProjectionMeta(this.ctx.storage);
-      if (started === undefined) throw new Error("projection metadata disappeared");
+      if (started === undefined)
+        throw new Error("projection metadata disappeared");
       return readStatusForMeta(this.ctx.storage, started);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
@@ -1589,7 +1618,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
    * Mark the active rebuild complete only after its current-generation replay
    * checkpoint has reached the terminal marker.
    */
-  async completeRebuild(input: CompleteRebuildInput): Promise<ProjectionStatus> {
+  async completeRebuild(
+    input: CompleteRebuildInput,
+  ): Promise<ProjectionStatus> {
     try {
       const parsed = parseProjectionInput(CompleteRebuildInputSchema, input);
       requireAuthorization(
@@ -1608,13 +1639,17 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         }
         return readStatusForMeta(this.ctx.storage, meta);
       }
-      if (meta.state !== "rebuilding" || meta.rebuild_id !== parsed.rebuild_id) {
+      if (
+        meta.state !== "rebuilding" ||
+        meta.rebuild_id !== parsed.rebuild_id
+      ) {
         throw projectionError("projection_rebuild_mismatch");
       }
 
       this.ctx.storage.transactionSync(() => {
         const current = readProjectionMeta(this.ctx.storage);
-        if (current === undefined) throw projectionError("projection_not_found");
+        if (current === undefined)
+          throw projectionError("projection_not_found");
         requireStoredTenant(current, parsed.tenant_id);
         // If the first completion won between the preflight read and this
         // transaction, the exact same completion is already durable.
@@ -1658,7 +1693,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       });
 
       const completed = readProjectionMeta(this.ctx.storage);
-      if (completed === undefined) throw new Error("projection metadata disappeared");
+      if (completed === undefined)
+        throw new Error("projection metadata disappeared");
       return readStatusForMeta(this.ctx.storage, completed);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
@@ -1687,7 +1723,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           throw projectionError("projection_rebuild_mismatch");
         }
         const failure = this.ctx.storage.sql
-          .exec<{ failed_at: string; failure_code: ProjectionStatus["last_rebuild_failure_code"] }>(
+          .exec<{
+            failed_at: string;
+            failure_code: ProjectionStatus["last_rebuild_failure_code"];
+          }>(
             "SELECT failed_at, failure_code FROM failed_rebuilds WHERE rebuild_id = ?",
             parsed.rebuild_id,
           )
@@ -1702,13 +1741,17 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         return readStatusForMeta(this.ctx.storage, meta);
       }
 
-      if (meta.state !== "rebuilding" || meta.rebuild_id !== parsed.rebuild_id) {
+      if (
+        meta.state !== "rebuilding" ||
+        meta.rebuild_id !== parsed.rebuild_id
+      ) {
         throw projectionError("projection_rebuild_mismatch");
       }
 
       this.ctx.storage.transactionSync(() => {
         const current = readProjectionMeta(this.ctx.storage);
-        if (current === undefined) throw projectionError("projection_not_found");
+        if (current === undefined)
+          throw projectionError("projection_not_found");
         requireStoredTenant(current, parsed.tenant_id);
         // Mirror the public failed-state retry semantics for two concurrent
         // abort callers. The failure row is checked before treating it as an
@@ -1718,7 +1761,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             throw projectionError("projection_rebuild_mismatch");
           }
           const failure = this.ctx.storage.sql
-            .exec<{ failed_at: string; failure_code: ProjectionStatus["last_rebuild_failure_code"] }>(
+            .exec<{
+              failed_at: string;
+              failure_code: ProjectionStatus["last_rebuild_failure_code"];
+            }>(
               "SELECT failed_at, failure_code FROM failed_rebuilds WHERE rebuild_id = ?",
               parsed.rebuild_id,
             )
@@ -1756,7 +1802,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       });
 
       const failed = readProjectionMeta(this.ctx.storage);
-      if (failed === undefined) throw new Error("projection metadata disappeared");
+      if (failed === undefined)
+        throw new Error("projection metadata disappeared");
       return readStatusForMeta(this.ctx.storage, failed);
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
@@ -1794,7 +1841,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       if (meta.state === "rebuild_failed") {
         throw projectionError("projection_rebuild_failed");
       }
-      if (meta.state !== "rebuilding" || meta.rebuild_id !== parsed.rebuild_id) {
+      if (
+        meta.state !== "rebuilding" ||
+        meta.rebuild_id !== parsed.rebuild_id
+      ) {
         throw projectionError("projection_rebuild_mismatch");
       }
       parseReplayCursor(parsed.source_cursor, parsed.tenant_id);
@@ -1850,14 +1900,17 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
 
       let preparedEvents: readonly PreparedProjectionEvent[] = [];
       let inputEventCount = 0;
-      let connections: readonly ProjectionConnectionBinding[] = parsed.connections;
+      let connections: readonly ProjectionConnectionBinding[] =
+        parsed.connections;
       if (!isEmptyTerminal) {
         inputEventCount = parsed.page.events.length;
         // Replay is tenant-wide and intentionally ignores allowed_identity_ids.
         // prepareProjectionBatch still supplies the shared descriptor-safe
         // event/binding/hash preflight, using an internal identity set only for
         // that helper's structural check.
-        const identities = [...new Set(parsed.page.events.map((event) => event.identity_id))].sort();
+        const identities = [
+          ...new Set(parsed.page.events.map((event) => event.identity_id)),
+        ].sort();
         const prepared = await prepareProjectionBatch({
           schema_version: 1,
           tenant_id: parsed.tenant_id,
@@ -1886,7 +1939,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         lastEventId: pageGreatest?.event.event_id ?? null,
         // updatedAt is finalized against the previously retained tuple inside
         // the transaction; this value is only a page-local fallback.
-        updatedAt: pageGreatest?.event.observed_at ?? meta.rebuild_started_at ?? meta.updated_at,
+        updatedAt:
+          pageGreatest?.event.observed_at ??
+          meta.rebuild_started_at ??
+          meta.updated_at,
       };
 
       return this.#applyPreparedBatch({
@@ -1923,7 +1979,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       requireStoredTenant(meta, parsed.tenant_id);
       this.#requireReadyState(meta);
 
-      const rows = readConversationRows(this.ctx.storage, parsed, meta.generation);
+      const rows = readConversationRows(
+        this.ctx.storage,
+        parsed,
+        meta.generation,
+      );
       return structuredClone(
         mapConversationPage(parsed.tenant_id, meta.generation, parsed, rows),
       );
@@ -1959,10 +2019,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           parsed.identity_id,
         )
         .toArray()[0];
-      const result = row === undefined
-        ? null
-        : mapConversationSummary(parsed.tenant_id, row);
-      return structuredClone(GetProjectionConversationResultSchema.parse(result));
+      const result =
+        row === undefined
+          ? null
+          : mapConversationSummary(parsed.tenant_id, row);
+      return structuredClone(
+        GetProjectionConversationResultSchema.parse(result),
+      );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }
@@ -2075,90 +2138,125 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     input: ApplyPreparedBatchInput,
   ): ApplyProjectionBatchResult {
     try {
-      const applied = this.ctx.storage.transactionSync<AppliedPreparedBatch>(() => {
-        const meta = readProjectionMeta(this.ctx.storage);
-        if (meta === undefined) throw projectionError("projection_not_found");
-        requireStoredTenant(meta, input.tenantId);
-        if (input.mode === "live") {
-          if (input.rebuildId !== null) {
-            throw projectionError("projection_invalid");
-          }
-          this.#requireReadyState(meta);
-        } else {
-          if (
-            meta.state === "rebuild_failed"
-          ) {
-            throw projectionError("projection_rebuild_failed");
-          }
-          if (
-            meta.state !== "rebuilding" ||
-            meta.rebuild_id !== input.rebuildId ||
-            input.rebuildId === null
-          ) {
-            throw projectionError("projection_rebuild_mismatch");
-          }
-        }
-
-        this.#ensurePersistentBindings(input.connections);
-
-        if (input.mode === "replay") {
-          const replayCheckpoint = input.checkpointMutation as PreparedReplayCheckpointMutation | null;
-          if (
-            replayCheckpoint === null ||
-            replayCheckpoint.kind !== REPLAY_CHECKPOINT_KIND
-          ) {
-            throw projectionError("projection_invalid");
-          }
-          const existing = this.ctx.storage.sql
-            .exec<ProjectionCheckpointStorageRow>(
-              "SELECT kind, value, updated_at, last_observed_at, last_observed_ms, last_event_id, source_cursor, page_digest, generation, last_applied_count, last_duplicate_count, last_sequence FROM projection_checkpoints WHERE kind = ?",
-              REPLAY_CHECKPOINT_KIND,
-            )
-            .toArray()[0];
-
-          if (existing !== undefined) {
-            if (existing.generation !== meta.generation) {
-              throw projectionError("projection_conflict");
+      const applied = this.ctx.storage.transactionSync<AppliedPreparedBatch>(
+        () => {
+          const meta = readProjectionMeta(this.ctx.storage);
+          if (meta === undefined) throw projectionError("projection_not_found");
+          requireStoredTenant(meta, input.tenantId);
+          if (input.mode === "live") {
+            if (input.rebuildId !== null) {
+              throw projectionError("projection_invalid");
             }
-            if (sameNullableString(existing.source_cursor, replayCheckpoint.sourceCursor)) {
-              if (existing.page_digest === replayCheckpoint.pageDigest) {
-                return {
-                  result: {
-                    schema_version: 1,
-                    tenant_id: input.tenantId,
-                    generation: meta.generation,
-                    applied_count: existing.last_applied_count ?? 0,
-                    duplicate_count: existing.last_duplicate_count ?? 0,
-                    last_sequence: existing.last_sequence ?? this.#readLastSequence(),
-                  },
-                  changes: [],
-                };
-              }
-              throw projectionError("projection_conflict");
+            this.#requireReadyState(meta);
+          } else {
+            if (meta.state === "rebuild_failed") {
+              throw projectionError("projection_rebuild_failed");
             }
             if (
-              existing.value === "terminal" ||
-              existing.value !== replayCheckpoint.sourceCursor
+              meta.state !== "rebuilding" ||
+              meta.rebuild_id !== input.rebuildId ||
+              input.rebuildId === null
             ) {
-              throw projectionError("projection_conflict");
+              throw projectionError("projection_rebuild_mismatch");
             }
-          } else if (replayCheckpoint.sourceCursor !== null) {
-            throw projectionError("projection_conflict");
           }
 
+          this.#ensurePersistentBindings(input.connections);
+
+          if (input.mode === "replay") {
+            const replayCheckpoint =
+              input.checkpointMutation as PreparedReplayCheckpointMutation | null;
+            if (
+              replayCheckpoint === null ||
+              replayCheckpoint.kind !== REPLAY_CHECKPOINT_KIND
+            ) {
+              throw projectionError("projection_invalid");
+            }
+            const existing = this.ctx.storage.sql
+              .exec<ProjectionCheckpointStorageRow>(
+                "SELECT kind, value, updated_at, last_observed_at, last_observed_ms, last_event_id, source_cursor, page_digest, generation, last_applied_count, last_duplicate_count, last_sequence FROM projection_checkpoints WHERE kind = ?",
+                REPLAY_CHECKPOINT_KIND,
+              )
+              .toArray()[0];
+
+            if (existing !== undefined) {
+              if (existing.generation !== meta.generation) {
+                throw projectionError("projection_conflict");
+              }
+              if (
+                sameNullableString(
+                  existing.source_cursor,
+                  replayCheckpoint.sourceCursor,
+                )
+              ) {
+                if (existing.page_digest === replayCheckpoint.pageDigest) {
+                  return {
+                    result: {
+                      schema_version: 1,
+                      tenant_id: input.tenantId,
+                      generation: meta.generation,
+                      applied_count: existing.last_applied_count ?? 0,
+                      duplicate_count: existing.last_duplicate_count ?? 0,
+                      last_sequence:
+                        existing.last_sequence ?? this.#readLastSequence(),
+                    },
+                    changes: [],
+                  };
+                }
+                throw projectionError("projection_conflict");
+              }
+              if (
+                existing.value === "terminal" ||
+                existing.value !== replayCheckpoint.sourceCursor
+              ) {
+                throw projectionError("projection_conflict");
+              }
+            } else if (replayCheckpoint.sourceCursor !== null) {
+              throw projectionError("projection_conflict");
+            }
+
+            const result = this.#projectPreparedEvents(
+              input.preparedEvents,
+              input.inputEventCount,
+              meta,
+            );
+            this.#writeReplayCheckpoint(
+              replayCheckpoint,
+              existing,
+              result.appliedCount,
+              result.duplicateCount,
+              result.lastSequence,
+              meta,
+            );
+            return {
+              result: {
+                schema_version: 1,
+                tenant_id: input.tenantId,
+                generation: meta.generation,
+                applied_count: result.appliedCount,
+                duplicate_count: result.duplicateCount,
+                last_sequence: result.lastSequence,
+              },
+              changes: [],
+            };
+          }
+
+          const liveCheckpoint =
+            input.checkpointMutation as PreparedCheckpointMutation | null;
+          if (
+            liveCheckpoint !== null &&
+            liveCheckpoint.kind === REPLAY_CHECKPOINT_KIND
+          ) {
+            throw projectionError("projection_invalid");
+          }
           const result = this.#projectPreparedEvents(
             input.preparedEvents,
             input.inputEventCount,
             meta,
           );
-          this.#writeReplayCheckpoint(
-            replayCheckpoint,
-            existing,
-            result.appliedCount,
-            result.duplicateCount,
-            result.lastSequence,
-            meta,
-          );
+          const lastSequence = result.lastSequence;
+          this.#applyLiveCheckpoint(liveCheckpoint, meta, lastSequence);
+
           return {
             result: {
               schema_version: 1,
@@ -2166,36 +2264,12 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               generation: meta.generation,
               applied_count: result.appliedCount,
               duplicate_count: result.duplicateCount,
-              last_sequence: result.lastSequence,
+              last_sequence: lastSequence,
             },
-            changes: [],
+            changes: result.changes,
           };
-        }
-
-        const liveCheckpoint = input.checkpointMutation as PreparedCheckpointMutation | null;
-        if (liveCheckpoint !== null && liveCheckpoint.kind === REPLAY_CHECKPOINT_KIND) {
-          throw projectionError("projection_invalid");
-        }
-        const result = this.#projectPreparedEvents(
-          input.preparedEvents,
-          input.inputEventCount,
-          meta,
-        );
-        const lastSequence = result.lastSequence;
-        this.#applyLiveCheckpoint(liveCheckpoint, meta, lastSequence);
-
-        return {
-          result: {
-            schema_version: 1,
-            tenant_id: input.tenantId,
-            generation: meta.generation,
-            applied_count: result.appliedCount,
-            duplicate_count: result.duplicateCount,
-            last_sequence: lastSequence,
-          },
-          changes: result.changes,
-        };
-      });
+        },
+      );
       if (input.mode === "live" && applied.changes.length > 0) {
         try {
           broadcastRealtimeChanges(
@@ -2235,11 +2309,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         continue;
       }
 
-      projectEvent(
-        prepared,
-        this.ctx.storage.sql,
-        touchedConversations,
-      );
+      projectEvent(prepared, this.ctx.storage.sql, touchedConversations);
       this.ctx.storage.sql.exec(
         "INSERT INTO applied_events (event_id, event_hash, event_type, event_source, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, observed_ms, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         prepared.event.event_id,
@@ -2293,10 +2363,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       appliedCount += 1;
     }
 
-    recomputeConversationSummaries(
-      this.ctx.storage.sql,
-      touchedConversations,
-    );
+    recomputeConversationSummaries(this.ctx.storage.sql, touchedConversations);
 
     this.#trimProjectionChanges();
     const lastSequence = this.#readLastSequence();
@@ -2326,15 +2393,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         existing.last_observed_ms !== null && existing.last_event_id !== null;
       const incomingHasTuple =
         checkpoint.lastObservedMs !== null && checkpoint.lastEventId !== null;
-      const incomingIsNewer = incomingHasTuple && (
-        !existingHasTuple ||
-        checkpoint.lastObservedMs! > existing.last_observed_ms! ||
-        (checkpoint.lastObservedMs === existing.last_observed_ms &&
-          compareOpaqueEventIds(
-            checkpoint.lastEventId!,
-            existing.last_event_id!,
-          ) > 0)
-      );
+      const incomingIsNewer =
+        incomingHasTuple &&
+        (!existingHasTuple ||
+          checkpoint.lastObservedMs! > existing.last_observed_ms! ||
+          (checkpoint.lastObservedMs === existing.last_observed_ms &&
+            compareOpaqueEventIds(
+              checkpoint.lastEventId!,
+              existing.last_event_id!,
+            ) > 0));
       if (!incomingIsNewer && existingHasTuple) {
         lastObservedAt = existing.last_observed_at;
         lastObservedMs = existing.last_observed_ms;
@@ -2585,16 +2652,12 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     const incomingIsNewer =
       checkpoint.lastObservedMs > existing.last_observed_ms ||
       (checkpoint.lastObservedMs === existing.last_observed_ms &&
-        compareOpaqueEventIds(
-          checkpoint.lastEventId,
-          existing.last_event_id,
-        ) > 0);
+        compareOpaqueEventIds(checkpoint.lastEventId, existing.last_event_id) >
+          0);
     const incomingIsEqual =
       checkpoint.lastObservedMs === existing.last_observed_ms &&
-      compareOpaqueEventIds(
-        checkpoint.lastEventId,
-        existing.last_event_id,
-      ) === 0;
+      compareOpaqueEventIds(checkpoint.lastEventId, existing.last_event_id) ===
+        0;
 
     if (incomingIsEqual) {
       if (
@@ -2619,5 +2682,4 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       checkpoint.kind,
     );
   }
-
 }

@@ -5,7 +5,6 @@ import {
   assertMessageTargetOwner,
   assertCanonicalResourceIdOwner,
   assertNoOwnerMismatch,
-  assertOwner,
   assertParticipantReferenceOwners,
   canonicalObservedAt,
   compareObservedTuple,
@@ -65,14 +64,20 @@ type EventTombstoneIdRow = {
   target_event_id: string;
 };
 
-const ownerMatches = (row: OwnedProjectionRow, owner: ProjectionOwner): boolean =>
+const ownerMatches = (
+  row: OwnedProjectionRow,
+  owner: ProjectionOwner,
+): boolean =>
   row.identity_id === owner.identityId &&
   row.account_id === owner.accountId &&
   row.connection_id === owner.connectionId &&
   row.conversation_id === owner.conversationId &&
   row.platform === owner.platform;
 
-const assertOwned = (row: OwnedProjectionRow | undefined, owner: ProjectionOwner): void => {
+const assertOwned = (
+  row: OwnedProjectionRow | undefined,
+  owner: ProjectionOwner,
+): void => {
   if (row !== undefined && !ownerMatches(row, owner)) {
     throw projectionError("projection_conflict");
   }
@@ -236,7 +241,12 @@ export const upsertResourceTombstone = (
 ): ResourceTombstoneRow => {
   const owner = ownerFor(prepared);
   assertTargetOwner(sql, resourceType, resourceId, owner);
-  assertTombstoneEventIdAvailable(sql, prepared.event.event_id, resourceType, resourceId);
+  assertTombstoneEventIdAvailable(
+    sql,
+    prepared.event.event_id,
+    resourceType,
+    resourceId,
+  );
   const existing = readResourceTombstone(sql, resourceType, resourceId);
   if (existing !== undefined) assertOwned(existing, owner);
 
@@ -321,9 +331,13 @@ export const redactMessage = (
     tombstone.reason_code,
     tombstoneWinsCurrent
       ? canonicalObservedAt(tombstone.observed_ms)
-      : message?.observed_at ?? canonicalObservedAt(tombstone.observed_ms),
-    tombstoneWinsCurrent ? tombstone.observed_ms : message?.current_observed_ms ?? tombstone.observed_ms,
-    tombstoneWinsCurrent ? tombstone.tombstone_event_id : message?.current_event_id ?? tombstone.tombstone_event_id,
+      : (message?.observed_at ?? canonicalObservedAt(tombstone.observed_ms)),
+    tombstoneWinsCurrent
+      ? tombstone.observed_ms
+      : (message?.current_observed_ms ?? tombstone.observed_ms),
+    tombstoneWinsCurrent
+      ? tombstone.tombstone_event_id
+      : (message?.current_event_id ?? tombstone.tombstone_event_id),
     messageId,
   );
 };
@@ -425,7 +439,10 @@ const redactConversation = (
   );
   sql.exec("DELETE FROM reactions WHERE conversation_id = ?", conversationId);
   sql.exec("DELETE FROM receipts WHERE conversation_id = ?", conversationId);
-  sql.exec("DELETE FROM typing_states WHERE conversation_id = ?", conversationId);
+  sql.exec(
+    "DELETE FROM typing_states WHERE conversation_id = ?",
+    conversationId,
+  );
   sql.exec(
     "UPDATE message_delivery_updates SET failure_code = NULL WHERE conversation_id = ?",
     conversationId,
@@ -454,7 +471,8 @@ export const projectMessageDeleted = (
     tombstone,
     readConversationTombstone(sql, owner.conversationId),
   );
-  if (effectiveTombstone === undefined) throw projectionError("projection_unavailable");
+  if (effectiveTombstone === undefined)
+    throw projectionError("projection_unavailable");
   redactMessage(sql, event.payload.message_id, effectiveTombstone);
 };
 
@@ -481,7 +499,8 @@ export const projectDeletionTombstone = (
         tombstone,
         readConversationTombstone(sql, owner.conversationId),
       );
-      if (effectiveTombstone === undefined) throw projectionError("projection_unavailable");
+      if (effectiveTombstone === undefined)
+        throw projectionError("projection_unavailable");
       redactMessage(sql, resourceId, effectiveTombstone);
       return;
     }
@@ -493,7 +512,8 @@ export const projectDeletionTombstone = (
         tombstone,
         readConversationTombstone(sql, owner.conversationId),
       );
-      if (effectiveTombstone === undefined) throw projectionError("projection_unavailable");
+      if (effectiveTombstone === undefined)
+        throw projectionError("projection_unavailable");
       redactParticipant(sql, resourceId, effectiveTombstone);
       return;
     }
@@ -508,7 +528,8 @@ export const projectDeletionTombstone = (
         ),
         readConversationTombstone(sql, owner.conversationId),
       );
-      if (effectiveTombstone === undefined) throw projectionError("projection_unavailable");
+      if (effectiveTombstone === undefined)
+        throw projectionError("projection_unavailable");
       redactAttachment(sql, resourceId, effectiveTombstone);
       return;
     }
@@ -520,17 +541,20 @@ export const projectDeletionTombstone = (
 export const conversationIsDeleted = (
   sql: SqlStorage,
   conversationId: string,
-): ResourceTombstoneRow | undefined => readConversationTombstone(sql, conversationId);
+): ResourceTombstoneRow | undefined =>
+  readConversationTombstone(sql, conversationId);
 
 export const participantIsDeleted = (
   sql: SqlStorage,
   participantId: string,
-): ResourceTombstoneRow | undefined => readParticipantTombstone(sql, participantId);
+): ResourceTombstoneRow | undefined =>
+  readParticipantTombstone(sql, participantId);
 
 export const attachmentIsDeleted = (
   sql: SqlStorage,
   attachmentId: string,
-): ResourceTombstoneRow | undefined => readAttachmentTombstone(sql, attachmentId);
+): ResourceTombstoneRow | undefined =>
+  readAttachmentTombstone(sql, attachmentId);
 
 export const messageIsDeleted = (
   sql: SqlStorage,

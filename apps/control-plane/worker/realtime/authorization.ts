@@ -26,7 +26,10 @@ const SAFE_MESSAGES: Record<RealtimeAuthorizationErrorCode, string> = {
   not_found: "Realtime authorization not found",
 };
 
-const realtimeAuthorizationErrorCauses = new WeakMap<RealtimeAuthorizationError, unknown>();
+const realtimeAuthorizationErrorCauses = new WeakMap<
+  RealtimeAuthorizationError,
+  unknown
+>();
 
 export class RealtimeAuthorizationError extends Error {
   readonly code!: RealtimeAuthorizationErrorCode;
@@ -60,19 +63,28 @@ export function authorizeRealtimeRequest(
 ): AuthorizedRealtimeRequest {
   const parsedSession = SessionResponseSchema.safeParse(session);
   if (!parsedSession.success) {
-    throw new RealtimeAuthorizationError("invalid_request", parsedSession.error);
+    throw new RealtimeAuthorizationError(
+      "invalid_request",
+      parsedSession.error,
+    );
   }
 
   const parsedRequest = RealtimeTicketRequestSchema.safeParse(request);
   if (!parsedRequest.success) {
-    throw new RealtimeAuthorizationError("invalid_request", parsedRequest.error);
+    throw new RealtimeAuthorizationError(
+      "invalid_request",
+      parsedRequest.error,
+    );
   }
 
   for (const subscription of parsedRequest.data.subscriptions) {
     const identity = parsedSession.data.identities.find(
       (candidate) => candidate.identity_id === subscription.identity_id,
     );
-    if (identity === undefined || !identity.scopes.includes("conversation.read")) {
+    if (
+      identity === undefined ||
+      !identity.scopes.includes("conversation.read")
+    ) {
       throw new RealtimeAuthorizationError("not_found");
     }
   }
@@ -106,8 +118,9 @@ export async function revalidateRealtimeAuthorization(
   const parsed = RealtimeUpgradeContextSchema.safeParse(authorization);
   if (!parsed.success) return false;
 
-  const membership = await db.prepare(
-    `SELECT 1 AS authorized
+  const membership = await db
+    .prepare(
+      `SELECT 1 AS authorized
      FROM tenants AS t
      JOIN memberships AS m ON m.tenant_id = t.id
      JOIN principals AS p ON p.id = m.principal_id
@@ -121,20 +134,23 @@ export async function revalidateRealtimeAuthorization(
        AND p.status = 'active'
        AND p.revoked_at IS NULL
      LIMIT 1`,
-  ).bind(
-    parsed.data.tenant_id,
-    parsed.data.membership_id,
-    parsed.data.principal_id,
-    parsed.data.principal_id,
-  ).first<{ authorized: number }>();
+    )
+    .bind(
+      parsed.data.tenant_id,
+      parsed.data.membership_id,
+      parsed.data.principal_id,
+      parsed.data.principal_id,
+    )
+    .first<{ authorized: number }>();
   if (membership === null) return false;
 
   const identityIds = parsed.data.subscriptions.map(
     (subscription) => subscription.identity_id,
   );
   const placeholders = identityIds.map(() => "?").join(", ");
-  const grants = await db.prepare(
-    `SELECT i.id AS identity_id
+  const grants = await db
+    .prepare(
+      `SELECT i.id AS identity_id
      FROM identity_grants AS g
      JOIN identities AS i
        ON i.tenant_id = g.tenant_id
@@ -145,13 +161,13 @@ export async function revalidateRealtimeAuthorization(
        AND i.status = 'active'
        AND i.id IN (${placeholders})
      ORDER BY i.id COLLATE BINARY`,
-  ).bind(
-    parsed.data.tenant_id,
-    parsed.data.membership_id,
-    ...identityIds,
-  ).all<{ identity_id: string }>();
+    )
+    .bind(parsed.data.tenant_id, parsed.data.membership_id, ...identityIds)
+    .all<{ identity_id: string }>();
 
-  const grantedIdentityIds = new Set(grants.results.map((row) => row.identity_id));
+  const grantedIdentityIds = new Set(
+    grants.results.map((row) => row.identity_id),
+  );
   return (
     grants.results.length === identityIds.length &&
     grantedIdentityIds.size === identityIds.length &&

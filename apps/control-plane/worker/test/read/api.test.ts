@@ -25,49 +25,56 @@ import {
   requireAuthorizedIdentity,
   toProjectionReadAuthorization,
 } from "../../read/authorization";
-import {
-  ReadError,
-  readErrorResponse,
-} from "../../read/errors";
+import { ReadError, readErrorResponse } from "../../read/errors";
 
 const workerEnv = env as typeof env & { CONTROL_DB: D1Database };
 const tenantId = "tenant_pilot";
 
-const createTestApp = () => createApp({
-  createTokenVerifier: () => ({
-    verify: async (token: string): Promise<VerifiedSubject> => {
-      if (token === "human-token") {
-        return { issuer: "https://issuer.example/", subject: "human-subject" };
-      }
-      if (token === "agent-token") {
-        return {
-          issuer: "https://issuer.example/",
-          subject: "agent-subject",
-          token_id: "agent-token-id",
-        };
-      }
-      throw new Error("invalid local test token");
-    },
-  }),
-});
+const createTestApp = () =>
+  createApp({
+    createTokenVerifier: () => ({
+      verify: async (token: string): Promise<VerifiedSubject> => {
+        if (token === "human-token") {
+          return {
+            issuer: "https://issuer.example/",
+            subject: "human-subject",
+          };
+        }
+        if (token === "agent-token") {
+          return {
+            issuer: "https://issuer.example/",
+            subject: "agent-subject",
+            token_id: "agent-token-id",
+          };
+        }
+        throw new Error("invalid local test token");
+      },
+    }),
+  });
 
 const request = async (
   path: string,
   token = "human-token",
   app = createTestApp(),
-) => app.request(`http://example.test${path}`, {
-  headers: { Authorization: `Bearer ${token}` },
-}, workerEnv);
+) =>
+  app.request(
+    `http://example.test${path}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    workerEnv,
+  );
 
 const readEvent = (
   eventId: string,
   payload: Record<string, unknown>,
   eventType: ProjectionEventEnvelope["event_type"],
   overrides: Partial<ProjectionEventEnvelope>,
-): ProjectionEventEnvelope => event(eventId, payload, eventType, {
-  tenant_id: tenantId,
-  ...overrides,
-});
+): ProjectionEventEnvelope =>
+  event(eventId, payload, eventType, {
+    tenant_id: tenantId,
+    ...overrides,
+  });
 
 const readFixtures = async () => {
   const stub = workerEnv.TENANT_PROJECTION.getByName(tenantId);
@@ -86,8 +93,16 @@ const readFixtures = async () => {
     mode: "live",
     rebuild_id: null,
     connections: [
-      bindingFor("account_agent", "connection_agent_whatsapp", "identity_agent"),
-      bindingFor("account_human", "connection_human_whatsapp", "identity_human"),
+      bindingFor(
+        "account_agent",
+        "connection_agent_whatsapp",
+        "identity_agent",
+      ),
+      bindingFor(
+        "account_human",
+        "connection_human_whatsapp",
+        "identity_human",
+      ),
     ],
     events: [
       readEvent(
@@ -211,25 +226,35 @@ describe("read authorization helpers", () => {
     tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },
     principal: { id: "principal_human", type: "human", display_name: "Human" },
     membership: { id: "membership_human", role: "owner" },
-    identities: [{
-      identity_id: "identity_human",
-      kind: "human",
-      display_name: "Human",
-      scopes: ["conversation.read", "connection.read"],
-    }],
+    identities: [
+      {
+        identity_id: "identity_human",
+        kind: "human",
+        display_name: "Human",
+        scopes: ["conversation.read", "connection.read"],
+      },
+    ],
   };
 
   it("returns an identity only when the requested external scope is granted", () => {
-    expect(requireAuthorizedIdentity(session, "identity_human", "conversation.read"))
-      .toEqual(session.identities[0]);
-    expect(() => requireAuthorizedIdentity(session, "identity_agent", "conversation.read"))
-      .toThrowError(ReadError);
-    expect(() => requireAuthorizedIdentity(
-      { ...session, identities: [{ ...session.identities[0]!, scopes: ["conversation.read"] }] },
-      "identity_human",
-      "connection.read",
-    ))
-      .toThrowError(ReadError);
+    expect(
+      requireAuthorizedIdentity(session, "identity_human", "conversation.read"),
+    ).toEqual(session.identities[0]);
+    expect(() =>
+      requireAuthorizedIdentity(session, "identity_agent", "conversation.read"),
+    ).toThrowError(ReadError);
+    expect(() =>
+      requireAuthorizedIdentity(
+        {
+          ...session,
+          identities: [
+            { ...session.identities[0]!, scopes: ["conversation.read"] },
+          ],
+        },
+        "identity_human",
+        "connection.read",
+      ),
+    ).toThrowError(ReadError);
   });
 
   it("builds the exact server-owned projection authorization context", () => {
@@ -253,7 +278,9 @@ describe("read authorization helpers", () => {
     });
     expect(readErrorResponse(new Error("secret internal failure"))).toEqual({
       status: 503,
-      body: { error: { code: "service_unavailable", message: "Service unavailable" } },
+      body: {
+        error: { code: "service_unavailable", message: "Service unavailable" },
+      },
     });
   });
 });
@@ -267,16 +294,24 @@ describe("authenticated live read API", () => {
   it("returns only identities from the authenticated session and tenant-filtered connections", async () => {
     const identitiesResponse = await request("/api/v1/identities");
     expect(identitiesResponse.status).toBe(200);
-    expect(IdentitySchema.array().parse(await identitiesResponse.json())).toEqual([{
-      id: "identity_human",
-      tenant_id: tenantId,
-      kind: "human",
-      display_name: "Human",
-    }]);
+    expect(
+      IdentitySchema.array().parse(await identitiesResponse.json()),
+    ).toEqual([
+      {
+        id: "identity_human",
+        tenant_id: tenantId,
+        kind: "human",
+        display_name: "Human",
+      },
+    ]);
 
-    const connectionsResponse = await request("/api/v1/connections?identity_id=identity_human");
+    const connectionsResponse = await request(
+      "/api/v1/connections?identity_id=identity_human",
+    );
     expect(connectionsResponse.status).toBe(200);
-    const connections = ConnectionSchema.array().parse(await connectionsResponse.json());
+    const connections = ConnectionSchema.array().parse(
+      await connectionsResponse.json(),
+    );
     expect(connections.map((connection) => connection.id)).toEqual([
       "connection_human_whatsapp",
     ]);
@@ -286,7 +321,9 @@ describe("authenticated live read API", () => {
       "/api/v1/connections?identity_id=identity_agent",
       "agent-token",
     );
-    const agentConnections = ConnectionSchema.array().parse(await agentResponse.json());
+    const agentConnections = ConnectionSchema.array().parse(
+      await agentResponse.json(),
+    );
     expect(agentConnections.map((connection) => connection.id)).toEqual([
       "connection_agent_whatsapp",
     ]);
@@ -294,7 +331,9 @@ describe("authenticated live read API", () => {
 
   it("merges D1 channel metadata with one projection aggregate and fills missing stats", async () => {
     await readFixtures();
-    const response = await request("/api/v1/identities/identity_human/channels");
+    const response = await request(
+      "/api/v1/identities/identity_human/channels",
+    );
     expect(response.status).toBe(200);
     const channels = ChannelSummarySchema.array().parse(await response.json());
 
@@ -337,16 +376,22 @@ describe("authenticated live read API", () => {
     const exactResponse = await request(
       "/api/v1/identities/identity_human/conversations/conversation_human_one",
     );
-    expect(ConversationSummarySchema.parse(await exactResponse.json())).toMatchObject({
+    expect(
+      ConversationSummarySchema.parse(await exactResponse.json()),
+    ).toMatchObject({
       id: "conversation_human_one",
     });
 
     const firstMessageResponse = await request(
       "/api/v1/conversations/conversation_human_one/messages?identity_id=identity_human&limit=1",
     );
-    const firstMessagePage = MessagePageResultSchema.parse(await firstMessageResponse.json());
+    const firstMessagePage = MessagePageResultSchema.parse(
+      await firstMessageResponse.json(),
+    );
     expect(firstMessageResponse.status).toBe(200);
-    expect(firstMessagePage.items.map((item) => item.id)).toEqual(["message_human_one"]);
+    expect(firstMessagePage.items.map((item) => item.id)).toEqual([
+      "message_human_one",
+    ]);
     expect(firstMessagePage.next_cursor).toBeNull();
   });
 
@@ -374,14 +419,19 @@ describe("authenticated live read API", () => {
     ];
     const bodies: string[] = [];
     for (const path of paths) {
-      const response = await request(path, path.includes("identity_agent") ? "agent-token" : "human-token");
+      const response = await request(
+        path,
+        path.includes("identity_agent") ? "agent-token" : "human-token",
+      );
       expect(response.status).toBe(404);
       bodies.push(await response.text());
     }
     expect(new Set(bodies)).toHaveLength(1);
-    expect(bodies[0]).toBe(JSON.stringify({
-      error: { code: "not_found", message: "Resource not found" },
-    }));
+    expect(bodies[0]).toBe(
+      JSON.stringify({
+        error: { code: "not_found", message: "Resource not found" },
+      }),
+    );
   });
 
   it("uses byte-identical invalid-request responses for malformed bounded inputs", async () => {
@@ -399,9 +449,11 @@ describe("authenticated live read API", () => {
       bodies.push(await response.text());
     }
     expect(new Set(bodies)).toHaveLength(1);
-    expect(bodies[0]).toBe(JSON.stringify({
-      error: { code: "invalid_request", message: "Invalid request" },
-    }));
+    expect(bodies[0]).toBe(
+      JSON.stringify({
+        error: { code: "invalid_request", message: "Invalid request" },
+      }),
+    );
   });
 
   it("maps rebuilding projections and corrupt directory rows to generic 503 responses", async () => {
@@ -410,7 +462,9 @@ describe("authenticated live read API", () => {
       state.storage.sql.exec("UPDATE projection_meta SET state = 'rebuilding'");
     });
     try {
-      const response = await request("/api/v1/identities/identity_human/channels");
+      const response = await request(
+        "/api/v1/identities/identity_human/channels",
+      );
       await expectErrorResponse(response, 503);
     } finally {
       await runInDurableObject(stub, async (_instance, state) => {
@@ -420,7 +474,9 @@ describe("authenticated live read API", () => {
 
     await workerEnv.CONTROL_DB.prepare(
       "UPDATE connections SET display_label = ? WHERE id = ?",
-    ).bind("x".repeat(101), "connection_human_whatsapp").run();
+    )
+      .bind("x".repeat(101), "connection_human_whatsapp")
+      .run();
     const corruptResponse = await request(
       "/api/v1/connections?identity_id=identity_human",
     );

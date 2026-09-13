@@ -15,11 +15,16 @@ describe("IdentitySwitcher", () => {
     );
 
     await screen.findByRole("option", { name: "Agent" });
-    await user.selectOptions(await screen.findByLabelText("Active identity"), "identity_agent");
+    await user.selectOptions(
+      await screen.findByLabelText("Active identity"),
+      "identity_agent",
+    );
 
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/conversations");
-      expect(router.state.location.search).toEqual({ identity: "identity_agent" });
+      expect(router.state.location.search).toEqual({
+        identity: "identity_agent",
+      });
     });
     expect(screen.queryByText("Family")).not.toBeInTheDocument();
   });
@@ -51,9 +56,15 @@ describe("IdentitySwitcher", () => {
 
     await screen.findByRole("option", { name: "Agent" });
     expect(sessionRequests).toBe(1);
-    const channelNavigation = await screen.findByRole("navigation", { name: "Conversation channels" });
-    const channelRows = Array.from(channelNavigation.querySelectorAll("[data-channel-id]"));
-    expect(channelRows.map((row) => row.getAttribute("data-channel-id"))).toEqual([
+    const channelNavigation = await screen.findByRole("navigation", {
+      name: "Conversation channels",
+    });
+    const channelRows = Array.from(
+      channelNavigation.querySelectorAll("[data-channel-id]"),
+    );
+    expect(
+      channelRows.map((row) => row.getAttribute("data-channel-id")),
+    ).toEqual([
       "connection_human_messenger",
       "connection_human_whatsapp",
       "connection_human_telegram",
@@ -65,17 +76,28 @@ describe("IdentitySwitcher", () => {
     const { queryClient } = renderApp("/conversations?identity=identity_human");
 
     await screen.findByText("I sent the outline");
-    queryClient.setQueryData(queryKeys.messages("identity_human", "conversation_human_telegram_alex"), {
-      pages: [],
-      pageParams: [],
-    });
+    queryClient.setQueryData(
+      queryKeys.messages("identity_human", "conversation_human_telegram_alex"),
+      {
+        pages: [],
+        pageParams: [],
+      },
+    );
 
-    await user.selectOptions(await screen.findByLabelText("Active identity"), "identity_agent");
+    await user.selectOptions(
+      await screen.findByLabelText("Active identity"),
+      "identity_agent",
+    );
 
     await waitFor(() => {
-      expect(queryClient.getQueryData(
-        queryKeys.messages("identity_human", "conversation_human_telegram_alex"),
-      )).toBeUndefined();
+      expect(
+        queryClient.getQueryData(
+          queryKeys.messages(
+            "identity_human",
+            "conversation_human_telegram_alex",
+          ),
+        ),
+      ).toBeUndefined();
     });
   });
 });

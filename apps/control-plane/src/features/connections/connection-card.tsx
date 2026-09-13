@@ -3,7 +3,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 function titleCase(value: string) {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function providerLabel(provider: Connection["provider"]) {
@@ -13,7 +15,10 @@ function providerLabel(provider: Connection["provider"]) {
 export function ConnectionCard({ connection }: { connection: Connection }) {
   const isAttentionRequired = connection.status === "attention_required";
   const lastSynced = connection.last_synced_at
-    ? new Date(connection.last_synced_at).toLocaleString("en-NZ", { dateStyle: "medium", timeStyle: "short" })
+    ? new Date(connection.last_synced_at).toLocaleString("en-NZ", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
     : "Never";
 
   return (
@@ -23,7 +28,9 @@ export function ConnectionCard({ connection }: { connection: Connection }) {
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
             {providerLabel(connection.provider)}
           </p>
-          <h2 className="mt-1 text-xl font-semibold">{connection.display_label}</h2>
+          <h2 className="mt-1 text-xl font-semibold">
+            {connection.display_label}
+          </h2>
         </div>
         <Badge variant={isAttentionRequired ? "destructive" : "secondary"}>
           {titleCase(connection.status)}
@@ -31,9 +38,14 @@ export function ConnectionCard({ connection }: { connection: Connection }) {
       </div>
 
       {isAttentionRequired && (
-        <div role="alert" className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+        <div
+          role="alert"
+          className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+        >
           <p className="font-semibold">Action required</p>
-          <p className="mt-1">This simulated connection needs operator attention.</p>
+          <p className="mt-1">
+            This simulated connection needs operator attention.
+          </p>
         </div>
       )}
 
@@ -52,13 +64,17 @@ export function ConnectionCard({ connection }: { connection: Connection }) {
         <summary className="cursor-pointer font-medium">Capabilities</summary>
         <div className="mt-3 flex flex-wrap gap-2">
           {connection.capabilities.map((capability) => (
-            <Badge key={capability} variant="outline">{capability}</Badge>
+            <Badge key={capability} variant="outline">
+              {capability}
+            </Badge>
           ))}
         </div>
       </details>
 
       <div className="mt-5 flex flex-wrap gap-2">
-        {(["Connect account", "Reconnect", "Disconnect", "Unlink"] as const).map((label) => (
+        {(
+          ["Connect account", "Reconnect", "Disconnect", "Unlink"] as const
+        ).map((label) => (
           <Button
             key={label}
             type="button"

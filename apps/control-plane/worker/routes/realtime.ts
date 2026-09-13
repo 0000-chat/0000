@@ -26,9 +26,18 @@ export const realtimeTicketRoute = createRoute({
       description: "A single-use realtime WebSocket ticket",
       content: { "application/json": { schema: RealtimeTicketResponseSchema } },
     },
-    400: { description: "Invalid realtime ticket request", content: errorContent },
+    400: {
+      description: "Invalid realtime ticket request",
+      content: errorContent,
+    },
     401: { description: "Authentication required", content: errorContent },
-    404: { description: "Realtime authorization not found", content: errorContent },
-    503: { description: "Realtime ticket service unavailable", content: errorContent },
+    404: {
+      description: "Realtime authorization not found",
+      content: errorContent,
+    },
+    503: {
+      description: "Realtime ticket service unavailable",
+      content: errorContent,
+    },
   },
 });

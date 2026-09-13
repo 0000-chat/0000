@@ -35,18 +35,26 @@ describe("listConnectionsForIdentity", () => {
     const first = rows[0];
     if (!first) throw new Error("connection fixture is missing");
     const { sort_position: _sortPosition, ...connection } = first;
-    expect(ConnectionSchema.parse(connection)).toMatchObject({ id: "connection_human_whatsapp" });
+    expect(ConnectionSchema.parse(connection)).toMatchObject({
+      id: "connection_human_whatsapp",
+    });
 
-    await expect(listConnectionsForIdentity(
-      env.CONTROL_DB.withSession("first-primary"),
-      "tenant_pilot",
-      "identity_agent",
-    )).resolves.toMatchObject([{ id: "connection_agent_whatsapp", identity_id: "identity_agent" }]);
-    await expect(listConnectionsForIdentity(
-      env.CONTROL_DB.withSession("first-primary"),
-      "tenant_other",
-      "identity_human",
-    )).resolves.toEqual([]);
+    await expect(
+      listConnectionsForIdentity(
+        env.CONTROL_DB.withSession("first-primary"),
+        "tenant_pilot",
+        "identity_agent",
+      ),
+    ).resolves.toMatchObject([
+      { id: "connection_agent_whatsapp", identity_id: "identity_agent" },
+    ]);
+    await expect(
+      listConnectionsForIdentity(
+        env.CONTROL_DB.withSession("first-primary"),
+        "tenant_other",
+        "identity_human",
+      ),
+    ).resolves.toEqual([]);
   });
 
   it("keeps disconnected and attention-required connections visible", async () => {
@@ -56,7 +64,11 @@ describe("listConnectionsForIdentity", () => {
       ).bind("connection_human_whatsapp"),
       env.CONTROL_DB.prepare(
         "UPDATE connections SET status = 'attention_required', attention_code = ?, last_synced_at = ? WHERE id = ?",
-      ).bind("reauth_required", "2026-08-28T00:00:00.000Z", "connection_agent_whatsapp"),
+      ).bind(
+        "reauth_required",
+        "2026-08-28T00:00:00.000Z",
+        "connection_agent_whatsapp",
+      ),
     ]);
 
     const human = await listConnectionsForIdentity(
@@ -70,29 +82,36 @@ describe("listConnectionsForIdentity", () => {
       "identity_agent",
     );
     expect(human[0]).toMatchObject({ status: "disconnected" });
-    expect(agent[0]).toMatchObject({ status: "attention_required", attention_code: "reauth_required" });
+    expect(agent[0]).toMatchObject({
+      status: "attention_required",
+      attention_code: "reauth_required",
+    });
   });
 
   it("fails closed when more than 64 connections are visible", async () => {
-    const statements = Array.from({ length: 64 }, (_, index) => env.CONTROL_DB.prepare(
-      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(
-      `connection_human_${String(index).padStart(2, "0")}`,
-      "tenant_pilot",
-      "identity_human",
-      "whatsapp",
-      `Human ${index}`,
-      "ready",
-      timestamp,
-      timestamp,
-    ));
+    const statements = Array.from({ length: 64 }, (_, index) =>
+      env.CONTROL_DB.prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(
+        `connection_human_${String(index).padStart(2, "0")}`,
+        "tenant_pilot",
+        "identity_human",
+        "whatsapp",
+        `Human ${index}`,
+        "ready",
+        timestamp,
+        timestamp,
+      ),
+    );
     await env.CONTROL_DB.batch(statements);
 
-    await expect(listConnectionsForIdentity(
-      env.CONTROL_DB.withSession("first-primary"),
-      "tenant_pilot",
-      "identity_human",
-    )).rejects.toMatchObject({
+    await expect(
+      listConnectionsForIdentity(
+        env.CONTROL_DB.withSession("first-primary"),
+        "tenant_pilot",
+        "identity_human",
+      ),
+    ).rejects.toMatchObject({
       code: "read_directory_too_large",
       message: "Connection directory is too large",
     });
@@ -102,7 +121,9 @@ describe("listConnectionsForIdentity", () => {
     const corruptTimestamp = "corrupt-private-timestamp";
     await env.CONTROL_DB.prepare(
       "UPDATE connections SET last_synced_at = ? WHERE id = ?",
-    ).bind(corruptTimestamp, "connection_human_whatsapp").run();
+    )
+      .bind(corruptTimestamp, "connection_human_whatsapp")
+      .run();
 
     const failure = await listConnectionsForIdentity(
       env.CONTROL_DB.withSession("first-primary"),
@@ -126,8 +147,14 @@ describe("connection capability metadata", () => {
       "tenant_pilot",
       "identity_human",
     );
-    expect(result[0]?.capabilities).toEqual(["message.send", "receipt.read", "typing.send"]);
-    expect(new Set(result[0]?.capabilities).size).toBe(result[0]?.capabilities.length);
+    expect(result[0]?.capabilities).toEqual([
+      "message.send",
+      "receipt.read",
+      "typing.send",
+    ]);
+    expect(new Set(result[0]?.capabilities).size).toBe(
+      result[0]?.capabilities.length,
+    );
   });
 
   it("does not expose internal routing metadata", async () => {

@@ -21,7 +21,9 @@ export type ConversationCacheUpdate = {
   updatePages: (
     pages: ConversationPageResult[] | undefined,
   ) => ConversationPageResult[] | undefined;
-  updateChannels: (items: ChannelSummary[] | undefined) => ChannelSummary[] | undefined;
+  updateChannels: (
+    items: ChannelSummary[] | undefined,
+  ) => ChannelSummary[] | undefined;
 };
 
 export type ConversationInvalidation = {
@@ -37,7 +39,11 @@ export function prepareConversationInvalidation(
   event: RealtimeClientEvent,
 ): ConversationInvalidation | null {
   if (event.type === "connected") return null;
-  if (event.tenant_id !== scope.tenantId || event.identity_id !== scope.identityId) return null;
+  if (
+    event.tenant_id !== scope.tenantId ||
+    event.identity_id !== scope.identityId
+  )
+    return null;
 
   if (event.type === "reset_required") {
     return {
@@ -54,7 +60,9 @@ export function prepareConversationInvalidation(
       connection_id?: string;
       conversation_id?: string;
     }>;
-    if (changes.some((change) => !change.connection_id || !change.conversation_id)) {
+    if (
+      changes.some((change) => !change.connection_id || !change.conversation_id)
+    ) {
       return {
         identityId: scope.identityId,
         channelIds: [],
@@ -66,14 +74,18 @@ export function prepareConversationInvalidation(
     return {
       identityId: scope.identityId,
       channelIds: [...new Set(changes.map((change) => change.connection_id!))],
-      conversationIds: [...new Set(changes.map((change) => change.conversation_id!))],
+      conversationIds: [
+        ...new Set(changes.map((change) => change.conversation_id!)),
+      ],
       invalidateIdentity: false,
       resetRequired: false,
     };
   }
 
-  if ((event.type === "message.created" || event.type === "connection.updated")
-    && (!event.connection_id || !event.conversation_id)) {
+  if (
+    (event.type === "message.created" || event.type === "connection.updated") &&
+    (!event.connection_id || !event.conversation_id)
+  ) {
     return {
       identityId: scope.identityId,
       channelIds: [],
@@ -90,13 +102,19 @@ export function prepareConversationEvent(
   scope: ActiveScope,
   event: RealtimeEvent,
 ): ConversationCacheUpdate | null {
-  if (event.sequence <= scope.lastSequence || event.type !== "message.created") return null;
-  if (event.tenant_id !== scope.tenantId || event.identity_id !== scope.identityId) return null;
+  if (event.sequence <= scope.lastSequence || event.type !== "message.created")
+    return null;
+  if (
+    event.tenant_id !== scope.tenantId ||
+    event.identity_id !== scope.identityId
+  )
+    return null;
   if (!event.connection_id || !event.conversation_id) return null;
-  const channel = scope.channels.find((item) =>
-    item.id === event.connection_id
-    && item.identity_id === event.identity_id
-    && item.tenant_id === event.tenant_id,
+  const channel = scope.channels.find(
+    (item) =>
+      item.id === event.connection_id &&
+      item.identity_id === event.identity_id &&
+      item.tenant_id === event.tenant_id,
   );
   if (!channel) return null;
   const parsed = MessageCreatedDataSchema.safeParse(event.data);
@@ -108,15 +126,16 @@ export function prepareConversationEvent(
     channelId: event.connection_id,
     conversationId: event.conversation_id,
     updatePages: (pages) => {
-      if (!pages || pages.length !== 1 || pages[0]?.next_cursor !== null) return pages;
+      if (!pages || pages.length !== 1 || pages[0]?.next_cursor !== null)
+        return pages;
       const page = pages[0];
       let changed = false;
       const items = page.items.map((item) => {
         if (
-          item.id !== event.conversation_id
-          || item.connection_id !== event.connection_id
-          || item.identity_id !== event.identity_id
-          || item.tenant_id !== event.tenant_id
+          item.id !== event.conversation_id ||
+          item.connection_id !== event.connection_id ||
+          item.identity_id !== event.identity_id ||
+          item.tenant_id !== event.tenant_id
         ) {
           return item;
         }
@@ -136,9 +155,9 @@ export function prepareConversationEvent(
       let changed = false;
       const updated = items.map((item) => {
         if (
-          item.id !== event.connection_id
-          || item.identity_id !== event.identity_id
-          || item.tenant_id !== event.tenant_id
+          item.id !== event.connection_id ||
+          item.identity_id !== event.identity_id ||
+          item.tenant_id !== event.tenant_id
         ) {
           return item;
         }

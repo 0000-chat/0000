@@ -4,10 +4,7 @@ import { canonicalJsonLineBytes } from "../../archive/canonical-json";
 import { deriveArchiveKeys } from "../../archive/keys";
 import { archiveCanonicalEventBatch } from "../../archive/writer";
 import { ArchiveError } from "../../archive/errors";
-import {
-  encodeCanonicalEventBatch,
-  gunzipBytes,
-} from "../../archive/codec";
+import { encodeCanonicalEventBatch, gunzipBytes } from "../../archive/codec";
 import {
   cleanupArchiveTenant,
   cloneEvents,
@@ -41,7 +38,9 @@ const newScope = (): ArchiveScope => {
 
 afterEach(async () => {
   const tenants = activeTenants.splice(0, activeTenants.length);
-  await Promise.all(tenants.map((tenantId) => cleanupArchiveTenant(bucket, tenantId)));
+  await Promise.all(
+    tenants.map((tenantId) => cleanupArchiveTenant(bucket, tenantId)),
+  );
 });
 
 const eventFor = (
@@ -67,7 +66,9 @@ const listKeys = async (prefix: string): Promise<string[]> => {
     keys.push(...page.objects.map((object) => object.key));
     cursor = page.truncated ? page.cursor : undefined;
     if (page.truncated && !cursor) {
-      throw new Error("archive test listing returned truncated page without cursor");
+      throw new Error(
+        "archive test listing returned truncated page without cursor",
+      );
     }
   } while (cursor !== undefined);
   return keys.sort();
@@ -119,7 +120,7 @@ const forwardingBucket = (
   beforePut: (call: PutCall) => void | Promise<void>,
 ): R2Bucket =>
   new Proxy(source, {
-    get(target, property, receiver) {
+    get(target, property, _receiver) {
       if (property !== "put") {
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
@@ -141,7 +142,11 @@ const putDataFixture = async (
 ): Promise<{ dataKey: string; manifestKey: string }> => {
   const firstEvent = encoded.events[0];
   if (!firstEvent) throw new Error("fixture unexpectedly has no first event");
-  const keys = deriveArchiveKeys(scope.tenantId, scope.batchId, firstEvent.observed_at);
+  const keys = deriveArchiveKeys(
+    scope.tenantId,
+    scope.batchId,
+    firstEvent.observed_at,
+  );
   await bucket.put(keys.dataKey, encoded.compressed, {
     httpMetadata: DATA_HTTP_METADATA,
     customMetadata: {
@@ -186,7 +191,9 @@ describe("archiveCanonicalEventBatch", () => {
     expect(manifestObject).not.toBeNull();
     expect(dataObject!.key).toBe(result.manifest.data_key);
     expect(manifestObject!.key).toBe(result.manifestKey);
-    expect(await gunzipBytes(new Uint8Array(await dataObject!.arrayBuffer()))).toEqual(
+    expect(
+      await gunzipBytes(new Uint8Array(await dataObject!.arrayBuffer())),
+    ).toEqual(
       (await encodeCanonicalEventBatch({ tenantId: scope.tenantId, events }))
         .canonicalJsonl,
     );
@@ -406,10 +413,9 @@ describe("archiveCanonicalEventBatch", () => {
     );
 
     expect(error.code).toBe("archive_conflict");
-    expect(await tenantKeys(scope.tenantId)).toEqual([
-      first.manifest.data_key,
-      first.manifestKey,
-    ].sort());
+    expect(await tenantKeys(scope.tenantId)).toEqual(
+      [first.manifest.data_key, first.manifestKey].sort(),
+    );
     expect(await readBody(first.manifest.data_key)).toEqual(beforeData);
     expect(await readBody(first.manifestKey)).toEqual(beforeManifest);
   });
@@ -456,7 +462,10 @@ describe("archiveCanonicalEventBatch", () => {
       },
       {
         name: "duplicate event ID",
-        events: [eventFor(scope), eventFor(scope, { payload: { body: "different" } })],
+        events: [
+          eventFor(scope),
+          eventFor(scope, { payload: { body: "different" } }),
+        ],
         code: "archive_invalid",
       },
       {
@@ -526,7 +535,8 @@ describe("archiveCanonicalEventBatch", () => {
   it("leaves one orphan data object and no manifest when the manifest put fails", async () => {
     const scope = newScope();
     const failingBucket = forwardingBucket(bucket, ({ key }) => {
-      if (key.startsWith("manifests/")) throw new Error("synthetic manifest outage");
+      if (key.startsWith("manifests/"))
+        throw new Error("synthetic manifest outage");
     });
 
     const error = await getArchiveError(
@@ -551,7 +561,8 @@ describe("archiveCanonicalEventBatch", () => {
     const scope = newScope();
     const events = [eventFor(scope)];
     const failingBucket = forwardingBucket(bucket, ({ key }) => {
-      if (key.startsWith("manifests/")) throw new Error("synthetic manifest outage");
+      if (key.startsWith("manifests/"))
+        throw new Error("synthetic manifest outage");
     });
 
     await expect(
@@ -577,10 +588,9 @@ describe("archiveCanonicalEventBatch", () => {
     });
 
     expect(retry.status).toBe("created");
-    expect(await tenantKeys(scope.tenantId)).toEqual([
-      retry.manifest.data_key,
-      retry.manifestKey,
-    ].sort());
+    expect(await tenantKeys(scope.tenantId)).toEqual(
+      [retry.manifest.data_key, retry.manifestKey].sort(),
+    );
   });
 
   it("conflicts with an existing corrupted data object and never overwrites it", async () => {

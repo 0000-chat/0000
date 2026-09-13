@@ -33,7 +33,9 @@ export const bindingFor = (
   platform: "whatsapp",
 });
 
-export const ownerBOverrides = (tenant: string): Partial<ProjectionEventEnvelope> => ({
+export const ownerBOverrides = (
+  tenant: string,
+): Partial<ProjectionEventEnvelope> => ({
   tenant_id: tenant,
   identity_id: "identity_b",
   account_id: "account_b",
@@ -45,26 +47,29 @@ export const event = (
   payload: Record<string, unknown>,
   eventType: ProjectionEventEnvelope["event_type"] = "message.created",
   overrides: Partial<ProjectionEventEnvelope> = {},
-): ProjectionEventEnvelope => ({
-  schema_version: 1,
-  event_id: eventId,
-  event_type: eventType,
-  event_source: "live",
-  tenant_id: tenantId,
-  identity_id: "identity_a",
-  platform: "whatsapp",
-  account_id: "account_a",
-  conversation_id: "conversation_a",
-  matrix_room_id: null,
-  matrix_event_id: null,
-  remote_message_id: null,
-  occurred_at: "2026-09-07T01:00:00.000Z",
-  observed_at: "2026-09-07T01:00:01.000Z",
-  payload,
-  ...overrides,
-} as ProjectionEventEnvelope);
+): ProjectionEventEnvelope =>
+  ({
+    schema_version: 1,
+    event_id: eventId,
+    event_type: eventType,
+    event_source: "live",
+    tenant_id: tenantId,
+    identity_id: "identity_a",
+    platform: "whatsapp",
+    account_id: "account_a",
+    conversation_id: "conversation_a",
+    matrix_room_id: null,
+    matrix_event_id: null,
+    remote_message_id: null,
+    occurred_at: "2026-09-07T01:00:00.000Z",
+    observed_at: "2026-09-07T01:00:01.000Z",
+    payload,
+    ...overrides,
+  }) as ProjectionEventEnvelope;
 
-export const createMessage = (eventId = "event_message"): ProjectionEventEnvelope =>
+export const createMessage = (
+  eventId = "event_message",
+): ProjectionEventEnvelope =>
   event(eventId, {
     message_id: "message_a",
     direction: "inbound",
@@ -82,7 +87,11 @@ export const input = (
 ): ApplyProjectionBatchInput => ({
   schema_version: 1,
   tenant_id: tenantId,
-  authorization: auth(["projection.write"], ["identity_a"], overrides.tenant_id ?? tenantId),
+  authorization: auth(
+    ["projection.write"],
+    ["identity_a"],
+    overrides.tenant_id ?? tenantId,
+  ),
   mode: "live",
   rebuild_id: null,
   connections: [bindingFor("account_a", "connection_a")],
@@ -131,16 +140,21 @@ export const created = (
   eventId: string,
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    message_id: "message_a",
-    direction: "inbound",
-    sender_participant_id: null,
-    sender_label: "Alice",
-    body: "hello",
-    reply_to_message_id: null,
-    delivery_status: "unknown",
-    unread: true,
-  }, "message.created", overrides);
+  event(
+    eventId,
+    {
+      message_id: "message_a",
+      direction: "inbound",
+      sender_participant_id: null,
+      sender_label: "Alice",
+      body: "hello",
+      reply_to_message_id: null,
+      delivery_status: "unknown",
+      unread: true,
+    },
+    "message.created",
+    overrides,
+  );
 
 export const edited = (
   eventId: string,
@@ -148,11 +162,16 @@ export const edited = (
   body = "edited",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    message_id: messageId,
-    body,
-    editor_participant_id: null,
-  }, "message.edited", overrides);
+  event(
+    eventId,
+    {
+      message_id: messageId,
+      body,
+      editor_participant_id: null,
+    },
+    "message.edited",
+    overrides,
+  );
 
 export const deleted = (
   eventId: string,
@@ -160,10 +179,15 @@ export const deleted = (
   reason_code: string | null = "removed",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    message_id: messageId,
-    reason_code,
-  }, "message.deleted", overrides);
+  event(
+    eventId,
+    {
+      message_id: messageId,
+      reason_code,
+    },
+    "message.deleted",
+    overrides,
+  );
 
 export const conversationUpdated = (
   eventId: string,
@@ -181,12 +205,17 @@ export const participantUpdated = (
   participantId = "participant_a",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    participant_id: participantId,
-    display_name: "Alice Updated",
-    remote_id: "remote-a",
-    avatar_url: "https://example.test/avatar.png",
-  }, "participant.updated", overrides);
+  event(
+    eventId,
+    {
+      participant_id: participantId,
+      display_name: "Alice Updated",
+      remote_id: "remote-a",
+      avatar_url: "https://example.test/avatar.png",
+    },
+    "participant.updated",
+    overrides,
+  );
 
 export const reactionAdded = (
   eventId: string,
@@ -196,12 +225,17 @@ export const reactionAdded = (
   emoji = "👍",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    reaction_id: reactionId,
-    message_id: messageId,
-    participant_id: participantId,
-    emoji,
-  }, "reaction.added", overrides);
+  event(
+    eventId,
+    {
+      reaction_id: reactionId,
+      message_id: messageId,
+      participant_id: participantId,
+      emoji,
+    },
+    "reaction.added",
+    overrides,
+  );
 
 export const reactionRemoved = (
   eventId: string,
@@ -209,10 +243,15 @@ export const reactionRemoved = (
   messageId = "message_a",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    reaction_id: reactionId,
-    message_id: messageId,
-  }, "reaction.removed", overrides);
+  event(
+    eventId,
+    {
+      reaction_id: reactionId,
+      message_id: messageId,
+    },
+    "reaction.removed",
+    overrides,
+  );
 
 export const receipt = (
   eventId: string,
@@ -222,11 +261,16 @@ export const receipt = (
   localIdentity = false,
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    message_id: messageId,
-    participant_id: participantId,
-    local_identity: localIdentity,
-  }, receiptType === "read" ? "receipt.read" : "receipt.delivered", overrides);
+  event(
+    eventId,
+    {
+      message_id: messageId,
+      participant_id: participantId,
+      local_identity: localIdentity,
+    },
+    receiptType === "read" ? "receipt.read" : "receipt.delivered",
+    overrides,
+  );
 
 export const typingStarted = (
   eventId: string,
@@ -234,17 +278,27 @@ export const typingStarted = (
   expiresAt = "2026-09-07T01:30:00.000Z",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    participant_id: participantId,
-    expires_at: expiresAt,
-  }, "typing.started", overrides);
+  event(
+    eventId,
+    {
+      participant_id: participantId,
+      expires_at: expiresAt,
+    },
+    "typing.started",
+    overrides,
+  );
 
 export const typingStopped = (
   eventId: string,
   participantId = "participant_typing",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, { participant_id: participantId }, "typing.stopped", overrides);
+  event(
+    eventId,
+    { participant_id: participantId },
+    "typing.stopped",
+    overrides,
+  );
 
 export const attachmentObserved = (
   eventId: string,
@@ -252,39 +306,54 @@ export const attachmentObserved = (
   messageId = "message_a",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    attachment_id: attachmentId,
-    message_id: messageId,
-    file_name: "photo.jpg",
-    mime_type: "image/jpeg",
-    size_bytes: 42,
-    sha256: null,
-    r2_key: null,
-  }, "attachment.observed", overrides);
+  event(
+    eventId,
+    {
+      attachment_id: attachmentId,
+      message_id: messageId,
+      file_name: "photo.jpg",
+      mime_type: "image/jpeg",
+      size_bytes: 42,
+      sha256: null,
+      r2_key: null,
+    },
+    "attachment.observed",
+    overrides,
+  );
 
 export const commandUpdated = (
   eventId: string,
   commandId = "command_a",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    command_id: commandId,
-    operation: "message.send",
-    delivery_mode: "direct",
-    status: "failed",
-    failure_code: "temporary",
-  }, "command.updated", overrides);
+  event(
+    eventId,
+    {
+      command_id: commandId,
+      operation: "message.send",
+      delivery_mode: "direct",
+      status: "failed",
+      failure_code: "temporary",
+    },
+    "command.updated",
+    overrides,
+  );
 
 export const deliveryUpdated = (
   eventId: string,
   messageId = "message_delivery_a",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    message_id: messageId,
-    delivery_status: "failed",
-    failure_code: "bridge_failed",
-  }, "bridge.delivery.updated", overrides);
+  event(
+    eventId,
+    {
+      message_id: messageId,
+      delivery_status: "failed",
+      failure_code: "bridge_failed",
+    },
+    "bridge.delivery.updated",
+    overrides,
+  );
 
 export const eventMarker = (
   eventId: string,
@@ -292,10 +361,15 @@ export const eventMarker = (
   targetEventId = "target_event_a",
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    target_event_id: targetEventId,
-    reason_code: "operator_review",
-  }, markerType, overrides);
+  event(
+    eventId,
+    {
+      target_event_id: targetEventId,
+      reason_code: "operator_review",
+    },
+    markerType,
+    overrides,
+  );
 
 export const deletionTombstone = (
   eventId: string,
@@ -303,8 +377,13 @@ export const deletionTombstone = (
   resourceId: string,
   overrides: Partial<ProjectionEventEnvelope> = {},
 ): ProjectionEventEnvelope =>
-  event(eventId, {
-    resource_type: resourceType,
-    resource_id: resourceId,
-    reason_code: "retention",
-  }, "deletion.tombstone", overrides);
+  event(
+    eventId,
+    {
+      resource_type: resourceType,
+      resource_id: resourceId,
+      reason_code: "retention",
+    },
+    "deletion.tombstone",
+    overrides,
+  );

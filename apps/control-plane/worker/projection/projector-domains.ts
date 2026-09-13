@@ -17,7 +17,10 @@ import {
   projectDeletionTombstone,
   projectMessageDeleted,
 } from "./projector-deletion";
-import { assertEventTombstoneOwner, readConversation } from "./projector-common";
+import {
+  assertEventTombstoneOwner,
+  readConversation,
+} from "./projector-common";
 import {
   projectAttachmentObservedEvent,
   projectReactionAddedEvent,
@@ -41,17 +44,13 @@ export const projectEvent = (
   sql: SqlStorage,
   touchedConversations: Set<string>,
 ): void => {
-  assertEventTombstoneOwner(
-    sql,
-    prepared.event.event_id,
-    {
-      identityId: prepared.event.identity_id,
-      accountId: prepared.event.account_id,
-      connectionId: prepared.connection.connection_id,
-      conversationId: prepared.event.conversation_id,
-      platform: prepared.event.platform,
-    },
-  );
+  assertEventTombstoneOwner(sql, prepared.event.event_id, {
+    identityId: prepared.event.identity_id,
+    accountId: prepared.event.account_id,
+    connectionId: prepared.connection.connection_id,
+    conversationId: prepared.event.conversation_id,
+    platform: prepared.event.platform,
+  });
   switch (prepared.event.event_type) {
     case "conversation.updated":
       projectConversationUpdated(sql, prepared);
@@ -155,7 +154,11 @@ export const recomputeConversationSummaries = (
     );
 
     const counts = sql
-      .exec<{ message_count: number; unread_count: number; attachment_count: number }>(
+      .exec<{
+        message_count: number;
+        unread_count: number;
+        attachment_count: number;
+      }>(
         "SELECT COUNT(*) AS message_count, COALESCE(SUM(CASE WHEN direction = 'inbound' AND unread = 1 THEN 1 ELSE 0 END), 0) AS unread_count, COALESCE(SUM(attachment_count), 0) AS attachment_count FROM messages WHERE identity_id = ? AND conversation_id = ? AND deleted_at IS NULL",
         conversation.identity_id,
         conversationId,

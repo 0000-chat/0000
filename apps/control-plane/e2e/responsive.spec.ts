@@ -14,21 +14,41 @@ test.beforeEach(async ({ page }) => {
   expect(status).toBe(200);
 });
 
-test("keeps desktop navigation visible and provides mobile navigation", async ({ page }) => {
+test("keeps desktop navigation visible and provides mobile navigation", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1024, height: 900 });
   await page.goto("/conversations?identity=identity_human");
-  await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "Primary navigation" }).first()).toBeHidden();
-  await expect(page.getByRole("navigation", { name: "Conversation channels" }).filter({ visible: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open navigation" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Primary navigation" }).first(),
+  ).toBeHidden();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Conversation channels" })
+      .filter({ visible: true }),
+  ).toBeVisible();
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
-  await expect(page.getByRole("navigation", { name: "Primary navigation" }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open navigation" })).toBeHidden();
+  await expect(
+    page.getByRole("navigation", { name: "Primary navigation" }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open navigation" }),
+  ).toBeHidden();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
-  await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open navigation" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Open navigation" }).click();
-  await expect(page.getByRole("dialog").getByRole("link", { name: "Connections", exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("dialog")
+      .getByRole("link", { name: "Connections", exact: true }),
+  ).toBeVisible();
 });

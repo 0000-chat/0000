@@ -31,7 +31,9 @@ export type RealtimeWebSocketLike = {
   readyState?: number;
   onopen: (() => void) | null;
   onmessage: ((event: { data: unknown }) => void) | null;
-  onclose: ((event: { code: number; reason: string; wasClean: boolean }) => void) | null;
+  onclose:
+    | ((event: { code: number; reason: string; wasClean: boolean }) => void)
+    | null;
   onerror: (() => void) | null;
   close(code?: number, reason?: string): void;
 };
@@ -63,7 +65,8 @@ type NormalizedConnectOptions = {
 
 const defaultTimers: RealtimeTimerScheduler = {
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+  clearTimeout: (handle) =>
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
 function defaultWebSocket(): RealtimeWebSocketConstructor {
@@ -78,9 +81,14 @@ function defaultStorage(): Storage | undefined {
   }
 }
 
-function normalizeOptions(options: RealtimeConnectOptions): NormalizedConnectOptions {
+function normalizeOptions(
+  options: RealtimeConnectOptions,
+): NormalizedConnectOptions {
   const identityIds = [...options.identityIds];
-  if (identityIds.length === 0 || new Set(identityIds).size !== identityIds.length) {
+  if (
+    identityIds.length === 0 ||
+    new Set(identityIds).size !== identityIds.length
+  ) {
     throw new Error("Realtime subscriptions must contain unique identities");
   }
   if (options.families.length !== 1 || options.families[0] !== "projection") {
@@ -94,12 +102,19 @@ function normalizeOptions(options: RealtimeConnectOptions): NormalizedConnectOpt
   };
 }
 
-function sameOptions(left: NormalizedConnectOptions, right: NormalizedConnectOptions) {
-  return left.tenantId === right.tenantId
-    && left.principalId === right.principalId
-    && left.families[0] === right.families[0]
-    && left.identityIds.length === right.identityIds.length
-    && left.identityIds.every((identityId, index) => identityId === right.identityIds[index]);
+function sameOptions(
+  left: NormalizedConnectOptions,
+  right: NormalizedConnectOptions,
+) {
+  return (
+    left.tenantId === right.tenantId &&
+    left.principalId === right.principalId &&
+    left.families[0] === right.families[0] &&
+    left.identityIds.length === right.identityIds.length &&
+    left.identityIds.every(
+      (identityId, index) => identityId === right.identityIds[index],
+    )
+  );
 }
 
 export function realtimePositionStorageKey(
@@ -153,8 +168,9 @@ export class LiveRealtimeClient implements RealtimeClient {
     if (!this.desiredOptions) return 0;
     return Math.max(
       0,
-      ...this.desiredOptions.identityIds.map((identityId) =>
-        this.positionFor(identityId)?.sequence ?? 0),
+      ...this.desiredOptions.identityIds.map(
+        (identityId) => this.positionFor(identityId)?.sequence ?? 0,
+      ),
     );
   }
 
@@ -165,7 +181,8 @@ export class LiveRealtimeClient implements RealtimeClient {
     }
 
     const normalized = normalizeOptions(options);
-    const scopeChanged = !this.desiredOptions || !sameOptions(this.desiredOptions, normalized);
+    const scopeChanged =
+      !this.desiredOptions || !sameOptions(this.desiredOptions, normalized);
     if (scopeChanged) {
       this.stopSocket("realtime scope changed");
       this.rejectPendingConnect(new Error("Realtime connection scope changed"));
@@ -175,7 +192,8 @@ export class LiveRealtimeClient implements RealtimeClient {
     }
 
     this.closed = false;
-    if (this.statusValue === "connected" && !scopeChanged) return Promise.resolve();
+    if (this.statusValue === "connected" && !scopeChanged)
+      return Promise.resolve();
     if (this.pendingConnect) return this.pendingConnect;
 
     this.pendingConnect = new Promise<void>((resolve, reject) => {
@@ -247,31 +265,63 @@ export class LiveRealtimeClient implements RealtimeClient {
     if (this.closed || !desiredOptions) return;
     const attemptToken = ++this.connectionToken;
     const request = this.ticketRequest(desiredOptions);
-    void this.ticketApi.createRealtimeTicket(request)
+    void this.ticketApi
+      .createRealtimeTicket(request)
       .then((response) => {
-        if (this.closed || attemptToken !== this.connectionToken || this.desiredOptions !== desiredOptions) return;
+        if (
+          this.closed ||
+          attemptToken !== this.connectionToken ||
+          this.desiredOptions !== desiredOptions
+        )
+          return;
         const parsed = RealtimeTicketResponseSchema.safeParse(response);
-        if (!parsed.success) throw new Error("Communicator API returned an invalid realtime ticket");
-        const socket = new this.webSocketConstructor(parsed.data.websocket_url, REALTIME_SUBPROTOCOL);
-        if (this.closed || attemptToken !== this.connectionToken || this.desiredOptions !== desiredOptions) {
+        if (!parsed.success)
+          throw new Error(
+            "Communicator API returned an invalid realtime ticket",
+          );
+        const socket = new this.webSocketConstructor(
+          parsed.data.websocket_url,
+          REALTIME_SUBPROTOCOL,
+        );
+        if (
+          this.closed ||
+          attemptToken !== this.connectionToken ||
+          this.desiredOptions !== desiredOptions
+        ) {
           socket.close(1000, "stale realtime attempt");
           return;
         }
         this.socket = socket;
         const socketToken = ++this.connectionToken;
         socket.onopen = () => undefined;
-        socket.onmessage = (event) => this.handleMessage(socket, socketToken, event.data);
+        socket.onmessage = (event) =>
+          this.handleMessage(socket, socketToken, event.data);
         socket.onerror = () => undefined;
-        socket.onclose = (event) => this.handleClose(socket, socketToken, event);
+        socket.onclose = (event) =>
+          this.handleClose(socket, socketToken, event);
       })
       .catch(() => {
-        if (this.closed || attemptToken !== this.connectionToken || this.desiredOptions !== desiredOptions) return;
+        if (
+          this.closed ||
+          attemptToken !== this.connectionToken ||
+          this.desiredOptions !== desiredOptions
+        )
+          return;
         this.scheduleReconnect();
       });
   }
 
-  private handleMessage(socket: RealtimeWebSocketLike, socketToken: number, data: unknown) {
-    if (this.closed || this.socket !== socket || socketToken !== this.connectionToken) return;
+  private handleMessage(
+    socket: RealtimeWebSocketLike,
+    socketToken: number,
+    data: unknown,
+  ) {
+    if (
+      this.closed ||
+      this.socket !== socket ||
+      socketToken !== this.connectionToken
+    )
+      return;
     const frame = this.parseFrame(data);
     if (!frame) {
       socket.close(1008, "invalid realtime frame");
@@ -311,17 +361,27 @@ export class LiveRealtimeClient implements RealtimeClient {
     }
 
     const positions = frame.positions.filter((position) =>
-      desiredOptions.identityIds.includes(position.identity_id));
-    const positionIdentityIds = new Set(positions.map((position) => position.identity_id));
-    if (positions.length !== desiredOptions.identityIds.length
-      || positionIdentityIds.size !== positions.length
-      || !desiredOptions.identityIds.every((identityId) => positionIdentityIds.has(identityId))) {
+      desiredOptions.identityIds.includes(position.identity_id),
+    );
+    const positionIdentityIds = new Set(
+      positions.map((position) => position.identity_id),
+    );
+    if (
+      positions.length !== desiredOptions.identityIds.length ||
+      positionIdentityIds.size !== positions.length ||
+      !desiredOptions.identityIds.every((identityId) =>
+        positionIdentityIds.has(identityId),
+      )
+    ) {
       socket.close(1008, "invalid realtime frame");
       return;
     }
     for (const position of positions) this.acceptConnectedPosition(position);
 
-    const safeFrame = RealtimeConnectedFrameSchema.safeParse({ ...frame, positions });
+    const safeFrame = RealtimeConnectedFrameSchema.safeParse({
+      ...frame,
+      positions,
+    });
     if (!safeFrame.success) {
       socket.close(1008, "invalid realtime frame");
       return;
@@ -349,7 +409,9 @@ export class LiveRealtimeClient implements RealtimeClient {
     const position = this.positionFor(frame.identity_id);
     if (position && frame.generation !== position.generation) return;
     const baseline = position?.sequence ?? 0;
-    const changes = frame.changes.filter((change) => change.sequence > baseline);
+    const changes = frame.changes.filter(
+      (change) => change.sequence > baseline,
+    );
     if (changes.length === 0) return;
     if (changes[0]!.sequence !== baseline + 1) {
       socket.close(1008, "realtime sequence gap");
@@ -390,9 +452,12 @@ export class LiveRealtimeClient implements RealtimeClient {
 
   private acceptConnectedPosition(position: RealtimePosition) {
     const existing = this.positionFor(position.identity_id);
-    if (!existing
-      || position.generation > existing.generation
-      || (position.generation === existing.generation && position.sequence > existing.sequence)) {
+    if (
+      !existing ||
+      position.generation > existing.generation ||
+      (position.generation === existing.generation &&
+        position.sequence > existing.sequence)
+    ) {
       this.writePosition(position);
     }
   }
@@ -410,10 +475,18 @@ export class LiveRealtimeClient implements RealtimeClient {
   }
 
   private scheduleReconnect(delayOverride?: number) {
-    if (this.closed || !this.desiredOptions || this.reconnectTimer !== undefined) return;
-    const delay = delayOverride ?? RECONNECT_DELAYS_MS[
-      Math.min(this.reconnectDelayIndex++, RECONNECT_DELAYS_MS.length - 1)
-    ] ?? RECONNECT_DELAYS_MS.at(-1)!;
+    if (
+      this.closed ||
+      !this.desiredOptions ||
+      this.reconnectTimer !== undefined
+    )
+      return;
+    const delay =
+      delayOverride ??
+      RECONNECT_DELAYS_MS[
+        Math.min(this.reconnectDelayIndex++, RECONNECT_DELAYS_MS.length - 1)
+      ] ??
+      RECONNECT_DELAYS_MS.at(-1)!;
     this.setStatus("reconnecting");
     this.reconnectTimer = this.timers.setTimeout(() => {
       this.reconnectTimer = undefined;
@@ -475,15 +548,19 @@ export class LiveRealtimeClient implements RealtimeClient {
     this.rejectPendingConnectPromise = undefined;
   }
 
-  private ticketRequest(options: NormalizedConnectOptions): RealtimeTicketRequest {
+  private ticketRequest(
+    options: NormalizedConnectOptions,
+  ): RealtimeTicketRequest {
     const resume = options.identityIds.flatMap((identityId) => {
       const position = this.positionFor(identityId);
       return position
-        ? [{
-          identity_id: identityId,
-          generation: position.generation,
-          after_sequence: position.sequence,
-        }]
+        ? [
+            {
+              identity_id: identityId,
+              generation: position.generation,
+              after_sequence: position.sequence,
+            },
+          ]
         : [];
     });
     const request = {
@@ -500,7 +577,11 @@ export class LiveRealtimeClient implements RealtimeClient {
   private positionFor(identityId: string) {
     const options = this.desiredOptions;
     if (!options) return undefined;
-    const key = realtimePositionStorageKey(options.tenantId, options.principalId, identityId);
+    const key = realtimePositionStorageKey(
+      options.tenantId,
+      options.principalId,
+      identityId,
+    );
     const inMemory = this.positions.get(key);
     if (inMemory) return inMemory;
     if (!this.storage) return undefined;

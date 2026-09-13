@@ -14,18 +14,30 @@ test.beforeEach(async ({ page }) => {
   expect(status).toBe(200);
 });
 
-test("switches identities symmetrically in Connections and Conversations", async ({ page }) => {
+test("switches identities symmetrically in Connections and Conversations", async ({
+  page,
+}) => {
   await page.goto("/connections");
-  await expect(page.getByText("Personal WhatsApp", { exact: true })).toBeVisible();
-  await expect(page.getByText("Agent WhatsApp", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText("Personal WhatsApp", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Agent WhatsApp", { exact: true })).toHaveCount(
+    0,
+  );
   await page.getByLabel("Active identity").selectOption("identity_agent");
   await expect(page.getByText("Agent WhatsApp", { exact: true })).toBeVisible();
-  await expect(page.getByText("Personal WhatsApp", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText("Personal WhatsApp", { exact: true }),
+  ).toHaveCount(0);
 
   await page.goto("/conversations");
   await expect(page.getByRole("link", { name: /Alex Rivera/ })).toHaveCount(2);
-  await expect(page.getByRole("link", { name: /Agent Test Chat/ })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /Agent Test Chat/ })).toHaveCount(
+    0,
+  );
   await page.getByLabel("Active identity").selectOption("identity_agent");
-  await expect(page.getByRole("link", { name: /Agent Test Chat/ })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /Agent Test Chat/ }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: /Alex Rivera/ })).toHaveCount(0);
 });

@@ -21,11 +21,7 @@ import {
   canonicalJsonStringify,
   canonicalJsonLineBytes,
 } from "./canonical-json";
-import {
-  decodeCanonicalJsonl,
-  gunzipBytes,
-  sha256Hex,
-} from "./codec";
+import { decodeCanonicalJsonl, gunzipBytes, sha256Hex } from "./codec";
 import { ArchiveError, archiveError } from "./errors";
 import {
   deriveArchiveKeys,
@@ -157,8 +153,8 @@ const encodeBase64Url = (bytes: Uint8Array): string => {
     const first = bytes[index] ?? 0;
     const hasSecond = index + 1 < bytes.length;
     const hasThird = index + 2 < bytes.length;
-    const second = hasSecond ? bytes[index + 1] ?? 0 : 0;
-    const third = hasThird ? bytes[index + 2] ?? 0 : 0;
+    const second = hasSecond ? (bytes[index + 1] ?? 0) : 0;
+    const third = hasThird ? (bytes[index + 2] ?? 0) : 0;
     result += BASE64URL_ALPHABET[first >> 2];
     result += BASE64URL_ALPHABET[((first & 0x03) << 4) | (second >> 4)];
     if (hasSecond) {
@@ -241,7 +237,9 @@ export const decodeReplayCursor = (
   const bytes = decodeBase64Url(cursor);
   let parsedJson: unknown;
   try {
-    parsedJson = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    parsedJson = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    );
   } catch (error) {
     throw archiveError("archive_invalid", error);
   }
@@ -358,7 +356,10 @@ const readR2 = async <T>(operation: () => Promise<T>): Promise<T> => {
   }
 };
 
-const concatBytes = (chunks: readonly Uint8Array[], total: number): Uint8Array => {
+const concatBytes = (
+  chunks: readonly Uint8Array[],
+  total: number,
+): Uint8Array => {
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -460,12 +461,12 @@ const readBodyBounded = async (
   return concatBytes(chunks, total);
 };
 
-const parseManifestBody = (
-  bytes: Uint8Array,
-): ArchiveBatchManifest => {
+const parseManifestBody = (bytes: Uint8Array): ArchiveBatchManifest => {
   let decoded: unknown;
   try {
-    decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    decoded = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    );
   } catch (error) {
     throw archiveError("archive_corrupt", error);
   }
@@ -717,7 +718,10 @@ const readDataForManifest = async (
 };
 
 const deepFreeze = <T>(value: T, seen = new WeakSet<object>()): T => {
-  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+  if (
+    value === null ||
+    (typeof value !== "object" && typeof value !== "function")
+  ) {
     return value;
   }
   const object = value as object;
@@ -800,7 +804,11 @@ export const listCommittedManifestPage = async (
   if (r2Cursor !== undefined) listOptions.cursor = r2Cursor;
 
   const listed = await readR2(() => bucket.list(listOptions));
-  const validated = validateListResult(listed, tenantId, parsedOptions.pageSize);
+  const validated = validateListResult(
+    listed,
+    tenantId,
+    parsedOptions.pageSize,
+  );
   const items: ManifestPageItem[] = [];
   for (const key of validated.keys) {
     const manifest = await readManifestOnly(
@@ -832,7 +840,10 @@ export const readCommittedArchiveBatch = async (
   bucket: R2Bucket,
   tenantId: string,
   manifestKey: string,
-): Promise<{ manifest: ArchiveBatchManifest; events: CanonicalEventEnvelope[] }> => {
+): Promise<{
+  manifest: ArchiveBatchManifest;
+  events: CanonicalEventEnvelope[];
+}> => {
   assertTenantId(tenantId);
   validateManifestKeyInput(tenantId, manifestKey);
   assertBucket(bucket);
@@ -878,7 +889,11 @@ export const readReplayPage = async (
   assertTenantId(tenantId);
   const parsedOptions = parsePageOptions(options, 1);
   assertBucket(bucket);
-  const listed = await listCommittedManifestPage(bucket, tenantId, parsedOptions);
+  const listed = await listCommittedManifestPage(
+    bucket,
+    tenantId,
+    parsedOptions,
+  );
 
   let totalEvents = 0;
   let totalBytes = 0;

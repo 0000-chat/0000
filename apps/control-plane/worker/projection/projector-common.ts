@@ -156,7 +156,9 @@ export const isMetadataSentinel = (conversation: ConversationRow): boolean =>
   conversation.metadata_observed_ms === METADATA_SENTINEL_OBSERVED_MS &&
   conversation.metadata_event_id === METADATA_SENTINEL_EVENT_ID;
 
-export const ownerFor = (prepared: PreparedProjectionEvent): ProjectionOwner => ({
+export const ownerFor = (
+  prepared: PreparedProjectionEvent,
+): ProjectionOwner => ({
   identityId: prepared.event.identity_id,
   accountId: prepared.event.account_id,
   connectionId: prepared.connection.connection_id,
@@ -284,7 +286,10 @@ export const assertCanonicalResourceIdOwner = (
     )
     .toArray();
   for (const tombstone of tombstones) {
-    if (tombstone.resource_type !== resourceType || !ownerMatches(tombstone, owner)) {
+    if (
+      tombstone.resource_type !== resourceType ||
+      !ownerMatches(tombstone, owner)
+    ) {
       throw projectionError("projection_conflict");
     }
   }

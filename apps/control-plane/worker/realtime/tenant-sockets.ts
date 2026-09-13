@@ -4,7 +4,6 @@ import {
   MAX_REALTIME_SOCKETS_PER_PRINCIPAL,
   MAX_REALTIME_SOCKETS_PER_TENANT,
   REALTIME_CONNECTION_TTL_MS,
-  REALTIME_SUBPROTOCOL,
   RealtimeIdSchema,
   RealtimeResetRequiredFrameSchema,
   RealtimeProjectionChangeSchema,
@@ -255,7 +254,10 @@ export const broadcastRealtimeChanges = (
         const position = currentAttachment.positions.find(
           (candidate) => candidate.identity_id === subscription.identity_id,
         );
-        if (position === undefined || position.generation !== group.generation) {
+        if (
+          position === undefined ||
+          position.generation !== group.generation
+        ) {
           continue;
         }
         const pending = group.changes.filter(

@@ -132,69 +132,186 @@ export async function seedIngestionFixture(
   const timestamp = TEST_TIMESTAMP;
   const db = env.CONTROL_DB;
   await db.batch([
-    db.prepare(
-      "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.tenantId, `ingestion-${suffix}`, "Ingestion tenant", "active", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.otherTenantId, `ingestion-other-${suffix}`, "Other ingestion tenant", "active", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(
-      fixture.servicePrincipalId,
-      fixture.issuer,
-      fixture.subject,
-      "service",
-      "Ingestion service",
-      "active",
-      timestamp,
-      timestamp,
-    ),
-    db.prepare(
-      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.identities.human, fixture.tenantId, "human", "Human inbox", "active", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.identities.agent, fixture.tenantId, "agent", "Agent inbox", "active", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.identities.otherTenantHuman, fixture.otherTenantId, "human", "Other inbox", "active", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.connections.humanWhatsapp, fixture.tenantId, fixture.identities.human, "whatsapp", "Human WhatsApp", "ready", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.connections.agentWhatsapp, fixture.tenantId, fixture.identities.agent, "whatsapp", "Agent WhatsApp", "ready", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.connections.humanTelegram, fixture.tenantId, fixture.identities.human, "telegram", "Human Telegram", "ready", timestamp, timestamp),
-    db.prepare(
-      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(fixture.connections.otherTenantWhatsapp, fixture.otherTenantId, fixture.identities.otherTenantHuman, "whatsapp", "Other WhatsApp", "ready", timestamp, timestamp),
+    db
+      .prepare(
+        "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.tenantId,
+        `ingestion-${suffix}`,
+        "Ingestion tenant",
+        "active",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.otherTenantId,
+        `ingestion-other-${suffix}`,
+        "Other ingestion tenant",
+        "active",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.servicePrincipalId,
+        fixture.issuer,
+        fixture.subject,
+        "service",
+        "Ingestion service",
+        "active",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.identities.human,
+        fixture.tenantId,
+        "human",
+        "Human inbox",
+        "active",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.identities.agent,
+        fixture.tenantId,
+        "agent",
+        "Agent inbox",
+        "active",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.identities.otherTenantHuman,
+        fixture.otherTenantId,
+        "human",
+        "Other inbox",
+        "active",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.connections.humanWhatsapp,
+        fixture.tenantId,
+        fixture.identities.human,
+        "whatsapp",
+        "Human WhatsApp",
+        "ready",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.connections.agentWhatsapp,
+        fixture.tenantId,
+        fixture.identities.agent,
+        "whatsapp",
+        "Agent WhatsApp",
+        "ready",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.connections.humanTelegram,
+        fixture.tenantId,
+        fixture.identities.human,
+        "telegram",
+        "Human Telegram",
+        "ready",
+        timestamp,
+        timestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        fixture.connections.otherTenantWhatsapp,
+        fixture.otherTenantId,
+        fixture.identities.otherTenantHuman,
+        "whatsapp",
+        "Other WhatsApp",
+        "ready",
+        timestamp,
+        timestamp,
+      ),
     ...[
       [fixture.routes.human, fixture.servicePrincipalId],
       [fixture.routes.agent, fixture.servicePrincipalId],
       [fixture.routes.telegram, fixture.servicePrincipalId],
       [fixture.routes.otherTenant, fixture.servicePrincipalId],
-    ].map(([routeId, principalId]) => db.prepare(
-      "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(routeId, principalId, "active", timestamp, timestamp, null)),
+    ].map(([routeId, principalId]) =>
+      db
+        .prepare(
+          "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(routeId, principalId, "active", timestamp, timestamp, null),
+    ),
     ...[
       [fixture.connections.humanWhatsapp, fixture.routes.human],
       [fixture.connections.agentWhatsapp, fixture.routes.agent],
       [fixture.connections.humanTelegram, fixture.routes.telegram],
       [fixture.connections.otherTenantWhatsapp, fixture.routes.otherTenant],
-    ].map(([connectionId, routeId]) => db.prepare(
-      "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(connectionId, routeId, `bridge_${suffix}`, `@route_${suffix}:example`, `!room_${suffix}:example`, timestamp, timestamp)),
+    ].map(([connectionId, routeId]) =>
+      db
+        .prepare(
+          "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          connectionId,
+          routeId,
+          `bridge_${suffix}`,
+          `@route_${suffix}:example`,
+          `!room_${suffix}:example`,
+          timestamp,
+          timestamp,
+        ),
+    ),
     ...[
       [fixture.accounts.humanWhatsapp, fixture.connections.humanWhatsapp],
       [fixture.accounts.agentWhatsapp, fixture.connections.agentWhatsapp],
       [fixture.accounts.humanTelegram, fixture.connections.humanTelegram],
-      [fixture.accounts.otherTenantWhatsapp, fixture.connections.otherTenantWhatsapp],
-    ].map(([accountId, connectionId]) => db.prepare(
-      "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at, retired_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(accountId, connectionId, "active", timestamp, timestamp, null)),
+      [
+        fixture.accounts.otherTenantWhatsapp,
+        fixture.connections.otherTenantWhatsapp,
+      ],
+    ].map(([accountId, connectionId]) =>
+      db
+        .prepare(
+          "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at, retired_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(accountId, connectionId, "active", timestamp, timestamp, null),
+    ),
   ]);
 
   return fixture;
@@ -212,7 +329,9 @@ export async function cleanupIngestionFixture(
           ...(cursor === undefined ? {} : { cursor }),
         });
         if (page.objects.length > 0) {
-          await env.EVENT_ARCHIVE.delete(page.objects.map((object) => object.key));
+          await env.EVENT_ARCHIVE.delete(
+            page.objects.map((object) => object.key),
+          );
         }
         cursor = page.truncated ? page.cursor : undefined;
       } while (cursor !== undefined);
@@ -291,12 +410,14 @@ export async function snapshotArchiveObject(
     bytes: new Uint8Array(await object.arrayBuffer()),
     size: object.size,
     etag: object.etag,
-    httpMetadata: object.httpMetadata === undefined
-      ? undefined
-      : { ...object.httpMetadata },
-    customMetadata: object.customMetadata === undefined
-      ? undefined
-      : { ...object.customMetadata },
+    httpMetadata:
+      object.httpMetadata === undefined
+        ? undefined
+        : { ...object.httpMetadata },
+    customMetadata:
+      object.customMetadata === undefined
+        ? undefined
+        : { ...object.customMetadata },
   };
 }
 
@@ -305,9 +426,12 @@ export async function snapshotArchivePair(
   dataKey?: string,
 ): Promise<ArchivePairSnapshot> {
   const manifest = await snapshotArchiveObject(pointer.manifest_key);
-  const manifestValue = dataKey === undefined
-    ? JSON.parse(new TextDecoder().decode(manifest.bytes)) as { data_key?: unknown }
-    : undefined;
+  const manifestValue =
+    dataKey === undefined
+      ? (JSON.parse(new TextDecoder().decode(manifest.bytes)) as {
+          data_key?: unknown;
+        })
+      : undefined;
   const resolvedDataKey = dataKey ?? manifestValue?.data_key;
   if (typeof resolvedDataKey !== "string") {
     throw new Error("archive manifest data key missing in test fixture");
@@ -354,9 +478,18 @@ export const messageEvent = (
   platform: options.platform ?? "whatsapp",
   account_id: options.accountId ?? fixture.accounts.humanWhatsapp,
   conversation_id: options.conversationId ?? `conversation_${fixture.suffix}`,
-  matrix_room_id: options.matrixRoomId === undefined ? `!room_${fixture.suffix}:example` : options.matrixRoomId,
-  matrix_event_id: options.matrixEventId === undefined ? `$matrix_${fixture.suffix}:example` : options.matrixEventId,
-  remote_message_id: options.remoteMessageId === undefined ? `remote_${fixture.suffix}` : options.remoteMessageId,
+  matrix_room_id:
+    options.matrixRoomId === undefined
+      ? `!room_${fixture.suffix}:example`
+      : options.matrixRoomId,
+  matrix_event_id:
+    options.matrixEventId === undefined
+      ? `$matrix_${fixture.suffix}:example`
+      : options.matrixEventId,
+  remote_message_id:
+    options.remoteMessageId === undefined
+      ? `remote_${fixture.suffix}`
+      : options.remoteMessageId,
   occurred_at: options.occurredAt ?? "2026-09-08T01:00:00.000Z",
   observed_at: options.observedAt ?? "2026-09-08T01:00:01.000Z",
   payload: {
@@ -395,7 +528,10 @@ export async function requestForEvents(
   });
   return {
     ...requestWithoutBatch,
-    batch_id: await recomputeBatchId(requestWithoutBatch, encoded.canonicalSha256),
+    batch_id: await recomputeBatchId(
+      requestWithoutBatch,
+      encoded.canonicalSha256,
+    ),
   };
 }
 
@@ -426,14 +562,17 @@ export async function deliverQueueMessages(
     });
   }
   const context = createExecutionContext();
-  const queueHandler = (worker as {
-    queue?: (
-      queueBatch: MessageBatch<unknown>,
-      environment: Cloudflare.Env,
-      executionContext: ExecutionContext,
-    ) => void | Promise<void>;
-  }).queue;
-  if (typeof queueHandler !== "function") throw new Error("worker queue handler is missing");
+  const queueHandler = (
+    worker as {
+      queue?: (
+        queueBatch: MessageBatch<unknown>,
+        environment: Cloudflare.Env,
+        executionContext: ExecutionContext,
+      ) => void | Promise<void>;
+    }
+  ).queue;
+  if (typeof queueHandler !== "function")
+    throw new Error("worker queue handler is missing");
   await queueHandler(batch, env, context);
   return {
     batch,
@@ -442,7 +581,9 @@ export async function deliverQueueMessages(
   };
 }
 
-export async function listTenantArchiveKeys(tenantId: string): Promise<string[]> {
+export async function listTenantArchiveKeys(
+  tenantId: string,
+): Promise<string[]> {
   const keys: string[] = [];
   for (const prefix of [`events/${tenantId}/`, `manifests/${tenantId}/`]) {
     let cursor: string | undefined;

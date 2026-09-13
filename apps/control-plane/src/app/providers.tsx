@@ -18,8 +18,8 @@ export function AppProviders({
   router?: ReturnType<typeof createAppRouter>;
 }) {
   const [queryClient] = useState(() => createAppQueryClient());
-  const [router] = useState(() =>
-    providedRouter ?? createAppRouter(queryClient),
+  const [router] = useState(
+    () => providedRouter ?? createAppRouter(queryClient),
   );
 
   return (

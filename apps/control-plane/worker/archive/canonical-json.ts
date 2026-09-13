@@ -107,16 +107,25 @@ const snapshotJsonValue = (
         descriptors.set(key, descriptor);
       }
 
-      const snapshot: CanonicalJsonValue[] = new Array(length);
+      const snapshot: CanonicalJsonValue[] = [];
+      snapshot.length = length;
       context.copies.set(value, snapshot);
       context.active.add(value);
       try {
         for (let index = 0; index < length; index += 1) {
           const descriptor = descriptors.get(String(index));
-          if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          if (
+            !descriptor ||
+            !descriptor.enumerable ||
+            !("value" in descriptor)
+          ) {
             throw archiveError("archive_invalid");
           }
-          snapshot[index] = snapshotJsonValue(descriptor.value, depth + 1, context);
+          snapshot[index] = snapshotJsonValue(
+            descriptor.value,
+            depth + 1,
+            context,
+          );
         }
       } finally {
         context.active.delete(value);
@@ -152,10 +161,9 @@ const snapshotJsonValue = (
       throw archiveError("archive_invalid");
     }
 
-    const snapshot = Object.create(prototype === null ? null : Object.prototype) as Record<
-      string,
-      CanonicalJsonValue
-    >;
+    const snapshot = Object.create(
+      prototype === null ? null : Object.prototype,
+    ) as Record<string, CanonicalJsonValue>;
     context.copies.set(value, snapshot);
     context.active.add(value);
     try {
@@ -230,9 +238,10 @@ export const snapshotCanonicalEventInput = (input: unknown): unknown => {
       Object.defineProperty(snapshot, key, {
         configurable: true,
         enumerable: true,
-        value: key === "payload"
-          ? snapshotJsonValue(descriptor.value, 0, context)
-          : descriptor.value,
+        value:
+          key === "payload"
+            ? snapshotJsonValue(descriptor.value, 0, context)
+            : descriptor.value,
         writable: true,
       });
     }
@@ -312,7 +321,8 @@ export const canonicalEventJsonStringify = (value: unknown): string => {
     const pairs: string[] = [];
     for (const key of Object.keys(snapshot).sort()) {
       const descriptor = Object.getOwnPropertyDescriptor(snapshot, key);
-      if (!descriptor || !("value" in descriptor)) throw archiveError("archive_invalid");
+      if (!descriptor || !("value" in descriptor))
+        throw archiveError("archive_invalid");
       const field = descriptor.value;
       pairs.push(
         `${JSON.stringify(key)}:${

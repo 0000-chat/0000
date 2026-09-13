@@ -20,7 +20,10 @@ const NOW = Date.parse("2026-09-10T00:00:00.000Z");
 class FakeTimers {
   nowMs = NOW;
   private nextHandle = 1;
-  private readonly tasks = new Map<number, { due: number; callback: () => void; order: number }>();
+  private readonly tasks = new Map<
+    number,
+    { due: number; callback: () => void; order: number }
+  >();
   private order = 0;
 
   readonly scheduler = {
@@ -43,7 +46,9 @@ class FakeTimers {
   }
 
   get nextDelay() {
-    const next = [...this.tasks.values()].toSorted((left, right) => left.due - right.due || left.order - right.order)[0];
+    const next = [...this.tasks.values()].toSorted(
+      (left, right) => left.due - right.due || left.order - right.order,
+    )[0];
     return next ? next.due - this.nowMs : undefined;
   }
 
@@ -52,7 +57,10 @@ class FakeTimers {
     while (true) {
       const next = [...this.tasks.entries()]
         .filter(([, task]) => task.due <= target)
-        .toSorted((left, right) => left[1].due - right[1].due || left[1].order - right[1].order)[0];
+        .toSorted(
+          (left, right) =>
+            left[1].due - right[1].due || left[1].order - right[1].order,
+        )[0];
       if (!next) break;
       const [handle, task] = next;
       this.tasks.delete(handle);
@@ -106,7 +114,9 @@ class FakeWebSocket {
   readyState = 0;
   onopen: (() => void) | null = null;
   onmessage: ((event: FakeSocketMessage) => void) | null = null;
-  onclose: ((event: { code: number; reason: string; wasClean: boolean }) => void) | null = null;
+  onclose:
+    | ((event: { code: number; reason: string; wasClean: boolean }) => void)
+    | null = null;
   onerror: (() => void) | null = null;
 
   constructor(url: string, protocols?: string | string[]) {
@@ -142,7 +152,9 @@ class FakeTicketApi {
   readonly responses: RealtimeTicketResponse[] = [];
   private responseNumber = 0;
 
-  async createRealtimeTicket(request: RealtimeTicketRequest): Promise<RealtimeTicketResponse> {
+  async createRealtimeTicket(
+    request: RealtimeTicketRequest,
+  ): Promise<RealtimeTicketResponse> {
     this.requests.push(structuredClone(request));
     const responseNumber = ++this.responseNumber;
     const response: RealtimeTicketResponse = {
@@ -245,15 +257,19 @@ describe("live realtime client", () => {
     const connected = client.connect(options);
     await Promise.resolve();
 
-    expect(api.requests).toEqual([{
-      schema_version: 1,
-      subscriptions: [
-        { identity_id: "identity_human", families: ["projection"] },
-        { identity_id: "identity_agent", families: ["projection"] },
-      ],
-    }]);
+    expect(api.requests).toEqual([
+      {
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: "identity_human", families: ["projection"] },
+          { identity_id: "identity_agent", families: ["projection"] },
+        ],
+      },
+    ]);
     expect(FakeWebSocket.instances).toHaveLength(1);
-    expect(FakeWebSocket.instances[0]?.url).toBe(api.responses[0]?.websocket_url);
+    expect(FakeWebSocket.instances[0]?.url).toBe(
+      api.responses[0]?.websocket_url,
+    );
     expect(FakeWebSocket.instances[0]?.protocols).toBe(REALTIME_SUBPROTOCOL);
     expect(statuses).toEqual(["connecting"]);
 
@@ -271,13 +287,23 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
     const events: RealtimeServerFrame[] = [];
-    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+    client.subscribe((event) =>
+      events.push(event as unknown as RealtimeServerFrame),
+    );
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const socket = FakeWebSocket.instances[0]!;
     socket.open();
-    sendFrame(socket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 2 }]));
+    sendFrame(
+      socket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 2 },
+      ]),
+    );
     await connected;
 
     sendFrame(socket, changesFrame("identity_human", 1, 3));
@@ -291,7 +317,9 @@ describe("live realtime client", () => {
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({
       type: "connected",
-      positions: [{ identity_id: "identity_human", generation: 1, sequence: 2 }],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 2 },
+      ],
     });
     expect(events[1]).toMatchObject({
       type: "projection.changes",
@@ -313,26 +341,42 @@ describe("live realtime client", () => {
       "principal_pilot",
       "identity_human",
     );
-    storage.setItem(storageKey, JSON.stringify({
-      identity_id: "identity_human",
-      generation: 1,
-      sequence: 3,
-    }));
+    storage.setItem(
+      storageKey,
+      JSON.stringify({
+        identity_id: "identity_human",
+        generation: 1,
+        sequence: 3,
+      }),
+    );
     const client = makeClient(api, timers, storage);
     const events: RealtimeServerFrame[] = [];
-    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+    client.subscribe((event) =>
+      events.push(event as unknown as RealtimeServerFrame),
+    );
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const socket = FakeWebSocket.instances[0]!;
     socket.open();
-    sendFrame(socket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 3 }]));
+    sendFrame(
+      socket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 3 },
+      ]),
+    );
     await connected;
 
     sendFrame(socket, changesFrame("identity_human", 5, 2));
 
     expect(events).toHaveLength(1);
-    expect(socket.closeCalls).toContainEqual({ code: 1008, reason: "realtime sequence gap" });
+    expect(socket.closeCalls).toContainEqual({
+      code: 1008,
+      reason: "realtime sequence gap",
+    });
     expect(timers.nextDelay).toBe(250);
     expect(JSON.parse(storage.getItem(storageKey)!)).toMatchObject({
       identity_id: "identity_human",
@@ -347,7 +391,9 @@ describe("live realtime client", () => {
     expect(api.requests[1]?.resume).toEqual([
       { identity_id: "identity_human", generation: 1, after_sequence: 3 },
     ]);
-    expect(JSON.parse(storage.getItem(storageKey)!)).toMatchObject({ sequence: 3 });
+    expect(JSON.parse(storage.getItem(storageKey)!)).toMatchObject({
+      sequence: 3,
+    });
     client.close();
   });
 
@@ -358,20 +404,35 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
     const events: RealtimeServerFrame[] = [];
-    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+    client.subscribe((event) =>
+      events.push(event as unknown as RealtimeServerFrame),
+    );
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const socket = FakeWebSocket.instances[0]!;
     socket.open();
-    sendFrame(socket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 0 }]));
+    sendFrame(
+      socket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]),
+    );
     await connected;
 
     socket.message("not json");
-    socket.message(JSON.stringify({ type: "projection.changes", tenant_id: "tenant_pilot" }));
+    socket.message(
+      JSON.stringify({ type: "projection.changes", tenant_id: "tenant_pilot" }),
+    );
 
     expect(events).toHaveLength(1);
-    expect(socket.closeCalls).toContainEqual({ code: 1008, reason: "invalid realtime frame" });
+    expect(socket.closeCalls).toContainEqual({
+      code: 1008,
+      reason: "invalid realtime frame",
+    });
   });
 
   it("rejects a connected frame that omits a requested identity", async () => {
@@ -381,18 +442,26 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
     const events: RealtimeServerFrame[] = [];
-    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+    client.subscribe((event) =>
+      events.push(event as unknown as RealtimeServerFrame),
+    );
 
     const connected = client.connect(options);
     try {
       await Promise.resolve();
       const socket = FakeWebSocket.instances[0]!;
       socket.open();
-      sendFrame(socket, connectedFrame([
-        { identity_id: "identity_human", generation: 1, sequence: 0 },
-      ]));
+      sendFrame(
+        socket,
+        connectedFrame([
+          { identity_id: "identity_human", generation: 1, sequence: 0 },
+        ]),
+      );
 
-      expect(socket.closeCalls).toContainEqual({ code: 1008, reason: "invalid realtime frame" });
+      expect(socket.closeCalls).toContainEqual({
+        code: 1008,
+        reason: "invalid realtime frame",
+      });
       expect(events).toHaveLength(0);
       expect(storage.entries()).toHaveLength(0);
       expect(client.status).toBe("reconnecting");
@@ -426,12 +495,17 @@ describe("live realtime client", () => {
       { identity_id: "identity_human", generation: 1, after_sequence: 2 },
       { identity_id: "identity_agent", generation: 1, after_sequence: 0 },
     ]);
-    expect(storage.entries().every(([key, value]) =>
-      key.includes("tenant_pilot")
-      && key.includes("principal_pilot")
-      && !value.includes("rt1_")
-      && !value.includes("wss://")
-    )).toBe(true);
+    expect(
+      storage
+        .entries()
+        .every(
+          ([key, value]) =>
+            key.includes("tenant_pilot") &&
+            key.includes("principal_pilot") &&
+            !value.includes("rt1_") &&
+            !value.includes("wss://"),
+        ),
+    ).toBe(true);
   });
 
   it("replaces a reset baseline before delivering the reset", async () => {
@@ -441,20 +515,34 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
     const events: RealtimeServerFrame[] = [];
-    client.subscribe((event) => events.push(event as unknown as RealtimeServerFrame));
+    client.subscribe((event) =>
+      events.push(event as unknown as RealtimeServerFrame),
+    );
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const socket = FakeWebSocket.instances[0]!;
     socket.open();
-    sendFrame(socket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 42 }]));
+    sendFrame(
+      socket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 42 },
+      ]),
+    );
     await connected;
     sendFrame(socket, resetFrame());
     socket.serverClose();
     timers.advanceBy(250);
     await Promise.resolve();
 
-    expect(events.at(-1)).toMatchObject({ type: "reset_required", generation: 2, latest_sequence: 7 });
+    expect(events.at(-1)).toMatchObject({
+      type: "reset_required",
+      generation: 2,
+      latest_sequence: 7,
+    });
     expect(api.requests[1]?.resume).toEqual([
       { identity_id: "identity_human", generation: 2, after_sequence: 7 },
     ]);
@@ -467,11 +555,19 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const firstSocket = FakeWebSocket.instances[0]!;
     firstSocket.open();
-    sendFrame(firstSocket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 0 }]));
+    sendFrame(
+      firstSocket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]),
+    );
     await connected;
 
     for (const delay of [250, 500, 1_000, 2_000, 5_000]) {
@@ -483,11 +579,18 @@ describe("live realtime client", () => {
     }
 
     expect(api.requests).toHaveLength(6);
-    expect(new Set(FakeWebSocket.instances.map((socket) => socket.url)).size).toBe(6);
+    expect(
+      new Set(FakeWebSocket.instances.map((socket) => socket.url)).size,
+    ).toBe(6);
 
     const finalSocket = FakeWebSocket.instances.at(-1)!;
     finalSocket.open();
-    sendFrame(finalSocket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 0 }]));
+    sendFrame(
+      finalSocket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]),
+    );
     finalSocket.serverClose();
     expect(timers.nextDelay).toBe(250);
   });
@@ -498,7 +601,10 @@ describe("live realtime client", () => {
     const timers = new FakeTimers();
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
 
     try {
       await Promise.resolve();
@@ -508,8 +614,12 @@ describe("live realtime client", () => {
 
       let settled = false;
       void connected.then(
-        () => { settled = true; },
-        () => { settled = true; },
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
       );
       await Promise.resolve();
 
@@ -520,13 +630,18 @@ describe("live realtime client", () => {
 
       expect(api.requests).toHaveLength(2);
       expect(FakeWebSocket.instances).toHaveLength(2);
-      expect(FakeWebSocket.instances[1]?.url).not.toBe(FakeWebSocket.instances[0]?.url);
+      expect(FakeWebSocket.instances[1]?.url).not.toBe(
+        FakeWebSocket.instances[0]?.url,
+      );
 
       const secondSocket = FakeWebSocket.instances[1]!;
       secondSocket.open();
-      sendFrame(secondSocket, connectedFrame([
-        { identity_id: "identity_human", generation: 1, sequence: 0 },
-      ]));
+      sendFrame(
+        secondSocket,
+        connectedFrame([
+          { identity_id: "identity_human", generation: 1, sequence: 0 },
+        ]),
+      );
       await expect(connected).resolves.toBeUndefined();
     } finally {
       client.close();
@@ -540,11 +655,19 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const firstSocket = FakeWebSocket.instances[0]!;
     firstSocket.open();
-    sendFrame(firstSocket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 0 }]));
+    sendFrame(
+      firstSocket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]),
+    );
     await connected;
 
     timers.advanceBy(15 * 60_000);
@@ -553,7 +676,10 @@ describe("live realtime client", () => {
 
     expect(api.requests).toHaveLength(2);
     expect(FakeWebSocket.instances).toHaveLength(2);
-    expect(FakeWebSocket.instances[0]?.closeCalls).toContainEqual({ code: 1000, reason: "realtime lease expired" });
+    expect(FakeWebSocket.instances[0]?.closeCalls).toContainEqual({
+      code: 1000,
+      reason: "realtime lease expired",
+    });
   });
 
   it("cancels reconnect and lease timers on explicit close", async () => {
@@ -563,11 +689,19 @@ describe("live realtime client", () => {
     const storage = new MemoryStorage();
     const client = makeClient(api, timers, storage);
 
-    const connected = client.connect({ ...options, identityIds: ["identity_human"] });
+    const connected = client.connect({
+      ...options,
+      identityIds: ["identity_human"],
+    });
     await Promise.resolve();
     const socket = FakeWebSocket.instances[0]!;
     socket.open();
-    sendFrame(socket, connectedFrame([{ identity_id: "identity_human", generation: 1, sequence: 0 }]));
+    sendFrame(
+      socket,
+      connectedFrame([
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ]),
+    );
     await connected;
     socket.serverClose();
     client.close();
@@ -635,6 +769,9 @@ describe("live realtime client", () => {
     });
 
     expect(events).toHaveLength(2);
-    expect(events[1]).toMatchObject({ type: "command.updated", identity_id: "identity_human" });
+    expect(events[1]).toMatchObject({
+      type: "command.updated",
+      identity_id: "identity_human",
+    });
   });
 });

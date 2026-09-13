@@ -53,7 +53,11 @@ const snapshotStrictArrayInput = (input: unknown): unknown => {
     const lengthDescriptor = Object.getOwnPropertyDescriptor(input, "length");
     if (!lengthDescriptor || !("value" in lengthDescriptor)) return undefined;
     const length = lengthDescriptor.value;
-    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_REALTIME_IDENTITIES) {
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_REALTIME_IDENTITIES
+    ) {
       return undefined;
     }
     const keys = Reflect.ownKeys(input);
@@ -62,7 +66,11 @@ const snapshotStrictArrayInput = (input: unknown): unknown => {
     const snapshot: unknown[] = [];
     for (const key of keys) {
       if (key === "length") continue;
-      if (typeof key !== "string" || !/^\d+$/.test(key) || Number(key) >= length) {
+      if (
+        typeof key !== "string" ||
+        !/^\d+$/.test(key) ||
+        Number(key) >= length
+      ) {
         return undefined;
       }
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
@@ -93,20 +101,23 @@ const RealtimeSocketOutcomeSchema = z.enum([
 
 export type RealtimeSocketOutcome = z.infer<typeof RealtimeSocketOutcomeSchema>;
 
-const RealtimeSocketTelemetryEventObjectSchema = z.object({
-  schema_version: z.literal(1),
-  type: z.literal("realtime.socket"),
-  outcome: RealtimeSocketOutcomeSchema,
-  tenant_id: RealtimeIdSchema,
-  identity_id: RealtimeIdSchema,
-  active_tenant_socket_count: z.number()
-    .int()
-    .safe()
-    .min(0)
-    .max(MAX_REALTIME_SOCKETS_PER_TENANT),
-  resumed: z.boolean(),
-  timestamp: TimestampSchema.max(64),
-}).strict();
+const RealtimeSocketTelemetryEventObjectSchema = z
+  .object({
+    schema_version: z.literal(1),
+    type: z.literal("realtime.socket"),
+    outcome: RealtimeSocketOutcomeSchema,
+    tenant_id: RealtimeIdSchema,
+    identity_id: RealtimeIdSchema,
+    active_tenant_socket_count: z
+      .number()
+      .int()
+      .safe()
+      .min(0)
+      .max(MAX_REALTIME_SOCKETS_PER_TENANT),
+    resumed: z.boolean(),
+    timestamp: TimestampSchema.max(64),
+  })
+  .strict();
 
 export const RealtimeSocketTelemetryEventSchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -119,14 +130,16 @@ export type RealtimeSocketTelemetryEvent = z.infer<
 
 const RealtimeTelemetrySubjectSchema = z.preprocess(
   snapshotStrictObjectInput,
-  z.object({
-    tenant_id: RealtimeIdSchema,
-    subscriptions: z.preprocess(
-      snapshotStrictArrayInput,
-      z.array(RealtimeSubscriptionSchema).min(1).max(MAX_REALTIME_IDENTITIES),
-    ),
-    resumed: z.boolean(),
-  }).strict(),
+  z
+    .object({
+      tenant_id: RealtimeIdSchema,
+      subscriptions: z.preprocess(
+        snapshotStrictArrayInput,
+        z.array(RealtimeSubscriptionSchema).min(1).max(MAX_REALTIME_IDENTITIES),
+      ),
+      resumed: z.boolean(),
+    })
+    .strict(),
 );
 
 export type RealtimeTelemetrySubject = {
@@ -135,7 +148,8 @@ export type RealtimeTelemetrySubject = {
   readonly resumed: boolean;
 };
 
-const telemetryFailure = (): Error => new Error("Invalid realtime telemetry event");
+const telemetryFailure = (): Error =>
+  new Error("Invalid realtime telemetry event");
 
 const parseSubject = (subject: RealtimeTelemetrySubject) => {
   const parsed = RealtimeTelemetrySubjectSchema.safeParse(subject);
@@ -144,7 +158,8 @@ const parseSubject = (subject: RealtimeTelemetrySubject) => {
 };
 
 const parseActiveSocketCount = (value: number): number => {
-  const parsed = z.number()
+  const parsed = z
+    .number()
     .int()
     .safe()
     .min(0)
@@ -213,13 +228,17 @@ const safeEventFields = (value: unknown): unknown => {
 };
 
 /** Wrap a sink so it receives only the closed, schema-validated event shape. */
-export const createRealtimeSocketLogger = (
-  sink: RealtimeSocketLogger = defaultRealtimeSocketLogger,
-): RealtimeSocketLogger => (value) => {
-  const parsed = RealtimeSocketTelemetryEventSchema.safeParse(safeEventFields(value));
-  if (!parsed.success) return;
-  sink(parsed.data);
-};
+export const createRealtimeSocketLogger =
+  (
+    sink: RealtimeSocketLogger = defaultRealtimeSocketLogger,
+  ): RealtimeSocketLogger =>
+  (value) => {
+    const parsed = RealtimeSocketTelemetryEventSchema.safeParse(
+      safeEventFields(value),
+    );
+    if (!parsed.success) return;
+    sink(parsed.data);
+  };
 
 export const logRealtimeSocketOutcome = (
   logger: RealtimeSocketLogger,
@@ -243,56 +262,61 @@ export const buildRealtimeSocketAcceptedEvents = (
   subject: RealtimeTelemetrySubject,
   activeTenantSocketCount: number,
   timestamp?: string,
-): RealtimeSocketTelemetryEvent[] => buildRealtimeSocketTelemetryEvents(
-  subject,
-  "accepted",
-  activeTenantSocketCount,
-  timestamp,
-);
+): RealtimeSocketTelemetryEvent[] =>
+  buildRealtimeSocketTelemetryEvents(
+    subject,
+    "accepted",
+    activeTenantSocketCount,
+    timestamp,
+  );
 
 export const buildRealtimeSocketResumedEvents = (
   subject: RealtimeTelemetrySubject,
   activeTenantSocketCount: number,
   timestamp?: string,
-): RealtimeSocketTelemetryEvent[] => buildRealtimeSocketTelemetryEvents(
-  subject,
-  "resumed",
-  activeTenantSocketCount,
-  timestamp,
-);
+): RealtimeSocketTelemetryEvent[] =>
+  buildRealtimeSocketTelemetryEvents(
+    subject,
+    "resumed",
+    activeTenantSocketCount,
+    timestamp,
+  );
 
 export const buildRealtimeSocketClosedEvents = (
   subject: RealtimeTelemetrySubject,
   activeTenantSocketCount: number,
   timestamp?: string,
-): RealtimeSocketTelemetryEvent[] => buildRealtimeSocketTelemetryEvents(
-  subject,
-  "closed",
-  activeTenantSocketCount,
-  timestamp,
-);
+): RealtimeSocketTelemetryEvent[] =>
+  buildRealtimeSocketTelemetryEvents(
+    subject,
+    "closed",
+    activeTenantSocketCount,
+    timestamp,
+  );
 
 export const buildRealtimeSocketLeaseExpiredEvents = (
   subject: RealtimeTelemetrySubject,
   activeTenantSocketCount: number,
   timestamp?: string,
-): RealtimeSocketTelemetryEvent[] => buildRealtimeSocketTelemetryEvents(
-  subject,
-  "lease_expired",
-  activeTenantSocketCount,
-  timestamp,
-);
+): RealtimeSocketTelemetryEvent[] =>
+  buildRealtimeSocketTelemetryEvents(
+    subject,
+    "lease_expired",
+    activeTenantSocketCount,
+    timestamp,
+  );
 
 export const buildRealtimeSocketCapacityRejectedEvents = (
   subject: RealtimeTelemetrySubject,
   activeTenantSocketCount: number,
   timestamp?: string,
-): RealtimeSocketTelemetryEvent[] => buildRealtimeSocketTelemetryEvents(
-  subject,
-  "capacity_rejected",
-  activeTenantSocketCount,
-  timestamp,
-);
+): RealtimeSocketTelemetryEvent[] =>
+  buildRealtimeSocketTelemetryEvents(
+    subject,
+    "capacity_rejected",
+    activeTenantSocketCount,
+    timestamp,
+  );
 
 type RealtimeTelemetryEnv = {
   readonly REALTIME_SOCKET_LOGGER?: unknown;
@@ -303,8 +327,11 @@ type RealtimeTelemetryEnv = {
 export const realtimeSocketLoggerFromEnv = (
   environment: unknown,
 ): RealtimeSocketLogger => {
-  const snapshot = snapshotStrictObjectInput(environment) as RealtimeTelemetryEnv | undefined;
-  const candidate = snapshot?.REALTIME_SOCKET_LOGGER ?? snapshot?.REALTIME_TELEMETRY_LOGGER;
+  const snapshot = snapshotStrictObjectInput(environment) as
+    | RealtimeTelemetryEnv
+    | undefined;
+  const candidate =
+    snapshot?.REALTIME_SOCKET_LOGGER ?? snapshot?.REALTIME_TELEMETRY_LOGGER;
   return typeof candidate === "function"
     ? createRealtimeSocketLogger(candidate as RealtimeSocketLogger)
     : createRealtimeSocketLogger();

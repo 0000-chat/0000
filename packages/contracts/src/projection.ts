@@ -27,7 +27,11 @@ export const MAX_PROJECTION_CHECKPOINT_VALUE_CHARS = 4_096;
 export const MAX_PROJECTION_CHANGES = 10_000;
 export const MAX_IDENTITY_CONNECTIONS = 64;
 
-const PROTOTYPE_SENSITIVE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const PROTOTYPE_SENSITIVE_KEYS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+]);
 
 /**
  * Snapshot an object using property descriptors. This keeps the contract
@@ -77,7 +81,10 @@ const isArrayIndexKey = (key: string, length: number): boolean => {
   );
 };
 
-const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown => {
+const snapshotStrictArrayInput = (
+  input: unknown,
+  maxLength: number,
+): unknown => {
   try {
     if (input === null || typeof input !== "object" || !Array.isArray(input)) {
       return undefined;
@@ -87,11 +94,7 @@ const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown =>
     const lengthDescriptor = Object.getOwnPropertyDescriptor(input, "length");
     if (!lengthDescriptor || !("value" in lengthDescriptor)) return undefined;
     const length = lengthDescriptor.value;
-    if (
-      !Number.isSafeInteger(length) ||
-      length < 0 ||
-      length > maxLength
-    ) {
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxLength) {
       return undefined;
     }
 
@@ -167,7 +170,9 @@ export const ProjectionChannelStatsSchema = strictArray(
   MAX_IDENTITY_CONNECTIONS,
 );
 
-export type ProjectionChannelStats = z.infer<typeof ProjectionChannelStatsSchema>;
+export type ProjectionChannelStats = z.infer<
+  typeof ProjectionChannelStatsSchema
+>;
 
 export const ProjectionScopeSchema = z.enum([
   "projection.initialize",
@@ -183,7 +188,11 @@ const hasStrictlyIncreasingValues = (values: readonly string[]): boolean => {
   for (let index = 1; index < values.length; index += 1) {
     const previous = values[index - 1];
     const current = values[index];
-    if (previous === undefined || current === undefined || previous >= current) {
+    if (
+      previous === undefined ||
+      current === undefined ||
+      previous >= current
+    ) {
       return false;
     }
   }
@@ -339,8 +348,16 @@ const AttachmentObservedProjectionPayloadSchema = strictObject({
   file_name: z.string().max(255).nullable(),
   mime_type: z.string().min(1).max(255).nullable(),
   size_bytes: z.number().int().safe().nonnegative().nullable(),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-  r2_key: z.string().min(1).max(512).regex(/^[\x20-\x7E]+$/).nullable(),
+  sha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  r2_key: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[\x20-\x7E]+$/)
+    .nullable(),
 });
 
 const ConversationUpdatedProjectionPayloadSchema = strictObject({
@@ -376,7 +393,12 @@ const EventMarkerProjectionPayloadSchema = strictObject({
 });
 
 const DeletionTombstoneProjectionPayloadSchema = strictObject({
-  resource_type: z.enum(["message", "conversation", "participant", "attachment"]),
+  resource_type: z.enum([
+    "message",
+    "conversation",
+    "participant",
+    "attachment",
+  ]),
   resource_id: CanonicalResourceIdSchema,
   reason_code: z.string().min(1).max(100),
 });
@@ -451,13 +473,10 @@ const ProjectionEventEnvelopeValidationSchema = z.preprocess(
 );
 
 export const ProjectionEventEnvelopeSchema =
-  ProjectionEventEnvelopeValidationSchema as unknown as z.ZodType<
-    ProjectionEventEnvelope
-  >;
+  ProjectionEventEnvelopeValidationSchema as unknown as z.ZodType<ProjectionEventEnvelope>;
 
-export const parseProjectionEvent = (
-  input: unknown,
-): ProjectionEventEnvelope => ProjectionEventEnvelopeSchema.parse(input);
+export const parseProjectionEvent = (input: unknown): ProjectionEventEnvelope =>
+  ProjectionEventEnvelopeSchema.parse(input);
 
 export const compareOpaqueEventIds = (
   a: OpaqueEventId,
@@ -655,8 +674,8 @@ const ApplyReplayPageInputObjectSchema = strictObject({
   authorization: ProjectionAuthorizationContextSchema,
 });
 
-export const ApplyReplayPageInputSchema = ApplyReplayPageInputObjectSchema.transform(
-  (value, context) => {
+export const ApplyReplayPageInputSchema =
+  ApplyReplayPageInputObjectSchema.transform((value, context) => {
     try {
       return structuredClone(value);
     } catch {
@@ -666,8 +685,7 @@ export const ApplyReplayPageInputSchema = ApplyReplayPageInputObjectSchema.trans
       });
       return z.NEVER;
     }
-  },
-);
+  });
 
 export type ApplyReplayPageInput = z.infer<typeof ApplyReplayPageInputSchema>;
 
@@ -676,7 +694,13 @@ export const ListProjectionConversationsInputSchema = strictObject({
   tenant_id: CanonicalResourceIdSchema,
   identity_id: CanonicalResourceIdSchema,
   connection_id: CanonicalResourceIdSchema.nullable(),
-  page_size: z.number().int().safe().min(1).max(MAX_PROJECTION_PAGE_SIZE).optional(),
+  page_size: z
+    .number()
+    .int()
+    .safe()
+    .min(1)
+    .max(MAX_PROJECTION_PAGE_SIZE)
+    .optional(),
   cursor: QueryCursorSchema.optional(),
   authorization: ProjectionAuthorizationContextSchema,
 });
@@ -690,7 +714,13 @@ export const ListProjectionMessagesInputSchema = strictObject({
   tenant_id: CanonicalResourceIdSchema,
   identity_id: CanonicalResourceIdSchema,
   conversation_id: CanonicalResourceIdSchema,
-  page_size: z.number().int().safe().min(1).max(MAX_PROJECTION_PAGE_SIZE).optional(),
+  page_size: z
+    .number()
+    .int()
+    .safe()
+    .min(1)
+    .max(MAX_PROJECTION_PAGE_SIZE)
+    .optional(),
   cursor: QueryCursorSchema.optional(),
   authorization: ProjectionAuthorizationContextSchema,
 });
@@ -705,7 +735,13 @@ export const ListProjectionChangesInputSchema = strictObject({
   identity_id: CanonicalResourceIdSchema,
   generation: PositiveSafeIntegerSchema,
   after_sequence: NonnegativeSafeIntegerSchema,
-  limit: z.number().int().safe().min(1).max(MAX_PROJECTION_PAGE_SIZE).optional(),
+  limit: z
+    .number()
+    .int()
+    .safe()
+    .min(1)
+    .max(MAX_PROJECTION_PAGE_SIZE)
+    .optional(),
   authorization: ProjectionAuthorizationContextSchema,
 });
 

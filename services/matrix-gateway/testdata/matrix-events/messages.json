@@ -1,14 +1,64 @@
 {
   "cases": [
-    {"name":"inbound-text","outcome":"events","event_types":["message.created"],"reason_code":null},
-    {"name":"outbound-text","outcome":"events","event_types":["message.created"],"reason_code":null},
-    {"name":"notice","outcome":"events","event_types":["message.created"],"reason_code":null},
-    {"name":"emote","outcome":"events","event_types":["message.created"],"reason_code":null},
-    {"name":"html-fallback","outcome":"events","event_types":["message.created"],"reason_code":null},
-    {"name":"reply","outcome":"events","event_types":["message.created"],"reason_code":null},
-    {"name":"edit","outcome":"events","event_types":["message.edited"],"reason_code":null},
-    {"name":"redaction-message","outcome":"events","event_types":["message.deleted"],"reason_code":null},
-    {"name":"reaction-add","outcome":"events","event_types":["reaction.added"],"reason_code":null},
-    {"name":"reaction-remove","outcome":"events","event_types":["reaction.removed"],"reason_code":null}
+    {
+      "name": "inbound-text",
+      "outcome": "events",
+      "event_types": ["message.created"],
+      "reason_code": null
+    },
+    {
+      "name": "outbound-text",
+      "outcome": "events",
+      "event_types": ["message.created"],
+      "reason_code": null
+    },
+    {
+      "name": "notice",
+      "outcome": "events",
+      "event_types": ["message.created"],
+      "reason_code": null
+    },
+    {
+      "name": "emote",
+      "outcome": "events",
+      "event_types": ["message.created"],
+      "reason_code": null
+    },
+    {
+      "name": "html-fallback",
+      "outcome": "events",
+      "event_types": ["message.created"],
+      "reason_code": null
+    },
+    {
+      "name": "reply",
+      "outcome": "events",
+      "event_types": ["message.created"],
+      "reason_code": null
+    },
+    {
+      "name": "edit",
+      "outcome": "events",
+      "event_types": ["message.edited"],
+      "reason_code": null
+    },
+    {
+      "name": "redaction-message",
+      "outcome": "events",
+      "event_types": ["message.deleted"],
+      "reason_code": null
+    },
+    {
+      "name": "reaction-add",
+      "outcome": "events",
+      "event_types": ["reaction.added"],
+      "reason_code": null
+    },
+    {
+      "name": "reaction-remove",
+      "outcome": "events",
+      "event_types": ["reaction.removed"],
+      "reason_code": null
+    }
   ]
 }

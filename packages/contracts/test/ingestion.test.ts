@@ -134,7 +134,11 @@ const expectRejected = (
   expect(result?.success).toBe(false);
 };
 
-const defineOwnKey = (target: object, key: string | symbol, value: unknown): void => {
+const defineOwnKey = (
+  target: object,
+  key: string | symbol,
+  value: unknown,
+): void => {
   Object.defineProperty(target, key, {
     configurable: true,
     enumerable: true,
@@ -145,7 +149,9 @@ const defineOwnKey = (target: object, key: string | symbol, value: unknown): voi
 
 describe("ingestion contract exports", () => {
   it("accepts the exact request, response, pointer, manifest, and error shapes", () => {
-    expect(IngestionBatchRequestSchema.parse(validRequest())).toEqual(validRequest());
+    expect(IngestionBatchRequestSchema.parse(validRequest())).toEqual(
+      validRequest(),
+    );
     expect(
       IngestionAcceptedResponseSchema.parse({
         schema_version: 1,
@@ -161,10 +167,12 @@ describe("ingestion contract exports", () => {
       status: "accepted",
       archive_status: "created",
     });
-    expect(CommittedArchivePointerSchema.parse(validPointer())).toEqual(validPointer());
-    expect(IngestionCommittedArchiveManifestSchema.parse(validManifest())).toEqual(
-      validManifest(),
+    expect(CommittedArchivePointerSchema.parse(validPointer())).toEqual(
+      validPointer(),
     );
+    expect(
+      IngestionCommittedArchiveManifestSchema.parse(validManifest()),
+    ).toEqual(validManifest());
     expect(IngestionErrorCodeSchema.options).toEqual([
       "ingestion_invalid",
       "ingestion_too_large",
@@ -175,10 +183,16 @@ describe("ingestion contract exports", () => {
     ]);
     expect(
       IngestionErrorResponseSchema.parse({
-        error: { code: "ingestion_invalid", message: "Invalid ingestion request" },
+        error: {
+          code: "ingestion_invalid",
+          message: "Invalid ingestion request",
+        },
       }),
     ).toEqual({
-      error: { code: "ingestion_invalid", message: "Invalid ingestion request" },
+      error: {
+        code: "ingestion_invalid",
+        message: "Invalid ingestion request",
+      },
     });
     expect(ArchiveManifestKeySchema.parse(MANIFEST_KEY)).toBe(MANIFEST_KEY);
   });
@@ -187,16 +201,22 @@ describe("ingestion contract exports", () => {
     for (const kind of CHECKPOINT_KINDS) {
       const checkpoint = validCheckpoint(kind);
 
-      expect(MatrixCheckpointDigestSchema.parse(checkpoint)).toEqual(checkpoint);
+      expect(MatrixCheckpointDigestSchema.parse(checkpoint)).toEqual(
+        checkpoint,
+      );
       expect(
-        IngestionBatchRequestSchema.parse(validRequest({
-          source_checkpoint: checkpoint,
-        })).source_checkpoint,
+        IngestionBatchRequestSchema.parse(
+          validRequest({
+            source_checkpoint: checkpoint,
+          }),
+        ).source_checkpoint,
       ).toEqual(checkpoint);
       expect(
-        IngestionCommittedArchiveManifestSchema.parse(validManifest({
-          source_checkpoint: checkpoint,
-        })).source_checkpoint,
+        IngestionCommittedArchiveManifestSchema.parse(
+          validManifest({
+            source_checkpoint: checkpoint,
+          }),
+        ).source_checkpoint,
       ).toEqual(checkpoint);
     }
   });
@@ -218,7 +238,10 @@ describe("ingestion contract exports", () => {
       },
     });
     expectRejected(IngestionErrorResponseSchema, {
-      error: { code: "ingestion_invalid", message: "Invalid ingestion request" },
+      error: {
+        code: "ingestion_invalid",
+        message: "Invalid ingestion request",
+      },
       unexpected: true,
     });
     expectRejected(MatrixCheckpointDigestSchema, {
@@ -235,34 +258,55 @@ describe("ingestion contract exports", () => {
     expect(MAX_INGESTION_QUEUE_POINTER_BYTES).toBe(8 * 1024);
     expect(MAX_INGESTION_TIMESTAMP_CHARS).toBe(64);
     expect(MAX_INGESTION_PRODUCER_VERSION_CHARS).toBe(128);
-    expect(MAX_INGESTION_PRODUCER_VERSION_CHARS).toBe(MAX_PRODUCER_VERSION_CHARS);
+    expect(MAX_INGESTION_PRODUCER_VERSION_CHARS).toBe(
+      MAX_PRODUCER_VERSION_CHARS,
+    );
   });
 });
 
 describe("ingestion request cross-field constraints", () => {
   it("requires one tenant, unique event IDs, and projection-valid events", () => {
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent(), validEvent()],
-    }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent({ tenant_id: "tenant_other" })],
-    }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent({ payload: { body: "not a projection payload" } as never })],
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [validEvent(), validEvent()],
+      }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [validEvent({ tenant_id: "tenant_other" })],
+      }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [
+          validEvent({
+            payload: { body: "not a projection payload" } as never,
+          }),
+        ],
+      }),
+    );
     expectRejected(IngestionBatchRequestSchema, validRequest({ events: [] }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({ events: Array.from(
-      { length: MAX_ARCHIVE_EVENTS + 1 },
-      (_, index) => validEvent({ event_id: `$event-${index}:communicator` }),
-    ) }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: Array.from({ length: MAX_ARCHIVE_EVENTS + 1 }, (_, index) =>
+          validEvent({ event_id: `$event-${index}:communicator` }),
+        ),
+      }),
+    );
     expect(MAX_ARCHIVE_EVENTS).toBe(MAX_PROJECTION_BATCH_EVENTS);
   });
 
   it("requires the exact batch grammar and digest-only source checkpoint", () => {
-    expect(MatrixCheckpointDigestSchema.parse({
-      kind: "matrix_sync_token_sha256",
-      value: `sha256:${"d".repeat(64)}`,
-    })).toEqual({
+    expect(
+      MatrixCheckpointDigestSchema.parse({
+        kind: "matrix_sync_token_sha256",
+        value: `sha256:${"d".repeat(64)}`,
+      }),
+    ).toEqual({
       kind: "matrix_sync_token_sha256",
       value: `sha256:${"d".repeat(64)}`,
     });
@@ -278,24 +322,45 @@ describe("ingestion request cross-field constraints", () => {
       kind: "matrix_sync_token_sha256",
       value: `sha256:${"D".repeat(64)}`,
     });
-    expectRejected(IngestionBatchRequestSchema, validRequest({ batch_id: "batch_abc" }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({ batch_id: `batch_${"a".repeat(63)}g` }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      producer_version: " ",
-    }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      producer_version: "",
-    }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      producer_version: `x${"a".repeat(MAX_INGESTION_PRODUCER_VERSION_CHARS)}`,
-    }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      source_checkpoint: { kind: "matrix_sync_token_sha256", value: "" },
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({ batch_id: "batch_abc" }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({ batch_id: `batch_${"a".repeat(63)}g` }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        producer_version: " ",
+      }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        producer_version: "",
+      }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        producer_version: `x${"a".repeat(MAX_INGESTION_PRODUCER_VERSION_CHARS)}`,
+      }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        source_checkpoint: { kind: "matrix_sync_token_sha256", value: "" },
+      }),
+    );
     expectRejected(IngestionBatchRequestSchema, {});
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      archived_at: " ".repeat(MAX_INGESTION_TIMESTAMP_CHARS + 1),
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        archived_at: " ".repeat(MAX_INGESTION_TIMESTAMP_CHARS + 1),
+      }),
+    );
   });
 
   it("rejects unknown kinds, malformed digests, and extra checkpoint keys everywhere", () => {
@@ -338,38 +403,65 @@ describe("ingestion request cross-field constraints", () => {
 
 describe("pointer and committed-manifest constraints", () => {
   it("requires the manifest key to carry the same tenant and batch", () => {
-    expectRejected(CommittedArchivePointerSchema, validPointer({
-      manifest_key: MANIFEST_KEY.replace(TENANT_ID, "tenant_other"),
-    }));
-    expectRejected(CommittedArchivePointerSchema, validPointer({
-      manifest_key: MANIFEST_KEY.replace(BATCH_ID, `batch_${"d".repeat(64)}`),
-    }));
-    expectRejected(CommittedArchivePointerSchema, validPointer({
-      canonical_sha256: "D".repeat(64),
-    }));
-    expectRejected(CommittedArchivePointerSchema, validPointer({ unexpected: true }));
+    expectRejected(
+      CommittedArchivePointerSchema,
+      validPointer({
+        manifest_key: MANIFEST_KEY.replace(TENANT_ID, "tenant_other"),
+      }),
+    );
+    expectRejected(
+      CommittedArchivePointerSchema,
+      validPointer({
+        manifest_key: MANIFEST_KEY.replace(BATCH_ID, `batch_${"d".repeat(64)}`),
+      }),
+    );
+    expectRejected(
+      CommittedArchivePointerSchema,
+      validPointer({
+        canonical_sha256: "D".repeat(64),
+      }),
+    );
+    expectRejected(
+      CommittedArchivePointerSchema,
+      validPointer({ unexpected: true }),
+    );
   });
 
   it("requires a non-null Matrix checkpoint in committed manifests", () => {
-    expectRejected(IngestionCommittedArchiveManifestSchema, validManifest({
-      source_checkpoint: null,
-    }));
-    expectRejected(IngestionCommittedArchiveManifestSchema, validManifest({
-      source_checkpoint: { kind: "generic", value: "cursor-1" },
-    }));
-    expectRejected(IngestionCommittedArchiveManifestSchema, validManifest({
-      source_checkpoint: {
-        kind: "matrix_sync_token_sha256",
-        value: "raw-matrix-token",
-      },
-    }));
-    expectRejected(IngestionCommittedArchiveManifestSchema, validManifest({
-      source_checkpoint: {
-        kind: " matrix_sync_token_sha256",
-        value: `sha256:${"b".repeat(64)} `,
-      },
-    }));
-    expectRejected(IngestionCommittedArchiveManifestSchema, validManifest({ unexpected: true }));
+    expectRejected(
+      IngestionCommittedArchiveManifestSchema,
+      validManifest({
+        source_checkpoint: null,
+      }),
+    );
+    expectRejected(
+      IngestionCommittedArchiveManifestSchema,
+      validManifest({
+        source_checkpoint: { kind: "generic", value: "cursor-1" },
+      }),
+    );
+    expectRejected(
+      IngestionCommittedArchiveManifestSchema,
+      validManifest({
+        source_checkpoint: {
+          kind: "matrix_sync_token_sha256",
+          value: "raw-matrix-token",
+        },
+      }),
+    );
+    expectRejected(
+      IngestionCommittedArchiveManifestSchema,
+      validManifest({
+        source_checkpoint: {
+          kind: " matrix_sync_token_sha256",
+          value: `sha256:${"b".repeat(64)} `,
+        },
+      }),
+    );
+    expectRejected(
+      IngestionCommittedArchiveManifestSchema,
+      validManifest({ unexpected: true }),
+    );
   });
 });
 
@@ -395,7 +487,9 @@ describe("descriptor-safe hostile input handling", () => {
         throw new Error("proxy get must not execute");
       },
     });
-    expect(IngestionBatchRequestSchema.safeParse(proxyInput).success).toBe(true);
+    expect(IngestionBatchRequestSchema.safeParse(proxyInput).success).toBe(
+      true,
+    );
     expect(getCalls).toBe(0);
 
     const checkpointAccessor = validCheckpoint("matrix_backfill_run_sha256");
@@ -429,7 +523,9 @@ describe("descriptor-safe hostile input handling", () => {
         },
       },
     );
-    expect(MatrixCheckpointDigestSchema.safeParse(checkpointProxy).success).toBe(true);
+    expect(
+      MatrixCheckpointDigestSchema.safeParse(checkpointProxy).success,
+    ).toBe(true);
     expect(
       IngestionBatchRequestSchema.safeParse(
         validRequest({ source_checkpoint: checkpointProxy }),
@@ -456,7 +552,10 @@ describe("descriptor-safe hostile input handling", () => {
   );
 
   it("rejects inherited, symbol, sparse, unexpected, and prototype-sensitive fields", () => {
-    const inherited = Object.create({ inherited: true }) as Record<string, unknown>;
+    const inherited = Object.create({ inherited: true }) as Record<
+      string,
+      unknown
+    >;
     Object.assign(inherited, validRequest());
     expectRejected(IngestionBatchRequestSchema, inherited);
 
@@ -466,16 +565,25 @@ describe("descriptor-safe hostile input handling", () => {
 
     const sparseEvents: unknown[] = [];
     sparseEvents.length = 1;
-    expectRejected(IngestionBatchRequestSchema, validRequest({ events: sparseEvents }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({ events: sparseEvents }),
+    );
 
-    expectRejected(IngestionBatchRequestSchema, validRequest({ unexpected: true }));
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      source_checkpoint: {
-        kind: "matrix_sync_token_sha256",
-        value: `sha256:${"b".repeat(64)}`,
-        unexpected: true,
-      },
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({ unexpected: true }),
+    );
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        source_checkpoint: {
+          kind: "matrix_sync_token_sha256",
+          value: `sha256:${"b".repeat(64)}`,
+          unexpected: true,
+        },
+      }),
+    );
 
     for (const key of ["__proto__", "prototype", "constructor"]) {
       const request = validRequest();
@@ -498,7 +606,10 @@ describe("descriptor-safe hostile input handling", () => {
     expectRejected(IngestionAcceptedResponseSchema, response);
 
     const errorResponse = {
-      error: { code: "ingestion_invalid", message: "Invalid ingestion request" },
+      error: {
+        code: "ingestion_invalid",
+        message: "Invalid ingestion request",
+      },
     };
     defineOwnKey(errorResponse.error, "constructor", "blocked");
     expectRejected(IngestionErrorResponseSchema, errorResponse);
@@ -507,21 +618,31 @@ describe("descriptor-safe hostile input handling", () => {
   it("rejects cyclic, excessively deep, and excessively wide event payloads", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent({ payload: { cyclic } as never })],
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [validEvent({ payload: { cyclic } as never })],
+      }),
+    );
 
     let deep: unknown = "leaf";
     for (let index = 0; index < 33; index += 1) deep = { child: deep };
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent({ payload: { deep } as never })],
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [validEvent({ payload: { deep } as never })],
+      }),
+    );
 
     const wide: Record<string, number> = {};
-    for (let index = 0; index <= 10_000; index += 1) wide[`entry_${index}`] = index;
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent({ payload: { wide } as never })],
-    }));
+    for (let index = 0; index <= 10_000; index += 1)
+      wide[`entry_${index}`] = index;
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [validEvent({ payload: { wide } as never })],
+      }),
+    );
   });
 
   it("rejects an acyclic payload above the canonical node bound", () => {
@@ -538,8 +659,13 @@ describe("descriptor-safe hostile input handling", () => {
     expect(treeDepth).toBeLessThan(MAX_CANONICAL_JSON_DEPTH);
     expect(2).toBeLessThan(MAX_CANONICAL_JSON_COLLECTION_ENTRIES);
 
-    expectRejected(IngestionBatchRequestSchema, validRequest({
-      events: [validEvent({ payload: { tree: makeBinaryTree(treeDepth) } as never })],
-    }));
+    expectRejected(
+      IngestionBatchRequestSchema,
+      validRequest({
+        events: [
+          validEvent({ payload: { tree: makeBinaryTree(treeDepth) } as never }),
+        ],
+      }),
+    );
   });
 });

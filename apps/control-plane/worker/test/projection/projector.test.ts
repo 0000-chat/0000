@@ -42,54 +42,90 @@ describe("tenant projection core", () => {
     }));
 
     expect(result.message).toEqual([{ body: "hello", unread: 1 }]);
-    expect(result.conversation).toEqual([{ last_message_preview: "hello", unread_count: 1 }]);
+    expect(result.conversation).toEqual([
+      { last_message_preview: "hello", unread_count: 1 },
+    ]);
   });
 
   it("applies conversation and participant metadata by the observed tuple", async () => {
     const tenant = "tenant_projector_metadata";
     const stub = await initialize(tenant);
-    const newerConversation = conversationUpdated("conversation_new", undefined, {
-      tenant_id: tenant,
-      observed_at: "2026-09-07T03:00:01.000Z",
-      occurred_at: "2026-09-07T03:00:00.000Z",
-    });
-    const olderConversation = conversationUpdated("conversation_old", {
-      title: "Older title",
-      archived: false,
-      muted: false,
-    }, {
-      tenant_id: tenant,
-      observed_at: "2026-09-07T04:00:01.000Z",
-      occurred_at: "2026-09-07T02:00:00.000Z",
-    });
+    const newerConversation = conversationUpdated(
+      "conversation_new",
+      undefined,
+      {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T03:00:01.000Z",
+        occurred_at: "2026-09-07T03:00:00.000Z",
+      },
+    );
+    const olderConversation = conversationUpdated(
+      "conversation_old",
+      {
+        title: "Older title",
+        archived: false,
+        muted: false,
+      },
+      {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T04:00:01.000Z",
+        occurred_at: "2026-09-07T02:00:00.000Z",
+      },
+    );
     await stub.applyBatch(input([newerConversation], { tenant_id: tenant }));
     await stub.applyBatch(input([olderConversation], { tenant_id: tenant }));
 
-    const newerParticipant = participantUpdated("participant_new", "participant_a", {
-      tenant_id: tenant,
-      observed_at: "2026-09-07T05:00:01.000Z",
-    });
-    const olderParticipant = participantUpdated("participant_old", "participant_a", {
-      tenant_id: tenant,
-      observed_at: "2026-09-07T04:00:01.000Z",
-    });
+    const newerParticipant = participantUpdated(
+      "participant_new",
+      "participant_a",
+      {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T05:00:01.000Z",
+      },
+    );
+    const olderParticipant = participantUpdated(
+      "participant_old",
+      "participant_a",
+      {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T04:00:01.000Z",
+      },
+    );
     await stub.applyBatch(input([newerParticipant], { tenant_id: tenant }));
     await stub.applyBatch(input([olderParticipant], { tenant_id: tenant }));
 
-    await expect(rows<{ title: string; archived: number; muted: number; shell_activity_at: string }>(
-      stub,
-      "SELECT title, archived, muted, shell_activity_at FROM conversations WHERE id = ?",
-      "conversation_a",
-    )).resolves.toEqual([{ title: "Older title", archived: 0, muted: 0, shell_activity_at: "2026-09-07T03:00:00.000Z" }]);
-    await expect(rows<{ display_name: string; remote_id: string; avatar_url: string }>(
-      stub,
-      "SELECT display_name, remote_id, avatar_url FROM participants WHERE id = ?",
-      "participant_a",
-    )).resolves.toEqual([{
-      display_name: "Alice Updated",
-      remote_id: "remote-a",
-      avatar_url: "https://example.test/avatar.png",
-    }]);
+    await expect(
+      rows<{
+        title: string;
+        archived: number;
+        muted: number;
+        shell_activity_at: string;
+      }>(
+        stub,
+        "SELECT title, archived, muted, shell_activity_at FROM conversations WHERE id = ?",
+        "conversation_a",
+      ),
+    ).resolves.toEqual([
+      {
+        title: "Older title",
+        archived: 0,
+        muted: 0,
+        shell_activity_at: "2026-09-07T03:00:00.000Z",
+      },
+    ]);
+    await expect(
+      rows<{ display_name: string; remote_id: string; avatar_url: string }>(
+        stub,
+        "SELECT display_name, remote_id, avatar_url FROM participants WHERE id = ?",
+        "participant_a",
+      ),
+    ).resolves.toEqual([
+      {
+        display_name: "Alice Updated",
+        remote_id: "remote-a",
+        avatar_url: "https://example.test/avatar.png",
+      },
+    ]);
   });
 
   it("reconciles winning create metadata independently from a newer edit", async () => {
@@ -127,18 +163,33 @@ describe("tenant projection core", () => {
         unread: false,
       },
     });
-    const newerEdit = edited("message_create_edit", "message_create_replay", "edited body", {
-      occurred_at: "2026-09-07T05:00:00.000Z",
-      observed_at: "2026-09-07T03:00:01.000Z",
-    });
+    const newerEdit = edited(
+      "message_create_edit",
+      "message_create_replay",
+      "edited body",
+      {
+        occurred_at: "2026-09-07T05:00:00.000Z",
+        observed_at: "2026-09-07T03:00:01.000Z",
+      },
+    );
 
-    const project = async (tenant: string, order: ProjectionEventEnvelope[]) => {
+    const project = async (
+      tenant: string,
+      order: ProjectionEventEnvelope[],
+    ) => {
       const stub = await initialize(tenant);
       for (const nextEvent of order) {
-        await stub.applyBatch(input([{
-          ...nextEvent,
-          tenant_id: tenant,
-        }], { tenant_id: tenant }));
+        await stub.applyBatch(
+          input(
+            [
+              {
+                ...nextEvent,
+                tenant_id: tenant,
+              },
+            ],
+            { tenant_id: tenant },
+          ),
+        );
       }
       return rows<{
         direction: string;
@@ -154,28 +205,42 @@ describe("tenant projection core", () => {
         matrix_event_id: string | null;
         remote_message_id: string | null;
         edited_at: string | null;
-      }>(stub, "SELECT direction, sender_label, body, delivery_status, unread, occurred_at, occurred_ms, observed_at, current_event_id, matrix_room_id, matrix_event_id, remote_message_id, edited_at FROM messages WHERE id = ?", "message_create_replay");
+      }>(
+        stub,
+        "SELECT direction, sender_label, body, delivery_status, unread, occurred_at, occurred_ms, observed_at, current_event_id, matrix_room_id, matrix_event_id, remote_message_id, edited_at FROM messages WHERE id = ?",
+        "message_create_replay",
+      );
     };
 
-    const forward = await project("tenant_projector_create_forward", [createOne, createTwo, newerEdit]);
-    const reverse = await project("tenant_projector_create_reverse", [createTwo, createOne, newerEdit]);
+    const forward = await project("tenant_projector_create_forward", [
+      createOne,
+      createTwo,
+      newerEdit,
+    ]);
+    const reverse = await project("tenant_projector_create_reverse", [
+      createTwo,
+      createOne,
+      newerEdit,
+    ]);
 
     expect(reverse).toEqual(forward);
-    expect(forward).toEqual([{
-      direction: "inbound",
-      sender_label: "Sender two",
-      body: "edited body",
-      delivery_status: "delivered",
-      unread: 0,
-      occurred_at: createTwo.occurred_at,
-      occurred_ms: Date.parse(createTwo.occurred_at),
-      observed_at: newerEdit.observed_at,
-      current_event_id: newerEdit.event_id,
-      matrix_room_id: createTwo.matrix_room_id,
-      matrix_event_id: createTwo.matrix_event_id,
-      remote_message_id: createTwo.remote_message_id,
-      edited_at: newerEdit.occurred_at,
-    }]);
+    expect(forward).toEqual([
+      {
+        direction: "inbound",
+        sender_label: "Sender two",
+        body: "edited body",
+        delivery_status: "delivered",
+        unread: 0,
+        occurred_at: createTwo.occurred_at,
+        occurred_ms: Date.parse(createTwo.occurred_at),
+        observed_at: newerEdit.observed_at,
+        current_event_id: newerEdit.event_id,
+        matrix_room_id: createTwo.matrix_room_id,
+        matrix_event_id: createTwo.matrix_event_id,
+        remote_message_id: createTwo.remote_message_id,
+        edited_at: newerEdit.occurred_at,
+      },
+    ]);
   });
 
   it("uses occurred tuples for presentation while message versions use observed LWW", async () => {
@@ -211,19 +276,25 @@ describe("tenant projection core", () => {
     await stub.applyBatch(input([latestEdit], { tenant_id: tenant }));
     await stub.applyBatch(input([olderEdit], { tenant_id: tenant }));
 
-    await expect(rows<{ body: string; current_event_id: string }>(
-      stub,
-      "SELECT body, current_event_id FROM messages WHERE id = ?",
-      "message_order",
-    )).resolves.toEqual([{ body: "latest", current_event_id: "edit_z" }]);
-    await expect(rows<{ last_message_preview: string; last_activity_at: string }>(
-      stub,
-      "SELECT last_message_preview, last_activity_at FROM conversations WHERE id = ?",
-      "conversation_a",
-    )).resolves.toEqual([{
-      last_message_preview: "latest",
-      last_activity_at: "2026-09-07T01:00:00.000Z",
-    }]);
+    await expect(
+      rows<{ body: string; current_event_id: string }>(
+        stub,
+        "SELECT body, current_event_id FROM messages WHERE id = ?",
+        "message_order",
+      ),
+    ).resolves.toEqual([{ body: "latest", current_event_id: "edit_z" }]);
+    await expect(
+      rows<{ last_message_preview: string; last_activity_at: string }>(
+        stub,
+        "SELECT last_message_preview, last_activity_at FROM conversations WHERE id = ?",
+        "conversation_a",
+      ),
+    ).resolves.toEqual([
+      {
+        last_message_preview: "latest",
+        last_activity_at: "2026-09-07T01:00:00.000Z",
+      },
+    ]);
 
     const tieShort = edited("edit_tie", "message_order", "tie-short", {
       tenant_id: tenant,
@@ -234,11 +305,15 @@ describe("tenant projection core", () => {
       observed_at: "2026-09-07T06:00:01.000Z",
     });
     await stub.applyBatch(input([tieLong, tieShort], { tenant_id: tenant }));
-    await expect(rows<{ body: string; current_event_id: string }>(
-      stub,
-      "SELECT body, current_event_id FROM messages WHERE id = ?",
-      "message_order",
-    )).resolves.toEqual([{ body: "tie-long", current_event_id: "edit_tie_long" }]);
+    await expect(
+      rows<{ body: string; current_event_id: string }>(
+        stub,
+        "SELECT body, current_event_id FROM messages WHERE id = ?",
+        "message_order",
+      ),
+    ).resolves.toEqual([
+      { body: "tie-long", current_event_id: "edit_tie_long" },
+    ]);
 
     const occurredLater = created("presentation_a", {
       tenant_id: tenant,
@@ -270,15 +345,20 @@ describe("tenant projection core", () => {
         unread: false,
       },
     });
-    await stub.applyBatch(input([occurredEarlier, occurredLater], { tenant_id: tenant }));
-    await expect(rows<{ last_message_preview: string; last_activity_at: string }>(
-      stub,
-      "SELECT last_message_preview, last_activity_at FROM conversations WHERE id = ?",
-      "conversation_a",
-    )).resolves.toEqual([{
-      last_message_preview: "occurred-later",
-      last_activity_at: "2026-09-07T06:00:00.000Z",
-    }]);
+    await stub.applyBatch(
+      input([occurredEarlier, occurredLater], { tenant_id: tenant }),
+    );
+    await expect(
+      rows<{ last_message_preview: string; last_activity_at: string }>(
+        stub,
+        "SELECT last_message_preview, last_activity_at FROM conversations WHERE id = ?",
+        "conversation_a",
+      ),
+    ).resolves.toEqual([
+      {
+        last_message_preview: "occurred-later",
+        last_activity_at: "2026-09-07T06:00:00.000Z",
+      },
+    ]);
   });
 });
-

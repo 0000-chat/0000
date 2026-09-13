@@ -5,4 +5,6 @@ function ConnectionsRoute() {
   return <ConnectionsPage />;
 }
 
-export const Route = createFileRoute("/connections")({ component: ConnectionsRoute });
+export const Route = createFileRoute("/connections")({
+  component: ConnectionsRoute,
+});

@@ -60,7 +60,10 @@ const isArrayIndexKey = (key: string, length: number): boolean => {
   );
 };
 
-const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown => {
+const snapshotStrictArrayInput = (
+  input: unknown,
+  maxLength: number,
+): unknown => {
   try {
     if (input === null || typeof input !== "object" || !Array.isArray(input)) {
       return undefined;
@@ -107,9 +110,6 @@ const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown =>
   }
 };
 
-const strictObject = <Shape extends z.ZodRawShape>(shape: Shape) =>
-  z.preprocess(snapshotStrictObjectInput, z.object(shape).strict());
-
 const strictArray = <Schema extends z.ZodTypeAny>(
   schema: Schema,
   maxLength: number,
@@ -121,12 +121,6 @@ const strictArray = <Schema extends z.ZodTypeAny>(
   );
 
 const RealtimeTimestampSchema = z.string().datetime({ offset: true }).max(64);
-const RealtimePositiveIntegerSchema = z.number().int().safe().positive();
-const RealtimeNonnegativeIntegerSchema = z
-  .number()
-  .int()
-  .safe()
-  .nonnegative();
 
 const RealtimeSubscriptionArraySchema = strictArray(
   RealtimeSubscriptionSchema,
@@ -260,7 +254,10 @@ const REALTIME_CONTRACT_ERROR_MESSAGES: Record<
   socket_attachment_too_large: "Realtime socket attachment is too large",
 };
 
-const realtimeContractErrorCauses = new WeakMap<RealtimeContractError, unknown>();
+const realtimeContractErrorCauses = new WeakMap<
+  RealtimeContractError,
+  unknown
+>();
 
 export class RealtimeContractError extends Error {
   readonly code: RealtimeContractErrorCode;
@@ -324,8 +321,4 @@ export const serializeRealtimeAttachment = (
   value: unknown,
 ): RealtimeSocketAttachment => parseRealtimeAttachment(value);
 
-export type {
-  RealtimePosition,
-  RealtimeResumePosition,
-  RealtimeSubscription,
-};
+export type { RealtimePosition, RealtimeResumePosition, RealtimeSubscription };

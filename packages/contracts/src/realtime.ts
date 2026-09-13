@@ -5,27 +5,31 @@ import {
 } from "./canonical-event";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 
-export const RealtimeEventSchema = z.object({
-  sequence: z.number().int().positive(),
-  type: z.enum([
-    "connection.updated",
-    "message.created",
-    "command.updated",
-    "system.status.updated",
-  ]),
-  tenant_id: CommunicatorIdSchema,
-  identity_id: CommunicatorIdSchema,
-  connection_id: CommunicatorIdSchema.optional(),
-  conversation_id: CommunicatorIdSchema.optional(),
-  occurred_at: TimestampSchema,
-  data: z.record(z.string(), z.unknown()),
-}).strict();
+export const RealtimeEventSchema = z
+  .object({
+    sequence: z.number().int().positive(),
+    type: z.enum([
+      "connection.updated",
+      "message.created",
+      "command.updated",
+      "system.status.updated",
+    ]),
+    tenant_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    connection_id: CommunicatorIdSchema.optional(),
+    conversation_id: CommunicatorIdSchema.optional(),
+    occurred_at: TimestampSchema,
+    data: z.record(z.string(), z.unknown()),
+  })
+  .strict();
 
-export const MessageCreatedDataSchema = z.object({
-  last_message_preview: z.string().max(280),
-  last_activity_at: TimestampSchema,
-  unread_delta: z.number().int(),
-}).strict();
+export const MessageCreatedDataSchema = z
+  .object({
+    last_message_preview: z.string().max(280),
+    last_activity_at: TimestampSchema,
+    unread_delta: z.number().int(),
+  })
+  .strict();
 
 export type RealtimeEvent = z.infer<typeof RealtimeEventSchema>;
 
@@ -92,7 +96,10 @@ const isArrayIndexKey = (key: string, length: number): boolean => {
 };
 
 /** Snapshot a strict array while rejecting holes, symbols, and extra keys. */
-const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown => {
+const snapshotStrictArrayInput = (
+  input: unknown,
+  maxLength: number,
+): unknown => {
   try {
     if (input === null || typeof input !== "object" || !Array.isArray(input)) {
       return undefined;
@@ -140,9 +147,6 @@ const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown =>
   }
 };
 
-const strictObject = <Shape extends z.ZodRawShape>(shape: Shape) =>
-  z.preprocess(snapshotStrictObjectInput, z.object(shape).strict());
-
 const strictArray = <Schema extends z.ZodTypeAny>(
   schema: Schema,
   maxLength: number,
@@ -176,11 +180,7 @@ const uniqueBy = <Value>(
 const RealtimeTimestampSchema = TimestampSchema.max(64);
 const RealtimeIdSchema = CommunicatorIdSchema.max(MAX_REALTIME_ID_LENGTH);
 const RealtimePositiveIntegerSchema = z.number().int().safe().positive();
-const RealtimeNonnegativeIntegerSchema = z
-  .number()
-  .int()
-  .safe()
-  .nonnegative();
+const RealtimeNonnegativeIntegerSchema = z.number().int().safe().nonnegative();
 const RealtimeTicketSchema = z.string().regex(/^rt1_[A-Za-z0-9_-]{43}$/);
 const RealtimeWebSocketUrlSchema = z
   .string()
@@ -217,11 +217,13 @@ export const RealtimeSubscriptionSchema = z.preprocess(
 );
 export type RealtimeSubscription = z.infer<typeof RealtimeSubscriptionSchema>;
 
-const RealtimeResumePositionObjectSchema = z.object({
-  identity_id: RealtimeIdentityIdSchema,
-  generation: RealtimePositiveIntegerSchema,
-  after_sequence: RealtimeNonnegativeIntegerSchema,
-}).strict();
+const RealtimeResumePositionObjectSchema = z
+  .object({
+    identity_id: RealtimeIdentityIdSchema,
+    generation: RealtimePositiveIntegerSchema,
+    after_sequence: RealtimeNonnegativeIntegerSchema,
+  })
+  .strict();
 
 export const RealtimeResumePositionSchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -278,16 +280,16 @@ export const RealtimeTicketRequestSchema = z.preprocess(
   snapshotStrictObjectInput,
   RealtimeTicketRequestObjectSchema,
 );
-export type RealtimeTicketRequest = z.infer<
-  typeof RealtimeTicketRequestSchema
->;
+export type RealtimeTicketRequest = z.infer<typeof RealtimeTicketRequestSchema>;
 
-const RealtimeTicketResponseObjectSchema = z.object({
-  schema_version: z.literal(1),
-  ticket: RealtimeTicketSchema,
-  expires_at: RealtimeTimestampSchema,
-  websocket_url: RealtimeWebSocketUrlSchema,
-}).strict();
+const RealtimeTicketResponseObjectSchema = z
+  .object({
+    schema_version: z.literal(1),
+    ticket: RealtimeTicketSchema,
+    expires_at: RealtimeTimestampSchema,
+    websocket_url: RealtimeWebSocketUrlSchema,
+  })
+  .strict();
 
 export const RealtimeTicketResponseSchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -297,11 +299,13 @@ export type RealtimeTicketResponse = z.infer<
   typeof RealtimeTicketResponseSchema
 >;
 
-const RealtimePositionObjectSchema = z.object({
-  identity_id: RealtimeIdentityIdSchema,
-  generation: RealtimePositiveIntegerSchema,
-  sequence: RealtimeNonnegativeIntegerSchema,
-}).strict();
+const RealtimePositionObjectSchema = z
+  .object({
+    identity_id: RealtimeIdentityIdSchema,
+    generation: RealtimePositiveIntegerSchema,
+    sequence: RealtimeNonnegativeIntegerSchema,
+  })
+  .strict();
 
 export const RealtimePositionSchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -309,13 +313,15 @@ export const RealtimePositionSchema = z.preprocess(
 );
 export type RealtimePosition = z.infer<typeof RealtimePositionSchema>;
 
-const RealtimeProjectionChangeObjectSchema = z.object({
-  sequence: RealtimePositiveIntegerSchema,
-  event_type: CanonicalEventTypeSchema,
-  connection_id: RealtimeIdSchema,
-  conversation_id: RealtimeIdSchema,
-  occurred_at: RealtimeTimestampSchema,
-}).strict();
+const RealtimeProjectionChangeObjectSchema = z
+  .object({
+    sequence: RealtimePositiveIntegerSchema,
+    event_type: CanonicalEventTypeSchema,
+    connection_id: RealtimeIdSchema,
+    conversation_id: RealtimeIdSchema,
+    occurred_at: RealtimeTimestampSchema,
+  })
+  .strict();
 
 export const RealtimeProjectionChangeSchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -330,11 +336,7 @@ const RealtimeConnectedFrameObjectSchema = z
     schema_version: z.literal(1),
     type: z.literal("connected"),
     tenant_id: RealtimeIdSchema,
-    positions: strictArray(
-      RealtimePositionSchema,
-      MAX_REALTIME_IDENTITIES,
-      1,
-    ),
+    positions: strictArray(RealtimePositionSchema, MAX_REALTIME_IDENTITIES, 1),
     connection_expires_at: RealtimeTimestampSchema,
   })
   .strict()
@@ -403,19 +405,21 @@ export type RealtimeProjectionChangesFrame = z.infer<
   typeof RealtimeProjectionChangesFrameSchema
 >;
 
-const RealtimeResetRequiredFrameObjectSchema = z.object({
-  schema_version: z.literal(1),
-  type: z.literal("reset_required"),
-  tenant_id: RealtimeIdSchema,
-  identity_id: RealtimeIdentityIdSchema,
-  generation: RealtimePositiveIntegerSchema,
-  latest_sequence: RealtimeNonnegativeIntegerSchema,
-  reason: z.enum([
-    "generation_changed",
-    "history_unavailable",
-    "replay_too_large",
-  ]),
-}).strict();
+const RealtimeResetRequiredFrameObjectSchema = z
+  .object({
+    schema_version: z.literal(1),
+    type: z.literal("reset_required"),
+    tenant_id: RealtimeIdSchema,
+    identity_id: RealtimeIdentityIdSchema,
+    generation: RealtimePositiveIntegerSchema,
+    latest_sequence: RealtimeNonnegativeIntegerSchema,
+    reason: z.enum([
+      "generation_changed",
+      "history_unavailable",
+      "replay_too_large",
+    ]),
+  })
+  .strict();
 
 export const RealtimeResetRequiredFrameSchema = z.preprocess(
   snapshotStrictObjectInput,

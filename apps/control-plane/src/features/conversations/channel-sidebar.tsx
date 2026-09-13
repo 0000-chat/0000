@@ -19,7 +19,10 @@ export function ChannelSidebar({
   onReorder,
 }: ChannelSidebarProps) {
   return (
-    <nav aria-label="Conversation channels" className="flex h-full min-h-0 flex-col">
+    <nav
+      aria-label="Conversation channels"
+      className="flex h-full min-h-0 flex-col"
+    >
       <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
         <div>
           <h2 className="text-sm font-semibold">Channels</h2>

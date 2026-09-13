@@ -21,8 +21,10 @@ import {
 } from "./ticket-repository";
 import { isRealtimeTicket } from "./token";
 
-export const REALTIME_INTERNAL_CONTEXT_HEADER = "X-Communicator-Realtime-Context";
-export const REALTIME_INTERNAL_UPGRADE_URL = "https://tenant-projection.internal/realtime";
+export const REALTIME_INTERNAL_CONTEXT_HEADER =
+  "X-Communicator-Realtime-Context";
+export const REALTIME_INTERNAL_UPGRADE_URL =
+  "https://tenant-projection.internal/realtime";
 
 type RealtimeRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -78,7 +80,9 @@ const ticketErrorResponse = (
   if (error instanceof RealtimeTicketError) {
     return responseForError(
       context,
-      error.code === "invalid_request" ? "invalid_request" : "service_unavailable",
+      error.code === "invalid_request"
+        ? "invalid_request"
+        : "service_unavailable",
       error.code === "invalid_request" ? 400 : 503,
     );
   }
@@ -104,9 +108,7 @@ export const realtimeTicketHandler: Handler<
   RealtimeRouteEnv,
   string,
   RealtimeTicketHandlerInput
-> = async (
-  context,
-) => {
+> = async (context) => {
   try {
     const request = context.req.valid("json");
     const authorization = authorizeRealtimeRequest(
@@ -150,17 +152,16 @@ const ticketFromUpgradeUrl = (request: Request): UpgradeTicketResult => {
   return { kind: "ticket", value: entries[0][1] };
 };
 
-const internalUpgradeRequest = (
-  contextJson: string,
-): Request => new Request(REALTIME_INTERNAL_UPGRADE_URL, {
-  method: "GET",
-  headers: {
-    Connection: "Upgrade",
-    Upgrade: "websocket",
-    "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
-    [REALTIME_INTERNAL_CONTEXT_HEADER]: contextJson,
-  },
-});
+const internalUpgradeRequest = (contextJson: string): Request =>
+  new Request(REALTIME_INTERNAL_UPGRADE_URL, {
+    method: "GET",
+    headers: {
+      Connection: "Upgrade",
+      Upgrade: "websocket",
+      "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+      [REALTIME_INTERNAL_CONTEXT_HEADER]: contextJson,
+    },
+  });
 
 const projectionStub = (
   env: Cloudflare.Env,

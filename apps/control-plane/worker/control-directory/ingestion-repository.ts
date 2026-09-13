@@ -1,6 +1,4 @@
-import {
-  type ProjectionConnectionBinding,
-} from "@communicator/contracts";
+import { type ProjectionConnectionBinding } from "@communicator/contracts";
 
 export type ActiveIngestionRoute = {
   gateway_route_id: string;
@@ -85,13 +83,19 @@ function hasExactUniqueAccountIds(accountIds: readonly string[]): boolean {
   if (accountIds.length === 0 || accountIds.length > MAX_INGESTION_ACCOUNTS) {
     return false;
   }
-  if (accountIds.some((accountId) => typeof accountId !== "string" || accountId.length === 0)) {
+  if (
+    accountIds.some(
+      (accountId) => typeof accountId !== "string" || accountId.length === 0,
+    )
+  ) {
     return false;
   }
   return new Set(accountIds).size === accountIds.length;
 }
 
-function sortBindings(rows: IngestionBindingRow[]): IngestionConnectionBinding[] {
+function sortBindings(
+  rows: IngestionBindingRow[],
+): IngestionConnectionBinding[] {
   return rows
     .slice()
     .sort((left, right) => compareUtf8(left.account_id, right.account_id))
@@ -114,8 +118,9 @@ export async function findActiveIngestionService(
   if (!issuer || !subject || !tokenId) return notFound();
 
   try {
-    const row = await primarySession(db).prepare(
-      `SELECT
+    const row = await primarySession(db)
+      .prepare(
+        `SELECT
          p.id AS service_principal_id,
          p.issuer,
          p.subject,
@@ -133,7 +138,9 @@ export async function findActiveIngestionService(
              AND rt.token_id = ?
          )
        LIMIT 1`,
-    ).bind(tokenId, issuer, subject, tokenId).first<IngestionServiceRow>();
+      )
+      .bind(tokenId, issuer, subject, tokenId)
+      .first<IngestionServiceRow>();
 
     return row ? { ok: true, value: row } : notFound();
   } catch {
@@ -149,8 +156,9 @@ export async function resolveActiveIngestionRoute(
   if (!servicePrincipalId || !gatewayRouteId) return notFound();
 
   try {
-    const row = await primarySession(db).prepare(
-      `SELECT
+    const row = await primarySession(db)
+      .prepare(
+        `SELECT
          gr.id AS gateway_route_id,
          gr.service_principal_id
        FROM gateway_routes AS gr
@@ -162,7 +170,9 @@ export async function resolveActiveIngestionRoute(
          AND p.status = 'active'
          AND p.revoked_at IS NULL
        LIMIT 1`,
-    ).bind(gatewayRouteId, servicePrincipalId).first<IngestionRouteRow>();
+      )
+      .bind(gatewayRouteId, servicePrincipalId)
+      .first<IngestionRouteRow>();
 
     return row ? { ok: true, value: row } : notFound();
   } catch {
@@ -177,8 +187,9 @@ export async function resolveArchivedIngestionRoute(
   if (!gatewayRouteId) return notFound();
 
   try {
-    const row = await primarySession(db).prepare(
-      `SELECT
+    const row = await primarySession(db)
+      .prepare(
+        `SELECT
          gr.id AS gateway_route_id,
          gr.service_principal_id
        FROM gateway_routes AS gr
@@ -186,7 +197,9 @@ export async function resolveArchivedIngestionRoute(
        WHERE gr.id = ?
          AND p.principal_type = 'service'
        LIMIT 1`,
-    ).bind(gatewayRouteId).first<IngestionRouteRow>();
+      )
+      .bind(gatewayRouteId)
+      .first<IngestionRouteRow>();
 
     return row ? { ok: true, value: row } : notFound();
   } catch {
@@ -221,11 +234,19 @@ async function resolveBindings(
   try {
     const session = primarySession(db);
     const rows: IngestionBindingRow[] = [];
-    for (let offset = 0; offset < accountIds.length; offset += INGESTION_ACCOUNT_QUERY_CHUNK) {
-      const accountChunk = accountIds.slice(offset, offset + INGESTION_ACCOUNT_QUERY_CHUNK);
+    for (
+      let offset = 0;
+      offset < accountIds.length;
+      offset += INGESTION_ACCOUNT_QUERY_CHUNK
+    ) {
+      const accountChunk = accountIds.slice(
+        offset,
+        offset + INGESTION_ACCOUNT_QUERY_CHUNK,
+      );
       const accountList = accountPlaceholders(accountChunk);
-      const chunkRows = await session.prepare(
-        `SELECT
+      const chunkRows = await session
+        .prepare(
+          `SELECT
            ca.account_id,
            ca.connection_id,
            c.identity_id,
@@ -250,13 +271,18 @@ async function resolveBindings(
            ${accountStatus}
            ${connectionStatus}
          ORDER BY ca.account_id COLLATE BINARY`,
-      ).bind(gatewayRouteId, tenantId, ...accountChunk).all<IngestionBindingRow>();
+        )
+        .bind(gatewayRouteId, tenantId, ...accountChunk)
+        .all<IngestionBindingRow>();
       rows.push(...chunkRows.results);
     }
 
     if (rows.length !== accountIds.length) return notFound();
     const returnedIds = new Set(rows.map((row) => row.account_id));
-    if (returnedIds.size !== accountIds.length || accountIds.some((id) => !returnedIds.has(id))) {
+    if (
+      returnedIds.size !== accountIds.length ||
+      accountIds.some((id) => !returnedIds.has(id))
+    ) {
       return notFound();
     }
 

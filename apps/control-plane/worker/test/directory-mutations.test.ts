@@ -29,12 +29,16 @@ describe("directory mutations", () => {
 
     const grants = await env.CONTROL_DB.prepare(
       "SELECT identity_id, operation_scope FROM identity_grants WHERE tenant_id = ? AND membership_id = ? ORDER BY identity_id, operation_scope",
-    ).bind("tenant_pilot", "membership_human").all();
+    )
+      .bind("tenant_pilot", "membership_human")
+      .all();
     const counts = await env.CONTROL_DB.prepare(
       "SELECT (SELECT COUNT(*) FROM directory_mutations) AS mutations, (SELECT COUNT(*) FROM audit_events) AS audits, (SELECT COUNT(*) FROM control_event_outbox) AS outbox",
     ).first<{ mutations: number; audits: number; outbox: number }>();
 
-    expect(grants.results).toEqual([{ identity_id: "identity_human", operation_scope: "message.send" }]);
+    expect(grants.results).toEqual([
+      { identity_id: "identity_human", operation_scope: "message.send" },
+    ]);
     expect(counts).toEqual({ mutations: 1, audits: 1, outbox: 1 });
   });
 
@@ -44,7 +48,12 @@ describe("directory mutations", () => {
       tenant_id: "tenant_pilot",
       actor_principal_id: "principal_human",
       membership_id: "membership_human",
-      grants: [{ identity_id: "identity_human", scopes: ["message.send", "conversation.read"] }],
+      grants: [
+        {
+          identity_id: "identity_human",
+          scopes: ["message.send", "conversation.read"],
+        },
+      ],
       occurred_at: occurredAt,
     };
     await replaceIdentityGrants(env.CONTROL_DB, input);
@@ -59,26 +68,46 @@ describe("directory mutations", () => {
   it("rolls back a cross-tenant grant replacement completely", async () => {
     const before = await env.CONTROL_DB.prepare(
       "SELECT identity_id, operation_scope FROM identity_grants WHERE tenant_id = ? AND membership_id = ? ORDER BY identity_id, operation_scope",
-    ).bind("tenant_pilot", "membership_human").all();
+    )
+      .bind("tenant_pilot", "membership_human")
+      .all();
     await env.CONTROL_DB.prepare(
       "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind("tenant_other", "other", "Other", "active", occurredAt, occurredAt).run();
+    )
+      .bind("tenant_other", "other", "Other", "active", occurredAt, occurredAt)
+      .run();
     await env.CONTROL_DB.prepare(
       "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind("identity_other", "tenant_other", "human", "Other", "active", occurredAt, occurredAt).run();
+    )
+      .bind(
+        "identity_other",
+        "tenant_other",
+        "human",
+        "Other",
+        "active",
+        occurredAt,
+        occurredAt,
+      )
+      .run();
 
-    await expect(replaceIdentityGrants(env.CONTROL_DB, {
-      idempotency_key: "replace-cross-tenant",
-      tenant_id: "tenant_pilot",
-      actor_principal_id: "principal_human",
-      membership_id: "membership_human",
-      grants: [{ identity_id: "identity_other", scopes: ["conversation.read"] }],
-      occurred_at: occurredAt,
-    })).rejects.toThrow();
+    await expect(
+      replaceIdentityGrants(env.CONTROL_DB, {
+        idempotency_key: "replace-cross-tenant",
+        tenant_id: "tenant_pilot",
+        actor_principal_id: "principal_human",
+        membership_id: "membership_human",
+        grants: [
+          { identity_id: "identity_other", scopes: ["conversation.read"] },
+        ],
+        occurred_at: occurredAt,
+      }),
+    ).rejects.toThrow();
 
     const after = await env.CONTROL_DB.prepare(
       "SELECT identity_id, operation_scope FROM identity_grants WHERE tenant_id = ? AND membership_id = ? ORDER BY identity_id, operation_scope",
-    ).bind("tenant_pilot", "membership_human").all();
+    )
+      .bind("tenant_pilot", "membership_human")
+      .all();
     const counts = await env.CONTROL_DB.prepare(
       "SELECT (SELECT COUNT(*) FROM directory_mutations) AS mutations, (SELECT COUNT(*) FROM audit_events) AS audits, (SELECT COUNT(*) FROM control_event_outbox) AS outbox",
     ).first<{ mutations: number; audits: number; outbox: number }>();
@@ -120,7 +149,9 @@ describe("directory mutations", () => {
       tenant_id: "tenant_pilot",
       actor_principal_id: "principal_human",
       membership_id: "membership_human",
-      grants: [{ identity_id: "identity_human", scopes: ["conversation.read"] }],
+      grants: [
+        { identity_id: "identity_human", scopes: ["conversation.read"] },
+      ],
       occurred_at: occurredAt,
     });
 

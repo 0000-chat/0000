@@ -107,10 +107,13 @@ const isValidSortPosition = (value: unknown): value is number =>
 const mapConnectionRows = (
   rows: readonly ConnectionReadRow[],
 ): DirectoryConnection[] => {
-  const grouped = new Map<string, {
-    row: ConnectionReadRow;
-    capabilities: Set<Capability>;
-  }>();
+  const grouped = new Map<
+    string,
+    {
+      row: ConnectionReadRow;
+      capabilities: Set<Capability>;
+    }
+  >();
 
   for (const row of rows) {
     if (!isValidSortPosition(row.sort_position)) {
@@ -155,9 +158,13 @@ const mapConnectionRows = (
         provider: row.provider,
         display_label: row.display_label,
         status: row.status,
-        capabilities: [...capabilities].sort((left, right) => left.localeCompare(right)),
+        capabilities: [...capabilities].sort((left, right) =>
+          left.localeCompare(right),
+        ),
         last_synced_at: row.last_synced_at,
-        ...(row.attention_code === null ? {} : { attention_code: row.attention_code }),
+        ...(row.attention_code === null
+          ? {}
+          : { attention_code: row.attention_code }),
       });
       return { ...connection, sort_position: row.sort_position };
     } catch (error) {
@@ -173,7 +180,8 @@ export async function listConnectionsForIdentity(
 ): Promise<DirectoryConnection[]> {
   let result: { results: ConnectionReadRow[] };
   try {
-    result = await db.prepare(CONNECTION_READ_QUERY)
+    result = await db
+      .prepare(CONNECTION_READ_QUERY)
       .bind(tenantId, identityId, MAX_IDENTITY_CONNECTIONS + 1)
       .all<ConnectionReadRow>();
   } catch (error) {

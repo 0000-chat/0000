@@ -11,7 +11,11 @@ function envValue(name: string) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function parseEnum<T extends z.ZodEnum>(schema: T, value: string | undefined, fallback: z.infer<T>) {
+function parseEnum<T extends z.ZodEnum>(
+  schema: T,
+  value: string | undefined,
+  fallback: z.infer<T>,
+) {
   const result = schema.safeParse(value ?? fallback);
   if (!result.success) {
     throw new Error(`Invalid ${schema.description ?? "runtime"} configuration`);
@@ -19,7 +23,9 @@ function parseEnum<T extends z.ZodEnum>(schema: T, value: string | undefined, fa
   return result.data;
 }
 
-const defaultDeploymentEnvironment = import.meta.env.PROD ? "production" : "local";
+const defaultDeploymentEnvironment = import.meta.env.PROD
+  ? "production"
+  : "local";
 const defaultDataMode = import.meta.env.PROD ? "live" : "simulated";
 
 export const runtimeConfig = {
@@ -28,9 +34,16 @@ export const runtimeConfig = {
     envValue("VITE_DEPLOYMENT_ENV"),
     defaultDeploymentEnvironment,
   ),
-  dataMode: parseEnum(DataModeSchema, envValue("VITE_DATA_MODE"), defaultDataMode),
+  dataMode: parseEnum(
+    DataModeSchema,
+    envValue("VITE_DATA_MODE"),
+    defaultDataMode,
+  ),
 } as const;
 
-if (runtimeConfig.deploymentEnv === "production" && runtimeConfig.dataMode !== "live") {
+if (
+  runtimeConfig.deploymentEnv === "production" &&
+  runtimeConfig.dataMode !== "live"
+) {
   throw new Error("Simulated data is forbidden in production");
 }

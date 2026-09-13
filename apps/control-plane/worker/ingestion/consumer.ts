@@ -95,7 +95,9 @@ const parsePointer = (body: unknown): CommittedArchivePointer => {
   if (!parsed.success) throw consumerFailure("invalid");
 
   try {
-    const encoded = new TextEncoder().encode(canonicalJsonStringify(parsed.data));
+    const encoded = new TextEncoder().encode(
+      canonicalJsonStringify(parsed.data),
+    );
     if (encoded.byteLength > MAX_INGESTION_QUEUE_POINTER_BYTES) {
       throw consumerFailure("invalid");
     }
@@ -108,7 +110,9 @@ const parsePointer = (body: unknown): CommittedArchivePointer => {
 };
 
 const assertPointerTenantKey = (pointer: CommittedArchivePointer): void => {
-  if (!isArchiveKeyForTenant(pointer.manifest_key, pointer.tenant_id, "manifest")) {
+  if (
+    !isArchiveKeyForTenant(pointer.manifest_key, pointer.tenant_id, "manifest")
+  ) {
     throw consumerFailure("invalid");
   }
 };
@@ -169,7 +173,11 @@ const assertHistoricalBindings = (
   bindings: readonly IngestionConnectionBinding[],
   route: ArchivedIngestionRoute,
 ): ProjectionConnectionBinding[] => {
-  if (!Array.isArray(bindings) || bindings.length === 0 || bindings.length > 500) {
+  if (
+    !Array.isArray(bindings) ||
+    bindings.length === 0 ||
+    bindings.length > 500
+  ) {
     throw consumerFailure("conflict");
   }
   const byAccount = new Map<string, IngestionConnectionBinding>();
@@ -182,7 +190,8 @@ const assertHistoricalBindings = (
     });
     if (
       !parsedBinding.success ||
-      (binding.account_status !== "active" && binding.account_status !== "retired") ||
+      (binding.account_status !== "active" &&
+        binding.account_status !== "retired") ||
       binding.gateway_route_id !== pointer.gateway_route_id ||
       byAccount.has(parsedBinding.success ? parsedBinding.data.account_id : "")
     ) {
@@ -317,7 +326,9 @@ const projectionFailureCode = (error: ProjectionError): ConsumerFailureCode => {
   }
 };
 
-const codeFromUnknownError = (error: unknown): ConsumerFailureCode | undefined => {
+const codeFromUnknownError = (
+  error: unknown,
+): ConsumerFailureCode | undefined => {
   try {
     if (isArchiveError(error)) return archiveFailureCode(error);
     if (isProjectionError(error)) return projectionFailureCode(error);
@@ -329,7 +340,9 @@ const codeFromUnknownError = (error: unknown): ConsumerFailureCode | undefined =
         typeof descriptor.value === "string" &&
         projectionFailureNames.has(descriptor.value)
       ) {
-        return projectionFailureCode({ code: descriptor.value } as ProjectionError);
+        return projectionFailureCode({
+          code: descriptor.value,
+        } as ProjectionError);
       }
     }
   } catch {
@@ -360,11 +373,9 @@ const processMessage = async (
 
   let committed: Awaited<ReturnType<typeof readCommittedArchiveBatch>>;
   try {
-    committed = await (services.readCommittedArchiveBatch ?? readCommittedArchiveBatch)(
-      environment.EVENT_ARCHIVE,
-      pointer.tenant_id,
-      pointer.manifest_key,
-    );
+    committed = await (
+      services.readCommittedArchiveBatch ?? readCommittedArchiveBatch
+    )(environment.EVENT_ARCHIVE, pointer.tenant_id, pointer.manifest_key);
   } catch (error) {
     const failureCode = codeFromUnknownError(error);
     throw consumerFailure(failureCode ?? "unavailable");
@@ -372,7 +383,9 @@ const processMessage = async (
 
   let manifest: IngestionCommittedArchiveManifest;
   try {
-    const parsed = IngestionCommittedArchiveManifestSchema.safeParse(committed.manifest);
+    const parsed = IngestionCommittedArchiveManifestSchema.safeParse(
+      committed.manifest,
+    );
     if (!parsed.success) throw consumerFailure("corrupt");
     manifest = parsed.data;
   } catch (error) {
@@ -384,7 +397,9 @@ const processMessage = async (
   const events = parseArchivedEvents(pointer, committed.events);
   const accountIds = [...new Set(events.map((event) => event.account_id))];
 
-  let historicalRoute: Awaited<ReturnType<typeof resolveArchivedIngestionRoute>>;
+  let historicalRoute: Awaited<
+    ReturnType<typeof resolveArchivedIngestionRoute>
+  >;
   try {
     historicalRoute = await (
       services.resolveArchivedIngestionRoute ?? resolveArchivedIngestionRoute
@@ -480,9 +495,10 @@ const processMessage = async (
   }
 };
 
-export const createIngestionQueueHandler = (
-  services: IngestionConsumerServices = {},
-): ExportedHandlerQueueHandler<Cloudflare.Env, unknown> =>
+export const createIngestionQueueHandler =
+  (
+    services: IngestionConsumerServices = {},
+  ): ExportedHandlerQueueHandler<Cloudflare.Env, unknown> =>
   async (batch, environment, _context): Promise<void> => {
     for (const message of batch.messages) {
       try {
@@ -492,7 +508,7 @@ export const createIngestionQueueHandler = (
         const failureCode =
           error instanceof IngestionConsumerFailure
             ? error.failureCode
-            : codeFromUnknownError(error) ?? "unavailable";
+            : (codeFromUnknownError(error) ?? "unavailable");
         try {
           message.retry({ delaySeconds: retryDelayFor(failureCode) });
         } catch {

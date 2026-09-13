@@ -16,9 +16,7 @@ import {
 export const MAX_INGESTION_REQUEST_BYTES = 32 * 1024 * 1024;
 export const MAX_INGESTION_QUEUE_POINTER_BYTES = 8 * 1024;
 export const MAX_INGESTION_TIMESTAMP_CHARS = 64;
-export {
-  MAX_PRODUCER_VERSION_CHARS as MAX_INGESTION_PRODUCER_VERSION_CHARS,
-};
+export { MAX_PRODUCER_VERSION_CHARS as MAX_INGESTION_PRODUCER_VERSION_CHARS };
 
 const PROTOTYPE_SENSITIVE_KEYS = new Set([
   "__proto__",
@@ -76,7 +74,10 @@ const isCanonicalArrayIndexKey = (key: string, length: number): boolean => {
 };
 
 /** Snapshot a strict array while rejecting holes, symbols, and extra keys. */
-const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown => {
+const snapshotStrictArrayInput = (
+  input: unknown,
+  maxLength: number,
+): unknown => {
   try {
     if (input === null || typeof input !== "object" || !Array.isArray(input)) {
       return undefined;
@@ -137,9 +138,7 @@ const strictArray = <Schema extends z.ZodTypeAny>(
     z.array(schema).min(minLength).max(maxLength),
   );
 
-const BatchIdSchema = z
-  .string()
-  .regex(/^batch_[0-9a-f]{64}$/);
+const BatchIdSchema = z.string().regex(/^batch_[0-9a-f]{64}$/);
 
 const ProducerVersionSchema = z
   .string()
@@ -314,12 +313,14 @@ const IngestionCommittedArchiveManifestValidationSchema = z.preprocess(
       }
     }
 
-    const checkpointResult = MatrixCheckpointDigestSchema.safeParse(rawCheckpoint);
+    const checkpointResult =
+      MatrixCheckpointDigestSchema.safeParse(rawCheckpoint);
     if (!checkpointResult.success) {
       context.addIssue({
         code: "custom",
         path: ["source_checkpoint"],
-        message: "Committed archive manifest requires a Matrix checkpoint digest",
+        message:
+          "Committed archive manifest requires a Matrix checkpoint digest",
       });
       return z.NEVER;
     }

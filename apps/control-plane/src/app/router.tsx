@@ -3,9 +3,12 @@ import { routeTree } from "../routeTree.gen";
 import type { QueryClient } from "@tanstack/react-query";
 import type { RouterHistory } from "@tanstack/react-router";
 
-export function createAppRouter(queryClient: QueryClient, options?: {
-  history?: RouterHistory;
-}) {
+export function createAppRouter(
+  queryClient: QueryClient,
+  options?: {
+    history?: RouterHistory;
+  },
+) {
   const routerOptions = {
     routeTree,
     context: { queryClient },

@@ -5,7 +5,10 @@ import type {
   ProjectionStatusInput,
 } from "@communicator/contracts";
 import { describe, expect, it } from "vitest";
-import { getProjectionErrorCause, ProjectionError } from "../../projection/errors";
+import {
+  getProjectionErrorCause,
+  ProjectionError,
+} from "../../projection/errors";
 import {
   PROJECTION_MIGRATIONS,
   runProjectionMigrations,
@@ -90,12 +93,19 @@ const expectProjectionError = async (
   });
 };
 
-const normalizeSql = (sql: string): string =>
-  sql.replace(/\s+/g, " ").trim();
+const normalizeSql = (sql: string): string => sql.replace(/\s+/g, " ").trim();
 
 const expectedColumns: Record<
   string,
-  Array<[name: string, type: string, notNull: number, primaryKey: number, defaultValue: string | null]>
+  Array<
+    [
+      name: string,
+      type: string,
+      notNull: number,
+      primaryKey: number,
+      defaultValue: string | null,
+    ]
+  >
 > = {
   _sql_schema_migrations: [
     ["version", "INTEGER", 0, 1, null],
@@ -389,7 +399,9 @@ const expectedChecks: Record<string, string[]> = {
     "CHECK(generation >= 1 AND generation <= 9007199254740991)",
     "CHECK(last_rebuild_failure_code IS NULL OR last_rebuild_failure_code IN ('operator_abort','unsupported_archive','archive_gap','binding_conflict','validation_failed'))",
   ],
-  completed_rebuilds: ["CHECK(generation >= 2 AND generation <= 9007199254740991)"],
+  completed_rebuilds: [
+    "CHECK(generation >= 2 AND generation <= 9007199254740991)",
+  ],
   failed_rebuilds: [
     "CHECK(generation >= 2 AND generation <= 9007199254740991)",
     "CHECK(failure_code IN ('operator_abort','unsupported_archive','archive_gap','binding_conflict','validation_failed'))",
@@ -551,16 +563,16 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_resource_tombstones_conversation_owner ON resource_tombstones(conversation_id,identity_id,account_id,connection_id,platform)",
 };
 
-const restoreVersionOneProjectionChanges = (state: DurableObjectState): void => {
+const restoreVersionOneProjectionChanges = (
+  state: DurableObjectState,
+): void => {
   state.storage.sql.exec(
     "DROP INDEX IF EXISTS idx_projection_changes_identity_sequence",
   );
   state.storage.sql.exec(
     "DROP INDEX IF EXISTS idx_projection_changes_global_sequence",
   );
-  state.storage.sql.exec(
-    "DROP TABLE IF EXISTS projection_identity_sequences",
-  );
+  state.storage.sql.exec("DROP TABLE IF EXISTS projection_identity_sequences");
   state.storage.sql.exec("DROP TABLE projection_changes");
   state.storage.sql.exec(`CREATE TABLE projection_changes (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -623,7 +635,13 @@ describe("tenant projection SQLite schema", () => {
         dflt_value: string | null;
       }>;
       expect(
-        rows.map((row) => [row.name, row.type, row.notnull, row.pk, row.dflt_value]),
+        rows.map((row) => [
+          row.name,
+          row.type,
+          row.notnull,
+          row.pk,
+          row.dflt_value,
+        ]),
       ).toEqual(columns);
 
       const createSql = normalizeSql(
@@ -685,11 +703,13 @@ describe("tenant projection SQLite schema", () => {
         applied_at: identitySequenceMigrationAppliedAt,
       },
     ]);
-    expect(PROJECTION_MIGRATIONS.map(({ version, name, appliedAt }) => ({
-      version,
-      name,
-      applied_at: appliedAt,
-    }))).toEqual(first);
+    expect(
+      PROJECTION_MIGRATIONS.map(({ version, name, appliedAt }) => ({
+        version,
+        name,
+        applied_at: appliedAt,
+      })),
+    ).toEqual(first);
 
     await evictDurableObject(stub);
     const second = await runInDurableObject(stub, async (_instance, state) =>
@@ -786,11 +806,18 @@ describe("tenant projection SQLite schema", () => {
       };
     });
 
-    expect(result.afterChanges.map(({ identity_sequence: _identitySequence, ...row }) => row)).toEqual(
-      result.beforeChanges,
-    );
+    expect(
+      result.afterChanges.map(
+        ({ identity_sequence: _identitySequence, ...row }) => row,
+      ),
+    ).toEqual(result.beforeChanges);
     expect(result.afterAppliedEvents).toEqual(result.beforeAppliedEvents);
-    expect(result.afterChanges.map((row) => [row.identity_id, row.identity_sequence])).toEqual([
+    expect(
+      result.afterChanges.map((row) => [
+        row.identity_id,
+        row.identity_sequence,
+      ]),
+    ).toEqual([
       ["identity_human", 1],
       ["identity_agent", 1],
       ["identity_human", 2],
@@ -855,19 +882,38 @@ describe("tenant projection SQLite schema", () => {
 
       const reverseLookups = Object.fromEntries(
         [
-          ["message_versions", "message_id", "idx_message_versions_message_order"],
-          ["messages", "sender_participant_id", "idx_messages_sender_participant"],
-          ["message_versions", "editor_participant_id", "idx_message_versions_editor_participant"],
+          [
+            "message_versions",
+            "message_id",
+            "idx_message_versions_message_order",
+          ],
+          [
+            "messages",
+            "sender_participant_id",
+            "idx_messages_sender_participant",
+          ],
+          [
+            "message_versions",
+            "editor_participant_id",
+            "idx_message_versions_editor_participant",
+          ],
           ["reactions", "message_id", "idx_reactions_message_state"],
           ["reactions", "participant_id", "idx_reactions_participant"],
           ["receipts", "message_id", "idx_receipts_message_type_time"],
           ["receipts", "participant_id", "idx_receipts_participant"],
           ["typing_states", "participant_id", "idx_typing_participant"],
           ["attachments", "message_id", "idx_attachments_message_state"],
-          ["message_delivery_updates", "message_id", "idx_delivery_message_order"],
+          [
+            "message_delivery_updates",
+            "message_id",
+            "idx_delivery_message_order",
+          ],
         ].map(([table, column, index]) => [
           index,
-          explain(`SELECT 1 FROM ${table} WHERE ${column} = ? LIMIT 1`, "participant_query"),
+          explain(
+            `SELECT 1 FROM ${table} WHERE ${column} = ? LIMIT 1`,
+            "participant_query",
+          ),
         ]),
       );
       const ownerMismatchParams = [
@@ -900,17 +946,41 @@ describe("tenant projection SQLite schema", () => {
         ]),
       );
       const conversationCascadeQueries = [
-        ["participants", "UPDATE participants SET display_name = 'Deleted participant' WHERE conversation_id = ?"],
-        ["messages", "UPDATE messages SET body = '', delivery_failure_code = NULL WHERE conversation_id = ?"],
-        ["message_versions", "UPDATE message_versions SET body = '', editor_participant_id = NULL WHERE conversation_id = ?"],
+        [
+          "participants",
+          "UPDATE participants SET display_name = 'Deleted participant' WHERE conversation_id = ?",
+        ],
+        [
+          "messages",
+          "UPDATE messages SET body = '', delivery_failure_code = NULL WHERE conversation_id = ?",
+        ],
+        [
+          "message_versions",
+          "UPDATE message_versions SET body = '', editor_participant_id = NULL WHERE conversation_id = ?",
+        ],
         ["reactions", "DELETE FROM reactions WHERE conversation_id = ?"],
         ["receipts", "DELETE FROM receipts WHERE conversation_id = ?"],
-        ["typing_states", "DELETE FROM typing_states WHERE conversation_id = ?"],
-        ["attachments", "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, deleted_at = NULL WHERE conversation_id = ?"],
-        ["commands", "UPDATE commands SET failure_code = NULL WHERE conversation_id = ?"],
-        ["message_delivery_updates", "UPDATE message_delivery_updates SET failure_code = NULL WHERE conversation_id = ?"],
+        [
+          "typing_states",
+          "DELETE FROM typing_states WHERE conversation_id = ?",
+        ],
+        [
+          "attachments",
+          "UPDATE attachments SET file_name = NULL, mime_type = NULL, size_bytes = NULL, sha256 = NULL, r2_key = NULL, deleted_at = NULL WHERE conversation_id = ?",
+        ],
+        [
+          "commands",
+          "UPDATE commands SET failure_code = NULL WHERE conversation_id = ?",
+        ],
+        [
+          "message_delivery_updates",
+          "UPDATE message_delivery_updates SET failure_code = NULL WHERE conversation_id = ?",
+        ],
       ] as const;
-      const conversationCascadePredicates = conversationCascadeQueries.map(([table, query]) => [table, explain(query, "conversation_query")] as const);
+      const conversationCascadePredicates = conversationCascadeQueries.map(
+        ([table, query]) =>
+          [table, explain(query, "conversation_query")] as const,
+      );
       return {
         summaryUpdate,
         summaryCount,
@@ -919,18 +989,38 @@ describe("tenant projection SQLite schema", () => {
         resourceTombstoneId,
         conversationAttachmentTombstones,
         conversationOwnerPreflight,
-        conversationCascadePredicates: Object.fromEntries(conversationCascadePredicates),
+        conversationCascadePredicates: Object.fromEntries(
+          conversationCascadePredicates,
+        ),
         reverseLookups,
       };
     });
 
-    for (const summaryPlan of [plans.summaryUpdate, plans.summaryCount, plans.latestMessage]) {
-      expect(summaryPlan.some((detail) => detail.includes("idx_messages_identity_conversation_occurred") || detail.includes("idx_messages_conversation_owner"))).toBe(true);
+    for (const summaryPlan of [
+      plans.summaryUpdate,
+      plans.summaryCount,
+      plans.latestMessage,
+    ]) {
+      expect(
+        summaryPlan.some(
+          (detail) =>
+            detail.includes("idx_messages_identity_conversation_occurred") ||
+            detail.includes("idx_messages_conversation_owner"),
+        ),
+      ).toBe(true);
     }
-    expect(plans.latestMessage.some((detail) => detail.includes("use temp b-tree"))).toBe(false);
-    expect(plans.replyTarget.some((detail) => detail.includes("idx_messages_reply_target"))).toBe(true);
+    expect(
+      plans.latestMessage.some((detail) => detail.includes("use temp b-tree")),
+    ).toBe(false);
+    expect(
+      plans.replyTarget.some((detail) =>
+        detail.includes("idx_messages_reply_target"),
+      ),
+    ).toBe(true);
     expect(plans.resourceTombstoneId).toEqual(
-      expect.arrayContaining([expect.stringContaining("idx_resource_tombstones_id")]),
+      expect.arrayContaining([
+        expect.stringContaining("idx_resource_tombstones_id"),
+      ]),
     );
     expect(plans.conversationAttachmentTombstones).toEqual(
       expect.arrayContaining([
@@ -990,13 +1080,17 @@ describe("tenant projection SQLite schema", () => {
     }
     expect(plans.reverseLookups.idx_delivery_message_order).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/idx_delivery_message_order|sqlite_autoindex_message_delivery_updates_1/),
+        expect.stringMatching(
+          /idx_delivery_message_order|sqlite_autoindex_message_delivery_updates_1/,
+        ),
       ]),
     );
   });
 
   it("fails closed on an unknown newer migration without changing stored schema", async () => {
-    const stub = env.TENANT_PROJECTION.getByName("tenant_schema_unknown_version");
+    const stub = env.TENANT_PROJECTION.getByName(
+      "tenant_schema_unknown_version",
+    );
     const result = await runInDurableObject(stub, async (_instance, state) => {
       const schemaSnapshot = () =>
         state.storage.sql
@@ -1032,7 +1126,9 @@ describe("tenant projection SQLite schema", () => {
         code: "projection_unavailable",
         message: "projection_unavailable",
       });
-      expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+      expect(Object.getOwnPropertyNames(failure as object)).not.toContain(
+        "cause",
+      );
       expect(getProjectionErrorCause(failure as ProjectionError)).toBeDefined();
 
       return {
@@ -1064,7 +1160,9 @@ describe("tenant projection SQLite schema", () => {
           .toArray();
 
       const schemaBefore = schemaSnapshot();
-      state.storage.sql.exec("DELETE FROM _sql_schema_migrations WHERE version = 1");
+      state.storage.sql.exec(
+        "DELETE FROM _sql_schema_migrations WHERE version = 1",
+      );
       state.storage.sql.exec(
         "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
         1,
@@ -1085,7 +1183,9 @@ describe("tenant projection SQLite schema", () => {
         code: "projection_unavailable",
         message: "projection_unavailable",
       });
-      expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+      expect(Object.getOwnPropertyNames(failure as object)).not.toContain(
+        "cause",
+      );
       expect(getProjectionErrorCause(failure as ProjectionError)).toBeDefined();
 
       return {
@@ -1101,7 +1201,9 @@ describe("tenant projection SQLite schema", () => {
   });
 
   it("rolls back every DDL effect when migration metadata insertion fails", async () => {
-    const stub = env.TENANT_PROJECTION.getByName("tenant_schema_transaction_rollback");
+    const stub = env.TENANT_PROJECTION.getByName(
+      "tenant_schema_transaction_rollback",
+    );
     const result = await runInDurableObject(stub, async (_instance, state) => {
       const schemaSnapshot = () =>
         state.storage.sql
@@ -1141,7 +1243,9 @@ describe("tenant projection SQLite schema", () => {
         code: "projection_unavailable",
         message: "projection_unavailable",
       });
-      expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+      expect(Object.getOwnPropertyNames(failure as object)).not.toContain(
+        "cause",
+      );
       expect(getProjectionErrorCause(failure as ProjectionError)).toBeDefined();
 
       state.storage.sql.exec("DROP TRIGGER projection_test_abort_migration");
@@ -1165,10 +1269,13 @@ describe("tenant projection SQLite schema", () => {
 
 describe("tenant projection initialization and status", () => {
   it("returns projection_not_found before initialize", async () => {
-    const stub = env.TENANT_PROJECTION.getByName("tenant_status_not_initialized");
+    const stub = env.TENANT_PROJECTION.getByName(
+      "tenant_status_not_initialized",
+    );
     await expectProjectionError(
       stub,
-      (instance) => instance.getStatus(statusInput("tenant_status_not_initialized")),
+      (instance) =>
+        instance.getStatus(statusInput("tenant_status_not_initialized")),
       "projection_not_found",
     );
   });
@@ -1177,7 +1284,9 @@ describe("tenant projection initialization and status", () => {
     const tenantId = "tenant_lifecycle";
     const stub = env.TENANT_PROJECTION.getByName(tenantId);
     const initializedAt = "2026-09-07T04:05:06.000Z";
-    const status = await stub.initialize(initializeInput(tenantId, initializedAt));
+    const status = await stub.initialize(
+      initializeInput(tenantId, initializedAt),
+    );
 
     expect(status).toEqual({
       schema_version: 1,
@@ -1219,18 +1328,26 @@ describe("tenant projection initialization and status", () => {
   it("is idempotent for the same tenant without changing original timestamps", async () => {
     const tenantId = "tenant_initialize_idempotent";
     const stub = env.TENANT_PROJECTION.getByName(tenantId);
-    await stub.initialize(initializeInput(tenantId, "2026-09-07T05:00:00.000Z"));
+    await stub.initialize(
+      initializeInput(tenantId, "2026-09-07T05:00:00.000Z"),
+    );
     const repeat = await stub.initialize(
       initializeInput(tenantId, "2026-09-07T06:00:00.000Z"),
     );
-    expect(repeat).toMatchObject({ tenant_id: tenantId, generation: 1, state: "ready" });
+    expect(repeat).toMatchObject({
+      tenant_id: tenantId,
+      generation: 1,
+      state: "ready",
+    });
 
-    const timestamps = await runInDurableObject(stub, async (_instance, state) =>
-      state.storage.sql
-        .exec<{ initialized_at: string; updated_at: string }>(
-          "SELECT initialized_at, updated_at FROM projection_meta",
-        )
-        .toArray(),
+    const timestamps = await runInDurableObject(
+      stub,
+      async (_instance, state) =>
+        state.storage.sql
+          .exec<{ initialized_at: string; updated_at: string }>(
+            "SELECT initialized_at, updated_at FROM projection_meta",
+          )
+          .toArray(),
     );
     expect(timestamps).toEqual([
       {
@@ -1247,7 +1364,8 @@ describe("tenant projection initialization and status", () => {
 
     await expectProjectionError(
       firstStub,
-      (instance) => instance.initialize(initializeInput("tenant_other_on_same_stub")),
+      (instance) =>
+        instance.initialize(initializeInput("tenant_other_on_same_stub")),
       "projection_tenant_mismatch",
     );
 
@@ -1266,29 +1384,36 @@ describe("tenant projection initialization and status", () => {
         .toArray(),
     );
     expect(rows).toEqual([{ tenant_id: firstTenant }]);
-    const otherRows = await runInDurableObject(otherStub, async (_instance, state) =>
-      state.storage.sql
-        .exec<{ tenant_id: string }>("SELECT tenant_id FROM projection_meta")
-        .toArray(),
+    const otherRows = await runInDurableObject(
+      otherStub,
+      async (_instance, state) =>
+        state.storage.sql
+          .exec<{ tenant_id: string }>("SELECT tenant_id FROM projection_meta")
+          .toArray(),
     );
     expect(otherRows).toEqual([{ tenant_id: otherTenant }]);
   });
 
   it("denies missing or wrong scopes before data access", async () => {
     const uninitializedTenant = "tenant_scope_before_storage";
-    const uninitializedStub = env.TENANT_PROJECTION.getByName(uninitializedTenant);
+    const uninitializedStub =
+      env.TENANT_PROJECTION.getByName(uninitializedTenant);
     await expectProjectionError(
       uninitializedStub,
-      (instance) => instance.getStatus(
-        statusInput(uninitializedTenant, ["projection.read"]),
-      ),
+      (instance) =>
+        instance.getStatus(
+          statusInput(uninitializedTenant, ["projection.read"]),
+        ),
       "projection_forbidden",
     );
     await expectProjectionError(
       uninitializedStub,
-      (instance) => instance.initialize(
-        initializeInput(uninitializedTenant, undefined, ["projection.status"]),
-      ),
+      (instance) =>
+        instance.initialize(
+          initializeInput(uninitializedTenant, undefined, [
+            "projection.status",
+          ]),
+        ),
       "projection_forbidden",
     );
 
@@ -1297,25 +1422,20 @@ describe("tenant projection initialization and status", () => {
     await initializedStub.initialize(initializeInput(initializedTenant));
     await expectProjectionError(
       initializedStub,
-      (instance) => instance.getStatus(
-        statusInput(initializedTenant, ["projection.read"]),
-      ),
+      (instance) =>
+        instance.getStatus(statusInput(initializedTenant, ["projection.read"])),
       "projection_forbidden",
     );
   });
 
   it("maps malformed hostile input to projection_invalid", async () => {
     const stub = env.TENANT_PROJECTION.getByName("tenant_hostile_status");
-    const hostile = Object.defineProperty(
-      {},
-      "tenant_id",
-      {
-        enumerable: true,
-        get() {
-          throw new Error("tenant getter must not run");
-        },
+    const hostile = Object.defineProperty({}, "tenant_id", {
+      enumerable: true,
+      get() {
+        throw new Error("tenant getter must not run");
       },
-    );
+    });
     const rejection = await runInDurableObject(stub, async (instance) => {
       try {
         await instance.getStatus(hostile as unknown as ProjectionStatusInput);
@@ -1332,7 +1452,8 @@ describe("tenant projection initialization and status", () => {
 
   it("maps unexpected storage errors to sanitized unavailable errors with private causes", async () => {
     const projection = Object.create(
-      (await import("../../projection/tenant-projection")).TenantProjectionDO.prototype,
+      (await import("../../projection/tenant-projection")).TenantProjectionDO
+        .prototype,
     ) as unknown as TenantProjectionDO;
     const rawCause = new Error("secret SQL binding and payload");
     (projection as unknown as { ctx: DurableObjectState }).ctx = {

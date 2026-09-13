@@ -43,51 +43,56 @@ const binding = (
 const event = (
   eventId: string,
   overrides: Partial<ProjectionEventEnvelope> = {},
-): ProjectionEventEnvelope => ({
-  schema_version: 1,
-  event_id: eventId,
-  event_type: "message.created",
-  event_source: "live",
-  tenant_id: tenantId,
-  identity_id: "identity_a",
-  platform: "whatsapp",
-  account_id: "account_a",
-  conversation_id: "conversation_a",
-  matrix_room_id: null,
-  matrix_event_id: null,
-  remote_message_id: null,
-  occurred_at: "2026-09-07T01:00:00.000Z",
-  observed_at: "2026-09-07T01:00:01.000Z",
-  payload: {
-    message_id: `message_${eventId.replace(/[^a-z0-9_]/g, "_")}`,
-    direction: "inbound",
-    sender_participant_id: null,
-    sender_label: "Alice",
-    body: "hello",
-    reply_to_message_id: null,
-    delivery_status: "unknown",
-    unread: true,
-  },
-  ...overrides,
-} as ProjectionEventEnvelope);
+): ProjectionEventEnvelope =>
+  ({
+    schema_version: 1,
+    event_id: eventId,
+    event_type: "message.created",
+    event_source: "live",
+    tenant_id: tenantId,
+    identity_id: "identity_a",
+    platform: "whatsapp",
+    account_id: "account_a",
+    conversation_id: "conversation_a",
+    matrix_room_id: null,
+    matrix_event_id: null,
+    remote_message_id: null,
+    occurred_at: "2026-09-07T01:00:00.000Z",
+    observed_at: "2026-09-07T01:00:01.000Z",
+    payload: {
+      message_id: `message_${eventId.replace(/[^a-z0-9_]/g, "_")}`,
+      direction: "inbound",
+      sender_participant_id: null,
+      sender_label: "Alice",
+      body: "hello",
+      reply_to_message_id: null,
+      delivery_status: "unknown",
+      unread: true,
+    },
+    ...overrides,
+  }) as ProjectionEventEnvelope;
 
 const applyInput = (
   tenant: string,
   events: ProjectionEventEnvelope[],
   options: Partial<ApplyProjectionBatchInput> = {},
-): ApplyProjectionBatchInput => ({
-  schema_version: 1,
-  tenant_id: tenant,
-  authorization: auth(tenant, ["projection.write"]),
-  mode: "live",
-  rebuild_id: null,
-  connections: [binding()],
-  events,
-  checkpoint: null,
-  ...options,
-} as ApplyProjectionBatchInput);
+): ApplyProjectionBatchInput =>
+  ({
+    schema_version: 1,
+    tenant_id: tenant,
+    authorization: auth(tenant, ["projection.write"]),
+    mode: "live",
+    rebuild_id: null,
+    connections: [binding()],
+    events,
+    checkpoint: null,
+    ...options,
+  }) as ApplyProjectionBatchInput;
 
-const initialize = async (stub: DurableObjectStub<TenantProjectionDO>, tenant = tenantId) => {
+const initialize = async (
+  stub: DurableObjectStub<TenantProjectionDO>,
+  tenant = tenantId,
+) => {
   await stub.initialize({
     schema_version: 1,
     tenant_id: tenant,
@@ -140,20 +145,23 @@ describe("tenant projection applyBatch", () => {
     const stub = env.TENANT_PROJECTION.getByName(tenantId);
     await initialize(stub);
 
-    await expect(stub.applyBatch(applyInput(tenantId, [event("event_one")])))
-      .resolves.toMatchObject({
-        schema_version: 1,
-        tenant_id: tenantId,
-        generation: 1,
-        applied_count: 1,
-        duplicate_count: 0,
-        last_sequence: 1,
-      });
+    await expect(
+      stub.applyBatch(applyInput(tenantId, [event("event_one")])),
+    ).resolves.toMatchObject({
+      schema_version: 1,
+      tenant_id: tenantId,
+      generation: 1,
+      applied_count: 1,
+      duplicate_count: 0,
+      last_sequence: 1,
+    });
 
-    await expect(rows<{ event_id: string; event_hash: string }>(
-      stub,
-      "SELECT event_id, event_hash FROM applied_events",
-    )).resolves.toHaveLength(1);
+    await expect(
+      rows<{ event_id: string; event_hash: string }>(
+        stub,
+        "SELECT event_id, event_hash FROM applied_events",
+      ),
+    ).resolves.toHaveLength(1);
   });
 
   it("accepts the 500-event boundary but rejects 501 before any SQL mutation", async () => {
@@ -190,8 +198,12 @@ describe("tenant projection applyBatch", () => {
       applyInput(rejectedTenant, rejectedEvents),
       "projection_too_large",
     );
-    await expect(rows(rejectedStub, "SELECT * FROM applied_events")).resolves.toEqual([]);
-    await expect(rows(rejectedStub, "SELECT * FROM connection_bindings")).resolves.toEqual([]);
+    await expect(
+      rows(rejectedStub, "SELECT * FROM applied_events"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(rejectedStub, "SELECT * FROM connection_bindings"),
+    ).resolves.toEqual([]);
   });
 
   it("counts one UTF-8 newline-delimited canonical line per input event at the 4 MiB boundary", async () => {
@@ -229,8 +241,9 @@ describe("tenant projection applyBatch", () => {
       0,
     );
     expect(exactBytes).toBe(target);
-    await expect(stub.applyBatch(applyInput(tenant, sizedEvents)))
-      .resolves.toMatchObject({ applied_count: count, duplicate_count: 0 });
+    await expect(
+      stub.applyBatch(applyInput(tenant, sizedEvents)),
+    ).resolves.toMatchObject({ applied_count: count, duplicate_count: 0 });
 
     const overflow = structuredClone(sizedEvents);
     const last = overflow.at(-1)!;
@@ -238,7 +251,11 @@ describe("tenant projection applyBatch", () => {
       ...(last.payload as Record<string, unknown>),
       body: `${(last.payload as { body: string }).body}x`,
     } as never;
-    await expectCode(stub, applyInput(tenant, overflow), "projection_too_large");
+    await expectCode(
+      stub,
+      applyInput(tenant, overflow),
+      "projection_too_large",
+    );
   }, 30_000);
 
   it("resolves and persists 500 distinct account bindings without an oversized SQL IN query", async () => {
@@ -262,10 +279,15 @@ describe("tenant projection applyBatch", () => {
         },
       } as Partial<ProjectionEventEnvelope>),
     );
-    await expect(stub.applyBatch(applyInput(tenant, events, { connections: bindings })))
-      .resolves.toMatchObject({ applied_count: 500, duplicate_count: 0 });
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM connection_bindings")).resolves.toEqual([{ count: 500 }]);
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM applied_events")).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      stub.applyBatch(applyInput(tenant, events, { connections: bindings })),
+    ).resolves.toMatchObject({ applied_count: 500, duplicate_count: 0 });
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM connection_bindings"),
+    ).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM applied_events"),
+    ).resolves.toEqual([{ count: 500 }]);
   });
 
   it("collapses exact duplicate IDs in one input and across calls", async () => {
@@ -274,12 +296,28 @@ describe("tenant projection applyBatch", () => {
     await initialize(stub, tenant);
     const duplicate = event("event_duplicate", { tenant_id: tenant });
 
-    await expect(stub.applyBatch(applyInput(tenant, [duplicate, structuredClone(duplicate)])))
-      .resolves.toMatchObject({ applied_count: 1, duplicate_count: 1, last_sequence: 1 });
-    await expect(stub.applyBatch(applyInput(tenant, [structuredClone(duplicate)])))
-      .resolves.toMatchObject({ applied_count: 0, duplicate_count: 1, last_sequence: 1 });
-    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toHaveLength(1);
-    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toHaveLength(1);
+    await expect(
+      stub.applyBatch(
+        applyInput(tenant, [duplicate, structuredClone(duplicate)]),
+      ),
+    ).resolves.toMatchObject({
+      applied_count: 1,
+      duplicate_count: 1,
+      last_sequence: 1,
+    });
+    await expect(
+      stub.applyBatch(applyInput(tenant, [structuredClone(duplicate)])),
+    ).resolves.toMatchObject({
+      applied_count: 0,
+      duplicate_count: 1,
+      last_sequence: 1,
+    });
+    await expect(
+      rows(stub, "SELECT * FROM applied_events"),
+    ).resolves.toHaveLength(1);
+    await expect(
+      rows(stub, "SELECT * FROM projection_changes"),
+    ).resolves.toHaveLength(1);
   });
 
   it("rejects an exact event retry when its resolved connection binding changes", async () => {
@@ -304,7 +342,9 @@ describe("tenant projection applyBatch", () => {
       "projection_conflict",
     );
 
-    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([
+    await expect(
+      rows(stub, "SELECT * FROM connection_bindings"),
+    ).resolves.toEqual([
       {
         account_id: "account_a",
         connection_id: "connection_original",
@@ -312,21 +352,26 @@ describe("tenant projection applyBatch", () => {
         platform: "whatsapp",
       },
     ]);
-    await expect(rows(stub, "SELECT event_id FROM applied_events")).resolves.toEqual([
-      { event_id: original.event_id },
-    ]);
-    await expect(rows(stub, "SELECT event_id FROM projection_changes")).resolves.toEqual([
-      { event_id: original.event_id },
-    ]);
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events"),
+    ).resolves.toEqual([{ event_id: original.event_id }]);
+    await expect(
+      rows(stub, "SELECT event_id FROM projection_changes"),
+    ).resolves.toEqual([{ event_id: original.event_id }]);
   });
 
   it("detaches prepared events before asynchronous hashing can observe caller mutation", async () => {
     const tenant = "tenant_apply_detached";
-    const input = applyInput(tenant, [event("event_detached", { tenant_id: tenant })]);
+    const input = applyInput(tenant, [
+      event("event_detached", { tenant_id: tenant }),
+    ]);
     const preparedPromise = prepareProjectionBatch(input);
-    (input.events[0]!.payload as { body: string }).body = "mutated after snapshot";
+    (input.events[0]!.payload as { body: string }).body =
+      "mutated after snapshot";
     const prepared = await preparedPromise;
-    expect((prepared.events[0]!.event.payload as { body: string }).body).toBe("hello");
+    expect((prepared.events[0]!.event.payload as { body: string }).body).toBe(
+      "hello",
+    );
   });
 
   it("keeps every projection helper runtime-private and blocks forged prepared application", async () => {
@@ -345,7 +390,9 @@ describe("tenant projection applyBatch", () => {
     const reflection = await runInDurableObject(stub, async (instance) => {
       const prototype = Object.getPrototypeOf(instance);
       const visibleHelpers = INTERNAL_HELPER_NAMES.filter(
-        (name) => Reflect.get(prototype, name) !== undefined || Reflect.get(instance, name) !== undefined,
+        (name) =>
+          Reflect.get(prototype, name) !== undefined ||
+          Reflect.get(instance, name) !== undefined,
       );
       const forged = Reflect.get(instance, "applyPreparedBatch");
       if (typeof forged === "function") {
@@ -369,9 +416,15 @@ describe("tenant projection applyBatch", () => {
 
     expect(reflection.visibleHelpers).toEqual([]);
     expect(reflection.forgedCallable).toBe(false);
-    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM connection_bindings"),
+    ).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual(
+      [],
+    );
+    await expect(
+      rows(stub, "SELECT * FROM projection_changes"),
+    ).resolves.toEqual([]);
   });
 
   it.each([
@@ -382,17 +435,20 @@ describe("tenant projection applyBatch", () => {
     ["archive_too_large", "projection_too_large"],
     ["archive_conflict", "projection_conflict"],
     ["archive_unavailable", "projection_unavailable"],
-  ] as const)("maps %s to %s without leaking a malicious sentinel", (archiveCode, projectionCode) => {
-    const sentinel = "payload=malicious sentinel SQL=secret";
-    const mapped = mapArchiveFailure(archiveError(archiveCode, sentinel));
+  ] as const)(
+    "maps %s to %s without leaking a malicious sentinel",
+    (archiveCode, projectionCode) => {
+      const sentinel = "payload=malicious sentinel SQL=secret";
+      const mapped = mapArchiveFailure(archiveError(archiveCode, sentinel));
 
-    expect(mapped.code).toBe(projectionCode);
-    expect(mapped.message).toBe(projectionCode);
-    expect(Object.keys(mapped)).toEqual(["code"]);
-    expect(JSON.stringify(mapped)).not.toContain(sentinel);
-    expect(Object.values(mapped)).not.toContain(sentinel);
-    expect(Object.getOwnPropertyNames(mapped)).not.toContain("cause");
-  });
+      expect(mapped.code).toBe(projectionCode);
+      expect(mapped.message).toBe(projectionCode);
+      expect(Object.keys(mapped)).toEqual(["code"]);
+      expect(JSON.stringify(mapped)).not.toContain(sentinel);
+      expect(Object.values(mapped)).not.toContain(sentinel);
+      expect(Object.getOwnPropertyNames(mapped)).not.toContain("cause");
+    },
+  );
 
   it("maps unknown canonicalization failures to unavailable without leaking the cause", () => {
     const sentinel = "payload=unknown canonicalization sentinel";
@@ -414,21 +470,30 @@ describe("tenant projection applyBatch", () => {
     await stub.applyBatch(applyInput(tenant, [original]));
     const changed = event("event_conflict", {
       tenant_id: tenant,
-      payload: { ...(original.payload as Record<string, unknown>), body: "changed" } as never,
+      payload: {
+        ...(original.payload as Record<string, unknown>),
+        body: "changed",
+      } as never,
     } as Partial<ProjectionEventEnvelope>);
-    await expectCode(stub, applyInput(tenant, [changed, event("event_new", { tenant_id: tenant })]), "projection_conflict");
-    await expect(rows(stub, "SELECT event_id FROM applied_events ORDER BY event_id")).resolves.toEqual([
-      { event_id: "event_conflict" },
-    ]);
+    await expectCode(
+      stub,
+      applyInput(tenant, [changed, event("event_new", { tenant_id: tenant })]),
+      "projection_conflict",
+    );
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events ORDER BY event_id"),
+    ).resolves.toEqual([{ event_id: "event_conflict" }]);
   });
 
   it("requires exact account bindings and rejects remaps or unused rows", async () => {
     const tenant = "tenant_apply_bindings";
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(stub, tenant);
-    await stub.applyBatch(applyInput(tenant, [event("event_binding", { tenant_id: tenant })], {
-      connections: [binding("account_a", "connection_other")],
-    }));
+    await stub.applyBatch(
+      applyInput(tenant, [event("event_binding", { tenant_id: tenant })], {
+        connections: [binding("account_a", "connection_other")],
+      }),
+    );
     await expectCode(
       stub,
       applyInput(tenant, [event("event_binding_2", { tenant_id: tenant })], {
@@ -443,7 +508,9 @@ describe("tenant projection applyBatch", () => {
       }),
       "projection_conflict",
     );
-    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([
+    await expect(
+      rows(stub, "SELECT * FROM connection_bindings"),
+    ).resolves.toEqual([
       {
         account_id: "account_a",
         connection_id: "connection_other",
@@ -458,31 +525,71 @@ describe("tenant projection applyBatch", () => {
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(stub, tenant);
     const valid = event("event_preflight", { tenant_id: tenant });
-    await expectCode(stub, {
-      ...applyInput(tenant, [valid]),
-      authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-    }, "projection_forbidden");
-    await expectCode(stub, {
-      ...applyInput(tenant, [valid]),
-      events: [event("event_wrong_tenant", { tenant_id: "tenant_other" })],
-    }, "projection_tenant_mismatch");
-    await expectCode(stub, {
-      ...applyInput(tenant, [valid]),
-      mode: "replay",
-    }, "projection_invalid");
-    await expectCode(stub, {
-      ...applyInput(tenant, [valid]),
-      events: [event("event_missing_grant", { tenant_id: tenant, identity_id: "identity_b" })],
-    }, "projection_forbidden");
-    await expectCode(stub, {
-      ...applyInput(tenant, [event("event_bad_media", { tenant_id: tenant, event_type: "attachment.observed", payload: {
-        attachment_id: "attachment_a", message_id: "message_a", file_name: null, mime_type: null,
-        size_bytes: null, sha256: null, r2_key: "media/tenant_apply_preflight/not-null",
-      } })]),
-      connections: [binding()],
-    }, "projection_invalid");
-    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([]);
+    await expectCode(
+      stub,
+      {
+        ...applyInput(tenant, [valid]),
+        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+      },
+      "projection_forbidden",
+    );
+    await expectCode(
+      stub,
+      {
+        ...applyInput(tenant, [valid]),
+        events: [event("event_wrong_tenant", { tenant_id: "tenant_other" })],
+      },
+      "projection_tenant_mismatch",
+    );
+    await expectCode(
+      stub,
+      {
+        ...applyInput(tenant, [valid]),
+        mode: "replay",
+      },
+      "projection_invalid",
+    );
+    await expectCode(
+      stub,
+      {
+        ...applyInput(tenant, [valid]),
+        events: [
+          event("event_missing_grant", {
+            tenant_id: tenant,
+            identity_id: "identity_b",
+          }),
+        ],
+      },
+      "projection_forbidden",
+    );
+    await expectCode(
+      stub,
+      {
+        ...applyInput(tenant, [
+          event("event_bad_media", {
+            tenant_id: tenant,
+            event_type: "attachment.observed",
+            payload: {
+              attachment_id: "attachment_a",
+              message_id: "message_a",
+              file_name: null,
+              mime_type: null,
+              size_bytes: null,
+              sha256: null,
+              r2_key: "media/tenant_apply_preflight/not-null",
+            },
+          }),
+        ]),
+        connections: [binding()],
+      },
+      "projection_invalid",
+    );
+    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual(
+      [],
+    );
+    await expect(
+      rows(stub, "SELECT * FROM connection_bindings"),
+    ).resolves.toEqual([]);
   });
 
   it("uses observed timestamp and UTF-8 opaque ID order for deterministic changes", async () => {
@@ -490,10 +597,22 @@ describe("tenant projection applyBatch", () => {
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(stub, tenant);
     const events = [
-      event("event_prefix_long", { tenant_id: tenant, observed_at: "2026-09-07T01:00:00.000Z" }),
-      event("event_prefix", { tenant_id: tenant, observed_at: "2026-09-07T01:00:00.000Z" }),
-      event("event_😀", { tenant_id: tenant, observed_at: "2026-09-07T01:00:00.000Z" }),
-      event("event_é", { tenant_id: tenant, observed_at: "2026-09-07T01:00:00.000Z" }),
+      event("event_prefix_long", {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T01:00:00.000Z",
+      }),
+      event("event_prefix", {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T01:00:00.000Z",
+      }),
+      event("event_😀", {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T01:00:00.000Z",
+      }),
+      event("event_é", {
+        tenant_id: tenant,
+        observed_at: "2026-09-07T01:00:00.000Z",
+      }),
     ];
     await stub.applyBatch(applyInput(tenant, events));
     const changes = await rows<{ event_id: string; sequence: number }>(
@@ -516,41 +635,70 @@ describe("tenant projection applyBatch", () => {
       tenant_id: tenant,
       observed_at: "2026-09-07T01:00:00.000Z",
     });
-    await stub.applyBatch(applyInput(tenant, [first], {
-      checkpoint: {
+    await stub.applyBatch(
+      applyInput(tenant, [first], {
+        checkpoint: {
+          kind: "source_cursor",
+          value: "cursor-1",
+          last_observed_at: first.observed_at,
+          last_event_id: first.event_id,
+        },
+      }),
+    );
+    await expect(
+      rows(
+        stub,
+        "SELECT kind,value,last_observed_at,last_event_id,last_sequence FROM projection_checkpoints",
+      ),
+    ).resolves.toEqual([
+      {
         kind: "source_cursor",
         value: "cursor-1",
         last_observed_at: first.observed_at,
         last_event_id: first.event_id,
+        last_sequence: 1,
       },
-    }));
-    await expect(rows(stub, "SELECT kind,value,last_observed_at,last_event_id,last_sequence FROM projection_checkpoints")).resolves.toEqual([
-      { kind: "source_cursor", value: "cursor-1", last_observed_at: first.observed_at, last_event_id: first.event_id, last_sequence: 1 },
     ]);
-    await expect(stub.applyBatch(applyInput(tenant, [structuredClone(first)], {
-      checkpoint: {
-        kind: "source_cursor",
-        value: "cursor-1",
-        last_observed_at: first.observed_at,
-        last_event_id: first.event_id,
-      },
-    }))).resolves.toMatchObject({ applied_count: 0, duplicate_count: 1, last_sequence: 1 });
-    await expectCode(stub, applyInput(tenant, [structuredClone(first)], {
-      checkpoint: {
-        kind: "source_cursor",
-        value: "different",
-        last_observed_at: first.observed_at,
-        last_event_id: first.event_id,
-      },
-    }), "projection_conflict");
-    await expectCode(stub, applyInput(tenant, [structuredClone(first)], {
-      checkpoint: {
-        kind: "r2_manifest_cursor",
-        value: "cursor-1",
-        last_observed_at: first.observed_at,
-        last_event_id: first.event_id,
-      },
-    }), "projection_invalid");
+    await expect(
+      stub.applyBatch(
+        applyInput(tenant, [structuredClone(first)], {
+          checkpoint: {
+            kind: "source_cursor",
+            value: "cursor-1",
+            last_observed_at: first.observed_at,
+            last_event_id: first.event_id,
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({
+      applied_count: 0,
+      duplicate_count: 1,
+      last_sequence: 1,
+    });
+    await expectCode(
+      stub,
+      applyInput(tenant, [structuredClone(first)], {
+        checkpoint: {
+          kind: "source_cursor",
+          value: "different",
+          last_observed_at: first.observed_at,
+          last_event_id: first.event_id,
+        },
+      }),
+      "projection_conflict",
+    );
+    await expectCode(
+      stub,
+      applyInput(tenant, [structuredClone(first)], {
+        checkpoint: {
+          kind: "r2_manifest_cursor",
+          value: "cursor-1",
+          last_observed_at: first.observed_at,
+          last_event_id: first.event_id,
+        },
+      }),
+      "projection_invalid",
+    );
   });
 
   it("advances only newer live checkpoint tuples and still applies duplicate-only batches", async () => {
@@ -561,35 +709,46 @@ describe("tenant projection applyBatch", () => {
       tenant_id: tenant,
       observed_at: "2026-09-07T01:00:00.000Z",
     });
-    await stub.applyBatch(applyInput(tenant, [first], {
-      checkpoint: {
-        kind: "source_cursor",
-        value: "cursor-old",
-        last_observed_at: first.observed_at,
-        last_event_id: first.event_id,
-      },
-    }));
+    await stub.applyBatch(
+      applyInput(tenant, [first], {
+        checkpoint: {
+          kind: "source_cursor",
+          value: "cursor-old",
+          last_observed_at: first.observed_at,
+          last_event_id: first.event_id,
+        },
+      }),
+    );
     const newer = event("event_checkpoint_new", {
       tenant_id: tenant,
       observed_at: "2026-09-07T02:00:00.000Z",
     });
-    await stub.applyBatch(applyInput(tenant, [newer], {
-      checkpoint: {
-        kind: "source_cursor",
-        value: "cursor-new",
-        last_observed_at: newer.observed_at,
-        last_event_id: newer.event_id,
-      },
-    }));
-    await stub.applyBatch(applyInput(tenant, [structuredClone(first)], {
-      checkpoint: {
-        kind: "source_cursor",
-        value: "cursor-older-repeat",
-        last_observed_at: first.observed_at,
-        last_event_id: first.event_id,
-      },
-    }));
-    await expect(rows(stub, "SELECT value,last_observed_at,last_event_id,last_sequence,source_cursor,page_digest,last_applied_count,last_duplicate_count FROM projection_checkpoints")).resolves.toEqual([
+    await stub.applyBatch(
+      applyInput(tenant, [newer], {
+        checkpoint: {
+          kind: "source_cursor",
+          value: "cursor-new",
+          last_observed_at: newer.observed_at,
+          last_event_id: newer.event_id,
+        },
+      }),
+    );
+    await stub.applyBatch(
+      applyInput(tenant, [structuredClone(first)], {
+        checkpoint: {
+          kind: "source_cursor",
+          value: "cursor-older-repeat",
+          last_observed_at: first.observed_at,
+          last_event_id: first.event_id,
+        },
+      }),
+    );
+    await expect(
+      rows(
+        stub,
+        "SELECT value,last_observed_at,last_event_id,last_sequence,source_cursor,page_digest,last_applied_count,last_duplicate_count FROM projection_checkpoints",
+      ),
+    ).resolves.toEqual([
       {
         value: "cursor-new",
         last_observed_at: newer.observed_at,
@@ -614,7 +773,11 @@ describe("tenant projection applyBatch", () => {
       await runInDurableObject(stub, async (_instance, context) => {
         context.storage.sql.exec("UPDATE projection_meta SET state = ?", state);
       });
-      await expectCode(stub, applyInput(tenant, [event(`event_${state}`, { tenant_id: tenant })]), code);
+      await expectCode(
+        stub,
+        applyInput(tenant, [event(`event_${state}`, { tenant_id: tenant })]),
+        code,
+      );
     }
   });
 
@@ -641,21 +804,36 @@ describe("tenant projection applyBatch", () => {
     });
     try {
       const pending = event("event_rollback", { tenant_id: tenant });
-      await expectCode(stub, applyInput(tenant, [pending], {
-        checkpoint: {
-          kind: "source_cursor",
-          value: "cursor-rollback",
-          last_observed_at: pending.observed_at,
-          last_event_id: pending.event_id,
-        },
-      }), "projection_unavailable");
+      await expectCode(
+        stub,
+        applyInput(tenant, [pending], {
+          checkpoint: {
+            kind: "source_cursor",
+            value: "cursor-rollback",
+            last_observed_at: pending.observed_at,
+            last_event_id: pending.event_id,
+          },
+        }),
+        "projection_unavailable",
+      );
     } finally {
       await runInDurableObject(stub, async (_instance, state) => {
         state.storage.sql.exec("DROP TRIGGER fail_projection_change");
       });
     }
     expect(triggerIsTemporary).toBe(false);
-    for (const table of ["connection_bindings", "conversations", "participants", "messages", "message_versions", "resource_tombstones", "applied_events", "projection_changes", "projection_change_floors", "projection_checkpoints"]) {
+    for (const table of [
+      "connection_bindings",
+      "conversations",
+      "participants",
+      "messages",
+      "message_versions",
+      "resource_tombstones",
+      "applied_events",
+      "projection_changes",
+      "projection_change_floors",
+      "projection_checkpoints",
+    ]) {
       await expect(rows(stub, `SELECT * FROM ${table}`)).resolves.toEqual([]);
     }
   });

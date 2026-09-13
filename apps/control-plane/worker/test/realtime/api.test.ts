@@ -15,17 +15,21 @@ import { clearDirectory, seedDirectory } from "../support/directory-fixtures";
 const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
 const humanRequest: RealtimeTicketRequest = {
   schema_version: 1,
-  subscriptions: [{
-    identity_id: "identity_human",
-    families: ["projection"],
-  }],
+  subscriptions: [
+    {
+      identity_id: "identity_human",
+      families: ["projection"],
+    },
+  ],
 };
 const agentRequest: RealtimeTicketRequest = {
   schema_version: 1,
-  subscriptions: [{
-    identity_id: "identity_agent",
-    families: ["projection"],
-  }],
+  subscriptions: [
+    {
+      identity_id: "identity_agent",
+      families: ["projection"],
+    },
+  ],
 };
 
 type TestAppOptions = {
@@ -39,7 +43,10 @@ function createTestApp(options: TestAppOptions = {}) {
     createTokenVerifier: () => ({
       verify: async (token: string): Promise<VerifiedSubject> => {
         if (token === "human-token") {
-          return { issuer: "https://issuer.example/", subject: "human-subject" };
+          return {
+            issuer: "https://issuer.example/",
+            subject: "human-subject",
+          };
         }
         if (token === "agent-token") {
           return {
@@ -70,7 +77,8 @@ async function issueTicket(
   authorization: string | null = "Bearer human-token",
 ) {
   const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   if (authorization !== null && !headers.has("Authorization")) {
     headers.set("Authorization", authorization);
   }
@@ -91,11 +99,15 @@ async function issuedTicket(
   url = "http://example.test/api/v1/realtime/tickets",
   headers: HeadersInit = { Authorization: "Bearer human-token" },
 ) {
-  const response = await createTestApp().request(url, {
-    method: "POST",
-    headers: new Headers({ "Content-Type": "application/json", ...headers }),
-    body: JSON.stringify(request),
-  }, requestEnvironment());
+  const response = await createTestApp().request(
+    url,
+    {
+      method: "POST",
+      headers: new Headers({ "Content-Type": "application/json", ...headers }),
+      body: JSON.stringify(request),
+    },
+    requestEnvironment(),
+  );
   expect(response.status).toBe(201);
   return RealtimeTicketResponseSchema.parse(await response.json());
 }
@@ -134,7 +146,8 @@ async function upgrade(
     requestEnv?: Cloudflare.Env;
   } = {},
 ) {
-  const search = options.query ?? (ticket === undefined ? "" : `?ticket=${ticket}`);
+  const search =
+    options.query ?? (ticket === undefined ? "" : `?ticket=${ticket}`);
   const headers = new Headers(options.headers);
   if (!headers.has("Upgrade")) headers.set("Upgrade", "websocket");
   if (!headers.has("Sec-WebSocket-Protocol")) {
@@ -205,10 +218,12 @@ describe("POST /api/v1/realtime/tickets", () => {
   });
 
   it("uses bearer authentication before an Access assertion", async () => {
-    const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => ({
-      issuer: "https://issuer.example/",
-      subject: "human-subject",
-    }));
+    const accessVerify = vi.fn(
+      async (): Promise<VerifiedSubject> => ({
+        issuer: "https://issuer.example/",
+        subject: "human-subject",
+      }),
+    );
     const response = await createApp({
       createTokenVerifier: () => ({
         verify: async (): Promise<VerifiedSubject> => ({
@@ -234,14 +249,18 @@ describe("POST /api/v1/realtime/tickets", () => {
 
     expect(response.status).toBe(201);
     expect(accessVerify).not.toHaveBeenCalled();
-    expect(RealtimeTicketResponseSchema.parse(await response.json())).toBeDefined();
+    expect(
+      RealtimeTicketResponseSchema.parse(await response.json()),
+    ).toBeDefined();
   });
 
   it("issues through the same-origin Access credential when bearer is absent", async () => {
-    const accessVerify = vi.fn(async (token: string): Promise<VerifiedSubject> => {
-      expect(token).toBe("access.header.payload");
-      return { issuer: "https://issuer.example/", subject: "human-subject" };
-    });
+    const accessVerify = vi.fn(
+      async (token: string): Promise<VerifiedSubject> => {
+        expect(token).toBe("access.header.payload");
+        return { issuer: "https://issuer.example/", subject: "human-subject" };
+      },
+    );
     const app = createApp({
       createTokenVerifier: () => ({
         verify: async (): Promise<VerifiedSubject> => {
@@ -273,7 +292,9 @@ describe("POST /api/v1/realtime/tickets", () => {
   ])("returns one bounded 401 for %s", async (_name, authorization) => {
     const response = await issueTicket(
       humanRequest,
-      authorization === undefined ? {} : { headers: { Authorization: authorization } },
+      authorization === undefined
+        ? {}
+        : { headers: { Authorization: authorization } },
       requestEnvironment(),
       authorization ?? null,
     );
@@ -289,13 +310,22 @@ describe("POST /api/v1/realtime/tickets", () => {
   it("returns the same 404 for an unknown identity and a missing conversation scope", async () => {
     const unknown = await issueTicket({
       schema_version: 1,
-      subscriptions: [{ identity_id: "identity_agent", families: ["projection"] }],
+      subscriptions: [
+        { identity_id: "identity_agent", families: ["projection"] },
+      ],
     });
     const unknownFailure = await expectApiError(unknown, 404);
 
     await env.CONTROL_DB.prepare(
       "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND operation_scope = ?",
-    ).bind("tenant_pilot", "membership_human", "identity_human", "conversation.read").run();
+    )
+      .bind(
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "conversation.read",
+      )
+      .run();
     const missingScope = await issueTicket();
     const missingScopeFailure = await expectApiError(missingScope, 404);
 
@@ -306,24 +336,30 @@ describe("POST /api/v1/realtime/tickets", () => {
   });
 
   it.each([
-    ["duplicate subscription", {
-      schema_version: 1,
-      subscriptions: [
-        { identity_id: "identity_human", families: ["projection"] },
-        { identity_id: "identity_human", families: ["projection"] },
-      ],
-    }],
+    [
+      "duplicate subscription",
+      {
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: "identity_human", families: ["projection"] },
+          { identity_id: "identity_human", families: ["projection"] },
+        ],
+      },
+    ],
     ["extra key", { ...humanRequest, unexpected: true }],
-  ])("rejects %s with the bounded invalid-request body", async (_name, request) => {
-    const response = await issueTicket(request as RealtimeTicketRequest);
-    const failure = await expectApiError(response, 400);
-    expect(failure.body).toEqual({
-      error: { code: "invalid_request", message: "Invalid request" },
-    });
-    expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(response.headers.get("Pragma")).toBe("no-cache");
-    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
-  });
+  ])(
+    "rejects %s with the bounded invalid-request body",
+    async (_name, request) => {
+      const response = await issueTicket(request as RealtimeTicketRequest);
+      const failure = await expectApiError(response, 400);
+      expect(failure.body).toEqual({
+        error: { code: "invalid_request", message: "Invalid request" },
+      });
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(response.headers.get("Pragma")).toBe("no-cache");
+      expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+    },
+  );
 
   it("rejects malformed JSON with the same invalid-request body", async () => {
     const response = await createTestApp().request(
@@ -348,47 +384,58 @@ describe("POST /api/v1/realtime/tickets", () => {
   });
 
   it.each([
-    ["a SyntaxError", new SyntaxError("unexpected ticket detail"), "Internal Server Error"],
+    [
+      "a SyntaxError",
+      new SyntaxError("unexpected ticket detail"),
+      "Internal Server Error",
+    ],
     [
       "an unrelated HTTP 400",
       new HTTPException(400, { message: "unrelated ticket detail" }),
       "unrelated ticket detail",
     ],
-  ])("does not map %s to invalid_request", async (_name, error, expectedText) => {
-    const errorHandler = (createTestApp() as unknown as {
-      errorHandler: (
-        error: Error,
-        context: {
-          req: { path: string };
-          json(body: unknown, status: number): Response;
-          text(body: string, status: number): Response;
-          newResponse(body: BodyInit | null, init?: ResponseInit): Response;
-        },
-      ) => Response | Promise<Response>;
-    }).errorHandler;
+  ])(
+    "does not map %s to invalid_request",
+    async (_name, error, expectedText) => {
+      const errorHandler = (
+        createTestApp() as unknown as {
+          errorHandler: (
+            error: Error,
+            context: {
+              req: { path: string };
+              json(body: unknown, status: number): Response;
+              text(body: string, status: number): Response;
+              newResponse(body: BodyInit | null, init?: ResponseInit): Response;
+            },
+          ) => Response | Promise<Response>;
+        }
+      ).errorHandler;
 
-    const response = await errorHandler(error, {
-      req: { path: "/api/v1/realtime/tickets" },
-      json: (body, status) => new Response(JSON.stringify(body), { status }),
-      text: (body, status) => new Response(body, { status }),
-      newResponse: (body, init) => new Response(body, init),
-    });
+      const response = await errorHandler(error, {
+        req: { path: "/api/v1/realtime/tickets" },
+        json: (body, status) => new Response(JSON.stringify(body), { status }),
+        text: (body, status) => new Response(body, { status }),
+        newResponse: (body, init) => new Response(body, init),
+      });
 
-    expect(response.status).toBe(error instanceof SyntaxError ? 500 : 400);
-    expect(await response.text()).toBe(expectedText);
-  });
+      expect(response.status).toBe(error instanceof SyntaxError ? 500 : 400);
+      expect(await response.text()).toBe(expectedText);
+    },
+  );
 
   it("maps only Hono's exact malformed JSON exception to invalid_request", async () => {
-    const errorHandler = (createTestApp() as unknown as {
-      errorHandler: (
-        error: Error,
-        context: {
-          req: { path: string };
-          json(body: unknown, status: number): Response;
-          text(body: string, status: number): Response;
-        },
-      ) => Response | Promise<Response>;
-    }).errorHandler;
+    const errorHandler = (
+      createTestApp() as unknown as {
+        errorHandler: (
+          error: Error,
+          context: {
+            req: { path: string };
+            json(body: unknown, status: number): Response;
+            text(body: string, status: number): Response;
+          },
+        ) => Response | Promise<Response>;
+      }
+    ).errorHandler;
 
     const response = await errorHandler(
       new HTTPException(400, { message: "Malformed JSON in request body" }),
@@ -407,16 +454,18 @@ describe("POST /api/v1/realtime/tickets", () => {
 
   it("keeps unexpected ticket implementation failures on the normal 500 path", async () => {
     const secret = "unexpected-ticket-implementation-detail";
-    const errorHandler = (createTestApp() as unknown as {
-      errorHandler: (
-        error: Error,
-        context: {
-          req: { path: string };
-          json(body: unknown, status: number): Response;
-          text(body: string, status: number): Response;
-        },
-      ) => Response | Promise<Response>;
-    }).errorHandler;
+    const errorHandler = (
+      createTestApp() as unknown as {
+        errorHandler: (
+          error: Error,
+          context: {
+            req: { path: string };
+            json(body: unknown, status: number): Response;
+            text(body: string, status: number): Response;
+          },
+        ) => Response | Promise<Response>;
+      }
+    ).errorHandler;
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const response = await errorHandler(new Error(secret), {
@@ -430,7 +479,9 @@ describe("POST /api/v1/realtime/tickets", () => {
       expect(text).toBe("Internal Server Error");
       expect(text).not.toContain(secret);
       const loggedArguments = log.mock.calls
-        .flatMap((argumentsList) => argumentsList.map((argument) => String(argument)))
+        .flatMap((argumentsList) =>
+          argumentsList.map((argument) => String(argument)),
+        )
         .join("\n");
       expect(loggedArguments).not.toContain(secret);
       expect(log.mock.calls).toEqual([[{ event: "internal_server_error" }]]);
@@ -446,11 +497,18 @@ describe("POST /api/v1/realtime/tickets", () => {
         throw new Error(secret);
       },
     } as unknown as D1Database;
-    const response = await issueTicket(humanRequest, {}, requestEnvironment({ CONTROL_DB: failingDb }));
+    const response = await issueTicket(
+      humanRequest,
+      {},
+      requestEnvironment({ CONTROL_DB: failingDb }),
+    );
     const failure = await expectApiError(response, 503);
 
     expect(failure.body).toEqual({
-      error: { code: "service_unavailable", message: "Authorization service unavailable" },
+      error: {
+        code: "service_unavailable",
+        message: "Authorization service unavailable",
+      },
     });
     expect(failure.text).not.toContain(secret);
   });
@@ -496,10 +554,14 @@ describe("GET /api/v1/realtime", () => {
     });
 
     expect(response.status).toBe(101);
-    expect(response.headers.get("Sec-WebSocket-Protocol")).toBe(REALTIME_SUBPROTOCOL);
+    expect(response.headers.get("Sec-WebSocket-Protocol")).toBe(
+      REALTIME_SUBPROTOCOL,
+    );
     expect(calls).toHaveLength(1);
     expect(calls[0]?.tenant).toBe("tenant_pilot");
-    expect(calls[0]?.request.url).toBe("https://tenant-projection.internal/realtime");
+    expect(calls[0]?.request.url).toBe(
+      "https://tenant-projection.internal/realtime",
+    );
     expect([...calls[0]!.request.headers.entries()].sort()).toEqual([
       ["connection", "Upgrade"],
       ["sec-websocket-protocol", REALTIME_SUBPROTOCOL],
@@ -507,7 +569,8 @@ describe("GET /api/v1/realtime", () => {
       ["x-communicator-realtime-context", expect.any(String)],
     ]);
     const internalContext = JSON.parse(
-      calls[0]!.request.headers.get("X-Communicator-Realtime-Context") ?? "null",
+      calls[0]!.request.headers.get("X-Communicator-Realtime-Context") ??
+        "null",
     ) as Record<string, unknown>;
     expect(internalContext).toMatchObject({
       schema_version: 1,
@@ -520,34 +583,51 @@ describe("GET /api/v1/realtime", () => {
     expect(calls[0]!.request.url).not.toContain(issued.ticket);
     expect(JSON.stringify(internalContext)).not.toContain("caller-token");
     expect(JSON.stringify(internalContext)).not.toContain("access.secret");
-    expect(JSON.stringify(internalContext)).not.toContain("tenant-attacker-choice");
+    expect(JSON.stringify(internalContext)).not.toContain(
+      "tenant-attacker-choice",
+    );
   });
 
   it.each([
     ["non-upgrade", { Upgrade: "not-websocket" }, ""],
-    ["wrong subprotocol", {
-      Upgrade: "websocket",
-      "Sec-WebSocket-Protocol": "communicator.realtime.v0",
-    }, ""],
-    ["duplicate ticket", {
-      Upgrade: "websocket",
-      "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
-    }, "?ticket=rt1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&ticket=rt1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
-    ["extra query key", {
-      Upgrade: "websocket",
-      "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
-    }, "?ticket=rt1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&tenant=tenant_pilot"],
+    [
+      "wrong subprotocol",
+      {
+        Upgrade: "websocket",
+        "Sec-WebSocket-Protocol": "communicator.realtime.v0",
+      },
+      "",
+    ],
+    [
+      "duplicate ticket",
+      {
+        Upgrade: "websocket",
+        "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+      },
+      "?ticket=rt1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&ticket=rt1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ],
+    [
+      "extra query key",
+      {
+        Upgrade: "websocket",
+        "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+      },
+      "?ticket=rt1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&tenant=tenant_pilot",
+    ],
   ])("rejects %s before D1 with bounded 400", async (_name, headers, query) => {
     const database = {
       withSession() {
         throw new Error("D1 must not be touched");
       },
     } as unknown as D1Database;
-    const response = await upgrade("rt1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {
-      headers,
-      query,
-      requestEnv: requestEnvironment({ CONTROL_DB: database }),
-    });
+    const response = await upgrade(
+      "rt1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      {
+        headers,
+        query,
+        requestEnv: requestEnvironment({ CONTROL_DB: database }),
+      },
+    );
     const failure = await expectApiError(response, 400);
     expect(failure.body).toEqual({
       error: { code: "invalid_request", message: "Invalid request" },
@@ -561,17 +641,31 @@ describe("GET /api/v1/realtime", () => {
     const expired = await issuedTicket();
     await env.CONTROL_DB.prepare(
       "UPDATE realtime_tickets SET expires_at_ms = ?, expires_at = ? WHERE ticket_digest = ?",
-    ).bind(
-      0,
-      "2020-01-01T00:00:00.000Z",
-      await digestRealtimeTicket(expired.ticket),
-    ).run();
-    const expiredFailure = await expectApiError(await upgrade(expired.ticket), 401);
+    )
+      .bind(
+        0,
+        "2020-01-01T00:00:00.000Z",
+        await digestRealtimeTicket(expired.ticket),
+      )
+      .run();
+    const expiredFailure = await expectApiError(
+      await upgrade(expired.ticket),
+      401,
+    );
 
     const reusable = await issuedTicket();
     const calls: ProjectionCall[] = [];
-    await expect((await upgrade(reusable.ticket, { requestEnv: projectionEnvironment(calls) })).status).toBe(101);
-    const reusedFailure = await expectApiError(await upgrade(reusable.ticket), 401);
+    await expect(
+      (
+        await upgrade(reusable.ticket, {
+          requestEnv: projectionEnvironment(calls),
+        })
+      ).status,
+    ).toBe(101);
+    const reusedFailure = await expectApiError(
+      await upgrade(reusable.ticket),
+      401,
+    );
 
     expect(expiredFailure.text).toBe(missingFailure.text);
     expect(reusedFailure.text).toBe(missingFailure.text);
@@ -606,22 +700,32 @@ describe("GET /api/v1/realtime", () => {
   });
 
   it("keeps Human and Agent ticket contexts isolated", async () => {
-    const human = await issuedTicket(humanRequest, "http://example.test/api/v1/realtime/tickets", {
-      Authorization: "Bearer human-token",
-    });
-    const agent = await issuedTicket(agentRequest, "http://example.test/api/v1/realtime/tickets", {
-      Authorization: "Bearer agent-token",
-    });
+    const human = await issuedTicket(
+      humanRequest,
+      "http://example.test/api/v1/realtime/tickets",
+      {
+        Authorization: "Bearer human-token",
+      },
+    );
+    const agent = await issuedTicket(
+      agentRequest,
+      "http://example.test/api/v1/realtime/tickets",
+      {
+        Authorization: "Bearer agent-token",
+      },
+    );
     const calls: ProjectionCall[] = [];
     await upgrade(human.ticket, { requestEnv: projectionEnvironment(calls) });
     await upgrade(agent.ticket, { requestEnv: projectionEnvironment(calls) });
 
     expect(calls).toHaveLength(2);
     const humanContext = JSON.parse(
-      calls[0]!.request.headers.get("X-Communicator-Realtime-Context") ?? "null",
+      calls[0]!.request.headers.get("X-Communicator-Realtime-Context") ??
+        "null",
     ) as Record<string, unknown>;
     const agentContext = JSON.parse(
-      calls[1]!.request.headers.get("X-Communicator-Realtime-Context") ?? "null",
+      calls[1]!.request.headers.get("X-Communicator-Realtime-Context") ??
+        "null",
     ) as Record<string, unknown>;
     expect(humanContext).toMatchObject({
       principal_id: "principal_human",

@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ArchiveBatchManifest, CanonicalEventEnvelope } from "@communicator/contracts";
+import type {
+  ArchiveBatchManifest,
+  CanonicalEventEnvelope,
+} from "@communicator/contracts";
 import {
   MAX_ARCHIVE_MANIFEST_BYTES,
   MAX_ARCHIVE_UNCOMPRESSED_BYTES,
@@ -49,9 +52,13 @@ const newScope = (): ArchiveScope => {
 const eventFor = (
   scope: ArchiveScope,
   overrides: Partial<CanonicalEventEnvelope> = {},
-): CanonicalEventEnvelope => makeEvent({ tenant_id: scope.tenantId, ...overrides });
+): CanonicalEventEnvelope =>
+  makeEvent({ tenant_id: scope.tenantId, ...overrides });
 
-const eventsFor = (scope: ArchiveScope, count: number): CanonicalEventEnvelope[] =>
+const eventsFor = (
+  scope: ArchiveScope,
+  count: number,
+): CanonicalEventEnvelope[] =>
   makeEvents(count).map((event) => ({ ...event, tenant_id: scope.tenantId }));
 
 const seedBatch = async (
@@ -69,7 +76,9 @@ const seedBatch = async (
     sourceCheckpoint: null,
   });
 
-const metadataFor = (manifest: ArchiveBatchManifest): Record<string, string> => ({
+const metadataFor = (
+  manifest: ArchiveBatchManifest,
+): Record<string, string> => ({
   "schema-version": "1",
   "tenant-id": manifest.tenant_id,
   "batch-id": manifest.batch_id,
@@ -95,7 +104,12 @@ const manifestKeyFor = (manifest: ArchiveBatchManifest): string => {
   if (!manifest.data_key.startsWith(dataPrefix)) {
     throw new Error("fixture data key missing tenant prefix");
   }
-  return "manifests/" + manifest.tenant_id + manifest.data_key.slice(dataPrefix.length, -".jsonl.gz".length) + ".json";
+  return (
+    "manifests/" +
+    manifest.tenant_id +
+    manifest.data_key.slice(dataPrefix.length, -".jsonl.gz".length) +
+    ".json"
+  );
 };
 
 const overwriteDataAndManifest = async (
@@ -107,7 +121,10 @@ const overwriteDataAndManifest = async (
   const hash = await sha256Hex(canonicalJsonl);
   const base = committed.manifest;
   await bucket.put(base.data_key, compressed, {
-    httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+    httpMetadata: {
+      contentType: "application/x-ndjson",
+      contentEncoding: "gzip",
+    },
     customMetadata: {
       "schema-version": "1",
       "tenant-id": base.tenant_id,
@@ -116,7 +133,8 @@ const overwriteDataAndManifest = async (
     },
   });
   const dataObject = await bucket.get(base.data_key);
-  if (!dataObject) throw new Error("fixture data object missing after overwrite");
+  if (!dataObject)
+    throw new Error("fixture data object missing after overwrite");
   const next = {
     ...base,
     ...changes,
@@ -141,7 +159,10 @@ const overwriteCompressedDataAndManifest = async (
   const hash = await sha256Hex(decodedBytes);
   const base = committed.manifest;
   await bucket.put(base.data_key, compressed, {
-    httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+    httpMetadata: {
+      contentType: "application/x-ndjson",
+      contentEncoding: "gzip",
+    },
     customMetadata: {
       "schema-version": "1",
       "tenant-id": base.tenant_id,
@@ -150,7 +171,8 @@ const overwriteCompressedDataAndManifest = async (
     },
   });
   const dataObject = await bucket.get(base.data_key);
-  if (!dataObject) throw new Error("fixture data object missing after overwrite");
+  if (!dataObject)
+    throw new Error("fixture data object missing after overwrite");
   const next = {
     ...base,
     ...changes,
@@ -197,7 +219,9 @@ const expectArchiveError = async (
   await expect(operation).rejects.toMatchObject({ code });
 };
 
-const getArchiveError = async (operation: Promise<unknown>): Promise<ArchiveError> => {
+const getArchiveError = async (
+  operation: Promise<unknown>,
+): Promise<ArchiveError> => {
   try {
     await operation;
   } catch (error) {
@@ -211,7 +235,10 @@ const rawCursor = (json: string): string => {
   const binary = Array.from(new TextEncoder().encode(json), (byte) =>
     String.fromCharCode(byte),
   ).join("");
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 };
 
 const forwardingBucket = (
@@ -232,7 +259,9 @@ const forwardingBucket = (
 
 afterEach(async () => {
   const tenants = activeTenants.splice(0, activeTenants.length);
-  await Promise.all(tenants.map((tenantId) => cleanupArchiveTenant(bucket, tenantId)));
+  await Promise.all(
+    tenants.map((tenantId) => cleanupArchiveTenant(bucket, tenantId)),
+  );
 });
 
 describe("replay cursor", () => {
@@ -246,9 +275,9 @@ describe("replay cursor", () => {
     const cursor = encodeReplayCursor(payload);
     expect(cursor).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(cursor).not.toContain("=");
-    expect(decodeReplayCursor(cursor, payload.tenant_id, payload.manifest_prefix)).toEqual(
-      payload,
-    );
+    expect(
+      decodeReplayCursor(cursor, payload.tenant_id, payload.manifest_prefix),
+    ).toEqual(payload);
   });
 
   it("rejects malformed, padded, oversized, foreign, and noncanonical cursors", () => {
@@ -259,14 +288,22 @@ describe("replay cursor", () => {
       r2_cursor: "opaque-r2-cursor",
     };
     const valid = encodeReplayCursor(payload);
-    expect(() => decodeReplayCursor("", payload.tenant_id, payload.manifest_prefix)).toThrow(
-      ArchiveError,
-    );
     expect(() =>
-      decodeReplayCursor(valid + "=", payload.tenant_id, payload.manifest_prefix),
+      decodeReplayCursor("", payload.tenant_id, payload.manifest_prefix),
     ).toThrow(ArchiveError);
     expect(() =>
-      decodeReplayCursor("A".repeat(4097), payload.tenant_id, payload.manifest_prefix),
+      decodeReplayCursor(
+        valid + "=",
+        payload.tenant_id,
+        payload.manifest_prefix,
+      ),
+    ).toThrow(ArchiveError);
+    expect(() =>
+      decodeReplayCursor(
+        "A".repeat(4097),
+        payload.tenant_id,
+        payload.manifest_prefix,
+      ),
     ).toThrow(ArchiveError);
     expect(() =>
       decodeReplayCursor(valid, "tenant_other", "manifests/tenant_other/"),
@@ -286,21 +323,30 @@ describe("replay cursor", () => {
     ).toThrow(ArchiveError);
     expect(() =>
       decodeReplayCursor(
-        rawCursor(base.replace('"r2_cursor":"opaque-r2-cursor"', '"unknown":true,"r2_cursor":"opaque-r2-cursor"')),
+        rawCursor(
+          base.replace(
+            '"r2_cursor":"opaque-r2-cursor"',
+            '"unknown":true,"r2_cursor":"opaque-r2-cursor"',
+          ),
+        ),
         "tenant_pilot",
         "manifests/tenant_pilot/",
       ),
     ).toThrow(ArchiveError);
     expect(() =>
       decodeReplayCursor(
-        rawCursor(base.replace('"r2_cursor":"opaque-r2-cursor"', '"r2_cursor":""')),
+        rawCursor(
+          base.replace('"r2_cursor":"opaque-r2-cursor"', '"r2_cursor":""'),
+        ),
         "tenant_pilot",
         "manifests/tenant_pilot/",
       ),
     ).toThrow(ArchiveError);
     expect(() =>
       decodeReplayCursor(
-        rawCursor('{"r2_cursor":"opaque-r2-cursor","manifest_prefix":"manifests/tenant_pilot/","tenant_id":"tenant_pilot","schema_version":1}'),
+        rawCursor(
+          '{"r2_cursor":"opaque-r2-cursor","manifest_prefix":"manifests/tenant_pilot/","tenant_id":"tenant_pilot","schema_version":1}',
+        ),
         "tenant_pilot",
         "manifests/tenant_pilot/",
       ),
@@ -324,7 +370,10 @@ describe("tenant-scoped manifest listing", () => {
       orphan.events[0]!.observed_at,
     );
     await bucket.put(orphanKeys.dataKey, orphan.compressed, {
-      httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+      httpMetadata: {
+        contentType: "application/x-ndjson",
+        contentEncoding: "gzip",
+      },
       customMetadata: {
         "schema-version": "1",
         "tenant-id": scope.tenantId,
@@ -335,19 +384,31 @@ describe("tenant-scoped manifest listing", () => {
     const result = (await listCommittedManifestPage(bucket, scope.tenantId, {
       pageSize: 100,
     })) as ManifestPage;
-    expect(result.items.map((item) => item.key)).toEqual([committed.manifestKey]);
+    expect(result.items.map((item) => item.key)).toEqual([
+      committed.manifestKey,
+    ]);
     expect(result.items[0]?.manifest).toEqual(committed.manifest);
-    expect(result.items.every((item) => !item.key.startsWith("events/"))).toBe(true);
+    expect(result.items.every((item) => !item.key.startsWith("events/"))).toBe(
+      true,
+    );
   });
 
   it("accepts page sizes 1, 50, and 100 and rejects invalid sizes", async () => {
     const scope = newScope();
     await seedBatch(scope);
     for (const pageSize of [1, 50, 100]) {
-      const result = await listCommittedManifestPage(bucket, scope.tenantId, { pageSize });
+      const result = await listCommittedManifestPage(bucket, scope.tenantId, {
+        pageSize,
+      });
       expect(result.items).toHaveLength(1);
     }
-    for (const pageSize of [0, 101, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const pageSize of [
+      0,
+      101,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
       await expectArchiveError(
         listCommittedManifestPage(bucket, scope.tenantId, { pageSize }),
         "archive_invalid",
@@ -357,10 +418,24 @@ describe("tenant-scoped manifest listing", () => {
 
   it("preserves R2 manifest key order across wrapped pages", async () => {
     const scope = newScope();
-    await seedBatch(scope, [eventFor(scope, { event_id: "$page-1:server" })], "batch_page_1");
-    await seedBatch(scope, [eventFor(scope, { event_id: "$page-2:server" })], "batch_page_2");
-    await seedBatch(scope, [eventFor(scope, { event_id: "$page-3:server" })], "batch_page_3");
-    const first = await listCommittedManifestPage(bucket, scope.tenantId, { pageSize: 1 });
+    await seedBatch(
+      scope,
+      [eventFor(scope, { event_id: "$page-1:server" })],
+      "batch_page_1",
+    );
+    await seedBatch(
+      scope,
+      [eventFor(scope, { event_id: "$page-2:server" })],
+      "batch_page_2",
+    );
+    await seedBatch(
+      scope,
+      [eventFor(scope, { event_id: "$page-3:server" })],
+      "batch_page_3",
+    );
+    const first = await listCommittedManifestPage(bucket, scope.tenantId, {
+      pageSize: 1,
+    });
     expect(first.items).toHaveLength(1);
     expect(first.next_cursor).not.toBeNull();
     const second = await listCommittedManifestPage(bucket, scope.tenantId, {
@@ -388,7 +463,10 @@ describe("tenant-scoped manifest listing", () => {
     });
     const first = await listCommittedManifestPage(source, scope.tenantId);
     expect(first.next_cursor).not.toBeNull();
-    expect(calls[0]).toMatchObject({ prefix: "manifests/" + scope.tenantId + "/", limit: 50 });
+    expect(calls[0]).toMatchObject({
+      prefix: "manifests/" + scope.tenantId + "/",
+      limit: 50,
+    });
   });
 
   it("continues when R2 returns fewer objects than the requested limit", async () => {
@@ -431,7 +509,11 @@ describe("tenant-scoped manifest listing", () => {
     );
     const outside = forwardingBucket(bucket, {
       list: async () => ({
-        objects: [{ key: "manifests/tenant_other/2026/09/07/01/batch_x.json" } as R2Object],
+        objects: [
+          {
+            key: "manifests/tenant_other/2026/09/07/01/batch_x.json",
+          } as R2Object,
+        ],
         delimitedPrefixes: [],
         truncated: false,
       }),
@@ -454,7 +536,10 @@ describe("committed archive reads", () => {
       committed.manifestKey,
     );
     expect(result.manifest).toEqual(committed.manifest);
-    const encoded = await encodeCanonicalEventBatch({ tenantId: scope.tenantId, events });
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: scope.tenantId,
+      events,
+    });
     expect(result.events.map((event) => event.event_id)).toEqual(
       encoded.events.map((event) => event.event_id),
     );
@@ -478,7 +563,9 @@ describe("committed archive reads", () => {
     const original = committed.manifest;
     const originalData = await bucket.get(original.data_key);
     expect(originalData).not.toBeNull();
-    const originalCompressed = new Uint8Array(await originalData!.arrayBuffer());
+    const originalCompressed = new Uint8Array(
+      await originalData!.arrayBuffer(),
+    );
     await bucket.delete(original.data_key);
     await expectArchiveError(
       readCommittedArchiveBatch(bucket, scope.tenantId, committed.manifestKey),
@@ -491,19 +578,34 @@ describe("committed archive reads", () => {
       ["partition", { data_key: original.data_key.replace("/01/", "/02/") }],
       ["etag", { data_etag: "wrong-etag" }],
       ["compressed size", { compressed_bytes: original.compressed_bytes + 1 }],
-      ["data key", { data_key: original.data_key.replace("events/", "events/tenant_other/") }],
+      [
+        "data key",
+        {
+          data_key: original.data_key.replace(
+            "events/",
+            "events/tenant_other/",
+          ),
+        },
+      ],
       ["first id", { first_event_id: "$wrong:server" }],
       ["last timestamp", { last_observed_at: "2026-09-07T00:00:00.000Z" }],
       ["count", { event_count: 1 }],
     ];
     for (const [name, changes] of cases) {
       await bucket.put(original.data_key, originalCompressed, {
-        httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+        httpMetadata: {
+          contentType: "application/x-ndjson",
+          contentEncoding: "gzip",
+        },
         customMetadata: metadataFor(original),
       });
       await overwriteManifest(original, changes);
       const error = await getArchiveError(
-        readCommittedArchiveBatch(bucket, scope.tenantId, committed.manifestKey),
+        readCommittedArchiveBatch(
+          bucket,
+          scope.tenantId,
+          committed.manifestKey,
+        ),
       );
       expect(error.code, name).toBe("archive_corrupt");
       await overwriteManifest(original);
@@ -575,13 +677,20 @@ describe("committed archive reads", () => {
         key === original.data_key ? oversizedData : bucket.get(key, options),
     });
     await expectArchiveError(
-      readCommittedArchiveBatch(oversizedSource, scope.tenantId, committed.manifestKey),
+      readCommittedArchiveBatch(
+        oversizedSource,
+        scope.tenantId,
+        committed.manifestKey,
+      ),
       "archive_corrupt",
     );
     expect(bodyReads).toBe(0);
 
     await bucket.put(original.data_key, compressed, {
-      httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+      httpMetadata: {
+        contentType: "application/x-ndjson",
+        contentEncoding: "gzip",
+      },
       customMetadata: {
         ...metadataFor(original),
         extra: "not allowed",
@@ -593,7 +702,10 @@ describe("committed archive reads", () => {
     );
 
     await bucket.put(original.data_key, compressed, {
-      httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+      httpMetadata: {
+        contentType: "application/x-ndjson",
+        contentEncoding: "gzip",
+      },
       customMetadata: {
         ...metadataFor(original),
         "canonical-sha256": "b".repeat(64),
@@ -605,7 +717,10 @@ describe("committed archive reads", () => {
     );
 
     await bucket.put(original.data_key, new Uint8Array([...compressed, 0]), {
-      httpMetadata: { contentType: "application/x-ndjson", contentEncoding: "gzip" },
+      httpMetadata: {
+        contentType: "application/x-ndjson",
+        contentEncoding: "gzip",
+      },
       customMetadata: metadataFor(original),
     });
     await expectArchiveError(
@@ -624,10 +739,20 @@ describe("committed archive reads", () => {
     const scope = newScope();
     const events = eventsFor(scope, 2);
     const committed = await seedBatch(scope, events);
-    const encoded = await encodeCanonicalEventBatch({ tenantId: scope.tenantId, events });
-    const lines = new TextDecoder().decode(encoded.canonicalJsonl).trimEnd().split("\n");
-    const reversed = new TextEncoder().encode(lines.slice().reverse().join("\n") + "\n");
-    const duplicate = new TextEncoder().encode(lines[0] + "\n" + lines[0] + "\n");
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: scope.tenantId,
+      events,
+    });
+    const lines = new TextDecoder()
+      .decode(encoded.canonicalJsonl)
+      .trimEnd()
+      .split("\n");
+    const reversed = new TextEncoder().encode(
+      lines.slice().reverse().join("\n") + "\n",
+    );
+    const duplicate = new TextEncoder().encode(
+      lines[0] + "\n" + lines[0] + "\n",
+    );
 
     await overwriteCompressedDataAndManifest(
       committed,
@@ -661,19 +786,29 @@ describe("committed archive reads", () => {
       "archive_corrupt",
     );
 
-    await overwriteCompressedDataAndManifest(committed, await gzipBytes(reversed), reversed);
+    await overwriteCompressedDataAndManifest(
+      committed,
+      await gzipBytes(reversed),
+      reversed,
+    );
     await expectArchiveError(
       readCommittedArchiveBatch(bucket, scope.tenantId, committed.manifestKey),
       "archive_corrupt",
     );
 
-    await overwriteCompressedDataAndManifest(committed, await gzipBytes(duplicate), duplicate);
+    await overwriteCompressedDataAndManifest(
+      committed,
+      await gzipBytes(duplicate),
+      duplicate,
+    );
     await expectArchiveError(
       readCommittedArchiveBatch(bucket, scope.tenantId, committed.manifestKey),
       "archive_corrupt",
     );
 
-    await overwriteDataAndManifest(committed, encoded.canonicalJsonl, { event_count: 1 });
+    await overwriteDataAndManifest(committed, encoded.canonicalJsonl, {
+      event_count: 1,
+    });
     await expectArchiveError(
       readCommittedArchiveBatch(bucket, scope.tenantId, committed.manifestKey),
       "archive_corrupt",
@@ -696,10 +831,14 @@ describe("committed archive reads", () => {
     const key = committed.manifestKey;
     const metadata = metadataFor(original);
 
-    await bucket.put(key, canonicalJsonLineBytes({ ...original, unexpected: true }), {
-      httpMetadata: { contentType: "application/json" },
-      customMetadata: metadata,
-    });
+    await bucket.put(
+      key,
+      canonicalJsonLineBytes({ ...original, unexpected: true }),
+      {
+        httpMetadata: { contentType: "application/json" },
+        customMetadata: metadata,
+      },
+    );
     await expectArchiveError(
       readCommittedArchiveBatch(bucket, scope.tenantId, key),
       "archive_corrupt",
@@ -834,9 +973,17 @@ describe("projection-only replay", () => {
   it("replays the same archive twice with identical sequences", async () => {
     const scope = newScope();
     await seedBatch(scope, eventsFor(scope, 2));
-    await seedBatch(scope, [eventFor(scope, { event_id: "$event-3:server" })], "batch_reader_second");
-    const first = await readReplayPage(bucket, scope.tenantId, { pageSize: 100 });
-    const second = await readReplayPage(bucket, scope.tenantId, { pageSize: 100 });
+    await seedBatch(
+      scope,
+      [eventFor(scope, { event_id: "$event-3:server" })],
+      "batch_reader_second",
+    );
+    const first = await readReplayPage(bucket, scope.tenantId, {
+      pageSize: 100,
+    });
+    const second = await readReplayPage(bucket, scope.tenantId, {
+      pageSize: 100,
+    });
     expect(first.manifests.map((manifest) => manifest.batch_id)).toEqual(
       second.manifests.map((manifest) => manifest.batch_id),
     );
@@ -848,7 +995,10 @@ describe("projection-only replay", () => {
   it("replays an individually valid 4 MiB batch with page size one", async () => {
     const scope = newScope();
     const events = makeExactUncompressedEvents(scope, "exact-single");
-    const encoded = await encodeCanonicalEventBatch({ tenantId: scope.tenantId, events });
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: scope.tenantId,
+      events,
+    });
     expect(encoded.uncompressedBytes).toBe(MAX_ARCHIVE_UNCOMPRESSED_BYTES);
     const committed = await seedBatch(scope, events);
     const page = await readReplayPage(bucket, scope.tenantId, { pageSize: 1 });
@@ -861,17 +1011,30 @@ describe("projection-only replay", () => {
     const scope = newScope();
     const firstEvents = makeExactUncompressedEvents(scope, "exact-first");
     const secondEvents = makeExactUncompressedEvents(scope, "exact-second");
-    const firstEncoded = await encodeCanonicalEventBatch({ tenantId: scope.tenantId, events: firstEvents });
-    const secondEncoded = await encodeCanonicalEventBatch({ tenantId: scope.tenantId, events: secondEvents });
+    const firstEncoded = await encodeCanonicalEventBatch({
+      tenantId: scope.tenantId,
+      events: firstEvents,
+    });
+    const secondEncoded = await encodeCanonicalEventBatch({
+      tenantId: scope.tenantId,
+      events: secondEvents,
+    });
     expect(firstEncoded.uncompressedBytes).toBe(MAX_ARCHIVE_UNCOMPRESSED_BYTES);
-    expect(secondEncoded.uncompressedBytes).toBe(MAX_ARCHIVE_UNCOMPRESSED_BYTES);
+    expect(secondEncoded.uncompressedBytes).toBe(
+      MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    );
     await seedBatch(scope, firstEvents, "batch_exact_first");
     await seedBatch(scope, secondEvents, "batch_exact_second");
-    const exactBytesPage = await readReplayPage(bucket, scope.tenantId, { pageSize: 2 });
+    const exactBytesPage = await readReplayPage(bucket, scope.tenantId, {
+      pageSize: 2,
+    });
     expect(exactBytesPage.manifests).toHaveLength(2);
-    expect(exactBytesPage.manifests.reduce((sum, manifest) => sum + manifest.uncompressed_bytes, 0)).toBe(
-      MAX_REPLAY_PAGE_UNCOMPRESSED_BYTES,
-    );
+    expect(
+      exactBytesPage.manifests.reduce(
+        (sum, manifest) => sum + manifest.uncompressed_bytes,
+        0,
+      ),
+    ).toBe(MAX_REPLAY_PAGE_UNCOMPRESSED_BYTES);
 
     const eventsScope = newScope();
     for (let batch = 0; batch < 4; batch += 1) {
@@ -881,7 +1044,9 @@ describe("projection-only replay", () => {
       }));
       await seedBatch(eventsScope, batchEvents, "batch_exact_events_" + batch);
     }
-    const exactEventsPage = await readReplayPage(bucket, eventsScope.tenantId, { pageSize: 4 });
+    const exactEventsPage = await readReplayPage(bucket, eventsScope.tenantId, {
+      pageSize: 4,
+    });
     expect(exactEventsPage.events).toHaveLength(MAX_REPLAY_PAGE_EVENTS);
   }, 15_000);
 
@@ -890,12 +1055,22 @@ describe("projection-only replay", () => {
     const byteCommits = [] as Awaited<ReturnType<typeof seedBatch>>[];
     for (let index = 0; index < 3; index += 1) {
       byteCommits.push(
-        await seedBatch(scope, [eventFor(scope, { event_id: "$byte-overflow-" + index + ":server" })], "batch_byte_overflow_" + index),
+        await seedBatch(
+          scope,
+          [
+            eventFor(scope, {
+              event_id: "$byte-overflow-" + index + ":server",
+            }),
+          ],
+          "batch_byte_overflow_" + index,
+        ),
       );
     }
     const byteCounts = [2_796_202, 2_796_202, 2_796_205];
     for (let index = 0; index < byteCommits.length; index += 1) {
-      await overwriteManifest(byteCommits[index]!.manifest, { uncompressed_bytes: byteCounts[index]! });
+      await overwriteManifest(byteCommits[index]!.manifest, {
+        uncompressed_bytes: byteCounts[index]!,
+      });
     }
     let byteDataGets = 0;
     const byteSource = forwardingBucket(bucket, {
@@ -914,12 +1089,22 @@ describe("projection-only replay", () => {
     const eventCommits = [] as Awaited<ReturnType<typeof seedBatch>>[];
     for (let index = 0; index < 5; index += 1) {
       eventCommits.push(
-        await seedBatch(eventScope, [eventFor(eventScope, { event_id: "$event-overflow-" + index + ":server" })], "batch_event_overflow_" + index),
+        await seedBatch(
+          eventScope,
+          [
+            eventFor(eventScope, {
+              event_id: "$event-overflow-" + index + ":server",
+            }),
+          ],
+          "batch_event_overflow_" + index,
+        ),
       );
     }
     const counts = [400, 400, 400, 400, 401];
     for (let index = 0; index < eventCommits.length; index += 1) {
-      await overwriteManifest(eventCommits[index]!.manifest, { event_count: counts[index]! });
+      await overwriteManifest(eventCommits[index]!.manifest, {
+        event_count: counts[index]!,
+      });
     }
     let eventDataGets = 0;
     const eventSource = forwardingBucket(bucket, {
@@ -941,7 +1126,11 @@ describe("projection-only replay", () => {
     const secondEvents = makeExactUncompressedEvents(scope, "retry-second");
     const first = await seedBatch(scope, firstEvents, "batch_retry_first");
     const second = await seedBatch(scope, secondEvents, "batch_retry_second");
-    const third = await seedBatch(scope, [eventFor(scope, { event_id: "$retry-third:server" })], "batch_retry_third");
+    const third = await seedBatch(
+      scope,
+      [eventFor(scope, { event_id: "$retry-third:server" })],
+      "batch_retry_third",
+    );
     await overwriteManifest(third.manifest, { uncompressed_bytes: 1 });
     const initialCursor = encodeReplayCursor({
       schema_version: 1,
@@ -970,7 +1159,10 @@ describe("projection-only replay", () => {
       },
     });
     await expectArchiveError(
-      readReplayPage(source, scope.tenantId, { pageSize: 3, cursor: initialCursor }),
+      readReplayPage(source, scope.tenantId, {
+        pageSize: 3,
+        cursor: initialCursor,
+      }),
       "archive_too_large",
     );
     const retry = await readReplayPage(source, scope.tenantId, {
@@ -986,7 +1178,11 @@ describe("projection-only replay", () => {
     const commits = [] as Awaited<ReturnType<typeof seedBatch>>[];
     for (let index = 0; index < 3; index += 1) {
       commits.push(
-        await seedBatch(scope, [eventFor(scope, { event_id: "$overflow-" + index + ":server" })], "batch_overflow_" + index),
+        await seedBatch(
+          scope,
+          [eventFor(scope, { event_id: "$overflow-" + index + ":server" })],
+          "batch_overflow_" + index,
+        ),
       );
     }
     for (const committed of commits) {
@@ -1011,8 +1207,13 @@ describe("projection-only replay", () => {
   it("rejects underreported decoded bytes after reading the data body", async () => {
     const scope = newScope();
     const committed = await seedBatch(scope, eventsFor(scope, 2));
-    const underreported = Math.max(1, committed.manifest.uncompressed_bytes - 1);
-    await overwriteManifest(committed.manifest, { uncompressed_bytes: underreported });
+    const underreported = Math.max(
+      1,
+      committed.manifest.uncompressed_bytes - 1,
+    );
+    await overwriteManifest(committed.manifest, {
+      uncompressed_bytes: underreported,
+    });
     await expectArchiveError(
       readReplayPage(bucket, scope.tenantId),
       "archive_corrupt",
@@ -1025,7 +1226,11 @@ describe("projection-only replay", () => {
     const calls: string[] = [];
     const source = new Proxy(bucket, {
       get(target, property, receiver) {
-        if (property === "put" || property === "delete" || property === "createMultipartUpload") {
+        if (
+          property === "put" ||
+          property === "delete" ||
+          property === "createMultipartUpload"
+        ) {
           return () => {
             calls.push(String(property));
             throw new Error("replay must remain read-only");
@@ -1035,24 +1240,33 @@ describe("projection-only replay", () => {
           const value = Reflect.get(target, property, target);
           return (...args: unknown[]) => {
             calls.push(String(property));
-            return (value as (...inner: unknown[]) => unknown).apply(target, args);
+            return (value as (...inner: unknown[]) => unknown).apply(
+              target,
+              args,
+            );
           };
         }
         return Reflect.get(target, property, receiver);
       },
     });
     await readReplayPage(source, scope.tenantId);
-    expect(calls.filter((call) =>
-      ["put", "delete", "createMultipartUpload"].includes(call),
-    )).toEqual([]);
-    expect(calls.filter((call) => ["list", "get", "head"].includes(call)).length).toBeGreaterThan(0);
+    expect(
+      calls.filter((call) =>
+        ["put", "delete", "createMultipartUpload"].includes(call),
+      ),
+    ).toEqual([]);
+    expect(
+      calls.filter((call) => ["list", "get", "head"].includes(call)).length,
+    ).toBeGreaterThan(0);
   });
 
   it("keeps replay errors generic and does not expose stored bodies", async () => {
     const scope = newScope();
     const source = forwardingBucket(bucket, {
       list: async () => {
-        throw new Error("" + "fixture reader message body that must stay private");
+        throw new Error(
+          "" + "fixture reader message body that must stay private",
+        );
       },
     });
     const error = await getArchiveError(readReplayPage(source, scope.tenantId));

@@ -4,10 +4,16 @@ function key(principalId: string, identityId: string) {
   return `${prefix}:${principalId}:${identityId}`;
 }
 
-export function loadChannelOrder(principalId: string, identityId: string): string[] {
+export function loadChannelOrder(
+  principalId: string,
+  identityId: string,
+): string[] {
   try {
-    const parsed: unknown = JSON.parse(sessionStorage.getItem(key(principalId, identityId)) ?? "[]");
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
+    const parsed: unknown = JSON.parse(
+      sessionStorage.getItem(key(principalId, identityId)) ?? "[]",
+    );
+    return Array.isArray(parsed) &&
+      parsed.every((item) => typeof item === "string")
       ? [...new Set(parsed)]
       : [];
   } catch {
@@ -15,8 +21,15 @@ export function loadChannelOrder(principalId: string, identityId: string): strin
   }
 }
 
-export function saveChannelOrder(principalId: string, identityId: string, ids: string[]) {
-  sessionStorage.setItem(key(principalId, identityId), JSON.stringify([...new Set(ids)]));
+export function saveChannelOrder(
+  principalId: string,
+  identityId: string,
+  ids: string[],
+) {
+  sessionStorage.setItem(
+    key(principalId, identityId),
+    JSON.stringify([...new Set(ids)]),
+  );
 }
 
 export function clearChannelOrderPreferences() {
@@ -26,18 +39,23 @@ export function clearChannelOrderPreferences() {
   }
 }
 
-export function applyChannelOrder<T extends { id: string; sort_position: number }>(
-  channels: T[],
-  preferredIds: string[],
-): T[] {
+export function applyChannelOrder<
+  T extends { id: string; sort_position: number },
+>(channels: T[], preferredIds: string[]): T[] {
   const preferred = new Map(preferredIds.map((id, index) => [id, index]));
   return channels.toSorted((left, right) => {
     const leftIndex = preferred.get(left.id);
     const rightIndex = preferred.get(right.id);
     if (leftIndex !== undefined || rightIndex !== undefined) {
-      return (leftIndex ?? Number.MAX_SAFE_INTEGER) - (rightIndex ?? Number.MAX_SAFE_INTEGER);
+      return (
+        (leftIndex ?? Number.MAX_SAFE_INTEGER) -
+        (rightIndex ?? Number.MAX_SAFE_INTEGER)
+      );
     }
-    return left.sort_position - right.sort_position || left.id.localeCompare(right.id);
+    return (
+      left.sort_position - right.sort_position ||
+      left.id.localeCompare(right.id)
+    );
   });
 }
 

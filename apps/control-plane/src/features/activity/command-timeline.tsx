@@ -25,14 +25,20 @@ function formatTimestamp(timestamp: string) {
   });
 }
 
-export function CommandTimeline({ commands, identityLabel }: {
+export function CommandTimeline({
+  commands,
+  identityLabel,
+}: {
   commands: Command[];
   identityLabel?: string;
 }) {
   return (
     <ol aria-label="Command activity" className="grid gap-4">
       {commands.map((command) => (
-        <li key={command.id} className="rounded-xl border bg-card p-4 shadow-sm">
+        <li
+          key={command.id}
+          className="rounded-xl border bg-card p-4 shadow-sm"
+        >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="font-semibold">{command.operation}</p>
@@ -47,15 +53,21 @@ export function CommandTimeline({ commands, identityLabel }: {
           <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">Delivery mode</dt>
-              <dd className="font-medium">{command.delivery_mode === "paced" ? "Human-paced" : "Direct"}</dd>
+              <dd className="font-medium">
+                {command.delivery_mode === "paced" ? "Human-paced" : "Direct"}
+              </dd>
             </div>
             <div>
               <dt className="text-muted-foreground">Created</dt>
-              <dd className="font-medium">{formatTimestamp(command.created_at)}</dd>
+              <dd className="font-medium">
+                {formatTimestamp(command.created_at)}
+              </dd>
             </div>
             <div>
               <dt className="text-muted-foreground">Updated</dt>
-              <dd className="font-medium">{formatTimestamp(command.updated_at)}</dd>
+              <dd className="font-medium">
+                {formatTimestamp(command.updated_at)}
+              </dd>
             </div>
           </dl>
           {command.failure_code && (

@@ -1,4 +1,7 @@
-import type { CanonicalEventEnvelope, CanonicalJsonObject } from "@communicator/contracts";
+import type {
+  CanonicalEventEnvelope,
+  CanonicalJsonObject,
+} from "@communicator/contracts";
 
 export const TENANT_ID = "tenant_pilot";
 export const OTHER_TENANT_ID = "tenant_other";
@@ -38,7 +41,8 @@ export const makeEvents = (count: number): CanonicalEventEnvelope[] =>
 
 export const cloneEvents = (
   events: readonly CanonicalEventEnvelope[],
-): CanonicalEventEnvelope[] => structuredClone(events) as CanonicalEventEnvelope[];
+): CanonicalEventEnvelope[] =>
+  structuredClone(events) as CanonicalEventEnvelope[];
 
 export const nestedPayload = (depth: number): CanonicalJsonObject => {
   const root: Record<string, unknown> = {};
@@ -73,7 +77,9 @@ export const cleanupArchiveTenant = async (
       if (keys.length > 0) await bucket.delete(keys);
       cursor = page.truncated ? page.cursor : undefined;
       if (page.truncated && !cursor) {
-        throw new Error("archive cleanup returned truncated page without cursor");
+        throw new Error(
+          "archive cleanup returned truncated page without cursor",
+        );
       }
     } while (cursor !== undefined);
   }

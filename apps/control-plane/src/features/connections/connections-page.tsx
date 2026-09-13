@@ -16,15 +16,22 @@ export function ConnectionsPage() {
   return (
     <section className="space-y-6">
       <div>
-        <p className="text-sm font-medium text-muted-foreground">Identity-scoped connections</p>
-        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Connections</h1>
+        <p className="text-sm font-medium text-muted-foreground">
+          Identity-scoped connections
+        </p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">
+          Connections
+        </h1>
         <p className="mt-2 max-w-2xl text-muted-foreground">
-          Review provider connections for the selected identity. Account pairing is not available in simulation.
+          Review provider connections for the selected identity. Account pairing
+          is not available in simulation.
         </p>
       </div>
 
       {(identitiesLoading || isLoading) && (
-        <p role="status" className="text-sm text-muted-foreground">Loading connections…</p>
+        <p role="status" className="text-sm text-muted-foreground">
+          Loading connections…
+        </p>
       )}
       {!identitiesLoading && !isLoading && connections.length === 0 && (
         <p className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">

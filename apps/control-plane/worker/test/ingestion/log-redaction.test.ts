@@ -31,20 +31,26 @@ afterEach(async () => {
 const bytesContainCanary = (
   bytes: Uint8Array,
   encodedCanaries: readonly Uint8Array[],
-): boolean => encodedCanaries.some((canary) => {
-  if (canary.byteLength === 0 || canary.byteLength > bytes.byteLength) return false;
-  for (let offset = 0; offset <= bytes.byteLength - canary.byteLength; offset += 1) {
-    let matches = true;
-    for (let index = 0; index < canary.byteLength; index += 1) {
-      if (bytes[offset + index] !== canary[index]) {
-        matches = false;
-        break;
+): boolean =>
+  encodedCanaries.some((canary) => {
+    if (canary.byteLength === 0 || canary.byteLength > bytes.byteLength)
+      return false;
+    for (
+      let offset = 0;
+      offset <= bytes.byteLength - canary.byteLength;
+      offset += 1
+    ) {
+      let matches = true;
+      for (let index = 0; index < canary.byteLength; index += 1) {
+        if (bytes[offset + index] !== canary[index]) {
+          matches = false;
+          break;
+        }
       }
+      if (matches) return true;
     }
-    if (matches) return true;
-  }
-  return false;
-});
+    return false;
+  });
 
 const hasCanaryIn = (
   value: unknown,
@@ -52,7 +58,8 @@ const hasCanaryIn = (
   encodedCanaries: readonly Uint8Array[],
   seen: WeakSet<object>,
 ): boolean => {
-  if (typeof value === "string") return canaries.some((canary) => value.includes(canary));
+  if (typeof value === "string")
+    return canaries.some((canary) => value.includes(canary));
   if (value === null || typeof value !== "object") return false;
   if (seen.has(value)) return false;
   seen.add(value);
@@ -60,9 +67,11 @@ const hasCanaryIn = (
   if (value instanceof ArrayBuffer) {
     if (bytesContainCanary(new Uint8Array(value), encodedCanaries)) return true;
   } else {
-    const sharedArrayBufferConstructor = (globalThis as {
-      SharedArrayBuffer?: typeof SharedArrayBuffer;
-    }).SharedArrayBuffer;
+    const sharedArrayBufferConstructor = (
+      globalThis as {
+        SharedArrayBuffer?: typeof SharedArrayBuffer;
+      }
+    ).SharedArrayBuffer;
     if (
       sharedArrayBufferConstructor !== undefined &&
       value instanceof sharedArrayBufferConstructor &&
@@ -71,7 +80,11 @@ const hasCanaryIn = (
       return true;
     }
     if (ArrayBuffer.isView(value)) {
-      const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      const bytes = new Uint8Array(
+        value.buffer,
+        value.byteOffset,
+        value.byteLength,
+      );
       if (bytesContainCanary(bytes, encodedCanaries)) return true;
     }
   }
@@ -93,13 +106,20 @@ const hasCanaryIn = (
 
   for (const key of Reflect.ownKeys(value)) {
     if (
-      (typeof key === "string" && canaries.some((canary) => key.includes(canary))) ||
-      (typeof key === "symbol" && key.description !== undefined && canaries.some((canary) => key.description!.includes(canary)))
+      (typeof key === "string" &&
+        canaries.some((canary) => key.includes(canary))) ||
+      (typeof key === "symbol" &&
+        key.description !== undefined &&
+        canaries.some((canary) => key.description!.includes(canary)))
     ) {
       return true;
     }
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor && "value" in descriptor && hasCanaryIn(descriptor.value, canaries, encodedCanaries, seen)) {
+    if (
+      descriptor &&
+      "value" in descriptor &&
+      hasCanaryIn(descriptor.value, canaries, encodedCanaries, seen)
+    ) {
       return true;
     }
   }
@@ -110,12 +130,13 @@ const hasCanary = (
   value: unknown,
   canaries: readonly string[],
   seen = new WeakSet<object>(),
-): boolean => hasCanaryIn(
-  value,
-  canaries,
-  canaries.map((canary) => new TextEncoder().encode(canary)),
-  seen,
-);
+): boolean =>
+  hasCanaryIn(
+    value,
+    canaries,
+    canaries.map((canary) => new TextEncoder().encode(canary)),
+    seen,
+  );
 
 const callableConsoleMethodNames = (): string[] => {
   const methods = new Set<string>();
@@ -154,18 +175,20 @@ const statusAuthorization = (fixtureValue: IngestionFixture) => ({
   scopes: ["projection.status" as const],
 });
 
-const unavailableDatabase = (canary: string): D1Database => ({
-  prepare: () => {
-    throw new Error(canary);
-  },
-} as unknown as D1Database);
+const unavailableDatabase = (canary: string): D1Database =>
+  ({
+    prepare: () => {
+      throw new Error(canary);
+    },
+  }) as unknown as D1Database;
 
-const unavailableArchive = (canary: string): R2Bucket => ({
-  get: async (key: string) => env.EVENT_ARCHIVE.get(key),
-  put: async () => {
-    throw new Error(canary);
-  },
-} as unknown as R2Bucket);
+const unavailableArchive = (canary: string): R2Bucket =>
+  ({
+    get: async (key: string) => env.EVENT_ARCHIVE.get(key),
+    put: async () => {
+      throw new Error(canary);
+    },
+  }) as unknown as R2Bucket;
 
 describe("ingestion observability boundaries", () => {
   it("never logs request bodies, tokens, protected IDs, or raw archive content across denial, failure, conflict, and success", async () => {
@@ -221,15 +244,23 @@ describe("ingestion observability boundaries", () => {
         pointer.tenant_id,
         pointer.gateway_route_id,
       ]);
-      return protectedCanaries.filter((canary) => !allowedPointerValues.has(canary));
+      return protectedCanaries.filter(
+        (canary) => !allowedPointerValues.has(canary),
+      );
     };
 
-    expect(hasCanary(new Map([[containerCanary, "map-key"]]), [containerCanary])).toBe(true);
-    expect(hasCanary(new Map([["map-value", containerCanary]]), [containerCanary])).toBe(true);
+    expect(
+      hasCanary(new Map([[containerCanary, "map-key"]]), [containerCanary]),
+    ).toBe(true);
+    expect(
+      hasCanary(new Map([["map-value", containerCanary]]), [containerCanary]),
+    ).toBe(true);
     expect(hasCanary(new Set([containerCanary]), [containerCanary])).toBe(true);
     const encodedContainerCanary = new TextEncoder().encode(containerCanary);
     expect(hasCanary(encodedContainerCanary, [containerCanary])).toBe(true);
-    expect(hasCanary(encodedContainerCanary.buffer, [containerCanary])).toBe(true);
+    expect(hasCanary(encodedContainerCanary.buffer, [containerCanary])).toBe(
+      true,
+    );
 
     const capturedCalls: unknown[][] = [];
     const consoleSpies: Array<{ mockRestore: () => void }> = [];
@@ -238,7 +269,10 @@ describe("ingestion observability boundaries", () => {
       for (const method of callableConsoleMethodNames()) {
         try {
           const candidate = vi.spyOn(
-            console as unknown as Record<string, (...args: unknown[]) => unknown>,
+            console as unknown as Record<
+              string,
+              (...args: unknown[]) => unknown
+            >,
             method,
           );
           try {
@@ -255,16 +289,23 @@ describe("ingestion observability boundaries", () => {
           // Successfully configured spies are restored in the finally block below.
         }
       }
-      expect(spiedConsoleMethods).toEqual(expect.arrayContaining(["trace", "dir", "table", "assert"]));
+      expect(spiedConsoleMethods).toEqual(
+        expect.arrayContaining(["trace", "dir", "table", "assert"]),
+      );
       const formerlyUncoveredMethod = spiedConsoleMethods.find((method) =>
         ["trace", "dir", "table", "assert"].includes(method),
       );
       expect(formerlyUncoveredMethod).toBeDefined();
-      const emitConsoleCanary = (console as unknown as Record<string, (...args: unknown[]) => unknown>)[formerlyUncoveredMethod!];
+      const emitConsoleCanary = (
+        console as unknown as Record<string, (...args: unknown[]) => unknown>
+      )[formerlyUncoveredMethod!];
       expect(typeof emitConsoleCanary).toBe("function");
-      if (typeof emitConsoleCanary !== "function") throw new Error("console regression method is not callable");
+      if (typeof emitConsoleCanary !== "function")
+        throw new Error("console regression method is not callable");
       emitConsoleCanary(consoleSurfaceCanary);
-      expect(capturedCalls.some((call) => hasCanary(call, [consoleSurfaceCanary]))).toBe(true);
+      expect(
+        capturedCalls.some((call) => hasCanary(call, [consoleSurfaceCanary])),
+      ).toBe(true);
 
       const denied = await createApp({
         createIngestionTokenVerifier: () => ({
@@ -332,36 +373,49 @@ describe("ingestion observability boundaries", () => {
       expect(conflictIngress.response.status).toBe(202);
       const conflictPointer = conflictIngress.queue.messages[0]!.body;
       const beforeConflict = await snapshotArchivePair(conflictPointer);
-      const conflict = await deliverQueueMessages([{
-        id: `queue-redaction-conflict-${fixture.suffix}`,
-        body: { ...conflictPointer, canonical_sha256: "f".repeat(64) },
-      }]);
+      const conflict = await deliverQueueMessages([
+        {
+          id: `queue-redaction-conflict-${fixture.suffix}`,
+          body: { ...conflictPointer, canonical_sha256: "f".repeat(64) },
+        },
+      ]);
       expect(conflict.result).toMatchObject({
         explicitAcks: [],
-        retryMessages: [{ msgId: `queue-redaction-conflict-${fixture.suffix}` }],
+        retryMessages: [
+          { msgId: `queue-redaction-conflict-${fixture.suffix}` },
+        ],
       });
-      expect(conflict.retryOptions.get(`queue-redaction-conflict-${fixture.suffix}`)).toEqual({ delaySeconds: 300 });
+      expect(
+        conflict.retryOptions.get(`queue-redaction-conflict-${fixture.suffix}`),
+      ).toEqual({ delaySeconds: 300 });
       await expectArchivePairUnchanged(conflictPointer, beforeConflict);
-      const conflictProjection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
-      const conflictState = await runInDurableObject(conflictProjection, async (instance) => {
-        try {
-          await instance.getStatus({
-            schema_version: 1,
-            tenant_id: fixture.tenantId,
-            authorization: statusAuthorization(fixture),
-          });
-          return undefined;
-        } catch (failure) {
-          return failure;
-        }
-      });
+      const conflictProjection = env.TENANT_PROJECTION.getByName(
+        fixture.tenantId,
+      );
+      const conflictState = await runInDurableObject(
+        conflictProjection,
+        async (instance) => {
+          try {
+            await instance.getStatus({
+              schema_version: 1,
+              tenant_id: fixture.tenantId,
+              authorization: statusAuthorization(fixture),
+            });
+            return undefined;
+          } catch (failure) {
+            return failure;
+          }
+        },
+      );
       expect(conflictState).toMatchObject({ code: "projection_not_found" });
 
       const d1FailureEvent = messageEvent(fixture, {
         eventId: `$redaction-d1-${fixture.suffix}:example`,
         body: bodyCanary,
       });
-      const d1FailureRequest = await requestForEvents(fixture, [d1FailureEvent]);
+      const d1FailureRequest = await requestForEvents(fixture, [
+        d1FailureEvent,
+      ]);
       const d1Failure = await postIngestionBatch(
         fixture,
         d1FailureRequest,
@@ -377,7 +431,9 @@ describe("ingestion observability boundaries", () => {
         eventId: `$redaction-r2-${fixture.suffix}:example`,
         body: bodyCanary,
       });
-      const r2FailureRequest = await requestForEvents(fixture, [r2FailureEvent]);
+      const r2FailureRequest = await requestForEvents(fixture, [
+        r2FailureEvent,
+      ]);
       const r2Failure = await postIngestionBatch(
         fixture,
         r2FailureRequest,
@@ -396,10 +452,14 @@ describe("ingestion observability boundaries", () => {
         accountId: fixture.accounts.otherTenantWhatsapp,
         body: bodyCanary,
       });
-      const queueFailureRequest = await requestForEvents(fixture, [queueFailureEvent], {
-        tenant_id: fixture.otherTenantId,
-        gateway_route_id: fixture.routes.otherTenant,
-      });
+      const queueFailureRequest = await requestForEvents(
+        fixture,
+        [queueFailureEvent],
+        {
+          tenant_id: fixture.otherTenantId,
+          gateway_route_id: fixture.routes.otherTenant,
+        },
+      );
       let queueFailurePointer: CommittedArchivePointer | undefined;
       const queueFailureApp = createApp({
         createIngestionTokenVerifier: () => ({
@@ -435,11 +495,12 @@ describe("ingestion observability boundaries", () => {
       });
       expect(queueFailurePointer).toBeDefined();
       const committedQueueFailurePointer = queueFailurePointer!;
-      const queueFailureArchive = await snapshotArchivePair(committedQueueFailurePointer);
-      expect(await listTenantArchiveKeys(fixture.otherTenantId)).toEqual([
-        queueFailureArchive.data.key,
-        queueFailureArchive.manifest.key,
-      ].sort());
+      const queueFailureArchive = await snapshotArchivePair(
+        committedQueueFailurePointer,
+      );
+      expect(await listTenantArchiveKeys(fixture.otherTenantId)).toEqual(
+        [queueFailureArchive.data.key, queueFailureArchive.manifest.key].sort(),
+      );
       const queueFailureManifest = JSON.parse(
         new TextDecoder().decode(queueFailureArchive.manifest.bytes),
       ) as {
@@ -456,10 +517,12 @@ describe("ingestion observability boundaries", () => {
         canonical_sha256: committedQueueFailurePointer.canonical_sha256,
         event_count: 1,
       });
-      expect(hasCanary(
-        committedQueueFailurePointer,
-        forbiddenPointerCanaries(committedQueueFailurePointer),
-      )).toBe(false);
+      expect(
+        hasCanary(
+          committedQueueFailurePointer,
+          forbiddenPointerCanaries(committedQueueFailurePointer),
+        ),
+      ).toBe(false);
       await expectArchivePairUnchanged(
         committedQueueFailurePointer,
         queueFailureArchive,
@@ -476,28 +539,39 @@ describe("ingestion observability boundaries", () => {
       const successIngress = await postIngestionBatch(fixture, successRequest);
       expect(successIngress.response.status).toBe(202);
       const successPointer = successIngress.queue.messages[0]!.body;
-      expect(hasCanary(successPointer, forbiddenPointerCanaries(successPointer))).toBe(false);
-      const projected = await deliverQueueMessages([{
-        id: `queue-redaction-success-${fixture.suffix}`,
-        body: successPointer,
-      }]);
+      expect(
+        hasCanary(successPointer, forbiddenPointerCanaries(successPointer)),
+      ).toBe(false);
+      const projected = await deliverQueueMessages([
+        {
+          id: `queue-redaction-success-${fixture.suffix}`,
+          body: successPointer,
+        },
+      ]);
       expect(projected.result).toMatchObject({
         explicitAcks: [`queue-redaction-success-${fixture.suffix}`],
         retryMessages: [],
       });
       const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
-      await expect(projection.getStatus({
-        schema_version: 1,
-        tenant_id: fixture.tenantId,
-        authorization: statusAuthorization(fixture),
-      })).resolves.toMatchObject({ applied_event_count: 1, message_count: 1 });
+      await expect(
+        projection.getStatus({
+          schema_version: 1,
+          tenant_id: fixture.tenantId,
+          authorization: statusAuthorization(fixture),
+        }),
+      ).resolves.toMatchObject({ applied_event_count: 1, message_count: 1 });
 
       const transactionEvent = messageEvent(fixture, {
         eventId: `$redaction-transaction-${fixture.suffix}:example`,
         body: doCanary,
       });
-      const transactionRequest = await requestForEvents(fixture, [transactionEvent]);
-      const transactionIngress = await postIngestionBatch(fixture, transactionRequest);
+      const transactionRequest = await requestForEvents(fixture, [
+        transactionEvent,
+      ]);
+      const transactionIngress = await postIngestionBatch(
+        fixture,
+        transactionRequest,
+      );
       expect(transactionIngress.response.status).toBe(202);
       const transactionPointer = transactionIngress.queue.messages[0]!.body;
       const beforeTransaction = await snapshotArchivePair(transactionPointer);
@@ -511,23 +585,35 @@ describe("ingestion observability boundaries", () => {
           "CREATE TRIGGER ingestion_redaction_fail_projection BEFORE INSERT ON projection_changes BEGIN SELECT RAISE(ABORT, 'synthetic projection failure'); END",
         );
       });
-      const transactionFailure = await deliverQueueMessages([{
-        id: `queue-redaction-transaction-${fixture.suffix}`,
-        body: transactionPointer,
-      }]);
+      const transactionFailure = await deliverQueueMessages([
+        {
+          id: `queue-redaction-transaction-${fixture.suffix}`,
+          body: transactionPointer,
+        },
+      ]);
       expect(transactionFailure.result).toMatchObject({
         explicitAcks: [],
-        retryMessages: [{ msgId: `queue-redaction-transaction-${fixture.suffix}` }],
+        retryMessages: [
+          { msgId: `queue-redaction-transaction-${fixture.suffix}` },
+        ],
       });
-      expect(transactionFailure.retryOptions.get(`queue-redaction-transaction-${fixture.suffix}`)).toEqual({ delaySeconds: 60 });
+      expect(
+        transactionFailure.retryOptions.get(
+          `queue-redaction-transaction-${fixture.suffix}`,
+        ),
+      ).toEqual({ delaySeconds: 60 });
       await expectArchivePairUnchanged(transactionPointer, beforeTransaction);
-      await expect(projection.getStatus({
-        schema_version: 1,
-        tenant_id: fixture.tenantId,
-        authorization: statusAuthorization(fixture),
-      })).resolves.toEqual(beforeTransactionStatus);
+      await expect(
+        projection.getStatus({
+          schema_version: 1,
+          tenant_id: fixture.tenantId,
+          authorization: statusAuthorization(fixture),
+        }),
+      ).resolves.toEqual(beforeTransactionStatus);
       await runInDurableObject(projection, async (_instance, state) => {
-        state.storage.sql.exec("DROP TRIGGER ingestion_redaction_fail_projection");
+        state.storage.sql.exec(
+          "DROP TRIGGER ingestion_redaction_fail_projection",
+        );
       });
 
       const rebuildEvent = messageEvent(fixture, {
@@ -550,28 +636,42 @@ describe("ingestion observability boundaries", () => {
         },
       });
       const beforeRebuild = await snapshotArchivePair(rebuildPointer);
-      const rebuilding = await deliverQueueMessages([{
-        id: `queue-redaction-rebuilding-${fixture.suffix}`,
-        body: rebuildPointer,
-      }]);
+      const rebuilding = await deliverQueueMessages([
+        {
+          id: `queue-redaction-rebuilding-${fixture.suffix}`,
+          body: rebuildPointer,
+        },
+      ]);
       expect(rebuilding.result).toMatchObject({
         explicitAcks: [],
-        retryMessages: [{ msgId: `queue-redaction-rebuilding-${fixture.suffix}` }],
+        retryMessages: [
+          { msgId: `queue-redaction-rebuilding-${fixture.suffix}` },
+        ],
       });
-      expect(rebuilding.retryOptions.get(`queue-redaction-rebuilding-${fixture.suffix}`)).toEqual({ delaySeconds: 60 });
+      expect(
+        rebuilding.retryOptions.get(
+          `queue-redaction-rebuilding-${fixture.suffix}`,
+        ),
+      ).toEqual({ delaySeconds: 60 });
       await expectArchivePairUnchanged(rebuildPointer, beforeRebuild);
-      await expect(projection.getStatus({
-        schema_version: 1,
-        tenant_id: fixture.tenantId,
-        authorization: statusAuthorization(fixture),
-      })).resolves.toMatchObject({ state: "rebuilding", generation: 2 });
+      await expect(
+        projection.getStatus({
+          schema_version: 1,
+          tenant_id: fixture.tenantId,
+          authorization: statusAuthorization(fixture),
+        }),
+      ).resolves.toMatchObject({ state: "rebuilding", generation: 2 });
     } finally {
       try {
         for (const call of capturedCalls) {
           expect(hasCanary(call, protectedCanaries)).toBe(false);
         }
         expect(capturedCalls).toContainEqual([
-          { event: "ingestion_auth_denied", status: 401, code: "ingestion_unauthenticated" },
+          {
+            event: "ingestion_auth_denied",
+            status: 401,
+            code: "ingestion_unauthenticated",
+          },
         ]);
       } finally {
         for (const spy of consoleSpies) spy.mockRestore();

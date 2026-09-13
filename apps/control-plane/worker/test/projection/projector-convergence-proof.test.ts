@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import type { ProjectionEventEnvelope } from "@communicator/contracts";
 import { canonicalJsonLineBytes } from "../../archive/canonical-json";
 import { sha256Hex } from "../../archive/codec";
@@ -17,7 +17,6 @@ import {
   auth,
   bindingFor,
   created,
-  edited,
   event,
   initialize,
   input,
@@ -80,17 +79,28 @@ const fullDomainEvents = (): ProjectionEventEnvelope[] => [
   ),
   fullEvent(
     "full_domain_02",
-    { message_id: FULL_MESSAGE, participant_id: FULL_PARTICIPANT, local_identity: true },
+    {
+      message_id: FULL_MESSAGE,
+      participant_id: FULL_PARTICIPANT,
+      local_identity: true,
+    },
     "receipt.read",
   ),
   fullEvent(
     "full_domain_03",
-    { message_id: FULL_MESSAGE, participant_id: "full_domain_remote_participant", local_identity: false },
+    {
+      message_id: FULL_MESSAGE,
+      participant_id: "full_domain_remote_participant",
+      local_identity: false,
+    },
     "receipt.delivered",
   ),
   fullEvent(
     "full_domain_04",
-    { participant_id: FULL_PARTICIPANT, expires_at: "2020-01-01T00:00:00.000Z" },
+    {
+      participant_id: FULL_PARTICIPANT,
+      expires_at: "2020-01-01T00:00:00.000Z",
+    },
     "typing.started",
   ),
   fullEvent(
@@ -108,7 +118,11 @@ const fullDomainEvents = (): ProjectionEventEnvelope[] => [
   ),
   fullEvent(
     "full_domain_06",
-    { message_id: FULL_MESSAGE, delivery_status: "failed", failure_code: "bridge_failure" },
+    {
+      message_id: FULL_MESSAGE,
+      delivery_status: "failed",
+      failure_code: "bridge_failure",
+    },
     "bridge.delivery.updated",
   ),
   fullEvent(
@@ -137,12 +151,19 @@ const fullDomainEvents = (): ProjectionEventEnvelope[] => [
   ),
   fullEvent(
     "full_domain_09",
-    { message_id: FULL_MESSAGE, body: "full-domain edited body", editor_participant_id: FULL_PARTICIPANT },
+    {
+      message_id: FULL_MESSAGE,
+      body: "full-domain edited body",
+      editor_participant_id: FULL_PARTICIPANT,
+    },
     "message.edited",
   ),
   fullEvent(
     "full_domain_10",
-    { message_id: "full_domain_deleted_message", reason_code: "message-retention" },
+    {
+      message_id: "full_domain_deleted_message",
+      reason_code: "message-retention",
+    },
     "message.deleted",
     { conversation_id: "full_domain_deleted_conversation" },
   ),
@@ -203,7 +224,9 @@ const tenantEvents = (
 const fullBindings = () => [bindingFor(FULL_ACCOUNT, FULL_CONNECTION)];
 
 const applyBatches = async (
-  stub: DurableObjectStub<import("../../projection/tenant-projection").TenantProjectionDO>,
+  stub: DurableObjectStub<
+    import("../../projection/tenant-projection").TenantProjectionDO
+  >,
   tenant: string,
   batches: readonly (readonly ProjectionEventEnvelope[])[],
 ): Promise<void> => {
@@ -223,7 +246,7 @@ const batchesOfSize = (
 ): ProjectionEventEnvelope[][] => {
   const batches: ProjectionEventEnvelope[][] = [];
   for (let offset = 0; offset < events.length; offset += size) {
-    batches.push([...events.slice(offset, offset + size)]);
+    batches.push(events.slice(offset, offset + size));
   }
   return batches;
 };
@@ -232,7 +255,7 @@ const batchesFromRanges = (
   events: readonly ProjectionEventEnvelope[],
   ranges: readonly (readonly [number, number])[],
 ): ProjectionEventEnvelope[][] =>
-  ranges.map(([start, end]) => [...events.slice(start, end)]);
+  ranges.map(([start, end]) => events.slice(start, end));
 
 const projectionTableNames = [
   "_sql_schema_migrations",
@@ -263,7 +286,9 @@ type SnapshotRow = Record<string, SqlStorageValue>;
 type ProjectionSnapshot = Record<ProjectionTableName, SnapshotRow[]>;
 
 const snapshot = async (
-  stub: DurableObjectStub<import("../../projection/tenant-projection").TenantProjectionDO>,
+  stub: DurableObjectStub<
+    import("../../projection/tenant-projection").TenantProjectionDO
+  >,
 ): Promise<ProjectionSnapshot> =>
   runInDurableObject(stub, async (_instance, state) => {
     const orderBy: Record<ProjectionTableName, string> = {
@@ -316,7 +341,8 @@ const normalize = (
       }
       if (table === "attachments" && typeof copy.r2_key === "string") {
         const mediaKey = /^media\/[^/]+\/([0-9a-f]{64})$/.exec(copy.r2_key);
-        if (mediaKey !== null) copy.r2_key = "media/" + TENANT_PLACEHOLDER + "/" + mediaKey[1];
+        if (mediaKey !== null)
+          copy.r2_key = "media/" + TENANT_PLACEHOLDER + "/" + mediaKey[1];
       }
       if (table === "applied_events") {
         const hash = tenantIndependentHashes.get(String(copy.event_id));
@@ -386,7 +412,12 @@ describe("tenant projection full-domain convergence proof", () => {
     await applyBatches(
       mixedStubA,
       mixedTenantA,
-      batchesFromRanges(events, [[0, 4], [4, 8], [8, 13], [13, 17]]),
+      batchesFromRanges(events, [
+        [0, 4],
+        [4, 8],
+        [8, 13],
+        [13, 17],
+      ]),
     );
     const mixedA = await snapshot(mixedStubA);
 
@@ -394,7 +425,13 @@ describe("tenant projection full-domain convergence proof", () => {
     await applyBatches(
       mixedStubB,
       mixedTenantB,
-      batchesFromRanges(events, [[0, 1], [1, 6], [6, 10], [10, 12], [12, 17]]),
+      batchesFromRanges(events, [
+        [0, 1],
+        [1, 6],
+        [6, 10],
+        [10, 12],
+        [12, 17],
+      ]),
     );
     const mixedB = await snapshot(mixedStubB);
 
@@ -402,14 +439,21 @@ describe("tenant projection full-domain convergence proof", () => {
     await applyBatches(
       mixedStubC,
       mixedTenantC,
-      batchesFromRanges(events, [[0, 3], [3, 9], [9, 11], [11, 14], [14, 17]]),
+      batchesFromRanges(events, [
+        [0, 3],
+        [3, 9],
+        [9, 11],
+        [11, 14],
+        [14, 17],
+      ]),
     );
     const mixedC = await snapshot(mixedStubC);
 
     const tenantIndependentHashes = new Map<string, string>();
     for (const nextEvent of events) {
       const normalizedEvent = tenantEvents(TENANT_PLACEHOLDER, [nextEvent])[0];
-      if (normalizedEvent === undefined) throw new Error("fixture event is missing");
+      if (normalizedEvent === undefined)
+        throw new Error("fixture event is missing");
       tenantIndependentHashes.set(
         nextEvent.event_id,
         await sha256Hex(canonicalJsonLineBytes(normalizedEvent)),
@@ -421,8 +465,10 @@ describe("tenant projection full-domain convergence proof", () => {
     expect(normalize(mixedB, tenantIndependentHashes)).toEqual(expected);
     expect(normalize(mixedC, tenantIndependentHashes)).toEqual(expected);
 
-    const mainConversation = row(chronological, "conversations", (candidate) =>
-      candidate.id === FULL_CONVERSATION,
+    const mainConversation = row(
+      chronological,
+      "conversations",
+      (candidate) => candidate.id === FULL_CONVERSATION,
     );
     expect(mainConversation).toMatchObject({
       title: "Full-domain conversation",
@@ -434,8 +480,10 @@ describe("tenant projection full-domain convergence proof", () => {
       attachment_count: 1,
     });
 
-    const mainMessage = row(chronological, "messages", (candidate) =>
-      candidate.id === FULL_MESSAGE,
+    const mainMessage = row(
+      chronological,
+      "messages",
+      (candidate) => candidate.id === FULL_MESSAGE,
     );
     expect(mainMessage).toMatchObject({
       body: "full-domain edited body",
@@ -449,20 +497,32 @@ describe("tenant projection full-domain convergence proof", () => {
       current_event_id: "full_domain_09",
     });
 
-    expect(row(chronological, "reactions", (candidate) =>
-      candidate.id === "full_domain_reaction",
-    )).toMatchObject({
+    expect(
+      row(
+        chronological,
+        "reactions",
+        (candidate) => candidate.id === "full_domain_reaction",
+      ),
+    ).toMatchObject({
       participant_id: null,
       emoji: null,
       removed_at: occurredAt(1),
     });
     expect(chronological.receipts).toHaveLength(2);
-    expect(row(chronological, "typing_states", (candidate) =>
-      candidate.participant_id === FULL_PARTICIPANT,
-    )).toMatchObject({ is_typing: 0, expires_at: null });
-    expect(row(chronological, "attachments", (candidate) =>
-      candidate.id === FULL_ATTACHMENT,
-    )).toMatchObject({
+    expect(
+      row(
+        chronological,
+        "typing_states",
+        (candidate) => candidate.participant_id === FULL_PARTICIPANT,
+      ),
+    ).toMatchObject({ is_typing: 0, expires_at: null });
+    expect(
+      row(
+        chronological,
+        "attachments",
+        (candidate) => candidate.id === FULL_ATTACHMENT,
+      ),
+    ).toMatchObject({
       file_name: "full-domain.txt",
       mime_type: "text/plain",
       size_bytes: 42,
@@ -470,24 +530,41 @@ describe("tenant projection full-domain convergence proof", () => {
       r2_key: mediaKeyFor(chronologicalTenant),
       deleted_at: null,
     });
-    expect(row(chronological, "resource_tombstones", (candidate) =>
-      candidate.resource_type === "attachment" &&
-      candidate.resource_id === FULL_ATTACHMENT,
-    )).toBeUndefined();
-    expect(row(chronological, "commands", (candidate) =>
-      candidate.id === "full_domain_command",
-    )).toMatchObject({
+    expect(
+      row(
+        chronological,
+        "resource_tombstones",
+        (candidate) =>
+          candidate.resource_type === "attachment" &&
+          candidate.resource_id === FULL_ATTACHMENT,
+      ),
+    ).toBeUndefined();
+    expect(
+      row(
+        chronological,
+        "commands",
+        (candidate) => candidate.id === "full_domain_command",
+      ),
+    ).toMatchObject({
       status: "failed",
       failure_code: "command_failure",
     });
     expect(chronological.event_tombstones).toHaveLength(2);
     for (const markerEventId of ["full_domain_11", "full_domain_12"]) {
-      expect(row(chronological, "applied_events", (candidate) =>
-        candidate.event_id === markerEventId,
-      )).toMatchObject({ event_id: markerEventId });
-      expect(row(chronological, "projection_changes", (candidate) =>
-        candidate.event_id === markerEventId,
-      )).toMatchObject({ event_id: markerEventId });
+      expect(
+        row(
+          chronological,
+          "applied_events",
+          (candidate) => candidate.event_id === markerEventId,
+        ),
+      ).toMatchObject({ event_id: markerEventId });
+      expect(
+        row(
+          chronological,
+          "projection_changes",
+          (candidate) => candidate.event_id === markerEventId,
+        ),
+      ).toMatchObject({ event_id: markerEventId });
     }
     expect(chronological.resource_tombstones).toEqual(
       expect.arrayContaining([
@@ -501,31 +578,42 @@ describe("tenant projection full-domain convergence proof", () => {
         }),
       ]),
     );
-    expect(row(chronological, "conversations", (candidate) =>
-      candidate.id === "full_domain_deleted_conversation",
-    )).toMatchObject({
+    expect(
+      row(
+        chronological,
+        "conversations",
+        (candidate) => candidate.id === "full_domain_deleted_conversation",
+      ),
+    ).toMatchObject({
       title: "Deleted conversation",
       last_message_preview: "",
       unread_count: 0,
       message_count: 0,
       attachment_count: 0,
     });
-    expect(row(chronological, "messages", (candidate) =>
-      candidate.id === "full_domain_deleted_message",
-    )).toBeUndefined();
+    expect(
+      row(
+        chronological,
+        "messages",
+        (candidate) => candidate.id === "full_domain_deleted_message",
+      ),
+    ).toBeUndefined();
     expect(chronological.applied_events).toHaveLength(17);
     expect(chronological.projection_changes).toHaveLength(17);
     expect(chronological.projection_checkpoints).toEqual([]);
     expect(chronological.projection_change_floors).toEqual([]);
-    expect(chronological._sql_schema_migrations).toEqual([{
-      version: 1,
-      name: "initial_tenant_projection",
-      applied_at: "2026-09-07T00:00:00.000Z",
-    }, {
-      version: 2,
-      name: "identity_local_projection_sequences",
-      applied_at: "2026-09-10T00:00:00.000Z",
-    }]);
+    expect(chronological._sql_schema_migrations).toEqual([
+      {
+        version: 1,
+        name: "initial_tenant_projection",
+        applied_at: "2026-09-07T00:00:00.000Z",
+      },
+      {
+        version: 2,
+        name: "identity_local_projection_sequences",
+        applied_at: "2026-09-10T00:00:00.000Z",
+      },
+    ]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);
     expect(chronological.connection_bindings).toEqual([
@@ -543,8 +631,12 @@ describe("tenant projection full-domain convergence proof", () => {
     const changedIds = chronological.projection_changes.map((candidate) =>
       String(candidate.event_id),
     );
-    expect(new Set(appliedIds)).toEqual(new Set(events.map((nextEvent) => nextEvent.event_id)));
-    expect(new Set(changedIds)).toEqual(new Set(events.map((nextEvent) => nextEvent.event_id)));
+    expect(new Set(appliedIds)).toEqual(
+      new Set(events.map((nextEvent) => nextEvent.event_id)),
+    );
+    expect(new Set(changedIds)).toEqual(
+      new Set(events.map((nextEvent) => nextEvent.event_id)),
+    );
     expect(appliedIds).toHaveLength(events.length);
     expect(changedIds).toHaveLength(events.length);
   }, 60_000);
@@ -620,62 +712,112 @@ describe("tenant projection full-domain convergence proof", () => {
       bindingFor("account_agent", "connection_agent", "identity_agent"),
       bindingFor("account_human", "connection_human", "identity_human"),
     ];
-    const write = (
-      tenant: string,
-      batch: ProjectionEventEnvelope[],
-    ) => input(batch.map((nextEvent) => ({ ...nextEvent, tenant_id: tenant })), {
-      tenant_id: tenant,
-      authorization: auth(["projection.write"], ["identity_agent", "identity_human"], tenant),
-      connections,
-    });
+    const write = (tenant: string, batch: ProjectionEventEnvelope[]) =>
+      input(
+        batch.map((nextEvent) => ({ ...nextEvent, tenant_id: tenant })),
+        {
+          tenant_id: tenant,
+          authorization: auth(
+            ["projection.write"],
+            ["identity_agent", "identity_human"],
+            tenant,
+          ),
+          connections,
+        },
+      );
 
     const wholeTenant = "tenant_convergence_local_a";
     const partitionedTenant = "tenant_convergence_local_b";
     const wholeStub = await initialize(wholeTenant);
     const partitionedStub = await initialize(partitionedTenant);
     await wholeStub.applyBatch(write(wholeTenant, events));
-    await partitionedStub.applyBatch(write(partitionedTenant, events.slice(0, 2)));
+    await partitionedStub.applyBatch(
+      write(partitionedTenant, events.slice(0, 2)),
+    );
     await partitionedStub.applyBatch(write(partitionedTenant, events.slice(2)));
 
-    const sequenceRows = async (stub: DurableObjectStub<import("../../projection/tenant-projection").TenantProjectionDO>) =>
-      rows(stub, "SELECT event_id, identity_id, identity_sequence FROM projection_changes ORDER BY identity_id, identity_sequence");
+    const sequenceRows = async (
+      stub: DurableObjectStub<
+        import("../../projection/tenant-projection").TenantProjectionDO
+      >,
+    ) =>
+      rows(
+        stub,
+        "SELECT event_id, identity_id, identity_sequence FROM projection_changes ORDER BY identity_id, identity_sequence",
+      );
     const expected = [
-      { event_id: "event_convergence_agent_one", identity_id: "identity_agent", identity_sequence: 1 },
-      { event_id: "event_convergence_agent_two", identity_id: "identity_agent", identity_sequence: 2 },
-      { event_id: "event_convergence_human_one", identity_id: "identity_human", identity_sequence: 1 },
-      { event_id: "event_convergence_human_two", identity_id: "identity_human", identity_sequence: 2 },
+      {
+        event_id: "event_convergence_agent_one",
+        identity_id: "identity_agent",
+        identity_sequence: 1,
+      },
+      {
+        event_id: "event_convergence_agent_two",
+        identity_id: "identity_agent",
+        identity_sequence: 2,
+      },
+      {
+        event_id: "event_convergence_human_one",
+        identity_id: "identity_human",
+        identity_sequence: 1,
+      },
+      {
+        event_id: "event_convergence_human_two",
+        identity_id: "identity_human",
+        identity_sequence: 2,
+      },
     ];
     await expect(sequenceRows(wholeStub)).resolves.toEqual(expected);
     await expect(sequenceRows(partitionedStub)).resolves.toEqual(expected);
 
-    await expect(wholeStub.applyBatch(write(wholeTenant, [events[1]!, events[0]!]))).resolves.toMatchObject({
+    await expect(
+      wholeStub.applyBatch(write(wholeTenant, [events[1]!, events[0]!])),
+    ).resolves.toMatchObject({
       applied_count: 0,
       duplicate_count: 2,
       last_sequence: 4,
     });
     await expect(sequenceRows(wholeStub)).resolves.toEqual(expected);
-    await expect(rows(wholeStub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+    await expect(
+      rows(
+        wholeStub,
+        "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+      ),
+    ).resolves.toEqual([
       { identity_id: "identity_agent", latest_sequence: 2 },
       { identity_id: "identity_human", latest_sequence: 2 },
     ]);
 
-    for (const [tenant, stub] of [[wholeTenant, wholeStub], [partitionedTenant, partitionedStub]] as const) {
-      await expect(stub.listChanges({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_human",
-        generation: 1,
-        after_sequence: 0,
-        authorization: auth(["projection.read"], ["identity_human"], tenant),
-      })).resolves.toMatchObject({ latest_sequence: 2, items: [{ sequence: 1 }, { sequence: 2 }] });
-      await expect(stub.listChanges({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_agent",
-        generation: 1,
-        after_sequence: 0,
-        authorization: auth(["projection.read"], ["identity_agent"], tenant),
-      })).resolves.toMatchObject({ latest_sequence: 2, items: [{ sequence: 1 }, { sequence: 2 }] });
+    for (const [tenant, stub] of [
+      [wholeTenant, wholeStub],
+      [partitionedTenant, partitionedStub],
+    ] as const) {
+      await expect(
+        stub.listChanges({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_human",
+          generation: 1,
+          after_sequence: 0,
+          authorization: auth(["projection.read"], ["identity_human"], tenant),
+        }),
+      ).resolves.toMatchObject({
+        latest_sequence: 2,
+        items: [{ sequence: 1 }, { sequence: 2 }],
+      });
+      await expect(
+        stub.listChanges({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_agent",
+          generation: 1,
+          after_sequence: 0,
+          authorization: auth(["projection.read"], ["identity_agent"], tenant),
+        }),
+      ).resolves.toMatchObject({
+        latest_sequence: 2,
+        items: [{ sequence: 1 }, { sequence: 2 }],
+      });
     }
   });
 
@@ -686,8 +828,10 @@ describe("tenant projection full-domain convergence proof", () => {
     await applyBatches(stub, tenant, batchesOfSize(events, 1));
 
     const beforeLoser = await snapshot(stub);
-    const winnerBefore = row(beforeLoser, "messages", (candidate) =>
-      candidate.id === FULL_MESSAGE,
+    const winnerBefore = row(
+      beforeLoser,
+      "messages",
+      (candidate) => candidate.id === FULL_MESSAGE,
     );
     const loser = fullEvent(
       "full_domain_older_loser",
@@ -716,42 +860,61 @@ describe("tenant projection full-domain convergence proof", () => {
     });
 
     const afterLoser = await snapshot(stub);
-    expect(row(afterLoser, "messages", (candidate) =>
-      candidate.id === FULL_MESSAGE,
-    )).toEqual(winnerBefore);
-    expect(row(afterLoser, "message_versions", (candidate) =>
-      candidate.event_id === "full_domain_older_loser",
-    )).toMatchObject({
+    expect(
+      row(afterLoser, "messages", (candidate) => candidate.id === FULL_MESSAGE),
+    ).toEqual(winnerBefore);
+    expect(
+      row(
+        afterLoser,
+        "message_versions",
+        (candidate) => candidate.event_id === "full_domain_older_loser",
+      ),
+    ).toMatchObject({
       body: "older loser body",
       version_kind: "edited",
     });
-    expect(row(afterLoser, "applied_events", (candidate) =>
-      candidate.event_id === "full_domain_older_loser",
-    )).toMatchObject({ event_type: "message.edited" });
-    expect(row(afterLoser, "projection_changes", (candidate) =>
-      candidate.event_id === "full_domain_older_loser",
-    )).toMatchObject({ event_type: "message.edited" });
+    expect(
+      row(
+        afterLoser,
+        "applied_events",
+        (candidate) => candidate.event_id === "full_domain_older_loser",
+      ),
+    ).toMatchObject({ event_type: "message.edited" });
+    expect(
+      row(
+        afterLoser,
+        "projection_changes",
+        (candidate) => candidate.event_id === "full_domain_older_loser",
+      ),
+    ).toMatchObject({ event_type: "message.edited" });
     expect(afterLoser.applied_events).toHaveLength(18);
     expect(afterLoser.projection_changes).toHaveLength(18);
 
     const beforeDuplicates = await snapshot(stub);
-    const duplicateResults: Array<{ applied_count: number; duplicate_count: number; last_sequence: number }> = [];
+    const duplicateResults: Array<{
+      applied_count: number;
+      duplicate_count: number;
+      last_sequence: number;
+    }> = [];
     for (const nextEvent of events) {
       duplicateResults.push(
         await stub.applyBatch(
           input(tenantEvents(tenant, [nextEvent]), {
             tenant_id: tenant,
-          connections: fullBindings(),
+            connections: fullBindings(),
           }),
         ),
       );
     }
     expect(duplicateResults).toHaveLength(events.length);
-    expect(duplicateResults.every((result) =>
-      result.applied_count === 0 &&
-      result.duplicate_count === 1 &&
-      result.last_sequence === 18,
-    )).toBe(true);
+    expect(
+      duplicateResults.every(
+        (result) =>
+          result.applied_count === 0 &&
+          result.duplicate_count === 1 &&
+          result.last_sequence === 18,
+      ),
+    ).toBe(true);
     await expect(snapshot(stub)).resolves.toEqual(beforeDuplicates);
   }, 60_000);
 
@@ -774,83 +937,120 @@ describe("tenant projection full-domain convergence proof", () => {
           unread: false,
         },
       });
-    const first = makeMessage("checkpoint_matrix_first", "checkpoint_message_first", 0);
+    const first = makeMessage(
+      "checkpoint_matrix_first",
+      "checkpoint_message_first",
+      0,
+    );
     const firstCheckpoint = {
       kind: "matrix_cursor",
       value: "cursor-first",
       last_observed_at: first.observed_at,
       last_event_id: first.event_id,
     };
-    await expect(stub.applyBatch(input([first], {
-      tenant_id: tenant,
-      connections: [bindingFor("account_a", "connection_a")],
-      checkpoint: firstCheckpoint,
-    }))).resolves.toMatchObject({
+    await expect(
+      stub.applyBatch(
+        input([first], {
+          tenant_id: tenant,
+          connections: [bindingFor("account_a", "connection_a")],
+          checkpoint: firstCheckpoint,
+        }),
+      ),
+    ).resolves.toMatchObject({
       applied_count: 1,
       duplicate_count: 0,
       last_sequence: 1,
     });
 
     const beforeEqual = await snapshot(stub);
-    await expect(stub.applyBatch(input([structuredClone(first)], {
-      tenant_id: tenant,
-      connections: [bindingFor("account_a", "connection_a")],
-      checkpoint: firstCheckpoint,
-    }))).resolves.toMatchObject({
+    await expect(
+      stub.applyBatch(
+        input([structuredClone(first)], {
+          tenant_id: tenant,
+          connections: [bindingFor("account_a", "connection_a")],
+          checkpoint: firstCheckpoint,
+        }),
+      ),
+    ).resolves.toMatchObject({
       applied_count: 0,
       duplicate_count: 1,
       last_sequence: 1,
     });
     await expect(snapshot(stub)).resolves.toEqual(beforeEqual);
 
-    const second = makeMessage("checkpoint_matrix_second", "checkpoint_message_second", 1);
+    const second = makeMessage(
+      "checkpoint_matrix_second",
+      "checkpoint_message_second",
+      1,
+    );
     const secondCheckpoint = {
       kind: "matrix_cursor",
       value: "cursor-second",
       last_observed_at: second.observed_at,
       last_event_id: second.event_id,
     };
-    await expect(stub.applyBatch(input([second], {
-      tenant_id: tenant,
-      connections: [bindingFor("account_a", "connection_a")],
-      checkpoint: secondCheckpoint,
-    }))).resolves.toMatchObject({
+    await expect(
+      stub.applyBatch(
+        input([second], {
+          tenant_id: tenant,
+          connections: [bindingFor("account_a", "connection_a")],
+          checkpoint: secondCheckpoint,
+        }),
+      ),
+    ).resolves.toMatchObject({
       applied_count: 1,
       duplicate_count: 0,
       last_sequence: 2,
     });
     const beforeOlder = await snapshot(stub);
-    await expect(stub.applyBatch(input([structuredClone(first)], {
-      tenant_id: tenant,
-      connections: [bindingFor("account_a", "connection_a")],
-      checkpoint: {
-        ...firstCheckpoint,
-        value: "cursor-older-repeat",
-      },
-    }))).resolves.toMatchObject({
+    await expect(
+      stub.applyBatch(
+        input([structuredClone(first)], {
+          tenant_id: tenant,
+          connections: [bindingFor("account_a", "connection_a")],
+          checkpoint: {
+            ...firstCheckpoint,
+            value: "cursor-older-repeat",
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({
       applied_count: 0,
       duplicate_count: 1,
       last_sequence: 2,
     });
     await expect(snapshot(stub)).resolves.toEqual(beforeOlder);
 
-    const third = makeMessage("checkpoint_matrix_third", "checkpoint_message_third", 2);
+    const third = makeMessage(
+      "checkpoint_matrix_third",
+      "checkpoint_message_third",
+      2,
+    );
     const thirdCheckpoint = {
       kind: "matrix_cursor",
       value: "cursor-third",
       last_observed_at: third.observed_at,
       last_event_id: third.event_id,
     };
-    await expect(stub.applyBatch(input([structuredClone(first), third], {
-      tenant_id: tenant,
-      connections: [bindingFor("account_a", "connection_a")],
-      checkpoint: thirdCheckpoint,
-    }))).resolves.toMatchObject({
+    await expect(
+      stub.applyBatch(
+        input([structuredClone(first), third], {
+          tenant_id: tenant,
+          connections: [bindingFor("account_a", "connection_a")],
+          checkpoint: thirdCheckpoint,
+        }),
+      ),
+    ).resolves.toMatchObject({
       applied_count: 1,
       duplicate_count: 1,
       last_sequence: 3,
     });
-    await expect(rows(stub, "SELECT value,last_observed_at,last_event_id,last_sequence FROM projection_checkpoints")).resolves.toEqual([
+    await expect(
+      rows(
+        stub,
+        "SELECT value,last_observed_at,last_event_id,last_sequence FROM projection_checkpoints",
+      ),
+    ).resolves.toEqual([
       {
         value: "cursor-third",
         last_observed_at: third.observed_at,
@@ -858,7 +1058,9 @@ describe("tenant projection full-domain convergence proof", () => {
         last_sequence: 3,
       },
     ]);
-    await expect(rows(stub, "SELECT event_id FROM applied_events ORDER BY event_id")).resolves.toEqual([
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events ORDER BY event_id"),
+    ).resolves.toEqual([
       { event_id: "checkpoint_matrix_first" },
       { event_id: "checkpoint_matrix_second" },
       { event_id: "checkpoint_matrix_third" },
@@ -879,11 +1081,13 @@ describe("tenant projection full-domain convergence proof", () => {
       last_observed_at: original.observed_at,
       last_event_id: original.event_id,
     };
-    await stub.applyBatch(input([original], {
-      tenant_id: tenant,
-      connections: [bindingFor("account_a", "connection_a")],
-      checkpoint: originalCheckpoint,
-    }));
+    await stub.applyBatch(
+      input([original], {
+        tenant_id: tenant,
+        connections: [bindingFor("account_a", "connection_a")],
+        checkpoint: originalCheckpoint,
+      }),
+    );
     const before = await snapshot(stub);
     const sentinel = "hash conflict payload must not escape";
     const changed = created("hash_rollback_original", {
@@ -918,14 +1122,16 @@ describe("tenant projection full-domain convergence proof", () => {
     });
     const failure = await runInDurableObject(stub, async (instance) => {
       try {
-        await instance.applyBatch(input([newEvent, changed], {
-          tenant_id: tenant,
-          connections: [bindingFor("account_a", "connection_a")],
-          checkpoint: {
-            ...originalCheckpoint,
-            value: "cursor-conflicting",
-          },
-        }));
+        await instance.applyBatch(
+          input([newEvent, changed], {
+            tenant_id: tenant,
+            connections: [bindingFor("account_a", "connection_a")],
+            checkpoint: {
+              ...originalCheckpoint,
+              value: "cursor-conflicting",
+            },
+          }),
+        );
         return undefined;
       } catch (error) {
         return {
@@ -948,7 +1154,8 @@ describe("tenant projection full-domain convergence proof", () => {
     const tenant = "tenant_full_domain_rollback";
     const stub = await initialize(tenant);
     const before = await snapshot(stub);
-    const sentinel = "malicious payload must never cross the projection error boundary";
+    const sentinel =
+      "malicious payload must never cross the projection error boundary";
 
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
@@ -1019,29 +1226,34 @@ describe("tenant projection full-domain convergence proof", () => {
   it("accepts exactly 500 distinct conversations and reapplies them without new audit rows", async () => {
     const tenant = "tenant_full_domain_capacity";
     const stub = await initialize(tenant);
-    const capacityBinding = bindingFor("capacity_account", "capacity_connection");
+    const capacityBinding = bindingFor(
+      "capacity_account",
+      "capacity_connection",
+    );
     const capacityEvents: ProjectionEventEnvelope[] = Array.from(
       { length: 500 },
-      (_unused, index) => fullEvent(
-        "capacity_event_" + String(index).padStart(3, "0"),
-        {
-          message_id: "capacity_message_" + String(index).padStart(3, "0"),
-          direction: "inbound",
-          sender_participant_id: null,
-          sender_label: "Capacity sender",
-          body: "capacity body " + String(index),
-          reply_to_message_id: null,
-          delivery_status: "unknown",
-          unread: false,
-        },
-        "message.created",
-        {
-          account_id: capacityBinding.account_id,
-          conversation_id: "capacity_conversation_" + String(index).padStart(3, "0"),
-          occurred_at: "2026-09-07T03:00:00.000Z",
-          observed_at: "2026-09-07T03:00:01.000Z",
-        },
-      ),
+      (_unused, index) =>
+        fullEvent(
+          "capacity_event_" + String(index).padStart(3, "0"),
+          {
+            message_id: "capacity_message_" + String(index).padStart(3, "0"),
+            direction: "inbound",
+            sender_participant_id: null,
+            sender_label: "Capacity sender",
+            body: "capacity body " + String(index),
+            reply_to_message_id: null,
+            delivery_status: "unknown",
+            unread: false,
+          },
+          "message.created",
+          {
+            account_id: capacityBinding.account_id,
+            conversation_id:
+              "capacity_conversation_" + String(index).padStart(3, "0"),
+            occurred_at: "2026-09-07T03:00:00.000Z",
+            observed_at: "2026-09-07T03:00:01.000Z",
+          },
+        ),
     );
     const request = input(tenantEvents(tenant, capacityEvents), {
       tenant_id: tenant,
@@ -1075,20 +1287,39 @@ describe("tenant projection full-domain convergence proof", () => {
         attachment_count: 0,
       });
     }
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM messages")).resolves.toEqual([{ count: 500 }]);
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM applied_events")).resolves.toEqual([{ count: 500 }]);
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM projection_changes")).resolves.toEqual([{ count: 500 }]);
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM connection_bindings")).resolves.toEqual([{ count: 1 }]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM messages"),
+    ).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM applied_events"),
+    ).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM projection_changes"),
+    ).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM connection_bindings"),
+    ).resolves.toEqual([{ count: 1 }]);
 
-    const beforeDuplicate = await rows(stub, "SELECT * FROM conversations ORDER BY id");
-    await expect(stub.applyBatch(structuredClone(request))).resolves.toMatchObject({
+    const beforeDuplicate = await rows(
+      stub,
+      "SELECT * FROM conversations ORDER BY id",
+    );
+    await expect(
+      stub.applyBatch(structuredClone(request)),
+    ).resolves.toMatchObject({
       applied_count: 0,
       duplicate_count: 500,
       last_sequence: 500,
     });
-    await expect(rows(stub, "SELECT * FROM conversations ORDER BY id")).resolves.toEqual(beforeDuplicate);
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM applied_events")).resolves.toEqual([{ count: 500 }]);
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM projection_changes")).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      rows(stub, "SELECT * FROM conversations ORDER BY id"),
+    ).resolves.toEqual(beforeDuplicate);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM applied_events"),
+    ).resolves.toEqual([{ count: 500 }]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM projection_changes"),
+    ).resolves.toEqual([{ count: 500 }]);
   }, 60_000);
 
   it("guards deterministic projector dispatch and one-set sorted summary recomputation", async () => {
@@ -1108,10 +1339,16 @@ describe("tenant projection full-domain convergence proof", () => {
     expect(source).not.toMatch(/\bnew Date\s*\(\s*\)/);
     expect(source).not.toMatch(/\bMath\.(?:random|floor|ceil)\s*\(/);
     expect(source).not.toMatch(/\bfetch\s*\(/);
-    expect(source).not.toMatch(/\b(?:console|logger)\.(?:log|debug|info|warn|error)\s*\(/);
+    expect(source).not.toMatch(
+      /\b(?:console|logger)\.(?:log|debug|info|warn|error)\s*\(/,
+    );
     expect(source).not.toMatch(/\b(?:R2|Queue|TENANT_PROJECTION|getByName)\b/);
-    expect(source).not.toMatch(/\basync\s+(?:function\s+)?(?:project|recompute)/);
-    expect(source).not.toMatch(/\b(?:projectEvent|recomputeConversationSummaries)\s*=\s*async\b/);
+    expect(source).not.toMatch(
+      /\basync\s+(?:function\s+)?(?:project|recompute)/,
+    );
+    expect(source).not.toMatch(
+      /\b(?:projectEvent|recomputeConversationSummaries)\s*=\s*async\b/,
+    );
 
     const dispatch = projectorDomainsSource;
     const eventTypes = [
@@ -1143,9 +1380,17 @@ describe("tenant projection full-domain convergence proof", () => {
       tenantProjectionSource.indexOf("  #applyPreparedBatch("),
       tenantProjectionSource.indexOf("  #writeReplayCheckpoint("),
     );
-    expect(applyPreparedBatchSource.match(/new Set<string>\(\)/g) ?? []).toHaveLength(1);
-    expect(tenantProjectionSource).toContain("const touchedConversations = new Set<string>();");
-    expect(domainsSource).toContain("const conversationIds = [...touchedConversations].sort();");
-    expect(domainsSource.match(/\[\.\.\.touchedConversations\]\.sort\(\)/g) ?? []).toHaveLength(1);
+    expect(
+      applyPreparedBatchSource.match(/new Set<string>\(\)/g) ?? [],
+    ).toHaveLength(1);
+    expect(tenantProjectionSource).toContain(
+      "const touchedConversations = new Set<string>();",
+    );
+    expect(domainsSource).toContain(
+      "const conversationIds = [...touchedConversations].sort();",
+    );
+    expect(
+      domainsSource.match(/\[\.\.\.touchedConversations\]\.sort\(\)/g) ?? [],
+    ).toHaveLength(1);
   });
 });

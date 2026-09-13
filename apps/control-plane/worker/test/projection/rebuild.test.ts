@@ -218,7 +218,9 @@ const replayState = async (
     const snapshot: Record<string, Record<string, SqlStorageValue>[]> = {};
     for (const table of DERIVED_TABLES) {
       snapshot[table] = state.storage.sql
-        .exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${table} ORDER BY rowid`)
+        .exec<Record<string, SqlStorageValue>>(
+          `SELECT * FROM ${table} ORDER BY rowid`,
+        )
         .toArray();
     }
     snapshot.connection_bindings = state.storage.sql
@@ -292,33 +294,39 @@ const replay = async (
 const nextSocketFrame = (
   socket: WebSocket,
   predicate: (frame: Record<string, unknown>) => boolean,
-): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
-  const onMessage = (event: MessageEvent) => {
-    const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
-    if (!predicate(frame)) return;
-    cleanup();
-    resolve(frame);
-  };
-  const cleanup = () => {
-    socket.removeEventListener("message", onMessage);
-    clearTimeout(timeout);
-  };
-  const timeout = setTimeout(() => {
-    cleanup();
-    reject(new Error("Timed out waiting for realtime frame"));
-  }, 1_000);
-  socket.addEventListener("message", onMessage);
-});
+): Promise<Record<string, unknown>> =>
+  new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent) => {
+      const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+      if (!predicate(frame)) return;
+      cleanup();
+      resolve(frame);
+    };
+    const cleanup = () => {
+      socket.removeEventListener("message", onMessage);
+      clearTimeout(timeout);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for realtime frame"));
+    }, 1_000);
+    socket.addEventListener("message", onMessage);
+  });
 
-const nextSocketClose = (socket: WebSocket): Promise<number> => new Promise((resolve, reject) => {
-  const timeout = setTimeout(() => {
-    reject(new Error("Timed out waiting for realtime socket close"));
-  }, 1_000);
-  socket.addEventListener("close", (event) => {
-    clearTimeout(timeout);
-    resolve((event as CloseEvent).code);
-  }, { once: true });
-});
+const nextSocketClose = (socket: WebSocket): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("Timed out waiting for realtime socket close"));
+    }, 1_000);
+    socket.addEventListener(
+      "close",
+      (event) => {
+        clearTimeout(timeout);
+        resolve((event as CloseEvent).code);
+      },
+      { once: true },
+    );
+  });
 
 describe("TenantProjectionDO resumable rebuilds", () => {
   it("sends the next-generation reset before closing sockets and never broadcasts replay pages", async () => {
@@ -330,14 +338,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       tenant_id: tenant,
       principal_id: "principal_rebuild",
       membership_id: "membership_rebuild",
-      subscriptions: [{ identity_id: "identity_a", families: ["projection"] as const }],
+      subscriptions: [
+        { identity_id: "identity_a", families: ["projection"] as const },
+      ],
       resume: [],
       issued_at: issuedAt.toISOString(),
       expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
     };
-    const response = await stub.fetch(new Request(
-      "https://tenant-projection.internal/realtime",
-      {
+    const response = await stub.fetch(
+      new Request("https://tenant-projection.internal/realtime", {
         method: "GET",
         headers: {
           Upgrade: "websocket",
@@ -345,8 +354,8 @@ describe("TenantProjectionDO resumable rebuilds", () => {
           "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
           "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
         },
-      },
-    ));
+      }),
+    );
     expect(response.status).toBe(101);
     const socket = response.webSocket;
     if (socket === null) throw new Error("missing realtime socket");
@@ -354,16 +363,28 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     socket.addEventListener("message", (event) => {
       frames.push(JSON.parse(String(event.data)) as Record<string, unknown>);
     });
-    const connected = nextSocketFrame(socket, (frame) => frame.type === "connected");
+    const connected = nextSocketFrame(
+      socket,
+      (frame) => frame.type === "connected",
+    );
     socket.accept();
     await connected;
-    const reset = nextSocketFrame(socket, (frame) => frame.type === "reset_required");
+    const reset = nextSocketFrame(
+      socket,
+      (frame) => frame.type === "reset_required",
+    );
     const closed = new Promise<number>((resolve) => {
-      socket.addEventListener("close", (event) => resolve((event as CloseEvent).code), { once: true });
+      socket.addEventListener(
+        "close",
+        (event) => resolve((event as CloseEvent).code),
+        { once: true },
+      );
     });
 
     try {
-      await expect(begin(stub, tenant, "rebuild_socket_reset", 1)).resolves.toMatchObject({
+      await expect(
+        begin(stub, tenant, "rebuild_socket_reset", 1),
+      ).resolves.toMatchObject({
         state: "rebuilding",
         generation: 2,
       });
@@ -382,10 +403,12 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         stub,
         tenant,
         "rebuild_socket_reset",
-        pageFor(tenant, [eventFor({
-          tenant,
-          eventId: "historical_replay_should_not_broadcast",
-        })]),
+        pageFor(tenant, [
+          eventFor({
+            tenant,
+            eventId: "historical_replay_should_not_broadcast",
+          }),
+        ]),
         null,
         [binding("account_a", "connection_a", "identity_a")],
       );
@@ -408,14 +431,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       tenant_id: tenant,
       principal_id: "principal_rebuild",
       membership_id: "membership_rebuild",
-      subscriptions: [{ identity_id: "identity_a", families: ["projection"] as const }],
+      subscriptions: [
+        { identity_id: "identity_a", families: ["projection"] as const },
+      ],
       resume: [],
       issued_at: issuedAt.toISOString(),
       expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
     };
-    const response = await stub.fetch(new Request(
-      "https://tenant-projection.internal/realtime",
-      {
+    const response = await stub.fetch(
+      new Request("https://tenant-projection.internal/realtime", {
         method: "GET",
         headers: {
           Upgrade: "websocket",
@@ -423,15 +447,21 @@ describe("TenantProjectionDO resumable rebuilds", () => {
           "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
           "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
         },
-      },
-    ));
+      }),
+    );
     expect(response.status).toBe(101);
     const socket = response.webSocket;
     if (socket === null) throw new Error("missing realtime socket");
-    const connected = nextSocketFrame(socket, (frame) => frame.type === "connected");
+    const connected = nextSocketFrame(
+      socket,
+      (frame) => frame.type === "connected",
+    );
     socket.accept();
     await connected;
-    const reset = nextSocketFrame(socket, (frame) => frame.type === "reset_required");
+    const reset = nextSocketFrame(
+      socket,
+      (frame) => frame.type === "reset_required",
+    );
     const closed = nextSocketClose(socket);
 
     await runInDurableObject(stub, async (_instance, state) => {
@@ -445,8 +475,12 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         (instance) => begin(instance, tenant, "rebuild_socket_reset_failed", 1),
         "projection_unavailable",
       );
-      await expect(reset).rejects.toThrow("Timed out waiting for realtime frame");
-      await expect(closed).rejects.toThrow("Timed out waiting for realtime socket close");
+      await expect(reset).rejects.toThrow(
+        "Timed out waiting for realtime frame",
+      );
+      await expect(closed).rejects.toThrow(
+        "Timed out waiting for realtime socket close",
+      );
       expect(socket.readyState).not.toBe(3);
     } finally {
       await runInDurableObject(stub, async (_instance, state) => {
@@ -512,7 +546,9 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       checkpoints: [],
     });
 
-    await expect(rows(stub, "SELECT * FROM connection_bindings")).resolves.toEqual([
+    await expect(
+      rows(stub, "SELECT * FROM connection_bindings"),
+    ).resolves.toEqual([
       {
         account_id: "account_a",
         connection_id: "connection_a",
@@ -520,23 +556,42 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         platform: "whatsapp",
       },
     ]);
-    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM conversations")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual(
+      [],
+    );
+    await expect(rows(stub, "SELECT * FROM conversations")).resolves.toEqual(
+      [],
+    );
     await expect(rows(stub, "SELECT * FROM messages")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_change_floors")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_checkpoints")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM completed_rebuilds")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM failed_rebuilds")).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_changes"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_change_floors"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_checkpoints"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM completed_rebuilds"),
+    ).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM failed_rebuilds")).resolves.toEqual(
+      [],
+    );
     for (const table of DERIVED_TABLES) {
-      await expect(rows(stub, `SELECT COUNT(*) AS count FROM ${table}`)).resolves.toEqual([
-        { count: 0 },
-      ]);
+      await expect(
+        rows(stub, `SELECT COUNT(*) AS count FROM ${table}`),
+      ).resolves.toEqual([{ count: 0 }]);
     }
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM _sql_schema_migrations")).resolves.toEqual([
-      { count: 2 },
-    ]);
-    await expect(rows(stub, "SELECT tenant_id, state, generation, rebuild_id, rebuild_started_at FROM projection_meta")).resolves.toEqual([
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM _sql_schema_migrations"),
+    ).resolves.toEqual([{ count: 2 }]);
+    await expect(
+      rows(
+        stub,
+        "SELECT tenant_id, state, generation, rebuild_id, rebuild_started_at FROM projection_meta",
+      ),
+    ).resolves.toEqual([
       {
         tenant_id: tenant,
         state: "rebuilding",
@@ -549,7 +604,8 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     await expect(begin(stub, tenant, "rebuild_one", 1)).resolves.toEqual(first);
     await expectCode(
       stub,
-      (instance) => begin(instance, tenant, "rebuild_one", 1, "2026-09-07T03:00:01.000Z"),
+      (instance) =>
+        begin(instance, tenant, "rebuild_one", 1, "2026-09-07T03:00:01.000Z"),
       "projection_rebuild_mismatch",
     );
     await expectCode(
@@ -590,7 +646,11 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     await stub.applyBatch({
       schema_version: 1,
       tenant_id: tenant,
-      authorization: auth(tenant, ["projection.write"], ["identity_agent", "identity_human"]),
+      authorization: auth(
+        tenant,
+        ["projection.write"],
+        ["identity_agent", "identity_human"],
+      ),
       mode: "live",
       rebuild_id: null,
       connections: [
@@ -600,15 +660,26 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       events: liveEvents,
       checkpoint: null,
     });
-    await expect(rows(stub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+    await expect(
+      rows(
+        stub,
+        "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+      ),
+    ).resolves.toEqual([
       { identity_id: "identity_agent", latest_sequence: 1 },
       { identity_id: "identity_human", latest_sequence: 1 },
     ]);
 
     await begin(stub, tenant, "rebuild_local_sequences", 1);
-    await expect(rows(stub, "SELECT * FROM projection_identity_sequences")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_change_floors")).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_identity_sequences"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_changes"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_change_floors"),
+    ).resolves.toEqual([]);
 
     const replayEvents = liveEvents.map((nextEvent) => ({
       ...nextEvent,
@@ -634,11 +705,21 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       authorization: auth(tenant, ["projection.rebuild"]),
     });
 
-    await expect(rows(stub, "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id")).resolves.toEqual([
+    await expect(
+      rows(
+        stub,
+        "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+      ),
+    ).resolves.toEqual([
       { identity_id: "identity_agent", latest_sequence: 1 },
       { identity_id: "identity_human", latest_sequence: 1 },
     ]);
-    await expect(rows(stub, "SELECT identity_id, sequence, identity_sequence FROM projection_changes ORDER BY sequence")).resolves.toEqual([
+    await expect(
+      rows(
+        stub,
+        "SELECT identity_id, sequence, identity_sequence FROM projection_changes ORDER BY sequence",
+      ),
+    ).resolves.toEqual([
       { identity_id: "identity_agent", sequence: 1, identity_sequence: 1 },
       { identity_id: "identity_human", sequence: 2, identity_sequence: 1 },
     ]);
@@ -677,151 +758,163 @@ describe("TenantProjectionDO resumable rebuilds", () => {
 
     await expectCode(
       stub,
-      (instance) => instance.beginRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_auth_begin",
-        expected_generation: 1,
-        started_at: "2026-09-07T03:10:00.000Z",
-        authorization: forbidden,
-      }),
+      (instance) =>
+        instance.beginRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_auth_begin",
+          expected_generation: 1,
+          started_at: "2026-09-07T03:10:00.000Z",
+          authorization: forbidden,
+        }),
       "projection_forbidden",
     );
     await expectCode(
       stub,
-      (instance) => instance.completeRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_auth_complete",
-        terminal_cursor: null,
-        completed_at: "2026-09-07T03:10:01.000Z",
-        authorization: forbidden,
-      }),
+      (instance) =>
+        instance.completeRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_auth_complete",
+          terminal_cursor: null,
+          completed_at: "2026-09-07T03:10:01.000Z",
+          authorization: forbidden,
+        }),
       "projection_forbidden",
     );
     await expectCode(
       stub,
-      (instance) => instance.abortRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_auth_abort",
-        failed_at: "2026-09-07T03:10:02.000Z",
-        failure_code: "operator_abort",
-        authorization: forbidden,
-      }),
+      (instance) =>
+        instance.abortRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_auth_abort",
+          failed_at: "2026-09-07T03:10:02.000Z",
+          failure_code: "operator_abort",
+          authorization: forbidden,
+        }),
       "projection_forbidden",
     );
     await expectCode(
       stub,
-      (instance) => instance.applyReplayPage({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_auth_replay",
-        source_cursor: null,
-        connections: [],
-        page: terminalPage,
-        authorization: forbidden,
-      }),
+      (instance) =>
+        instance.applyReplayPage({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_auth_replay",
+          source_cursor: null,
+          connections: [],
+          page: terminalPage,
+          authorization: forbidden,
+        }),
       "projection_forbidden",
     );
 
     await expectCode(
       stub,
-      (instance) => instance.beginRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_tenant_begin",
-        expected_generation: 1,
-        started_at: "2026-09-07T03:11:00.000Z",
-        authorization: foreign,
-      }),
+      (instance) =>
+        instance.beginRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_tenant_begin",
+          expected_generation: 1,
+          started_at: "2026-09-07T03:11:00.000Z",
+          authorization: foreign,
+        }),
       "projection_tenant_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.completeRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_tenant_complete",
-        terminal_cursor: null,
-        completed_at: "2026-09-07T03:11:01.000Z",
-        authorization: foreign,
-      }),
+      (instance) =>
+        instance.completeRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_tenant_complete",
+          terminal_cursor: null,
+          completed_at: "2026-09-07T03:11:01.000Z",
+          authorization: foreign,
+        }),
       "projection_tenant_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.abortRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_tenant_abort",
-        failed_at: "2026-09-07T03:11:02.000Z",
-        failure_code: "operator_abort",
-        authorization: foreign,
-      }),
+      (instance) =>
+        instance.abortRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_tenant_abort",
+          failed_at: "2026-09-07T03:11:02.000Z",
+          failure_code: "operator_abort",
+          authorization: foreign,
+        }),
       "projection_tenant_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.applyReplayPage({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_tenant_replay",
-        source_cursor: null,
-        connections: [],
-        page: terminalPage,
-        authorization: foreign,
-      }),
+      (instance) =>
+        instance.applyReplayPage({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_tenant_replay",
+          source_cursor: null,
+          connections: [],
+          page: terminalPage,
+          authorization: foreign,
+        }),
       "projection_tenant_mismatch",
     );
 
     await expectCode(
       stub,
-      (instance) => instance.beginRebuild({
-        schema_version: 1,
-        tenant_id: storedTenantInput,
-        rebuild_id: "rebuild_stored_tenant_begin",
-        expected_generation: 1,
-        started_at: "2026-09-07T03:12:00.000Z",
-        authorization: storedTenantAuth,
-      }),
+      (instance) =>
+        instance.beginRebuild({
+          schema_version: 1,
+          tenant_id: storedTenantInput,
+          rebuild_id: "rebuild_stored_tenant_begin",
+          expected_generation: 1,
+          started_at: "2026-09-07T03:12:00.000Z",
+          authorization: storedTenantAuth,
+        }),
       "projection_tenant_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.completeRebuild({
-        schema_version: 1,
-        tenant_id: storedTenantInput,
-        rebuild_id: "rebuild_stored_tenant_complete",
-        terminal_cursor: null,
-        completed_at: "2026-09-07T03:12:01.000Z",
-        authorization: storedTenantAuth,
-      }),
+      (instance) =>
+        instance.completeRebuild({
+          schema_version: 1,
+          tenant_id: storedTenantInput,
+          rebuild_id: "rebuild_stored_tenant_complete",
+          terminal_cursor: null,
+          completed_at: "2026-09-07T03:12:01.000Z",
+          authorization: storedTenantAuth,
+        }),
       "projection_tenant_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.abortRebuild({
-        schema_version: 1,
-        tenant_id: storedTenantInput,
-        rebuild_id: "rebuild_stored_tenant_abort",
-        failed_at: "2026-09-07T03:12:02.000Z",
-        failure_code: "operator_abort",
-        authorization: storedTenantAuth,
-      }),
+      (instance) =>
+        instance.abortRebuild({
+          schema_version: 1,
+          tenant_id: storedTenantInput,
+          rebuild_id: "rebuild_stored_tenant_abort",
+          failed_at: "2026-09-07T03:12:02.000Z",
+          failure_code: "operator_abort",
+          authorization: storedTenantAuth,
+        }),
       "projection_tenant_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.applyReplayPage({
-        schema_version: 1,
-        tenant_id: storedTenantInput,
-        rebuild_id: "rebuild_stored_tenant_replay",
-        source_cursor: null,
-        connections: [],
-        page: storedTenantPage,
-        authorization: storedTenantAuth,
-      }),
+      (instance) =>
+        instance.applyReplayPage({
+          schema_version: 1,
+          tenant_id: storedTenantInput,
+          rebuild_id: "rebuild_stored_tenant_replay",
+          source_cursor: null,
+          connections: [],
+          page: storedTenantPage,
+          authorization: storedTenantAuth,
+        }),
       "projection_tenant_mismatch",
     );
   });
@@ -848,18 +941,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     });
     const page = pageFor(tenant, [eventB, eventA]);
     await expect(
-      replay(
-        stub,
-        tenant,
-        "rebuild_multi",
-        page,
-        null,
-        [
-          binding("account_a", "connection_a", "identity_a"),
-          binding("account_b", "connection_b", "identity_b"),
-        ],
-      ),
-    ).resolves.toMatchObject({ applied_count: 2, duplicate_count: 0, generation: 2 });
+      replay(stub, tenant, "rebuild_multi", page, null, [
+        binding("account_a", "connection_a", "identity_a"),
+        binding("account_b", "connection_b", "identity_b"),
+      ]),
+    ).resolves.toMatchObject({
+      applied_count: 2,
+      duplicate_count: 0,
+      generation: 2,
+    });
 
     const status = await stub.getStatus({
       schema_version: 1,
@@ -873,23 +963,35 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       value: "terminal",
       source_cursor: null,
     });
-    await expect(rows(stub, "SELECT account_id,connection_id,identity_id FROM connection_bindings ORDER BY account_id")).resolves.toEqual([
-      { account_id: "account_a", connection_id: "connection_a", identity_id: "identity_a" },
-      { account_id: "account_b", connection_id: "connection_b", identity_id: "identity_b" },
+    await expect(
+      rows(
+        stub,
+        "SELECT account_id,connection_id,identity_id FROM connection_bindings ORDER BY account_id",
+      ),
+    ).resolves.toEqual([
+      {
+        account_id: "account_a",
+        connection_id: "connection_a",
+        identity_id: "identity_a",
+      },
+      {
+        account_id: "account_b",
+        connection_id: "connection_b",
+        identity_id: "identity_b",
+      },
     ]);
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_multi",
-        page,
-        null,
-        [binding("account_a", "connection_changed", "identity_a"), binding("account_b", "connection_b", "identity_b")],
-      ),
+      (instance) =>
+        replay(instance, tenant, "rebuild_multi", page, null, [
+          binding("account_a", "connection_changed", "identity_a"),
+          binding("account_b", "connection_b", "identity_b"),
+        ]),
       "projection_conflict",
     );
-    await expect(begin(stub, tenant, "rebuild_multi", 1)).resolves.toMatchObject({
+    await expect(
+      begin(stub, tenant, "rebuild_multi", 1),
+    ).resolves.toMatchObject({
       state: "rebuilding",
       generation: 2,
       rebuild_id: "rebuild_multi",
@@ -900,91 +1002,104 @@ describe("TenantProjectionDO resumable rebuilds", () => {
   it("gates live apply and ordinary queries while rebuilding, requires the active replay ID, and rolls back failed transitions", async () => {
     const tenant = newTenant();
     const stub = await initialize(tenant);
-    const event = eventFor({ tenant, eventId: "event_gated", eventSource: "live" });
+    const event = eventFor({
+      tenant,
+      eventId: "event_gated",
+      eventSource: "live",
+    });
     await begin(stub, tenant, "rebuild_gate", 1);
 
     await expectCode(
       stub,
-      (instance) => instance.applyBatch({
-        schema_version: 1,
-        tenant_id: tenant,
-        authorization: auth(tenant, ["projection.write"], ["identity_a"]),
-        mode: "live",
-        rebuild_id: null,
-        connections: [binding("account_a", "connection_a", "identity_a")],
-        events: [event],
-        checkpoint: null,
-      }),
+      (instance) =>
+        instance.applyBatch({
+          schema_version: 1,
+          tenant_id: tenant,
+          authorization: auth(tenant, ["projection.write"], ["identity_a"]),
+          mode: "live",
+          rebuild_id: null,
+          connections: [binding("account_a", "connection_a", "identity_a")],
+          events: [event],
+          checkpoint: null,
+        }),
       "projection_rebuilding",
     );
     await expectCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        connection_id: null,
-        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          connection_id: null,
+          authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+        }),
       "projection_rebuilding",
     );
     await expectCode(
       stub,
-      (instance) => instance.listMessages({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        conversation_id: "conversation_gated",
-        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-      }),
+      (instance) =>
+        instance.listMessages({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          conversation_id: "conversation_gated",
+          authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+        }),
       "projection_rebuilding",
     );
     await expectCode(
       stub,
-      (instance) => instance.listChanges({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        generation: 2,
-        after_sequence: 0,
-        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-      }),
+      (instance) =>
+        instance.listChanges({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          generation: 2,
+          after_sequence: 0,
+          authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+        }),
       "projection_rebuilding",
     );
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "not_active",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_wrong_rebuild" })]),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "not_active",
+          pageFor(tenant, [
+            eventFor({ tenant, eventId: "event_wrong_rebuild" }),
+          ]),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_rebuild_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.completeRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "not_active",
-        terminal_cursor: null,
-        completed_at: "2026-09-07T04:00:00.000Z",
-        authorization: auth(tenant, ["projection.rebuild"]),
-      }),
+      (instance) =>
+        instance.completeRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "not_active",
+          terminal_cursor: null,
+          completed_at: "2026-09-07T04:00:00.000Z",
+          authorization: auth(tenant, ["projection.rebuild"]),
+        }),
       "projection_rebuild_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => instance.abortRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "not_active",
-        failed_at: "2026-09-07T04:00:00.000Z",
-        failure_code: "operator_abort",
-        authorization: auth(tenant, ["projection.rebuild"]),
-      }),
+      (instance) =>
+        instance.abortRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "not_active",
+          failed_at: "2026-09-07T04:00:00.000Z",
+          failure_code: "operator_abort",
+          authorization: auth(tenant, ["projection.rebuild"]),
+        }),
       "projection_rebuild_mismatch",
     );
 
@@ -1037,14 +1152,20 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         state.storage.sql.exec("DROP TRIGGER fail_rebuild_meta");
       });
     }
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toMatchObject({ state: "ready", generation: 1, applied_event_count: 1 });
-    await expect(rows(stub, "SELECT event_id FROM applied_events")).resolves.toEqual([
-      { event_id: baseline.event_id },
-    ]);
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toMatchObject({
+      state: "ready",
+      generation: 1,
+      applied_event_count: 1,
+    });
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events"),
+    ).resolves.toEqual([{ event_id: baseline.event_id }]);
 
     await begin(stub, tenant, "rebuild_transition", 1);
     const partialEvent = eventFor({
@@ -1063,14 +1184,10 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     try {
       await expectCode(
         stub,
-        (instance) => replay(
-          instance,
-          tenant,
-          "rebuild_transition",
-          partialPage,
-          null,
-          [binding("account_a", "connection_a", "identity_a")],
-        ),
+        (instance) =>
+          replay(instance, tenant, "rebuild_transition", partialPage, null, [
+            binding("account_a", "connection_a", "identity_a"),
+          ]),
         "projection_unavailable",
       );
     } finally {
@@ -1078,22 +1195,25 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         state.storage.sql.exec("DROP TRIGGER fail_rebuild_projection");
       });
     }
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toMatchObject({ state: "rebuilding", applied_event_count: 0, checkpoints: [] });
-    await expect(rows(stub, "SELECT event_id FROM applied_events")).resolves.toEqual([]);
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toMatchObject({
+      state: "rebuilding",
+      applied_event_count: 0,
+      checkpoints: [],
+    });
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events"),
+    ).resolves.toEqual([]);
     await expect(rows(stub, "SELECT id FROM messages")).resolves.toEqual([]);
 
-    await replay(
-      stub,
-      tenant,
-      "rebuild_transition",
-      partialPage,
-      null,
-      [binding("account_a", "connection_a", "identity_a")],
-    );
+    await replay(stub, tenant, "rebuild_transition", partialPage, null, [
+      binding("account_a", "connection_a", "identity_a"),
+    ]);
     const beforeAbortFailure = await stub.getStatus({
       schema_version: 1,
       tenant_id: tenant,
@@ -1107,14 +1227,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     try {
       await expectCode(
         stub,
-        (instance) => instance.abortRebuild({
-          schema_version: 1,
-          tenant_id: tenant,
-          rebuild_id: "rebuild_transition",
-          failed_at: "2026-09-07T05:30:00.000Z",
-          failure_code: "operator_abort",
-          authorization: auth(tenant, ["projection.rebuild"]),
-        }),
+        (instance) =>
+          instance.abortRebuild({
+            schema_version: 1,
+            tenant_id: tenant,
+            rebuild_id: "rebuild_transition",
+            failed_at: "2026-09-07T05:30:00.000Z",
+            failure_code: "operator_abort",
+            authorization: auth(tenant, ["projection.rebuild"]),
+          }),
         "projection_unavailable",
       );
     } finally {
@@ -1122,18 +1243,22 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         state.storage.sql.exec("DROP TRIGGER fail_rebuild_abort");
       });
     }
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toEqual(beforeAbortFailure);
-    await expect(rows(stub, "SELECT event_id FROM applied_events")).resolves.toEqual([
-      { event_id: partialEvent.event_id },
-    ]);
-    await expect(rows(stub, "SELECT value FROM projection_checkpoints")).resolves.toEqual([
-      { value: nextCursor },
-    ]);
-    await expect(rows(stub, "SELECT * FROM failed_rebuilds")).resolves.toEqual([]);
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toEqual(beforeAbortFailure);
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events"),
+    ).resolves.toEqual([{ event_id: partialEvent.event_id }]);
+    await expect(
+      rows(stub, "SELECT value FROM projection_checkpoints"),
+    ).resolves.toEqual([{ value: nextCursor }]);
+    await expect(rows(stub, "SELECT * FROM failed_rebuilds")).resolves.toEqual(
+      [],
+    );
 
     await replay(
       stub,
@@ -1156,14 +1281,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     try {
       await expectCode(
         stub,
-        (instance) => instance.completeRebuild({
-          schema_version: 1,
-          tenant_id: tenant,
-          rebuild_id: "rebuild_transition",
-          terminal_cursor: null,
-          completed_at: "2026-09-07T05:31:00.000Z",
-          authorization: auth(tenant, ["projection.rebuild"]),
-        }),
+        (instance) =>
+          instance.completeRebuild({
+            schema_version: 1,
+            tenant_id: tenant,
+            rebuild_id: "rebuild_transition",
+            terminal_cursor: null,
+            completed_at: "2026-09-07T05:31:00.000Z",
+            authorization: auth(tenant, ["projection.rebuild"]),
+          }),
         "projection_unavailable",
       );
     } finally {
@@ -1171,15 +1297,19 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         state.storage.sql.exec("DROP TRIGGER fail_rebuild_complete");
       });
     }
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toEqual(beforeCompleteFailure);
-    await expect(rows(stub, "SELECT value FROM projection_checkpoints")).resolves.toEqual([
-      { value: "terminal" },
-    ]);
-    await expect(rows(stub, "SELECT * FROM completed_rebuilds")).resolves.toEqual([]);
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toEqual(beforeCompleteFailure);
+    await expect(
+      rows(stub, "SELECT value FROM projection_checkpoints"),
+    ).resolves.toEqual([{ value: "terminal" }]);
+    await expect(
+      rows(stub, "SELECT * FROM completed_rebuilds"),
+    ).resolves.toEqual([]);
   });
 
   it("aborts invalid partial replay atomically into bounded failed metadata and permits only a fresh corrected rebuild", async () => {
@@ -1191,16 +1321,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       eventId: "event_partial_valid",
       messageId: "message_partial_valid",
     });
-    const partialPage = pageFor(tenant, [validEvent], cursorFor(tenant, "r2-next"));
+    const partialPage = pageFor(
+      tenant,
+      [validEvent],
+      cursorFor(tenant, "r2-next"),
+    );
     await expect(
-      replay(
-        stub,
-        tenant,
-        "rebuild_recover",
-        partialPage,
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      replay(stub, tenant, "rebuild_recover", partialPage, null, [
+        binding("account_a", "connection_a", "identity_a"),
+      ]),
     ).resolves.toMatchObject({ applied_count: 1 });
     const beforeInvalid = await stub.getStatus({
       schema_version: 1,
@@ -1218,21 +1347,24 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     });
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_recover",
-        pageFor(tenant, [ownerConflictEvent], null),
-        cursorFor(tenant, "r2-next"),
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_recover",
+          pageFor(tenant, [ownerConflictEvent], null),
+          cursorFor(tenant, "r2-next"),
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_conflict",
     );
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toEqual(beforeInvalid);
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toEqual(beforeInvalid);
 
     const unsupportedEvent = {
       ...eventFor({ tenant, eventId: "event_unsupported" }),
@@ -1240,14 +1372,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     } as ProjectionEventEnvelope;
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_recover",
-        pageFor(tenant, [unsupportedEvent], null),
-        cursorFor(tenant, "r2-next"),
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_recover",
+          pageFor(tenant, [unsupportedEvent], null),
+          cursorFor(tenant, "r2-next"),
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_invalid",
     );
     const afterInvalid = await stub.getStatus({
@@ -1256,9 +1389,9 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       authorization: auth(tenant, ["projection.status"]),
     });
     expect(afterInvalid).toEqual(beforeInvalid);
-    await expect(rows(stub, "SELECT event_id FROM applied_events")).resolves.toEqual([
-      { event_id: "event_partial_valid" },
-    ]);
+    await expect(
+      rows(stub, "SELECT event_id FROM applied_events"),
+    ).resolves.toEqual([{ event_id: "event_partial_valid" }]);
     await expect(rows(stub, "SELECT body FROM messages")).resolves.toEqual([
       { body: "replay body" },
     ]);
@@ -1305,12 +1438,22 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       "latest_change_sequence",
       "checkpoints",
     ]);
-    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM conversations")).resolves.toEqual([]);
+    await expect(rows(stub, "SELECT * FROM applied_events")).resolves.toEqual(
+      [],
+    );
+    await expect(rows(stub, "SELECT * FROM conversations")).resolves.toEqual(
+      [],
+    );
     await expect(rows(stub, "SELECT * FROM messages")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_changes")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_checkpoints")).resolves.toEqual([]);
-    await expect(rows(stub, "SELECT * FROM projection_change_floors")).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_changes"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_checkpoints"),
+    ).resolves.toEqual([]);
+    await expect(
+      rows(stub, "SELECT * FROM projection_change_floors"),
+    ).resolves.toEqual([]);
     await expect(rows(stub, "SELECT * FROM failed_rebuilds")).resolves.toEqual([
       {
         rebuild_id: "rebuild_recover",
@@ -1332,74 +1475,80 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     ).resolves.toEqual(aborted);
     await expectCode(
       stub,
-      (instance) => instance.abortRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_recover",
-        failed_at: "2026-09-07T05:00:00.000Z",
-        failure_code: "operator_abort",
-        authorization: auth(tenant, ["projection.rebuild"]),
-      }),
+      (instance) =>
+        instance.abortRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_recover",
+          failed_at: "2026-09-07T05:00:00.000Z",
+          failure_code: "operator_abort",
+          authorization: auth(tenant, ["projection.rebuild"]),
+        }),
       "projection_rebuild_mismatch",
     );
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_recover",
-        pageFor(tenant, [validEvent]),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_recover",
+          pageFor(tenant, [validEvent]),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_rebuild_failed",
     );
     await expectCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        connection_id: null,
-        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          connection_id: null,
+          authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+        }),
       "projection_rebuild_failed",
     );
     await expectCode(
       stub,
-      (instance) => instance.listMessages({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        conversation_id: "conversation_failed",
-        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-      }),
+      (instance) =>
+        instance.listMessages({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          conversation_id: "conversation_failed",
+          authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+        }),
       "projection_rebuild_failed",
     );
     await expectCode(
       stub,
-      (instance) => instance.listChanges({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        generation: 2,
-        after_sequence: 0,
-        authorization: auth(tenant, ["projection.read"], ["identity_a"]),
-      }),
+      (instance) =>
+        instance.listChanges({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          generation: 2,
+          after_sequence: 0,
+          authorization: auth(tenant, ["projection.read"], ["identity_a"]),
+        }),
       "projection_rebuild_failed",
     );
     await expectCode(
       stub,
-      (instance) => instance.applyBatch({
-        schema_version: 1,
-        tenant_id: tenant,
-        authorization: auth(tenant, ["projection.write"], ["identity_a"]),
-        mode: "live",
-        rebuild_id: null,
-        connections: [binding("account_a", "connection_a", "identity_a")],
-        events: [validEvent],
-        checkpoint: null,
-      }),
+      (instance) =>
+        instance.applyBatch({
+          schema_version: 1,
+          tenant_id: tenant,
+          authorization: auth(tenant, ["projection.write"], ["identity_a"]),
+          mode: "live",
+          rebuild_id: null,
+          connections: [binding("account_a", "connection_a", "identity_a")],
+          events: [validEvent],
+          checkpoint: null,
+        }),
       "projection_rebuild_failed",
     );
 
@@ -1442,7 +1591,9 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       last_failed_rebuild_id: "rebuild_recover",
       last_rebuild_failure_code: null,
     });
-    await expect(rows(stub, "SELECT account_id,connection_id FROM connection_bindings")).resolves.toEqual([
+    await expect(
+      rows(stub, "SELECT account_id,connection_id FROM connection_bindings"),
+    ).resolves.toEqual([
       { account_id: "account_a", connection_id: "connection_a" },
     ]);
   });
@@ -1462,14 +1613,17 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     const firstPage = pageFor(tenant, [firstEvent], firstCursor);
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_cursor_nonfirst" })]),
-        firstCursor,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(tenant, [
+            eventFor({ tenant, eventId: "event_cursor_nonfirst" }),
+          ]),
+          firstCursor,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_conflict",
     );
     const firstResult = await replay(
@@ -1480,107 +1634,121 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       null,
       [binding("account_a", "connection_a", "identity_a")],
     );
-    expect(firstResult).toMatchObject({ applied_count: 1, duplicate_count: 0, last_sequence: 1 });
+    expect(firstResult).toMatchObject({
+      applied_count: 1,
+      duplicate_count: 0,
+      last_sequence: 1,
+    });
     const beforeSamePageRetry = await replayState(stub);
     await expect(
-      replay(
-        stub,
-        tenant,
-        "rebuild_cursor",
-        firstPage,
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      replay(stub, tenant, "rebuild_cursor", firstPage, null, [
+        binding("account_a", "connection_a", "identity_a"),
+      ]),
     ).resolves.toEqual(firstResult);
     const afterSamePageRetry = await replayState(stub);
     expect(afterSamePageRetry).toEqual(beforeSamePageRetry);
 
     const changedFirstPage = pageFor(
       tenant,
-      [eventFor({
-        tenant,
-        eventId: "event_cursor_different",
-        observedAt: firstEvent.observed_at,
-        occurredAt: firstEvent.occurred_at,
-      messageId: "message_cursor_different",
-      })],
+      [
+        eventFor({
+          tenant,
+          eventId: "event_cursor_different",
+          observedAt: firstEvent.observed_at,
+          occurredAt: firstEvent.occurred_at,
+          messageId: "message_cursor_different",
+        }),
+      ],
       firstCursor,
     );
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        changedFirstPage,
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(instance, tenant, "rebuild_cursor", changedFirstPage, null, [
+          binding("account_a", "connection_a", "identity_a"),
+        ]),
       "projection_conflict",
     );
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_gap" })], null),
-        cursorFor(tenant, "r2-not-expected"),
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(tenant, [eventFor({ tenant, eventId: "event_gap" })], null),
+          cursorFor(tenant, "r2-not-expected"),
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_conflict",
     );
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_wrong_tenant_cursor" })]),
-        cursorFor("tenant_rebuild_cursor_other", "r2-page-2"),
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(tenant, [
+            eventFor({ tenant, eventId: "event_wrong_tenant_cursor" }),
+          ]),
+          cursorFor("tenant_rebuild_cursor_other", "r2-page-2"),
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_tenant_mismatch",
     );
     const foreignPageTenant = newTenant();
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(
-          foreignPageTenant,
-          [eventFor({ tenant: foreignPageTenant, eventId: "event_wrong_page_tenant" })],
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(foreignPageTenant, [
+            eventFor({
+              tenant: foreignPageTenant,
+              eventId: "event_wrong_page_tenant",
+            }),
+          ]),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
         ),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
       "projection_tenant_mismatch",
     );
     const nonCanonical = firstCursor + "=";
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_noncanonical" })], null),
-        nonCanonical,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(
+            tenant,
+            [eventFor({ tenant, eventId: "event_noncanonical" })],
+            null,
+          ),
+          nonCanonical,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_invalid",
     );
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_self_loop" })], firstCursor),
-        firstCursor,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(
+            tenant,
+            [eventFor({ tenant, eventId: "event_self_loop" })],
+            firstCursor,
+          ),
+          firstCursor,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_conflict",
     );
 
@@ -1594,14 +1762,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     const terminalPage = pageFor(tenant, [olderEvent], null);
     await expectCode(
       stub,
-      (instance) => instance.completeRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "rebuild_cursor",
-        terminal_cursor: null,
-        completed_at: "2026-09-07T06:30:00.000Z",
-        authorization: auth(tenant, ["projection.rebuild"]),
-      }),
+      (instance) =>
+        instance.completeRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_cursor",
+          terminal_cursor: null,
+          completed_at: "2026-09-07T06:30:00.000Z",
+          authorization: auth(tenant, ["projection.rebuild"]),
+        }),
       "projection_rebuild_mismatch",
     );
     const terminalResult = await replay(
@@ -1612,7 +1781,11 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       firstCursor,
       [binding("account_a", "connection_a", "identity_a")],
     );
-    expect(terminalResult).toMatchObject({ applied_count: 1, duplicate_count: 0, last_sequence: 2 });
+    expect(terminalResult).toMatchObject({
+      applied_count: 1,
+      duplicate_count: 0,
+      last_sequence: 2,
+    });
     const status = await stub.getStatus({
       schema_version: 1,
       tenant_id: tenant,
@@ -1636,25 +1809,23 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       ),
     ).resolves.toBe(status.checkpoints[0]?.page_digest);
     await expect(
-      replay(
-        stub,
-        tenant,
-        "rebuild_cursor",
-        terminalPage,
-        firstCursor,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      replay(stub, tenant, "rebuild_cursor", terminalPage, firstCursor, [
+        binding("account_a", "connection_a", "identity_a"),
+      ]),
     ).resolves.toEqual(terminalResult);
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_cursor",
-        pageFor(tenant, [eventFor({ tenant, eventId: "event_post_terminal" })]),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_cursor",
+          pageFor(tenant, [
+            eventFor({ tenant, eventId: "event_post_terminal" }),
+          ]),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_conflict",
     );
 
@@ -1666,7 +1837,10 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       completed_at: "2026-09-07T07:00:00.000Z",
       authorization: auth(tenant, ["projection.rebuild"]),
     });
-    expect(completed).toMatchObject({ state: "ready", last_completed_rebuild_id: "rebuild_cursor" });
+    expect(completed).toMatchObject({
+      state: "ready",
+      last_completed_rebuild_id: "rebuild_cursor",
+    });
     const completedHistoryBeforeRetry = await rows(
       stub,
       "SELECT rebuild_id, generation, completed_at FROM completed_rebuilds WHERE rebuild_id = ?",
@@ -1698,26 +1872,35 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     ).resolves.toEqual(completedHistoryBeforeRetry);
     await expectCode(
       stub,
-      (instance) => instance.completeRebuild({
-        schema_version: 1,
-        tenant_id: tenant,
-        rebuild_id: "another_rebuild",
-        terminal_cursor: null,
-        completed_at: "2026-09-07T08:00:00.000Z",
-        authorization: auth(tenant, ["projection.rebuild"]),
-      }),
+      (instance) =>
+        instance.completeRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "another_rebuild",
+          terminal_cursor: null,
+          completed_at: "2026-09-07T08:00:00.000Z",
+          authorization: auth(tenant, ["projection.rebuild"]),
+        }),
       "projection_rebuild_mismatch",
     );
-    await expect(stub.applyBatch({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.write"], ["identity_a"]),
-      mode: "live",
-      rebuild_id: null,
-      connections: [binding("account_a", "connection_a", "identity_a")],
-      events: [eventFor({ tenant, eventId: "event_after_rebuild", eventSource: "live" })],
-      checkpoint: null,
-    })).resolves.toMatchObject({ generation: 2, applied_count: 1 });
+    await expect(
+      stub.applyBatch({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.write"], ["identity_a"]),
+        mode: "live",
+        rebuild_id: null,
+        connections: [binding("account_a", "connection_a", "identity_a")],
+        events: [
+          eventFor({
+            tenant,
+            eventId: "event_after_rebuild",
+            eventSource: "live",
+          }),
+        ],
+        checkpoint: null,
+      }),
+    ).resolves.toMatchObject({ generation: 2, applied_count: 1 });
   });
 
   it("accepts an empty terminal archive, rejects empty/nonterminal and malformed pages before SQL, and exposes no skip escape hatch", async () => {
@@ -1728,7 +1911,11 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     const emptyTerminal = pageFor(tenant, []);
     await expect(
       replay(stub, tenant, "rebuild_empty", emptyTerminal, null, []),
-    ).resolves.toMatchObject({ applied_count: 0, duplicate_count: 0, last_sequence: 0 });
+    ).resolves.toMatchObject({
+      applied_count: 0,
+      duplicate_count: 0,
+      last_sequence: 0,
+    });
     const status = await stub.getStatus({
       schema_version: 1,
       tenant_id: tenant,
@@ -1758,14 +1945,15 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     const nonterminalCursor = cursorFor(nonterminalTenant, "nonterminal");
     await expectCode(
       nonterminalStub,
-      (instance) => replay(
-        instance,
-        nonterminalTenant,
-        "rebuild_invalid_pages",
-        pageFor(nonterminalTenant, [], nonterminalCursor),
-        null,
-        [],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          nonterminalTenant,
+          "rebuild_invalid_pages",
+          pageFor(nonterminalTenant, [], nonterminalCursor),
+          null,
+          [],
+        ),
       "projection_invalid",
     );
     const manifestOnlyEvent = eventFor({
@@ -1774,40 +1962,45 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     });
     await expectCode(
       nonterminalStub,
-      (instance) => replay(
-        instance,
-        nonterminalTenant,
-        "rebuild_invalid_pages",
-        {
-          schema_version: 1,
-          replay_mode: "projection_only",
-          tenant_id: nonterminalTenant,
-          manifests: [
-            manifestFor(
-              nonterminalTenant,
-              "batch_manifest_without_events",
-              manifestOnlyEvent,
-            ),
-          ],
-          events: [],
-          next_cursor: null,
-        },
-        null,
-        [],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          nonterminalTenant,
+          "rebuild_invalid_pages",
+          {
+            schema_version: 1,
+            replay_mode: "projection_only",
+            tenant_id: nonterminalTenant,
+            manifests: [
+              manifestFor(
+                nonterminalTenant,
+                "batch_manifest_without_events",
+                manifestOnlyEvent,
+              ),
+            ],
+            events: [],
+            next_cursor: null,
+          },
+          null,
+          [],
+        ),
       "projection_invalid",
     );
-    const event = eventFor({ tenant: nonterminalTenant, eventId: "event_missing_manifest" });
+    const event = eventFor({
+      tenant: nonterminalTenant,
+      eventId: "event_missing_manifest",
+    });
     await expectCode(
       nonterminalStub,
-      (instance) => replay(
-        instance,
-        nonterminalTenant,
-        "rebuild_invalid_pages",
-        pageFor(nonterminalTenant, [event], null, []),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          nonterminalTenant,
+          "rebuild_invalid_pages",
+          pageFor(nonterminalTenant, [event], null, []),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_invalid",
     );
     const afterInvalid = await nonterminalStub.getStatus({
@@ -1817,8 +2010,10 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     });
     expect(afterInvalid).toMatchObject({ state: "rebuilding", generation: 2 });
     expect(afterInvalid.checkpoints).toEqual([]);
-    const methods = await runInDurableObject(nonterminalStub, async (instance) =>
-      Object.getOwnPropertyNames(Object.getPrototypeOf(instance)),
+    const methods = await runInDurableObject(
+      nonterminalStub,
+      async (instance) =>
+        Object.getOwnPropertyNames(Object.getPrototypeOf(instance)),
     );
     expect(methods).not.toContain("skipReplayEvent");
     expect(methods).not.toContain("skipRebuildEvent");
@@ -1840,16 +2035,22 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         acceptedStub,
         acceptedTenant,
         "rebuild_limits_500",
-        pageFor(
-          acceptedTenant,
-          acceptedEvents,
-          null,
-          [manifestFor(acceptedTenant, "batch_replay_500", acceptedEvents[0]!, 500)],
-        ),
+        pageFor(acceptedTenant, acceptedEvents, null, [
+          manifestFor(
+            acceptedTenant,
+            "batch_replay_500",
+            acceptedEvents[0]!,
+            500,
+          ),
+        ]),
         null,
         [binding("account_a", "connection_a", "identity_a")],
       ),
-    ).resolves.toMatchObject({ applied_count: 500, duplicate_count: 0, generation: 2 });
+    ).resolves.toMatchObject({
+      applied_count: 500,
+      duplicate_count: 0,
+      generation: 2,
+    });
 
     const tenant = newTenant();
     const stub = await initialize(tenant);
@@ -1867,19 +2068,20 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     ];
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_limits",
-        pageFor(tenant, events, null, manifests),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_limits",
+          pageFor(tenant, events, null, manifests),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_too_large",
     );
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM applied_events")).resolves.toEqual([
-      { count: 0 },
-    ]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM applied_events"),
+    ).resolves.toEqual([{ count: 0 }]);
 
     const oversizedEvents = Array.from({ length: 220 }, (_, index) =>
       eventFor({
@@ -1891,32 +2093,43 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     );
     const byteManifests = [
       manifestFor(tenant, "batch_bytes_a", oversizedEvents[0]!, 110, 2_000_000),
-      manifestFor(tenant, "batch_bytes_b", oversizedEvents[110]!, 110, 2_000_000),
+      manifestFor(
+        tenant,
+        "batch_bytes_b",
+        oversizedEvents[110]!,
+        110,
+        2_000_000,
+      ),
     ];
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_limits",
-        pageFor(tenant, oversizedEvents, null, byteManifests),
-        null,
-        [binding("account_a", "connection_a", "identity_a")],
-      ),
+      (instance) =>
+        replay(
+          instance,
+          tenant,
+          "rebuild_limits",
+          pageFor(tenant, oversizedEvents, null, byteManifests),
+          null,
+          [binding("account_a", "connection_a", "identity_a")],
+        ),
       "projection_too_large",
     );
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM applied_events")).resolves.toEqual([
-      { count: 0 },
-    ]);
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toMatchObject({ state: "rebuilding", checkpoints: [] });
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM applied_events"),
+    ).resolves.toEqual([{ count: 0 }]);
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toMatchObject({ state: "rebuilding", checkpoints: [] });
   });
 
   it("sanitizes a failed getStatus RPC to its exact bounded public error key", async () => {
-    const projection = Object.create(TenantProjectionDO.prototype) as TenantProjectionDO;
+    const projection = Object.create(
+      TenantProjectionDO.prototype,
+    ) as TenantProjectionDO;
     const sensitive = "message=secret payload=private SQL=SELECT-secret";
     const rawCause = new Error(sensitive);
     (projection as unknown as { ctx: DurableObjectState }).ctx = {
@@ -1947,7 +2160,9 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     expect(Object.keys(failure as object)).toEqual(["code"]);
     expect(JSON.stringify(failure)).not.toContain(sensitive);
     expect(String((failure as Error).message)).not.toContain(sensitive);
-    expect(Object.getOwnPropertyNames(failure as object)).not.toContain("cause");
+    expect(Object.getOwnPropertyNames(failure as object)).not.toContain(
+      "cause",
+    );
   });
 
   it("preserves deterministic query state when the same archive is rebuilt twice and persists lifecycle state through a fresh stub lookup", async () => {
@@ -1976,20 +2191,36 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     const firstPage = pageFor(tenant, [firstEvents[0]!], firstPageCursor);
     const secondPage = pageFor(tenant, [firstEvents[1]!], null);
     await begin(stub, tenant, "rebuild_equal_one", 1);
-    await replay(stub, tenant, "rebuild_equal_one", firstPage, null, connections);
+    await replay(
+      stub,
+      tenant,
+      "rebuild_equal_one",
+      firstPage,
+      null,
+      connections,
+    );
     await evictDurableObject(stub);
     stub = asRebuildStub(env.TENANT_PROJECTION.getByName(tenant));
-    await expect(stub.getStatus({
-      schema_version: 1,
-      tenant_id: tenant,
-      authorization: auth(tenant, ["projection.status"]),
-    })).resolves.toMatchObject({
+    await expect(
+      stub.getStatus({
+        schema_version: 1,
+        tenant_id: tenant,
+        authorization: auth(tenant, ["projection.status"]),
+      }),
+    ).resolves.toMatchObject({
       state: "rebuilding",
       generation: 2,
       rebuild_id: "rebuild_equal_one",
       checkpoints: [{ value: firstPageCursor, source_cursor: null }],
     });
-    await replay(stub, tenant, "rebuild_equal_one", secondPage, firstPageCursor, connections);
+    await replay(
+      stub,
+      tenant,
+      "rebuild_equal_one",
+      secondPage,
+      firstPageCursor,
+      connections,
+    );
     await stub.completeRebuild({
       schema_version: 1,
       tenant_id: tenant,
@@ -1998,8 +2229,14 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       completed_at: "2026-09-07T11:00:00.000Z",
       authorization: auth(tenant, ["projection.rebuild"]),
     });
-    const firstDomain = await rows(stub, "SELECT id,identity_id,account_id,connection_id,conversation_id,body,occurred_at,current_observed_ms,current_event_id FROM messages ORDER BY id");
-    const firstSummary = await rows(stub, "SELECT id,identity_id,account_id,connection_id,title,last_message_preview,last_activity_at,unread_count,message_count,attachment_count FROM conversations ORDER BY id");
+    const firstDomain = await rows(
+      stub,
+      "SELECT id,identity_id,account_id,connection_id,conversation_id,body,occurred_at,current_observed_ms,current_event_id FROM messages ORDER BY id",
+    );
+    const firstSummary = await rows(
+      stub,
+      "SELECT id,identity_id,account_id,connection_id,title,last_message_preview,last_activity_at,unread_count,message_count,attachment_count FROM conversations ORDER BY id",
+    );
     const firstQueries = {
       conversations: await stub.listConversations({
         schema_version: 1,
@@ -2031,23 +2268,37 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       tenant_id: tenant,
       authorization: auth(tenant, ["projection.status"]),
     });
-    expect(persisted).toMatchObject({ state: "ready", generation: 2, last_completed_rebuild_id: "rebuild_equal_one" });
+    expect(persisted).toMatchObject({
+      state: "ready",
+      generation: 2,
+      last_completed_rebuild_id: "rebuild_equal_one",
+    });
 
     await begin(stub, tenant, "rebuild_equal_two", 2);
     await expectCode(
       stub,
-      (instance) => replay(
-        instance,
-        tenant,
-        "rebuild_equal_two",
-        firstPage,
-        null,
-        [binding("account_a", "connection_changed", "identity_a")],
-      ),
+      (instance) =>
+        replay(instance, tenant, "rebuild_equal_two", firstPage, null, [
+          binding("account_a", "connection_changed", "identity_a"),
+        ]),
       "projection_conflict",
     );
-    await replay(stub, tenant, "rebuild_equal_two", firstPage, null, connections);
-    await replay(stub, tenant, "rebuild_equal_two", secondPage, firstPageCursor, connections);
+    await replay(
+      stub,
+      tenant,
+      "rebuild_equal_two",
+      firstPage,
+      null,
+      connections,
+    );
+    await replay(
+      stub,
+      tenant,
+      "rebuild_equal_two",
+      secondPage,
+      firstPageCursor,
+      connections,
+    );
     await stub.completeRebuild({
       schema_version: 1,
       tenant_id: tenant,
@@ -2056,8 +2307,14 @@ describe("TenantProjectionDO resumable rebuilds", () => {
       completed_at: "2026-09-07T12:00:00.000Z",
       authorization: auth(tenant, ["projection.rebuild"]),
     });
-    const secondDomain = await rows(stub, "SELECT id,identity_id,account_id,connection_id,conversation_id,body,occurred_at,current_observed_ms,current_event_id FROM messages ORDER BY id");
-    const secondSummary = await rows(stub, "SELECT id,identity_id,account_id,connection_id,title,last_message_preview,last_activity_at,unread_count,message_count,attachment_count FROM conversations ORDER BY id");
+    const secondDomain = await rows(
+      stub,
+      "SELECT id,identity_id,account_id,connection_id,conversation_id,body,occurred_at,current_observed_ms,current_event_id FROM messages ORDER BY id",
+    );
+    const secondSummary = await rows(
+      stub,
+      "SELECT id,identity_id,account_id,connection_id,title,last_message_preview,last_activity_at,unread_count,message_count,attachment_count FROM conversations ORDER BY id",
+    );
     expect(secondDomain).toEqual(firstDomain);
     expect(secondSummary).toEqual(firstSummary);
     const secondQueries = {
@@ -2089,11 +2346,14 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     expect(secondQueries.changes).toEqual({
       ...firstQueries.changes,
       generation: 3,
-      items: firstQueries.changes.items.map((item) => ({ ...item, generation: 3 })),
+      items: firstQueries.changes.items.map((item) => ({
+        ...item,
+        generation: 3,
+      })),
     });
-    await expect(rows(stub, "SELECT COUNT(*) AS count FROM completed_rebuilds")).resolves.toEqual([
-      { count: 2 },
-    ]);
+    await expect(
+      rows(stub, "SELECT COUNT(*) AS count FROM completed_rebuilds"),
+    ).resolves.toEqual([{ count: 2 }]);
     await expectCode(
       stub,
       (instance) => begin(instance, tenant, "rebuild_equal_one", 3),

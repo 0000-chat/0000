@@ -1,6 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useRouter } from "@tanstack/react-router";
-import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  type ReactNode,
+} from "react";
 import type { Identity, SessionResponse } from "@communicator/contracts";
 import { apiClient, identitiesFromSession } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
@@ -35,7 +41,8 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     () => (session ? identitiesFromSession(session) : []),
     [session],
   );
-  const activeIdentity = identities.find((item) => item.id === search.identity) ?? identities[0];
+  const activeIdentity =
+    identities.find((item) => item.id === search.identity) ?? identities[0];
 
   useEffect(() => {
     if (activeIdentity && search.identity !== activeIdentity.id) {
@@ -53,25 +60,31 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     const previousIdentityId = activeIdentity?.id;
     const pathname = router.state.location.pathname;
     const inConversationThread = pathname.startsWith("/conversations/");
-    const isPreviousIdentityQuery = (query: { queryKey: readonly unknown[] }) => {
+    const isPreviousIdentityQuery = (query: {
+      queryKey: readonly unknown[];
+    }) => {
       const root = query.queryKey[0];
-      return previousIdentityId !== undefined
-        && previousIdentityId !== identityId
-        && query.queryKey[1] === previousIdentityId
-        && typeof root === "string"
-        && identityScopedQueryRoots.has(root);
+      return (
+        previousIdentityId !== undefined &&
+        previousIdentityId !== identityId &&
+        query.queryKey[1] === previousIdentityId &&
+        typeof root === "string" &&
+        identityScopedQueryRoots.has(root)
+      );
     };
     await queryClient.cancelQueries({ predicate: isPreviousIdentityQuery });
     queryClient.removeQueries({ predicate: isPreviousIdentityQuery });
 
     await router.navigate({
-      to: inConversationThread ? "/conversations" : pathname as "/",
+      to: inConversationThread ? "/conversations" : (pathname as "/"),
       search: { identity: identityId },
     });
   };
 
   return (
-    <IdentityContext.Provider value={{ session, identities, activeIdentity, isLoading, switchIdentity }}>
+    <IdentityContext.Provider
+      value={{ session, identities, activeIdentity, isLoading, switchIdentity }}
+    >
       {children}
     </IdentityContext.Provider>
   );
@@ -79,7 +92,8 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
 
 export function useIdentityContext() {
   const value = useContext(IdentityContext);
-  if (!value) throw new Error("useIdentityContext must be used within IdentityProvider");
+  if (!value)
+    throw new Error("useIdentityContext must be used within IdentityProvider");
   return value;
 }
 
@@ -88,7 +102,10 @@ export function IdentitySwitcher() {
 
   return (
     <div className="flex items-center gap-1.5 sm:gap-2">
-      <label htmlFor="active-identity" className="sr-only text-sm font-medium sm:not-sr-only">
+      <label
+        htmlFor="active-identity"
+        className="sr-only text-sm font-medium sm:not-sr-only"
+      >
         Active identity
       </label>
       <select
@@ -99,7 +116,9 @@ export function IdentitySwitcher() {
         className="h-8 rounded-md border border-input bg-background px-2 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-9 sm:px-3"
       >
         {identities.map((identity) => (
-          <option key={identity.id} value={identity.id}>{identity.display_name}</option>
+          <option key={identity.id} value={identity.id}>
+            {identity.display_name}
+          </option>
         ))}
       </select>
     </div>

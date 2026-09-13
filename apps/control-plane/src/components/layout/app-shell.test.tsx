@@ -23,7 +23,9 @@ describe("AppShell", () => {
   it("gives Conversations the full-bleed content area", async () => {
     renderApp("/conversations?identity=identity_human");
 
-    expect(await screen.findByRole("heading", { name: "All conversations" })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "All conversations" }),
+    ).toBeVisible();
     const main = screen.getByRole("main");
     expect(main).toHaveClass("min-h-0", "overflow-hidden", "p-0");
     expect(main).not.toHaveClass("lg:p-8");
@@ -32,7 +34,13 @@ describe("AppShell", () => {
   it("keeps the global app header sticky above the bounded workspace", async () => {
     renderApp("/conversations?identity=identity_human");
 
-    expect(await screen.findByRole("heading", { name: "All conversations" })).toBeVisible();
-    expect(screen.getAllByRole("banner")[0]).toHaveClass("sticky", "top-0", "z-10");
+    expect(
+      await screen.findByRole("heading", { name: "All conversations" }),
+    ).toBeVisible();
+    expect(screen.getAllByRole("banner")[0]).toHaveClass(
+      "sticky",
+      "top-0",
+      "z-10",
+    );
   });
 });
