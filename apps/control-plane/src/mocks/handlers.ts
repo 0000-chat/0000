@@ -34,7 +34,10 @@ const sendMessageSchema = z
   .strict();
 
 const commandDecisionSchema = z
-  .object({ idempotency_key: z.string().trim().min(1).max(200) })
+  .object({
+    idempotency_key: z.string().trim().min(1).max(200),
+    duplicate_risk_acknowledged: z.boolean().optional(),
+  })
   .strict();
 
 const simulatedMessageEventSchema = z
@@ -51,7 +54,12 @@ const simulatedMessageEventSchema = z
 
 const errorResponse = (
   status: 400 | 403 | 404 | 409 | 503,
-  code: "invalid_request" | "forbidden" | "not_found" | "service_unavailable",
+  code:
+    | "invalid_request"
+    | "chat_paused"
+    | "forbidden"
+    | "not_found"
+    | "service_unavailable",
 ) =>
   HttpResponse.json(
     {
@@ -62,7 +70,9 @@ const errorResponse = (
             ? "Resource not found"
             : code === "service_unavailable"
               ? "Service unavailable"
-              : "Invalid request",
+              : code === "chat_paused"
+                ? "This chat is paused while delivery remains uncertain"
+                : "Invalid request",
       },
     },
     { status },
@@ -545,7 +555,12 @@ export const handlers = [
     "*/api/v1/commands/:commandId/:decision",
     async ({ request, params }) => {
       const decision = String(params.decision);
-      if (decision !== "confirm" && decision !== "cancel") {
+      if (
+        decision !== "confirm" &&
+        decision !== "cancel" &&
+        decision !== "continue" &&
+        decision !== "resend"
+      ) {
         return errorResponse(400, "invalid_request");
       }
       const parsed = commandDecisionSchema.safeParse(await request.json());
@@ -570,10 +585,25 @@ export const handlers = [
           connection_id: command.connection_id ?? "connection_simulated",
           conversation_id: command.conversation_id,
           idempotency_key: parsed.data.idempotency_key,
-          status: decision === "cancel" ? "cancelled" : "pending",
+          status:
+            decision === "cancel"
+              ? "cancelled"
+              : decision === "continue"
+                ? "delivery_uncertain"
+                : "pending",
+          transaction_id: command.transaction_id ?? `transaction_${command.id}`,
+          request_digest: command.request_digest ?? "0".repeat(64),
+          projection_generation: 1,
+          matrix_stage: command.matrix_stage ?? "unknown",
+          bridge_stage: command.bridge_stage ?? "unknown",
+          provider_stage: command.provider_stage ?? "unknown",
+          chat_paused: command.chat_paused ?? false,
+          duplicate_risk: decision === "resend",
           created_at: command.created_at,
           updated_at: command.updated_at,
-          confirmation_decision: decision,
+          ...(decision === "confirm" || decision === "cancel"
+            ? { confirmation_decision: decision }
+            : {}),
           confirmation_actor_principal_id:
             command.confirmation_actor_principal_id,
           confirmation_actor_identity_id:

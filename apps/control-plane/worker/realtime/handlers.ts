@@ -43,6 +43,7 @@ type PublicErrorStatus = 400 | 401 | 404 | 503;
 const PUBLIC_ERROR_MESSAGES: Record<PublicErrorCode, string> = {
   unauthenticated: "Authentication required",
   invalid_request: "Invalid request",
+  chat_paused: "This chat is paused while delivery remains uncertain",
   forbidden: "Forbidden",
   not_found: "Resource not found",
   tenant_selection_required: "Select an authorized tenant",

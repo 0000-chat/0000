@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ApiErrorResponseSchema,
   ChannelSummarySchema,
   CommandSchema,
   ConnectionSchema,
@@ -51,6 +52,7 @@ import {
   type LinkSessionStart,
   type MessagePageResult,
   type ConfirmationDecision,
+  type OutboundAction,
   type RealtimeTicketRequest,
   type RealtimeTicketResponse,
   type SessionResponse,
@@ -91,6 +93,7 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -126,10 +129,18 @@ export class ApiClient {
         ).toString();
     const response = await (this.fetcher ?? globalThis.fetch)(url, init);
     if (!response.ok) {
-      throw new ApiError(
-        response.status,
-        `Communicator API request failed with ${response.status}`,
-      );
+      let code: string | undefined;
+      let message = `Communicator API request failed with ${response.status}`;
+      try {
+        const errorBody = ApiErrorResponseSchema.parse(
+          await response.clone().json(),
+        );
+        code = errorBody.error.code;
+        message = errorBody.error.message;
+      } catch {
+        // Keep the generic status message for non-contract failures.
+      }
+      throw new ApiError(response.status, message, code);
     }
     let body: unknown;
     try {
@@ -452,8 +463,9 @@ export class ApiClient {
 
   decideCommand(
     commandId: string,
-    decision: ConfirmationDecision,
+    decision: ConfirmationDecision | OutboundAction,
     idempotencyKey: string,
+    duplicateRiskAcknowledged = false,
   ) {
     return this.request(
       `/api/v1/commands/${encodeURIComponent(commandId)}/${decision}`,
@@ -461,7 +473,12 @@ export class ApiClient {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idempotency_key: idempotencyKey }),
+        body: JSON.stringify({
+          idempotency_key: idempotencyKey,
+          ...(decision === "resend"
+            ? { duplicate_risk_acknowledged: duplicateRiskAcknowledged }
+            : {}),
+        }),
       },
     );
   }

@@ -2,7 +2,11 @@ import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { apiClient, isDefinitiveRequestRejection } from "@/lib/api/client";
+import {
+  ApiError,
+  apiClient,
+  isDefinitiveRequestRejection,
+} from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 
 function makeIdempotencyKey() {
@@ -55,7 +59,11 @@ export function MessageComposer({
       if (isDefinitiveRequestRejection(error)) {
         idempotencyKey.current = null;
       }
-      setResultMessage("The simulated command could not be accepted.");
+      setResultMessage(
+        error instanceof ApiError && error.code === "chat_paused"
+          ? "This chat is paused while delivery remains uncertain. Review Activity to choose cancel, continue, or deliberate resend."
+          : "The simulated command could not be accepted.",
+      );
     },
   });
 

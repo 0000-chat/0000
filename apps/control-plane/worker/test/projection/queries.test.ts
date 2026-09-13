@@ -1329,6 +1329,7 @@ describe("tenant projection query RPCs", () => {
       "applyReplayPage",
       "resolveConversationOwner",
       "acceptTextReply",
+      "claimOutboundDispatch",
       "reconcileOutbound",
       "decideOutbound",
       "listOutboundCommands",

@@ -4,12 +4,15 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import {
   AccountGrantSchema,
   ApiErrorResponseSchema,
+  CommandSchema,
   ConnectedAccountPageSchema,
   ConnectionSchema,
   ConversationPageResultSchema,
+  OutboundDecisionResultSchema,
 } from "@communicator/contracts";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppServices } from "../app";
+import type { OutboundAcceptanceServices } from "../outbound/acceptance";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   auth,
@@ -248,6 +251,22 @@ async function projectReadFixtures() {
 
 beforeAll(projectReadFixtures);
 beforeEach(async () => {
+  const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+  await runInDurableObject(projection, (_instance, state) => {
+    state.storage.transactionSync(() => {
+      state.storage.sql.exec("DELETE FROM outbound_actions");
+      state.storage.sql.exec("DELETE FROM outbound_evidence");
+      state.storage.sql.exec("DELETE FROM outbound_command_decisions");
+      state.storage.sql.exec("DELETE FROM outbound_dispatches");
+      state.storage.sql.exec(
+        "DELETE FROM commands WHERE operation = 'message.send'",
+      );
+      state.storage.sql.exec(
+        "DELETE FROM messages WHERE direction = 'outbound'",
+      );
+    });
+  });
+  await projectReadFixtures();
   await clearDirectory(workerEnv.CONTROL_DB);
   await seedDirectory(workerEnv.CONTROL_DB);
   await workerEnv.CONTROL_DB.batch([
@@ -2314,5 +2333,701 @@ describe("account-scoped grant API", () => {
       },
     );
     expect(deniedCancel.status).toBe(403);
+  });
+
+  it("records one uncertain transaction when the controlled adapter times out after acceptance", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const transactionIds: string[] = [];
+    let adapterObservedDurableClaim = false;
+    const outboundAcceptance: OutboundAcceptanceServices = {
+      now: () => new Date("2050-01-01T00:00:00.000Z"),
+      dispatchOutbound: async (dispatch) => {
+        expect(dispatch.status).toBe("dispatching");
+        expect(dispatch.dispatch_lease_id).toEqual(expect.any(String));
+        transactionIds.push(dispatch.transaction_id);
+        adapterObservedDurableClaim = true;
+        return {
+          type: "uncertain",
+          reason: "timeout_after_provider_acceptance",
+        };
+      },
+    };
+    const app = createTestApp({ outboundAcceptance });
+    const idempotencyKey = `uncertain-send-${crypto.randomUUID()}`;
+    const send = () =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "The adapter accepted this before timing out",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send();
+    expect(first.status).toBe(202);
+    const firstCommand = CommandSchema.parse(await first.json());
+    expect(adapterObservedDurableClaim).toBe(true);
+    expect(firstCommand.status).toBe("delivery_uncertain");
+    expect(firstCommand.transaction_id).toEqual(expect.any(String));
+    expect(firstCommand.request_digest).toMatch(/^[0-9a-f]{64}$/);
+
+    const replay = await send();
+    expect(replay.status).toBe(202);
+    const replayCommand = CommandSchema.parse(await replay.json());
+    expect(replayCommand).toMatchObject({
+      id: firstCommand.id,
+      status: "delivery_uncertain",
+      transaction_id: firstCommand.transaction_id,
+    });
+    expect(transactionIds).toEqual([firstCommand.transaction_id]);
+
+    const cleanup = await requestForApp(
+      app,
+      `/api/v1/commands/${firstCommand.id}/continue`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `uncertain-cleanup-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(cleanup.status).toBe(200);
+  });
+
+  it("correlates evidence and records a deliberate resend without unpausing another chat", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-action-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => ({
+          type: "uncertain" as const,
+          reason: "timeout_after_provider_acceptance",
+        }),
+      },
+    });
+    const send = (conversationId: string, key: string) =>
+      requestForApp(
+        app,
+        `/api/v1/conversations/${conversationId}/messages`,
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Correlate this uncertain message",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send(
+      "conversation_human_one",
+      `uncertain-action-${crypto.randomUUID()}`,
+    );
+    expect(first.status).toBe(202);
+    const command = CommandSchema.parse(await first.json());
+    expect(command.status).toBe("delivery_uncertain");
+    const generation = command.projection_generation ?? 1;
+    const evidence = {
+      schema_version: 1 as const,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "matrix" as const,
+      evidence_id: "matrix-echo-uncertain-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation,
+      status: "confirmed" as const,
+      observed_at: "2050-01-01T00:00:01.000Z",
+      remote_echo_id: "matrix-remote-uncertain-1",
+    };
+    const wrongChat = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...evidence,
+          conversation_id: "conversation_human_two",
+        }),
+      },
+    );
+    expect(wrongChat.status).toBe(400);
+
+    const staleGeneration = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...evidence,
+          evidence_id: "matrix-stale-generation-1",
+          generation: generation + 1,
+        }),
+      },
+    );
+    expect(staleGeneration.status).toBe(400);
+
+    const matrixDelivered = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({ ...evidence, status: "delivered" }),
+      },
+    );
+    expect(matrixDelivered.status).toBe(400);
+
+    const paused = await send(
+      "conversation_human_one",
+      `uncertain-paused-${crypto.randomUUID()}`,
+    );
+    expect(paused.status).toBe(409);
+    expect((await paused.json()) as unknown).toMatchObject({
+      error: { code: "chat_paused" },
+    });
+
+    const resendKey = `uncertain-resend-${crypto.randomUUID()}`;
+    const resend = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/resend`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: resendKey,
+          duplicate_risk_acknowledged: true,
+        }),
+      },
+    );
+    expect(resend.status).toBe(200);
+    const resendResult = OutboundDecisionResultSchema.parse(
+      await resend.json(),
+    );
+    expect(resendResult.action).toBe("resend");
+    expect(resendResult.duplicate_risk).toBe(true);
+    expect(resendResult.command.id).not.toBe(command.id);
+    expect(resendResult.command.resend_of_command_id).toBe(command.id);
+
+    const matrix = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      { method: "POST", body: JSON.stringify(evidence) },
+    );
+    expect(matrix.status).toBe(200);
+    const matrixResult = OutboundDecisionResultSchema.parse(
+      await matrix.json(),
+    );
+    expect(matrixResult.command).toMatchObject({
+      id: command.id,
+      status: "matrix_confirmed",
+      matrix_stage: "confirmed",
+      provider_stage: "unknown",
+      chat_paused: false,
+    });
+    expect(matrixResult.dispatch.status).toBe("dispatched");
+
+    const duplicate = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      { method: "POST", body: JSON.stringify(evidence) },
+    );
+    expect(duplicate.status).toBe(200);
+
+    const resumedChat = await send(
+      "conversation_human_one",
+      `uncertain-resumed-${crypto.randomUUID()}`,
+    );
+    expect(resumedChat.status).toBe(202);
+    const resumedCommand = CommandSchema.parse(await resumedChat.json());
+
+    const unrelated = await send(
+      "conversation_human_two",
+      `uncertain-unrelated-${crypto.randomUUID()}`,
+    );
+    expect(unrelated.status).toBe(202);
+    const unrelatedCommand = CommandSchema.parse(await unrelated.json());
+
+    const resendReplay = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/resend`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: resendKey,
+          duplicate_risk_acknowledged: true,
+        }),
+      },
+    );
+    expect(resendReplay.status).toBe(200);
+    const resendReplayResult = OutboundDecisionResultSchema.parse(
+      await resendReplay.json(),
+    );
+    expect(resendReplayResult.command.id).toBe(resendResult.command.id);
+
+    for (const commandToContinue of [resumedCommand, unrelatedCommand]) {
+      const cleanup = await requestForApp(
+        app,
+        `/api/v1/commands/${commandToContinue.id}/continue`,
+        "human-token",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            idempotency_key: `cleanup-continue-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      expect(cleanup.status).toBe(200);
+    }
+  });
+
+  it("preserves an explicit continue when late provider evidence arrives", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-continue-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+    const grant = AccountGrantSchema.parse(await grantResponse.json());
+
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => ({
+          type: "uncertain" as const,
+          reason: "provider_timeout_after_acceptance",
+        }),
+      },
+    });
+    const send = () =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": `continue-${crypto.randomUUID()}` },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Continue while the original remains recorded",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send();
+    expect(first.status).toBe(202);
+    const command = CommandSchema.parse(await first.json());
+    expect(command.status).toBe("delivery_uncertain");
+    const generation = command.projection_generation ?? 1;
+    const continuation = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/continue`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `continue-action-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(continuation.status).toBe(200);
+    const continued = OutboundDecisionResultSchema.parse(
+      await continuation.json(),
+    );
+    expect(continued).toMatchObject({
+      action: "continue",
+      command: {
+        id: command.id,
+        status: "delivery_uncertain",
+        chat_paused: false,
+        last_action: "continue",
+      },
+      dispatch: { status: "delivery_uncertain", chat_paused: false },
+    });
+
+    const nextMessage = await send();
+    expect(nextMessage.status).toBe(202);
+
+    const lateEvidence = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: 1,
+          tenant_id: tenantId,
+          command_id: command.id,
+          source: "provider",
+          evidence_id: "provider-late-accepted-1",
+          transaction_id: command.transaction_id,
+          request_digest: command.request_digest,
+          account_id: command.account_id,
+          conversation_id: command.conversation_id,
+          generation,
+          status: "accepted",
+          observed_at: "2050-01-01T00:00:02.000Z",
+          reason: "provider accepted before response was lost",
+        }),
+      },
+    );
+    expect(lateEvidence.status).toBe(200);
+    const lateResult = OutboundDecisionResultSchema.parse(
+      await lateEvidence.json(),
+    );
+    expect(lateResult).toMatchObject({
+      command: {
+        id: command.id,
+        status: "delivery_uncertain",
+        chat_paused: false,
+        provider_stage: "accepted",
+        last_action: "continue",
+      },
+      dispatch: { status: "delivery_uncertain", chat_paused: false },
+    });
+
+    const outOfOrderUncertain = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: 1,
+          tenant_id: tenantId,
+          command_id: command.id,
+          source: "provider",
+          evidence_id: "provider-out-of-order-uncertain-1",
+          transaction_id: command.transaction_id,
+          request_digest: command.request_digest,
+          account_id: command.account_id,
+          conversation_id: command.conversation_id,
+          generation,
+          status: "uncertain",
+          observed_at: "2050-01-01T00:00:01.000Z",
+          reason: "late uncertain callback",
+        }),
+      },
+    );
+    expect(outOfOrderUncertain.status).toBe(200);
+    const outOfOrderResult = OutboundDecisionResultSchema.parse(
+      await outOfOrderUncertain.json(),
+    );
+    expect(outOfOrderResult).toMatchObject({
+      command: {
+        id: command.id,
+        status: "delivery_uncertain",
+        provider_stage: "accepted",
+        chat_paused: false,
+        last_action: "continue",
+      },
+      dispatch: {
+        status: "delivery_uncertain",
+        provider_stage: "accepted",
+        chat_paused: false,
+      },
+    });
+
+    const revoke = await request(`/api/v1/grants/${grant.id}`, "human-token", {
+      method: "DELETE",
+      headers: { "Idempotency-Key": `revoke-uncertain-${crypto.randomUUID()}` },
+    });
+    expect(revoke.status).toBe(200);
+    const revokedAgentCancel = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/cancel`,
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `revoked-uncertain-cancel-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(revokedAgentCancel.status).toBe(403);
+  });
+
+  it("keeps uncertainty evidence and human action audit through projection rebuild", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-rebuild-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => ({
+          type: "uncertain" as const,
+          reason: "provider_timeout_before_rebuild",
+        }),
+      },
+    });
+    const response = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_one/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": `rebuild-uncertain-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "Keep this uncertain command across rebuild",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(response.status).toBe(202);
+    const command = CommandSchema.parse(await response.json());
+
+    const continuation = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/continue`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `rebuild-continue-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(continuation.status).toBe(200);
+
+    const evidence = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: 1,
+          tenant_id: tenantId,
+          command_id: command.id,
+          source: "provider",
+          evidence_id: "provider-rebuild-accepted-1",
+          transaction_id: command.transaction_id,
+          request_digest: command.request_digest,
+          account_id: command.account_id,
+          conversation_id: command.conversation_id,
+          generation: command.projection_generation ?? 1,
+          status: "accepted",
+          observed_at: "2050-01-01T00:00:01.000Z",
+          reason: "provider accepted before rebuild",
+        }),
+      },
+    );
+    expect(evidence.status).toBe(200);
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const currentMeta = await rows<{ generation: number }>(
+      projection,
+      "SELECT generation FROM projection_meta WHERE singleton = 1",
+    );
+    const rebuildId = `rebuild_uncertain_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rebuildAuthorization = auth(
+      ["projection.rebuild"],
+      ["identity_human"],
+      tenantId,
+    );
+    await projection.beginRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      expected_generation: currentMeta[0]!.generation,
+      started_at: "2050-01-01T00:01:00.000Z",
+      authorization: rebuildAuthorization,
+    });
+
+    const replayEvent = event(
+      `event_rebuild_uncertain_${crypto.randomUUID().replaceAll("-", "")}`,
+      {
+        title: "Rebuilt uncertain conversation",
+        archived: false,
+        muted: false,
+      },
+      "conversation.updated",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2050-01-01T00:01:01.000Z",
+        observed_at: "2050-01-01T00:01:02.000Z",
+      },
+    );
+    await projection.applyReplayPage({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      source_cursor: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      page: {
+        schema_version: 1,
+        replay_mode: "projection_only",
+        tenant_id: tenantId,
+        manifests: [
+          {
+            schema_version: 1,
+            tenant_id: tenantId,
+            batch_id: "batch_rebuild_uncertain",
+            data_key: `events/${tenantId}/2050/01/01/00/batch_rebuild_uncertain.jsonl.gz`,
+            compression: "gzip",
+            content_type: "application/x-ndjson",
+            event_count: 1,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            canonical_sha256: "0".repeat(64),
+            data_etag: "etag-rebuild-uncertain",
+            first_event_id: replayEvent.event_id,
+            last_event_id: replayEvent.event_id,
+            first_observed_at: replayEvent.observed_at,
+            last_observed_at: replayEvent.observed_at,
+            archived_at: "2050-01-01T00:01:02.000Z",
+            producer: {
+              service: "communicator-control-plane",
+              version: "uncertainty-rebuild-test/1",
+            },
+            source_checkpoint: null,
+          },
+        ],
+        events: [replayEvent],
+        next_cursor: null,
+      },
+      authorization: rebuildAuthorization,
+    });
+    await projection.completeRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      terminal_cursor: null,
+      completed_at: "2050-01-01T00:01:03.000Z",
+      authorization: rebuildAuthorization,
+    });
+
+    expect(
+      await rows<{
+        status: string;
+        chat_paused: number;
+        last_action: string | null;
+        last_action_actor_principal_id: string | null;
+      }>(
+        projection,
+        "SELECT status, chat_paused, last_action, last_action_actor_principal_id FROM outbound_dispatches WHERE command_id = ?",
+        command.id,
+      ),
+    ).toEqual([
+      {
+        status: "delivery_uncertain",
+        chat_paused: 0,
+        last_action: "continue",
+        last_action_actor_principal_id: "principal_human",
+      },
+    ]);
+    expect(
+      await rows<{ status: string }>(
+        projection,
+        "SELECT status FROM commands WHERE id = ?",
+        command.id,
+      ),
+    ).toEqual([{ status: "delivery_uncertain" }]);
+    expect(
+      await rows<{ count: number }>(
+        projection,
+        "SELECT COUNT(*) AS count FROM outbound_evidence WHERE command_id = ?",
+        command.id,
+      ),
+    ).toEqual([{ count: 2 }]);
+    expect(
+      await rows<{ action: string; actor_principal_id: string }>(
+        projection,
+        "SELECT action, actor_principal_id FROM outbound_actions WHERE original_command_id = ?",
+        command.id,
+      ),
+    ).toEqual([{ action: "continue", actor_principal_id: "principal_human" }]);
+
+    const cleanup = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `rebuild-cancel-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(cleanup.status).toBe(200);
   });
 });

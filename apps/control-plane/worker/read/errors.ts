@@ -9,12 +9,14 @@ import {
 
 export type ReadErrorCode =
   | "invalid_request"
+  | "chat_paused"
   | "forbidden"
   | "not_found"
   | "service_unavailable";
 
 const SAFE_MESSAGES: Record<ReadErrorCode, string> = {
   invalid_request: "Invalid request",
+  chat_paused: "This chat is paused while delivery remains uncertain",
   forbidden: "Forbidden",
   not_found: "Resource not found",
   service_unavailable: "Service unavailable",
@@ -65,6 +67,8 @@ const PROJECTION_INVALID_CODES = new Set([
   "projection_tenant_mismatch",
 ]);
 
+const PROJECTION_PAUSED_CODES = new Set(["projection_chat_paused"]);
+
 const PROJECTION_NOT_FOUND_CODES = new Set(["projection_forbidden"]);
 
 const PROJECTION_UNAVAILABLE_CODES = new Set([
@@ -96,6 +100,9 @@ export const mapReadError = (error: unknown): ReadError => {
   if (code !== undefined && PROJECTION_INVALID_CODES.has(code)) {
     return readError("invalid_request", error);
   }
+  if (code !== undefined && PROJECTION_PAUSED_CODES.has(code)) {
+    return readError("chat_paused", error);
+  }
   if (code !== undefined && PROJECTION_NOT_FOUND_CODES.has(code)) {
     return readError("not_found", error);
   }
@@ -109,18 +116,20 @@ export const mapReadError = (error: unknown): ReadError => {
 export const readErrorResponse = (
   error: unknown,
 ): {
-  status: 400 | 403 | 404 | 503;
+  status: 400 | 403 | 404 | 409 | 503;
   body: ApiErrorResponse;
 } => {
   const mapped = mapReadError(error);
   const status =
     mapped.code === "invalid_request"
       ? 400
-      : mapped.code === "forbidden"
-        ? 403
-        : mapped.code === "not_found"
-          ? 404
-          : 503;
+      : mapped.code === "chat_paused"
+        ? 409
+        : mapped.code === "forbidden"
+          ? 403
+          : mapped.code === "not_found"
+            ? 404
+            : 503;
   const body = ApiErrorResponseSchema.parse({
     error: {
       code: mapped.code,

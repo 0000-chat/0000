@@ -19,6 +19,7 @@ import type {
   OperationScope,
   ProviderCapability,
   SessionResponse,
+  OutboundAction,
 } from "@communicator/contracts";
 import {
   pilotScenario,
@@ -898,7 +899,7 @@ export class SimulatedStore {
 
   decideCommand(
     commandId: string,
-    decision: "confirm" | "cancel",
+    decision: "confirm" | "cancel" | OutboundAction,
   ): Command | null {
     const command = [
       ...this.state.commands,
@@ -906,7 +907,14 @@ export class SimulatedStore {
     ].find((item) => item.id === commandId);
     if (!command) return null;
     Object.assign(command, {
-      status: decision === "cancel" ? "cancelled" : "accepted",
+      status:
+        decision === "cancel"
+          ? "cancelled"
+          : decision === "continue"
+            ? "delivery_uncertain"
+            : decision === "resend"
+              ? "accepted"
+              : "accepted",
       updated_at: "2026-08-29T00:00:00.000Z",
       confirmation_decision: decision,
       confirmation_actor_principal_id: "principal_pilot",

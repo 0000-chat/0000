@@ -4,6 +4,7 @@ import {
   CommandSchema,
   CommunicatorIdSchema,
   OutboundDecisionResultSchema,
+  OutboundEvidenceInputSchema,
   TextReplyRequestSchema,
 } from "@communicator/contracts";
 import { z } from "zod";
@@ -31,8 +32,12 @@ const TextReplyBodySchema = TextReplyRequestSchema.omit({
 });
 type TextReplyBody = z.infer<typeof TextReplyBodySchema>;
 const DecisionBodySchema = z
-  .object({ idempotency_key: z.string().trim().min(1).max(200) })
+  .object({
+    idempotency_key: z.string().trim().min(1).max(200),
+    duplicate_risk_acknowledged: z.boolean().optional(),
+  })
   .strict();
+const EvidenceBodySchema = OutboundEvidenceInputSchema;
 
 export const textReplyRoute = createRoute({
   method: "post",
@@ -121,6 +126,7 @@ const commandRouteResponse = {
   401: { description: "Authentication required", content: errorContent },
   403: { description: "Forbidden", content: errorContent },
   404: { description: "Command not found", content: errorContent },
+  409: { description: "Chat is paused", content: errorContent },
   503: { description: "Projection unavailable", content: errorContent },
 };
 
@@ -158,6 +164,17 @@ export const outboundStatusRoute = createRoute({
   responses: commandRouteResponse,
 });
 
+export const outboundEvidenceRoute = createRoute({
+  method: "post",
+  path: "/api/v1/commands/{command_id}/evidence",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: commandPath,
+    body: { content: { "application/json": { schema: EvidenceBodySchema } } },
+  },
+  responses: commandRouteResponse,
+});
+
 export const confirmOutboundRoute = createRoute({
   method: "post",
   path: "/api/v1/commands/{command_id}/confirm",
@@ -180,10 +197,37 @@ export const cancelOutboundRoute = createRoute({
   responses: commandRouteResponse,
 });
 
+export const continueOutboundRoute = createRoute({
+  method: "post",
+  path: "/api/v1/commands/{command_id}/continue",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: commandPath,
+    body: { content: { "application/json": { schema: DecisionBodySchema } } },
+  },
+  responses: commandRouteResponse,
+});
+
+export const resendOutboundRoute = createRoute({
+  method: "post",
+  path: "/api/v1/commands/{command_id}/resend",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: commandPath,
+    body: { content: { "application/json": { schema: DecisionBodySchema } } },
+  },
+  responses: commandRouteResponse,
+});
+
 type ReconcileHandler = Handler<
   CommandRouteEnv,
   string,
-  { out: { param: { command_id: string } } }
+  {
+    out: {
+      param: { command_id: string };
+      json?: z.infer<typeof EvidenceBodySchema>;
+    };
+  }
 >;
 
 export const reconcileOutboundHandler =
@@ -198,6 +242,38 @@ export const reconcileOutboundHandler =
         },
         params.command_id,
         services,
+      );
+      return context.json(result, 200);
+    } catch (error) {
+      return outboundFailure(context, error);
+    }
+  };
+
+export const evidenceOutboundHandler =
+  (
+    services: OutboundAcceptanceServices = {},
+  ): Handler<
+    CommandRouteEnv,
+    string,
+    {
+      out: {
+        param: { command_id: string };
+        json: z.infer<typeof EvidenceBodySchema>;
+      };
+    }
+  > =>
+  async (context) => {
+    try {
+      const params = context.req.valid("param");
+      const body = context.req.valid("json");
+      const result = await reconcileOutboundCommand(
+        {
+          env: context.env,
+          authorization: context.get("authorization"),
+        },
+        params.command_id,
+        services,
+        body,
       );
       return context.json(result, 200);
     } catch (error) {
@@ -226,13 +302,19 @@ type DecisionHandler = Handler<
   {
     out: {
       param: { command_id: string };
-      json: { idempotency_key: string };
+      json: {
+        idempotency_key: string;
+        duplicate_risk_acknowledged?: boolean;
+      };
     };
   }
 >;
 
 const decisionHandler =
-  (decision: "confirm" | "cancel", services: OutboundAcceptanceServices = {}) =>
+  (
+    decision: "confirm" | "cancel" | "continue" | "resend",
+    services: OutboundAcceptanceServices = {},
+  ) =>
   async (context: Parameters<DecisionHandler>[0]) => {
     try {
       const params = context.req.valid("param");
@@ -246,6 +328,7 @@ const decisionHandler =
         decision,
         body.idempotency_key,
         services,
+        body.duplicate_risk_acknowledged,
       );
       return context.json(result, 200);
     } catch (error) {
@@ -260,3 +343,11 @@ export const confirmOutboundHandler = (
 export const cancelOutboundHandler = (
   services: OutboundAcceptanceServices = {},
 ): DecisionHandler => decisionHandler("cancel", services);
+
+export const continueOutboundHandler = (
+  services: OutboundAcceptanceServices = {},
+): DecisionHandler => decisionHandler("continue", services);
+
+export const resendOutboundHandler = (
+  services: OutboundAcceptanceServices = {},
+): DecisionHandler => decisionHandler("resend", services);
