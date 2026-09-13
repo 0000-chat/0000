@@ -456,10 +456,12 @@ dependencies = [
 name = "communicator-matrix-gateway"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "async-trait",
  "base64",
  "chacha20poly1305",
  "chrono",
+ "ctr",
  "futures-util",
  "http",
  "libc",
