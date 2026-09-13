@@ -3,6 +3,8 @@ import {
   ApiErrorResponseSchema,
   CommunicatorIdSchema,
   MAX_WEBHOOK_PAGE_SIZE,
+  WebhookDeliveryRetrySchema,
+  WebhookDeliverySchema,
   WebhookSubscriptionCreateSchema,
   WebhookSubscriptionCutoverSchema,
   WebhookSubscriptionEvaluationSchema,
@@ -20,11 +22,13 @@ import type { AuthorizationVariables } from "../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../auth/ingestion-middleware";
 import {
   authorizeWebhookInspection,
+  authorizeWebhookDeliveryInspection,
   createWebhookSubscription,
   cutoverWebhookSubscription,
   evaluateWebhookSubscription,
   listWebhookSubscriptionPage,
   revokeWebhookSubscription,
+  retryWebhookDelivery,
   updateWebhookSubscription,
   WebhookRepositoryError,
   type WebhookActor,
@@ -64,6 +68,25 @@ const subscriptionResponses = (description: string) => ({
   409: { description: "Subscription mutation conflict", content: errorContent },
   503: {
     description: "Subscription directory unavailable",
+    content: errorContent,
+  },
+});
+
+const deliveryResponses = (description: string) => ({
+  200: {
+    description,
+    content: { "application/json": { schema: WebhookDeliverySchema } },
+  },
+  400: { description: "Invalid request", content: errorContent },
+  401: { description: "Authentication required", content: errorContent },
+  403: {
+    description: "Webhook management permission required",
+    content: errorContent,
+  },
+  404: { description: "Delivery not found", content: errorContent },
+  409: { description: "Delivery retry conflict", content: errorContent },
+  503: {
+    description: "Webhook delivery ledger unavailable",
     content: errorContent,
   },
 });
@@ -196,6 +219,27 @@ export const evaluateWebhookSubscriptionRoute = createRoute({
       content: errorContent,
     },
   },
+});
+
+export const webhookDeliveryRoute = createRoute({
+  method: "get",
+  path: "/api/v1/webhook-deliveries/{delivery_id}",
+  security: [{ bearerAuth: [] }],
+  request: { params: z.object({ delivery_id: boundedId }).strict() },
+  responses: deliveryResponses("Webhook delivery"),
+});
+
+export const retryWebhookDeliveryRoute = createRoute({
+  method: "post",
+  path: "/api/v1/webhook-deliveries/{delivery_id}/retry",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ delivery_id: boundedId }).strict(),
+    body: {
+      content: { "application/json": { schema: WebhookDeliveryRetrySchema } },
+    },
+  },
+  responses: deliveryResponses("Webhook delivery retry requested"),
 });
 
 const actorFor = (context: Context<WebhookRouteEnv>): WebhookActor => {
@@ -418,6 +462,52 @@ export const evaluateWebhookSubscriptionHandler: Handler<
         subscription.id,
         query.account_id,
         query.chat_id ?? null,
+      ),
+      200,
+    );
+  } catch (error) {
+    return errorResponse(context, error);
+  }
+};
+
+export const webhookDeliveryHandler: Handler<
+  WebhookRouteEnv,
+  string,
+  { out: { param: { delivery_id: string } } }
+> = async (context) => {
+  try {
+    return context.json(
+      await authorizeWebhookDeliveryInspection(
+        context.env.CONTROL_DB.withSession("first-primary"),
+        actorFor(context),
+        context.req.valid("param").delivery_id,
+      ),
+      200,
+    );
+  } catch (error) {
+    return errorResponse(context, error);
+  }
+};
+
+export const retryWebhookDeliveryHandler: Handler<
+  WebhookRouteEnv,
+  string,
+  {
+    out: {
+      param: { delivery_id: string };
+      json: { idempotency_key: string };
+    };
+  }
+> = async (context) => {
+  try {
+    const input = context.req.valid("json");
+    return context.json(
+      await retryWebhookDelivery(
+        context.env.CONTROL_DB,
+        actorFor(context),
+        context.req.valid("param").delivery_id,
+        input.idempotency_key,
+        now(),
       ),
       200,
     );

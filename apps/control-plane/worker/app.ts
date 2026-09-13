@@ -94,6 +94,10 @@ import {
   revokeWebhookSubscriptionHandler,
   evaluateWebhookSubscriptionRoute,
   evaluateWebhookSubscriptionHandler,
+  webhookDeliveryRoute,
+  webhookDeliveryHandler,
+  retryWebhookDeliveryRoute,
+  retryWebhookDeliveryHandler,
 } from "./routes/webhooks";
 import { ReadError, readErrorResponse } from "./read/errors";
 import {
@@ -417,6 +421,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/search/*", productAuthorization);
   app.use("/api/v1/webhook-subscriptions", productAuthorization);
   app.use("/api/v1/webhook-subscriptions/*", productAuthorization);
+  app.use("/api/v1/webhook-deliveries/*", productAuthorization);
   app.use("/api/v1/history-imports/*", productAuthorization);
   app.use("/api/v1/attachments/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
@@ -506,6 +511,8 @@ export function createApp(services: AppServices = {}) {
     evaluateWebhookSubscriptionRoute,
     evaluateWebhookSubscriptionHandler,
   );
+  app.openapi(webhookDeliveryRoute, webhookDeliveryHandler);
+  app.openapi(retryWebhookDeliveryRoute, retryWebhookDeliveryHandler);
   const historyServices: HistoryRouteServices = {};
   if (services.createHistoryImportProvider !== undefined)
     historyServices.createProvider = services.createHistoryImportProvider;

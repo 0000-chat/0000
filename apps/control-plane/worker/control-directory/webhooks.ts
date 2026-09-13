@@ -3,12 +3,14 @@ import {
   WebhookChatRuleSchema,
   WebhookEventFilterSchema,
   WebhookOwnershipModeSchema,
+  WebhookDeliverySchema,
   WebhookSubscriptionEvaluationSchema,
   WebhookSubscriptionPageSchema,
   WebhookSubscriptionSchema,
   type WebhookAccountRule,
   type WebhookChatRule,
   type WebhookDestination,
+  type WebhookDelivery,
   type WebhookEventFilter,
   type WebhookOwnershipMode,
   type WebhookSubscription,
@@ -84,6 +86,28 @@ type SubscriptionRow = {
   created_at: string;
   updated_at: string;
   revoked_at: string | null;
+};
+
+type DeliveryRow = {
+  id: string;
+  tenant_id: string;
+  subscription_id: string;
+  source_event_id: string;
+  source_message_id: string | null;
+  destination_version: number;
+  status: string;
+  first_pending_at: string;
+  retry_deadline: string;
+  attempt_count: number;
+  next_attempt_at: string | null;
+  last_attempt_at: string | null;
+  delivered_at: string | null;
+  http_status: number | null;
+  error_code: string | null;
+  last_response_body: string | null;
+  cancellation_reason: string | null;
+  uncertain_at: string | null;
+  uncertainty_reason: string | null;
 };
 
 type RuleRow = {
@@ -1194,7 +1218,8 @@ export async function cutoverWebhookSubscription(
         .prepare(
           `UPDATE webhook_deliveries
            SET status = 'cancelled', cancelled_at = ?,
-               cancellation_reason = 'destination_cutover'
+               cancellation_reason = 'destination_cutover',
+               next_attempt_at = NULL, manual_retry_at = NULL
            WHERE tenant_id = ? AND subscription_id = ?
              AND destination_version < (
                SELECT destination_version
@@ -1204,7 +1229,7 @@ export async function cutoverWebhookSubscription(
              AND EXISTS (
                SELECT 1 FROM directory_mutations WHERE idempotency_key = ?
              )
-             AND status IN ('pending', 'leased')`,
+             AND status = 'pending'`,
         )
         .bind(
           occurredAt,
@@ -1282,9 +1307,10 @@ export async function revokeWebhookSubscription(
         .prepare(
           `UPDATE webhook_deliveries
            SET status = 'cancelled', cancelled_at = ?,
-               cancellation_reason = 'subscription_revoked'
+               cancellation_reason = 'subscription_revoked',
+               next_attempt_at = NULL, manual_retry_at = NULL
            WHERE tenant_id = ? AND subscription_id = ?
-             AND status IN ('pending', 'leased')`,
+             AND status = 'pending'`,
         )
         .bind(occurredAt, actor.tenantId, subscriptionId),
       ...auditStatements(db, {
@@ -1333,6 +1359,185 @@ export async function evaluateWebhookSubscription(
     enabled,
     source,
   });
+}
+
+const deliveryQuery = `
+  SELECT id, tenant_id, subscription_id, source_event_id, source_message_id,
+         destination_version, status, first_pending_at, retry_deadline,
+         attempt_count, next_attempt_at, last_attempt_at, delivered_at,
+         http_status, error_code, last_response_body, cancellation_reason,
+         uncertain_at, uncertainty_reason
+  FROM webhook_deliveries
+`;
+
+const mapDelivery = (row: DeliveryRow): WebhookDelivery =>
+  WebhookDeliverySchema.parse(row);
+
+async function readDelivery(
+  db: D1DatabaseSession,
+  tenantId: string,
+  deliveryId: string,
+): Promise<DeliveryRow> {
+  const row = await db
+    .prepare(`${deliveryQuery} WHERE tenant_id = ? AND id = ? LIMIT 1`)
+    .bind(tenantId, deliveryId)
+    .first<DeliveryRow>();
+  if (row === null) throw webhookError("webhook_not_found");
+  return row;
+}
+
+const deliveryAuditStatements = (
+  db: D1Database,
+  input: {
+    key: string;
+    actor: WebhookActor;
+    deliveryId: string;
+    subscriptionId: string;
+    payload: unknown;
+    occurredAt: string;
+  },
+) => {
+  const payloadJson = JSON.stringify(input.payload);
+  return [
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO audit_events
+         (id, tenant_id, actor_principal_id, action, target_type, target_id,
+          reason, metadata_json, occurred_at)
+         VALUES (?, ?, ?, 'webhook.delivery.retry', 'webhook_delivery', ?, NULL, ?, ?)`,
+      )
+      .bind(
+        `audit_webhook_delivery_${input.key}`,
+        input.actor.tenantId,
+        input.actor.principalId,
+        input.deliveryId,
+        payloadJson,
+        input.occurredAt,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO control_event_outbox
+         (event_id, tenant_id, event_type, aggregate_type, aggregate_id,
+          payload_json, created_at)
+         VALUES (?, ?, 'webhook.delivery.retry', 'webhook_delivery', ?, ?, ?)`,
+      )
+      .bind(
+        `control_webhook_delivery_${input.key}`,
+        input.actor.tenantId,
+        input.deliveryId,
+        payloadJson,
+        input.occurredAt,
+      ),
+  ];
+};
+
+export async function authorizeWebhookDeliveryInspection(
+  db: D1DatabaseSession,
+  actor: WebhookActor,
+  deliveryId: string,
+): Promise<WebhookDelivery> {
+  try {
+    const row = await readDelivery(db, actor.tenantId, deliveryId);
+    const subscription = await readSubscription(
+      db,
+      actor.tenantId,
+      row.subscription_id,
+    );
+    await requireSubscriptionAuthority(db, actor, subscription);
+    return mapDelivery(row);
+  } catch (error) {
+    if (error instanceof WebhookRepositoryError) throw error;
+    throw webhookError("webhook_unavailable", error);
+  }
+}
+
+export async function retryWebhookDelivery(
+  db: D1Database,
+  actor: WebhookActor,
+  deliveryId: string,
+  idempotencyKey: string,
+  occurredAt: string,
+): Promise<WebhookDelivery> {
+  try {
+    const database = db.withSession("first-primary");
+    const existingRow = await readDelivery(
+      database,
+      actor.tenantId,
+      deliveryId,
+    );
+    const subscription = await readSubscription(
+      database,
+      actor.tenantId,
+      existingRow.subscription_id,
+    );
+    await requireSubscriptionAuthority(database, actor, subscription);
+    if (subscription.status !== "active") throw webhookError("webhook_conflict");
+    const payload = {
+      operation: "retry",
+      delivery_id: deliveryId,
+      subscription_id: existingRow.subscription_id,
+    };
+    const idempotency = await checkIdempotency(
+      database,
+      idempotencyKey,
+      payload,
+    );
+    if (idempotency.exists) return mapDelivery(existingRow);
+    if (existingRow.status !== "failed" && existingRow.status !== "uncertain") {
+      throw webhookError("webhook_conflict");
+    }
+    if (existingRow.destination_version !== subscription.destination_version) {
+      // A destination replacement owns future events only. An explicit retry
+      // cannot turn old-version backlog into a send to the replacement.
+      throw webhookError("webhook_conflict");
+    }
+    await db.batch([
+      mutationStatement(
+        db,
+        idempotencyKey,
+        actor,
+        "webhook.delivery.retry",
+        idempotency.hash,
+        occurredAt,
+      ),
+      db
+        .prepare(
+          `UPDATE webhook_deliveries
+           SET status = 'pending', next_attempt_at = ?, cancelled_at = NULL,
+               cancellation_reason = NULL, manual_retry_at = ?,
+               uncertain_at = NULL, uncertainty_reason = NULL,
+               error_code = 'manual_retry_requested'
+           WHERE tenant_id = ? AND id = ?
+             AND status IN ('failed', 'uncertain')`,
+        )
+        .bind(
+          occurredAt,
+          occurredAt,
+          actor.tenantId,
+          deliveryId,
+        ),
+      ...deliveryAuditStatements(db, {
+        key: idempotencyKey,
+        actor,
+        deliveryId,
+        subscriptionId: existingRow.subscription_id,
+        payload: {
+          ...payload,
+          previous_status: existingRow.status,
+          destination_version: subscription.destination_version,
+          first_pending_at: existingRow.first_pending_at,
+          retry_deadline: existingRow.retry_deadline,
+        },
+        occurredAt,
+      }),
+    ]);
+    return mapDelivery(
+      await readDelivery(database, actor.tenantId, deliveryId),
+    );
+  } catch (error) {
+    if (error instanceof WebhookRepositoryError) throw error;
+    throw webhookError("webhook_conflict", error);
+  }
 }
 
 export async function authorizeWebhookInspection(

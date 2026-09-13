@@ -17,6 +17,19 @@ import { getWebhookSubscription } from "../control-directory/webhooks";
 
 const DELIVERY_LEASE_MS = 60_000;
 const MAX_DELIVERY_BATCH = 100;
+const MAX_RETRY_BATCH = 100;
+const RETRY_WINDOW_MS = 24 * 60 * 60 * 1_000;
+const RETRY_BACKOFF_MS = [
+  1_000,
+  5_000,
+  30_000,
+  5 * 60_000,
+  15 * 60_000,
+  60 * 60_000,
+  6 * 60 * 60_000,
+] as const;
+const MAX_RESPONSE_BODY_BYTES = 8_192;
+const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 const MESSAGE_CREATED = "message.created";
 
 type DeliveryRow = {
@@ -30,9 +43,15 @@ type DeliveryRow = {
   source_conversation_id: string | null;
   source_revision: string | null;
   destination_version: number;
-  status: "pending" | "leased" | "delivered" | "failed" | "cancelled";
+  status:
+    | "pending"
+    | "leased"
+    | "delivered"
+    | "failed"
+    | "uncertain"
+    | "cancelled";
   first_pending_at: string;
-  retry_deadline: string | null;
+  retry_deadline: string;
   attempt_count: number;
   next_attempt_at: string | null;
   cancelled_at: string | null;
@@ -44,6 +63,10 @@ type DeliveryRow = {
   http_status: number | null;
   error_code: string | null;
   payload_json: string | null;
+  last_response_body: string | null;
+  manual_retry_at: string | null;
+  uncertain_at: string | null;
+  uncertainty_reason: string | null;
 };
 
 type DeliveryLease = DeliveryRow & {
@@ -83,8 +106,19 @@ export type WebhookDeliveryServices = {
   fetch?: typeof fetch | undefined;
   resolveCredential?: WebhookCredentialResolver | undefined;
   credentialStore?: WebhookCredentialStore | undefined;
+  httpTimeoutMs?: number | undefined;
   /** Test-only seam for revocation/edit races immediately before HTTP. */
   beforeFetch?: ((deliveryId: string) => Promise<void>) | undefined;
+};
+
+export type WebhookRetryTickServices = Pick<
+  WebhookDeliveryServices,
+  "now" | "fetch" | "resolveCredential" | "credentialStore" | "beforeFetch"
+>;
+
+export type WebhookRetryTickResult = {
+  scanned: number;
+  attempted: number;
 };
 
 type StoredCredential = {
@@ -174,6 +208,103 @@ const nowFor = (services: WebhookDeliveryServices): Date => {
   if (!Number.isFinite(value.getTime()))
     throw new Error("webhook delivery clock invalid");
   return value;
+};
+
+const retryDeadlineFor = (firstPendingAt: string): string => {
+  const parsed = Date.parse(firstPendingAt);
+  if (!Number.isFinite(parsed)) throw new Error("webhook delivery timestamp invalid");
+  return new Date(parsed + RETRY_WINDOW_MS).toISOString();
+};
+
+const retryDelayFor = (attemptCount: number): number => {
+  const index = Math.max(0, Math.min(attemptCount - 1, RETRY_BACKOFF_MS.length - 1));
+  const fallback = RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1];
+  if (fallback === undefined) throw new Error("webhook retry backoff unavailable");
+  return RETRY_BACKOFF_MS[index] ?? fallback;
+};
+
+const boundedResponseBody = async (
+  response: Response,
+  timeoutMs: number,
+): Promise<string | null> => {
+  if (response.body === null) return null;
+  const reader = response.body.getReader();
+  const readBody = async (): Promise<string | null> => {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (size < MAX_RESPONSE_BODY_BYTES) {
+        const next = await reader.read();
+        if (next.done) break;
+        const remaining = MAX_RESPONSE_BODY_BYTES - size;
+        const chunk =
+          next.value.byteLength <= remaining
+            ? next.value
+            : next.value.slice(0, remaining);
+        chunks.push(chunk);
+        size += chunk.byteLength;
+        if (size >= MAX_RESPONSE_BODY_BYTES) {
+          void reader.cancel().catch(() => undefined);
+          break;
+        }
+      }
+      const result = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new TextDecoder().decode(result);
+    } catch {
+      try {
+        await reader.cancel();
+      } catch {
+        // The response body is already unusable.
+      }
+      return null;
+    }
+  };
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve(null);
+      void reader.cancel().catch(() => undefined);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([readBody(), timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+};
+
+const httpTimeoutFor = (services: WebhookDeliveryServices): number => {
+  const candidate = services.httpTimeoutMs;
+  if (candidate === undefined || !Number.isFinite(candidate) || candidate < 1) {
+    return DEFAULT_HTTP_TIMEOUT_MS;
+  }
+  return Math.min(Math.floor(candidate), 5 * 60_000);
+};
+
+const fetchWithTimeout = async (
+  fetcher: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> => {
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<Response>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new Error("webhook delivery timeout"));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fetcher(url, { ...init, signal: controller.signal }), timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
 };
 
 const sourceIsEligible = (
@@ -404,9 +535,11 @@ const insertDeliveryRows = async (
               status, first_pending_at, retry_deadline, attempt_count,
               next_attempt_at, cancelled_at, cancellation_reason, lease_id,
               lease_expires_at, last_attempt_at, delivered_at, http_status,
-              error_code, payload_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, 0,
-                     ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)`,
+              error_code, payload_json, last_response_body, manual_retry_at,
+              uncertain_at, uncertainty_reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0,
+                     ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                     NULL, NULL, NULL, NULL)`,
           )
           .bind(
             candidate.deliveryId,
@@ -420,6 +553,7 @@ const insertDeliveryRows = async (
             candidate.event.event_id,
             candidate.subscription.destination_version,
             now,
+            retryDeadlineFor(now),
             now,
           ),
       ),
@@ -440,7 +574,8 @@ const readDelivery = async (
               status, first_pending_at, retry_deadline, attempt_count,
               next_attempt_at, cancelled_at, cancellation_reason, lease_id,
               lease_expires_at, last_attempt_at, delivered_at, http_status,
-              error_code, payload_json
+              error_code, payload_json, last_response_body, manual_retry_at,
+              uncertain_at, uncertainty_reason
        FROM webhook_deliveries
        WHERE tenant_id = ? AND id = ?
        LIMIT 1`,
@@ -458,26 +593,53 @@ const claimDelivery = async (
 ): Promise<DeliveryClaim> => {
   const leaseId = `lease_${crypto.randomUUID()}`;
   const leasedUntil = new Date(now.getTime() + DELIVERY_LEASE_MS).toISOString();
+  const nowIso = now.toISOString();
   const db = databaseSession(database);
+  await database
+    .prepare(
+      `UPDATE webhook_deliveries
+       SET status = 'failed', error_code = 'retry_deadline_exceeded',
+           next_attempt_at = NULL, lease_id = NULL, lease_expires_at = NULL,
+           manual_retry_at = NULL
+       WHERE tenant_id = ? AND id = ?
+         AND retry_deadline <= ? AND manual_retry_at IS NULL
+         AND (
+           status = 'pending'
+           OR (status = 'leased' AND lease_expires_at IS NOT NULL
+               AND lease_expires_at <= ?)
+         )`,
+    )
+    .bind(tenantId, deliveryId, nowIso, nowIso)
+    .run();
   await database
     .prepare(
       `UPDATE webhook_deliveries
        SET status = 'leased', lease_id = ?, lease_expires_at = ?,
            last_attempt_at = ?, attempt_count = attempt_count + 1,
-           next_attempt_at = NULL
+           next_attempt_at = NULL, manual_retry_at = NULL
        WHERE tenant_id = ? AND id = ?
          AND (
-           status = 'pending'
-           OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+           (
+             status = 'pending'
+             AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+             AND (manual_retry_at IS NOT NULL OR retry_deadline > ?)
+           )
+           OR (
+             status = 'leased' AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ? AND retry_deadline > ?
+           )
          )`,
     )
     .bind(
       leaseId,
       leasedUntil,
-      now.toISOString(),
+      nowIso,
       tenantId,
       deliveryId,
-      now.toISOString(),
+      nowIso,
+      nowIso,
+      nowIso,
+      nowIso,
     )
     .run();
   const row = await readDelivery(db, tenantId, deliveryId);
@@ -508,41 +670,135 @@ const cancelDelivery = async (
       `UPDATE webhook_deliveries
        SET status = 'cancelled', cancelled_at = ?, cancellation_reason = ?,
            lease_id = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
-           payload_json = NULL
+           payload_json = NULL, manual_retry_at = NULL, uncertain_at = NULL,
+           uncertainty_reason = NULL
        WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
     )
     .bind(now, reason, tenantId, deliveryId, leaseId)
     .run();
 };
 
-const finishDelivery = async (
+const finishSuccessfulDelivery = async (
   database: D1Database,
   input: {
     tenantId: string;
     deliveryId: string;
     leaseId: string;
-    status: "delivered" | "failed";
     now: string;
     httpStatus: number | null;
-    errorCode: string | null;
     payloadJson: string | null;
+    responseBody: string | null;
   },
 ): Promise<void> => {
   await database
     .prepare(
       `UPDATE webhook_deliveries
-       SET status = ?, delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE NULL END,
-           http_status = ?, error_code = ?, payload_json = ?,
-           lease_id = NULL, lease_expires_at = NULL
+       SET status = 'delivered', delivered_at = ?, http_status = ?,
+           error_code = NULL, payload_json = ?, last_response_body = ?,
+           lease_id = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
+           manual_retry_at = NULL, uncertain_at = NULL, uncertainty_reason = NULL
        WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
     )
     .bind(
-      input.status,
-      input.status,
       input.now,
       input.httpStatus,
-      input.errorCode,
       input.payloadJson,
+      input.responseBody,
+      input.tenantId,
+      input.deliveryId,
+      input.leaseId,
+    )
+    .run();
+};
+
+const finishFailedDelivery = async (
+  database: D1Database,
+  input: {
+    tenantId: string;
+    deliveryId: string;
+    leaseId: string;
+    now: Date;
+    retryDeadline: string;
+    attemptCount: number;
+    httpStatus: number | null;
+    errorCode: string;
+    payloadJson: string | null;
+    responseBody: string | null;
+  },
+): Promise<void> => {
+  const deadlineMs = Date.parse(input.retryDeadline);
+  const retryable = Number.isFinite(deadlineMs) && input.now.getTime() < deadlineMs;
+  const nextAttemptAt = retryable
+    ? new Date(
+        Math.min(
+          input.now.getTime() + retryDelayFor(input.attemptCount),
+          deadlineMs,
+        ),
+      ).toISOString()
+    : null;
+  await database
+    .prepare(
+      `UPDATE webhook_deliveries
+       SET status = ?, next_attempt_at = ?,
+           delivered_at = NULL, http_status = ?, error_code = ?,
+           payload_json = ?, last_response_body = ?, lease_id = NULL,
+           lease_expires_at = NULL, manual_retry_at = NULL,
+           uncertain_at = NULL, uncertainty_reason = NULL
+       WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
+    )
+    .bind(
+      retryable ? "pending" : "failed",
+      nextAttemptAt,
+      input.httpStatus,
+      retryable ? input.errorCode : "retry_deadline_exceeded",
+      input.payloadJson,
+      input.responseBody,
+      input.tenantId,
+      input.deliveryId,
+      input.leaseId,
+    )
+    .run();
+  if (!retryable) {
+    await database
+      .prepare(
+        `UPDATE webhook_deliveries
+         SET next_attempt_at = NULL
+         WHERE tenant_id = ? AND id = ? AND status = 'failed'`,
+      )
+      .bind(input.tenantId, input.deliveryId)
+      .run();
+  }
+};
+
+const finishUncertainDelivery = async (
+  database: D1Database,
+  input: {
+    tenantId: string;
+    deliveryId: string;
+    leaseId: string;
+    now: string;
+    httpStatus: number | null;
+    reason: string;
+    payloadJson: string | null;
+    responseBody: string | null;
+  },
+): Promise<void> => {
+  await database
+    .prepare(
+      `UPDATE webhook_deliveries
+       SET status = 'uncertain', uncertain_at = ?, uncertainty_reason = ?,
+           delivered_at = NULL, next_attempt_at = NULL, http_status = ?,
+           error_code = 'delivery_uncertain', payload_json = ?,
+           last_response_body = ?, lease_id = NULL, lease_expires_at = NULL,
+           manual_retry_at = NULL
+       WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
+    )
+    .bind(
+      input.now,
+      input.reason,
+      input.httpStatus,
+      input.payloadJson,
+      input.responseBody,
       input.tenantId,
       input.deliveryId,
       input.leaseId,
@@ -728,6 +984,81 @@ const deliverOne = async (
   if (lease === null) return;
   const db = databaseSession(database);
   let payloadJson: string | null = null;
+  const authorizationMatches = async (
+    subscription: WebhookSubscription | null,
+    credentialRef: string | null | undefined,
+  ): Promise<boolean> =>
+    subscription !== null &&
+    subscription.status === "active" &&
+    subscription.destination_version === lease.destination_version &&
+    subscription.destination.credential_ref === credentialRef &&
+    lease.source_account_id !== null &&
+    lease.source_conversation_id !== null &&
+    (await currentAuthority(
+      db,
+      subscription,
+      lease.source_account_id,
+      lease.source_conversation_id,
+    ));
+
+  const cancelFor = async (
+    subscription: WebhookSubscription | null,
+    credentialRef: string | null | undefined,
+  ): Promise<void> => {
+    await cancelDelivery(
+      database,
+      tenantId,
+      deliveryId,
+      lease.lease_id,
+      subscription === null || subscription.status !== "active"
+        ? "subscription_revoked"
+        : subscription.destination_version !== lease.destination_version ||
+            subscription.destination.credential_ref !== credentialRef
+          ? "destination_version_mismatch"
+          : "authorization_revoked",
+      now.toISOString(),
+    );
+  };
+
+  const markNetworkFailure = async (
+    errorCode: string,
+    httpStatus: number | null,
+    responseBody: string | null,
+  ): Promise<void> => {
+    const latest = await currentSubscription(
+      db,
+      tenantId,
+      lease.subscription_id,
+    );
+    if (!(await authorizationMatches(latest, latest?.destination.credential_ref))) {
+      await finishUncertainDelivery(database, {
+        tenantId,
+        deliveryId,
+        leaseId: lease.lease_id,
+        now: nowFor(services).toISOString(),
+        httpStatus,
+        reason:
+          latest === null || latest.status !== "active"
+            ? "subscription_revoked_in_flight"
+            : "destination_version_changed_in_flight",
+        payloadJson,
+        responseBody,
+      });
+      return;
+    }
+    await finishFailedDelivery(database, {
+      tenantId,
+      deliveryId,
+      leaseId: lease.lease_id,
+      now: nowFor(services),
+      retryDeadline: lease.retry_deadline,
+      attemptCount: lease.attempt_count,
+      httpStatus,
+      errorCode,
+      payloadJson,
+      responseBody,
+    });
+  };
   try {
     const subscription = await currentSubscription(
       db,
@@ -736,34 +1067,15 @@ const deliverOne = async (
     );
     if (
       subscription === null ||
-      subscription.status !== "active" ||
-      subscription.destination_version !== lease.destination_version ||
-      lease.source_account_id === null ||
-      lease.source_conversation_id === null ||
-      !(await currentAuthority(
-        db,
-        subscription,
-        lease.source_account_id,
-        lease.source_conversation_id,
-      ))
+      !(await authorizationMatches(subscription, subscription.destination.credential_ref))
     ) {
-      await cancelDelivery(
-        database,
-        tenantId,
-        deliveryId,
-        lease.lease_id,
-        subscription === null || subscription.status !== "active"
-          ? "subscription_revoked"
-          : subscription.destination_version !== lease.destination_version
-            ? "destination_version_mismatch"
-            : "authorization_revoked",
-        now.toISOString(),
-      );
+      await cancelFor(subscription, subscription?.destination.credential_ref);
       return;
     }
+    const activeSubscription = subscription;
 
     let authorizationHeader: string | null = null;
-    const credentialRef = subscription.destination.credential_ref;
+    const credentialRef = activeSubscription.destination.credential_ref;
     if (credentialRef !== undefined && credentialRef !== null) {
       const resolver =
         services.resolveCredential === undefined &&
@@ -773,22 +1085,13 @@ const deliverOne = async (
           : services.resolveCredential;
       const credential = await resolver?.({
         tenantId,
-        subscriptionId: subscription.id,
-        ownerPrincipalId: subscription.owner_principal_id,
-        ownerInstallationId: subscription.owner_installation_id,
+        subscriptionId: activeSubscription.id,
+        ownerPrincipalId: activeSubscription.owner_principal_id,
+        ownerInstallationId: activeSubscription.owner_installation_id,
         credentialRef,
       });
       if (credential === null || credential === undefined) {
-        await finishDelivery(database, {
-          tenantId,
-          deliveryId,
-          leaseId: lease.lease_id,
-          status: "failed",
-          now: now.toISOString(),
-          httpStatus: null,
-          errorCode: "credential_unavailable",
-          payloadJson: null,
-        });
+        await markNetworkFailure("credential_unavailable", null, null);
         return;
       }
       authorizationHeader = credential;
@@ -808,39 +1111,17 @@ const deliverOne = async (
     );
     if (
       finalSubscription === null ||
-      finalSubscription.status !== "active" ||
-      finalSubscription.destination_version !== lease.destination_version ||
-      finalSubscription.destination.credential_ref !== credentialRef ||
-      lease.source_account_id === null ||
-      lease.source_conversation_id === null ||
-      !(await currentAuthority(
-        db,
-        finalSubscription,
-        lease.source_account_id,
-        lease.source_conversation_id,
-      ))
+      !(await authorizationMatches(finalSubscription, credentialRef))
     ) {
-      await cancelDelivery(
-        database,
-        tenantId,
-        deliveryId,
-        lease.lease_id,
-        finalSubscription === null || finalSubscription.status !== "active"
-          ? "subscription_revoked"
-          : finalSubscription.destination_version !== lease.destination_version
-            ? "destination_version_mismatch"
-            : finalSubscription.destination.credential_ref !== credentialRef
-              ? "destination_version_mismatch"
-              : "authorization_revoked",
-        now.toISOString(),
-      );
+      await cancelFor(finalSubscription, credentialRef);
       return;
     }
+    const activeFinalSubscription = finalSubscription;
     const hydrated = await hydrateCurrentPayload(
       database,
       projection,
       lease,
-      finalSubscription,
+      activeFinalSubscription,
       now,
     );
     if (hydrated === null) {
@@ -856,8 +1137,9 @@ const deliverOne = async (
     }
     payloadJson = JSON.stringify(hydrated.payload);
 
-    const response = await (services.fetch ?? fetch)(
-      finalSubscription.destination.url,
+    const response = await fetchWithTimeout(
+      services.fetch ?? fetch,
+      activeFinalSubscription.destination.url,
       {
         method: "POST",
         headers: {
@@ -869,28 +1151,65 @@ const deliverOne = async (
         },
         body: payloadJson,
       },
+      httpTimeoutFor(services),
     );
-    await finishDelivery(database, {
+    const responseBody = await boundedResponseBody(
+      response,
+      httpTimeoutFor(services),
+    );
+    const outcomeNow = nowFor(services);
+    const afterResponse = await currentSubscription(
+      db,
+      tenantId,
+      lease.subscription_id,
+    );
+    if (!(await authorizationMatches(afterResponse, credentialRef))) {
+      await finishUncertainDelivery(database, {
+        tenantId,
+        deliveryId,
+        leaseId: lease.lease_id,
+        now: outcomeNow.toISOString(),
+        httpStatus: response.status,
+        reason:
+          afterResponse === null || afterResponse.status !== "active"
+            ? "subscription_revoked_in_flight"
+            : "destination_version_changed_in_flight",
+        payloadJson,
+        responseBody,
+      });
+      return;
+    }
+    if (response.ok) {
+      await finishSuccessfulDelivery(database, {
+        tenantId,
+        deliveryId,
+        leaseId: lease.lease_id,
+        now: outcomeNow.toISOString(),
+        httpStatus: response.status,
+        payloadJson,
+        responseBody,
+      });
+      return;
+    }
+    await finishFailedDelivery(database, {
       tenantId,
       deliveryId,
       leaseId: lease.lease_id,
-      status: response.ok ? "delivered" : "failed",
-      now: now.toISOString(),
+      now: outcomeNow,
+      retryDeadline: lease.retry_deadline,
+      attemptCount: lease.attempt_count,
       httpStatus: response.status,
-      errorCode: response.ok ? null : `http_${response.status}`,
+      errorCode: `http_${response.status}`,
       payloadJson,
+      responseBody,
     });
   } catch {
-    await finishDelivery(database, {
-      tenantId,
-      deliveryId,
-      leaseId: lease.lease_id,
-      status: "failed",
-      now: now.toISOString(),
-      httpStatus: null,
-      errorCode: "delivery_unavailable",
-      payloadJson,
-    });
+    try {
+      await markNetworkFailure("delivery_unavailable", null, null);
+    } catch {
+      // Leave the lease for durable expiry if storage or the final check is
+      // unavailable; the scheduled sweep will make the row recoverable.
+    }
   }
 };
 
@@ -960,4 +1279,72 @@ export const deliverIncomingWebhookBatch = async (input: {
     }
   }
   if (activeLeaseError !== undefined) throw activeLeaseError;
+};
+
+const dueDeliveryIds = async (
+  database: D1Database,
+  now: string,
+): Promise<Array<{ tenantId: string; deliveryId: string }>> => {
+  const rows = await database
+    .prepare(
+      `SELECT tenant_id, id
+       FROM webhook_deliveries
+       WHERE (
+         status = 'pending'
+         AND (
+           next_attempt_at IS NULL OR next_attempt_at <= ?
+           OR retry_deadline <= ?
+         )
+       ) OR (
+         status = 'leased' AND lease_expires_at IS NOT NULL
+         AND lease_expires_at <= ?
+       )
+       ORDER BY COALESCE(next_attempt_at, lease_expires_at, first_pending_at), id
+       LIMIT ?`,
+    )
+    .bind(now, now, now, MAX_RETRY_BATCH)
+    .all<{ tenant_id: string; id: string }>();
+  return rows.results.map((row) => ({
+    tenantId: row.tenant_id,
+    deliveryId: row.id,
+  }));
+};
+
+/**
+ * The cron sweep is the durable retry wakeup. It re-reads due rows from D1 on
+ * every invocation so a lost queue message, process restart, or duplicate
+ * wakeup cannot change the delivery's age or create a second delivery ID.
+ */
+export const runWebhookRetryTick = async (input: {
+  database: D1Database;
+  projectionForTenant: (tenantId: string) => WebhookProjection;
+  services?: WebhookRetryTickServices;
+}): Promise<WebhookRetryTickResult> => {
+  const services = input.services ?? {};
+  const now = nowFor(services);
+  const due = await dueDeliveryIds(input.database, now.toISOString());
+  const byTenant = new Map<string, string[]>();
+  for (const row of due) {
+    const ids = byTenant.get(row.tenantId) ?? [];
+    ids.push(row.deliveryId);
+    byTenant.set(row.tenantId, ids);
+  }
+  let attempted = 0;
+  for (const [tenantId, deliveryIds] of byTenant) {
+    try {
+      await deliverIncomingWebhookBatch({
+        database: input.database,
+        tenantId,
+        projection: input.projectionForTenant(tenantId),
+        deliveryIds,
+        services,
+      });
+      attempted += deliveryIds.length;
+    } catch {
+      // A live lease belongs to another invocation. The ledger and the next
+      // cron sweep remain authoritative; other tenants are independent.
+      attempted += deliveryIds.length;
+    }
+  }
+  return { scanned: due.length, attempted };
 };
