@@ -1,0 +1,35 @@
+export {
+  CONTROLLED_COPY_RETENTION_SCHEMA,
+  CONTROLLED_COPY_RETENTION_SCHEMA_VERSION,
+} from "./schema";
+export {
+  createAccountKeyAdapter,
+  createBridgeDatabaseAdapter,
+  createMediaStoreAdapter,
+  createProjectionBackupAdapter,
+  createQueueAdapter,
+  createResticSnapshotAdapter,
+  createSessionCredentialAdapter,
+  createStoreAdapter,
+  createSynapseAdapter,
+  createUnavailableAdapter,
+  type ControlledCopyAdapter,
+  type RetentionBackendCopy,
+  type RetentionCleanupContext,
+  type RetentionInventoryResult,
+  type RetentionInventoryScope,
+  type RetentionStoreBackend,
+} from "./adapters";
+export {
+  CONTROLLED_COPY_WORKER_LEASE_MS,
+  MAX_CONTROLLED_COPY_BATCH,
+  controlledCopyDeadlines,
+  createControlledCopyRetentionPlan,
+  evaluateControlledCopyCompletion,
+  readControlledCopyEvidence,
+  readControlledCopyOperations,
+  recordControlledCopyEvidence,
+  runControlledCopyRetentionWorker,
+  type ControlledCopyPlanResult,
+  type ControlledCopyWorkerResult,
+} from "./service";
