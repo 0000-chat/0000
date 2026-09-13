@@ -274,7 +274,9 @@ export const reconcileOutboundHandler =
   };
 
 export const evidenceOutboundHandler =
-  (_services: OutboundAcceptanceServices = {}): Handler<
+  (
+    _services: OutboundAcceptanceServices = {},
+  ): Handler<
     CommandRouteEnv,
     string,
     {

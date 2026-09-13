@@ -218,7 +218,10 @@ async function insertAccounts() {
 }
 
 async function projectReadFixtures() {
-  await applyD1Migrations(migrationEnv.CONTROL_DB, migrationEnv.TEST_MIGRATIONS);
+  await applyD1Migrations(
+    migrationEnv.CONTROL_DB,
+    migrationEnv.TEST_MIGRATIONS,
+  );
   const stub = workerEnv.TENANT_PROJECTION.getByName(tenantId);
   await initialize(tenantId);
   await runInDurableObject(stub, async (_instance, state) => {
