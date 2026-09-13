@@ -2,9 +2,16 @@
   "$schema": "https://oxc.rs/schema/oxlint.json",
   "plugins": ["eslint", "typescript", "oxc", "unicorn"],
   "ignorePatterns": [
+    "**/.agents/**",
+    "**/.cache/**",
+    "**/.git/**",
     "**/node_modules/**",
     "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
     "**/target/**",
-    "**/.git/**"
+    "**/generated/**",
+    "**/vendor/**",
+    "**/.wrangler/**"
   ]
 }

@@ -21,8 +21,14 @@ expected = {
     "biome.json",
     "docs/README.md",
     "scripts/check",
+    "scripts/format",
+    "scripts/format-check",
+    "scripts/install-tools",
+    "scripts/lint",
 }
 tracked = set(subprocess.check_output(["git", "ls-files"], text=True).splitlines())
+# Include expected files added in the current worktree before they are staged.
+tracked.update(path for path in expected if (root / path).is_file())
 if tracked != expected:
     raise SystemExit(f"tracked scaffold mismatch: missing={sorted(expected-tracked)} extra={sorted(tracked-expected)}")
 metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
@@ -37,4 +43,7 @@ if "Standalone public" not in readme or "Cloudflare" not in readme:
     raise SystemExit("README must state authentication and hosting intent")
 PY
 git diff --check
+"$root/scripts/install-tools"
+"$root/scripts/lint"
+"$root/scripts/format-check"
 echo "0000-brain scaffold checks passed"
