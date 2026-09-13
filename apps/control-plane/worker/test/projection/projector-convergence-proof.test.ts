@@ -623,6 +623,11 @@ describe("tenant projection full-domain convergence proof", () => {
         name: "offline_outbound_confirmation",
         applied_at: "2026-09-14T00:00:00.000Z",
       },
+      {
+        version: 5,
+        name: "attachment_expiry",
+        applied_at: "2026-09-14T00:00:00.000Z",
+      },
     ]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);

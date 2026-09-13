@@ -184,6 +184,7 @@ function messagesFor(conversation: ConversationSummary): Message[] {
     occurred_at: conversation.last_activity_at,
     delivery_status: "delivered" as const,
     attachment_count: 0,
+    attachments: [],
   };
   return [
     {
@@ -219,6 +220,7 @@ const agentMessages: Message[] = [
     occurred_at: "2026-08-27T00:05:00.000Z",
     delivery_status: "delivered",
     attachment_count: 0,
+    attachments: [],
   },
   {
     id: "message_agent_one_outbound",
@@ -232,6 +234,7 @@ const agentMessages: Message[] = [
     occurred_at: "2026-08-27T00:07:00.000Z",
     delivery_status: "delivered",
     attachment_count: 0,
+    attachments: [],
   },
   {
     id: "message_agent_one_inbound_two",
@@ -245,6 +248,7 @@ const agentMessages: Message[] = [
     occurred_at: "2026-08-27T00:11:00.000Z",
     delivery_status: "delivered",
     attachment_count: 0,
+    attachments: [],
   },
 ];
 

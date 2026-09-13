@@ -13,6 +13,11 @@ import {
   ConversationOwnerSchema,
   GetProjectionConversationInputSchema,
   GetProjectionConversationResultSchema,
+  GetProjectionAttachmentInputSchema,
+  GetProjectionAttachmentResultSchema,
+  ProjectionAttachmentSchema,
+  ListProjectionAttachmentsInputSchema,
+  ListProjectionAttachmentsResultSchema,
   ResolveConversationOwnerInputSchema,
   DEFAULT_PROJECTION_PAGE_SIZE,
   ListProjectionChannelStatsInputSchema,
@@ -54,6 +59,9 @@ import {
   type ConversationOwner,
   type ConversationPageResult,
   type GetProjectionConversationInput,
+  type GetProjectionAttachmentInput,
+  type ProjectionAttachment,
+  type ListProjectionAttachmentsInput,
   type ListProjectionChannelStatsInput,
   AbortRebuildInputSchema,
   BeginRebuildInputSchema,
@@ -301,6 +309,24 @@ type MessageSearchAttachmentQueryRow = {
   mime_type: string | null;
   size_bytes: number | null;
   sha256: string | null;
+};
+
+type ProjectionAttachmentQueryRow = {
+  id: string;
+  message_id: string;
+  identity_id: string;
+  account_id: string;
+  connection_id: string;
+  conversation_id: string;
+  platform: string;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
+  r2_key: string | null;
+  last_event_id: string;
+  expires_at: string | null;
+  deleted_at: string | null;
 };
 
 type ConversationOwnerRow = {
@@ -957,6 +983,30 @@ const readMessageRows = (
     .toArray();
 };
 
+const mapProjectionAttachment = (
+  row: ProjectionAttachmentQueryRow,
+): ProjectionAttachment =>
+  ProjectionAttachmentSchema.parse({
+    attachment_id: row.id,
+    message_id: row.message_id,
+    identity_id: row.identity_id,
+    account_id: row.account_id,
+    connection_id: row.connection_id,
+    conversation_id: row.conversation_id,
+    platform: row.platform,
+    file_name: row.file_name,
+    mime_type: row.mime_type,
+    size_bytes: row.size_bytes,
+    sha256: row.sha256,
+    media_key: row.r2_key,
+    revision: row.last_event_id,
+    expires_at: row.expires_at,
+    deleted_at: row.deleted_at,
+  });
+
+const attachmentSelect =
+  "SELECT attachments.id, attachments.message_id, attachments.identity_id, attachments.account_id, attachments.connection_id, attachments.conversation_id, attachments.platform, attachments.file_name, attachments.mime_type, attachments.size_bytes, attachments.sha256, attachments.r2_key, attachments.last_event_id, attachments.expires_at, attachments.deleted_at FROM attachments";
+
 const mapMessagePage = (
   tenantId: string,
   generation: number,
@@ -987,6 +1037,7 @@ const mapMessagePage = (
       occurred_at: row.occurred_at,
       delivery_status: row.delivery_status,
       attachment_count: redacted ? 0 : row.attachment_count,
+      attachments: [],
     };
   });
   const last = visibleRows.at(-1);
@@ -1364,6 +1415,7 @@ const mapOutboundMessage = (tenantId: string, row: MessageQueryRow) =>
     occurred_at: row.occurred_at,
     delivery_status: row.delivery_status,
     attachment_count: row.deleted_at === null ? row.attachment_count : 0,
+    attachments: [],
   });
 
 /**
@@ -3493,6 +3545,100 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         )
         .toArray();
       return structuredClone(mapChannelStats(rows));
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async getAttachment(
+    input: GetProjectionAttachmentInput,
+  ): Promise<ProjectionAttachment | null> {
+    try {
+      const parsed = parseProjectionInput(
+        GetProjectionAttachmentInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const scope = accountScopeFilter(
+        parsed.authorization,
+        "attachments.account_id",
+        "attachments.conversation_id",
+        parsed.account_id,
+      );
+      const row = this.ctx.storage.sql
+        .exec<ProjectionAttachmentQueryRow>(
+          `${attachmentSelect} WHERE attachments.id = ? AND attachments.identity_id = ?${scope.sql} LIMIT 1`,
+          parsed.attachment_id,
+          parsed.identity_id,
+          ...scope.bindings,
+        )
+        .toArray()[0];
+      return structuredClone(
+        GetProjectionAttachmentResultSchema.parse(
+          row === undefined ? null : mapProjectionAttachment(row),
+        ),
+      );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  async listAttachments(
+    input: ListProjectionAttachmentsInput,
+  ): Promise<ProjectionAttachment[]> {
+    try {
+      const parsed = parseProjectionInput(
+        ListProjectionAttachmentsInputSchema,
+        input,
+      );
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      if (parsed.message_ids.length === 0) return [];
+
+      const scope = accountScopeFilter(
+        parsed.authorization,
+        "attachments.account_id",
+        "attachments.conversation_id",
+        parsed.account_id,
+      );
+      const rows = this.ctx.storage.sql
+        .exec<ProjectionAttachmentQueryRow>(
+          `${attachmentSelect} JOIN messages ON messages.id = attachments.message_id AND messages.identity_id = attachments.identity_id AND messages.account_id = attachments.account_id AND messages.connection_id = attachments.connection_id AND messages.conversation_id = attachments.conversation_id WHERE attachments.identity_id = ? AND attachments.conversation_id = ? AND attachments.message_id IN (${parsed.message_ids.map(() => "?").join(",")}) AND attachments.deleted_at IS NULL AND messages.deleted_at IS NULL${scope.sql} ORDER BY attachments.message_id ASC, attachments.id ASC LIMIT ?`,
+          parsed.identity_id,
+          parsed.conversation_id,
+          ...parsed.message_ids,
+          ...scope.bindings,
+          100 * MAX_PROJECTION_PAGE_SIZE + 1,
+        )
+        .toArray();
+      if (rows.length > 100 * MAX_PROJECTION_PAGE_SIZE) {
+        throw projectionError("projection_too_large");
+      }
+      return structuredClone(
+        ListProjectionAttachmentsResultSchema.parse(
+          rows.map(mapProjectionAttachment),
+        ),
+      );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");
     }

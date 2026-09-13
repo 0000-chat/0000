@@ -23,6 +23,8 @@ const durableOutboundMigrationName = "durable_outbound_acceptance";
 const durableOutboundMigrationAppliedAt = "2026-09-13T00:00:00.000Z";
 const offlineOutboundMigrationName = "offline_outbound_confirmation";
 const offlineOutboundMigrationAppliedAt = "2026-09-14T00:00:00.000Z";
+const attachmentExpiryMigrationName = "attachment_expiry";
+const attachmentExpiryMigrationAppliedAt = "2026-09-14T00:00:00.000Z";
 const applicationTableNames = [
   "projection_meta",
   "connection_bindings",
@@ -304,6 +306,7 @@ const expectedColumns: Record<
     ["last_observed_ms", "INTEGER", 1, 0, null],
     ["last_event_id", "TEXT", 1, 0, null],
     ["deleted_at", "TEXT", 0, 0, null],
+    ["expires_at", "TEXT", 0, 0, null],
   ],
   commands: [
     ["id", "TEXT", 1, 1, null],
@@ -535,6 +538,7 @@ const expectedIndexes = [
   "idx_receipts_conversation_owner",
   "idx_typing_participant",
   "idx_attachments_message_state",
+  "idx_attachments_expiry",
   "idx_attachments_conversation_owner",
   "idx_delivery_message_order",
   "idx_delivery_conversation_owner",
@@ -592,6 +596,8 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_typing_participant ON typing_states(participant_id)",
   idx_attachments_message_state:
     "CREATE INDEX idx_attachments_message_state ON attachments(message_id,deleted_at,id)",
+  idx_attachments_expiry:
+    "CREATE INDEX idx_attachments_expiry ON attachments(expires_at) WHERE expires_at IS NOT NULL",
   idx_attachments_conversation_owner:
     "CREATE INDEX idx_attachments_conversation_owner ON attachments(conversation_id,identity_id,account_id,connection_id,platform)",
   idx_delivery_message_order:
@@ -717,7 +723,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(34);
+    expect(indexNames).toHaveLength(35);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -770,6 +776,11 @@ describe("tenant projection SQLite schema", () => {
         version: 4,
         name: offlineOutboundMigrationName,
         applied_at: offlineOutboundMigrationAppliedAt,
+      },
+      {
+        version: 5,
+        name: attachmentExpiryMigrationName,
+        applied_at: attachmentExpiryMigrationAppliedAt,
       },
     ]);
     expect(
@@ -1177,7 +1188,7 @@ describe("tenant projection SQLite schema", () => {
       const schemaBefore = schemaSnapshot();
       state.storage.sql.exec(
         "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        5,
+        6,
         "future_projection_schema",
         migrationAppliedAt,
       );
@@ -1360,7 +1371,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 4,
+      schema_generation: 5,
       state: "ready",
       generation: 1,
       rebuild_id: null,

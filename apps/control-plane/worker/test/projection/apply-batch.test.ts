@@ -577,6 +577,7 @@ describe("tenant projection applyBatch", () => {
               size_bytes: null,
               sha256: null,
               r2_key: "media/tenant_apply_preflight/not-null",
+              expires_at: null,
             },
           }),
         ]),
