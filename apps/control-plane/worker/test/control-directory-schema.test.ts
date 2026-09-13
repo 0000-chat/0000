@@ -44,6 +44,8 @@ const applicationTables = [
   "history_imports",
   "history_import_ranges",
   "history_import_events",
+  "removal_authority",
+  "removal_expiry_schedule",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
