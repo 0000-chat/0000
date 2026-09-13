@@ -7,6 +7,7 @@
 
 use std::{collections::HashMap, fmt, net::SocketAddr, sync::Arc, time::Duration};
 
+use chrono::{DateTime, Utc};
 use reqwest::{Client, Method, StatusCode, Url, redirect::Policy};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,7 +18,13 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{history::HistoryGatewayServer, ingestion::SecretString};
+use crate::{
+    history::HistoryGatewayServer,
+    ingestion::SecretString,
+    model::Provider,
+    outbound::OutboundTextSender,
+    store::{NewOutboundText, OutboundTextCompletion, OutboundTextPreparation, Store},
+};
 
 const PROVISIONING_ROOT: &str = "/_matrix/provision/v3";
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
@@ -28,6 +35,11 @@ const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 const PROVISIONING_DISABLED: &str = "provisioning_disabled";
 const IDENTITY_MISMATCH: &str = "identity_mismatch";
 const INVALID_REQUEST: &str = "invalid_request";
+const OUTBOUND_TRANSACTION_CONFLICT: &str = "outbound_transaction_conflict";
+const OUTBOUND_SCOPE_MISMATCH: &str = "outbound_scope_mismatch";
+const OUTBOUND_UNCERTAIN: &str = "outbound_delivery_uncertain";
+const OUTBOUND_MISSING_SENDER: &str = "outbound_sender_unavailable";
+const OUTBOUND_STALE_SESSION: &str = "outbound_stale_session";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningFailure {
@@ -414,6 +426,74 @@ struct GatewayRequest {
     gateway_ref: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutboundRouteRequest {
+    gateway_route_id: String,
+    bridge_instance_id: String,
+    matrix_user_id: String,
+    matrix_room_namespace: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutboundTextRequest {
+    schema_version: u8,
+    tenant_id: String,
+    account_id: String,
+    connection_id: String,
+    identity_id: String,
+    provider: Provider,
+    conversation_id: String,
+    message_id: String,
+    event_id: String,
+    transaction_id: String,
+    request_digest: String,
+    projection_generation: u64,
+    session_generation: String,
+    route: OutboundRouteRequest,
+    body: String,
+}
+
+impl OutboundTextRequest {
+    fn validate(&self, route: &GatewayRouteMetadata) -> Result<(), &'static str> {
+        if self.schema_version != 1
+            || self.provider != Provider::Whatsapp
+            || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.account_id)
+            || !valid_resource_id(&self.connection_id)
+            || !valid_resource_id(&self.identity_id)
+            || !valid_resource_id(&self.conversation_id)
+            || !valid_resource_id(&self.message_id)
+            || !valid_resource_id(&self.event_id)
+            || !valid_resource_id(&self.transaction_id)
+            || !valid_digest(&self.request_digest)
+            || self.projection_generation == 0
+            || self.body.is_empty()
+            || self.body.len() > 20_000
+            || DateTime::parse_from_rfc3339(&self.session_generation).is_err()
+            || self.route.gateway_route_id != route.gateway_route_id
+            || self.route.bridge_instance_id != route.bridge_instance_id
+            || self.route.matrix_user_id != route.matrix_user_id
+            || self.route.matrix_room_namespace != route.matrix_room_namespace
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(())
+    }
+}
+
+fn valid_resource_id(value: &str) -> bool {
+    crate::model::valid_resource_id(value)
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct GatewayOwner {
     session_id: String,
@@ -460,6 +540,8 @@ pub struct ProvisioningGatewayServer {
     route: GatewayRouteMetadata,
     sessions: Arc<Mutex<HashMap<String, GatewaySession>>>,
     history: Option<Arc<HistoryGatewayServer>>,
+    outbound_store: Option<Arc<Mutex<Store>>>,
+    outbound_sender: Option<Arc<dyn OutboundTextSender>>,
 }
 
 impl fmt::Debug for ProvisioningGatewayServer {
@@ -483,13 +565,24 @@ impl ProvisioningGatewayServer {
             route,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             history: None,
+            outbound_store: None,
+            outbound_sender: None,
         })
     }
 
     /// Add the authenticated Matrix history adapter to the same private
     /// listener used by the provider-linking routes.
     pub fn with_history(mut self, history: HistoryGatewayServer) -> Self {
+        self.outbound_store = Some(history.store_handle());
         self.history = Some(Arc::new(history));
+        self
+    }
+
+    /// Attach the one restored, encrypted Matrix sender. The sender is kept
+    /// behind the route's private process boundary and cannot choose another
+    /// account or room.
+    pub fn with_outbound_sender(mut self, sender: Arc<dyn OutboundTextSender>) -> Self {
+        self.outbound_sender = Some(sender);
         self
     }
 
@@ -535,6 +628,22 @@ impl ProvisioningGatewayServer {
         {
             return response(400, json!({ "error": INVALID_REQUEST }));
         }
+        if request.path == "/v1/outbound/text" {
+            let idempotency_key = request.idempotency_key.as_deref().unwrap_or_default();
+            let parsed = match serde_json::from_slice::<OutboundTextRequest>(&request.body) {
+                Ok(parsed) => parsed,
+                Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            if let Err(error) = parsed.validate(&self.route) {
+                let status = if error == OUTBOUND_STALE_SESSION {
+                    409
+                } else {
+                    400
+                };
+                return response(status, json!({ "error": error }));
+            }
+            return self.outbound_text(parsed, idempotency_key).await;
+        }
         let parsed = match serde_json::from_slice::<GatewayRequest>(&request.body) {
             Ok(parsed) => parsed,
             Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
@@ -573,6 +682,213 @@ impl ProvisioningGatewayServer {
             }
             Err(error) => response(502, json!({ "error": error.code() })),
         }
+    }
+
+    async fn outbound_text(
+        &self,
+        request: OutboundTextRequest,
+        idempotency_key: &str,
+    ) -> (u16, Vec<u8>) {
+        let Some(store_handle) = self.outbound_store.as_ref() else {
+            return response(503, json!({ "error": OUTBOUND_MISSING_SENDER }));
+        };
+        let Some(sender) = self.outbound_sender.as_ref() else {
+            return response(503, json!({ "error": OUTBOUND_MISSING_SENDER }));
+        };
+
+        let mut store = store_handle.lock().await;
+        let binding = match store.active_room_binding_for_outbound(
+            &request.tenant_id,
+            &request.account_id,
+            &request.connection_id,
+            &request.identity_id,
+            Provider::Whatsapp,
+            &request.conversation_id,
+        ) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => return response(403, json!({ "error": OUTBOUND_SCOPE_MISMATCH })),
+            Err(_) => return response(503, json!({ "error": OUTBOUND_SCOPE_MISMATCH })),
+        };
+        if binding.session_generation() != Some(request.session_generation.as_str()) {
+            return response(409, json!({ "error": OUTBOUND_STALE_SESSION }));
+        }
+        if binding.gateway_route_id() != self.route.gateway_route_id
+            || binding.owner_matrix_user_id() != self.route.matrix_user_id
+        {
+            return response(403, json!({ "error": OUTBOUND_SCOPE_MISMATCH }));
+        }
+        let matrix_room_id = binding.matrix_room_id().to_owned();
+        let input = NewOutboundText {
+            transaction_id: request.transaction_id.clone(),
+            idempotency_key: idempotency_key.to_owned(),
+            request_digest: request.request_digest.clone(),
+            tenant_id: request.tenant_id.clone(),
+            account_id: request.account_id.clone(),
+            connection_id: request.connection_id.clone(),
+            identity_id: request.identity_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            message_id: request.message_id.clone(),
+            event_id: request.event_id.clone(),
+            matrix_room_id: matrix_room_id.clone(),
+            session_generation: request.session_generation.clone(),
+            projection_generation: request.projection_generation,
+            body: request.body.clone(),
+            created_at: Utc::now(),
+        };
+        let preparation = match store.prepare_outbound_text(input) {
+            Ok(preparation) => preparation,
+            Err(error) if error.code() == crate::store::STORE_OUTBOUND_CONFLICT => {
+                return response(409, json!({ "error": OUTBOUND_TRANSACTION_CONFLICT }));
+            }
+            Err(_) => return response(503, json!({ "error": OUTBOUND_SCOPE_MISMATCH })),
+        };
+        match preparation {
+            OutboundTextPreparation::ExistingTerminal { response: body } => {
+                drop(store);
+                return (200, body);
+            }
+            OutboundTextPreparation::ExistingPending => {
+                let observed_at = Utc::now().to_rfc3339();
+                let body = outbound_result_json(
+                    &request,
+                    "uncertain",
+                    &observed_at,
+                    Some(OUTBOUND_UNCERTAIN),
+                    Some(json!({
+                        "source": "refresh",
+                        "status": "uncertain",
+                        "evidence_id": format!("uncertain_{}", request.transaction_id),
+                        "observed_at": observed_at.clone(),
+                        "reason": "transaction_pending_after_restart"
+                    })),
+                );
+                let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+                let _ = store.complete_outbound_text(
+                    &request.tenant_id,
+                    &request.transaction_id,
+                    &request.request_digest,
+                    OutboundTextCompletion {
+                        state: "uncertain".to_owned(),
+                        matrix_stage: "unknown".to_owned(),
+                        bridge_stage: "unknown".to_owned(),
+                        provider_stage: "unknown".to_owned(),
+                        response: body_bytes.clone(),
+                        matrix_evidence: None,
+                        bridge_evidence: None,
+                        provider_evidence: None,
+                        updated_at: Utc::now(),
+                    },
+                );
+                drop(store);
+                return (200, body_bytes);
+            }
+            OutboundTextPreparation::Created => {}
+        }
+        drop(store);
+
+        let send_result = sender
+            .send_encrypted_text(&matrix_room_id, &request.transaction_id, &request.body)
+            .await;
+        let observed_at = Utc::now().to_rfc3339();
+        let (outcome, state, matrix_stage, matrix_evidence, reason, status) = match send_result {
+            Ok(result) => {
+                let evidence = json!({
+                    "source": "matrix",
+                    "status": "confirmed",
+                    "evidence_id": result.event_id.as_str(),
+                    "observed_at": observed_at.clone(),
+                });
+                (
+                    "accepted",
+                    "accepted",
+                    "confirmed",
+                    Some(evidence),
+                    None,
+                    200,
+                )
+            }
+            Err(crate::outbound::OutboundSendFailure::RoomNotFound)
+            | Err(crate::outbound::OutboundSendFailure::RoomNotEncrypted) => (
+                "rejected",
+                "rejected",
+                "unknown",
+                None,
+                Some("matrix_room_not_sendable"),
+                200,
+            ),
+            Err(crate::outbound::OutboundSendFailure::MatrixSessionExpired) => (
+                "session_expired",
+                "session_expired",
+                "unknown",
+                None,
+                Some("matrix_session_expired"),
+                200,
+            ),
+            Err(crate::outbound::OutboundSendFailure::MatrixRateLimited) => (
+                "rate_limited",
+                "rate_limited",
+                "unknown",
+                None,
+                Some("matrix_rate_limited"),
+                200,
+            ),
+            Err(crate::outbound::OutboundSendFailure::MatrixRejected) => (
+                "rejected",
+                "rejected",
+                "unknown",
+                None,
+                Some("matrix_request_rejected"),
+                200,
+            ),
+            Err(crate::outbound::OutboundSendFailure::MatrixRequest) => (
+                "uncertain",
+                "uncertain",
+                "unknown",
+                Some(json!({
+                    "source": "refresh",
+                    "status": "uncertain",
+                    "evidence_id": format!("uncertain_{}", request.transaction_id),
+                    "observed_at": observed_at,
+                    "reason": "matrix_request_failed_after_authorization"
+                })),
+                Some(OUTBOUND_UNCERTAIN),
+                200,
+            ),
+        };
+        let body = outbound_result_json(
+            &request,
+            outcome,
+            &observed_at,
+            reason,
+            matrix_evidence.clone(),
+        );
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let matrix_evidence_bytes = matrix_evidence
+            .as_ref()
+            .and_then(|evidence| serde_json::to_vec(evidence).ok());
+        let mut store = store_handle.lock().await;
+        if store
+            .complete_outbound_text(
+                &request.tenant_id,
+                &request.transaction_id,
+                &request.request_digest,
+                OutboundTextCompletion {
+                    state: state.to_owned(),
+                    matrix_stage: matrix_stage.to_owned(),
+                    bridge_stage: "unknown".to_owned(),
+                    provider_stage: "unknown".to_owned(),
+                    response: body_bytes.clone(),
+                    matrix_evidence: matrix_evidence_bytes,
+                    bridge_evidence: None,
+                    provider_evidence: None,
+                    updated_at: Utc::now(),
+                },
+            )
+            .is_err()
+        {
+            return response(503, json!({ "error": OUTBOUND_UNCERTAIN }));
+        }
+        (status, body_bytes)
     }
 
     async fn poll(&self, request: GatewayRequest, owner: GatewayOwner) -> (u16, Vec<u8>) {
@@ -742,6 +1058,31 @@ pub(crate) fn response(status: u16, body: Value) -> (u16, Vec<u8>) {
     )
 }
 
+fn outbound_result_json(
+    request: &OutboundTextRequest,
+    outcome: &str,
+    observed_at: &str,
+    reason: Option<&str>,
+    evidence: Option<Value>,
+) -> Value {
+    let mut body = json!({
+        "outcome": outcome,
+        "transaction_id": request.transaction_id,
+        "request_digest": request.request_digest,
+        "account_id": request.account_id,
+        "connection_id": request.connection_id,
+        "session_generation": request.session_generation,
+        "observed_at": observed_at,
+    });
+    if let Some(reason) = reason {
+        body["reason"] = Value::String(reason.to_owned());
+    }
+    if let Some(evidence) = evidence {
+        body["evidence"] = Value::Array(vec![evidence]);
+    }
+    body
+}
+
 pub(crate) async fn write_http_response(
     stream: &mut TcpStream,
     status: u16,
@@ -778,7 +1119,7 @@ mod tests {
         fs,
         os::unix::fs::PermissionsExt,
         sync::{
-            Arc,
+            Arc, Mutex as StdMutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -789,7 +1130,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use tempfile::tempdir;
-    use tokio::io::AsyncWriteExt;
+    use tokio::{io::AsyncWriteExt, sync::Notify};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
     use crate::{
@@ -806,6 +1147,7 @@ mod tests {
             AttachmentObservedPayload, CanonicalEvent, CanonicalEventSource, CanonicalPayload,
         },
         normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
+        outbound::{MatrixSendResult, OutboundTextSender},
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
         store::Store,
@@ -1013,6 +1355,368 @@ mod tests {
         assert!(!serialized.contains("txn-1"));
         assert!(!serialized.contains(BRIDGE_SECRET));
         task.abort();
+    }
+
+    struct BlockingOutboundSender {
+        calls: Arc<AtomicUsize>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl OutboundTextSender for BlockingOutboundSender {
+        async fn send_encrypted_text(
+            &self,
+            _room_id: &str,
+            _transaction_id: &str,
+            _body: &str,
+        ) -> Result<MatrixSendResult, crate::outbound::OutboundSendFailure> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(MatrixSendResult {
+                event_id: ruma::EventId::parse("$outbound-race:example.test")
+                    .expect("valid outbound event ID"),
+            })
+        }
+    }
+
+    struct RecordingOutboundSender {
+        rooms: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl OutboundTextSender for RecordingOutboundSender {
+        async fn send_encrypted_text(
+            &self,
+            room_id: &str,
+            transaction_id: &str,
+            _body: &str,
+        ) -> Result<MatrixSendResult, crate::outbound::OutboundSendFailure> {
+            self.rooms
+                .lock()
+                .expect("recording sender lock")
+                .push(room_id.to_owned());
+            Ok(MatrixSendResult {
+                event_id: ruma::EventId::parse(format!("${transaction_id}:example.test").as_str())
+                    .expect("valid recording event ID"),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_duplicate_in_flight_keeps_one_send_and_replays_confirmation_after_reopen() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let generation = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid generation timestamp");
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x44; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    "binding_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "!outbound-race:example.test",
+                    "tenant_outbound",
+                    "identity_outbound",
+                    "connection_outbound",
+                    "account_outbound",
+                    Provider::Whatsapp,
+                    "gateway_route_whatsapp",
+                    "conversation_outbound",
+                    MATRIX_USER,
+                    generation.to_rfc3339(),
+                    generation,
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+        let transport = Arc::new(SharedHistoryTransport {
+            calls: AtomicUsize::new(0),
+            event_count: 0,
+        });
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::clone(&transport) as Arc<dyn MatrixTransport>,
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sender = Arc::new(BlockingOutboundSender {
+            calls: Arc::clone(&calls),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        });
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history)
+                .with_outbound_sender(Arc::clone(&sender) as Arc<dyn OutboundTextSender>);
+
+        let request_body = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "tenant_id": "tenant_outbound",
+            "account_id": "account_outbound",
+            "connection_id": "connection_outbound",
+            "identity_id": "identity_outbound",
+            "provider": "whatsapp",
+            "conversation_id": "conversation_outbound",
+            "message_id": "message_outbound",
+            "event_id": "event_outbound",
+            "transaction_id": "txn_outbound_race",
+            "request_digest": "b".repeat(64),
+            "projection_generation": 1,
+            "session_generation": generation.to_rfc3339(),
+            "route": {
+                "gateway_route_id": "gateway_route_whatsapp",
+                "bridge_instance_id": "whatsapp-primary",
+                "matrix_user_id": MATRIX_USER,
+                "matrix_room_namespace": "communicator.0000.gold"
+            },
+            "body": "race body"
+        }))
+        .expect("request JSON");
+        let first_request = HttpRequest {
+            path: "/v1/outbound/text".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("first".to_owned()),
+            idempotency_key: Some("outbound-idempotency-race".to_owned()),
+            body: request_body.clone(),
+        };
+        let duplicate_request = HttpRequest {
+            path: "/v1/outbound/text".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("duplicate".to_owned()),
+            idempotency_key: Some("outbound-idempotency-race".to_owned()),
+            body: request_body.clone(),
+        };
+        let replay_request = HttpRequest {
+            path: "/v1/outbound/text".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("replay".to_owned()),
+            idempotency_key: Some("outbound-idempotency-race".to_owned()),
+            body: request_body,
+        };
+
+        let first_server = server.clone();
+        let first = tokio::spawn(async move { first_server.handle_request(first_request).await });
+        tokio::time::timeout(Duration::from_secs(2), sender.entered.notified())
+            .await
+            .expect("first sender reaches controlled gate");
+
+        let (duplicate_status, duplicate_body) = server.handle_request(duplicate_request).await;
+        assert_eq!(duplicate_status, 200);
+        let duplicate_json: Value =
+            serde_json::from_slice(&duplicate_body).expect("duplicate response JSON");
+        assert_eq!(duplicate_json["outcome"], "uncertain");
+
+        sender.release.notify_one();
+        let (first_status, first_body) = first.await.expect("first request task");
+        assert_eq!(first_status, 200);
+        let first_json: Value = serde_json::from_slice(&first_body).expect("first response JSON");
+        assert_eq!(first_json["outcome"], "accepted");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let (replay_status, replay_body) = server.handle_request(replay_request).await;
+        assert_eq!(replay_status, 200);
+        let replay_json: Value = serde_json::from_slice(&replay_body).expect("replay JSON");
+        assert_eq!(replay_json["outcome"], "accepted");
+        assert_eq!(replay_json["evidence"][0]["source"], "matrix");
+
+        drop(server);
+        let mut reopened = Store::open(
+            &database,
+            Keyring::new([0x44; 32], 1).expect("reopen test keyring"),
+        )
+        .expect("reopen outbound store");
+        let preparation = reopened
+            .prepare_outbound_text(NewOutboundText {
+                transaction_id: "txn_outbound_race".to_owned(),
+                idempotency_key: "outbound-idempotency-race".to_owned(),
+                request_digest: "b".repeat(64),
+                tenant_id: "tenant_outbound".to_owned(),
+                account_id: "account_outbound".to_owned(),
+                connection_id: "connection_outbound".to_owned(),
+                identity_id: "identity_outbound".to_owned(),
+                conversation_id: "conversation_outbound".to_owned(),
+                message_id: "message_outbound".to_owned(),
+                event_id: "event_outbound".to_owned(),
+                matrix_room_id: "!outbound-race:example.test".to_owned(),
+                session_generation: generation.to_rfc3339(),
+                projection_generation: 1,
+                body: "race body".to_owned(),
+                created_at: generation,
+            })
+            .expect("replay after reopen");
+        match preparation {
+            OutboundTextPreparation::ExistingTerminal { response } => {
+                let response: Value = serde_json::from_slice(&response).expect("stored JSON");
+                assert_eq!(response["outcome"], "accepted");
+                assert_eq!(response["evidence"][0]["source"], "matrix");
+            }
+            OutboundTextPreparation::Created | OutboundTextPreparation::ExistingPending => {
+                panic!("reopened journal lost the confirmed terminal result")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_routes_two_conversations_on_one_account_to_their_bound_rooms() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid binding timestamp");
+        let session_generation = "2026-09-13T00:00:00.000Z".to_owned();
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x55; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        for (binding_id, room_id, conversation_id) in [
+            (
+                "binding_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "!outbound-chat-one:example.test",
+                "conversation_one",
+            ),
+            (
+                "binding_cccccccccccccccccccccccccccccccc",
+                "!outbound-chat-two:example.test",
+                "conversation_two",
+            ),
+        ] {
+            store
+                .append_room_binding(
+                    NewRoomBinding::new_with_session_generation(
+                        binding_id,
+                        room_id,
+                        "tenant_outbound",
+                        "identity_outbound",
+                        "connection_outbound",
+                        "account_outbound",
+                        Provider::Whatsapp,
+                        "gateway_route_whatsapp",
+                        conversation_id,
+                        MATRIX_USER,
+                        session_generation.clone(),
+                        created_at,
+                    )
+                    .expect("room binding"),
+                )
+                .expect("append room binding");
+        }
+        let transport = Arc::new(SharedHistoryTransport {
+            calls: AtomicUsize::new(0),
+            event_count: 0,
+        });
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::clone(&transport) as Arc<dyn MatrixTransport>,
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let rooms = Arc::new(StdMutex::new(Vec::new()));
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history)
+                .with_outbound_sender(Arc::new(RecordingOutboundSender {
+                    rooms: Arc::clone(&rooms),
+                }));
+
+        let request = |conversation_id: &str, transaction_id: &str, digest: char| HttpRequest {
+            path: "/v1/outbound/text".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some(format!("request-{transaction_id}")),
+            idempotency_key: Some(format!("idempotency-{transaction_id}")),
+            body: serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant_id": "tenant_outbound",
+                "account_id": "account_outbound",
+                "connection_id": "connection_outbound",
+                "identity_id": "identity_outbound",
+                "provider": "whatsapp",
+                "conversation_id": conversation_id,
+                "message_id": format!("message_{transaction_id}"),
+                "event_id": format!("event_{transaction_id}"),
+                "transaction_id": transaction_id,
+                "request_digest": digest.to_string().repeat(64),
+                "projection_generation": 1,
+                "session_generation": session_generation.clone(),
+                "route": {
+                    "gateway_route_id": "gateway_route_whatsapp",
+                    "bridge_instance_id": "whatsapp-primary",
+                    "matrix_user_id": MATRIX_USER,
+                    "matrix_room_namespace": "communicator.0000.gold"
+                },
+                "body": format!("body-{transaction_id}")
+            }))
+            .expect("request JSON"),
+        };
+
+        let mut stale_request = request("conversation_one", "txn_chat_stale", 'c');
+        let mut stale_body: Value =
+            serde_json::from_slice(&stale_request.body).expect("stale request JSON");
+        stale_body["session_generation"] = Value::String("2026-09-12T00:00:00.000Z".to_owned());
+        stale_request.body = serde_json::to_vec(&stale_body).expect("stale request body");
+        let (stale_status, stale_response) = server.handle_request(stale_request).await;
+        assert_eq!(stale_status, 409);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stale_response).expect("stale response JSON")["error"],
+            OUTBOUND_STALE_SESSION
+        );
+        assert!(rooms.lock().expect("recording sender lock").is_empty());
+
+        let (first_status, _) = server
+            .handle_request(request("conversation_one", "txn_chat_one", 'd'))
+            .await;
+        let (second_status, _) = server
+            .handle_request(request("conversation_two", "txn_chat_two", 'e'))
+            .await;
+        assert_eq!(first_status, 200);
+        assert_eq!(second_status, 200);
+        assert_eq!(
+            rooms.lock().expect("recording sender lock").as_slice(),
+            [
+                "!outbound-chat-one:example.test",
+                "!outbound-chat-two:example.test"
+            ]
+        );
+
+        let (wrong_status, _) = server
+            .handle_request(request("conversation_missing", "txn_chat_missing", 'f'))
+            .await;
+        assert_eq!(wrong_status, 403);
+        assert_eq!(rooms.lock().expect("recording sender lock").len(), 2);
     }
 
     #[tokio::test]

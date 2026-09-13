@@ -39,6 +39,8 @@ pub(crate) struct RoomBindingPayload {
     gateway_route_id: String,
     conversation_id: String,
     owner_matrix_user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_generation: Option<String>,
 }
 
 /// A newly appended room binding, including non-secret registry metadata.
@@ -54,6 +56,7 @@ pub struct NewRoomBinding {
     gateway_route_id: String,
     conversation_id: String,
     owner_matrix_user_id: String,
+    session_generation: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -122,6 +125,42 @@ impl NewRoomBinding {
         owner_matrix_user_id: impl Into<String>,
         created_at: DateTime<Utc>,
     ) -> Result<Self, SafeError> {
+        let session_generation = created_at.to_rfc3339();
+        Self::new_with_session_generation(
+            binding_id,
+            matrix_room_id,
+            tenant_id,
+            identity_id,
+            connection_id,
+            account_id,
+            platform,
+            gateway_route_id,
+            conversation_id,
+            owner_matrix_user_id,
+            session_generation,
+            created_at,
+        )
+    }
+
+    /// Construct a binding with the exact current Worker connection
+    /// generation. Relink callers supply the new generation here; the value
+    /// is sealed with the room authority and is never accepted from an
+    /// outbound request as an authority grant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_session_generation(
+        binding_id: impl Into<String>,
+        matrix_room_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        identity_id: impl Into<String>,
+        connection_id: impl Into<String>,
+        account_id: impl Into<String>,
+        platform: Provider,
+        gateway_route_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        owner_matrix_user_id: impl Into<String>,
+        session_generation: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Result<Self, SafeError> {
         let binding = Self {
             binding_id: binding_id.into(),
             matrix_room_id: matrix_room_id.into(),
@@ -133,6 +172,7 @@ impl NewRoomBinding {
             gateway_route_id: gateway_route_id.into(),
             conversation_id: conversation_id.into(),
             owner_matrix_user_id: owner_matrix_user_id.into(),
+            session_generation: Some(session_generation.into()),
             created_at,
         };
         binding.validate()?;
@@ -151,6 +191,10 @@ impl NewRoomBinding {
             || !model::valid_resource_id(&self.gateway_route_id)
             || !model::valid_resource_id(&self.conversation_id)
             || !valid_matrix_user_id(&self.owner_matrix_user_id)
+            || !self
+                .session_generation
+                .as_deref()
+                .is_some_and(model::valid_timestamp)
             || !model::valid_timestamp(&created_at)
         {
             return Err(invalid_binding());
@@ -226,6 +270,7 @@ impl NewRoomBinding {
             gateway_route_id: self.gateway_route_id().to_owned(),
             conversation_id: self.conversation_id().to_owned(),
             owner_matrix_user_id: self.owner_matrix_user_id().to_owned(),
+            session_generation: self.session_generation.clone(),
         }
     }
 
@@ -354,6 +399,12 @@ impl RoomBinding {
         &self.payload.owner_matrix_user_id
     }
 
+    /// Return the server-owned connection/session generation, if this row
+    /// predates the generation-bearing registry payload.
+    pub fn session_generation(&self) -> Option<&str> {
+        self.payload.session_generation.as_deref()
+    }
+
     /// Return the UTC creation timestamp.
     pub fn created_at(&self) -> &DateTime<Utc> {
         &self.created_at
@@ -423,6 +474,10 @@ impl RoomBindingPayload {
             || !model::valid_resource_id(&self.gateway_route_id)
             || !model::valid_resource_id(&self.conversation_id)
             || !valid_matrix_user_id(&self.owner_matrix_user_id)
+            || self
+                .session_generation
+                .as_deref()
+                .is_some_and(|value| !model::valid_timestamp(value))
         {
             return Err(invalid_binding());
         }
