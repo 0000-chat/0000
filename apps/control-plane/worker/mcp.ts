@@ -3,6 +3,11 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import {
   CommunicatorIdSchema,
   MessageSearchDirectionSchema,
+  WebhookEventFilterSchema,
+  WebhookSubscriptionCreateSchema,
+  WebhookSubscriptionCutoverSchema,
+  WebhookSubscriptionUpdateSchema,
+  WebhookSubscriptionRevokeSchema,
 } from "@communicator/contracts";
 import type { Context } from "hono";
 import { z } from "zod/v4";
@@ -27,6 +32,17 @@ import {
 } from "./read/handlers";
 import { ReadError, readErrorResponse } from "./read/errors";
 import { listConnectedAccounts } from "./control-directory/grants";
+import {
+  authorizeWebhookInspection,
+  createWebhookSubscription,
+  cutoverWebhookSubscription,
+  evaluateWebhookSubscription,
+  listWebhookSubscriptionPage,
+  revokeWebhookSubscription,
+  updateWebhookSubscription,
+  WebhookRepositoryError,
+  type WebhookActor,
+} from "./control-directory/webhooks";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -77,11 +93,84 @@ const searchMessagesInput = {
   limit: optionalLimit,
 };
 
+const webhookDestinationInput = z
+  .object({
+    url: z.string(),
+    credential_ref: z.string().nullable().optional(),
+  })
+  .strict();
+const webhookEventFilterInput = WebhookEventFilterSchema;
+const webhookCreateInput = {
+  owner_installation_id: optionalId,
+  logical_agent_id: boundedId.nullable().optional(),
+  destination: webhookDestinationInput,
+  event_filter: webhookEventFilterInput.optional(),
+  global_enabled: z.boolean().optional(),
+  account_rules: z
+    .array(z.object({ account_id: boundedId, enabled: z.boolean() }).strict())
+    .optional(),
+  chat_rules: z
+    .array(
+      z
+        .object({
+          account_id: boundedId,
+          chat_id: boundedId,
+          enabled: z.boolean(),
+        })
+        .strict(),
+    )
+    .optional(),
+  idempotency_key: z.string().trim().min(1).max(200),
+};
+const webhookUpdateInput = {
+  owner_installation_id: boundedId.nullable().optional(),
+  logical_agent_id: boundedId.nullable().optional(),
+  event_filter: webhookEventFilterInput.optional(),
+  global_enabled: z.boolean().optional(),
+  account_rules: webhookCreateInput.account_rules,
+  chat_rules: webhookCreateInput.chat_rules,
+  idempotency_key: z.string().trim().min(1).max(200),
+};
+const webhookCutoverInput = {
+  destination: webhookDestinationInput,
+  idempotency_key: z.string().trim().min(1).max(200),
+};
+const webhookRevokeInput = {
+  idempotency_key: z.string().trim().min(1).max(200),
+};
+const webhookEvaluateInput = {
+  subscription_id: boundedId,
+  account_id: boundedId,
+  chat_id: boundedId.nullable().optional(),
+};
+
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
   env: context.env,
   authorization: context.get("authorization"),
   delegated: context.get("delegated"),
 });
+
+const webhookActorFor = (context: ReadHandlerContext): WebhookActor => ({
+  tenantId: context.authorization.tenant.id,
+  principalId: context.authorization.principal.id,
+  principalType: context.authorization.principal.type,
+  membershipId: context.authorization.membership.id,
+  role: context.authorization.membership.role,
+  identityIds: context.authorization.identities.map(
+    (identity) => identity.identity_id,
+  ),
+  delegated: context.delegated === true,
+});
+
+const webhookDatabase = (context: ReadHandlerContext): D1Database => {
+  if (
+    context.env.CONTROL_DB === undefined ||
+    typeof context.env.CONTROL_DB.withSession !== "function"
+  ) {
+    throw new WebhookRepositoryError("webhook_unavailable");
+  }
+  return context.env.CONTROL_DB;
+};
 
 const requireDelegatedGrant = async (
   context: ReadHandlerContext,
@@ -99,6 +188,27 @@ const requireDelegatedGrant = async (
 };
 
 const errorResult = (error: unknown) => {
+  if (error instanceof WebhookRepositoryError) {
+    const code =
+      error.code === "webhook_invalid"
+        ? "invalid_request"
+        : error.code === "webhook_forbidden"
+          ? "forbidden"
+          : error.code === "webhook_not_found"
+            ? "not_found"
+            : error.code === "webhook_conflict"
+              ? "invalid_request"
+              : "service_unavailable";
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ error: { code, message: error.message } }),
+        },
+      ],
+    };
+  }
   const mapped = readErrorResponse(error);
   return {
     isError: true,
@@ -319,6 +429,143 @@ const registerTools = (
           ...(input.limit === undefined ? {} : { limit: input.limit }),
         };
         return searchMessages(context, value);
+      }),
+  );
+
+  server.registerTool(
+    "list_webhook_subscriptions",
+    {
+      description: "List webhook subscriptions visible to this identity",
+      inputSchema: {
+        cursor: optionalCursor,
+        limit: optionalLimit,
+      },
+    },
+    (input) =>
+      withReadErrors(() =>
+        listWebhookSubscriptionPage(
+          webhookDatabase(context).withSession("first-primary"),
+          webhookActorFor(context),
+          input.cursor,
+          input.limit,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "get_webhook_subscription",
+    {
+      description: "Inspect one webhook subscription",
+      inputSchema: { subscription_id: boundedId },
+    },
+    (input) =>
+      withReadErrors(() =>
+        authorizeWebhookInspection(
+          webhookDatabase(context).withSession("first-primary"),
+          webhookActorFor(context),
+          input.subscription_id,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "create_webhook_subscription",
+    {
+      description: "Create an independently managed webhook subscription",
+      inputSchema: webhookCreateInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        createWebhookSubscription(
+          webhookDatabase(context),
+          webhookActorFor(context),
+          WebhookSubscriptionCreateSchema.parse(input),
+          new Date().toISOString(),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "update_webhook_subscription",
+    {
+      description: "Update webhook filters, rules, or ownership",
+      inputSchema: { subscription_id: boundedId, ...webhookUpdateInput },
+    },
+    (input) =>
+      withReadErrors(() => {
+        const { subscription_id, ...body } = input;
+        return updateWebhookSubscription(
+          webhookDatabase(context),
+          webhookActorFor(context),
+          subscription_id,
+          WebhookSubscriptionUpdateSchema.parse(body),
+          new Date().toISOString(),
+        );
+      }),
+  );
+
+  server.registerTool(
+    "cutover_webhook_subscription",
+    {
+      description: "Change a subscription destination and version",
+      inputSchema: { subscription_id: boundedId, ...webhookCutoverInput },
+    },
+    (input) =>
+      withReadErrors(() => {
+        const { subscription_id, ...body } = input;
+        const parsed = WebhookSubscriptionCutoverSchema.parse(body);
+        return cutoverWebhookSubscription(
+          webhookDatabase(context),
+          webhookActorFor(context),
+          subscription_id,
+          parsed.destination,
+          parsed.idempotency_key,
+          new Date().toISOString(),
+        );
+      }),
+  );
+
+  server.registerTool(
+    "revoke_webhook_subscription",
+    {
+      description: "Revoke a webhook subscription and cancel its pending work",
+      inputSchema: { subscription_id: boundedId, ...webhookRevokeInput },
+    },
+    (input) =>
+      withReadErrors(() => {
+        const { subscription_id, ...body } = input;
+        const parsed = WebhookSubscriptionRevokeSchema.parse(body);
+        return revokeWebhookSubscription(
+          webhookDatabase(context),
+          webhookActorFor(context),
+          subscription_id,
+          parsed.idempotency_key,
+          new Date().toISOString(),
+        );
+      }),
+  );
+
+  server.registerTool(
+    "evaluate_webhook_subscription",
+    {
+      description: "Evaluate chat, account, and global webhook precedence",
+      inputSchema: webhookEvaluateInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        const database = webhookDatabase(context);
+        const subscription = await authorizeWebhookInspection(
+          database.withSession("first-primary"),
+          webhookActorFor(context),
+          input.subscription_id,
+        );
+        return evaluateWebhookSubscription(
+          database.withSession("first-primary"),
+          subscription.tenant_id,
+          subscription.id,
+          input.account_id,
+          input.chat_id ?? null,
+        );
       }),
   );
 };

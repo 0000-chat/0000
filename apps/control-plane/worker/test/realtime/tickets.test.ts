@@ -271,7 +271,7 @@ describe("digest-only realtime ticket storage", () => {
     await issueRealtimeTicket(env.CONTROL_DB, authorizedRequest(), now);
 
     const remaining = await env.CONTROL_DB.prepare(
-      "SELECT COUNT(*) AS count FROM realtime_tickets WHERE expires_at_ms = ? AND ticket_digest LIKE 'e%'",
+      "SELECT COUNT(*) AS count FROM realtime_tickets WHERE ticket_digest LIKE 'e%' AND expires_at_ms = ?",
     )
       .bind(expiredAt.getTime())
       .first<{ count: number }>();

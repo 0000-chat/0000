@@ -35,6 +35,10 @@ const applicationTables = [
   "oauth_authorization_transactions",
   "oauth_authorization_codes",
   "oauth_upstream_login_transactions",
+  "webhook_subscriptions",
+  "webhook_subscription_account_rules",
+  "webhook_subscription_chat_rules",
+  "webhook_deliveries",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -104,6 +108,10 @@ async function dropControlDirectorySchema(db: D1Database) {
     "oauth_authorization_transactions",
     "oauth_client_installations",
     "oauth_clients",
+    "webhook_deliveries",
+    "webhook_subscription_chat_rules",
+    "webhook_subscription_account_rules",
+    "webhook_subscriptions",
     "break_glass_grants",
     "revoked_tokens",
     "connection_capabilities",
@@ -148,6 +156,8 @@ describe("control directory schema", () => {
         "0003_connection_read_metadata.sql",
         "0004_realtime_tickets.sql",
         "0005_account_grants.sql",
+        "0006_oauth_installations.sql",
+        "0010_webhook_subscriptions.sql",
       ]),
     );
     expect(
@@ -184,6 +194,24 @@ describe("control directory schema", () => {
     ).toBeGreaterThan(
       migrations.results.findIndex(
         (row) => row.name === "0004_realtime_tickets.sql",
+      ),
+    );
+    expect(
+      migrations.results.findIndex(
+        (row) => row.name === "0006_oauth_installations.sql",
+      ),
+    ).toBeGreaterThan(
+      migrations.results.findIndex(
+        (row) => row.name === "0005_account_grants.sql",
+      ),
+    );
+    expect(
+      migrations.results.findIndex(
+        (row) => row.name === "0010_webhook_subscriptions.sql",
+      ),
+    ).toBeGreaterThan(
+      migrations.results.findIndex(
+        (row) => row.name === "0006_oauth_installations.sql",
       ),
     );
     const legacyTables = await env.CONTROL_DB.prepare(
