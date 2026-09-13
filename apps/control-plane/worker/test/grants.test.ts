@@ -1931,6 +1931,129 @@ describe("account-scoped grant API", () => {
     ).toBe("pending");
   });
 
+  it("keeps a later waiting deadline scheduled when an earlier pending deadline has elapsed", async () => {
+    const grant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: "alarm-two-row-grant-" + crypto.randomUUID(),
+        }),
+      ),
+    });
+    expect(grant.status).toBe(201);
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2040-01-01T00:00:00.000Z");
+    const app = createTestApp({ outboundAcceptance: { now: () => now } });
+    const send = (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Alarm deadline row",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const firstKey = "alarm-two-row-first-" + crypto.randomUUID();
+    const first = await send(firstKey);
+    expect(first.status).toBe(202);
+    const firstCommand = (await first.json()) as { id: string };
+
+    now = new Date("2040-01-01T01:00:00.000Z");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'ready' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const firstReconcile = await requestForApp(
+      app,
+      `/api/v1/commands/${firstCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(firstReconcile.status).toBe(200);
+    expect(
+      ((await firstReconcile.json()) as { dispatch: { status: string } })
+        .dispatch.status,
+    ).toBe("pending");
+
+    now = new Date("2040-01-01T02:00:00.000Z");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const second = await send("alarm-two-row-second-" + crypto.randomUUID());
+    expect(second.status).toBe(202);
+    const secondCommand = (await second.json()) as { id: string };
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    await runInDurableObject(projection, async (_instance, state) => {
+      // Keep the first row pending on an independently ready connection while
+      // the second row remains waiting on the disconnected pilot connection.
+      state.storage.sql.exec(
+        "UPDATE outbound_dispatches SET connection_id = ? WHERE command_id = ?",
+        "connection_agent_secondary",
+        firstCommand.id,
+      );
+    });
+
+    now = new Date("2040-01-01T05:00:00.000Z");
+    const dateNow = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.parse("2040-01-01T05:00:00.000Z"));
+    try {
+      await runInDurableObject(projection, async (instance) => {
+        await instance.alarm();
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    const rowsAfterAlarm = await rows<{
+      command_id: string;
+      status: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT command_id, status, confirmation_due_at FROM outbound_dispatches WHERE command_id IN (?, ?) ORDER BY confirmation_due_at ASC",
+      firstCommand.id,
+      secondCommand.id,
+    );
+    expect(rowsAfterAlarm).toEqual([
+      {
+        command_id: firstCommand.id,
+        status: "pending",
+        confirmation_due_at: "2040-01-01T04:00:00.000Z",
+      },
+      {
+        command_id: secondCommand.id,
+        status: "waiting_for_connection",
+        confirmation_due_at: "2040-01-01T06:00:00.000Z",
+      },
+    ]);
+    expect(await runInDurableObject(projection, (_instance, state) =>
+      state.storage.getAlarm(),
+    )).toBe(Date.parse("2040-01-01T06:00:00.000Z"));
+  });
+
   it("allows a granted agent to cancel before dispatch, then blocks cancellation after grant revocation", async () => {
     const grantResponse = await request("/api/v1/grants", "human-token", {
       method: "POST",

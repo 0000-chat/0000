@@ -2050,13 +2050,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   #nextOutboundAlarm(): number | null {
     const rows = this.ctx.storage.sql
       .exec<{ confirmation_due_at: string | null }>(
-        "SELECT confirmation_due_at FROM outbound_dispatches WHERE status IN ('waiting_for_connection', 'pending') AND confirmation_decision IS NULL AND confirmation_due_at IS NOT NULL ORDER BY confirmation_due_at ASC LIMIT 1",
+        "SELECT confirmation_due_at FROM outbound_dispatches WHERE status IN ('waiting_for_connection', 'pending') AND confirmation_decision IS NULL AND confirmation_due_at IS NOT NULL ORDER BY confirmation_due_at ASC",
       )
       .toArray();
-    const due = rows[0]?.confirmation_due_at;
-    if (due === undefined || due === null) return null;
-    const dueMs = Date.parse(due);
-    return Number.isSafeInteger(dueMs) && dueMs > Date.now() ? dueMs : null;
+    const now = Date.now();
+    for (const row of rows) {
+      if (row.confirmation_due_at === null) continue;
+      const dueMs = Date.parse(row.confirmation_due_at);
+      if (Number.isSafeInteger(dueMs) && dueMs > now) return dueMs;
+    }
+    return null;
   }
 
   async #scheduleCombinedAlarm(
