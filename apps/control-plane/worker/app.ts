@@ -55,6 +55,22 @@ import {
   realtimeTicketHandler,
   realtimeUpgradeHandler,
 } from "./realtime/handlers";
+import {
+  webhookSubscriptionsRoute,
+  webhookSubscriptionsHandler,
+  createWebhookSubscriptionRoute,
+  createWebhookSubscriptionHandler,
+  webhookSubscriptionRoute,
+  webhookSubscriptionHandler,
+  updateWebhookSubscriptionRoute,
+  updateWebhookSubscriptionHandler,
+  cutoverWebhookSubscriptionRoute,
+  cutoverWebhookSubscriptionHandler,
+  revokeWebhookSubscriptionRoute,
+  revokeWebhookSubscriptionHandler,
+  evaluateWebhookSubscriptionRoute,
+  evaluateWebhookSubscriptionHandler,
+} from "./routes/webhooks";
 import { ReadError, readErrorResponse } from "./read/errors";
 import {
   registerOAuthRoutes,
@@ -327,6 +343,8 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/grants/*", productAuthorization);
   app.use("/api/v1/permission-requests", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
+  app.use("/api/v1/webhook-subscriptions", productAuthorization);
+  app.use("/api/v1/webhook-subscriptions/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -353,6 +371,19 @@ export function createApp(services: AppServices = {}) {
   app.openapi(revokeGrantRoute, revokeGrantHandler);
   app.openapi(permissionRequestsRoute, permissionRequestsHandler);
   app.openapi(createPermissionRequestRoute, createPermissionRequestHandler);
+  app.openapi(webhookSubscriptionsRoute, webhookSubscriptionsHandler);
+  app.openapi(createWebhookSubscriptionRoute, createWebhookSubscriptionHandler);
+  app.openapi(webhookSubscriptionRoute, webhookSubscriptionHandler);
+  app.openapi(updateWebhookSubscriptionRoute, updateWebhookSubscriptionHandler);
+  app.openapi(
+    cutoverWebhookSubscriptionRoute,
+    cutoverWebhookSubscriptionHandler,
+  );
+  app.openapi(revokeWebhookSubscriptionRoute, revokeWebhookSubscriptionHandler);
+  app.openapi(
+    evaluateWebhookSubscriptionRoute,
+    evaluateWebhookSubscriptionHandler,
+  );
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",
