@@ -6,7 +6,7 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `e3a153f` | Health #5 and runtime #9 merged serially; focused runtime/health tests passed; main tooling gate is restored and remains red on recorded baseline findings; grants #12 remains held. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `d72dd70` | Health #5 and runtime #9 merged serially; focused runtime/health tests passed; main tooling gate is restored and remains red on recorded baseline findings; grants #12 remains held. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
@@ -78,6 +78,17 @@ Biome exits 1 after checking the exact tracked set of 232 files: 1 `.js`, 22
 diagnostics. The set follows `biome.json` includes and excludes generated,
 cache, dependency, build, coverage, target, vendor, and Wrangler directories.
 No whole-tree formatting or unrelated source cleanup was applied.
+
+## Grants recovery checkpoint
+
+After several unanswered checkpoint requests and a repair diff growing by
+roughly 1,000 lines without reported test results, the parent interrupted and
+resumed the same worker with a bounded checkpoint/typecheck/API-regression-first
+instruction. The working hypothesis is that accumulated edits without
+incremental feedback prolonged the loop. The attempt is to preserve dirty
+source and require current compilation plus the smallest meaningful grant test
+before further expansion; the check remains pending. #12 stays held and no
+code is merged.
 
 ## Coordination artifacts
 
