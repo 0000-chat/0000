@@ -195,49 +195,67 @@ export const handlers = [
     );
   }),
 
-  http.get("*/api/v1/accounts/:accountId/capabilities", ({ request, params }) => {
-    const search = new URL(request.url).searchParams;
-    if (!hasOnlyQueryKeys(search, ["identity_id"]))
-      return errorResponse(400, "invalid_request");
-    const identityId = parseSingleQueryValue(search, "identity_id", boundedId);
-    if (!identityId) return errorResponse(400, "invalid_request");
-    const capabilities = simulatedStore.historyCapabilities(String(params.accountId));
-    if (
-      capabilities.length === 0 ||
-      capabilities[0]?.identity_id !== identityId
-    ) {
-      return errorResponse(404, "not_found");
-    }
-    return HttpResponse.json(
-      capabilities.map((capability) => ProviderCapabilitySchema.parse(capability)),
-    );
-  }),
+  http.get(
+    "*/api/v1/accounts/:accountId/capabilities",
+    ({ request, params }) => {
+      const search = new URL(request.url).searchParams;
+      if (!hasOnlyQueryKeys(search, ["identity_id"]))
+        return errorResponse(400, "invalid_request");
+      const identityId = parseSingleQueryValue(
+        search,
+        "identity_id",
+        boundedId,
+      );
+      if (!identityId) return errorResponse(400, "invalid_request");
+      const capabilities = simulatedStore.historyCapabilities(
+        String(params.accountId),
+      );
+      if (
+        capabilities.length === 0 ||
+        capabilities[0]?.identity_id !== identityId
+      ) {
+        return errorResponse(404, "not_found");
+      }
+      return HttpResponse.json(
+        capabilities.map((capability) =>
+          ProviderCapabilitySchema.parse(capability),
+        ),
+      );
+    },
+  ),
 
-  http.get("*/api/v1/accounts/:accountId/history-imports", ({ request, params }) => {
-    const search = new URL(request.url).searchParams;
-    if (!hasOnlyQueryKeys(search, ["identity_id", "cursor", "limit"]))
-      return errorResponse(400, "invalid_request");
-    const identityId = parseSingleQueryValue(search, "identity_id", boundedId);
-    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
-    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
-    if (!identityId || cursor === null || limit === null)
-      return errorResponse(400, "invalid_request");
-    const details = simulatedStore.historyImportPage(
-      String(params.accountId),
-      identityId,
-    );
-    if (details === null) return errorResponse(404, "not_found");
-    const page = pageByCursor(
-      details,
-      cursor,
-      limit,
-      (detail) => detail.import.import_id,
-    );
-    return HttpResponse.json({
-      items: page.items.map((detail) => detail.import),
-      next_cursor: page.next_cursor,
-    });
-  }),
+  http.get(
+    "*/api/v1/accounts/:accountId/history-imports",
+    ({ request, params }) => {
+      const search = new URL(request.url).searchParams;
+      if (!hasOnlyQueryKeys(search, ["identity_id", "cursor", "limit"]))
+        return errorResponse(400, "invalid_request");
+      const identityId = parseSingleQueryValue(
+        search,
+        "identity_id",
+        boundedId,
+      );
+      const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+      const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+      if (!identityId || cursor === null || limit === null)
+        return errorResponse(400, "invalid_request");
+      const details = simulatedStore.historyImportPage(
+        String(params.accountId),
+        identityId,
+      );
+      if (details === null) return errorResponse(404, "not_found");
+      const page = pageByCursor(
+        details,
+        cursor,
+        limit,
+        (detail) => detail.import.import_id,
+      );
+      return HttpResponse.json({
+        items: page.items.map((detail) => detail.import),
+        next_cursor: page.next_cursor,
+      });
+    },
+  ),
 
   http.post(
     "*/api/v1/accounts/:accountId/history-imports",
@@ -254,7 +272,9 @@ export const handlers = [
         idempotencyKey,
       );
       return detail
-        ? HttpResponse.json(HistoryImportDetailSchema.parse(detail), { status: 201 })
+        ? HttpResponse.json(HistoryImportDetailSchema.parse(detail), {
+            status: 201,
+          })
         : errorResponse(404, "not_found");
     },
   ),

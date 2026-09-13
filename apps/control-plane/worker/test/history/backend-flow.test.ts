@@ -126,7 +126,11 @@ const startResult: HistoryProviderStartResult = {
   source_start_at: rangeStart,
   source_end_at: rangeEnd,
   ranges: [
-    { start_at: rangeStart, end_at: firstRangeEnd, source_cursor: "cursor-one" },
+    {
+      start_at: rangeStart,
+      end_at: firstRangeEnd,
+      source_cursor: "cursor-one",
+    },
     {
       start_at: secondRangeStart,
       end_at: rangeEnd,
@@ -189,7 +193,10 @@ const createTestApp = (
     createTokenVerifier: () => ({
       verify: async (token: string): Promise<VerifiedSubject> => {
         if (token === "human-token")
-          return { issuer: "https://issuer.example/", subject: "human-subject" };
+          return {
+            issuer: "https://issuer.example/",
+            subject: "human-subject",
+          };
         if (token === "agent-token")
           return {
             issuer: "https://issuer.example/",
@@ -285,7 +292,11 @@ async function seedEmptyAgentConversation(): Promise<void> {
     mode: "live",
     rebuild_id: null,
     connections: [
-      bindingFor("account_agent", "connection_agent_whatsapp", "identity_agent"),
+      bindingFor(
+        "account_agent",
+        "connection_agent_whatsapp",
+        "identity_agent",
+      ),
     ],
     events: [
       event(
@@ -403,10 +414,7 @@ describe("history import production route", () => {
       "partial",
       "completed",
     ]);
-    expect(calls).toEqual([
-      firstRange?.range_id,
-      secondRange?.range_id,
-    ]);
+    expect(calls).toEqual([firstRange?.range_id, secondRange?.range_id]);
   });
 
   it("keeps coverage stable when a seek page is empty after the chat has messages", async () => {
@@ -435,9 +443,7 @@ describe("history import production route", () => {
       `/api/v1/conversations/conversation_history/messages?identity_id=identity_human&account_id=account_human&limit=1&cursor=${encodeURIComponent(endCursor)}`,
     );
     expect(emptyResponse.status).toBe(200);
-    const emptyPage = MessagePageResultSchema.parse(
-      await emptyResponse.json(),
-    );
+    const emptyPage = MessagePageResultSchema.parse(await emptyResponse.json());
     expect(emptyPage.items).toEqual([]);
     expect(emptyPage.history?.state).toBe("available");
   });
@@ -506,9 +512,9 @@ describe("history import production route", () => {
       "agent-token",
     );
     expect(withoutAccount.status).toBe(200);
-    expect(MessagePageResultSchema.parse(await withoutAccount.json()).history).toEqual(
-      page.history,
-    );
+    expect(
+      MessagePageResultSchema.parse(await withoutAccount.json()).history,
+    ).toEqual(page.history);
   });
 
   it("reports empty coverage after a provider confirms no available history", async () => {
@@ -558,9 +564,9 @@ describe("history import production route", () => {
       "agent-token",
     );
     expect(withoutAccount.status).toBe(200);
-    expect(MessagePageResultSchema.parse(await withoutAccount.json()).history?.state).toBe(
-      "empty",
-    );
+    expect(
+      MessagePageResultSchema.parse(await withoutAccount.json()).history?.state,
+    ).toBe("empty");
   });
 
   it("records malformed provider ranges as a failed import", async () => {
@@ -641,11 +647,7 @@ describe("history import production route", () => {
     expect(detail.import.status).toBe("failed");
     expect(detail.import.last_error_code).toBe("bounded_retry_exhausted");
     expect(detail.ranges[0]?.status).toBe("failed");
-    expect(calls).toEqual([
-      range?.range_id,
-      range?.range_id,
-      range?.range_id,
-    ]);
+    expect(calls).toEqual([range?.range_id, range?.range_id, range?.range_id]);
   });
 
   it("keeps sibling ranges active after one range exhausts runtime retries", async () => {
@@ -756,9 +758,7 @@ describe("history import production route", () => {
         }),
       },
     );
-    const active = HistoryImportDetailSchema.parse(
-      await failedResponse.json(),
-    );
+    const active = HistoryImportDetailSchema.parse(await failedResponse.json());
     expect(active.import.status).toBe("active");
     expect(active.ranges.map((range) => range.status)).toEqual([
       "failed",
@@ -799,8 +799,9 @@ describe("history import production route", () => {
     }>;
     expect(capabilities).toHaveLength(5);
     expect(
-      capabilities.find((capability) => capability.capability === "history.import")
-        ?.status,
+      capabilities.find(
+        (capability) => capability.capability === "history.import",
+      )?.status,
     ).toBe("unverified");
 
     const initial = await startImport(app, "history-progress-001");
@@ -810,9 +811,9 @@ describe("history import production route", () => {
     );
     expect(listResponse.status).toBe(200);
     expect(
-      (await listResponse.json() as { items: Array<{ import_id: string }> }).items.map(
-        (item) => item.import_id,
-      ),
+      (
+        (await listResponse.json()) as { items: Array<{ import_id: string }> }
+      ).items.map((item) => item.import_id),
     ).toContain(initial.import.import_id);
 
     const detailResponse = await request(
@@ -821,7 +822,8 @@ describe("history import production route", () => {
     );
     expect(detailResponse.status).toBe(200);
     expect(
-      HistoryImportDetailSchema.parse(await detailResponse.json()).import.import_id,
+      HistoryImportDetailSchema.parse(await detailResponse.json()).import
+        .import_id,
     ).toBe(initial.import.import_id);
   });
 

@@ -399,7 +399,8 @@ export function createApp(services: AppServices = {}) {
   const historyServices: HistoryRouteServices = {};
   if (services.createHistoryImportProvider !== undefined)
     historyServices.createProvider = services.createHistoryImportProvider;
-  if (services.historyNow !== undefined) historyServices.now = services.historyNow;
+  if (services.historyNow !== undefined)
+    historyServices.now = services.historyNow;
   if (services.applyHistoryEvents !== undefined)
     historyServices.applyEvents = services.applyHistoryEvents;
   const historyHandlers = createHistoryHandlers(historyServices);

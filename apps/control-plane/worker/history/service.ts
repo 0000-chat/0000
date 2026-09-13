@@ -1,6 +1,4 @@
 import {
-  HistoryImportFailureCodeSchema,
-  HistoryImportRangeSchema,
   HistoryImportSchema,
   ProviderCapabilitySchema,
   ProjectionAuthorizationContextSchema,
@@ -16,17 +14,19 @@ import { sha256Hex } from "../archive/codec";
 import { getTenantProjection } from "../projection/routing";
 import {
   createImport,
+  claimHistoryRangeWork,
+  closeHistoryRangeWork,
+  ensureHistoryRangeWork,
   findHistoryAccount,
   findHistoryProjectionBinding,
   findImportByIdempotency,
   getDetail,
   getImport,
-  getRange,
   getRanges,
   insertEventHashes,
   insertRanges,
   listExistingEventHashes,
-  listCapabilities,
+  scheduleHistoryRangeWork,
   updateImport,
   updateRange,
   upsertCapability,
@@ -44,7 +44,8 @@ import {
 
 const MAX_PROVIDER_RANGES = 100;
 const MAX_PROVIDER_EVENTS_PER_PAGE = 500;
-const DEFAULT_MAX_ATTEMPTS = 3;
+const HISTORY_RETRY_BASE_MS = 60_000;
+const HISTORY_RETRY_MAX_MS = 15 * 60_000;
 
 export type HistoryServiceEnvironment = Pick<
   Cloudflare.Env,
@@ -69,6 +70,8 @@ export type HistoryService = {
     accountId: string;
     identityId: string;
     rangeId?: string;
+    leaseToken?: string;
+    leaseUntil?: string;
   }): Promise<HistoryImportDetail>;
 };
 
@@ -304,11 +307,13 @@ const applyDefaultProjectionEvents = async (input: {
     identity_id: input.identityId,
     platform: binding.provider,
   });
-  const last = [...input.events].sort((left, right) =>
-    left.observed_at === right.observed_at
-      ? left.event_id.localeCompare(right.event_id)
-      : left.observed_at.localeCompare(right.observed_at),
-  ).at(-1);
+  const last = [...input.events]
+    .sort((left, right) =>
+      left.observed_at === right.observed_at
+        ? left.event_id.localeCompare(right.event_id)
+        : left.observed_at.localeCompare(right.observed_at),
+    )
+    .at(-1);
   if (last === undefined) return;
   await projection.applyBatch({
     schema_version: 1,
@@ -327,7 +332,9 @@ const applyDefaultProjectionEvents = async (input: {
   });
 };
 
-const eventObservedAt = (events: readonly ProjectionEventEnvelope[]): string => {
+const eventObservedAt = (
+  events: readonly ProjectionEventEnvelope[],
+): string => {
   const first = events[0];
   if (first === undefined) throw new HistoryServiceError("history_invalid");
   return first.observed_at;
@@ -362,6 +369,7 @@ const updateFailed = async (
   errorCode: HistoryImport["last_error_code"],
   now: string,
   terminal: boolean,
+  leaseToken?: string,
 ): Promise<void> => {
   const nextAttempts = Math.min(item.max_attempts, range.attempt_count + 1);
   const exhausted = terminal || nextAttempts >= item.max_attempts;
@@ -372,6 +380,7 @@ const updateFailed = async (
     error_code: errorCode,
     updated_at: now,
     completed_at: exhausted ? now : null,
+    ...(leaseToken === undefined ? {} : { lease_token: leaseToken }),
   });
   const ranges = await getRanges(db, item.import_id);
   const completed = ranges.filter(
@@ -391,7 +400,8 @@ const updateFailed = async (
   await updateImport(db, {
     import_id: item.import_id,
     status: importFailed ? "failed" : "active",
-    availability: errorCode === "runtime_unavailable" ? "unavailable" : "blocked",
+    availability:
+      errorCode === "runtime_unavailable" ? "unavailable" : "blocked",
     attempt_count: nextAttempts,
     last_error_code: exhausted
       ? nextAttempts >= item.max_attempts
@@ -403,6 +413,9 @@ const updateFailed = async (
     gap_count: gaps,
     updated_at: now,
     completed_at: importFailed ? now : null,
+    ...(leaseToken === undefined
+      ? {}
+      : { lease_token: leaseToken, range_id: range.range_id }),
   });
 };
 
@@ -413,6 +426,69 @@ const refreshDetail = async (
   accountId: string,
 ): Promise<HistoryImportDetail> =>
   getDetail(env.CONTROL_DB, tenantId, importId, accountId);
+
+const retryDelay = (attemptCount: number): number =>
+  Math.min(
+    HISTORY_RETRY_MAX_MS,
+    HISTORY_RETRY_BASE_MS * 2 ** Math.max(0, Math.min(attemptCount - 1, 4)),
+  );
+
+const retryAt = (now: string, attemptCount: number): string => {
+  const timestamp = Date.parse(now);
+  if (!Number.isFinite(timestamp))
+    throw new HistoryServiceError("history_invalid");
+  return new Date(timestamp + retryDelay(attemptCount)).toISOString();
+};
+
+/** Reconcile wake state only after the range checkpoint has been written. */
+const reconcileHistoryWork = async (input: {
+  env: HistoryServiceEnvironment;
+  item: HistoryImport;
+  ranges: readonly HistoryImportRange[];
+  now: string;
+  leaseToken?: string;
+  currentRangeId?: string;
+}): Promise<void> => {
+  for (const range of input.ranges) {
+    const currentLease =
+      range.range_id === input.currentRangeId ? input.leaseToken : undefined;
+    if (range.status === "active" || range.status === "pending") {
+      if (input.currentRangeId === undefined || currentLease !== undefined) {
+        await scheduleHistoryRangeWork(input.env.CONTROL_DB, {
+          tenant_id: input.item.tenant_id,
+          import_id: input.item.import_id,
+          range_id: range.range_id,
+          account_id: input.item.account_id,
+          source_cursor: range.source_cursor,
+          next_attempt_at:
+            range.error_code === null
+              ? input.now
+              : retryAt(input.now, range.attempt_count),
+          updated_at: input.now,
+          ...(currentLease === undefined ? {} : { lease_token: currentLease }),
+        });
+      }
+    } else {
+      await closeHistoryRangeWork(input.env.CONTROL_DB, {
+        import_id: input.item.import_id,
+        range_id: range.range_id,
+        account_id: input.item.account_id,
+        updated_at: input.now,
+        ...(currentLease === undefined ? {} : { lease_token: currentLease }),
+      });
+    }
+    if (range.status === "active" || range.status === "pending") {
+      await ensureHistoryRangeWork(input.env.CONTROL_DB, {
+        import_id: input.item.import_id,
+        range_id: range.range_id,
+        account_id: input.item.account_id,
+        source_cursor: range.source_cursor,
+        next_attempt_at: input.now,
+        updated_at: input.now,
+      });
+    }
+  }
+};
 
 const createService = (
   dependencies: HistoryServiceDependencies,
@@ -490,18 +566,37 @@ const createService = (
         failure.code === "history_provider_error" ||
           failure.code === "history_provider_timeout",
       );
-      return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+      const detail = await refreshDetail(
+        input.env,
+        input.tenantId,
+        item.import_id,
+        input.accountId,
+      );
+      await reconcileHistoryWork({
+        env: input.env,
+        item: detail.import,
+        ranges: detail.ranges,
+        now: nowIso(clock),
+      });
+      return detail;
     }
     try {
-      validateRanges(providerResult.ranges, item.requested_start_at, item.requested_end_at);
+      validateRanges(
+        providerResult.ranges,
+        item.requested_start_at,
+        item.requested_end_at,
+      );
       const updated = nowIso(clock);
       await upsertCapability(
         input.env.CONTROL_DB,
         capabilityFromStart(item, providerResult, updated),
       );
       if (providerResult.availability !== "available") {
-        const range = (await getRanges(input.env.CONTROL_DB, item.import_id))[0];
-        if (range === undefined) throw new HistoryServiceError("history_invalid");
+        const range = (
+          await getRanges(input.env.CONTROL_DB, item.import_id)
+        )[0];
+        if (range === undefined)
+          throw new HistoryServiceError("history_invalid");
         await updateFailed(
           input.env.CONTROL_DB,
           item,
@@ -513,11 +608,26 @@ const createService = (
           updated,
           true,
         );
-        return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+        const detail = await refreshDetail(
+          input.env,
+          input.tenantId,
+          item.import_id,
+          input.accountId,
+        );
+        await reconcileHistoryWork({
+          env: input.env,
+          item: detail.import,
+          ranges: detail.ranges,
+          now: updated,
+        });
+        return detail;
       }
       if (providerResult.ranges.length === 0) {
-        const range = (await getRanges(input.env.CONTROL_DB, item.import_id))[0];
-        if (range === undefined) throw new HistoryServiceError("history_invalid");
+        const range = (
+          await getRanges(input.env.CONTROL_DB, item.import_id)
+        )[0];
+        if (range === undefined)
+          throw new HistoryServiceError("history_invalid");
         await updateRange(input.env.CONTROL_DB, {
           range_id: range.range_id,
           status: "completed",
@@ -536,12 +646,27 @@ const createService = (
           updated_at: updated,
           completed_at: updated,
         });
-        return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+        const detail = await refreshDetail(
+          input.env,
+          input.tenantId,
+          item.import_id,
+          input.accountId,
+        );
+        await reconcileHistoryWork({
+          env: input.env,
+          item: detail.import,
+          ranges: detail.ranges,
+          now: updated,
+        });
+        return detail;
       }
       const [first, ...rest] = providerResult.ranges;
       if (first === undefined) throw new HistoryServiceError("history_invalid");
-      const oldRange = (await getRanges(input.env.CONTROL_DB, item.import_id))[0];
-      if (oldRange === undefined) throw new HistoryServiceError("history_invalid");
+      const oldRange = (
+        await getRanges(input.env.CONTROL_DB, item.import_id)
+      )[0];
+      if (oldRange === undefined)
+        throw new HistoryServiceError("history_invalid");
       await updateRange(input.env.CONTROL_DB, {
         range_id: oldRange.range_id,
         status: "active",
@@ -580,13 +705,27 @@ const createService = (
           input.env.CONTROL_DB,
           item,
           range,
-          failure.code === "history_invalid" ? "malformed_range" : "provider_error",
+          failure.code === "history_invalid"
+            ? "malformed_range"
+            : "provider_error",
           nowIso(clock),
           true,
         );
       }
     }
-    return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+    const detail = await refreshDetail(
+      input.env,
+      input.tenantId,
+      item.import_id,
+      input.accountId,
+    );
+    await reconcileHistoryWork({
+      env: input.env,
+      item: detail.import,
+      ranges: detail.ranges,
+      now: nowIso(clock),
+    });
+    return detail;
   };
 
   const advance = async (input: Parameters<HistoryService["advance"]>[0]) => {
@@ -598,18 +737,61 @@ const createService = (
     );
     if (item.identity_id !== input.identityId)
       throw new HistoryServiceError("history_not_found");
-    const ranges = await getRanges(input.env.CONTROL_DB, item.import_id);
+    const before = await refreshDetail(
+      input.env,
+      input.tenantId,
+      item.import_id,
+      input.accountId,
+    );
     const range = input.rangeId
-      ? ranges.find((candidate) => candidate.range_id === input.rangeId)
-      : ranges.find(
+      ? before.ranges.find((candidate) => candidate.range_id === input.rangeId)
+      : before.ranges.find(
           (candidate) =>
             candidate.status === "active" || candidate.status === "pending",
         );
-    if (range === undefined) throw new HistoryServiceError("history_not_found");
-    if (item.status === "completed" || item.status === "failed" || item.status === "partial")
-      return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
-    if (range.status === "completed" || range.status === "gap" || range.status === "failed")
-      return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+    if (range === undefined) {
+      if (input.rangeId !== undefined)
+        throw new HistoryServiceError("history_not_found");
+      return before;
+    }
+    if (
+      range.status === "completed" ||
+      range.status === "gap" ||
+      range.status === "failed" ||
+      range.status === "partial"
+    )
+      return before;
+
+    const now = nowIso(clock);
+    for (const candidate of before.ranges) {
+      if (candidate.status !== "active" && candidate.status !== "pending")
+        continue;
+      await ensureHistoryRangeWork(input.env.CONTROL_DB, {
+        import_id: item.import_id,
+        range_id: candidate.range_id,
+        account_id: item.account_id,
+        source_cursor: candidate.source_cursor,
+        next_attempt_at: now,
+        updated_at: now,
+      });
+    }
+    const leaseToken = input.leaseToken ?? crypto.randomUUID();
+    const claimed = await claimHistoryRangeWork(input.env.CONTROL_DB, {
+      tenant_id: input.tenantId,
+      import_id: item.import_id,
+      range_id: range.range_id,
+      account_id: item.account_id,
+      identity_id: item.identity_id,
+      source_cursor: range.source_cursor,
+      lease_token: leaseToken,
+      lease_until:
+        input.leaseUntil ??
+        new Date(Date.parse(now) + 5 * 60_000).toISOString(),
+      now,
+      ignore_due: input.leaseToken === undefined,
+    });
+    if (!claimed) return before;
+
     const activeItem = HistoryImportSchema.parse(item);
     let result: HistoryProviderAdvanceResult;
     try {
@@ -620,16 +802,32 @@ const createService = (
       });
     } catch (error) {
       const failure = providerFailure(error);
+      const updated = nowIso(clock);
       await updateFailed(
         input.env.CONTROL_DB,
         item,
         range,
         providerErrorCode(failure),
-        nowIso(clock),
+        updated,
         failure.code === "history_provider_error" ||
           failure.code === "history_provider_timeout",
+        leaseToken,
       );
-      return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+      const detail = await refreshDetail(
+        input.env,
+        input.tenantId,
+        item.import_id,
+        input.accountId,
+      );
+      await reconcileHistoryWork({
+        env: input.env,
+        item: detail.import,
+        ranges: detail.ranges,
+        now: updated,
+        currentRangeId: range.range_id,
+        leaseToken,
+      });
+      return detail;
     }
     try {
       validateEvents(result.events, item);
@@ -639,7 +837,9 @@ const createService = (
         item.import_id,
         eventIds,
       );
-      const existingHashes = new Map(existing.map((row) => [row.source_event_id, row.event_hash]));
+      const existingHashes = new Map(
+        existing.map((row) => [row.source_event_id, row.event_hash]),
+      );
       const newEvents: ProjectionEventEnvelope[] = [];
       const hashes: Array<{
         import_id: string;
@@ -657,9 +857,7 @@ const createService = (
           continue;
         }
         newEvents.push(event);
-        // A provider may repeat an event within one page. Treat the first
-        // occurrence as the page's checkpoint candidate so it cannot be
-        // applied or counted twice before the D1 hash row is written.
+        // A repeated provider event is counted once before the checkpoint is written.
         existingHashes.set(event.event_id, hash);
         hashes.push({
           import_id: item.import_id,
@@ -700,27 +898,34 @@ const createService = (
         attempt_count: range.attempt_count,
         updated_at: updated,
         completed_at: nextRangeStatus === "active" ? null : updated,
+        lease_token: leaseToken,
       });
       const allRanges = await getRanges(input.env.CONTROL_DB, item.import_id);
-      const completed = allRanges.filter((candidate) => candidate.status === "completed").length;
+      const completed = allRanges.filter(
+        (candidate) => candidate.status === "completed",
+      ).length;
       const gaps = allRanges.filter(
         (candidate) =>
           candidate.status === "gap" ||
           candidate.status === "partial" ||
           candidate.status === "failed",
       ).length;
-      const failed = allRanges.some((candidate) => candidate.status === "failed");
-      const hasPending = allRanges.some((candidate) => candidate.status === "pending" || candidate.status === "active");
-      const importStatus: HistoryImport["status"] =
-        hasPending
-          ? "active"
-          : failed || result.status === "failed"
-            ? "failed"
-            : result.status === "partial" || gaps > 0
-              ? "partial"
-              : completed === allRanges.length
-                ? "completed"
-                : "active";
+      const failed = allRanges.some(
+        (candidate) => candidate.status === "failed",
+      );
+      const hasPending = allRanges.some(
+        (candidate) =>
+          candidate.status === "pending" || candidate.status === "active",
+      );
+      const importStatus: HistoryImport["status"] = hasPending
+        ? "active"
+        : failed || result.status === "failed"
+          ? "failed"
+          : result.status === "partial" || gaps > 0
+            ? "partial"
+            : completed === allRanges.length
+              ? "completed"
+              : "active";
       await updateImport(input.env.CONTROL_DB, {
         import_id: item.import_id,
         status: importStatus,
@@ -732,12 +937,15 @@ const createService = (
         last_error_code: result.error_code,
         updated_at: updated,
         completed_at: importStatus === "active" ? null : updated,
+        lease_token: leaseToken,
+        range_id: range.range_id,
       });
     } catch (error) {
       const failure =
         error instanceof HistoryServiceError
           ? error
           : new HistoryServiceError("history_provider_error", error);
+      const updated = nowIso(clock);
       await updateFailed(
         input.env.CONTROL_DB,
         item,
@@ -747,11 +955,27 @@ const createService = (
           : failure.code === "history_invalid"
             ? "malformed_range"
             : "provider_error",
-        nowIso(clock),
-        failure.code === "history_conflict" || failure.code === "history_invalid",
+        updated,
+        failure.code === "history_conflict" ||
+          failure.code === "history_invalid",
+        leaseToken,
       );
     }
-    return refreshDetail(input.env, input.tenantId, item.import_id, input.accountId);
+    const detail = await refreshDetail(
+      input.env,
+      input.tenantId,
+      item.import_id,
+      input.accountId,
+    );
+    await reconcileHistoryWork({
+      env: input.env,
+      item: detail.import,
+      ranges: detail.ranges,
+      now: nowIso(clock),
+      currentRangeId: range.range_id,
+      leaseToken,
+    });
+    return detail;
   };
 
   return { start, advance };

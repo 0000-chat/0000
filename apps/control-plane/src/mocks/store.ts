@@ -151,7 +151,7 @@ export class SimulatedStore {
               last_error_code: null,
               completed_at: now,
             }
-            : account.account_id === "account_connection_human_telegram"
+          : account.account_id === "account_connection_human_telegram"
             ? {
                 import_id: "import_telegram_failed",
                 status: "failed" as const,
@@ -216,7 +216,8 @@ export class SimulatedStore {
           identity_id: account.identity_id,
           provider: account.provider,
           status: seeded.status,
-          availability: seeded.status === "failed" ? "unavailable" : "available",
+          availability:
+            seeded.status === "failed" ? "unavailable" : "available",
           requested_start_at: "2026-08-01T00:00:00.000Z",
           requested_end_at: "2026-08-15T00:00:00.000Z",
           source_start_at: "2026-08-01T00:00:00.000Z",
@@ -288,13 +289,17 @@ export class SimulatedStore {
   historyImportPage(accountId: string, identityId: string) {
     const account = this.connectedAccounts().find(
       (candidate) =>
-        candidate.account_id === accountId && candidate.identity_id === identityId,
+        candidate.account_id === accountId &&
+        candidate.identity_id === identityId,
     );
     if (!account) return null;
     return clone(this.historyImports.get(accountId) ?? []);
   }
 
-  historyImport(importId: string, identityId: string): HistoryImportDetail | null {
+  historyImport(
+    importId: string,
+    identityId: string,
+  ): HistoryImportDetail | null {
     for (const details of this.historyImports.values()) {
       const detail = details.find(
         (candidate) =>
@@ -388,7 +393,9 @@ export class SimulatedStore {
       if (!detail) continue;
       const range =
         (input.range_id
-          ? detail.ranges.find((candidate) => candidate.range_id === input.range_id)
+          ? detail.ranges.find(
+              (candidate) => candidate.range_id === input.range_id,
+            )
           : detail.ranges.find(
               (candidate) =>
                 candidate.status === "active" || candidate.status === "pending",

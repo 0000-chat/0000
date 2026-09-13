@@ -49,9 +49,7 @@ export type HistoryProviderAdvanceResult = {
 };
 
 export type HistoryImportProvider = {
-  start(
-    owner: HistoryImportProviderOwner,
-  ): Promise<HistoryProviderStartResult>;
+  start(owner: HistoryImportProviderOwner): Promise<HistoryProviderStartResult>;
   advance(input: {
     owner: HistoryImportProviderOwner;
     range_id: string;
@@ -108,7 +106,11 @@ const parseStart = (value: unknown): HistoryProviderStartResult => {
     throw new HistoryProviderError("provider_error");
   }
   const ranges = value.ranges.map((range): HistoryProviderRange => {
-    if (!isRecord(range) || !isString(range.start_at) || !isString(range.end_at)) {
+    if (
+      !isRecord(range) ||
+      !isString(range.start_at) ||
+      !isString(range.end_at)
+    ) {
       throw new HistoryProviderError("provider_error");
     }
     return {
@@ -122,7 +124,9 @@ const parseStart = (value: unknown): HistoryProviderStartResult => {
       ? null
       : HistoryImportFailureCodeSchema.safeParse(value.error_code).success
         ? (value.error_code as HistoryImportFailureCode)
-        : (() => { throw new HistoryProviderError("provider_error"); })();
+        : (() => {
+            throw new HistoryProviderError("provider_error");
+          })();
   const providerVersion = optionalNullableString(value.provider_version);
   const proofSource = value.proof_source;
   if (!isString(proofSource)) throw new HistoryProviderError("provider_error");
@@ -166,7 +170,9 @@ const parseAdvance = (value: unknown): HistoryProviderAdvanceResult => {
       ? null
       : HistoryImportFailureCodeSchema.safeParse(value.error_code).success
         ? (value.error_code as HistoryImportFailureCode)
-        : (() => { throw new HistoryProviderError("provider_error"); })();
+        : (() => {
+            throw new HistoryProviderError("provider_error");
+          })();
   if (!Object.prototype.hasOwnProperty.call(value, "next_cursor"))
     throw new HistoryProviderError("provider_error");
   const nextCursor = nullableString(value.next_cursor);
@@ -268,7 +274,9 @@ export class HttpHistoryImportProvider implements HistoryImportProvider {
     return parse(value);
   }
 
-  start(owner: HistoryImportProviderOwner): Promise<HistoryProviderStartResult> {
+  start(
+    owner: HistoryImportProviderOwner,
+  ): Promise<HistoryProviderStartResult> {
     validateOwner(owner);
     return this.request("/v1/history-imports/start", owner, parseStart);
   }
@@ -283,7 +291,11 @@ export class HttpHistoryImportProvider implements HistoryImportProvider {
       return Promise.reject(new HistoryProviderError("provider_error"));
     return this.request(
       "/v1/history-imports/advance",
-      { ...input.owner, range_id: input.range_id, source_cursor: input.source_cursor },
+      {
+        ...input.owner,
+        range_id: input.range_id,
+        source_cursor: input.source_cursor,
+      },
       parseAdvance,
     );
   }

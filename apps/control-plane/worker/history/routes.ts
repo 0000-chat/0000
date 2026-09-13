@@ -7,7 +7,6 @@ import {
   HistoryImportPageSchema,
   HistoryImportStartRequestSchema,
   ProviderCapabilitySchema,
-  type HistoryImportDetail,
 } from "@communicator/contracts";
 import type { Context, Handler } from "hono";
 import type { AuthorizationVariables } from "../auth/middleware";
@@ -23,10 +22,7 @@ import {
   listImports,
   HistoryRepositoryError,
 } from "./repository";
-import {
-  historyProviderFromEnv,
-  type HistoryImportProvider,
-} from "./provider";
+import { historyProviderFromEnv, type HistoryImportProvider } from "./provider";
 import {
   createHistoryService,
   HistoryServiceError,
@@ -92,7 +88,9 @@ export const historyImportStartRoute = createRoute({
       .object({ "idempotency-key": z.string().trim().min(8).max(200) })
       .passthrough(),
     body: {
-      content: { "application/json": { schema: HistoryImportStartRequestSchema } },
+      content: {
+        "application/json": { schema: HistoryImportStartRequestSchema },
+      },
     },
   },
   responses: {
@@ -153,13 +151,18 @@ export const providerCapabilitiesRoute = createRoute({
     200: {
       description: "Account provider capabilities and evidence",
       content: {
-        "application/json": { schema: ProviderCapabilitySchema.array().max(20) },
+        "application/json": {
+          schema: ProviderCapabilitySchema.array().max(20),
+        },
       },
     },
     400: { description: "Invalid request", content: errorContent },
     403: { description: "Forbidden", content: errorContent },
     404: { description: "Account not found", content: errorContent },
-    503: { description: "Capability directory unavailable", content: errorContent },
+    503: {
+      description: "Capability directory unavailable",
+      content: errorContent,
+    },
   },
 });
 
@@ -178,30 +181,80 @@ const errorResponse = (context: HistoryRouteContext, error: unknown) => {
   if (error instanceof HistoryRepositoryError) {
     switch (error.code) {
       case "history_invalid":
-        return responseError(context, 400, "invalid_request", "Invalid history import");
+        return responseError(
+          context,
+          400,
+          "invalid_request",
+          "Invalid history import",
+        );
       case "history_not_found":
-        return responseError(context, 404, "not_found", "History import not found");
+        return responseError(
+          context,
+          404,
+          "not_found",
+          "History import not found",
+        );
       case "history_conflict":
-        return responseError(context, 409, "invalid_request", "History import conflict");
+        return responseError(
+          context,
+          409,
+          "invalid_request",
+          "History import conflict",
+        );
       default:
-        return responseError(context, 503, "service_unavailable", "History import unavailable");
+        return responseError(
+          context,
+          503,
+          "service_unavailable",
+          "History import unavailable",
+        );
     }
   }
   if (error instanceof HistoryServiceError) {
     switch (error.code) {
       case "history_invalid":
-        return responseError(context, 400, "invalid_request", "Invalid history import");
+        return responseError(
+          context,
+          400,
+          "invalid_request",
+          "Invalid history import",
+        );
       case "history_not_found":
-        return responseError(context, 404, "not_found", "History import not found");
+        return responseError(
+          context,
+          404,
+          "not_found",
+          "History import not found",
+        );
       case "history_conflict":
-        return responseError(context, 409, "invalid_request", "History import conflict");
+        return responseError(
+          context,
+          409,
+          "invalid_request",
+          "History import conflict",
+        );
       case "history_unavailable":
-        return responseError(context, 503, "service_unavailable", "History import unavailable");
+        return responseError(
+          context,
+          503,
+          "service_unavailable",
+          "History import unavailable",
+        );
       default:
-        return responseError(context, 503, "service_unavailable", "History provider unavailable");
+        return responseError(
+          context,
+          503,
+          "service_unavailable",
+          "History provider unavailable",
+        );
     }
   }
-  return responseError(context, 503, "service_unavailable", "History import unavailable");
+  return responseError(
+    context,
+    503,
+    "service_unavailable",
+    "History import unavailable",
+  );
 };
 
 const requireAdministrator = (
@@ -210,12 +263,22 @@ const requireAdministrator = (
 ): Response | undefined => {
   const authorization = context.get("authorization");
   if (!isAdministratorSession(authorization))
-    return responseError(context, 403, "forbidden", "Administrator permission required");
+    return responseError(
+      context,
+      403,
+      "forbidden",
+      "Administrator permission required",
+    );
   const target = authorization.identities.find(
     (identity) => identity.identity_id === identityId,
   );
   if (target === undefined || !target.scopes.includes("connection.manage")) {
-    return responseError(context, 403, "forbidden", "Connection management permission required");
+    return responseError(
+      context,
+      403,
+      "forbidden",
+      "Connection management permission required",
+    );
   }
   return undefined;
 };
@@ -274,7 +337,10 @@ export const createHistoryHandlers = (services: HistoryRouteServices = {}) => {
         endAt: body.end_at,
         maxEvents: body.max_events,
       });
-      return context.json(detail, detail.import.status === "started" ? 201 : 200);
+      return context.json(
+        detail,
+        detail.import.status === "started" ? 201 : 200,
+      );
     } catch (error) {
       return errorResponse(context, error);
     }
@@ -317,13 +383,27 @@ export const createHistoryHandlers = (services: HistoryRouteServices = {}) => {
         context.get("authorization").tenant.id,
         params.import_id,
       );
-      await requireAccountRead(context, loaded.import.account_id, query.identity_id);
+      await requireAccountRead(
+        context,
+        loaded.import.account_id,
+        query.identity_id,
+      );
       if (loaded.import.identity_id !== query.identity_id)
-        return responseError(context, 404, "not_found", "History import not found");
+        return responseError(
+          context,
+          404,
+          "not_found",
+          "History import not found",
+        );
       return context.json(loaded, 200);
     } catch (error) {
       if (error instanceof Error && error.name === "ReadError")
-        return responseError(context, 404, "not_found", "History import not found");
+        return responseError(
+          context,
+          404,
+          "not_found",
+          "History import not found",
+        );
       return errorResponse(context, error);
     }
   };
@@ -344,7 +424,12 @@ export const createHistoryHandlers = (services: HistoryRouteServices = {}) => {
         params.import_id,
       );
       if (current.import.identity_id !== body.identity_id)
-        return responseError(context, 404, "not_found", "History import not found");
+        return responseError(
+          context,
+          404,
+          "not_found",
+          "History import not found",
+        );
       const loaded = await getService(context.env).advance({
         env: context.env as HistoryServiceEnvironment,
         tenantId: context.get("authorization").tenant.id,

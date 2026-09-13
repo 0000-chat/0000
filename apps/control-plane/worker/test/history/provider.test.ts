@@ -99,9 +99,9 @@ describe("private history provider adapter", () => {
     expect(idempotencyKey(requests[2]?.init)).not.toBe(
       idempotencyKey(requests[3]?.init),
     );
-    const advanceBody = JSON.parse(
-      String(requests[1]?.init?.body),
-    ) as { source_cursor: string };
+    const advanceBody = JSON.parse(String(requests[1]?.init?.body)) as {
+      source_cursor: string;
+    };
     expect(advanceBody.source_cursor).toBe("opaque-page-a");
   });
 

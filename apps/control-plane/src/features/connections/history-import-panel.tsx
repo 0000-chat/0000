@@ -22,7 +22,9 @@ import { queryKeys } from "@/lib/api/query-keys";
 const newIdempotencyKey = () => `ui-history-${crypto.randomUUID()}`;
 
 const titleCase = (value: string) =>
-  value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+  value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 
 const formatTimestamp = (value: string | null) =>
   value
@@ -36,8 +38,13 @@ const formatRange = (range: Pick<HistoryImportRange, "start_at" | "end_at">) =>
   `${formatTimestamp(range.start_at)} – ${formatTimestamp(range.end_at)}`;
 
 const badgeVariant = (status: string) => {
-  if (status === "failed" || status === "unsupported") return "destructive" as const;
-  if (status === "partial" || status === "conditional" || status === "unverified")
+  if (status === "failed" || status === "unsupported")
+    return "destructive" as const;
+  if (
+    status === "partial" ||
+    status === "conditional" ||
+    status === "unverified"
+  )
     return "outline" as const;
   return "secondary" as const;
 };
@@ -57,8 +64,10 @@ const progressPercent = (item: HistoryImport) =>
 const isAdministrator = (session: SessionResponse | undefined) =>
   Boolean(
     session &&
-      (session.membership.role === "owner" || session.membership.role === "admin") &&
-      (session.principal.type === "human" || session.principal.type === "operator"),
+      (session.membership.role === "owner" ||
+        session.membership.role === "admin") &&
+      (session.principal.type === "human" ||
+        session.principal.type === "operator"),
   );
 
 const canManageAccount = (
@@ -74,9 +83,17 @@ const canManageAccount = (
     ),
   );
 
-function CapabilityProof({ capabilities }: { capabilities: readonly ProviderCapability[] }) {
+function CapabilityProof({
+  capabilities,
+}: {
+  capabilities: readonly ProviderCapability[];
+}) {
   if (capabilities.length === 0)
-    return <p className="text-sm text-muted-foreground">No capability evidence is recorded.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        No capability evidence is recorded.
+      </p>
+    );
   return (
     <div className="space-y-2">
       {capabilities.map((capability) => (
@@ -128,7 +145,9 @@ function RangeRow({
     <li className="rounded-md border p-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Badge variant={badgeVariant(range.status)}>{titleCase(range.status)}</Badge>
+          <Badge variant={badgeVariant(range.status)}>
+            {titleCase(range.status)}
+          </Badge>
           <span className="font-medium">{formatRange(range)}</span>
         </div>
         {canManage && canAdvance && (
@@ -144,10 +163,13 @@ function RangeRow({
         )}
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        {range.event_count} event{range.event_count === 1 ? "" : "s"} · {range.attempt_count} attempt{range.attempt_count === 1 ? "" : "s"}
+        {range.event_count} event{range.event_count === 1 ? "" : "s"} ·{" "}
+        {range.attempt_count} attempt{range.attempt_count === 1 ? "" : "s"}
       </p>
       {range.gap_code && (
-        <p className="mt-1 text-xs text-amber-800">Known gap: {range.gap_code}</p>
+        <p className="mt-1 text-xs text-amber-800">
+          Known gap: {range.gap_code}
+        </p>
       )}
       {range.error_code && (
         <p role="alert" className="mt-1 text-xs text-destructive">
@@ -173,9 +195,15 @@ function HistoryImportAccountCard({
   const [maxEvents, setMaxEvents] = useState("500");
 
   const capabilitiesQuery = useQuery({
-    queryKey: queryKeys.historyCapabilities(account.account_id, account.identity_id),
+    queryKey: queryKeys.historyCapabilities(
+      account.account_id,
+      account.identity_id,
+    ),
     queryFn: () =>
-      apiClient.getProviderCapabilities(account.account_id, account.identity_id),
+      apiClient.getProviderCapabilities(
+        account.account_id,
+        account.identity_id,
+      ),
   });
   const importsQuery = useInfiniteQuery({
     queryKey: queryKeys.historyImports(account.account_id, account.identity_id),
@@ -206,8 +234,12 @@ function HistoryImportAccountCard({
   }, [imports, latestImport, selectedImportId]);
 
   const detailQuery = useQuery({
-    queryKey: queryKeys.historyImport(selectedImportId ?? "", account.identity_id),
-    queryFn: () => apiClient.getHistoryImport(selectedImportId ?? "", account.identity_id),
+    queryKey: queryKeys.historyImport(
+      selectedImportId ?? "",
+      account.identity_id,
+    ),
+    queryFn: () =>
+      apiClient.getHistoryImport(selectedImportId ?? "", account.identity_id),
     enabled: selectedImportId !== null,
   });
   const detail = detailQuery.data;
@@ -215,14 +247,23 @@ function HistoryImportAccountCard({
 
   const invalidateHistory = () => {
     void queryClient.invalidateQueries({
-      queryKey: queryKeys.historyImports(account.account_id, account.identity_id),
+      queryKey: queryKeys.historyImports(
+        account.account_id,
+        account.identity_id,
+      ),
     });
     void queryClient.invalidateQueries({
-      queryKey: queryKeys.historyCapabilities(account.account_id, account.identity_id),
+      queryKey: queryKeys.historyCapabilities(
+        account.account_id,
+        account.identity_id,
+      ),
     });
     if (selectedImportId !== null) {
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.historyImport(selectedImportId, account.identity_id),
+        queryKey: queryKeys.historyImport(
+          selectedImportId,
+          account.identity_id,
+        ),
       });
     }
   };
@@ -230,7 +271,11 @@ function HistoryImportAccountCard({
   const startMutation = useMutation({
     mutationFn: () => {
       const parsedMaxEvents = Number(maxEvents);
-      if (!Number.isSafeInteger(parsedMaxEvents) || parsedMaxEvents < 1 || parsedMaxEvents > 100_000) {
+      if (
+        !Number.isSafeInteger(parsedMaxEvents) ||
+        parsedMaxEvents < 1 ||
+        parsedMaxEvents > 100_000
+      ) {
         throw new Error("Events per batch must be between 1 and 100,000");
       }
       const start = toIsoTimestamp(startAt, "Start date");
@@ -282,12 +327,16 @@ function HistoryImportAccountCard({
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
             {titleCase(account.provider)} · Linked account
           </p>
-          <h3 className="mt-1 text-xl font-semibold">{account.display_label} history</h3>
+          <h3 className="mt-1 text-xl font-semibold">
+            {account.display_label} history
+          </h3>
           <p className="mt-1 text-xs text-muted-foreground">
             Account {account.account_id} · Identity {account.identity_id}
           </p>
         </div>
-        <Badge variant={badgeVariant(account.status)}>{titleCase(account.status)} account</Badge>
+        <Badge variant={badgeVariant(account.status)}>
+          {titleCase(account.status)} account
+        </Badge>
       </div>
 
       <details className="mt-5 rounded-lg border p-3" open>
@@ -305,18 +354,27 @@ function HistoryImportAccountCard({
               Unable to load capability evidence for this account.
             </p>
           )}
-          {capabilitiesQuery.data && <CapabilityProof capabilities={capabilitiesQuery.data} />}
+          {capabilitiesQuery.data && (
+            <CapabilityProof capabilities={capabilitiesQuery.data} />
+          )}
         </div>
       </details>
 
-      <section aria-labelledby={`${account.account_id}-history-heading`} className="mt-5">
+      <section
+        aria-labelledby={`${account.account_id}-history-heading`}
+        className="mt-5"
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h4 id={`${account.account_id}-history-heading`} className="font-semibold">
+            <h4
+              id={`${account.account_id}-history-heading`}
+              className="font-semibold"
+            >
               History import progress
             </h4>
             <p className="mt-1 text-sm text-muted-foreground">
-              Requested ranges stay separate from provider batches, so advancing a batch never limits the requested history.
+              Requested ranges stay separate from provider batches, so advancing
+              a batch never limits the requested history.
             </p>
           </div>
           {pendingRange && canManage && (
@@ -347,7 +405,10 @@ function HistoryImportAccountCard({
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Recorded imports
             </p>
-            <div className="flex flex-wrap gap-2" aria-label="Recorded history imports">
+            <div
+              className="flex flex-wrap gap-2"
+              aria-label="Recorded history imports"
+            >
               {imports.map((historyImport) => (
                 <Button
                   key={historyImport.import_id}
@@ -381,7 +442,8 @@ function HistoryImportAccountCard({
         )}
         {!importsQuery.isLoading && !importsQuery.isError && !item && (
           <p className="mt-3 rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-            Not imported yet. Stored reads will identify this range as not imported, even when the chat itself has no messages.
+            Not imported yet. Stored reads will identify this range as not
+            imported, even when the chat itself has no messages.
           </p>
         )}
         {item && (
@@ -391,23 +453,34 @@ function HistoryImportAccountCard({
                 <div>
                   <p className="text-sm font-medium">Import {item.import_id}</p>
                   <p className="text-xs text-muted-foreground">
-                    {formatTimestamp(item.requested_start_at)} – {formatTimestamp(item.requested_end_at)}
+                    {formatTimestamp(item.requested_start_at)} –{" "}
+                    {formatTimestamp(item.requested_end_at)}
                   </p>
                 </div>
-                <Badge variant={badgeVariant(item.status)}>{titleCase(item.status)}</Badge>
+                <Badge variant={badgeVariant(item.status)}>
+                  {titleCase(item.status)}
+                </Badge>
               </div>
-              <Progress className="mt-3" value={progressPercent(item)} aria-label="History range progress" />
+              <Progress
+                className="mt-3"
+                value={progressPercent(item)}
+                aria-label="History range progress"
+              />
               <p className="mt-2 text-xs text-muted-foreground">
-                {item.completed_range_count} of {item.total_range_count} ranges complete · {item.event_count} events · {item.gap_count} known gap{item.gap_count === 1 ? "" : "s"}
+                {item.completed_range_count} of {item.total_range_count} ranges
+                complete · {item.event_count} events · {item.gap_count} known
+                gap{item.gap_count === 1 ? "" : "s"}
               </p>
               {item.status === "partial" && (
                 <p className="mt-2 text-sm text-amber-800">
-                  Partial coverage remains visible; known gaps were not presented as complete history.
+                  Partial coverage remains visible; known gaps were not
+                  presented as complete history.
                 </p>
               )}
               {item.status === "failed" && (
                 <p role="alert" className="mt-2 text-sm text-destructive">
-                  Import stopped with {titleCase(item.last_error_code ?? "provider_error")}.
+                  Import stopped with{" "}
+                  {titleCase(item.last_error_code ?? "provider_error")}.
                 </p>
               )}
               {item.status === "completed" && item.event_count === 0 && (
@@ -428,13 +501,18 @@ function HistoryImportAccountCard({
               </p>
             )}
             {detail && (
-              <ol className="space-y-2" aria-label={`Ranges for ${item.import_id}`}>
+              <ol
+                className="space-y-2"
+                aria-label={`Ranges for ${item.import_id}`}
+              >
                 {detail.ranges.map((range) => (
                   <RangeRow
                     key={range.range_id}
                     range={range}
                     canManage={canManage}
-                    canAdvance={range.status === "active" || range.status === "pending"}
+                    canAdvance={
+                      range.status === "active" || range.status === "pending"
+                    }
                     isAdvancing={advanceMutation.isPending}
                     onAdvance={() => advanceMutation.mutate(range.range_id)}
                   />
@@ -456,7 +534,8 @@ function HistoryImportAccountCard({
           <div className="sm:col-span-2 lg:col-span-4">
             <p className="font-medium">Start a history range</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Choose the coverage window explicitly. The batch size only bounds one resumable provider step.
+              Choose the coverage window explicitly. The batch size only bounds
+              one resumable provider step.
             </p>
           </div>
           <label className="grid gap-1 text-sm font-medium">
@@ -495,12 +574,19 @@ function HistoryImportAccountCard({
             />
           </label>
           <div className="flex items-end">
-            <Button type="submit" className="w-full" disabled={startMutation.isPending}>
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={startMutation.isPending}
+            >
               {startMutation.isPending ? "Starting…" : "Start import"}
             </Button>
           </div>
           {startMutation.isError && (
-            <p role="alert" className="sm:col-span-2 lg:col-span-4 text-sm text-destructive">
+            <p
+              role="alert"
+              className="sm:col-span-2 lg:col-span-4 text-sm text-destructive"
+            >
               {startMutation.error instanceof Error
                 ? startMutation.error.message
                 : "History import could not be started."}
@@ -509,7 +595,9 @@ function HistoryImportAccountCard({
         </form>
       ) : (
         <p className="mt-5 rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-          Import controls require an administrator identity with connection management permission. Capability and progress state remain readable here.
+          Import controls require an administrator identity with connection
+          management permission. Capability and progress state remain readable
+          here.
         </p>
       )}
     </article>
@@ -531,14 +619,24 @@ export function HistoryImportPanel({
 }) {
   if (!isAdministrator(session)) return null;
   return (
-    <section aria-labelledby="history-import-management-heading" className="space-y-4">
+    <section
+      aria-labelledby="history-import-management-heading"
+      className="space-y-4"
+    >
       <div>
-        <p className="text-sm font-medium text-muted-foreground">Provider state and coverage</p>
-        <h2 id="history-import-management-heading" className="mt-1 text-xl font-semibold">
+        <p className="text-sm font-medium text-muted-foreground">
+          Provider state and coverage
+        </p>
+        <h2
+          id="history-import-management-heading"
+          className="mt-1 text-xl font-semibold"
+        >
           History imports
         </h2>
         <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-          Review proof-backed capabilities and resumable coverage for each linked account. Empty, not imported, partial, and failed states stay distinct.
+          Review proof-backed capabilities and resumable coverage for each
+          linked account. Empty, not imported, partial, and failed states stay
+          distinct.
         </p>
       </div>
       {accounts.length === 0 && (
@@ -548,7 +646,11 @@ export function HistoryImportPanel({
       )}
       <div className="grid gap-5 xl:grid-cols-2">
         {accounts.map((account) => (
-          <HistoryImportAccountCard key={account.account_id} account={account} session={session} />
+          <HistoryImportAccountCard
+            key={account.account_id}
+            account={account}
+            session={session}
+          />
         ))}
       </div>
       {accountsHasNextPage && (
@@ -558,7 +660,9 @@ export function HistoryImportPanel({
           disabled={accountsFetchingNextPage}
           onClick={onLoadMoreAccounts}
         >
-          {accountsFetchingNextPage ? "Loading more linked accounts…" : "Load more linked accounts"}
+          {accountsFetchingNextPage
+            ? "Loading more linked accounts…"
+            : "Load more linked accounts"}
         </Button>
       )}
     </section>

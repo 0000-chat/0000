@@ -76,6 +76,15 @@ type HistoryRangeRow = {
   completed_at: string | null;
 };
 
+type HistoryRangeWorkRow = HistoryRangeRow & {
+  tenant_id: string;
+  identity_id: string;
+  next_attempt_at: string | null;
+  lease_token: string | null;
+  lease_until: string | null;
+  operation_key: string | null;
+};
+
 type CapabilityRow = {
   tenant_id: string;
   account_id: string;
@@ -139,6 +148,8 @@ export type HistoryImportUpdate = {
   last_error_code?: HistoryImportFailureCode | null;
   updated_at: string;
   completed_at?: string | null;
+  lease_token?: string;
+  range_id?: string;
 };
 
 export type HistoryRangeUpdate = {
@@ -151,6 +162,30 @@ export type HistoryRangeUpdate = {
   event_count?: number;
   updated_at: string;
   completed_at?: string | null;
+  lease_token?: string;
+};
+
+export type HistoryRangeWorkClaim = {
+  tenant_id: string;
+  import_id: string;
+  range_id: string;
+  account_id: string;
+  identity_id: string;
+  source_cursor: string | null;
+  operation_key: string;
+  lease_token: string;
+  lease_until: string;
+};
+
+export type HistoryRangeWorkSchedule = {
+  tenant_id: string;
+  import_id: string;
+  range_id: string;
+  account_id: string;
+  source_cursor: string | null;
+  next_attempt_at: string;
+  updated_at: string;
+  lease_token?: string;
 };
 
 export type HistoryRepositoryErrorCode =
@@ -423,12 +458,12 @@ export async function updateImport(
   db: D1Database,
   input: HistoryImportUpdate,
 ): Promise<void> {
-  const assignments = [
-    "status = ?",
-    "availability = ?",
-    "updated_at = ?",
+  const assignments = ["status = ?", "availability = ?", "updated_at = ?"];
+  const values: unknown[] = [
+    input.status,
+    input.availability,
+    input.updated_at,
   ];
-  const values: unknown[] = [input.status, input.availability, input.updated_at];
   const optional: Array<[string, unknown]> = [
     ["source_start_at = ?", input.source_start_at],
     ["source_end_at = ?", input.source_end_at],
@@ -447,10 +482,17 @@ export async function updateImport(
     }
   }
   values.push(input.import_id);
+  const leaseClause =
+    input.lease_token === undefined || input.range_id === undefined
+      ? ""
+      : " AND EXISTS (SELECT 1 FROM history_import_ranges WHERE import_id = ? AND range_id = ? AND lease_token = ?)";
+  if (input.lease_token !== undefined && input.range_id !== undefined) {
+    values.push(input.import_id, input.range_id, input.lease_token);
+  }
   try {
     const result = await db
       .prepare(
-        `UPDATE history_imports SET ${assignments.join(", ")} WHERE import_id = ?`,
+        `UPDATE history_imports SET ${assignments.join(", ")} WHERE import_id = ?${leaseClause}`,
       )
       .bind(...values)
       .run();
@@ -483,10 +525,13 @@ export async function updateRange(
     }
   }
   values.push(input.range_id);
+  const leaseClause =
+    input.lease_token === undefined ? "" : " AND lease_token = ?";
+  if (input.lease_token !== undefined) values.push(input.lease_token);
   try {
     const result = await db
       .prepare(
-        `UPDATE history_import_ranges SET ${assignments.join(", ")} WHERE range_id = ?`,
+        `UPDATE history_import_ranges SET ${assignments.join(", ")} WHERE range_id = ?${leaseClause}`,
       )
       .bind(...values)
       .run();
@@ -494,6 +539,257 @@ export async function updateRange(
       throw historyError("history_not_found");
   } catch (error) {
     if (error instanceof HistoryRepositoryError) throw error;
+    throw historyError("history_unavailable", error);
+  }
+}
+
+const historyRangeOperationKey = (
+  importId: string,
+  rangeId: string,
+  sourceCursor: string | null,
+): string => `history-page:${importId}:${rangeId}:${sourceCursor ?? "initial"}`;
+
+/** Initialize a range's durable wake and page key without disturbing a live lease. */
+export async function ensureHistoryRangeWork(
+  db: D1Database,
+  input: {
+    import_id: string;
+    range_id: string;
+    account_id: string;
+    source_cursor: string | null;
+    next_attempt_at: string;
+    updated_at: string;
+  },
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `UPDATE history_import_ranges
+            SET next_attempt_at = COALESCE(next_attempt_at, ?),
+                operation_key = COALESCE(operation_key, ?),
+                updated_at = ?
+          WHERE import_id = ? AND range_id = ? AND account_id = ?
+            AND status IN ('pending', 'active')
+            AND (lease_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`,
+      )
+      .bind(
+        input.next_attempt_at,
+        historyRangeOperationKey(
+          input.import_id,
+          input.range_id,
+          input.source_cursor,
+        ),
+        input.updated_at,
+        input.import_id,
+        input.range_id,
+        input.account_id,
+        input.updated_at,
+      )
+      .run();
+  } catch (error) {
+    throw historyError("history_unavailable", error);
+  }
+}
+
+/** Claim one page. The same claim path is used by cron and manual replay. */
+export async function claimHistoryRangeWork(
+  db: D1Database,
+  input: {
+    tenant_id: string;
+    import_id: string;
+    range_id: string;
+    account_id: string;
+    identity_id: string;
+    source_cursor: string | null;
+    lease_token: string;
+    lease_until: string;
+    now: string;
+    ignore_due?: boolean;
+  },
+): Promise<boolean> {
+  try {
+    const dueClause = input.ignore_due
+      ? ""
+      : "AND (next_attempt_at IS NULL OR next_attempt_at <= ?)";
+    const dueValues = input.ignore_due ? [] : [input.now];
+    const result = await db
+      .prepare(
+        `UPDATE history_import_ranges
+            SET lease_token = ?, lease_until = ?,
+                operation_key = ?, updated_at = ?
+          WHERE import_id = ? AND range_id = ? AND account_id = ?
+            AND status IN ('pending', 'active')
+            AND EXISTS (
+              SELECT 1 FROM history_imports
+               WHERE history_imports.import_id = history_import_ranges.import_id
+                 AND history_imports.tenant_id = ?
+                 AND history_imports.account_id = ?
+                 AND history_imports.identity_id = ?
+            )
+            AND (lease_token IS NULL OR lease_until IS NULL OR lease_until <= ? OR lease_token = ?)
+            ${dueClause}`,
+      )
+      .bind(
+        input.lease_token,
+        input.lease_until,
+        historyRangeOperationKey(
+          input.import_id,
+          input.range_id,
+          input.source_cursor,
+        ),
+        input.now,
+        input.import_id,
+        input.range_id,
+        input.account_id,
+        input.tenant_id,
+        input.account_id,
+        input.identity_id,
+        input.now,
+        input.lease_token,
+        ...dueValues,
+      )
+      .run();
+    return (result.meta.changes ?? 0) === 1;
+  } catch (error) {
+    throw historyError("history_unavailable", error);
+  }
+}
+
+/** Claim the oldest due range for a bounded scheduled tick. */
+export async function claimNextHistoryRangeWork(
+  db: D1Database,
+  input: {
+    lease_token: string;
+    lease_until: string;
+    now: string;
+  },
+): Promise<HistoryRangeWorkClaim | null> {
+  try {
+    const row = await primarySession(db)
+      .prepare(
+        `SELECT i.tenant_id, i.identity_id, r.import_id, r.range_id,
+                r.account_id, r.source_cursor, r.operation_key, r.lease_until
+           FROM history_import_ranges AS r
+           JOIN history_imports AS i ON i.import_id = r.import_id
+          WHERE r.status IN ('pending', 'active')
+            AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)
+            AND (r.lease_token IS NULL OR r.lease_until IS NULL OR r.lease_until <= ?)
+          ORDER BY COALESCE(r.next_attempt_at, r.updated_at) ASC,
+                   r.updated_at ASC, r.range_id ASC
+          LIMIT 1`,
+      )
+      .bind(input.now, input.now)
+      .first<HistoryRangeWorkRow>();
+    if (row === null) return null;
+    const claimed = await claimHistoryRangeWork(db, {
+      tenant_id: row.tenant_id,
+      import_id: row.import_id,
+      range_id: row.range_id,
+      account_id: row.account_id,
+      identity_id: row.identity_id,
+      source_cursor: row.source_cursor,
+      lease_token: input.lease_token,
+      lease_until: input.lease_until,
+      now: input.now,
+    });
+    if (!claimed) return null;
+    return {
+      tenant_id: row.tenant_id,
+      import_id: row.import_id,
+      range_id: row.range_id,
+      account_id: row.account_id,
+      identity_id: row.identity_id,
+      source_cursor: row.source_cursor,
+      operation_key:
+        row.operation_key ??
+        historyRangeOperationKey(
+          row.import_id,
+          row.range_id,
+          row.source_cursor,
+        ),
+      lease_token: input.lease_token,
+      lease_until: input.lease_until,
+    };
+  } catch (error) {
+    if (error instanceof HistoryRepositoryError) throw error;
+    throw historyError("history_unavailable", error);
+  }
+}
+
+/** Move a claimed range to its next durable wake after its checkpoint changed. */
+export async function scheduleHistoryRangeWork(
+  db: D1Database,
+  input: HistoryRangeWorkSchedule,
+): Promise<void> {
+  try {
+    const leaseClause =
+      input.lease_token === undefined
+        ? "(lease_token IS NULL OR lease_until IS NULL OR lease_until <= ?)"
+        : "lease_token = ?";
+    const leaseValue = input.lease_token ?? input.updated_at;
+    await db
+      .prepare(
+        `UPDATE history_import_ranges
+            SET next_attempt_at = ?, lease_token = NULL, lease_until = NULL,
+                operation_key = ?, updated_at = ?
+          WHERE import_id = ? AND range_id = ? AND account_id = ?
+            AND status IN ('pending', 'active')
+            AND ${leaseClause}`,
+      )
+      .bind(
+        input.next_attempt_at,
+        historyRangeOperationKey(
+          input.import_id,
+          input.range_id,
+          input.source_cursor,
+        ),
+        input.updated_at,
+        input.import_id,
+        input.range_id,
+        input.account_id,
+        leaseValue,
+      )
+      .run();
+  } catch (error) {
+    throw historyError("history_unavailable", error);
+  }
+}
+
+/** Close the scheduler state only after the range checkpoint is terminal. */
+export async function closeHistoryRangeWork(
+  db: D1Database,
+  input: {
+    import_id: string;
+    range_id: string;
+    account_id: string;
+    updated_at: string;
+    lease_token?: string;
+  },
+): Promise<void> {
+  try {
+    const leaseClause =
+      input.lease_token === undefined
+        ? "(lease_token IS NULL OR lease_until IS NULL OR lease_until <= ?)"
+        : "lease_token = ?";
+    const leaseValue = input.lease_token ?? input.updated_at;
+    await db
+      .prepare(
+        `UPDATE history_import_ranges
+            SET next_attempt_at = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ?
+          WHERE import_id = ? AND range_id = ? AND account_id = ?
+            AND status IN ('completed', 'partial', 'failed', 'gap')
+            AND ${leaseClause}`,
+      )
+      .bind(
+        input.updated_at,
+        input.import_id,
+        input.range_id,
+        input.account_id,
+        leaseValue,
+      )
+      .run();
+  } catch (error) {
     throw historyError("history_unavailable", error);
   }
 }
@@ -620,9 +916,10 @@ export async function listImports(
       )
       .all<HistoryImportRow>();
     const items = result.results.slice(0, boundedLimit).map(mapImport);
-    const next = result.results.length > boundedLimit
-      ? items.at(-1)?.import_id ?? null
-      : null;
+    const next =
+      result.results.length > boundedLimit
+        ? (items.at(-1)?.import_id ?? null)
+        : null;
     return HistoryImportPageSchema.parse({ items, next_cursor: next });
   } catch (error) {
     if (error instanceof HistoryRepositoryError) throw error;

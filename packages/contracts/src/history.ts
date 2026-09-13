@@ -197,9 +197,7 @@ export const HistoryCoverageStateSchema = z.enum([
   "unavailable",
 ]);
 
-export type HistoryCoverageState = z.infer<
-  typeof HistoryCoverageStateSchema
->;
+export type HistoryCoverageState = z.infer<typeof HistoryCoverageStateSchema>;
 
 /** Stored-read metadata: an empty chat is different from a range we have not imported. */
 export const HistoryCoverageSchema = z
