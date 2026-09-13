@@ -65,11 +65,11 @@ worker records a concrete blocked state.
 
 T01/#12 feature behavior is accepted and integrated at aggregate commit
 `c86c9b0`, with the focused grants/read/socket, UI, TypeScript/Vite, and
-repository checks recorded in the worker ledger. The full Worker suite still
-exits with a reproducible Vitest/workerd teardown error after 591 passing
-tests. That is a crosscutting aggregate PR-readiness blocker; it does not
-reopen the #12 feature gate or block implementation of its independent child
-contracts.
+repository checks recorded in the worker ledger. Fresh default, async-leak,
+and no-file-parallelism Worker diagnostics each exit 0 with 41 files and 591
+passing tests. The earlier teardown is recorded as an observed Vitest 4.1.11
+shutdown nondeterminism risk under final-validation monitoring; it is not an
+active #12 feature blocker and does not block independent child contracts.
 
 T02/#13 and T24/#14 were therefore dispatched independently from aggregate
 checkpoint `cf6b50f` (OAuth branch `codex/implement-oauth-13`; linking branch

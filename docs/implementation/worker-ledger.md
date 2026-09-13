@@ -6,12 +6,12 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `cf6b50f` | Health #5, runtime #9, tooling baseline, and #12 feature behavior integrated serially; focused checks and restored `scripts/check` pass. A separate full-Worker teardown failure holds aggregate PR readiness, while #13/#14 implement independently from this checkpoint. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `ef6b591` | Health #5, runtime #9, tooling baseline, and #12 feature behavior integrated serially; focused checks and restored `scripts/check` pass. Fresh default, async-leak, and no-file-parallelism Worker diagnostics each pass 41 files/591 tests; the earlier teardown is an observed Vitest 4.1.11 shutdown flake under final-validation monitoring, with no active feature blocker. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
 | Tooling baseline | `/tmp/communicator-implementation/tooling-baseline/0000-communicator` | `codex/communicator-tooling-baseline` | `8dcd2acfa396a6ff8a1223d699b9aa7a5e910f47` | Clean source branch merged as aggregate commit `e4b8ede`; 191 authored files mechanically formatted, 46 Oxlint warnings fixed minimally, and three generated artifacts excluded from Biome. |
-| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `823642f42dacab3ba24f75c57203f94b03125896` | Feature behavior accepted and integrated at aggregate `c86c9b0`; worker retains only three untracked dependency links; source/lockfile changes are clean. Full-Worker teardown remains a separate aggregate PR-readiness blocker. |
+| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `823642f42dacab3ba24f75c57203f94b03125896` | Feature behavior accepted and integrated at aggregate `c86c9b0`; worker retains only three untracked dependency links; source/lockfile changes are clean. Fresh full Worker diagnostics pass; the earlier teardown is monitored as an upstream Vitest 4.1.11 shutdown flake, with no root-cause-fix claim. |
 | OAuth worker (T02/#13) | `/tmp/communicator-implementation/worker-13/0000-communicator` | `codex/implement-oauth-13` | `cf6b50f6a56b5bf56ffaf1cf8bb0d8359ed0b2ea` | Dispatched independently from aggregate checkpoint `cf6b50f`; implementation in progress; no acceptance evidence yet. |
 | Linking worker (T24/#14) | `/tmp/communicator-implementation/worker-14/0000-communicator` | `codex/implement-linking-14` | `cf6b50f6a56b5bf56ffaf1cf8bb0d8359ed0b2ea` | Dispatched independently from aggregate checkpoint `cf6b50f`; implementation in progress; no acceptance evidence yet. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
@@ -35,8 +35,8 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | --- | --- | --- |
 | #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
 | #9 | Runtime | verified and merged as `f681496`; issue remains open until aggregate PR merge |
-| #11 | Agent messaging specification | aggregate parent active; #12 feature behavior is accepted/integrated at `c86c9b0`; a separate full-Worker teardown failure holds PR readiness; #13/#14 are dispatched independently |
-| #12 | T01 account grants | feature behavior accepted and integrated at aggregate `c86c9b0` from `codex/implement-grants-12` at `823642f`; full-suite process failure remains a crosscutting PR-readiness blocker; issue remains open |
+| #11 | Agent messaging specification | aggregate parent active; #12 feature behavior is accepted/integrated at `c86c9b0`; the prior teardown is an observed Vitest 4.1.11 shutdown flake under final-validation monitoring, not an active feature blocker; #13/#14 are dispatched independently |
+| #12 | T01 account grants | feature behavior accepted and integrated at aggregate `c86c9b0` from `codex/implement-grants-12` at `823642f`; fresh default and diagnostic Worker runs pass 41/591, while the prior teardown remains an observed shutdown flake with no root-cause-fix claim; issue remains open |
 | #13/#14 | T02 OAuth and T24 WhatsApp linking | independently implementing from aggregate checkpoint `cf6b50f`; no child acceptance evidence yet; issues remain open |
 | #15–#36 | T03–T25 child tickets | planned; dependencies in aggregate plan |
 
@@ -220,6 +220,20 @@ console-log teardown race. The attempt was to rerun the full Worker alone, with
 the temporary dependency links retained, after the earlier concurrent run. The
 same teardown signature reproduced, so this is an integration checkpoint rather
 than a full-suite process pass. The #12 feature behavior remains accepted and
-integrated; the teardown is a separate crosscutting PR-readiness blocker. It
-does not gate #13/#14 implementation, which was dispatched independently from
-`cf6b50f`. Issues remain open and no PR-ready or deployment claim is made.
+integrated; the earlier teardown is tracked separately below as an observed
+shutdown flake. It does not gate #13/#14 implementation, which was dispatched
+independently from `cf6b50f`.
+
+## Teardown verification checkpoint
+
+In a fresh canonical worktree at the exact tracked checkpoint `cf6b50f`, the
+default full Worker run, `detectAsyncLeaks`, and the no-file-parallelism run
+each exited 0 with 41 files and 591 passing tests. The leak diagnostic emitted
+no leak report. The worktree had no tracked source or configuration changes;
+its validation dependency links remain preserved.
+
+The earlier `EnvironmentTeardownError` is therefore classified as an observed
+Vitest 4.1.11/workerd shutdown nondeterminism risk under final-validation
+monitoring, rather than an active #12 feature blocker. No root-cause fix,
+suppression, or dependency/configuration change is claimed. Issues remain open
+and the aggregate remains work in progress pending final validation.
