@@ -585,7 +585,7 @@ fn read_document(source: &InputSource) -> Result<SecretBytes, AdminError> {
     match source {
         InputSource::File(path) => load_secret(
             path,
-            SecretKind::Text {
+            SecretKind::Document {
                 max_bytes: MAX_REGISTRY_DOCUMENT_BYTES,
             },
         )
@@ -603,7 +603,7 @@ fn read_document(source: &InputSource) -> Result<SecretBytes, AdminError> {
             if bytes.len() > MAX_REGISTRY_DOCUMENT_BYTES {
                 return Err(AdminError::new(ADMIN_INPUT_TOO_LARGE));
             }
-            SecretBytes::from_text(&bytes, MAX_REGISTRY_DOCUMENT_BYTES).map_err(Into::into)
+            SecretBytes::from_owned_document(bytes, MAX_REGISTRY_DOCUMENT_BYTES).map_err(Into::into)
         }
     }
 }

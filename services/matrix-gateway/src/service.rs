@@ -22,6 +22,7 @@ use crate::{
         MATRIX_ROOM_MEMBERSHIP_INVALID, MATRIX_SDK_FAILED, MatrixProcessor, MatrixTransport,
         ObservedMatrixEvent as SdkObservedMatrixEvent, ProcessedSync, RestartCryptoAck,
     },
+    model::CanonicalEventSource,
     normalize::{
         self, KnownRelation, KnownRelations, MATRIX_MALFORMED_EVENT, MATRIX_UNKNOWN_ROOM,
         MatrixAttachment, MatrixMembership, MatrixMembershipKind, MatrixMessage, MatrixMessageKind,
@@ -883,6 +884,7 @@ where
                         .collect::<String>()
                 ),
                 observed_at,
+                CanonicalEventSource::Live,
             )?;
             for converted in converted {
                 if let Some(value) = converted.typing {
@@ -1145,6 +1147,60 @@ fn safe_ignored(reason_code: &str) -> bool {
     )
 }
 
+/// Normalize one authenticated Matrix history page through the same pure
+/// projection boundary used by live sync. The caller supplies observations in
+/// state-before-timeline order so participant and relation checks see the
+/// complete page context. Any undecryptable event becomes a retry error; the
+/// caller must not checkpoint that page.
+pub(crate) fn normalize_backfill_events(
+    seed_events: &[SdkObservedMatrixEvent],
+    events: &[SdkObservedMatrixEvent],
+    room_id: &str,
+    room_lookup: [u8; 32],
+    binding: &crate::registry::RoomBinding,
+    checkpoint_digest: &str,
+    observed_at: DateTime<Utc>,
+) -> Result<Vec<RoutedEvent>, SafeError> {
+    let mut known = KnownRelations::new();
+    for event in seed_events.iter().chain(events) {
+        seed_known_relations(event, room_id, binding, &mut known);
+    }
+    let typing_snapshots = BTreeMap::new();
+    let mut routed = Vec::new();
+    for event in events {
+        for converted in convert_sdk_event(
+            event,
+            room_id,
+            room_lookup,
+            &typing_snapshots,
+            checkpoint_digest,
+            observed_at,
+            CanonicalEventSource::Backfill,
+        )? {
+            match normalize::normalize(converted.event, binding, &known, observed_at) {
+                NormalizeOutcome::Events(events) => {
+                    routed.extend(
+                        events
+                            .into_iter()
+                            .map(|event| RoutedEvent::new(binding.gateway_route_id(), event)),
+                    );
+                }
+                NormalizeOutcome::Ignored { reason_code } if safe_ignored(reason_code) => {}
+                NormalizeOutcome::RetryWindow { reason_code } => {
+                    return Err(SafeError::new(reason_code));
+                }
+                NormalizeOutcome::SourceGap { .. } => {
+                    return Err(SafeError::new("matrix_source_gap"));
+                }
+                NormalizeOutcome::Ignored { reason_code } => {
+                    return Err(SafeError::new(reason_code));
+                }
+            }
+        }
+    }
+    Ok(routed)
+}
+
 fn raw_has_non_joined_rooms(bytes: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
         return false;
@@ -1247,6 +1303,7 @@ fn convert_sdk_event(
     typing_snapshots: &BTreeMap<[u8; 32], TypingSnapshot>,
     checkpoint_digest: &str,
     fallback_at: DateTime<Utc>,
+    source: CanonicalEventSource,
 ) -> Result<Vec<ConvertedObservation>, SafeError> {
     let room_event = event.room_event();
     let exact = room_event.exact_json().as_bytes();
@@ -1339,6 +1396,7 @@ fn convert_sdk_event(
                             .unwrap_or("$missing:matrix"),
                     ));
                 }
+                message = message.with_source(source);
                 Ok(one(NormalizedMatrixEvent::Message(message)))
             }
             "m.reaction" => {
@@ -1349,14 +1407,10 @@ fn convert_sdk_event(
                     .ok_or_else(|| SafeError::new(MATRIX_MALFORMED_EVENT))?;
                 let target = json_string(relates, "event_id").unwrap_or("");
                 let emoji = json_string(relates, "key").unwrap_or("");
-                Ok(one(NormalizedMatrixEvent::Reaction(MatrixReaction::new(
-                    room_id,
-                    event_id,
-                    sender,
-                    target,
-                    emoji,
-                    occurred_text,
-                ))))
+                Ok(one(NormalizedMatrixEvent::Reaction(
+                    MatrixReaction::new(room_id, event_id, sender, target, emoji, occurred_text)
+                        .with_source(source),
+                )))
             }
             "m.room.redaction" => {
                 let sender = sender.ok_or_else(|| SafeError::new(MATRIX_MALFORMED_EVENT))?;
@@ -1365,14 +1419,10 @@ fn convert_sdk_event(
                     .or_else(|| json_string(&content, "redacts"))
                     .unwrap_or("");
                 let reason = json_string(&content, "reason").map(str::to_owned);
-                Ok(one(NormalizedMatrixEvent::Redaction(MatrixRedaction::new(
-                    room_id,
-                    event_id,
-                    sender,
-                    target,
-                    reason,
-                    occurred_text,
-                ))))
+                Ok(one(NormalizedMatrixEvent::Redaction(
+                    MatrixRedaction::new(room_id, event_id, sender, target, reason, occurred_text)
+                        .with_source(source),
+                )))
             }
             _ => Ok(one(NormalizedMatrixEvent::Unsupported {
                 reason_code: normalize::MATRIX_UNSUPPORTED_MESSAGE_TYPE,
@@ -1390,16 +1440,19 @@ fn convert_sdk_event(
                     }
                     _ => unreachable!("event type was matched above"),
                 };
-                Ok(one(NormalizedMatrixEvent::RoomState(MatrixRoomState::new(
-                    room_id,
-                    event_id,
-                    sender,
-                    kind,
-                    title.unwrap_or(""),
-                    false,
-                    false,
-                    occurred_text,
-                ))))
+                Ok(one(NormalizedMatrixEvent::RoomState(
+                    MatrixRoomState::new(
+                        room_id,
+                        event_id,
+                        sender,
+                        kind,
+                        title.unwrap_or(""),
+                        false,
+                        false,
+                        occurred_text,
+                    )
+                    .with_source(source),
+                )))
             }
             "m.room.member" => {
                 let sender = sender.ok_or_else(|| SafeError::new(MATRIX_MALFORMED_EVENT))?;
@@ -1424,7 +1477,8 @@ fn convert_sdk_event(
                         json_string(&content, "remote_id").map(str::to_owned),
                         json_string(&content, "avatar_url").map(str::to_owned),
                         occurred_text,
-                    ),
+                    )
+                    .with_source(source),
                 )))
             }
             _ => Ok(one(NormalizedMatrixEvent::Unsupported {
@@ -1449,13 +1503,16 @@ fn convert_sdk_event(
                         };
                         for user_id in users.keys() {
                             output.push(ConvertedObservation {
-                                event: NormalizedMatrixEvent::Receipt(MatrixReceipt::new(
-                                    room_id,
-                                    target,
-                                    user_id,
-                                    receipt_type,
-                                    occurred_text.clone(),
-                                )),
+                                event: NormalizedMatrixEvent::Receipt(
+                                    MatrixReceipt::new(
+                                        room_id,
+                                        target,
+                                        user_id,
+                                        receipt_type,
+                                        occurred_text.clone(),
+                                    )
+                                    .with_source(source),
+                                ),
                                 typing: None,
                             });
                         }
@@ -1491,12 +1548,10 @@ fn convert_sdk_event(
                 .checked_add_signed(ChronoDuration::seconds(30))
                 .ok_or_else(|| SafeError::new(normalize::MATRIX_INVALID_TIMESTAMP))?;
             Ok(vec![ConvertedObservation {
-                event: NormalizedMatrixEvent::Typing(MatrixTyping::new(
-                    room_id,
-                    checkpoint_digest,
-                    members.clone(),
-                    previous,
-                )),
+                event: NormalizedMatrixEvent::Typing(
+                    MatrixTyping::new(room_id, checkpoint_digest, members.clone(), previous)
+                        .with_source(source),
+                ),
                 typing: Some(TypingCandidate {
                     lookup: room_lookup,
                     members,

@@ -17,7 +17,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::ingestion::SecretString;
+use crate::{history::HistoryGatewayServer, ingestion::SecretString};
 
 const PROVISIONING_ROOT: &str = "/_matrix/provision/v3";
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
@@ -459,6 +459,7 @@ pub struct ProvisioningGatewayServer {
     gateway_token: SecretString,
     route: GatewayRouteMetadata,
     sessions: Arc<Mutex<HashMap<String, GatewaySession>>>,
+    history: Option<Arc<HistoryGatewayServer>>,
 }
 
 impl fmt::Debug for ProvisioningGatewayServer {
@@ -481,7 +482,15 @@ impl ProvisioningGatewayServer {
             gateway_token,
             route,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            history: None,
         })
+    }
+
+    /// Add the authenticated Matrix history adapter to the same private
+    /// listener used by the provider-linking routes.
+    pub fn with_history(mut self, history: HistoryGatewayServer) -> Self {
+        self.history = Some(Arc::new(history));
+        self
     }
 
     /// Serve the private gateway on a caller-supplied listener.  The caller
@@ -504,6 +513,12 @@ impl ProvisioningGatewayServer {
     }
 
     async fn handle_request(&self, request: HttpRequest) -> (u16, Vec<u8>) {
+        if request.path.starts_with("/v1/history-imports/") {
+            return match &self.history {
+                Some(history) => history.handle_request(request).await,
+                None => response(404, json!({ "error": "not_found" })),
+            };
+        }
         if request.authorization.as_deref() != Some(self.gateway_token.as_str()) {
             return response(401, json!({ "error": "unauthorized" }));
         }
@@ -627,15 +642,17 @@ impl ProvisioningGatewayServer {
 }
 
 #[derive(Debug)]
-struct HttpRequest {
-    path: String,
-    authorization: Option<String>,
-    request_id: Option<String>,
-    idempotency_key: Option<String>,
-    body: Vec<u8>,
+pub(crate) struct HttpRequest {
+    pub(crate) path: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) request_id: Option<String>,
+    pub(crate) idempotency_key: Option<String>,
+    pub(crate) body: Vec<u8>,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, std::io::Error> {
+pub(crate) async fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<HttpRequest, std::io::Error> {
     let mut buffer = Vec::with_capacity(4096);
     let header_end = loop {
         let mut chunk = [0_u8; 2048];
@@ -716,14 +733,14 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, std::i
     })
 }
 
-fn response(status: u16, body: Value) -> (u16, Vec<u8>) {
+pub(crate) fn response(status: u16, body: Value) -> (u16, Vec<u8>) {
     (
         status,
         serde_json::to_vec(&body).unwrap_or_else(|_| b"{\"error\":\"provider_error\"}".to_vec()),
     )
 }
 
-async fn write_http_response(
+pub(crate) async fn write_http_response(
     stream: &mut TcpStream,
     status: u16,
     body: &[u8],
@@ -755,9 +772,33 @@ pub async fn serve_private_gateway(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
     use super::*;
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
     use serde_json::json;
+    use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+
+    use crate::{
+        crypto::Keyring,
+        crypto_outbox::{PendingMatrixRequest, RawMatrixResponse},
+        history::HistoryGatewayServer,
+        matrix::{FetchedMatrixSync, MatrixTransport, RawBackfillPage},
+        registry::NewRoomBinding,
+        secret::{SafeError, SecretBytes},
+        store::Store,
+    };
+    use ruma::{events::AnyTimelineEvent, serde::Raw};
 
     const BRIDGE_SECRET: &str = "bridge-secret-for-test";
     const GATEWAY_SECRET: &str = "gateway-secret-for-test";
@@ -960,5 +1001,338 @@ mod tests {
         assert!(!serialized.contains("txn-1"));
         assert!(!serialized.contains(BRIDGE_SECRET));
         task.abort();
+    }
+
+    struct SharedHistoryTransport {
+        calls: AtomicUsize,
+        event_count: usize,
+    }
+
+    #[async_trait]
+    impl MatrixTransport for SharedHistoryTransport {
+        async fn fetch_sync(&self, _since: &SecretBytes) -> Result<FetchedMatrixSync, SafeError> {
+            Err(SafeError::new("history_test_unexpected_sync"))
+        }
+
+        async fn backfill_page(
+            &self,
+            _room_id: &str,
+            _from: Option<&SecretBytes>,
+            _limit: u64,
+        ) -> Result<RawBackfillPage, SafeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let chunk = (0..self.event_count)
+                .map(|index| {
+                    Raw::<AnyTimelineEvent>::from_json_string(
+                        json!({
+                            "event_id": format!("$shared-history-{index}:example.test"),
+                            "origin_server_ts": 1_767_225_600_000_i64,
+                            "sender": "@owner:example.test",
+                            "type": "m.room.message",
+                            "room_id": "!shared-history:example.test",
+                            "content": {
+                                "msgtype": "m.text",
+                                "body": format!("history page {index}")
+                            }
+                        })
+                        .to_string(),
+                    )
+                    .map_err(|_| SafeError::new("history_test_invalid_event"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            RawBackfillPage::new(
+                "matrix-start".to_owned(),
+                Some("matrix-end".to_owned()),
+                chunk,
+                Vec::new(),
+            )
+        }
+
+        async fn send_crypto(
+            &self,
+            _request: &PendingMatrixRequest,
+        ) -> Result<RawMatrixResponse, SafeError> {
+            Err(SafeError::new("history_test_unexpected_crypto"))
+        }
+    }
+
+    async fn wait_for_history_page(transport: &SharedHistoryTransport) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while transport.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lost-response request reaches Matrix history transport");
+    }
+
+    async fn spawn_shared_history_gateway(
+        event_count: usize,
+    ) -> (
+        tempfile::TempDir,
+        Arc<SharedHistoryTransport>,
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let keyring = Keyring::new([0x11; 32], 1).expect("test keyring");
+        let mut store = Store::open(&database, keyring).expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new(
+                    "binding_0123456789abcdef0123456789abcdef",
+                    "!shared-history:example.test",
+                    "tenant_demo",
+                    "identity_demo",
+                    "connection_demo",
+                    "account_demo",
+                    crate::model::Provider::Whatsapp,
+                    "route_demo",
+                    "conversation_demo",
+                    "@owner:example.test",
+                    Utc.timestamp_millis_opt(1_700_000_000_000)
+                        .single()
+                        .expect("valid binding timestamp"),
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+
+        let transport = Arc::new(SharedHistoryTransport {
+            calls: AtomicUsize::new(0),
+            event_count,
+        });
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::clone(&transport) as Arc<dyn MatrixTransport>,
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        let task = tokio::spawn(server.serve(listener));
+        (directory, transport, address, task)
+    }
+
+    fn shared_history_owner(import_id: &str, max_events: u64) -> Value {
+        json!({
+            "tenant_id": "tenant_demo",
+            "account_id": "account_demo",
+            "connection_id": "connection_demo",
+            "identity_id": "identity_demo",
+            "provider": "whatsapp",
+            "import_id": import_id,
+            "start_at": "2026-01-01T00:00:00.000Z",
+            "end_at": "2026-01-02T00:00:00.000Z",
+            "max_events": max_events
+        })
+    }
+
+    #[tokio::test]
+    async fn shared_listener_authenticates_history_and_replays_a_lost_advance_response() {
+        let (_directory, transport, address, task) = spawn_shared_history_gateway(1).await;
+        let http = Client::builder().no_proxy().build().expect("HTTP client");
+        let base_url = format!("http://{address}");
+        let owner = shared_history_owner("import_shared_history", 100);
+        let start_body = serde_json::to_vec(&owner).expect("start body");
+        let unauthorized = http
+            .post(format!("{base_url}/v1/history-imports/start"))
+            .bearer_auth("wrong-history-secret")
+            .header("content-type", "application/json")
+            .header("x-request-id", "history-unauthorized")
+            .header("idempotency-key", "history-unauthorized")
+            .body(start_body.clone())
+            .send()
+            .await
+            .expect("unauthorized history response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let started = http
+            .post(format!("{base_url}/v1/history-imports/start"))
+            .bearer_auth(GATEWAY_SECRET)
+            .header("content-type", "application/json")
+            .header("x-request-id", "history-start")
+            .header("idempotency-key", "history-start")
+            .body(start_body)
+            .send()
+            .await
+            .expect("history start response");
+        assert_eq!(started.status(), StatusCode::OK);
+
+        let mut advance = owner;
+        advance["range_id"] = json!("range_shared_history");
+        advance["source_cursor"] = Value::Null;
+        let advance_body = serde_json::to_vec(&advance).expect("advance body");
+        let mut lost_response = TcpStream::connect(address)
+            .await
+            .expect("connect lost-response request");
+        let request = format!(
+            "POST /v1/history-imports/advance HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {GATEWAY_SECRET}\r\nContent-Type: application/json\r\nX-Request-Id: history-advance\r\nIdempotency-Key: history-advance\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            advance_body.len(),
+            String::from_utf8(advance_body.clone()).expect("advance JSON UTF-8")
+        );
+        lost_response
+            .write_all(request.as_bytes())
+            .await
+            .expect("write lost-response request");
+        lost_response
+            .shutdown()
+            .await
+            .expect("close lost-response request");
+        drop(lost_response);
+        wait_for_history_page(&transport).await;
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        let replay = http
+            .post(format!("{base_url}/v1/history-imports/advance"))
+            .bearer_auth(GATEWAY_SECRET)
+            .header("content-type", "application/json")
+            .header("x-request-id", "history-advance")
+            .header("idempotency-key", "history-advance")
+            .body(advance_body)
+            .send()
+            .await
+            .expect("replayed history response");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_body: Value =
+            serde_json::from_slice(&replay.bytes().await.expect("replayed history body"))
+                .expect("replayed history JSON");
+        assert_eq!(replay_body["status"], "active");
+        assert_eq!(replay_body["events"].as_array().map(Vec::len), Some(1));
+        let public_cursor = replay_body["next_cursor"]
+            .as_str()
+            .expect("opaque replay cursor");
+        assert!(public_cursor.starts_with("history_"));
+        assert_ne!(public_cursor, "matrix-end");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn shared_listener_accepts_500_events_and_rejects_501_without_checkpointing() {
+        for (event_count, max_events, expected_status) in [
+            (500_usize, 500_u64, StatusCode::OK),
+            (501, 501, StatusCode::BAD_GATEWAY),
+        ] {
+            let (_directory, transport, address, task) =
+                spawn_shared_history_gateway(event_count).await;
+            let http = Client::builder().no_proxy().build().expect("HTTP client");
+            let base_url = format!("http://{address}");
+            let import_id = format!("import_shared_bound_{event_count}");
+            let owner = shared_history_owner(&import_id, max_events);
+            let started = http
+                .post(format!("{base_url}/v1/history-imports/start"))
+                .bearer_auth(GATEWAY_SECRET)
+                .header("content-type", "application/json")
+                .header("x-request-id", format!("history-bound-start-{event_count}"))
+                .header(
+                    "idempotency-key",
+                    format!("history-bound-start-{event_count}"),
+                )
+                .body(serde_json::to_vec(&owner).expect("start body"))
+                .send()
+                .await
+                .expect("history start response");
+            assert_eq!(started.status(), StatusCode::OK);
+
+            let mut advance = owner;
+            advance["range_id"] = json!(format!("range_shared_bound_{event_count}"));
+            advance["source_cursor"] = Value::Null;
+            let advance_body = serde_json::to_vec(&advance).expect("advance body");
+            let first = http
+                .post(format!("{base_url}/v1/history-imports/advance"))
+                .bearer_auth(GATEWAY_SECRET)
+                .header("content-type", "application/json")
+                .header(
+                    "x-request-id",
+                    format!("history-bound-advance-{event_count}"),
+                )
+                .header(
+                    "idempotency-key",
+                    format!("history-bound-advance-{event_count}"),
+                )
+                .body(advance_body.clone())
+                .send()
+                .await
+                .expect("history advance response");
+            assert_eq!(first.status(), expected_status);
+            let first_body: Value =
+                serde_json::from_slice(&first.bytes().await.expect("history advance body"))
+                    .expect("history advance JSON");
+
+            if event_count == 500 {
+                assert_eq!(first_body["status"], "active");
+                assert_eq!(first_body["events"].as_array().map(Vec::len), Some(500));
+                assert!(
+                    first_body["next_cursor"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("history_"))
+                );
+                assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(first_body["error"], "provider_error");
+                assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+                let retry = http
+                    .post(format!("{base_url}/v1/history-imports/advance"))
+                    .bearer_auth(GATEWAY_SECRET)
+                    .header("content-type", "application/json")
+                    .header(
+                        "x-request-id",
+                        format!("history-bound-advance-{event_count}"),
+                    )
+                    .header(
+                        "idempotency-key",
+                        format!("history-bound-advance-{event_count}"),
+                    )
+                    .body(advance_body)
+                    .send()
+                    .await
+                    .expect("oversized history retry response");
+                assert_eq!(retry.status(), StatusCode::BAD_GATEWAY);
+                assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+
+                let start_retry = http
+                    .post(format!("{base_url}/v1/history-imports/start"))
+                    .bearer_auth(GATEWAY_SECRET)
+                    .header("content-type", "application/json")
+                    .header("x-request-id", "history-bound-start-retry")
+                    .header("idempotency-key", "history-bound-start-retry")
+                    .body(
+                        serde_json::to_vec(&shared_history_owner(&import_id, max_events))
+                            .expect("start retry body"),
+                    )
+                    .send()
+                    .await
+                    .expect("history start retry response");
+                assert_eq!(start_retry.status(), StatusCode::OK);
+                let start_retry_body: Value = serde_json::from_slice(
+                    &start_retry.bytes().await.expect("history start retry body"),
+                )
+                .expect("history start retry JSON");
+                assert_eq!(start_retry_body["ranges"][0]["source_cursor"], Value::Null);
+            }
+
+            task.abort();
+        }
     }
 }

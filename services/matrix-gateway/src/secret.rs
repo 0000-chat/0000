@@ -152,6 +152,24 @@ impl SecretBytes {
         Ok(Self::new(bytes))
     }
 
+    /// Parse one bounded UTF-8 document without applying the single-line text
+    /// secret policy.  Structured protected inputs may contain formatting
+    /// whitespace; their schema is validated by the owning boundary.
+    pub(crate) fn from_owned_document(
+        mut bytes: Vec<u8>,
+        max_bytes: usize,
+    ) -> Result<Self, SafeError> {
+        if max_bytes > MAX_TEXT_SECRET_BYTES || bytes.len() > max_bytes {
+            bytes.zeroize();
+            return Err(SafeError::new(SECRET_TOO_LARGE));
+        }
+        if bytes.is_empty() || str::from_utf8(&bytes).is_err() {
+            bytes.zeroize();
+            return Err(SafeError::new(SECRET_INVALID));
+        }
+        Ok(Self::new(bytes))
+    }
+
     /// Decode a canonical standard-base64 state key containing exactly 32
     /// decoded bytes.  The encoded value is not trimmed: no whitespace is
     /// accepted in the state-key representation.
@@ -236,6 +254,8 @@ impl Drop for SecretBytes {
 pub enum SecretKind {
     /// A non-empty UTF-8, single-line secret with a bounded file size.
     Text { max_bytes: usize },
+    /// A bounded UTF-8 structured document whose schema is checked by its caller.
+    Document { max_bytes: usize },
     /// A canonical standard-base64 encoding of a 32-byte state key.
     StateKey,
 }
@@ -261,7 +281,7 @@ pub fn load_secret(path: &Path, kind: SecretKind) -> Result<SecretBytes, SafeErr
     }
 
     let max_bytes = match kind {
-        SecretKind::Text { max_bytes } => max_bytes,
+        SecretKind::Text { max_bytes } | SecretKind::Document { max_bytes } => max_bytes,
         SecretKind::StateKey => STATE_KEY_ENCODED_BYTES,
     };
     if max_bytes > MAX_TEXT_SECRET_BYTES {
@@ -407,6 +427,7 @@ fn read_bounded(file: &rustix::fd::OwnedFd, file_size: usize) -> Result<Vec<u8>,
 pub(crate) fn parse_secret(bytes: Vec<u8>, kind: SecretKind) -> Result<SecretBytes, SafeError> {
     match kind {
         SecretKind::Text { max_bytes } => SecretBytes::from_owned_text(bytes, max_bytes),
+        SecretKind::Document { max_bytes } => SecretBytes::from_owned_document(bytes, max_bytes),
         SecretKind::StateKey => SecretBytes::from_owned_state_key_base64(bytes),
     }
 }

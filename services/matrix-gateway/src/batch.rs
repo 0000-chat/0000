@@ -1045,7 +1045,7 @@ fn canonical_timestamp(value: &str) -> Result<String, BatchError> {
 }
 
 fn validate_backfill_job(job: &BackfillJob) -> Result<(), BatchError> {
-    if !valid_uuid_v7(&job.job_id)
+    if !(model::valid_resource_id(&job.job_id) || valid_uuid_v7(&job.job_id))
         || !model::valid_matrix_room_id(&job.room_id)
         || job.max_events == 0
         || job.max_events > MAX_BACKFILL_EVENTS
