@@ -6,11 +6,11 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `f681496` | Runtime worker #9 merged serially after health; focused runtime/health tests and `scripts/check` passed; ledger update pending this commit. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `910933f` | Health #5 and runtime #9 merged serially; focused runtime/health tests and `scripts/check` passed; grants #12 remains unmerged pending a bounded authorization fix. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
-| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Dirty implementation handoff: modified `packages/contracts/src/{authorization,conversation,index,projection}.ts`; untracked `apps/control-plane/migrations/0005_account_grants.sql` and `packages/contracts/src/grants.ts`. |
+| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` | Paused with source preserved: dirty implementation handoff and bounded realtime authorization fix pending final regressions/commit. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
@@ -33,7 +33,7 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
 | #9 | Runtime | verified and merged as `f681496`; issue remains open until aggregate PR merge |
 | #11 | Agent messaging specification | aggregate parent / planned |
-| #12 | T01 account grants | implementing on `codex/implement-grants-12` in `/tmp/0000-communicator-worker-12`; dirty handoff |
+| #12 | T01 account grants | paused on `codex/implement-grants-12` in `/tmp/0000-communicator-worker-12`; source preserved while final authorization regression evidence is collected |
 | #13–#36 | T02–T25 child tickets | planned; dependencies in aggregate plan |
 
 Architecture decision #7 is tracked at
@@ -73,3 +73,20 @@ Issue state remains intentionally open while the aggregate draft PR is in
 progress. Readiness is recorded here by dependency and worker evidence; an
 open GitHub issue or a future `Closes` reference is not treated as proof that
 the ticket is complete.
+
+## Grants worker checkpoint
+
+The #12 parent is paused for a final test report and bounded authorization fix;
+its source worktree remains preserved and no grants code has entered the
+aggregate. The checkpoint reports 5/5 grants checks, 41 worker files with 585
+tests, 18 UI files with 107 tests, and passing contracts/control-plane type
+checks. Three parent P1 read/grant/list findings were fixed.
+
+Independent review found an absence-based realtime authorization path:
+`realtimeReadScopeSupported` could allow an identity socket when no active
+accounts existed, exposing retired backlog. The worker resumed a bounded fix
+with an explicit principal/permission policy, denying delegated identity-wide
+subscriptions while preserving the proper human-admin path. The working
+hypothesis is a legacy-compatibility fallback bypass; the attempted fix removes
+that implicit fallback and must add focused retired/no-account and revocation
+regressions before commit. This checkpoint does not claim #12 complete.
