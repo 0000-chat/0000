@@ -83,17 +83,24 @@ webhook configuration is integrated as aggregate commit `b42ff168` from clean
 worker commit `145a120`; its focused webhook/auth/schema/search/realtime checks
 and repository gates pass. The verified atomic cutover follow-up is now
 integrated as aggregate commit `f9a22905`, with focused webhook 5/5,
-control-plane, and repository gates passing. T03/#15 is active from
-`87695a5d` with review findings held, and #18 remains in a bounded phase. Do
-not claim any child complete from dispatch alone.
+control-plane, and repository gates passing. T06/#18 is integrated as
+aggregate merge `d7dee32` from worker commit `0933839`; focused acceptance,
+OAuth/MCP, search, webhook, projection, and schema checks pass (9 files/99
+tests), as do TypeScript, both Vite builds, and `scripts/check`. T03/#15
+remains active from `87695a5d` with review findings held. T07/#19 is now active
+from `d7dee32` on its isolated worker for offline confirmation and recovery;
+its first bounded checkpoint is not acceptance. Do not claim any child complete
+from dispatch alone.
 
 Migration `0006_oauth` is integrated for #13, `0007_linking` for #14, and
 `0010_webhook_subscriptions` for #25. #17 search required no new migration.
-Reserve `0009_acceptance` only if #18 requires it; do not add migrations merely
-to fill numbers. #15 owns conditional migration `0011_history` from its active
-worker handoff.
+#18 durable acceptance uses the projection schema migration
+`durable_outbound_acceptance`; no standalone `0009_acceptance` migration was
+added. Do not add migrations merely to fill numbers. #15 owns conditional
+migration `0011_history` from its active worker handoff.
 
-The aggregate merge commit is `f9a2290534728feb2629ce2461dfe8d80f57fd7b`.
+The aggregate merge commit is
+`d7dee32db7d5f718252e545c761d0ede31413b48`.
 The #25 source worker was clean at `145a1206f98387efc1edb3c75b2572087ca553ef`,
 with atomic cutover follow-up `008ddfc49ae6f98774524925541a43c63b9b445e`.
 Aggregate webhook/auth/schema/search/realtime compatibility, the cutover
@@ -101,8 +108,9 @@ regression, control-plane TypeScript and both Vite builds, and the pinned
 `scripts/check` gate pass. The draft PR remains work in progress; no
 default-branch merge, production deployment, live webhook delivery, or live
 account proof occurred. #15 history remains held for its range-termination,
-gateway-endpoint, and total-coverage findings, and #18 remains held for its
-final MCP/invalid/crash matrix.
+gateway-endpoint, and total-coverage findings. #19 offline confirmation is
+active from the verified #18 aggregate; no live provider delivery or client
+acceptance is claimed.
 
 ## Merge and release rules
 
@@ -117,7 +125,8 @@ final MCP/invalid/crash matrix.
   worktrees unchanged. Do not clean shared caches or temporary state while the
   disk-pressure incident is unresolved.
 - Never merge `main`, close issues, deploy production, pair a real account, or
-  claim live ChatGPT/Grok acceptance from mocks.
+  claim live ChatGPT/Grok acceptance from mocks. The aggregate branch remains
+  local pending the separately authorized public-source push.
 - The eventual draft PR should target the repository's actual default branch
   and use a truthful work-in-progress body that references `Closes #11` and
   `Closes #12` through `#36`, plus `#5` and `#9` only when those tickets are
