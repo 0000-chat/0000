@@ -24,8 +24,14 @@ expected = {
     "docs/agents/issue-tracker.md",
     "docs/agents/triage-labels.md",
     "scripts/check",
+    "scripts/format",
+    "scripts/format-check",
+    "scripts/install-tools",
+    "scripts/lint",
 }
 tracked = set(subprocess.check_output(["git", "ls-files"], text=True).splitlines())
+# Include expected files added in the current worktree before they are staged.
+tracked.update(path for path in expected if (root / path).is_file())
 if tracked != expected:
     raise SystemExit(f"tracked scaffold mismatch: missing={sorted(expected-tracked)} extra={sorted(tracked-expected)}")
 metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
@@ -43,4 +49,7 @@ for phrase in ("Cloudflare", "private provider-neutral Docker host", "no public 
         raise SystemExit(f"README must state {phrase}")
 PY
 git diff --check
+"$root/scripts/install-tools"
+"$root/scripts/lint"
+"$root/scripts/format-check"
 echo "0000-cloud scaffold checks passed"

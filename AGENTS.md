@@ -11,7 +11,9 @@ repository coordinates hosted deployment later and currently contains no
 deployment implementation, package manifest, generated dependency tree,
 database, API, secret, or license.
 
-Run `./scripts/check`; direct commits on `main` are blocked after bootstrap.
+Run `./scripts/check`; it validates metadata, formats supported files with
+Biome, and lints supported JavaScript and TypeScript files with pinned tools.
+Direct commits on `main` are blocked after bootstrap.
 
 ## Agent skills
 
