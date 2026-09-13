@@ -16,7 +16,9 @@ export function ActivityPage() {
   return (
     <section className="space-y-6">
       <div>
-        <p className="text-sm font-medium text-muted-foreground">Identity-scoped command history</p>
+        <p className="text-sm font-medium text-muted-foreground">
+          Identity-scoped command history
+        </p>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Activity</h1>
         <p className="mt-2 max-w-2xl text-muted-foreground">
           Follow accepted commands and their delivery phases.
@@ -28,7 +30,10 @@ export function ActivityPage() {
           No commands are available for this identity.
         </p>
       )}
-      <CommandTimeline commands={commands} identityLabel={activeIdentity?.display_name ?? "Unavailable"} />
+      <CommandTimeline
+        commands={commands}
+        identityLabel={activeIdentity?.display_name ?? "Unavailable"}
+      />
     </section>
   );
 }

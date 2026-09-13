@@ -105,7 +105,10 @@ const expectedNames = {
 const requiredBindings = {
   d1: { binding: "CONTROL_DB", migrations_dir: "migrations" },
   r2: { binding: "EVENT_ARCHIVE" },
-  durableObject: { name: "TENANT_PROJECTION", class_name: "TenantProjectionDO" },
+  durableObject: {
+    name: "TENANT_PROJECTION",
+    class_name: "TenantProjectionDO",
+  },
   producer: { binding: "INGESTION_QUEUE" },
 } as const;
 
@@ -132,7 +135,8 @@ const EXPECTED_WRANGLER_VAR_KEYS = [
   "COMMUNICATOR_INGESTION_OIDC_JWKS_URL",
 ] as const;
 
-const CLOUDFLARE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLOUDFLARE_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QUEUE_ID_PATTERN = /^[0-9a-f]{32}$/i;
 const MAX_QUEUE_RETENTION_SECONDS = 1_209_600;
 const LOCAL_D1_SENTINELS = new Set([
@@ -140,9 +144,12 @@ const LOCAL_D1_SENTINELS = new Set([
   "00000000-0000-0000-0000-000000000000",
   "00000000-0000-0000-0000-000000000001",
 ]);
-const CREDENTIAL_KEY_PATTERN = /(?:secret|token|private[_-]?key|access[_-]?key|password|cookie|credential)/i;
-const CREDENTIAL_VALUE_PATTERN = /(?:-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|\b(?:bearer|basic)\s+[^\s]+|\b(?:client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token|password|credential)\s*[:=]|\b(?:eyJ[A-Za-z0-9_-]+\.){2})/i;
-const RFC3339_UTC_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
+const CREDENTIAL_KEY_PATTERN =
+  /(?:secret|token|private[_-]?key|access[_-]?key|password|cookie|credential)/i;
+const CREDENTIAL_VALUE_PATTERN =
+  /(?:-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|\b(?:bearer|basic)\s+[^\s]+|\b(?:client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token|password|credential)\s*[:=]|\b(?:eyJ[A-Za-z0-9_-]+\.){2})/i;
+const RFC3339_UTC_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
 
 function assertEnvironmentBindings(
   environment: WranglerEnvironment,
@@ -213,7 +220,16 @@ function assertVerifiedAt(value: string) {
   const match = RFC3339_UTC_PATTERN.exec(value);
   if (match === null) throw new Error("verified_at must be RFC3339 UTC");
 
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fractionText] = match;
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText,
+    fractionText,
+  ] = match;
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
@@ -239,12 +255,16 @@ function assertVerifiedAt(value: string) {
 }
 
 function assertIngestionVars(vars: Record<string, string>) {
-  expect(Object.keys(vars).sort()).toEqual([...EXPECTED_WRANGLER_VAR_KEYS].sort());
+  expect(Object.keys(vars).sort()).toEqual(
+    [...EXPECTED_WRANGLER_VAR_KEYS].sort(),
+  );
   expect(vars[requiredVars.ingress]).toBe("false");
   expect(vars[requiredVars.issuer]).toMatch(/^https:\/\//);
   expect(vars[requiredVars.audience]).toMatch(/\S/);
   expect(vars[requiredVars.jwks]).toMatch(/^https:\/\//);
-  expect(vars[requiredVars.audience]).not.toBe(vars[requiredVars.publicAudience]);
+  expect(vars[requiredVars.audience]).not.toBe(
+    vars[requiredVars.publicAudience],
+  );
   assertNoCredentialMaterial(vars);
 }
 
@@ -269,10 +289,16 @@ describe("ingestion Wrangler configuration", () => {
       expect(handoff.dlq.name).toBe(expectedNames[environmentName].dlq);
       assertNonLocalResourceIds(handoff);
 
-      assertEnvironmentBindings(environment, expectedNames[environmentName], handoff.d1.id);
+      assertEnvironmentBindings(
+        environment,
+        expectedNames[environmentName],
+        handoff.d1.id,
+      );
       expect(environment.d1_databases[0]?.database_id).toBe(handoff.d1.id);
       expect(environment.d1_databases[0]?.preview_database_id).toBeUndefined();
-      expect(environment.queues.consumers[0]?.dead_letter_queue).toBe(handoff.dlq.name);
+      expect(environment.queues.consumers[0]?.dead_letter_queue).toBe(
+        handoff.dlq.name,
+      );
       assertIngestionVars(environment.vars);
     }
 
@@ -288,7 +314,9 @@ describe("ingestion Wrangler configuration", () => {
   });
 
   it("keeps environment resources isolated and routes internal paths to the Worker", () => {
-    expect(config.assets.run_worker_first).toEqual(expect.arrayContaining(["/api/*", "/internal/*"]));
+    expect(config.assets.run_worker_first).toEqual(
+      expect.arrayContaining(["/api/*", "/internal/*"]),
+    );
 
     const resourceNames = [
       config.d1_databases[0]?.database_name,
@@ -309,7 +337,10 @@ describe("ingestion Wrangler configuration", () => {
     expect(resources.schema_version).toBe(1);
     expect(resources.cloudflare_account_id).toMatch(/^[0-9a-f]{32}$/i);
     assertVerifiedAt(resources.verified_at);
-    expect(Object.keys(resources.environments).sort()).toEqual(["production", "staging"]);
+    expect(Object.keys(resources.environments).sort()).toEqual([
+      "production",
+      "staging",
+    ]);
     assertSafeHandoffText(resourceText);
   });
 
@@ -332,7 +363,11 @@ describe("ingestion Wrangler configuration", () => {
     };
     expect(() => assertIngestionVars(pkcs8ValueVars)).toThrow();
 
-    expect(() => assertSafeHandoffText(`${resourceText}\n-----BEGIN PRIVATE KEY-----opaque`)).toThrow();
+    expect(() =>
+      assertSafeHandoffText(
+        `${resourceText}\n-----BEGIN PRIVATE KEY-----opaque`,
+      ),
+    ).toThrow();
   });
 
   it("rejects local D1 sentinels, malformed IDs, duplicate queue IDs, and nonmaximum retention", () => {
@@ -351,9 +386,14 @@ describe("ingestion Wrangler configuration", () => {
   });
 
   it("uses a JSONC parser for Wrangler configuration", () => {
-    expect(parseStrictJsonc<{ enabled: boolean }>('{"enabled": true, // accepted JSONC comment\n}'))
-      .toEqual({ enabled: true });
-    expect(() => parseStrictJsonc('{"enabled": true} trailing-garbage')).toThrow();
+    expect(
+      parseStrictJsonc<{ enabled: boolean }>(
+        '{"enabled": true, // accepted JSONC comment\n}',
+      ),
+    ).toEqual({ enabled: true });
+    expect(() =>
+      parseStrictJsonc('{"enabled": true} trailing-garbage'),
+    ).toThrow();
     expect(() => parseStrictJsonc('{"enabled":')).toThrow();
   });
 

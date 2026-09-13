@@ -1,8 +1,6 @@
 import { z } from "zod";
 
-export const CommunicatorIdSchema = z
-  .string()
-  .regex(/^[a-z]+_[a-z0-9_]+$/);
+export const CommunicatorIdSchema = z.string().regex(/^[a-z]+_[a-z0-9_]+$/);
 
 export const TimestampSchema = z.string().datetime({ offset: true });
 

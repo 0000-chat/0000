@@ -58,7 +58,8 @@ const contextForTenant = (
   subscriptions: string[] = ["identity_human"],
   resume: RealtimeUpgradeContext["resume"] = [],
   overrides: Partial<RealtimeUpgradeContext> = {},
-): RealtimeUpgradeContext => context(subscriptions, resume, { tenant_id, ...overrides });
+): RealtimeUpgradeContext =>
+  context(subscriptions, resume, { tenant_id, ...overrides });
 
 const upgradeRequest = (
   realtimeContext: RealtimeUpgradeContext,
@@ -70,25 +71,29 @@ const upgradeRequest = (
     contextJson?: string;
     extraHeaders?: Record<string, string>;
   } = {},
-): Request => new Request(
-  `https://tenant-projection.internal${overrides.path ?? "/realtime"}`,
-  {
-    method: "GET",
-    headers: {
-      Upgrade: overrides.upgrade ?? "websocket",
-      Connection: "Upgrade",
-      "Sec-WebSocket-Protocol": overrides.protocol ?? REALTIME_SUBPROTOCOL,
-      [overrides.header ?? INTERNAL_CONTEXT_HEADER]:
-        overrides.contextJson ?? JSON.stringify(realtimeContext),
-      ...overrides.extraHeaders,
+): Request =>
+  new Request(
+    `https://tenant-projection.internal${overrides.path ?? "/realtime"}`,
+    {
+      method: "GET",
+      headers: {
+        Upgrade: overrides.upgrade ?? "websocket",
+        Connection: "Upgrade",
+        "Sec-WebSocket-Protocol": overrides.protocol ?? REALTIME_SUBPROTOCOL,
+        [overrides.header ?? INTERNAL_CONTEXT_HEADER]:
+          overrides.contextJson ?? JSON.stringify(realtimeContext),
+        ...overrides.extraHeaders,
+      },
     },
-  },
-);
+  );
 
 const authorization = (
   tenant_id = TENANT,
   allowed_identity_ids: string[] = ["identity_human", "identity_agent"],
-  scopes: ProjectionAuthorizationContext["scopes"] = ["projection.initialize", "projection.write"],
+  scopes: ProjectionAuthorizationContext["scopes"] = [
+    "projection.initialize",
+    "projection.write",
+  ],
 ): ProjectionAuthorizationContext => ({
   schema_version: 1,
   tenant_id,
@@ -99,7 +104,7 @@ const authorization = (
 
 const binding = (
   identity_id: string,
-  index: number,
+  _index: number,
 ): ProjectionConnectionBinding => ({
   account_id: `account_${identity_id}`,
   connection_id: `connection_${identity_id}`,
@@ -166,7 +171,8 @@ const frameMessages = async (
   expectedCount: number,
 ): Promise<unknown[]> => {
   const socket = response.webSocket;
-  if (socket === null) throw new Error("upgrade did not return a client socket");
+  if (socket === null)
+    throw new Error("upgrade did not return a client socket");
   socket.accept();
   const messages: unknown[] = [];
   return new Promise((resolve) => {
@@ -183,28 +189,31 @@ const waitForSocketFrames = (
   socket: WebSocket,
   predicate: (frame: SocketFrame) => boolean,
   expectedCount: number,
-): Promise<SocketFrame[]> => new Promise((resolve, reject) => {
-  const frames: SocketFrame[] = [];
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const cleanup = () => {
-    socket.removeEventListener("message", onMessage);
-    if (timeout !== undefined) clearTimeout(timeout);
-  };
-  const onMessage = (event: MessageEvent) => {
-    const frame = JSON.parse(String(event.data)) as SocketFrame;
-    if (!predicate(frame)) return;
-    frames.push(frame);
-    if (frames.length === expectedCount) {
+): Promise<SocketFrame[]> =>
+  new Promise((resolve, reject) => {
+    const frames: SocketFrame[] = [];
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      socket.removeEventListener("message", onMessage);
+      if (timeout !== undefined) clearTimeout(timeout);
+    };
+    const onMessage = (event: MessageEvent) => {
+      const frame = JSON.parse(String(event.data)) as SocketFrame;
+      if (!predicate(frame)) return;
+      frames.push(frame);
+      if (frames.length === expectedCount) {
+        cleanup();
+        resolve(frames);
+      }
+    };
+    socket.addEventListener("message", onMessage);
+    timeout = setTimeout(() => {
       cleanup();
-      resolve(frames);
-    }
-  };
-  socket.addEventListener("message", onMessage);
-  timeout = setTimeout(() => {
-    cleanup();
-    reject(new Error(`Timed out waiting for ${expectedCount} realtime frames`));
-  }, 1_000);
-});
+      reject(
+        new Error(`Timed out waiting for ${expectedCount} realtime frames`),
+      );
+    }, 1_000);
+  });
 
 type SocketFrameCollector = {
   readonly frames: SocketFrame[];
@@ -240,7 +249,8 @@ const connectRealtimeSocket = async (
 ): Promise<{ socket: WebSocket; connected: SocketFrame }> => {
   const response = await stub.fetch(upgradeRequest(realtimeContext));
   const socket = response.webSocket;
-  if (socket === null) throw new Error("upgrade did not return a client socket");
+  if (socket === null)
+    throw new Error("upgrade did not return a client socket");
   const connectedFrame = waitForSocketFrames(
     socket,
     (frame) => frame.type === "connected",
@@ -254,16 +264,22 @@ const connectRealtimeSocket = async (
 
 const waitForClosed = (socket: WebSocket): Promise<number> =>
   new Promise((resolve) => {
-    socket.addEventListener("close", (event) => {
-      resolve((event as CloseEvent).code);
-    }, { once: true });
+    socket.addEventListener(
+      "close",
+      (event) => {
+        resolve((event as CloseEvent).code);
+      },
+      { once: true },
+    );
   });
 
 const rows = async <T extends Record<string, SqlStorageValue>>(
   stub: DurableObjectStub<TenantProjectionDO>,
   sql: string,
-): Promise<T[]> => runInDurableObject(stub, async (_instance, state) =>
-  state.storage.sql.exec<T>(sql).toArray());
+): Promise<T[]> =>
+  runInDurableObject(stub, async (_instance, state) =>
+    state.storage.sql.exec<T>(sql).toArray(),
+  );
 
 const REALTIME_TEST_APPLY_BATCH_SIZE = 100;
 
@@ -272,12 +288,18 @@ const applyBatchedEvents = async (
   tenant_id: string,
   events: ProjectionEventEnvelope[],
 ): Promise<void> => {
-  for (let offset = 0; offset < events.length; offset += REALTIME_TEST_APPLY_BATCH_SIZE) {
-    await stub.applyBatch(applyInput(
-      events.slice(offset, offset + REALTIME_TEST_APPLY_BATCH_SIZE),
-      ["identity_human"],
-      tenant_id,
-    ));
+  for (
+    let offset = 0;
+    offset < events.length;
+    offset += REALTIME_TEST_APPLY_BATCH_SIZE
+  ) {
+    await stub.applyBatch(
+      applyInput(
+        events.slice(offset, offset + REALTIME_TEST_APPLY_BATCH_SIZE),
+        ["identity_human"],
+        tenant_id,
+      ),
+    );
   }
 };
 
@@ -289,10 +311,14 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const stub = realtimeStub("tenant_socket_upgrade");
     await initialize(stub, "tenant_socket_upgrade");
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant("tenant_socket_upgrade")));
+    const response = await stub.fetch(
+      upgradeRequest(contextForTenant("tenant_socket_upgrade")),
+    );
 
     expect(response.status).toBe(101);
-    expect(response.headers.get("Sec-WebSocket-Protocol")).toBe(REALTIME_SUBPROTOCOL);
+    expect(response.headers.get("Sec-WebSocket-Protocol")).toBe(
+      REALTIME_SUBPROTOCOL,
+    );
     expect(response.webSocket).not.toBeNull();
     response.webSocket?.accept();
     response.webSocket?.close(1000, "test complete");
@@ -305,21 +331,23 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     let response: Response | undefined;
     try {
-      response = await stub.fetch(upgradeRequest(context(
-        ["identity_human"],
-        [],
-        {
-          tenant_id: tenant,
-          principal_id: "principal_bearer_access_token_sentinel",
-          membership_id: "membership_raw_ticket_sentinel",
-        },
-      )));
+      response = await stub.fetch(
+        upgradeRequest(
+          context(["identity_human"], [], {
+            tenant_id: tenant,
+            principal_id: "principal_bearer_access_token_sentinel",
+            membership_id: "membership_raw_ticket_sentinel",
+          }),
+        ),
+      );
 
       expect(response.status).toBe(101);
       response.webSocket?.accept();
       expect(info).toHaveBeenCalledTimes(1);
       const logged = info.mock.calls[0]?.[0];
-      expect(RealtimeSocketTelemetryEventSchema.safeParse(logged).success).toBe(true);
+      expect(RealtimeSocketTelemetryEventSchema.safeParse(logged).success).toBe(
+        true,
+      );
       expect(logged).toEqual({
         schema_version: 1,
         type: "realtime.socket",
@@ -358,19 +386,46 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const stub = realtimeStub("tenant_socket_boundary");
     await initialize(stub, "tenant_socket_boundary");
 
-    await expect(stub.fetch(new Request("https://example.test/realtime"))).resolves.toMatchObject({
+    await expect(
+      stub.fetch(new Request("https://example.test/realtime")),
+    ).resolves.toMatchObject({
       status: 400,
     });
-    await expect(stub.fetch(upgradeRequest(contextForTenant("tenant_socket_boundary"), { path: "/api/v1/realtime" }))).resolves.toMatchObject({
+    await expect(
+      stub.fetch(
+        upgradeRequest(contextForTenant("tenant_socket_boundary"), {
+          path: "/api/v1/realtime",
+        }),
+      ),
+    ).resolves.toMatchObject({
       status: 400,
     });
-    await expect(stub.fetch(upgradeRequest(contextForTenant("tenant_socket_boundary"), { protocol: "wrong.protocol" }))).resolves.toMatchObject({
+    await expect(
+      stub.fetch(
+        upgradeRequest(contextForTenant("tenant_socket_boundary"), {
+          protocol: "wrong.protocol",
+        }),
+      ),
+    ).resolves.toMatchObject({
       status: 400,
     });
-    await expect(stub.fetch(upgradeRequest(contextForTenant("tenant_socket_boundary"), { header: "Authorization" }))).resolves.toMatchObject({
+    await expect(
+      stub.fetch(
+        upgradeRequest(contextForTenant("tenant_socket_boundary"), {
+          header: "Authorization",
+        }),
+      ),
+    ).resolves.toMatchObject({
       status: 400,
     });
-    await expect(stub.fetch(upgradeRequest({ ...contextForTenant("tenant_socket_boundary"), tenant_id: "bad" }))).resolves.toMatchObject({
+    await expect(
+      stub.fetch(
+        upgradeRequest({
+          ...contextForTenant("tenant_socket_boundary"),
+          tenant_id: "bad",
+        }),
+      ),
+    ).resolves.toMatchObject({
       status: 400,
     });
   });
@@ -380,9 +435,11 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant(tenant), {
-      extraHeaders: { "X-Caller-Controlled": "unexpected" },
-    }));
+    const response = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant), {
+        extraHeaders: { "X-Caller-Controlled": "unexpected" },
+      }),
+    );
 
     expect(response.status).toBe(400);
     expect(response.webSocket).toBeNull();
@@ -395,9 +452,11 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const serializedContextValue = JSON.stringify(contextForTenant(tenant));
     const serializedContext = `${serializedContextValue.slice(0, -1)}${" ".repeat(MAX_REALTIME_ATTACHMENT_JSON_BYTES)}${serializedContextValue.slice(-1)}`;
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant(tenant), {
-      contextJson: serializedContext,
-    }));
+    const response = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant), {
+        contextJson: serializedContext,
+      }),
+    );
 
     expect(response.status).toBe(400);
     expect(response.webSocket).toBeNull();
@@ -407,11 +466,17 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const tenant = "tenant_socket_fresh";
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
-    await stub.applyBatch(applyInput([
-      event("identity_human", 1, undefined, tenant),
-      event("identity_agent", 1, undefined, tenant),
-      event("identity_human", 2, undefined, tenant),
-    ], ["identity_human", "identity_agent"], tenant));
+    await stub.applyBatch(
+      applyInput(
+        [
+          event("identity_human", 1, undefined, tenant),
+          event("identity_agent", 1, undefined, tenant),
+          event("identity_human", 2, undefined, tenant),
+        ],
+        ["identity_human", "identity_agent"],
+        tenant,
+      ),
+    );
 
     const response = await stub.fetch(upgradeRequest(contextForTenant(tenant)));
     const messages = await frameMessages(response, 1);
@@ -421,7 +486,9 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         schema_version: 1,
         type: "connected",
         tenant_id: tenant,
-        positions: [{ identity_id: "identity_human", generation: 1, sequence: 2 }],
+        positions: [
+          { identity_id: "identity_human", generation: 1, sequence: 2 },
+        ],
         connection_expires_at: expect.any(String),
       },
     ]);
@@ -432,22 +499,35 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const tenant = "tenant_socket_replay";
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
-    await stub.applyBatch(applyInput([
-      event("identity_human", 1, undefined, tenant),
-      event("identity_agent", 1, undefined, tenant),
-      event("identity_human", 2, undefined, tenant),
-      event("identity_agent", 2, undefined, tenant),
-    ], ["identity_human", "identity_agent"], tenant));
+    await stub.applyBatch(
+      applyInput(
+        [
+          event("identity_human", 1, undefined, tenant),
+          event("identity_agent", 1, undefined, tenant),
+          event("identity_human", 2, undefined, tenant),
+          event("identity_agent", 2, undefined, tenant),
+        ],
+        ["identity_human", "identity_agent"],
+        tenant,
+      ),
+    );
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant(tenant,
-      ["identity_human"],
-      [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
-    )));
+    const response = await stub.fetch(
+      upgradeRequest(
+        contextForTenant(
+          tenant,
+          ["identity_human"],
+          [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
+        ),
+      ),
+    );
     const messages = await frameMessages(response, 2);
 
     expect(messages[0]).toMatchObject({
       type: "connected",
-      positions: [{ identity_id: "identity_human", generation: 1, sequence: 0 }],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ],
     });
     expect(messages[1]).toMatchObject({
       type: "projection.changes",
@@ -475,39 +555,67 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         occurred_at: "2026-09-10T01:00:00.000Z",
       }),
     );
-    expect(batchRealtimeChanges(changes, MAX_REALTIME_CHANGES_PER_FRAME).map((batch) => batch.length))
-      .toEqual([100, 100, 1]);
-    expect(batchRealtimeChanges(changes, MAX_REALTIME_CHANGES_PER_FRAME).flat().length).toBe(201);
+    expect(
+      batchRealtimeChanges(changes, MAX_REALTIME_CHANGES_PER_FRAME).map(
+        (batch) => batch.length,
+      ),
+    ).toEqual([100, 100, 1]);
+    expect(
+      batchRealtimeChanges(changes, MAX_REALTIME_CHANGES_PER_FRAME).flat()
+        .length,
+    ).toBe(201);
   });
 
   it.each([
     ["generation_changed", { generation: 2, after_sequence: 0 }],
     ["history_unavailable", { generation: 1, after_sequence: 2 }],
-  ] as const)("sends an exact %s reset and keeps the socket open", async (reason, position) => {
-    const tenant = `tenant_socket_reset_${reason}`;
-    const stub = realtimeStub(tenant);
-    await initialize(stub, tenant);
-    await stub.applyBatch(applyInput([event("identity_human", 1, undefined, tenant)], ["identity_human"], tenant));
+  ] as const)(
+    "sends an exact %s reset and keeps the socket open",
+    async (reason, position) => {
+      const tenant = `tenant_socket_reset_${reason}`;
+      const stub = realtimeStub(tenant);
+      await initialize(stub, tenant);
+      await stub.applyBatch(
+        applyInput(
+          [event("identity_human", 1, undefined, tenant)],
+          ["identity_human"],
+          tenant,
+        ),
+      );
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant(tenant,
-      ["identity_human"],
-      [{ identity_id: "identity_human", generation: position.generation, after_sequence: position.after_sequence }],
-    )));
-    const messages = await frameMessages(response, 2);
-    const reset = messages.find((message) => (message as { type?: string }).type === "reset_required") as Record<string, unknown> | undefined;
+      const response = await stub.fetch(
+        upgradeRequest(
+          contextForTenant(
+            tenant,
+            ["identity_human"],
+            [
+              {
+                identity_id: "identity_human",
+                generation: position.generation,
+                after_sequence: position.after_sequence,
+              },
+            ],
+          ),
+        ),
+      );
+      const messages = await frameMessages(response, 2);
+      const reset = messages.find(
+        (message) => (message as { type?: string }).type === "reset_required",
+      ) as Record<string, unknown> | undefined;
 
-    expect(reset).toEqual({
-      schema_version: 1,
-      type: "reset_required",
-      tenant_id: tenant,
-      identity_id: "identity_human",
-      generation: 1,
-      latest_sequence: 1,
-      reason,
-    });
-    expect(response.webSocket?.readyState).not.toBe(3);
-    response.webSocket?.close(1000, "test complete");
-  });
+      expect(reset).toEqual({
+        schema_version: 1,
+        type: "reset_required",
+        tenant_id: tenant,
+        identity_id: "identity_human",
+        generation: 1,
+        latest_sequence: 1,
+        reason,
+      });
+      expect(response.webSocket?.readyState).not.toBe(3);
+      response.webSocket?.close(1000, "test complete");
+    },
+  );
 
   it("sends reset_required for exactly 501 retained changes populated through applyBatch", async () => {
     const tenant = "tenant_socket_replay_too_large";
@@ -519,22 +627,30 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     );
     await applyBatchedEvents(stub, tenant, events);
 
-    await expect(rows<{ count: number }>(
-      stub,
-      "SELECT COUNT(*) AS count FROM projection_changes WHERE identity_id = 'identity_human' AND generation = 1",
-    )).resolves.toEqual([{ count: MAX_REALTIME_REPLAY_CHANGES + 1 }]);
+    await expect(
+      rows<{ count: number }>(
+        stub,
+        "SELECT COUNT(*) AS count FROM projection_changes WHERE identity_id = 'identity_human' AND generation = 1",
+      ),
+    ).resolves.toEqual([{ count: MAX_REALTIME_REPLAY_CHANGES + 1 }]);
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant(
-      tenant,
-      ["identity_human"],
-      [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
-    )));
+    const response = await stub.fetch(
+      upgradeRequest(
+        contextForTenant(
+          tenant,
+          ["identity_human"],
+          [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
+        ),
+      ),
+    );
     const messages = await frameMessages(response, 2);
 
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({
       type: "connected",
-      positions: [{ identity_id: "identity_human", generation: 1, sequence: 0 }],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ],
     });
     expect(messages[1]).toEqual({
       schema_version: 1,
@@ -558,16 +674,22 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     );
     await applyBatchedEvents(stub, tenant, events);
 
-    await expect(rows<{ count: number }>(
-      stub,
-      "SELECT COUNT(*) AS count FROM projection_changes WHERE identity_id = 'identity_human' AND generation = 1",
-    )).resolves.toEqual([{ count: MAX_REALTIME_CHANGES_PER_FRAME + 1 }]);
+    await expect(
+      rows<{ count: number }>(
+        stub,
+        "SELECT COUNT(*) AS count FROM projection_changes WHERE identity_id = 'identity_human' AND generation = 1",
+      ),
+    ).resolves.toEqual([{ count: MAX_REALTIME_CHANGES_PER_FRAME + 1 }]);
 
-    const response = await stub.fetch(upgradeRequest(contextForTenant(
-      tenant,
-      ["identity_human"],
-      [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
-    )));
+    const response = await stub.fetch(
+      upgradeRequest(
+        contextForTenant(
+          tenant,
+          ["identity_human"],
+          [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
+        ),
+      ),
+    );
     const messages = await frameMessages(response, 3);
     const changeFrames = messages.slice(1) as Array<{
       type: "projection.changes";
@@ -580,7 +702,9 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
 
     expect(messages[0]).toMatchObject({
       type: "connected",
-      positions: [{ identity_id: "identity_human", generation: 1, sequence: 0 }],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ],
     });
     expect(changeFrames).toHaveLength(2);
     expect(changeFrames.map((frame) => frame.type)).toEqual([
@@ -589,15 +713,28 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     ]);
     expect(changeFrames.map((frame) => frame.changes)).toHaveLength(2);
     expect(changeFrames.map((frame) => frame.changes.length)).toEqual([100, 1]);
-    expect(changeFrames.map((frame) => [frame.from_sequence, frame.to_sequence])).toEqual([
+    expect(
+      changeFrames.map((frame) => [frame.from_sequence, frame.to_sequence]),
+    ).toEqual([
       [1, 101],
       [101, 102],
     ]);
-    expect(changeFrames.every((frame) =>
-      frame.identity_id === "identity_human" && frame.generation === 1,
-    )).toBe(true);
-    expect(changeFrames.flatMap((frame) => frame.changes.map((change) => change.sequence)))
-      .toEqual(Array.from({ length: MAX_REALTIME_CHANGES_PER_FRAME + 1 }, (_, index) => index + 1));
+    expect(
+      changeFrames.every(
+        (frame) =>
+          frame.identity_id === "identity_human" && frame.generation === 1,
+      ),
+    ).toBe(true);
+    expect(
+      changeFrames.flatMap((frame) =>
+        frame.changes.map((change) => change.sequence),
+      ),
+    ).toEqual(
+      Array.from(
+        { length: MAX_REALTIME_CHANGES_PER_FRAME + 1 },
+        (_, index) => index + 1,
+      ),
+    );
     response.webSocket?.close(1000, "test complete");
   });
 
@@ -616,39 +753,54 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         (frame) => frame.type === "projection.changes",
         1,
       );
-      const applied = await stub.applyBatch(applyInput(
-        [event("identity_human", 1, undefined, tenant)],
-        ["identity_human"],
-        tenant,
-      ));
+      const applied = await stub.applyBatch(
+        applyInput(
+          [event("identity_human", 1, undefined, tenant)],
+          ["identity_human"],
+          tenant,
+        ),
+      );
 
-      const persisted = await runInDurableObject(stub, async (_instance, state) => ({
-        changes: state.storage.sql.exec<{
-          identity_sequence: number;
-          event_type: string;
-          connection_id: string;
-          conversation_id: string;
-          occurred_at: string;
-        }>(
-          "SELECT identity_sequence, event_type, connection_id, conversation_id, occurred_at FROM projection_changes ORDER BY sequence",
-        ).toArray(),
-        identities: state.storage.sql.exec<{
-          identity_id: string;
-          latest_sequence: number;
-        }>(
-          "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
-        ).toArray(),
-      }));
+      const persisted = await runInDurableObject(
+        stub,
+        async (_instance, state) => ({
+          changes: state.storage.sql
+            .exec<{
+              identity_sequence: number;
+              event_type: string;
+              connection_id: string;
+              conversation_id: string;
+              occurred_at: string;
+            }>(
+              "SELECT identity_sequence, event_type, connection_id, conversation_id, occurred_at FROM projection_changes ORDER BY sequence",
+            )
+            .toArray(),
+          identities: state.storage.sql
+            .exec<{
+              identity_id: string;
+              latest_sequence: number;
+            }>(
+              "SELECT identity_id, latest_sequence FROM projection_identity_sequences ORDER BY identity_id",
+            )
+            .toArray(),
+        }),
+      );
 
-      expect(applied).toMatchObject({ applied_count: 1, duplicate_count: 0, last_sequence: 1 });
+      expect(applied).toMatchObject({
+        applied_count: 1,
+        duplicate_count: 0,
+        last_sequence: 1,
+      });
       expect(persisted).toEqual({
-        changes: [{
-          identity_sequence: 1,
-          event_type: "conversation.updated",
-          connection_id: "connection_identity_human",
-          conversation_id: "conversation_identity_human",
-          occurred_at: "2026-09-10T01:00:01.000Z",
-        }],
+        changes: [
+          {
+            identity_sequence: 1,
+            event_type: "conversation.updated",
+            connection_id: "connection_identity_human",
+            conversation_id: "conversation_identity_human",
+            occurred_at: "2026-09-10T01:00:01.000Z",
+          },
+        ],
         identities: [{ identity_id: "identity_human", latest_sequence: 1 }],
       });
 
@@ -661,13 +813,15 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         generation: 1,
         from_sequence: 1,
         to_sequence: 2,
-        changes: [{
-          sequence: 1,
-          event_type: "conversation.updated",
-          connection_id: "connection_identity_human",
-          conversation_id: "conversation_identity_human",
-          occurred_at: "2026-09-10T01:00:01.000Z",
-        }],
+        changes: [
+          {
+            sequence: 1,
+            event_type: "conversation.updated",
+            connection_id: "connection_identity_human",
+            conversation_id: "conversation_identity_human",
+            occurred_at: "2026-09-10T01:00:01.000Z",
+          },
+        ],
       });
     } finally {
       socket.close(1000, "test complete");
@@ -690,24 +844,37 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         (frame) => frame.type === "projection.changes",
         1,
       );
-      await stub.applyBatch(applyInput([liveEvent], ["identity_human"], tenant));
+      await stub.applyBatch(
+        applyInput([liveEvent], ["identity_human"], tenant),
+      );
       await firstFrame;
 
       const duplicateFrames = startSocketFrameCollector(socket);
       const duplicate = await stub.applyBatch(
         applyInput([liveEvent], ["identity_human"], tenant),
       );
-      const persisted = await runInDurableObject(stub, async (_instance, state) => ({
-        changes: state.storage.sql.exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM projection_changes WHERE identity_id = 'identity_human'",
-        ).toArray(),
-        sequence: state.storage.sql.exec<{ latest_sequence: number }>(
-          "SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = 'identity_human'",
-        ).toArray(),
-      }));
+      const persisted = await runInDurableObject(
+        stub,
+        async (_instance, state) => ({
+          changes: state.storage.sql
+            .exec<{ count: number }>(
+              "SELECT COUNT(*) AS count FROM projection_changes WHERE identity_id = 'identity_human'",
+            )
+            .toArray(),
+          sequence: state.storage.sql
+            .exec<{ latest_sequence: number }>(
+              "SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = 'identity_human'",
+            )
+            .toArray(),
+        }),
+      );
       const frames = await waitForSocketQuiet(duplicateFrames);
 
-      expect(duplicate).toMatchObject({ applied_count: 0, duplicate_count: 1, last_sequence: 1 });
+      expect(duplicate).toMatchObject({
+        applied_count: 0,
+        duplicate_count: 1,
+        last_sequence: 1,
+      });
       expect(persisted).toEqual({
         changes: [{ count: 1 }],
         sequence: [{ latest_sequence: 1 }],
@@ -740,22 +907,27 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       const agentFrames = startSocketFrameCollector(agent.socket);
       const unmatchedFrames = startSocketFrameCollector(unmatched.socket);
 
-      await stub.applyBatch(applyInput(
-        [event("identity_human", 1, undefined, tenant)],
-        ["identity_human"],
-        tenant,
-      ));
-      await stub.applyBatch(applyInput(
-        [event("identity_agent", 1, undefined, tenant)],
-        ["identity_agent"],
-        tenant,
-      ));
+      await stub.applyBatch(
+        applyInput(
+          [event("identity_human", 1, undefined, tenant)],
+          ["identity_human"],
+          tenant,
+        ),
+      );
+      await stub.applyBatch(
+        applyInput(
+          [event("identity_agent", 1, undefined, tenant)],
+          ["identity_agent"],
+          tenant,
+        ),
+      );
 
-      const [humanMessages, agentMessages, unmatchedMessages] = await Promise.all([
-        waitForSocketQuiet(humanFrames),
-        waitForSocketQuiet(agentFrames),
-        waitForSocketQuiet(unmatchedFrames),
-      ]);
+      const [humanMessages, agentMessages, unmatchedMessages] =
+        await Promise.all([
+          waitForSocketQuiet(humanFrames),
+          waitForSocketQuiet(agentFrames),
+          waitForSocketQuiet(unmatchedFrames),
+        ]);
       const projectionFrames = (frames: readonly SocketFrame[]) =>
         frames.filter((frame) => frame.type === "projection.changes");
 
@@ -792,25 +964,37 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         (frame) => frame.type === "projection.changes",
         3,
       );
-      const events = Array.from(
-        { length: 201 },
-        (_, index) => event("identity_human", index + 1, undefined, tenant),
+      const events = Array.from({ length: 201 }, (_, index) =>
+        event("identity_human", index + 1, undefined, tenant),
       );
-      const applied = await stub.applyBatch(applyInput(events, ["identity_human"], tenant));
+      const applied = await stub.applyBatch(
+        applyInput(events, ["identity_human"], tenant),
+      );
       const frames = await framesPromise;
 
-      expect(applied).toMatchObject({ applied_count: 201, duplicate_count: 0, last_sequence: 201 });
-      expect(frames.map((frame) => (frame.changes as unknown[]).length)).toEqual([100, 100, 1]);
-      expect(frames.map((frame) => [frame.from_sequence, frame.to_sequence])).toEqual([
+      expect(applied).toMatchObject({
+        applied_count: 201,
+        duplicate_count: 0,
+        last_sequence: 201,
+      });
+      expect(
+        frames.map((frame) => (frame.changes as unknown[]).length),
+      ).toEqual([100, 100, 1]);
+      expect(
+        frames.map((frame) => [frame.from_sequence, frame.to_sequence]),
+      ).toEqual([
         [1, 101],
         [101, 201],
         [201, 202],
       ]);
-      expect(frames.every((frame) =>
-        frame.tenant_id === tenant &&
-        frame.identity_id === "identity_human" &&
-        frame.generation === 1,
-      )).toBe(true);
+      expect(
+        frames.every(
+          (frame) =>
+            frame.tenant_id === tenant &&
+            frame.identity_id === "identity_human" &&
+            frame.generation === 1,
+        ),
+      ).toBe(true);
     } finally {
       socket.close(1000, "test complete");
     }
@@ -830,44 +1014,69 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     try {
       await runInDurableObject(stub, async (_instance, state) => {
         const serverSocket = state.getWebSockets("realtime")[0];
-        if (serverSocket === undefined) throw new Error("server socket was missing");
-        (serverSocket as unknown as { send: (message: string) => void }).send = () => {
-          throw new Error("synthetic realtime send failure");
-        };
+        if (serverSocket === undefined)
+          throw new Error("server socket was missing");
+        (serverSocket as unknown as { send: (message: string) => void }).send =
+          () => {
+            throw new Error("synthetic realtime send failure");
+          };
       });
 
       await expect(
         stub.applyBatch(applyInput([liveEvent], ["identity_human"], tenant)),
-      ).resolves.toMatchObject({ applied_count: 1, duplicate_count: 0, last_sequence: 1 });
-      const persisted = await runInDurableObject(stub, async (_instance, state) => ({
-        changes: state.storage.sql.exec<{
-          identity_sequence: number;
-          event_type: string;
-          connection_id: string;
-          conversation_id: string;
-        }>(
-          "SELECT identity_sequence, event_type, connection_id, conversation_id FROM projection_changes ORDER BY sequence",
-        ).toArray(),
-        latest: state.storage.sql.exec<{ latest_sequence: number }>(
-          "SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = 'identity_human'",
-        ).toArray(),
-      }));
+      ).resolves.toMatchObject({
+        applied_count: 1,
+        duplicate_count: 0,
+        last_sequence: 1,
+      });
+      const persisted = await runInDurableObject(
+        stub,
+        async (_instance, state) => ({
+          changes: state.storage.sql
+            .exec<{
+              identity_sequence: number;
+              event_type: string;
+              connection_id: string;
+              conversation_id: string;
+            }>(
+              "SELECT identity_sequence, event_type, connection_id, conversation_id FROM projection_changes ORDER BY sequence",
+            )
+            .toArray(),
+          latest: state.storage.sql
+            .exec<{ latest_sequence: number }>(
+              "SELECT latest_sequence FROM projection_identity_sequences WHERE identity_id = 'identity_human'",
+            )
+            .toArray(),
+        }),
+      );
       expect(persisted).toEqual({
-        changes: [{
-          identity_sequence: 1,
-          event_type: "conversation.updated",
-          connection_id: "connection_identity_human",
-          conversation_id: "conversation_identity_human",
-        }],
+        changes: [
+          {
+            identity_sequence: 1,
+            event_type: "conversation.updated",
+            connection_id: "connection_identity_human",
+            conversation_id: "conversation_identity_human",
+          },
+        ],
         latest: [{ latest_sequence: 1 }],
       });
       expect(await closed).toBe(1011);
 
-      const replayResponse = await stub.fetch(upgradeRequest(contextForTenant(
-        tenant,
-        ["identity_human"],
-        [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
-      )));
+      const replayResponse = await stub.fetch(
+        upgradeRequest(
+          contextForTenant(
+            tenant,
+            ["identity_human"],
+            [
+              {
+                identity_id: "identity_human",
+                generation: 1,
+                after_sequence: 0,
+              },
+            ],
+          ),
+        ),
+      );
       const replayMessages = await frameMessages(replayResponse, 2);
       expect(replayMessages[1]).toMatchObject({
         type: "projection.changes",
@@ -909,11 +1118,16 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const tenant = "tenant_socket_eviction_message";
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
-    const rejectedResponse = await stub.fetch(upgradeRequest(contextForTenant(tenant)));
-    const peerResponse = await stub.fetch(upgradeRequest(contextForTenant(tenant, ["identity_agent"])));
+    const rejectedResponse = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant)),
+    );
+    const peerResponse = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant, ["identity_agent"])),
+    );
     const rejectedSocket = rejectedResponse.webSocket;
     const peerSocket = peerResponse.webSocket;
-    if (rejectedSocket === null || peerSocket === null) throw new Error("missing sockets");
+    if (rejectedSocket === null || peerSocket === null)
+      throw new Error("missing sockets");
     rejectedSocket.accept();
     peerSocket.accept();
 
@@ -961,7 +1175,9 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     await initialize(stub, tenant);
     const responses: Response[] = [];
     for (let index = 0; index < 8; index += 1) {
-      responses.push(await stub.fetch(upgradeRequest(contextForTenant(tenant))));
+      responses.push(
+        await stub.fetch(upgradeRequest(contextForTenant(tenant))),
+      );
     }
     expect(responses.every((response) => response.status === 101)).toBe(true);
     const rejected = await stub.fetch(upgradeRequest(contextForTenant(tenant)));
@@ -981,32 +1197,31 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
 
     try {
       for (let index = 0; index < 256; index += 1) {
-        const response = await stub.fetch(upgradeRequest(contextForTenant(
-          tenant,
-          ["identity_human"],
-          [],
-          {
-            principal_id: `principal_capacity_${String(index).padStart(3, "0")}`,
-            membership_id: `membership_capacity_${String(index).padStart(3, "0")}`,
-          },
-        )));
+        const response = await stub.fetch(
+          upgradeRequest(
+            contextForTenant(tenant, ["identity_human"], [], {
+              principal_id: `principal_capacity_${String(index).padStart(3, "0")}`,
+              membership_id: `membership_capacity_${String(index).padStart(3, "0")}`,
+            }),
+          ),
+        );
         expect(response.status).toBe(101);
         const socket = response.webSocket;
-        if (socket === null) throw new Error("accepted upgrade did not return a client socket");
+        if (socket === null)
+          throw new Error("accepted upgrade did not return a client socket");
         socket.accept();
         acceptedSockets.push(socket);
       }
       expect(acceptedSockets).toHaveLength(256);
 
-      const rejected = await stub.fetch(upgradeRequest(contextForTenant(
-        tenant,
-        ["identity_human"],
-        [],
-        {
-          principal_id: "principal_capacity_256",
-          membership_id: "membership_capacity_256",
-        },
-      )));
+      const rejected = await stub.fetch(
+        upgradeRequest(
+          contextForTenant(tenant, ["identity_human"], [], {
+            principal_id: "principal_capacity_256",
+            membership_id: "membership_capacity_256",
+          }),
+        ),
+      );
 
       expect(rejected.status).toBe(503);
       expect(rejected.webSocket).toBeNull();
@@ -1046,11 +1261,14 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const tenant = "tenant_socket_incomplete_attachment";
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
-    const validResponse = await stub.fetch(upgradeRequest(contextForTenant(tenant)));
-    const incompleteResponse = await stub.fetch(upgradeRequest(contextForTenant(tenant, [
-      "identity_human",
-      "identity_agent",
-    ])));
+    const validResponse = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant)),
+    );
+    const incompleteResponse = await stub.fetch(
+      upgradeRequest(
+        contextForTenant(tenant, ["identity_human", "identity_agent"]),
+      ),
+    );
     const validSocket = validResponse.webSocket;
     const incompleteSocket = incompleteResponse.webSocket;
     if (validSocket === null || incompleteSocket === null) {
@@ -1065,7 +1283,10 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
           subscriptions?: unknown[];
           positions?: unknown[];
         };
-        if (attachment.subscriptions?.length === 2 && attachment.positions !== undefined) {
+        if (
+          attachment.subscriptions?.length === 2 &&
+          attachment.positions !== undefined
+        ) {
           socket.serializeAttachment({
             ...attachment,
             positions: attachment.positions.slice(0, 1),
@@ -1091,22 +1312,33 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const tenant = "tenant_socket_alarm";
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
-    const expiredResponse = await stub.fetch(upgradeRequest(contextForTenant(tenant)));
-    const remainingResponse = await stub.fetch(upgradeRequest(contextForTenant(tenant, ["identity_agent"])));
+    const expiredResponse = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant)),
+    );
+    const remainingResponse = await stub.fetch(
+      upgradeRequest(contextForTenant(tenant, ["identity_agent"])),
+    );
     const expiredSocket = expiredResponse.webSocket;
     const remainingSocket = remainingResponse.webSocket;
-    if (expiredSocket === null || remainingSocket === null) throw new Error("missing sockets");
+    if (expiredSocket === null || remainingSocket === null)
+      throw new Error("missing sockets");
     expiredSocket.accept();
     remainingSocket.accept();
-    const remainingExpiry = new Date(Date.now() + REALTIME_CONNECTION_TTL_MS / 2).toISOString();
+    const remainingExpiry = new Date(
+      Date.now() + REALTIME_CONNECTION_TTL_MS / 2,
+    ).toISOString();
     await runInDurableObject(stub, async (_instance, state) => {
       const sockets = state.getWebSockets("realtime");
       sockets[0]?.serializeAttachment({
         schema_version: 1,
         tenant_id: tenant,
         principal_id: "principal_human",
-        subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
-        positions: [{ identity_id: "identity_human", generation: 1, sequence: 0 }],
+        subscriptions: [
+          { identity_id: "identity_human", families: ["projection"] },
+        ],
+        positions: [
+          { identity_id: "identity_human", generation: 1, sequence: 0 },
+        ],
         lease_expires_at: new Date(Date.now() - 1_000).toISOString(),
         resumed: false,
       });
@@ -1114,8 +1346,12 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
         schema_version: 1,
         tenant_id: tenant,
         principal_id: "principal_human",
-        subscriptions: [{ identity_id: "identity_agent", families: ["projection"] }],
-        positions: [{ identity_id: "identity_agent", generation: 1, sequence: 0 }],
+        subscriptions: [
+          { identity_id: "identity_agent", families: ["projection"] },
+        ],
+        positions: [
+          { identity_id: "identity_agent", generation: 1, sequence: 0 },
+        ],
         lease_expires_at: remainingExpiry,
         resumed: false,
       });
@@ -1133,11 +1369,22 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
     const tenant = "tenant_socket_privacy";
     const stub = realtimeStub(tenant);
     await initialize(stub, tenant);
-    await stub.applyBatch(applyInput([event("identity_human", 1, undefined, tenant)], ["identity_human"], tenant));
-    const response = await stub.fetch(upgradeRequest(contextForTenant(tenant,
-      ["identity_human"],
-      [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
-    )));
+    await stub.applyBatch(
+      applyInput(
+        [event("identity_human", 1, undefined, tenant)],
+        ["identity_human"],
+        tenant,
+      ),
+    );
+    const response = await stub.fetch(
+      upgradeRequest(
+        contextForTenant(
+          tenant,
+          ["identity_human"],
+          [{ identity_id: "identity_human", generation: 1, after_sequence: 0 }],
+        ),
+      ),
+    );
     const messages = await frameMessages(response, 2);
     const serialized = JSON.stringify(messages);
     for (const forbidden of [
@@ -1155,12 +1402,17 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
   });
 
   it("sends frames through the strict public schema", () => {
-    const socket = { send: (message: string) => expect(JSON.parse(message)).toMatchObject({ type: "connected" }) } as unknown as WebSocket;
+    const socket = {
+      send: (message: string) =>
+        expect(JSON.parse(message)).toMatchObject({ type: "connected" }),
+    } as unknown as WebSocket;
     sendRealtimeFrame(socket, {
       schema_version: 1,
       type: "connected",
       tenant_id: TENANT,
-      positions: [{ identity_id: "identity_human", generation: 1, sequence: 0 }],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ],
       connection_expires_at: "2026-09-11T00:00:00.000Z",
     });
   });

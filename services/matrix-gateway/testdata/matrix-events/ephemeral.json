@@ -1,11 +1,46 @@
 {
   "cases": [
-    {"name":"receipt-read","outcome":"events","event_types":["receipt.read"],"reason_code":null},
-    {"name":"typing-start","outcome":"events","event_types":["typing.started"],"reason_code":null},
-    {"name":"typing-stop","outcome":"events","event_types":["typing.stopped"],"reason_code":null},
-    {"name":"typing-replay","outcome":"events","event_types":["typing.started"],"reason_code":null},
-    {"name":"typing-expiry","outcome":"events","event_types":["typing.started"],"reason_code":null},
-    {"name":"typing-unchanged","outcome":"ignored","event_types":[],"reason_code":"matrix_typing_unchanged"},
-    {"name":"read-receipt-replay","outcome":"events","event_types":["receipt.read"],"reason_code":null}
+    {
+      "name": "receipt-read",
+      "outcome": "events",
+      "event_types": ["receipt.read"],
+      "reason_code": null
+    },
+    {
+      "name": "typing-start",
+      "outcome": "events",
+      "event_types": ["typing.started"],
+      "reason_code": null
+    },
+    {
+      "name": "typing-stop",
+      "outcome": "events",
+      "event_types": ["typing.stopped"],
+      "reason_code": null
+    },
+    {
+      "name": "typing-replay",
+      "outcome": "events",
+      "event_types": ["typing.started"],
+      "reason_code": null
+    },
+    {
+      "name": "typing-expiry",
+      "outcome": "events",
+      "event_types": ["typing.started"],
+      "reason_code": null
+    },
+    {
+      "name": "typing-unchanged",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_typing_unchanged"
+    },
+    {
+      "name": "read-receipt-replay",
+      "outcome": "events",
+      "event_types": ["receipt.read"],
+      "reason_code": null
+    }
   ]
 }

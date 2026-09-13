@@ -56,7 +56,8 @@ function canonicalizeGrants(
   const grouped = new Map<string, Set<OperationScope>>();
   for (const grant of grants) {
     const scopes = grouped.get(grant.identity_id) ?? new Set<OperationScope>();
-    for (const scope of grant.scopes) scopes.add(OperationScopeSchema.parse(scope));
+    for (const scope of grant.scopes)
+      scopes.add(OperationScopeSchema.parse(scope));
     grouped.set(grant.identity_id, scopes);
   }
   return [...grouped.entries()]
@@ -64,7 +65,9 @@ function canonicalizeGrants(
     .map(([identity_id, scopes]) => ({
       identity_id,
       scopes: [...scopes].sort(
-        (left, right) => operationScopeOrder.indexOf(left) - operationScopeOrder.indexOf(right),
+        (left, right) =>
+          operationScopeOrder.indexOf(left) -
+          operationScopeOrder.indexOf(right),
       ),
     }));
 }
@@ -84,9 +87,12 @@ export async function findActivePrincipal(
   issuer: string,
   subject: string,
 ): Promise<PrincipalRow | null> {
-  const result = await db.prepare(
-    "SELECT id, principal_type, display_name FROM principals WHERE issuer = ? AND subject = ? AND status = 'active' LIMIT 1",
-  ).bind(issuer, subject).first<PrincipalRow>();
+  const result = await db
+    .prepare(
+      "SELECT id, principal_type, display_name FROM principals WHERE issuer = ? AND subject = ? AND status = 'active' LIMIT 1",
+    )
+    .bind(issuer, subject)
+    .first<PrincipalRow>();
   return result ?? null;
 }
 
@@ -110,14 +116,17 @@ export async function listAuthorizedIdentities(
   membershipId: string,
   tenantId: string,
 ): Promise<AuthorizedIdentity[]> {
-  const result = await db.prepare(
-    "SELECT i.id AS identity_id, i.identity_kind AS kind, i.display_name, g.operation_scope FROM identity_grants AS g JOIN identities AS i ON i.tenant_id = g.tenant_id AND i.id = g.identity_id WHERE g.tenant_id = ? AND g.membership_id = ? AND i.status = 'active' ORDER BY i.id",
-  ).bind(tenantId, membershipId).all<{
-    identity_id: string;
-    kind: "human" | "agent";
-    display_name: string;
-    operation_scope: string;
-  }>();
+  const result = await db
+    .prepare(
+      "SELECT i.id AS identity_id, i.identity_kind AS kind, i.display_name, g.operation_scope FROM identity_grants AS g JOIN identities AS i ON i.tenant_id = g.tenant_id AND i.id = g.identity_id WHERE g.tenant_id = ? AND g.membership_id = ? AND i.status = 'active' ORDER BY i.id",
+    )
+    .bind(tenantId, membershipId)
+    .all<{
+      identity_id: string;
+      kind: "human" | "agent";
+      display_name: string;
+      operation_scope: string;
+    }>();
 
   const grouped = new Map<string, AuthorizedIdentity>();
   for (const row of result.results) {
@@ -137,12 +146,16 @@ export async function listAuthorizedIdentities(
 
   return [...grouped.values()]
     .sort((left, right) => left.identity_id.localeCompare(right.identity_id))
-    .map((identity) => AuthorizedIdentitySchema.parse({
-      ...identity,
-      scopes: [...identity.scopes].sort(
-        (left, right) => operationScopeOrder.indexOf(left) - operationScopeOrder.indexOf(right),
-      ),
-    }));
+    .map((identity) =>
+      AuthorizedIdentitySchema.parse({
+        ...identity,
+        scopes: [...identity.scopes].sort(
+          (left, right) =>
+            operationScopeOrder.indexOf(left) -
+            operationScopeOrder.indexOf(right),
+        ),
+      }),
+    );
 }
 
 export async function isTokenRevoked(
@@ -150,9 +163,12 @@ export async function isTokenRevoked(
   issuer: string,
   tokenId: string,
 ): Promise<boolean> {
-  const result = await db.prepare(
-    "SELECT 1 AS revoked FROM revoked_tokens WHERE issuer = ? AND token_id = ? LIMIT 1",
-  ).bind(issuer, tokenId).first<{ revoked: number }>();
+  const result = await db
+    .prepare(
+      "SELECT 1 AS revoked FROM revoked_tokens WHERE issuer = ? AND token_id = ? LIMIT 1",
+    )
+    .bind(issuer, tokenId)
+    .first<{ revoked: number }>();
   return result !== null;
 }
 
@@ -177,46 +193,66 @@ export async function replaceIdentityGrants(
   });
 
   const statements = [
-    db.prepare(
-      "INSERT INTO directory_mutations (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET request_hash = excluded.request_hash",
-    ).bind(
-      input.idempotency_key,
-      input.tenant_id,
-      input.actor_principal_id,
-      "authorization.identity_grants.replaced",
-      requestHash,
-      input.occurred_at,
+    db
+      .prepare(
+        "INSERT INTO directory_mutations (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET request_hash = excluded.request_hash",
+      )
+      .bind(
+        input.idempotency_key,
+        input.tenant_id,
+        input.actor_principal_id,
+        "authorization.identity_grants.replaced",
+        requestHash,
+        input.occurred_at,
+      ),
+    db
+      .prepare(
+        "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ?",
+      )
+      .bind(input.tenant_id, input.membership_id),
+    ...canonicalGrants.flatMap((grant) =>
+      grant.scopes.map((scope) =>
+        db
+          .prepare(
+            "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .bind(
+            input.tenant_id,
+            input.membership_id,
+            grant.identity_id,
+            scope,
+            input.occurred_at,
+          ),
+      ),
     ),
-    db.prepare(
-      "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ?",
-    ).bind(input.tenant_id, input.membership_id),
-    ...canonicalGrants.flatMap((grant) => grant.scopes.map((scope) => db.prepare(
-      "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(input.tenant_id, input.membership_id, grant.identity_id, scope, input.occurred_at))),
-    db.prepare(
-      "INSERT OR IGNORE INTO audit_events (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(
-      `audit_${input.idempotency_key}`,
-      input.tenant_id,
-      input.actor_principal_id,
-      "authorization.identity_grants.replaced",
-      "membership",
-      input.membership_id,
-      null,
-      payloadJson,
-      input.occurred_at,
-    ),
-    db.prepare(
-      "INSERT OR IGNORE INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(
-      `control_${input.idempotency_key}`,
-      input.tenant_id,
-      "authorization.identity_grants.replaced",
-      "membership",
-      input.membership_id,
-      payloadJson,
-      input.occurred_at,
-    ),
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO audit_events (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        `audit_${input.idempotency_key}`,
+        input.tenant_id,
+        input.actor_principal_id,
+        "authorization.identity_grants.replaced",
+        "membership",
+        input.membership_id,
+        null,
+        payloadJson,
+        input.occurred_at,
+      ),
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        `control_${input.idempotency_key}`,
+        input.tenant_id,
+        "authorization.identity_grants.replaced",
+        "membership",
+        input.membership_id,
+        payloadJson,
+        input.occurred_at,
+      ),
   ];
   await db.batch(statements);
 }
@@ -241,42 +277,56 @@ export async function setMembershipStatus(
   const revokedAt = input.status === "revoked" ? input.occurred_at : null;
 
   await db.batch([
-    db.prepare(
-      "INSERT INTO directory_mutations (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET request_hash = excluded.request_hash",
-    ).bind(
-      input.idempotency_key,
-      input.tenant_id,
-      input.actor_principal_id,
-      "authorization.membership.updated",
-      requestHash,
-      input.occurred_at,
-    ),
-    db.prepare(
-      "UPDATE memberships SET status = ?, revoked_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
-    ).bind(input.status, revokedAt, input.occurred_at, input.tenant_id, input.membership_id),
-    db.prepare(
-      "INSERT OR IGNORE INTO audit_events (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(
-      `audit_${input.idempotency_key}`,
-      input.tenant_id,
-      input.actor_principal_id,
-      "authorization.membership.updated",
-      "membership",
-      input.membership_id,
-      null,
-      payloadJson,
-      input.occurred_at,
-    ),
-    db.prepare(
-      "INSERT OR IGNORE INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(
-      `control_${input.idempotency_key}`,
-      input.tenant_id,
-      "authorization.membership.updated",
-      "membership",
-      input.membership_id,
-      payloadJson,
-      input.occurred_at,
-    ),
+    db
+      .prepare(
+        "INSERT INTO directory_mutations (idempotency_key, tenant_id, actor_principal_id, mutation_type, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO UPDATE SET request_hash = excluded.request_hash",
+      )
+      .bind(
+        input.idempotency_key,
+        input.tenant_id,
+        input.actor_principal_id,
+        "authorization.membership.updated",
+        requestHash,
+        input.occurred_at,
+      ),
+    db
+      .prepare(
+        "UPDATE memberships SET status = ?, revoked_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+      )
+      .bind(
+        input.status,
+        revokedAt,
+        input.occurred_at,
+        input.tenant_id,
+        input.membership_id,
+      ),
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO audit_events (id, tenant_id, actor_principal_id, action, target_type, target_id, reason, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        `audit_${input.idempotency_key}`,
+        input.tenant_id,
+        input.actor_principal_id,
+        "authorization.membership.updated",
+        "membership",
+        input.membership_id,
+        null,
+        payloadJson,
+        input.occurred_at,
+      ),
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO control_event_outbox (event_id, tenant_id, event_type, aggregate_type, aggregate_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        `control_${input.idempotency_key}`,
+        input.tenant_id,
+        "authorization.membership.updated",
+        "membership",
+        input.membership_id,
+        payloadJson,
+        input.occurred_at,
+      ),
   ]);
 }

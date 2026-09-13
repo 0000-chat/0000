@@ -60,23 +60,30 @@ describe("ChannelSidebar", () => {
       />,
     );
 
-    const navigation = screen.getByRole("navigation", { name: "Conversation channels" });
+    const navigation = screen.getByRole("navigation", {
+      name: "Conversation channels",
+    });
     expect(screen.getByText("Channels")).toBeVisible();
     expect(navigation.querySelector("button")).toHaveTextContent("All");
     expect(screen.getByRole("button", { name: /All/ })).toHaveTextContent("10");
-    expect(screen.getByRole("button", { name: "Select Telegram" })).toHaveTextContent("telegram");
-    expect(screen.getByRole("button", { name: "Select Telegram" })).toHaveTextContent("Telegram");
+    expect(
+      screen.getByRole("button", { name: "Select Telegram" }),
+    ).toHaveTextContent("telegram");
+    expect(
+      screen.getByRole("button", { name: "Select Telegram" }),
+    ).toHaveTextContent("Telegram");
     expect(screen.getAllByText("Ready")).toHaveLength(2);
     expect(screen.getByText("Attention required")).toBeVisible();
-    expect(screen.getByRole("link", { name: "Manage connection" })).toHaveAttribute(
-      "href",
-      "/connections?identity=identity_human",
-    );
+    expect(
+      screen.getByRole("link", { name: "Manage connection" }),
+    ).toHaveAttribute("href", "/connections?identity=identity_human");
 
     await user.click(screen.getByRole("button", { name: "Select Telegram" }));
     expect(onSelect).toHaveBeenCalledWith("connection_human_telegram");
 
-    const reorderTelegram = screen.getByRole("button", { name: "Reorder Telegram" });
+    const reorderTelegram = screen.getByRole("button", {
+      name: "Reorder Telegram",
+    });
     reorderTelegram.focus();
     await user.keyboard("[Space]");
     await user.keyboard("{ArrowUp}");
@@ -86,6 +93,8 @@ describe("ChannelSidebar", () => {
       "connection_human_whatsapp",
       "connection_human_messenger",
     ]);
-    expect(screen.queryByRole("button", { name: /Move .* (up|down)/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Move .* (up|down)/ }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -23,32 +23,41 @@ import {
   type SessionResponse,
 } from "@communicator/contracts";
 
-const ResetResponseSchema = z.object({
-  status: z.literal("reset"),
-  scenario: z.enum(["ready", "attention_required"]),
-  fixture_reset_at: z.string().datetime({ offset: true }),
-}).strict();
+const ResetResponseSchema = z
+  .object({
+    status: z.literal("reset"),
+    scenario: z.enum(["ready", "attention_required"]),
+    fixture_reset_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
 
-const HealthResponseSchema = z.object({
-  status: z.literal("ok"),
-  service: z.literal("communicator-control-plane"),
-  data_mode: z.enum(["unconfigured", "simulated", "live"]),
-}).strict();
+const HealthResponseSchema = z
+  .object({
+    status: z.literal("ok"),
+    service: z.literal("communicator-control-plane"),
+    data_mode: z.enum(["unconfigured", "simulated", "live"]),
+  })
+  .strict();
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 export type ResetResponse = z.infer<typeof ResetResponseSchema>;
 
 export function identitiesFromSession(session: SessionResponse): Identity[] {
-  return session.identities.map((identity) => IdentitySchema.parse({
-    id: identity.identity_id,
-    tenant_id: session.tenant.id,
-    kind: identity.kind,
-    display_name: identity.display_name,
-  }));
+  return session.identities.map((identity) =>
+    IdentitySchema.parse({
+      id: identity.identity_id,
+      tenant_id: session.tenant.id,
+      kind: identity.kind,
+      display_name: identity.display_name,
+    }),
+  );
 }
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -56,10 +65,12 @@ export class ApiError extends Error {
 
 export function isDefinitiveRequestRejection(error: unknown) {
   if (!(error instanceof ApiError)) return false;
-  return error.status >= 400
-    && error.status < 500
-    && error.status !== 408
-    && error.status !== 429;
+  return (
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  );
 }
 
 export class ApiClient {
@@ -68,13 +79,23 @@ export class ApiClient {
     private readonly baseUrl = "",
   ) {}
 
-  private async request<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): Promise<T> {
+  private async request<T>(
+    path: string,
+    schema: z.ZodType<T>,
+    init?: RequestInit,
+  ): Promise<T> {
     const url = this.baseUrl
       ? `${this.baseUrl}${path}`
-      : new URL(path, globalThis.location?.origin ?? "http://example.test").toString();
+      : new URL(
+          path,
+          globalThis.location?.origin ?? "http://example.test",
+        ).toString();
     const response = await (this.fetcher ?? globalThis.fetch)(url, init);
     if (!response.ok) {
-      throw new ApiError(response.status, `Communicator API request failed with ${response.status}`);
+      throw new ApiError(
+        response.status,
+        `Communicator API request failed with ${response.status}`,
+      );
     }
     let body: unknown;
     try {
@@ -122,7 +143,10 @@ export class ApiClient {
     );
   }
 
-  getConversation(identityId: string, conversationId: string): Promise<ConversationSummary> {
+  getConversation(
+    identityId: string,
+    conversationId: string,
+  ): Promise<ConversationSummary> {
     return this.request(
       `/api/v1/identities/${encodeURIComponent(identityId)}/conversations/${encodeURIComponent(conversationId)}`,
       ConversationSummarySchema,
@@ -184,7 +208,9 @@ export class ApiClient {
     );
   }
 
-  resetSimulation(scenario: "ready" | "attention_required" = "ready"): Promise<ResetResponse> {
+  resetSimulation(
+    scenario: "ready" | "attention_required" = "ready",
+  ): Promise<ResetResponse> {
     return this.request("/api/v1/testing/reset", ResetResponseSchema, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -196,13 +222,19 @@ export class ApiClient {
     return this.request("/api/v1/health", HealthResponseSchema);
   }
 
-  createRealtimeTicket(request: RealtimeTicketRequest): Promise<RealtimeTicketResponse> {
+  createRealtimeTicket(
+    request: RealtimeTicketRequest,
+  ): Promise<RealtimeTicketResponse> {
     const parsedRequest = RealtimeTicketRequestSchema.parse(request);
-    return this.request("/api/v1/realtime/tickets", RealtimeTicketResponseSchema, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(parsedRequest),
-    });
+    return this.request(
+      "/api/v1/realtime/tickets",
+      RealtimeTicketResponseSchema,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedRequest),
+      },
+    );
   }
 }
 

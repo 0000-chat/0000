@@ -30,26 +30,27 @@ export class ProjectionError extends Error {
       value: code,
       writable: false,
     });
-    if (options.cause !== undefined) projectionErrorCauses.set(this, options.cause);
+    if (options.cause !== undefined)
+      projectionErrorCauses.set(this, options.cause);
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
 /** @internal Diagnostic-only access; never expose this through RPC. */
-export const getProjectionErrorCause = (
-  error: ProjectionError,
-): unknown => projectionErrorCauses.get(error);
+export const getProjectionErrorCause = (error: ProjectionError): unknown =>
+  projectionErrorCauses.get(error);
 
-export const isProjectionError = (
-  error: unknown,
-): error is ProjectionError => error instanceof ProjectionError;
+export const isProjectionError = (error: unknown): error is ProjectionError =>
+  error instanceof ProjectionError;
 
 export const projectionError = (
   code: ProjectionErrorCode,
   cause?: unknown,
-): ProjectionError => new ProjectionError(code, cause === undefined ? {} : { cause });
+): ProjectionError =>
+  new ProjectionError(code, cause === undefined ? {} : { cause });
 
 export const safeProjectionError = (
   error: unknown,
   fallback: ProjectionErrorCode,
-): ProjectionError => (isProjectionError(error) ? error : projectionError(fallback, error));
+): ProjectionError =>
+  isProjectionError(error) ? error : projectionError(fallback, error);

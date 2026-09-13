@@ -52,7 +52,9 @@ describe("realtime socket telemetry", () => {
       },
     ]);
     for (const event of events) {
-      expect(RealtimeSocketTelemetryEventSchema.safeParse(event).success).toBe(true);
+      expect(RealtimeSocketTelemetryEventSchema.safeParse(event).success).toBe(
+        true,
+      );
     }
   });
 
@@ -79,7 +81,7 @@ describe("realtime socket telemetry", () => {
         "arbitrary-label" as never,
         0,
         "2026-09-11T00:00:00.000Z",
-      )
+      ),
     ).toThrow();
   });
 
@@ -141,7 +143,9 @@ describe("realtime socket telemetry", () => {
 
       expect(info).toHaveBeenCalledTimes(1);
       const logged = info.mock.calls[0]?.[0];
-      expect(RealtimeSocketTelemetryEventSchema.safeParse(logged).success).toBe(true);
+      expect(RealtimeSocketTelemetryEventSchema.safeParse(logged).success).toBe(
+        true,
+      );
       expect(logged).toEqual({
         schema_version: 1,
         type: "realtime.socket",

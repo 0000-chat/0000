@@ -33,17 +33,26 @@ const getError = async (operation: Promise<unknown>): Promise<ArchiveError> => {
 
 describe("archive codec", () => {
   it("serializes and decodes an event at the exact payload depth boundary", async () => {
-    const event = makeEvent({ payload: nestedPayload(MAX_CANONICAL_JSON_DEPTH) });
+    const event = makeEvent({
+      payload: nestedPayload(MAX_CANONICAL_JSON_DEPTH),
+    });
     expect(CanonicalEventEnvelopeSchema.safeParse(event).success).toBe(true);
 
-    const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [event] });
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events: [event],
+    });
     await expect(
       decodeCanonicalJsonl(encoded.canonicalJsonl, { tenantId: TENANT_ID }),
     ).resolves.toHaveLength(1);
 
-    const tooDeep = makeEvent({ payload: nestedPayload(MAX_CANONICAL_JSON_DEPTH + 1) });
+    const tooDeep = makeEvent({
+      payload: nestedPayload(MAX_CANONICAL_JSON_DEPTH + 1),
+    });
     expect(CanonicalEventEnvelopeSchema.safeParse(tooDeep).success).toBe(false);
-    await expect(encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [tooDeep] })).rejects.toMatchObject({
+    await expect(
+      encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [tooDeep] }),
+    ).rejects.toMatchObject({
       code: "archive_invalid",
     });
   });
@@ -68,7 +77,10 @@ describe("archive codec", () => {
     ];
     const before = cloneEvents(events);
 
-    const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events });
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events,
+    });
 
     expect(encoded.events.map((event) => event.event_id)).toEqual([
       "$a:server",
@@ -76,7 +88,9 @@ describe("archive codec", () => {
       "$z:server",
     ]);
     expect(encoded.canonicalJsonl.at(-1)).toBe(0x0a);
-    expect(new TextDecoder().decode(encoded.canonicalJsonl).split("\n").at(-1)).toBe("");
+    expect(
+      new TextDecoder().decode(encoded.canonicalJsonl).split("\n").at(-1),
+    ).toBe("");
     expect(events).toEqual(before);
     expect(encoded.uncompressedBytes).toBe(encoded.canonicalJsonl.byteLength);
     expect(encoded.canonicalSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -85,12 +99,20 @@ describe("archive codec", () => {
   it("canonicalizes payload insertion order and hashes uncompressed bytes", async () => {
     const first = makeEvent({ payload: { z: 2, a: { y: 1, x: 0 } } });
     const second = makeEvent({ payload: { a: { x: 0, y: 1 }, z: 2 } });
-    const firstEncoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [first] });
-    const secondEncoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [second] });
+    const firstEncoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events: [first],
+    });
+    const secondEncoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events: [second],
+    });
 
     expect(firstEncoded.canonicalJsonl).toEqual(secondEncoded.canonicalJsonl);
     expect(firstEncoded.canonicalSha256).toBe(secondEncoded.canonicalSha256);
-    expect(firstEncoded.canonicalSha256).toBe(await sha256Hex(firstEncoded.canonicalJsonl));
+    expect(firstEncoded.canonicalSha256).toBe(
+      await sha256Hex(firstEncoded.canonicalJsonl),
+    );
   });
 
   it("rejects cross-tenant events and duplicate IDs before any storage exists", async () => {
@@ -105,17 +127,32 @@ describe("archive codec", () => {
     const duplicate = await getError(
       encodeCanonicalEventBatch({
         tenantId: TENANT_ID,
-        events: [makeEvent(), makeEvent({ payload: { body: "different fixture" } })],
+        events: [
+          makeEvent(),
+          makeEvent({ payload: { body: "different fixture" } }),
+        ],
       }),
     );
     expect(duplicate.code).toBe("archive_invalid");
   });
 
   it("rejects empty and excessive batches with safe bounds", async () => {
-    expect((await getError(encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [] }))).code)
-      .toBe("archive_invalid");
     expect(
-      (await getError(encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: makeEvents(501) }))).code,
+      (
+        await getError(
+          encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [] }),
+        )
+      ).code,
+    ).toBe("archive_invalid");
+    expect(
+      (
+        await getError(
+          encodeCanonicalEventBatch({
+            tenantId: TENANT_ID,
+            events: makeEvents(501),
+          }),
+        )
+      ).code,
     ).toBe("archive_too_large");
   });
 
@@ -142,7 +179,10 @@ describe("archive codec", () => {
   });
 
   it("round-trips gzip bytes exactly and computes lowercase SHA-256", async () => {
-    const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: makeEvents(2) });
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events: makeEvents(2),
+    });
     const compressed = await gzipBytes(encoded.canonicalJsonl);
     const uncompressed = await gunzipBytes(compressed);
 
@@ -153,24 +193,32 @@ describe("archive codec", () => {
 
     const corrupted = compressed.slice();
     corrupted[Math.floor(corrupted.byteLength / 2)]! ^= 0x01;
-    expect((await getError(gunzipBytes(corrupted))).code).toBe("archive_corrupt");
+    expect((await getError(gunzipBytes(corrupted))).code).toBe(
+      "archive_corrupt",
+    );
   });
 
   it("enforces the uncompressed gzip bound before creating a stream", async () => {
-    await expect(gzipBytes(new Uint8Array(MAX_ARCHIVE_UNCOMPRESSED_BYTES))).resolves.toBeInstanceOf(
-      Uint8Array,
-    );
-    await expect(gzipBytes(new Uint8Array(MAX_ARCHIVE_UNCOMPRESSED_BYTES + 1))).rejects.toMatchObject({
+    await expect(
+      gzipBytes(new Uint8Array(MAX_ARCHIVE_UNCOMPRESSED_BYTES)),
+    ).resolves.toBeInstanceOf(Uint8Array);
+    await expect(
+      gzipBytes(new Uint8Array(MAX_ARCHIVE_UNCOMPRESSED_BYTES + 1)),
+    ).rejects.toMatchObject({
       code: "archive_too_large",
     });
   });
 
   it("rejects malformed gzip and invalid UTF-8 as archive_corrupt", async () => {
-    const gzipError = await getError(gunzipBytes(new Uint8Array([0x1f, 0x8b, 0x00])));
+    const gzipError = await getError(
+      gunzipBytes(new Uint8Array([0x1f, 0x8b, 0x00])),
+    );
     expect(gzipError.code).toBe("archive_corrupt");
 
     const invalidUtf8 = await getError(
-      Promise.resolve().then(() => decodeCanonicalJsonl(new Uint8Array([0xff, 0x0a]))),
+      Promise.resolve().then(() =>
+        decodeCanonicalJsonl(new Uint8Array([0xff, 0x0a])),
+      ),
     );
     expect(invalidUtf8.code).toBe("archive_corrupt");
   });
@@ -178,39 +226,71 @@ describe("archive codec", () => {
   it.each([
     ["blank interior line", '{"x":1}\n\n{"x":2}\n'],
     ["absent final newline", '{"x":1}'],
-    ["malformed JSON", '{not-json}\n'],
+    ["malformed JSON", "{not-json}\n"],
   ])("rejects %s JSONL without leaking body", async (_name, body) => {
     const fixtureBody = `${body}fixture message body`;
     const error = await getError(
-      Promise.resolve().then(() => decodeCanonicalJsonl(new TextEncoder().encode(fixtureBody))),
+      Promise.resolve().then(() =>
+        decodeCanonicalJsonl(new TextEncoder().encode(fixtureBody)),
+      ),
     );
     expect(error.code).toBe("archive_corrupt");
     expect(error.message).not.toContain("fixture message body");
   });
 
   it("rejects reordered, duplicate, invalid, and wrong-tenant decoded rows", async () => {
-    const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: makeEvents(2) });
-    const rows = new TextDecoder().decode(encoded.canonicalJsonl).trimEnd().split("\n");
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events: makeEvents(2),
+    });
+    const rows = new TextDecoder()
+      .decode(encoded.canonicalJsonl)
+      .trimEnd()
+      .split("\n");
     const reordered = new TextEncoder().encode(`${rows[1]!}\n${rows[0]!}\n`);
-    expect((await getError(Promise.resolve().then(() => decodeCanonicalJsonl(reordered, { tenantId: TENANT_ID })))).code)
-      .toBe("archive_corrupt");
+    expect(
+      (
+        await getError(
+          Promise.resolve().then(() =>
+            decodeCanonicalJsonl(reordered, { tenantId: TENANT_ID }),
+          ),
+        )
+      ).code,
+    ).toBe("archive_corrupt");
 
     const duplicate = new TextEncoder().encode(`${rows[0]}\n${rows[0]}\n`);
-    expect((await getError(Promise.resolve().then(() => decodeCanonicalJsonl(duplicate, { tenantId: TENANT_ID })))).code)
-      .toBe("archive_corrupt");
-
-    const wrongTenant = rows[0]!.replace('"tenant_id":"tenant_pilot"', '"tenant_id":"tenant_other"');
     expect(
-      (await getError(
-        Promise.resolve().then(() =>
-          decodeCanonicalJsonl(new TextEncoder().encode(`${wrongTenant}\n`), { tenantId: TENANT_ID }),
-        ),
-      )).code,
+      (
+        await getError(
+          Promise.resolve().then(() =>
+            decodeCanonicalJsonl(duplicate, { tenantId: TENANT_ID }),
+          ),
+        )
+      ).code,
+    ).toBe("archive_corrupt");
+
+    const wrongTenant = rows[0]!.replace(
+      '"tenant_id":"tenant_pilot"',
+      '"tenant_id":"tenant_other"',
+    );
+    expect(
+      (
+        await getError(
+          Promise.resolve().then(() =>
+            decodeCanonicalJsonl(new TextEncoder().encode(`${wrongTenant}\n`), {
+              tenantId: TENANT_ID,
+            }),
+          ),
+        )
+      ).code,
     ).toBe("archive_corrupt");
   });
 
   it("rejects decoded size overflow while consuming a stream incrementally", async () => {
-    const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events: [makeEvent()] });
+    const encoded = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events: [makeEvent()],
+    });
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoded.canonicalJsonl);
@@ -219,7 +299,10 @@ describe("archive codec", () => {
       },
     });
     const error = await getError(
-      decodeCanonicalJsonl(stream, { tenantId: TENANT_ID, maxDecodedBytes: encoded.canonicalJsonl.byteLength }),
+      decodeCanonicalJsonl(stream, {
+        tenantId: TENANT_ID,
+        maxDecodedBytes: encoded.canonicalJsonl.byteLength,
+      }),
     );
     expect(error.code).toBe("archive_too_large");
   });

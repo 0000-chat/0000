@@ -9,7 +9,6 @@ import {
   participantIsDeleted,
 } from "./projector-deletion";
 import {
-  assertMessageTargetOwner,
   assertCanonicalResourceIdOwner,
   assertOwner,
   assertReferencedMessageOwner,
@@ -91,7 +90,10 @@ type AttachmentRow = OwnedProjectionRow & {
   deleted_at: string | null;
 };
 
-const readReaction = (sql: SqlStorage, reactionId: string): ReactionRow | undefined =>
+const readReaction = (
+  sql: SqlStorage,
+  reactionId: string,
+): ReactionRow | undefined =>
   sql
     .exec<ReactionRow>(
       "SELECT id, message_id, identity_id, account_id, connection_id, conversation_id, platform, participant_id, emoji, occurred_at, last_observed_ms, last_event_id, removed_at FROM reactions WHERE id = ?",
@@ -159,7 +161,8 @@ const assertReactionIdentity = (
   owner: ProjectionOwner,
 ): void => {
   assertOwnedRow(row, owner);
-  if (row.message_id !== messageId) throw projectionError("projection_conflict");
+  if (row.message_id !== messageId)
+    throw projectionError("projection_conflict");
 };
 
 const messageIsRedacted = (
@@ -167,7 +170,10 @@ const messageIsRedacted = (
   messageId: string,
   conversationId: string,
 ): ResourceTombstoneRow | undefined =>
-  latestTombstone(messageIsDeleted(sql, messageId), conversationIsDeleted(sql, conversationId));
+  latestTombstone(
+    messageIsDeleted(sql, messageId),
+    conversationIsDeleted(sql, conversationId),
+  );
 
 const projectReactionAdded = (
   sql: SqlStorage,
@@ -183,10 +189,18 @@ const projectReactionAdded = (
   assertReferencedParticipantOwner(sql, payload.participant_id, owner);
 
   const existing = readReaction(sql, payload.reaction_id);
-  if (existing !== undefined) assertReactionIdentity(existing, payload.message_id, owner);
+  if (existing !== undefined)
+    assertReactionIdentity(existing, payload.message_id, owner);
 
-  const tombstone = messageIsRedacted(sql, payload.message_id, owner.conversationId);
-  const participantTombstone = participantIsDeleted(sql, payload.participant_id);
+  const tombstone = messageIsRedacted(
+    sql,
+    payload.message_id,
+    owner.conversationId,
+  );
+  const participantTombstone = participantIsDeleted(
+    sql,
+    payload.participant_id,
+  );
   if (tombstone !== undefined || participantTombstone !== undefined) {
     // Deletions remove reactions rather than retaining a row whose participant
     // or emoji could be mistaken for visible content.
@@ -250,11 +264,17 @@ const projectReactionRemoved = (
   assertCanonicalResourceIdOwner(sql, "reaction", payload.reaction_id, owner);
   assertReactionTarget(sql, payload.message_id, owner);
   const existing = readReaction(sql, payload.reaction_id);
-  if (existing !== undefined) assertReactionIdentity(existing, payload.message_id, owner);
+  if (existing !== undefined)
+    assertReactionIdentity(existing, payload.message_id, owner);
 
-  const tombstone = messageIsRedacted(sql, payload.message_id, owner.conversationId);
+  const tombstone = messageIsRedacted(
+    sql,
+    payload.message_id,
+    owner.conversationId,
+  );
   if (tombstone !== undefined) {
-    if (existing !== undefined) sql.exec("DELETE FROM reactions WHERE id = ?", payload.reaction_id);
+    if (existing !== undefined)
+      sql.exec("DELETE FROM reactions WHERE id = ?", payload.reaction_id);
     return;
   }
 
@@ -302,9 +322,15 @@ const projectReactionRemoved = (
 const latestLocalRead = (
   sql: SqlStorage,
   messageId: string,
-): { occurred_at: string; last_observed_ms: number; last_event_id: string } | undefined =>
+):
+  | { occurred_at: string; last_observed_ms: number; last_event_id: string }
+  | undefined =>
   sql
-    .exec<{ occurred_at: string; last_observed_ms: number; last_event_id: string }>(
+    .exec<{
+      occurred_at: string;
+      last_observed_ms: number;
+      last_event_id: string;
+    }>(
       "SELECT occurred_at, last_observed_ms, last_event_id FROM receipts WHERE message_id = ? AND receipt_type = 'read' AND local_identity = 1 ORDER BY last_observed_ms DESC, last_event_id COLLATE BINARY DESC LIMIT 1",
       messageId,
     )
@@ -316,7 +342,11 @@ export const reconcileMessageLocalRead = (
   messageId: string,
 ): void => {
   const message = readMessage(sql, messageId);
-  if (message === undefined || messageIsRedacted(sql, messageId, message.conversation_id) !== undefined) return;
+  if (
+    message === undefined ||
+    messageIsRedacted(sql, messageId, message.conversation_id) !== undefined
+  )
+    return;
   const localRead = latestLocalRead(sql, messageId);
   if (localRead === undefined) return;
   sql.exec(
@@ -333,7 +363,8 @@ const projectReceipt = (
   const event = prepared.event as ReceiptEvent;
   const payload = event.payload;
   const owner = ownerFor(prepared);
-  const receiptType = event.event_type === "receipt.read" ? "read" : "delivered";
+  const receiptType =
+    event.event_type === "receipt.read" ? "read" : "delivered";
 
   ensureConversationShell(sql, prepared);
   assertReferencedMessageOwner(sql, payload.message_id, owner);
@@ -355,8 +386,15 @@ const projectReceipt = (
     throw projectionError("projection_conflict");
   }
 
-  const tombstone = messageIsRedacted(sql, payload.message_id, owner.conversationId);
-  const participantTombstone = participantIsDeleted(sql, payload.participant_id);
+  const tombstone = messageIsRedacted(
+    sql,
+    payload.message_id,
+    owner.conversationId,
+  );
+  const participantTombstone = participantIsDeleted(
+    sql,
+    payload.participant_id,
+  );
   if (tombstone !== undefined || participantTombstone !== undefined) {
     // Receipts are removed when a message is tombstoned and remain blocked
     // for any later observations, including an older tuple arriving late.
@@ -432,7 +470,11 @@ const projectTypingStarted = (
 
   ensureConversationShell(sql, prepared);
   assertReferencedParticipantOwner(sql, payload.participant_id, owner);
-  const existing = readTyping(sql, owner.conversationId, payload.participant_id);
+  const existing = readTyping(
+    sql,
+    owner.conversationId,
+    payload.participant_id,
+  );
   assertOwnedRow(existing, owner);
   if (
     conversationIsDeleted(sql, owner.conversationId) !== undefined ||
@@ -498,7 +540,11 @@ const projectTypingStopped = (
 
   ensureConversationShell(sql, prepared);
   assertReferencedParticipantOwner(sql, payload.participant_id, owner);
-  const existing = readTyping(sql, owner.conversationId, payload.participant_id);
+  const existing = readTyping(
+    sql,
+    owner.conversationId,
+    payload.participant_id,
+  );
   assertOwnedRow(existing, owner);
   if (
     conversationIsDeleted(sql, owner.conversationId) !== undefined ||
@@ -561,7 +607,12 @@ const projectAttachmentObserved = (
   const owner = ownerFor(prepared);
 
   ensureConversationShell(sql, prepared);
-  assertCanonicalResourceIdOwner(sql, "attachment", payload.attachment_id, owner);
+  assertCanonicalResourceIdOwner(
+    sql,
+    "attachment",
+    payload.attachment_id,
+    owner,
+  );
   assertReferencedMessageOwner(sql, payload.message_id, owner);
   const existing = readAttachment(sql, payload.attachment_id);
   assertOwnedRow(existing, owner);
@@ -569,13 +620,21 @@ const projectAttachmentObserved = (
     throw projectionError("projection_conflict");
   }
 
-  const messageTombstone = messageIsRedacted(sql, payload.message_id, owner.conversationId);
+  const messageTombstone = messageIsRedacted(
+    sql,
+    payload.message_id,
+    owner.conversationId,
+  );
   const attachmentTombstone = attachmentIsDeleted(sql, payload.attachment_id);
-  if (attachmentTombstone !== undefined) assertOwnedRow(attachmentTombstone, owner);
+  if (attachmentTombstone !== undefined)
+    assertOwnedRow(attachmentTombstone, owner);
   // A containing message/conversation tombstone and the attachment tombstone
   // are one effective redaction stream. Presence gates content permanently;
   // metadata follows the tuple-maximal tombstone regardless of arrival order.
-  const redactionTombstone = latestTombstone(attachmentTombstone, messageTombstone);
+  const redactionTombstone = latestTombstone(
+    attachmentTombstone,
+    messageTombstone,
+  );
   const deletionTombstone = redactionTombstone;
   if (redactionTombstone !== undefined && existing !== undefined) {
     // Redaction is a standing invariant, not another LWW candidate: even an

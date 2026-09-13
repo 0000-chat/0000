@@ -4,7 +4,10 @@ import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/mocks/server";
-import { loadChannelOrder, saveChannelOrder } from "@/features/conversations/channel-order";
+import {
+  loadChannelOrder,
+  saveChannelOrder,
+} from "@/features/conversations/channel-order";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
 afterEach(() => {
@@ -14,11 +17,15 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  server.use(http.get("http://localhost:3000/api/v1/health", () => HttpResponse.json({
-    status: "ok",
-    service: "communicator-control-plane",
-    data_mode: "simulated",
-  })));
+  server.use(
+    http.get("http://localhost:3000/api/v1/health", () =>
+      HttpResponse.json({
+        status: "ok",
+        service: "communicator-control-plane",
+        data_mode: "simulated",
+      }),
+    ),
+  );
 });
 
 describe("diagnostic surfaces", () => {
@@ -31,7 +38,9 @@ describe("diagnostic surfaces", () => {
     expect(await screen.findByText("Connected")).toBeVisible();
     expect(screen.getByText("Last sequence")).toBeVisible();
     expect(screen.getByText("Fixture reset time")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Reset simulated scenario" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Reset simulated scenario" }),
+    ).toBeVisible();
   });
 
   it("shows a bounded status and connects with the authenticated active identity", async () => {
@@ -45,16 +54,22 @@ describe("diagnostic surfaces", () => {
       identityIds: ["identity_human"],
       families: ["projection"],
     });
-    expect(document.body.textContent).not.toMatch(/ticket|wss?:|bearer|access/i);
+    expect(document.body.textContent).not.toMatch(
+      /ticket|wss?:|bearer|access/i,
+    );
   });
 
   it("resets the simulated scenario through a labelled diagnostic control", async () => {
     const user = userEvent.setup();
     renderApp("/system");
 
-    const reset = await screen.findByRole("button", { name: "Reset simulated scenario" });
+    const reset = await screen.findByRole("button", {
+      name: "Reset simulated scenario",
+    });
     await user.click(reset);
-    expect(await screen.findByRole("status", { name: "Simulation reset complete" })).toBeVisible();
+    expect(
+      await screen.findByRole("status", { name: "Simulation reset complete" }),
+    ).toBeVisible();
   });
 
   it("clears channel order preferences when the simulation resets", async () => {
@@ -69,7 +84,9 @@ describe("diagnostic surfaces", () => {
 
     const user = userEvent.setup();
     renderApp("/system");
-    await user.click(await screen.findByRole("button", { name: "Reset simulated scenario" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Reset simulated scenario" }),
+    );
     await screen.findByRole("status", { name: "Simulation reset complete" });
     expect(loadChannelOrder("principal_pilot", "identity_human")).toEqual([]);
   });
@@ -86,8 +103,15 @@ describe("diagnostic surfaces", () => {
     renderApp("/");
     expect(await screen.findByText("3 connections")).toBeVisible();
     expect(screen.getByText("1 command")).toBeVisible();
-    for (const linkName of ["Connections", "Conversations", "Activity", "System"]) {
-      expect(screen.getAllByRole("link", { name: linkName }).length).toBeGreaterThan(0);
+    for (const linkName of [
+      "Connections",
+      "Conversations",
+      "Activity",
+      "System",
+    ]) {
+      expect(
+        screen.getAllByRole("link", { name: linkName }).length,
+      ).toBeGreaterThan(0);
     }
   });
 });

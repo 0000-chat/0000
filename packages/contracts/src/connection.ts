@@ -29,17 +29,19 @@ export const CapabilitySchema = z.enum([
   "attachment.send",
 ]);
 
-export const ConnectionSchema = z.object({
-  id: CommunicatorIdSchema,
-  tenant_id: CommunicatorIdSchema,
-  identity_id: CommunicatorIdSchema,
-  provider: ProviderSchema,
-  display_label: z.string().min(1).max(100),
-  status: ConnectionStatusSchema,
-  capabilities: z.array(CapabilitySchema),
-  last_synced_at: TimestampSchema.nullable(),
-  attention_code: z.string().max(100).optional(),
-}).strict();
+export const ConnectionSchema = z
+  .object({
+    id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    provider: ProviderSchema,
+    display_label: z.string().min(1).max(100),
+    status: ConnectionStatusSchema,
+    capabilities: z.array(CapabilitySchema),
+    last_synced_at: TimestampSchema.nullable(),
+    attention_code: z.string().max(100).optional(),
+  })
+  .strict();
 
 export type Provider = z.infer<typeof ProviderSchema>;
 export type ConnectionStatus = z.infer<typeof ConnectionStatusSchema>;

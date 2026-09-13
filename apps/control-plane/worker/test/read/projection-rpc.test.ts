@@ -60,136 +60,141 @@ const statsInput = (
 const applyReadFixtures = async () => {
   const stub = env.TENANT_PROJECTION.getByName(tenant);
   await initialize(tenant);
-  await stub.applyBatch(input([
-    event(
-      "event_read_conversation_shell",
-      { title: "Conversation A", archived: false, muted: false },
-      "conversation.updated",
+  await stub.applyBatch(
+    input(
+      [
+        event(
+          "event_read_conversation_shell",
+          { title: "Conversation A", archived: false, muted: false },
+          "conversation.updated",
+          {
+            tenant_id: tenant,
+            identity_id: identity,
+            account_id: "account_a",
+            conversation_id: "conversation_a",
+            occurred_at: "2026-09-07T01:00:00.000Z",
+            observed_at: "2026-09-07T01:00:01.000Z",
+          },
+        ),
+        created("event_read_message_a", {
+          tenant_id: tenant,
+          identity_id: identity,
+          account_id: "account_a",
+          conversation_id: "conversation_a",
+          occurred_at: "2026-09-07T02:00:00.000Z",
+          observed_at: "2026-09-07T02:00:01.000Z",
+          payload: {
+            message_id: "message_a",
+            direction: "inbound",
+            sender_participant_id: null,
+            sender_label: "Alice",
+            body: "hello",
+            reply_to_message_id: null,
+            delivery_status: "unknown",
+            unread: true,
+          },
+        }),
+        created("event_read_message_c", {
+          tenant_id: tenant,
+          identity_id: identity,
+          account_id: "account_c",
+          conversation_id: "conversation_c",
+          occurred_at: "2026-09-07T03:00:00.000Z",
+          observed_at: "2026-09-07T03:00:01.000Z",
+          payload: {
+            message_id: "message_c",
+            direction: "inbound",
+            sender_participant_id: null,
+            sender_label: "Carol",
+            body: "later",
+            reply_to_message_id: null,
+            delivery_status: "unknown",
+            unread: false,
+          },
+        }),
+        created("event_read_agent_message", {
+          tenant_id: tenant,
+          identity_id: "identity_b",
+          account_id: "account_b",
+          conversation_id: "conversation_b",
+          occurred_at: "2026-09-07T04:00:00.000Z",
+          observed_at: "2026-09-07T04:00:01.000Z",
+          payload: {
+            message_id: "message_b",
+            direction: "inbound",
+            sender_participant_id: null,
+            sender_label: "Agent contact",
+            body: "agent-only",
+            reply_to_message_id: null,
+            delivery_status: "unknown",
+            unread: true,
+          },
+        }),
+        created("event_read_message_a_two", {
+          tenant_id: tenant,
+          identity_id: identity,
+          account_id: "account_a",
+          conversation_id: "conversation_a_two",
+          occurred_at: "2026-09-07T05:00:00.000Z",
+          observed_at: "2026-09-07T05:00:01.000Z",
+          payload: {
+            message_id: "message_a_two",
+            direction: "inbound",
+            sender_participant_id: null,
+            sender_label: "Alice two",
+            body: "second hello",
+            reply_to_message_id: null,
+            delivery_status: "unknown",
+            unread: true,
+          },
+        }),
+        created("event_read_deleted_message", {
+          tenant_id: tenant,
+          identity_id: identity,
+          account_id: "account_a",
+          conversation_id: "conversation_deleted",
+          occurred_at: "2026-09-07T05:00:00.000Z",
+          observed_at: "2026-09-07T05:00:01.000Z",
+          payload: {
+            message_id: "message_deleted",
+            direction: "inbound",
+            sender_participant_id: null,
+            sender_label: "Deleted contact",
+            body: "deleted body",
+            reply_to_message_id: null,
+            delivery_status: "unknown",
+            unread: true,
+          },
+        }),
+        deletionTombstone(
+          "event_read_deleted_conversation",
+          "conversation",
+          "conversation_deleted",
+          {
+            tenant_id: tenant,
+            identity_id: identity,
+            account_id: "account_a",
+            conversation_id: "conversation_deleted",
+            occurred_at: "2026-09-07T06:00:00.000Z",
+            observed_at: "2026-09-07T06:00:01.000Z",
+          },
+        ),
+      ],
       {
         tenant_id: tenant,
-        identity_id: identity,
-        account_id: "account_a",
-        conversation_id: "conversation_a",
-        occurred_at: "2026-09-07T01:00:00.000Z",
-        observed_at: "2026-09-07T01:00:01.000Z",
+        authorization: auth(
+          ["projection.write"],
+          ["identity_a", "identity_b"],
+          tenant,
+        ),
+        connections: [
+          bindingFor("account_a", "connection_a", "identity_a"),
+          bindingFor("account_b", "connection_b", "identity_b"),
+          bindingFor("account_c", "connection_c", "identity_a"),
+        ],
       },
     ),
-    created("event_read_message_a", {
-      tenant_id: tenant,
-      identity_id: identity,
-      account_id: "account_a",
-      conversation_id: "conversation_a",
-      occurred_at: "2026-09-07T02:00:00.000Z",
-      observed_at: "2026-09-07T02:00:01.000Z",
-      payload: {
-        message_id: "message_a",
-        direction: "inbound",
-        sender_participant_id: null,
-        sender_label: "Alice",
-        body: "hello",
-        reply_to_message_id: null,
-        delivery_status: "unknown",
-        unread: true,
-      },
-    }),
-    created("event_read_message_c", {
-      tenant_id: tenant,
-      identity_id: identity,
-      account_id: "account_c",
-      conversation_id: "conversation_c",
-      occurred_at: "2026-09-07T03:00:00.000Z",
-      observed_at: "2026-09-07T03:00:01.000Z",
-      payload: {
-        message_id: "message_c",
-        direction: "inbound",
-        sender_participant_id: null,
-        sender_label: "Carol",
-        body: "later",
-        reply_to_message_id: null,
-        delivery_status: "unknown",
-        unread: false,
-      },
-    }),
-    created("event_read_agent_message", {
-      tenant_id: tenant,
-      identity_id: "identity_b",
-      account_id: "account_b",
-      conversation_id: "conversation_b",
-      occurred_at: "2026-09-07T04:00:00.000Z",
-      observed_at: "2026-09-07T04:00:01.000Z",
-      payload: {
-        message_id: "message_b",
-        direction: "inbound",
-        sender_participant_id: null,
-        sender_label: "Agent contact",
-        body: "agent-only",
-        reply_to_message_id: null,
-        delivery_status: "unknown",
-        unread: true,
-      },
-    }),
-    created("event_read_message_a_two", {
-      tenant_id: tenant,
-      identity_id: identity,
-      account_id: "account_a",
-      conversation_id: "conversation_a_two",
-      occurred_at: "2026-09-07T05:00:00.000Z",
-      observed_at: "2026-09-07T05:00:01.000Z",
-      payload: {
-        message_id: "message_a_two",
-        direction: "inbound",
-        sender_participant_id: null,
-        sender_label: "Alice two",
-        body: "second hello",
-        reply_to_message_id: null,
-        delivery_status: "unknown",
-        unread: true,
-      },
-    }),
-    created("event_read_deleted_message", {
-      tenant_id: tenant,
-      identity_id: identity,
-      account_id: "account_a",
-      conversation_id: "conversation_deleted",
-      occurred_at: "2026-09-07T05:00:00.000Z",
-      observed_at: "2026-09-07T05:00:01.000Z",
-      payload: {
-        message_id: "message_deleted",
-        direction: "inbound",
-        sender_participant_id: null,
-        sender_label: "Deleted contact",
-        body: "deleted body",
-        reply_to_message_id: null,
-        delivery_status: "unknown",
-        unread: true,
-      },
-    }),
-    deletionTombstone(
-      "event_read_deleted_conversation",
-      "conversation",
-      "conversation_deleted",
-      {
-        tenant_id: tenant,
-        identity_id: identity,
-        account_id: "account_a",
-        conversation_id: "conversation_deleted",
-        occurred_at: "2026-09-07T06:00:00.000Z",
-        observed_at: "2026-09-07T06:00:01.000Z",
-      },
-    ),
-  ], {
-    tenant_id: tenant,
-    authorization: auth(
-      ["projection.write"],
-      ["identity_a", "identity_b"],
-      tenant,
-    ),
-    connections: [
-      bindingFor("account_a", "connection_a", "identity_a"),
-      bindingFor("account_b", "connection_b", "identity_b"),
-      bindingFor("account_c", "connection_c", "identity_a"),
-    ],
-  }));
+  );
   return stub;
 };
 
@@ -197,7 +202,9 @@ describe("TenantProjectionDO read RPCs", () => {
   it("returns an exact authorized conversation and null for every miss", async () => {
     const stub = await applyReadFixtures();
 
-    await expect(stub.getConversation(conversationInput("conversation_a"))).resolves.toMatchObject({
+    await expect(
+      stub.getConversation(conversationInput("conversation_a")),
+    ).resolves.toMatchObject({
       id: "conversation_a",
       tenant_id: tenant,
       identity_id: identity,
@@ -207,9 +214,15 @@ describe("TenantProjectionDO read RPCs", () => {
       last_activity_at: "2026-09-07T02:00:00.000Z",
       unread_count: 1,
     });
-    await expect(stub.getConversation(conversationInput("conversation_missing"))).resolves.toBeNull();
-    await expect(stub.getConversation(conversationInput("conversation_deleted"))).resolves.toBeNull();
-    await expect(stub.getConversation(conversationInput("conversation_b"))).resolves.toBeNull();
+    await expect(
+      stub.getConversation(conversationInput("conversation_missing")),
+    ).resolves.toBeNull();
+    await expect(
+      stub.getConversation(conversationInput("conversation_deleted")),
+    ).resolves.toBeNull();
+    await expect(
+      stub.getConversation(conversationInput("conversation_b")),
+    ).resolves.toBeNull();
   });
 
   it("returns one sorted aggregate per active connection for the identity", async () => {
@@ -232,18 +245,30 @@ describe("TenantProjectionDO read RPCs", () => {
   it("does not mutate projection state while serving reads", async () => {
     const stub = await applyReadFixtures();
     const before = await runInDurableObject(stub, async (_instance, state) => ({
-      changes: state.storage.sql.exec("SELECT * FROM projection_changes ORDER BY sequence").toArray(),
-      checkpoints: state.storage.sql.exec("SELECT * FROM projection_checkpoints ORDER BY kind").toArray(),
-      events: state.storage.sql.exec("SELECT * FROM applied_events ORDER BY event_id").toArray(),
+      changes: state.storage.sql
+        .exec("SELECT * FROM projection_changes ORDER BY sequence")
+        .toArray(),
+      checkpoints: state.storage.sql
+        .exec("SELECT * FROM projection_checkpoints ORDER BY kind")
+        .toArray(),
+      events: state.storage.sql
+        .exec("SELECT * FROM applied_events ORDER BY event_id")
+        .toArray(),
     }));
 
     await stub.getConversation(conversationInput("conversation_a"));
     await stub.listChannelStats(statsInput());
 
     const after = await runInDurableObject(stub, async (_instance, state) => ({
-      changes: state.storage.sql.exec("SELECT * FROM projection_changes ORDER BY sequence").toArray(),
-      checkpoints: state.storage.sql.exec("SELECT * FROM projection_checkpoints ORDER BY kind").toArray(),
-      events: state.storage.sql.exec("SELECT * FROM applied_events ORDER BY event_id").toArray(),
+      changes: state.storage.sql
+        .exec("SELECT * FROM projection_changes ORDER BY sequence")
+        .toArray(),
+      checkpoints: state.storage.sql
+        .exec("SELECT * FROM projection_checkpoints ORDER BY kind")
+        .toArray(),
+      events: state.storage.sql
+        .exec("SELECT * FROM applied_events ORDER BY event_id")
+        .toArray(),
     }));
     expect(after).toEqual(before);
   });
@@ -257,31 +282,56 @@ describe("TenantProjectionDO read RPCs", () => {
   });
 
   it("fails closed for missing, unauthorized, wrong-tenant, and non-ready state", async () => {
-    const uninitialized = env.TENANT_PROJECTION.getByName("tenant_read_uninitialized");
+    const uninitialized = env.TENANT_PROJECTION.getByName(
+      "tenant_read_uninitialized",
+    );
     await expectCode(
       uninitialized,
-      (instance) => instance.getConversation({
-        ...conversationInput("conversation_a"),
-        tenant_id: "tenant_read_uninitialized",
-        authorization: auth(["projection.read"], [identity], "tenant_read_uninitialized"),
-      }),
+      (instance) =>
+        instance.getConversation({
+          ...conversationInput("conversation_a"),
+          tenant_id: "tenant_read_uninitialized",
+          authorization: auth(
+            ["projection.read"],
+            [identity],
+            "tenant_read_uninitialized",
+          ),
+        }),
       "projection_not_found",
     );
 
     const stub = await applyReadFixtures();
     await expectCode(
       stub,
-      (instance) => instance.getConversation(conversationInput("conversation_a", auth(["projection.write"], [identity], tenant))),
+      (instance) =>
+        instance.getConversation(
+          conversationInput(
+            "conversation_a",
+            auth(["projection.write"], [identity], tenant),
+          ),
+        ),
       "projection_forbidden",
     );
     await expectCode(
       stub,
-      (instance) => instance.getConversation(conversationInput("conversation_a", auth(["projection.read"], ["identity_b"], tenant))),
+      (instance) =>
+        instance.getConversation(
+          conversationInput(
+            "conversation_a",
+            auth(["projection.read"], ["identity_b"], tenant),
+          ),
+        ),
       "projection_forbidden",
     );
     await expectCode(
       stub,
-      (instance) => instance.getConversation(conversationInput("conversation_a", auth(["projection.read"], [identity], "tenant_other"))),
+      (instance) =>
+        instance.getConversation(
+          conversationInput(
+            "conversation_a",
+            auth(["projection.read"], [identity], "tenant_other"),
+          ),
+        ),
       "projection_tenant_mismatch",
     );
 
@@ -310,7 +360,8 @@ describe("TenantProjectionDO read RPCs", () => {
 
     await expectCode(
       stub,
-      (instance) => instance.getConversation(conversationInput("conversation_a")),
+      (instance) =>
+        instance.getConversation(conversationInput("conversation_a")),
       "projection_unavailable",
     );
   });

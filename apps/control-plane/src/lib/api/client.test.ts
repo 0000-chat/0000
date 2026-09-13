@@ -67,24 +67,34 @@ describe("Communicator API client", () => {
   });
 
   it("turns an invalid channel response into a bad gateway error", async () => {
-    const client = new ApiClient(async () => new Response(JSON.stringify([{
-      id: "connection_human_telegram",
-      tenant_id: "tenant_pilot",
-      identity_id: "identity_human",
-      provider: "telegram",
-      display_label: "Telegram",
-      status: "ready",
-      capabilities: ["message.send"],
-      unread_count: -1,
-      last_activity_at: null,
-      sort_position: 20,
-    }]), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
+    const client = new ApiClient(
+      async () =>
+        new Response(
+          JSON.stringify([
+            {
+              id: "connection_human_telegram",
+              tenant_id: "tenant_pilot",
+              identity_id: "identity_human",
+              provider: "telegram",
+              display_label: "Telegram",
+              status: "ready",
+              capabilities: ["message.send"],
+              unread_count: -1,
+              last_activity_at: null,
+              sort_position: 20,
+            },
+          ]),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
 
-    await expect(client.getChannels("identity_human"))
-      .rejects.toMatchObject({ name: "ApiError", status: 502 });
+    await expect(client.getChannels("identity_human")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 502,
+    });
   });
 
   it("rejects navigation collections that exceed the hard response bound", async () => {
@@ -100,18 +110,26 @@ describe("Communicator API client", () => {
       last_activity_at: null,
       sort_position: 20,
     };
-    const client = new ApiClient(async () => new Response(JSON.stringify(
-      Array.from({ length: 65 }, (_, index) => ({
-        ...channel,
-        id: `connection_human_telegram_${index}`,
-      })),
-    ), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
+    const client = new ApiClient(
+      async () =>
+        new Response(
+          JSON.stringify(
+            Array.from({ length: 65 }, (_, index) => ({
+              ...channel,
+              id: `connection_human_telegram_${index}`,
+            })),
+          ),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
 
-    await expect(client.getChannels("identity_human"))
-      .rejects.toMatchObject({ name: "ApiError", status: 502 });
+    await expect(client.getChannels("identity_human")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 502,
+    });
   });
 
   it("loads the session contract and derives authorized identities with its tenant", async () => {
@@ -154,8 +172,9 @@ describe("Communicator API client", () => {
       });
     }, "https://communicator.test");
 
-    await expect(client.getMessages("conversation/a", "identity/a", "cursor /?&", 2))
-      .resolves.toEqual(page);
+    await expect(
+      client.getMessages("conversation/a", "identity/a", "cursor /?&", 2),
+    ).resolves.toEqual(page);
     expect(urls).toEqual([
       "https://communicator.test/api/v1/conversations/conversation%2Fa/messages?identity_id=identity%2Fa&limit=2&cursor=cursor+%2F%3F%26",
     ]);
@@ -167,28 +186,49 @@ describe("Communicator API client", () => {
 
   it("turns malformed successful response bodies into a generic bad gateway error", async () => {
     const privateResponseDetail = "private response detail";
-    const client = new ApiClient(async () => new Response(JSON.stringify({
-      items: [{ body: privateResponseDetail }],
-      next_cursor: null,
-    }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
+    const client = new ApiClient(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [{ body: privateResponseDetail }],
+            next_cursor: null,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
 
-    await expect(client.getMessages("conversation_one", "identity_human"))
-      .rejects.toSatisfy((error: unknown) =>
-        error instanceof ApiError
-        && error.status === 502
-        && !error.message.includes(privateResponseDetail));
+    await expect(
+      client.getMessages("conversation_one", "identity_human"),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof ApiError &&
+        error.status === 502 &&
+        !error.message.includes(privateResponseDetail),
+    );
   });
 
   it("only treats definitive client rejections as safe to forget", () => {
-    expect(isDefinitiveRequestRejection(new ApiError(400, "bad request"))).toBe(true);
-    expect(isDefinitiveRequestRejection(new ApiError(404, "not found"))).toBe(true);
-    expect(isDefinitiveRequestRejection(new ApiError(408, "timeout"))).toBe(false);
-    expect(isDefinitiveRequestRejection(new ApiError(429, "rate limited"))).toBe(false);
-    expect(isDefinitiveRequestRejection(new ApiError(503, "server error"))).toBe(false);
-    expect(isDefinitiveRequestRejection(new TypeError("network failure"))).toBe(false);
+    expect(isDefinitiveRequestRejection(new ApiError(400, "bad request"))).toBe(
+      true,
+    );
+    expect(isDefinitiveRequestRejection(new ApiError(404, "not found"))).toBe(
+      true,
+    );
+    expect(isDefinitiveRequestRejection(new ApiError(408, "timeout"))).toBe(
+      false,
+    );
+    expect(
+      isDefinitiveRequestRejection(new ApiError(429, "rate limited")),
+    ).toBe(false);
+    expect(
+      isDefinitiveRequestRejection(new ApiError(503, "server error")),
+    ).toBe(false);
+    expect(isDefinitiveRequestRejection(new TypeError("network failure"))).toBe(
+      false,
+    );
   });
 
   it("posts the strict realtime ticket request and validates its response", async () => {
@@ -207,44 +247,73 @@ describe("Communicator API client", () => {
       });
     }, "https://communicator.test");
 
-    await expect(client.createRealtimeTicket({
-      schema_version: 1,
-      subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
-      resume: [{ identity_id: "identity_human", generation: 1, after_sequence: 42 }],
-    })).resolves.toEqual(response);
+    await expect(
+      client.createRealtimeTicket({
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: "identity_human", families: ["projection"] },
+        ],
+        resume: [
+          { identity_id: "identity_human", generation: 1, after_sequence: 42 },
+        ],
+      }),
+    ).resolves.toEqual(response);
 
-    expect(calls).toEqual([{
-      url: "https://communicator.test/api/v1/realtime/tickets",
-      init: {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          schema_version: 1,
-          subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
-          resume: [{ identity_id: "identity_human", generation: 1, after_sequence: 42 }],
-        }),
+    expect(calls).toEqual([
+      {
+        url: "https://communicator.test/api/v1/realtime/tickets",
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            schema_version: 1,
+            subscriptions: [
+              { identity_id: "identity_human", families: ["projection"] },
+            ],
+            resume: [
+              {
+                identity_id: "identity_human",
+                generation: 1,
+                after_sequence: 42,
+              },
+            ],
+          }),
+        },
       },
-    }]);
+    ]);
   });
 
   it("turns a malformed realtime ticket response into a generic bad gateway error", async () => {
     const privateTicket = `rt1_${"x".repeat(43)}`;
-    const client = new ApiClient(async () => new Response(JSON.stringify({
-      schema_version: 1,
-      ticket: privateTicket,
-      expires_at: "not-a-timestamp",
-      websocket_url: "wss://communicator.test/api/v1/realtime?ticket=opaque",
-    }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
+    const client = new ApiClient(
+      async () =>
+        new Response(
+          JSON.stringify({
+            schema_version: 1,
+            ticket: privateTicket,
+            expires_at: "not-a-timestamp",
+            websocket_url:
+              "wss://communicator.test/api/v1/realtime?ticket=opaque",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+    );
 
-    await expect(client.createRealtimeTicket({
-      schema_version: 1,
-      subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
-    })).rejects.toSatisfy((error: unknown) =>
-      error instanceof ApiError
-      && error.status === 502
-      && !error.message.includes(privateTicket));
+    await expect(
+      client.createRealtimeTicket({
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: "identity_human", families: ["projection"] },
+        ],
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof ApiError &&
+        error.status === 502 &&
+        !error.message.includes(privateTicket),
+    );
   });
 });

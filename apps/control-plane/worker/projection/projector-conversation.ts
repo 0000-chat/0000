@@ -21,7 +21,8 @@ export const projectConversationUpdated = (
 ): void => {
   const event = prepared.event as ConversationUpdatedEvent;
   const conversation = ensureConversationShell(sql, prepared);
-  if (readConversationTombstone(sql, event.conversation_id) !== undefined) return;
+  if (readConversationTombstone(sql, event.conversation_id) !== undefined)
+    return;
   if (
     !isMetadataSentinel(conversation) &&
     compareObservedTuple(
@@ -55,12 +56,26 @@ export const projectParticipantUpdated = (
   ensureConversationShell(sql, prepared);
   const owner = ownerFor(prepared);
   const payload = event.payload;
-  assertCanonicalResourceIdOwner(sql, "participant", payload.participant_id, owner);
+  assertCanonicalResourceIdOwner(
+    sql,
+    "participant",
+    payload.participant_id,
+    owner,
+  );
   assertParticipantReferenceOwners(sql, payload.participant_id, owner);
   const existing = readParticipant(sql, payload.participant_id);
-  const participantTombstone = readParticipantTombstone(sql, payload.participant_id);
-  const conversationTombstone = readConversationTombstone(sql, owner.conversationId);
-  const deletionTombstone = latestTombstone(participantTombstone, conversationTombstone);
+  const participantTombstone = readParticipantTombstone(
+    sql,
+    payload.participant_id,
+  );
+  const conversationTombstone = readConversationTombstone(
+    sql,
+    owner.conversationId,
+  );
+  const deletionTombstone = latestTombstone(
+    participantTombstone,
+    conversationTombstone,
+  );
   const deletedAt = deletionTombstone?.occurred_at ?? null;
   if (existing !== undefined) {
     assertOwner(
@@ -83,7 +98,11 @@ export const projectParticipantUpdated = (
     ) {
       return;
     }
-    if (existing.deleted_at !== null || participantTombstone !== undefined || conversationTombstone !== undefined) {
+    if (
+      existing.deleted_at !== null ||
+      participantTombstone !== undefined ||
+      conversationTombstone !== undefined
+    ) {
       sql.exec(
         "UPDATE participants SET display_name = 'Deleted participant', remote_id = NULL, avatar_url = NULL, deleted_at = COALESCE(deleted_at, ?), last_observed_ms = ?, last_event_id = ? WHERE id = ?",
         deletedAt,
@@ -113,9 +132,15 @@ export const projectParticipantUpdated = (
     owner.accountId,
     owner.connectionId,
     owner.platform,
-    participantTombstone !== undefined || conversationTombstone !== undefined ? "Deleted participant" : payload.display_name,
-    participantTombstone !== undefined || conversationTombstone !== undefined ? null : payload.remote_id,
-    participantTombstone !== undefined || conversationTombstone !== undefined ? null : payload.avatar_url,
+    participantTombstone !== undefined || conversationTombstone !== undefined
+      ? "Deleted participant"
+      : payload.display_name,
+    participantTombstone !== undefined || conversationTombstone !== undefined
+      ? null
+      : payload.remote_id,
+    participantTombstone !== undefined || conversationTombstone !== undefined
+      ? null
+      : payload.avatar_url,
     prepared.observedMs,
     event.event_id,
     deletedAt,

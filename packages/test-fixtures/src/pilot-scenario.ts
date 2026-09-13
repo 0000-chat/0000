@@ -39,7 +39,12 @@ const humanConnections: Connection[] = [
     provider: "whatsapp" as const,
     display_label: "Personal WhatsApp",
     status: "ready" as const,
-    capabilities: ["message.send", "reaction.add", "receipt.read", "typing.send"],
+    capabilities: [
+      "message.send",
+      "reaction.add",
+      "receipt.read",
+      "typing.send",
+    ],
     last_synced_at: "2026-08-28T00:06:00.000Z",
   },
   {
@@ -49,7 +54,12 @@ const humanConnections: Connection[] = [
     provider: "telegram",
     display_label: "Telegram",
     status: "ready",
-    capabilities: ["message.send", "reaction.add", "receipt.read", "typing.send"],
+    capabilities: [
+      "message.send",
+      "reaction.add",
+      "receipt.read",
+      "typing.send",
+    ],
     last_synced_at: "2026-08-28T00:05:00.000Z",
   },
   {
@@ -75,10 +85,7 @@ const agentConnection: Connection = {
   last_synced_at: "2026-08-27T00:14:00.000Z",
 };
 
-const readyConnections: Connection[] = [
-  ...humanConnections,
-  agentConnection,
-];
+const readyConnections: Connection[] = [...humanConnections, agentConnection];
 
 const attentionConnections: Connection[] = [
   humanConnections[0]!,
@@ -241,10 +248,7 @@ const agentMessages: Message[] = [
   },
 ];
 
-const messages: Message[] = [
-  ...humanMessages,
-  ...agentMessages,
-];
+const messages: Message[] = [...humanMessages, ...agentMessages];
 
 const commands = [
   {
@@ -271,41 +275,51 @@ const commands = [
   },
 ];
 
-export const PilotScenarioSchema = z.object({
-  tenant_id: z.literal(tenantId),
-  identities: z.array(IdentitySchema),
-  connections: z.array(ConnectionSchema),
-  connection_variants: z.object({
-    ready: z.array(ConnectionSchema),
-    attention_required: z.array(ConnectionSchema),
-  }).strict(),
-  conversations: z.array(ConversationSummarySchema),
-  messages: z.array(MessageSchema),
-  commands: z.array(CommandSchema),
-  fixture_reset_at: TimestampSchema,
-}).strict();
+export const PilotScenarioSchema = z
+  .object({
+    tenant_id: z.literal(tenantId),
+    identities: z.array(IdentitySchema),
+    connections: z.array(ConnectionSchema),
+    connection_variants: z
+      .object({
+        ready: z.array(ConnectionSchema),
+        attention_required: z.array(ConnectionSchema),
+      })
+      .strict(),
+    conversations: z.array(ConversationSummarySchema),
+    messages: z.array(MessageSchema),
+    commands: z.array(CommandSchema),
+    fixture_reset_at: TimestampSchema,
+  })
+  .strict();
 
-const PilotIngestionRouteSchema = z.object({
-  gateway_route_id: z.string().min(1),
-  service_principal_id: z.string().min(1),
-  status: z.enum(["active", "disabled", "revoked"]),
-}).strict();
+const PilotIngestionRouteSchema = z
+  .object({
+    gateway_route_id: z.string().min(1),
+    service_principal_id: z.string().min(1),
+    status: z.enum(["active", "disabled", "revoked"]),
+  })
+  .strict();
 
-const PilotIngestionBindingSchema = z.object({
-  tenant_id: z.string().min(1),
-  gateway_route_id: z.string().min(1),
-  account_id: z.string().min(1),
-  connection_id: z.string().min(1),
-  identity_id: z.string().min(1),
-  platform: z.enum(["whatsapp", "telegram", "messenger"]),
-  account_status: z.enum(["active", "retired"]),
-}).strict();
+const PilotIngestionBindingSchema = z
+  .object({
+    tenant_id: z.string().min(1),
+    gateway_route_id: z.string().min(1),
+    account_id: z.string().min(1),
+    connection_id: z.string().min(1),
+    identity_id: z.string().min(1),
+    platform: z.enum(["whatsapp", "telegram", "messenger"]),
+    account_status: z.enum(["active", "retired"]),
+  })
+  .strict();
 
-export const PilotIngestionDirectorySchema = z.object({
-  tenant_ids: z.array(z.string().min(1)).min(2),
-  routes: z.array(PilotIngestionRouteSchema).min(2),
-  bindings: z.array(PilotIngestionBindingSchema).min(1),
-}).strict();
+export const PilotIngestionDirectorySchema = z
+  .object({
+    tenant_ids: z.array(z.string().min(1)).min(2),
+    routes: z.array(PilotIngestionRouteSchema).min(2),
+    bindings: z.array(PilotIngestionBindingSchema).min(1),
+  })
+  .strict();
 
 const deepFreeze = <T>(value: T): Readonly<T> => {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
@@ -393,6 +407,8 @@ export const pilotIngestionDirectory = deepFreeze({
   ],
 });
 
-export type PilotIngestionDirectory = z.infer<typeof PilotIngestionDirectorySchema>;
+export type PilotIngestionDirectory = z.infer<
+  typeof PilotIngestionDirectorySchema
+>;
 
 export type PilotScenario = z.infer<typeof PilotScenarioSchema>;

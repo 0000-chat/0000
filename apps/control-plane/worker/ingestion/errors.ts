@@ -29,10 +29,7 @@ const ingestionErrorCauses = new WeakMap<IngestionError, unknown>();
 export class IngestionError extends Error {
   readonly code!: IngestionErrorCode;
 
-  constructor(
-    code: IngestionErrorCode,
-    options: IngestionErrorOptions = {},
-  ) {
+  constructor(code: IngestionErrorCode, options: IngestionErrorOptions = {}) {
     super(SAFE_MESSAGES[code]);
     Object.defineProperty(this, "name", {
       configurable: true,
@@ -46,19 +43,18 @@ export class IngestionError extends Error {
       value: code,
       writable: false,
     });
-    if (options.cause !== undefined) ingestionErrorCauses.set(this, options.cause);
+    if (options.cause !== undefined)
+      ingestionErrorCauses.set(this, options.cause);
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
 /** @internal Diagnostic-only access; never expose this through RPC. */
-export const getIngestionErrorCause = (
-  error: IngestionError,
-): unknown => ingestionErrorCauses.get(error);
+export const getIngestionErrorCause = (error: IngestionError): unknown =>
+  ingestionErrorCauses.get(error);
 
-export const isIngestionError = (
-  error: unknown,
-): error is IngestionError => error instanceof IngestionError;
+export const isIngestionError = (error: unknown): error is IngestionError =>
+  error instanceof IngestionError;
 
 export const ingestionError = (
   code: IngestionErrorCode,

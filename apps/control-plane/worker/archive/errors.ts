@@ -55,10 +55,10 @@ export const isArchiveError = (error: unknown): error is ArchiveError =>
 export const archiveError = (
   code: ArchiveErrorCode,
   cause?: unknown,
-): ArchiveError =>
-  new ArchiveError(code, cause === undefined ? {} : { cause });
+): ArchiveError => new ArchiveError(code, cause === undefined ? {} : { cause });
 
 export const safeArchiveError = (
   error: unknown,
   fallback: ArchiveErrorCode,
-): ArchiveError => (isArchiveError(error) ? error : archiveError(fallback, error));
+): ArchiveError =>
+  isArchiveError(error) ? error : archiveError(fallback, error);

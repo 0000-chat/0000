@@ -25,7 +25,15 @@ export function createAuthorizationMiddleware(
 }> {
   return async (context, next) => {
     const requestId = crypto.randomUUID();
-    const respond = (status: 400 | 401 | 404 | 503, code: "unauthenticated" | "not_found" | "tenant_selection_required" | "service_unavailable", message: string) => {
+    const respond = (
+      status: 400 | 401 | 404 | 503,
+      code:
+        | "unauthenticated"
+        | "not_found"
+        | "tenant_selection_required"
+        | "service_unavailable",
+      message: string,
+    ) => {
       logAuthorizationFailure(status, requestId);
       return context.json({ error: { code, message } }, status);
     };
@@ -33,16 +41,23 @@ export function createAuthorizationMiddleware(
     try {
       const authorization = context.req.header("Authorization");
       const accessAssertion = context.req.header("Cf-Access-Jwt-Assertion");
-      const subject = authorization !== undefined
-        ? await options.getVerifier(context.env).verify(
-            parseBearerToken(authorization),
-          )
-        : await options.getAccessVerifier(context.env).verify(
-            parseAccessAssertion(accessAssertion),
-          );
+      const subject =
+        authorization !== undefined
+          ? await options
+              .getVerifier(context.env)
+              .verify(parseBearerToken(authorization))
+          : await options
+              .getAccessVerifier(context.env)
+              .verify(parseAccessAssertion(accessAssertion));
       const database = context.env.CONTROL_DB;
-      if (!database) return respond(503, "service_unavailable", "Authorization service unavailable");
-      const tenantHint = context.req.header("X-Communicator-Tenant") ?? undefined;
+      if (!database)
+        return respond(
+          503,
+          "service_unavailable",
+          "Authorization service unavailable",
+        );
+      const tenantHint =
+        context.req.header("X-Communicator-Tenant") ?? undefined;
       const result = await resolveAuthorization(database, subject, tenantHint);
       if (result.ok) {
         context.set("authorization", result.context);
@@ -53,9 +68,17 @@ export function createAuthorizationMiddleware(
         case "not_found":
           return respond(404, "not_found", "Resource not found");
         case "tenant_selection_required":
-          return respond(400, "tenant_selection_required", "Select an authorized tenant");
+          return respond(
+            400,
+            "tenant_selection_required",
+            "Select an authorized tenant",
+          );
         case "directory_unavailable":
-          return respond(503, "service_unavailable", "Authorization service unavailable");
+          return respond(
+            503,
+            "service_unavailable",
+            "Authorization service unavailable",
+          );
         case "unauthenticated":
           return respond(401, "unauthenticated", "Authentication required");
       }

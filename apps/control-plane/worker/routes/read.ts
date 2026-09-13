@@ -33,10 +33,7 @@ const errorContent = {
   "application/json": { schema: ApiErrorResponseSchema },
 };
 
-const readResponses = (
-  schema: z.ZodTypeAny,
-  description: string,
-) => ({
+const readResponses = (schema: z.ZodTypeAny, description: string) => ({
   200: {
     description,
     content: { "application/json": { schema } },
@@ -50,31 +47,34 @@ const readResponses = (
 const rejectRepeatedQueryValues = (value: unknown): unknown =>
   Array.isArray(value) ? { invalid_query_value: true } : value;
 
-const singleString = (
-  schema: z.ZodTypeAny,
-) => z.preprocess(rejectRepeatedQueryValues, schema);
+const singleString = (schema: z.ZodTypeAny) =>
+  z.preprocess(rejectRepeatedQueryValues, schema);
 
 const boundedId = CommunicatorIdSchema.max(128);
 const queryId = () => singleString(boundedId);
 const optionalQueryId = () => singleString(boundedId.optional());
-const optionalCursor = () => singleString(
-  z.string().min(1).max(MAX_PROJECTION_CURSOR_CHARS).optional(),
-);
-const optionalLimit = () => singleString(
-  z.coerce.number().int().min(1).max(MAX_PROJECTION_PAGE_SIZE).optional(),
-);
+const optionalCursor = () =>
+  singleString(z.string().min(1).max(MAX_PROJECTION_CURSOR_CHARS).optional());
+const optionalLimit = () =>
+  singleString(
+    z.coerce.number().int().min(1).max(MAX_PROJECTION_PAGE_SIZE).optional(),
+  );
 
 const connectionQuery = z.object({ identity_id: queryId() }).strict();
-const conversationQuery = z.object({
-  channel_id: optionalQueryId(),
-  cursor: optionalCursor(),
-  limit: optionalLimit(),
-}).strict();
-const messageQuery = z.object({
-  identity_id: queryId(),
-  cursor: optionalCursor(),
-  limit: optionalLimit(),
-}).strict();
+const conversationQuery = z
+  .object({
+    channel_id: optionalQueryId(),
+    cursor: optionalCursor(),
+    limit: optionalLimit(),
+  })
+  .strict();
+const messageQuery = z
+  .object({
+    identity_id: queryId(),
+    cursor: optionalCursor(),
+    limit: optionalLimit(),
+  })
+  .strict();
 
 export const identitiesRoute = createRoute({
   method: "get",
@@ -127,10 +127,12 @@ export const conversationRoute = createRoute({
   path: "/api/v1/identities/{identity_id}/conversations/{conversation_id}",
   security: [{ bearerAuth: [] }],
   request: {
-    params: z.object({
-      identity_id: boundedId,
-      conversation_id: boundedId,
-    }).strict(),
+    params: z
+      .object({
+        identity_id: boundedId,
+        conversation_id: boundedId,
+      })
+      .strict(),
   },
   responses: readResponses(
     ConversationSummarySchema,
@@ -146,10 +148,7 @@ export const messagesRoute = createRoute({
     params: z.object({ conversation_id: boundedId }).strict(),
     query: messageQuery,
   },
-  responses: readResponses(
-    MessagePageResultSchema,
-    "Seek-paginated messages",
-  ),
+  responses: readResponses(MessagePageResultSchema, "Seek-paginated messages"),
 });
 
 type ReadRouteEnv = {
@@ -164,15 +163,16 @@ const readContext = <I extends Input>(
   authorization: context.get("authorization"),
 });
 
-const failureResponse = (
-  context: Context<ReadRouteEnv>,
-  error: unknown,
-) => {
+const failureResponse = (context: Context<ReadRouteEnv>, error: unknown) => {
   const result = readErrorResponse(error);
   return context.json(result.body, result.status);
 };
 
-export const identitiesHandler: Handler<ReadRouteEnv, string, { out: {} }> = async (context) => {
+export const identitiesHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: {} }
+> = async (context) => {
   try {
     return context.json(await listIdentities(readContext(context)), 200);
   } catch (error) {
@@ -180,62 +180,82 @@ export const identitiesHandler: Handler<ReadRouteEnv, string, { out: {} }> = asy
   }
 };
 
-export const connectionsHandler: Handler<ReadRouteEnv, string, { out: { query: ListConnectionsInput } }> = async (context) => {
+export const connectionsHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { query: ListConnectionsInput } }
+> = async (context) => {
   try {
-    return context.json(await listConnections(
-      readContext(context),
-      context.req.valid("query"),
-    ), 200);
+    return context.json(
+      await listConnections(readContext(context), context.req.valid("query")),
+      200,
+    );
   } catch (error) {
     return failureResponse(context, error);
   }
 };
 
-export const channelsHandler: Handler<ReadRouteEnv, string, { out: { param: { identity_id: string } } }> = async (context) => {
+export const channelsHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { param: { identity_id: string } } }
+> = async (context) => {
   try {
-    return context.json(await listChannels(
-      readContext(context),
-      context.req.valid("param"),
-    ), 200);
+    return context.json(
+      await listChannels(readContext(context), context.req.valid("param")),
+      200,
+    );
   } catch (error) {
     return failureResponse(context, error);
   }
 };
 
-export const conversationsHandler: Handler<ReadRouteEnv, string, { out: { param: { identity_id: string }; query: ListConversationsInput } }> = async (context) => {
+export const conversationsHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { param: { identity_id: string }; query: ListConversationsInput } }
+> = async (context) => {
   try {
-    return context.json(await listConversations(
-      readContext(context),
-      {
+    return context.json(
+      await listConversations(readContext(context), {
         ...context.req.valid("param"),
         ...context.req.valid("query"),
-      },
-    ), 200);
+      }),
+      200,
+    );
   } catch (error) {
     return failureResponse(context, error);
   }
 };
 
-export const conversationHandler: Handler<ReadRouteEnv, string, { out: { param: { identity_id: string; conversation_id: string } } }> = async (context) => {
+export const conversationHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { param: { identity_id: string; conversation_id: string } } }
+> = async (context) => {
   try {
-    return context.json(await getConversation(
-      readContext(context),
-      context.req.valid("param"),
-    ), 200);
+    return context.json(
+      await getConversation(readContext(context), context.req.valid("param")),
+      200,
+    );
   } catch (error) {
     return failureResponse(context, error);
   }
 };
 
-export const messagesHandler: Handler<ReadRouteEnv, string, { out: { param: { conversation_id: string }; query: ListMessagesInput } }> = async (context) => {
+export const messagesHandler: Handler<
+  ReadRouteEnv,
+  string,
+  { out: { param: { conversation_id: string }; query: ListMessagesInput } }
+> = async (context) => {
   try {
-    return context.json(await listMessages(
-      readContext(context),
-      {
+    return context.json(
+      await listMessages(readContext(context), {
         ...context.req.valid("param"),
         ...context.req.valid("query"),
-      },
-    ), 200);
+      }),
+      200,
+    );
   } catch (error) {
     return failureResponse(context, error);
   }

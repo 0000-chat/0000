@@ -4,19 +4,11 @@ import type {
   IngestionDirectoryDatabase,
   IngestionDirectoryResult,
 } from "../control-directory/ingestion-repository";
-import {
-  findActiveIngestionService,
-} from "../control-directory/ingestion-repository";
-import {
-  ingestionError,
-  ingestionErrorResponse,
-} from "../ingestion/errors";
+import { findActiveIngestionService } from "../control-directory/ingestion-repository";
+import { ingestionError, ingestionErrorResponse } from "../ingestion/errors";
 import { isIngressEnabled } from "../ingestion/config";
 import { AuthenticationError, parseBearerToken } from "./bearer";
-import {
-  OidcVerificationError,
-  type TokenVerifier,
-} from "./oidc";
+import { OidcVerificationError, type TokenVerifier } from "./oidc";
 
 export type IngestionAuthorization = {
   service_principal_id: string;
@@ -61,15 +53,9 @@ export function createIngestionAuthorizationMiddleware(
   const resolveService = options.resolveService ?? findActiveIngestionService;
 
   return async (context, next) => {
-    const respond = (
-      status: 401 | 404 | 503,
-      code: IngestionFailureCode,
-    ) => {
+    const respond = (status: 401 | 404 | 503, code: IngestionFailureCode) => {
       logIngestionAuthorizationFailure(status, code);
-      return context.json(
-        ingestionErrorResponse(ingestionError(code)),
-        status,
-      );
+      return context.json(ingestionErrorResponse(ingestionError(code)), status);
     };
 
     // This gate is intentionally the first operation. In particular, do not

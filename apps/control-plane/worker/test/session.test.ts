@@ -22,10 +22,17 @@ function createTestApp(options: TestAppOptions = {}) {
     createTokenVerifier: () => ({
       verify: async (token: string): Promise<VerifiedSubject> => {
         if (token === "human-token") {
-          return { issuer: "https://issuer.example/", subject: "human-subject" };
+          return {
+            issuer: "https://issuer.example/",
+            subject: "human-subject",
+          };
         }
         if (token === "agent-token") {
-          return { issuer: "https://issuer.example/", subject: "agent-subject", token_id: "agent-token-id" };
+          return {
+            issuer: "https://issuer.example/",
+            subject: "agent-subject",
+            token_id: "agent-token-id",
+          };
         }
         throw new Error("invalid local test token");
       },
@@ -40,7 +47,11 @@ async function sessionRequest(authHeader?: string, tenant?: string) {
   const headers = new Headers();
   if (authHeader !== undefined) headers.set("Authorization", authHeader);
   if (tenant !== undefined) headers.set("X-Communicator-Tenant", tenant);
-  return createTestApp().request("http://example.test/api/v1/session", { headers }, env);
+  return createTestApp().request(
+    "http://example.test/api/v1/session",
+    { headers },
+    env,
+  );
 }
 
 async function sessionRequestWithHeaders(
@@ -48,7 +59,11 @@ async function sessionRequestWithHeaders(
   app = createTestApp(),
   requestEnv: Cloudflare.Env = env,
 ) {
-  return app.request("http://example.test/api/v1/session", { headers }, requestEnv);
+  return app.request(
+    "http://example.test/api/v1/session",
+    { headers },
+    requestEnv,
+  );
 }
 
 beforeEach(async () => {
@@ -105,7 +120,12 @@ describe("GET /api/v1/session", () => {
     }
 
     expect(bodies).toHaveLength(headers.length);
-    expect(bodies.every((body) => ApiErrorResponseSchema.parse(body).error.code === "unauthenticated")).toBe(true);
+    expect(
+      bodies.every(
+        (body) =>
+          ApiErrorResponseSchema.parse(body).error.code === "unauthenticated",
+      ),
+    ).toBe(true);
     expect(new Set(bodies.map((body) => JSON.stringify(body)))).toHaveLength(1);
     expect(bodies[0]).toEqual({
       error: { code: "unauthenticated", message: "Authentication required" },
@@ -113,8 +133,11 @@ describe("GET /api/v1/session", () => {
   });
 
   it("returns generic not_found for a revoked principal", async () => {
-    await env.CONTROL_DB.prepare("UPDATE principals SET status = 'revoked' WHERE id = ?")
-      .bind("principal_human").run();
+    await env.CONTROL_DB.prepare(
+      "UPDATE principals SET status = 'revoked' WHERE id = ?",
+    )
+      .bind("principal_human")
+      .run();
     const response = await sessionRequest("Bearer human-token");
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({
@@ -123,8 +146,11 @@ describe("GET /api/v1/session", () => {
   });
 
   it("returns generic not_found for a revoked membership", async () => {
-    await env.CONTROL_DB.prepare("UPDATE memberships SET status = 'revoked' WHERE id = ?")
-      .bind("membership_human").run();
+    await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET status = 'revoked' WHERE id = ?",
+    )
+      .bind("membership_human")
+      .run();
     const response = await sessionRequest("Bearer human-token");
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({
@@ -133,9 +159,13 @@ describe("GET /api/v1/session", () => {
   });
 
   it("keeps health public and non-secret", async () => {
-    const response = await createTestApp().request("http://example.test/api/v1/health", {}, env);
+    const response = await createTestApp().request(
+      "http://example.test/api/v1/health",
+      {},
+      env,
+    );
     expect(response.status).toBe(200);
-    expect((await response.json())).toMatchObject({ status: "ok" });
+    expect(await response.json()).toMatchObject({ status: "ok" });
   });
 
   it("does not expose subjects or routing identifiers in the session response", async () => {
@@ -149,13 +179,17 @@ describe("GET /api/v1/session", () => {
   });
 
   it("uses a valid Access assertion when Authorization is absent", async () => {
-    const accessVerify = vi.fn(async (token: string): Promise<VerifiedSubject> => {
-      expect(token).toBe("access.header.payload");
-      return { issuer: "https://issuer.example/", subject: "human-subject" };
-    });
+    const accessVerify = vi.fn(
+      async (token: string): Promise<VerifiedSubject> => {
+        expect(token).toBe("access.header.payload");
+        return { issuer: "https://issuer.example/", subject: "human-subject" };
+      },
+    );
     const response = await sessionRequestWithHeaders(
       new Headers({ "Cf-Access-Jwt-Assertion": "access.header.payload" }),
-      createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) }),
+      createTestApp({
+        createAccessTokenVerifier: () => ({ verify: accessVerify }),
+      }),
     );
 
     expect(response.status).toBe(200);
@@ -166,7 +200,9 @@ describe("GET /api/v1/session", () => {
     const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => {
       throw new Error("access assertion rejected");
     });
-    const app = createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) });
+    const app = createTestApp({
+      createAccessTokenVerifier: () => ({ verify: accessVerify }),
+    });
     const assertions = ["not a jwt", "access.header.payload"];
     const bodies = [];
 
@@ -187,15 +223,19 @@ describe("GET /api/v1/session", () => {
   });
 
   it("rejects an oversized Access assertion before verification", async () => {
-    const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => ({
-      issuer: "https://issuer.example/",
-      subject: "human-subject",
-    }));
+    const accessVerify = vi.fn(
+      async (): Promise<VerifiedSubject> => ({
+        issuer: "https://issuer.example/",
+        subject: "human-subject",
+      }),
+    );
     const response = await sessionRequestWithHeaders(
       new Headers({
         "Cf-Access-Jwt-Assertion": `a.b.${"c".repeat(MAX_AUTH_TOKEN_CHARS)}`,
       }),
-      createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) }),
+      createTestApp({
+        createAccessTokenVerifier: () => ({ verify: accessVerify }),
+      }),
     );
 
     expect(response.status).toBe(401);
@@ -206,16 +246,20 @@ describe("GET /api/v1/session", () => {
   });
 
   it("never falls back to Access after an Authorization failure", async () => {
-    const accessVerify = vi.fn(async (): Promise<VerifiedSubject> => ({
-      issuer: "https://issuer.example/",
-      subject: "human-subject",
-    }));
+    const accessVerify = vi.fn(
+      async (): Promise<VerifiedSubject> => ({
+        issuer: "https://issuer.example/",
+        subject: "human-subject",
+      }),
+    );
     const response = await sessionRequestWithHeaders(
       new Headers({
         Authorization: "Bearer invalid-bearer",
         "Cf-Access-Jwt-Assertion": "access.header.payload",
       }),
-      createTestApp({ createAccessTokenVerifier: () => ({ verify: accessVerify }) }),
+      createTestApp({
+        createAccessTokenVerifier: () => ({ verify: accessVerify }),
+      }),
     );
 
     expect(response.status).toBe(401);
@@ -234,7 +278,9 @@ describe("GET /api/v1/session", () => {
         createTestApp({
           createAccessTokenVerifier: () => ({
             verify: async (): Promise<VerifiedSubject> => {
-              throw new Error(`issuer=https://secret.example sub=secret-subject token=${assertion}`);
+              throw new Error(
+                `issuer=https://secret.example sub=secret-subject token=${assertion}`,
+              );
             },
           }),
         }),

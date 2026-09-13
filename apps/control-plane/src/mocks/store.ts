@@ -7,8 +7,14 @@ import type {
   MessagePageResult,
   SessionResponse,
 } from "@communicator/contracts";
-import { pilotScenario, PilotScenarioSchema } from "@communicator/test-fixtures";
-import { compareConversationRecency, paginateMessages } from "./conversation-pagination";
+import {
+  pilotScenario,
+  PilotScenarioSchema,
+} from "@communicator/test-fixtures";
+import {
+  compareConversationRecency,
+  paginateMessages,
+} from "./conversation-pagination";
 
 export type SimulatedScenario = "ready" | "attention_required";
 export type SimulatedMessageMode = "normal" | "pages" | "error";
@@ -64,7 +70,11 @@ export class SimulatedStore {
         identity_id: identity.id,
         kind: identity.kind,
         display_name: identity.display_name,
-        scopes: ["conversation.read", "connection.read", "message.send"] as const,
+        scopes: [
+          "conversation.read",
+          "connection.read",
+          "message.send",
+        ] as const,
       })),
     };
   }
@@ -83,7 +93,9 @@ export class SimulatedStore {
     return connections
       .map((connection) => {
         const conversations = this.state.conversations.filter(
-          (item) => item.identity_id === identityId && item.connection_id === connection.id,
+          (item) =>
+            item.identity_id === identityId &&
+            item.connection_id === connection.id,
         );
         return {
           id: connection.id,
@@ -93,28 +105,62 @@ export class SimulatedStore {
           display_label: connection.display_label,
           status: connection.status,
           capabilities: connection.capabilities,
-          unread_count: conversations.reduce((sum, item) => sum + item.unread_count, 0),
-          last_activity_at: conversations.toSorted(compareConversationRecency)[0]?.last_activity_at ?? null,
+          unread_count: conversations.reduce(
+            (sum, item) => sum + item.unread_count,
+            0,
+          ),
+          last_activity_at:
+            conversations.toSorted(compareConversationRecency)[0]
+              ?.last_activity_at ?? null,
           sort_position: defaultSortPosition.get(connection.id) ?? 1_000,
-          ...(connection.attention_code ? { attention_code: connection.attention_code } : {}),
+          ...(connection.attention_code
+            ? { attention_code: connection.attention_code }
+            : {}),
         };
       })
-      .toSorted((left, right) => left.sort_position - right.sort_position || left.id.localeCompare(right.id));
+      .toSorted(
+        (left, right) =>
+          left.sort_position - right.sort_position ||
+          left.id.localeCompare(right.id),
+      );
   }
 
-  conversations(identityId: string, channelId?: string): ConversationSummary[] | null {
-    if (!this.state.identities.some((item) => item.id === identityId)) return null;
-    if (channelId && !this.connections(identityId).some((item) => item.id === channelId)) return null;
-    return clone(this.state.conversations
-      .filter((item) => item.identity_id === identityId && (!channelId || item.connection_id === channelId))
-      .toSorted(compareConversationRecency));
+  conversations(
+    identityId: string,
+    channelId?: string,
+  ): ConversationSummary[] | null {
+    if (!this.state.identities.some((item) => item.id === identityId))
+      return null;
+    if (
+      channelId &&
+      !this.connections(identityId).some((item) => item.id === channelId)
+    )
+      return null;
+    return clone(
+      this.state.conversations
+        .filter(
+          (item) =>
+            item.identity_id === identityId &&
+            (!channelId || item.connection_id === channelId),
+        )
+        .toSorted(compareConversationRecency),
+    );
   }
 
-  conversation(identityId: string, conversationId: string): ConversationSummary | null {
-    return clone(this.state.conversations.find(
-      (item) => item.id === conversationId && item.identity_id === identityId
-        && this.connections(identityId).some((connection) => connection.id === item.connection_id),
-    ) ?? null);
+  conversation(
+    identityId: string,
+    conversationId: string,
+  ): ConversationSummary | null {
+    return clone(
+      this.state.conversations.find(
+        (item) =>
+          item.id === conversationId &&
+          item.identity_id === identityId &&
+          this.connections(identityId).some(
+            (connection) => connection.id === item.connection_id,
+          ),
+      ) ?? null,
+    );
   }
 
   messages(
@@ -125,24 +171,37 @@ export class SimulatedStore {
     const conversation = this.state.conversations.find(
       (item) => item.id === conversationId && item.identity_id === identityId,
     );
-    if (!conversation || !this.connections(identityId).some((item) => item.id === conversation.connection_id)) return null;
-    const result = paginateMessages(this.state.messages.filter(
-      (item) => item.conversation_id === conversationId && item.identity_id === identityId,
-    ), options);
+    if (
+      !conversation ||
+      !this.connections(identityId).some(
+        (item) => item.id === conversation.connection_id,
+      )
+    )
+      return null;
+    const result = paginateMessages(
+      this.state.messages.filter(
+        (item) =>
+          item.conversation_id === conversationId &&
+          item.identity_id === identityId,
+      ),
+      options,
+    );
     return result.ok ? clone(result.page) : null;
   }
 
   commands(identityId: string): Command[] {
     return clone([
       ...this.state.commands.filter((item) => item.identity_id === identityId),
-      ...Array.from(this.idempotency.values()).filter((item) => item.identity_id === identityId),
+      ...Array.from(this.idempotency.values()).filter(
+        (item) => item.identity_id === identityId,
+      ),
     ]);
   }
 
   commandForMessage({
     conversationId,
     identityId,
-    body,
+    body: _body,
     deliveryMode,
     idempotencyKey,
   }: {
@@ -153,8 +212,12 @@ export class SimulatedStore {
     idempotencyKey: string;
   }): Command | null {
     const conversation = this.state.conversations.find(
-      (item) => item.id === conversationId && item.identity_id === identityId
-        && this.connections(identityId).some((connection) => connection.id === item.connection_id),
+      (item) =>
+        item.id === conversationId &&
+        item.identity_id === identityId &&
+        this.connections(identityId).some(
+          (connection) => connection.id === item.connection_id,
+        ),
     );
     if (!conversation) return null;
 

@@ -13,7 +13,6 @@ import {
   ownerFor,
   type OwnedProjectionRow,
   type ProjectionOwner,
-  type ResourceTombstoneRow,
 } from "./projector-common";
 
 type CommandUpdatedEvent = Extract<
@@ -59,20 +58,29 @@ type EventTombstoneRow = OwnedProjectionRow & {
   observed_ms: number;
 };
 
-const ownerMatchesRow = (row: OwnedProjectionRow, owner: ProjectionOwner): boolean =>
+const ownerMatchesRow = (
+  row: OwnedProjectionRow,
+  owner: ProjectionOwner,
+): boolean =>
   row.identity_id === owner.identityId &&
   row.account_id === owner.accountId &&
   row.connection_id === owner.connectionId &&
   row.conversation_id === owner.conversationId &&
   row.platform === owner.platform;
 
-const assertOwned = (row: OwnedProjectionRow | undefined, owner: ProjectionOwner): void => {
+const assertOwned = (
+  row: OwnedProjectionRow | undefined,
+  owner: ProjectionOwner,
+): void => {
   if (row !== undefined && !ownerMatchesRow(row, owner)) {
     throw projectionError("projection_conflict");
   }
 };
 
-const readCommand = (sql: SqlStorage, commandId: string): CommandRow | undefined =>
+const readCommand = (
+  sql: SqlStorage,
+  commandId: string,
+): CommandRow | undefined =>
   sql
     .exec<CommandRow>(
       "SELECT id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id FROM commands WHERE id = ?",
@@ -80,7 +88,10 @@ const readCommand = (sql: SqlStorage, commandId: string): CommandRow | undefined
     )
     .toArray()[0];
 
-const readDelivery = (sql: SqlStorage, messageId: string): DeliveryRow | undefined =>
+const readDelivery = (
+  sql: SqlStorage,
+  messageId: string,
+): DeliveryRow | undefined =>
   sql
     .exec<DeliveryRow>(
       "SELECT message_id, identity_id, account_id, connection_id, conversation_id, platform, delivery_status, failure_code, occurred_at, last_observed_ms, last_event_id FROM message_delivery_updates WHERE message_id = ?",
@@ -111,8 +122,7 @@ const failureForStatus = (
   status: string,
   failureCode: string | null,
   blocked: boolean,
-): string | null =>
-  blocked || status !== "failed" ? null : failureCode;
+): string | null => (blocked || status !== "failed" ? null : failureCode);
 
 export const projectCommandUpdated = (
   sql: SqlStorage,
@@ -121,10 +131,18 @@ export const projectCommandUpdated = (
   const event = prepared.event as CommandUpdatedEvent;
   const owner = ownerFor(prepared);
   ensureConversationShell(sql, prepared);
-  assertCanonicalResourceIdOwner(sql, "command", event.payload.command_id, owner);
+  assertCanonicalResourceIdOwner(
+    sql,
+    "command",
+    event.payload.command_id,
+    owner,
+  );
   const existing = readCommand(sql, event.payload.command_id);
   assertOwned(existing, owner);
-  const conversationTombstone = readConversationTombstone(sql, owner.conversationId);
+  const conversationTombstone = readConversationTombstone(
+    sql,
+    owner.conversationId,
+  );
 
   if (existing !== undefined) {
     // created_at describes the command's first observed occurrence, not the
@@ -221,7 +239,10 @@ const applyDeliveryToMessage = (
     },
   );
 
-  const conversationTombstone = readConversationTombstone(sql, message.conversation_id);
+  const conversationTombstone = readConversationTombstone(
+    sql,
+    message.conversation_id,
+  );
   const messageTombstone = messageIsDeleted(sql, message.id);
   const currentIsOlder =
     message.delivery_observed_ms === null ||
@@ -286,14 +307,18 @@ export const projectBridgeDeliveryUpdated = (
   assertMessageTargetOwner(sql, event.payload.message_id, owner);
   const existing = readDelivery(sql, event.payload.message_id);
   assertOwned(existing, owner);
-  const conversationTombstone = readConversationTombstone(sql, owner.conversationId);
+  const conversationTombstone = readConversationTombstone(
+    sql,
+    owner.conversationId,
+  );
   const messageTombstone = sql
     .exec<{ occurred_at: string }>(
       "SELECT occurred_at FROM resource_tombstones WHERE resource_type = 'message' AND resource_id = ?",
       event.payload.message_id,
     )
     .toArray()[0];
-  const blocked = conversationTombstone !== undefined || messageTombstone !== undefined;
+  const blocked =
+    conversationTombstone !== undefined || messageTombstone !== undefined;
   const failureCode = failureForStatus(
     event.payload.delivery_status,
     event.payload.failure_code,
@@ -400,7 +425,11 @@ export const projectEventMarker = (
   assertEventMarkerTargetOwner(sql, event.payload.target_event_id, owner);
   const existing = readEventTombstone(sql, event.payload.target_event_id);
   assertOwned(existing, owner);
-  assertTombstoneEventIdAvailable(sql, event.event_id, event.payload.target_event_id);
+  assertTombstoneEventIdAvailable(
+    sql,
+    event.event_id,
+    event.payload.target_event_id,
+  );
 
   if (
     existing !== undefined &&

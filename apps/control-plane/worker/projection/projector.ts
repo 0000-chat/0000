@@ -12,7 +12,11 @@ import {
 import { canonicalJsonLineBytes, bytesEqual } from "../archive/canonical-json";
 import { sha256Hex } from "../archive/codec";
 import { isArchiveError } from "../archive/errors";
-import { isProjectionError, projectionError, type ProjectionError } from "./errors";
+import {
+  isProjectionError,
+  projectionError,
+  type ProjectionError,
+} from "./errors";
 import type {
   PreparedCheckpointMutation,
   PreparedProjectionBatch,
@@ -100,7 +104,10 @@ const hasOversizedEventArray = (input: unknown): boolean => {
       return false;
     }
     const events = eventsDescriptor.value;
-    if (!Array.isArray(events) || Object.getPrototypeOf(events) !== Array.prototype) {
+    if (
+      !Array.isArray(events) ||
+      Object.getPrototypeOf(events) !== Array.prototype
+    ) {
       return false;
     }
     const lengthDescriptor = Object.getOwnPropertyDescriptor(events, "length");
@@ -115,9 +122,7 @@ const hasOversizedEventArray = (input: unknown): boolean => {
   }
 };
 
-const parseAndSnapshotBatch = (
-  input: unknown,
-): ApplyProjectionBatchInput => {
+const parseAndSnapshotBatch = (input: unknown): ApplyProjectionBatchInput => {
   try {
     if (hasOversizedEventArray(input)) {
       throw projectionError("projection_too_large");
@@ -134,7 +139,10 @@ const parseAndSnapshotBatch = (
 const validateExactBindings = (
   parsed: ApplyProjectionBatchInput,
 ): Map<string, ProjectionConnectionBinding> => {
-  if (parsed.connections.length < 1 || parsed.connections.length > MAX_PROJECTION_BATCH_EVENTS) {
+  if (
+    parsed.connections.length < 1 ||
+    parsed.connections.length > MAX_PROJECTION_BATCH_EVENTS
+  ) {
     throw projectionError("projection_conflict");
   }
 
@@ -145,7 +153,10 @@ const validateExactBindings = (
       throw projectionError("projection_invalid");
     }
     const priorConnection = byConnection.get(connection.connection_id);
-    if (priorConnection !== undefined && !sameBinding(priorConnection, connection)) {
+    if (
+      priorConnection !== undefined &&
+      !sameBinding(priorConnection, connection)
+    ) {
       throw projectionError("projection_conflict");
     }
     byAccount.set(connection.account_id, connection);
@@ -233,7 +244,11 @@ export const prepareProjectionBatch = async (
     const event = parsed.events[index];
     const canonicalLine = canonicalLines[index];
     const eventHash = hashes[index];
-    if (event === undefined || canonicalLine === undefined || eventHash === undefined) {
+    if (
+      event === undefined ||
+      canonicalLine === undefined ||
+      eventHash === undefined
+    ) {
       throw projectionError("projection_invalid");
     }
     const connection = byAccount.get(event.account_id);
@@ -274,7 +289,10 @@ export const prepareProjectionBatch = async (
     if (
       greatest === undefined ||
       lastObservedMs !== greatest.observedMs ||
-      compareOpaqueEventIds(parsed.checkpoint.last_event_id, greatest.event.event_id) !== 0
+      compareOpaqueEventIds(
+        parsed.checkpoint.last_event_id,
+        greatest.event.event_id,
+      ) !== 0
     ) {
       throw projectionError("projection_conflict");
     }
@@ -298,4 +316,7 @@ export const prepareProjectionBatch = async (
   };
 };
 
-export { projectEvent, recomputeConversationSummaries } from "./projector-domains";
+export {
+  projectEvent,
+  recomputeConversationSummaries,
+} from "./projector-domains";

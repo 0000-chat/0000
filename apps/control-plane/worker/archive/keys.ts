@@ -27,12 +27,15 @@ export type ArchiveKeyParts = {
 
 const BATCH_ID_PREFIX = "batch_";
 
-const parseDateParts = (observedAt: string): Omit<ArchiveKeyParts, "kind" | "tenantId" | "batchId"> => {
+const parseDateParts = (
+  observedAt: string,
+): Omit<ArchiveKeyParts, "kind" | "tenantId" | "batchId"> => {
   const timestampResult = TimestampSchema.max(64).safeParse(observedAt);
   if (!timestampResult.success) throw archiveError("archive_invalid");
 
   const instant = new Date(observedAt);
-  if (!Number.isFinite(instant.getTime())) throw archiveError("archive_invalid");
+  if (!Number.isFinite(instant.getTime()))
+    throw archiveError("archive_invalid");
 
   return {
     year: String(instant.getUTCFullYear()).padStart(4, "0"),
@@ -81,9 +84,15 @@ export const deriveArchiveKeys = (
 
 export const deriveArchiveKeyPair = deriveArchiveKeys;
 
-const KEY_PATTERN = /^(events|manifests)\/([^/]+)\/(\d{4})\/(\d{2})\/(\d{2})\/(\d{2})\/([^/]+)\.(jsonl\.gz|json)$/;
+const KEY_PATTERN =
+  /^(events|manifests)\/([^/]+)\/(\d{4})\/(\d{2})\/(\d{2})\/(\d{2})\/([^/]+)\.(jsonl\.gz|json)$/;
 
-const validDatePart = (year: string, month: string, day: string, hour: string): boolean => {
+const validDatePart = (
+  year: string,
+  month: string,
+  day: string,
+  hour: string,
+): boolean => {
   const instant = new Date(`${year}-${month}-${day}T${hour}:00:00.000Z`);
   return (
     Number.isFinite(instant.getTime()) &&
@@ -119,7 +128,10 @@ export const parseArchiveKey = (key: string): ArchiveKeyParts | null => {
     return null;
   }
   const kind = suffix === "jsonl.gz" ? "data" : "manifest";
-  if ((kind === "data" && kindSegment !== "events") || (kind === "manifest" && kindSegment !== "manifests")) {
+  if (
+    (kind === "data" && kindSegment !== "events") ||
+    (kind === "manifest" && kindSegment !== "manifests")
+  ) {
     return null;
   }
   const batchId = file;
@@ -131,7 +143,8 @@ export const parseArchiveKey = (key: string): ArchiveKeyParts | null => {
   ) {
     return null;
   }
-  const schema = kind === "data" ? ArchiveDataKeySchema : ArchiveManifestKeySchema;
+  const schema =
+    kind === "data" ? ArchiveDataKeySchema : ArchiveManifestKeySchema;
   if (!schema.safeParse(key).success) return null;
   return { kind, tenantId, year, month, day, hour, batchId };
 };

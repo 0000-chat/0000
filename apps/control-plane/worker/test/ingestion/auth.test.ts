@@ -76,7 +76,11 @@ type AppForOptions = {
   };
 };
 
-function appFor(verifier: TokenVerifier, enabled = "true", options: AppForOptions = {}) {
+function appFor(
+  verifier: TokenVerifier,
+  enabled = "true",
+  options: AppForOptions = {},
+) {
   const app = new Hono<{
     Bindings: Cloudflare.Env;
     Variables: IngestionAuthorizationVariables;
@@ -127,9 +131,16 @@ function appFor(verifier: TokenVerifier, enabled = "true", options: AppForOption
       },
     },
   });
-  return (path: string | Request = "/internal/v1/ingestion/batches", init: RequestInit = {}) => {
+  return (
+    path: string | Request = "/internal/v1/ingestion/batches",
+    init: RequestInit = {},
+  ) => {
     if (path instanceof Request) {
-      return app.request(path, undefined, requestEnv as unknown as Cloudflare.Env);
+      return app.request(
+        path,
+        undefined,
+        requestEnv as unknown as Cloudflare.Env,
+      );
     }
     return app.request(
       `https://example.test${path}`,
@@ -155,16 +166,18 @@ beforeEach(async () => {
   await seedDirectory(env.CONTROL_DB);
   await env.CONTROL_DB.prepare(
     "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(
-    "principal_service",
-    issuer,
-    "service-subject",
-    "service",
-    "Ingestion service",
-    "active",
-    "2026-08-29T00:00:00.000Z",
-    "2026-08-29T00:00:00.000Z",
-  ).run();
+  )
+    .bind(
+      "principal_service",
+      issuer,
+      "service-subject",
+      "service",
+      "Ingestion service",
+      "active",
+      "2026-08-29T00:00:00.000Z",
+      "2026-08-29T00:00:00.000Z",
+    )
+    .run();
 });
 
 describe("ingestion configuration", () => {
@@ -225,13 +238,19 @@ describe("ingestion authorization middleware", () => {
     [undefined, "ingestion_unauthenticated"],
     ["Basic token", "ingestion_unauthenticated"],
     ["Bearer ", "ingestion_unauthenticated"],
-  ])("returns generic 401 for malformed bearer %s", async (authorization, code) => {
-    const response = await appFor({ verify: vi.fn() })("", {
-      headers: authorization === undefined ? {} : { Authorization: authorization },
-    });
-    expect(response.status).toBe(401);
-    expect((await response.json() as { error: { code: string } }).error.code).toBe(code);
-  });
+  ])(
+    "returns generic 401 for malformed bearer %s",
+    async (authorization, code) => {
+      const response = await appFor({ verify: vi.fn() })("", {
+        headers:
+          authorization === undefined ? {} : { Authorization: authorization },
+      });
+      expect(response.status).toBe(401);
+      expect(
+        ((await response.json()) as { error: { code: string } }).error.code,
+      ).toBe(code);
+    },
+  );
 
   it("maps typed OIDC invalid and unavailable failures separately", async () => {
     const invalid = await appFor({
@@ -290,24 +309,26 @@ describe("ingestion OIDC temporal contract", () => {
 
   it("accepts exactly a 300-second signed lifetime", async () => {
     await expect(
-      verifier().verify(
-        await token({ iat: now - 100, exp: now + 200 }),
-      ),
-    ).resolves.toMatchObject({ subject: "service-subject", token_id: "service-token" });
+      verifier().verify(await token({ iat: now - 100, exp: now + 200 })),
+    ).resolves.toMatchObject({
+      subject: "service-subject",
+      token_id: "service-token",
+    });
   });
 
   it("does not add clock tolerance to the signed lifetime", async () => {
     await expect(
-      verifier().verify(
-        await token({ iat: now - 100, exp: now + 201 }),
-      ),
+      verifier().verify(await token({ iat: now - 100, exp: now + 201 })),
     ).rejects.toMatchObject({ code: "invalid" });
   });
 
   it("allows the configured clock tolerance only for comparisons", async () => {
     await expect(
       verifier().verify(
-        await token({ iat: now + INGESTION_TOKEN_CLOCK_TOLERANCE_SECONDS, exp: now + 300 }),
+        await token({
+          iat: now + INGESTION_TOKEN_CLOCK_TOLERANCE_SECONDS,
+          exp: now + 300,
+        }),
       ),
     ).resolves.toMatchObject({ subject: "service-subject" });
   });
@@ -331,15 +352,16 @@ describe("ingestion authorization denial boundary", () => {
     });
     expect(response.status).toBe(expectedStatus);
     expect(await response.json()).toEqual({
-      error: expectedStatus === 401
-        ? {
-            code: "ingestion_unauthenticated",
-            message: "Ingestion authentication failed",
-          }
-        : {
-            code: "ingestion_not_found",
-            message: "Ingestion resource not found",
-          },
+      error:
+        expectedStatus === 401
+          ? {
+              code: "ingestion_unauthenticated",
+              message: "Ingestion authentication failed",
+            }
+          : {
+              code: "ingestion_not_found",
+              message: "Ingestion resource not found",
+            },
     });
   }
 
@@ -350,18 +372,26 @@ describe("ingestion authorization denial boundary", () => {
 
     const signed = await token();
     const [, encodedPayload, signature] = signed.split(".");
-    const header = base64url.encode(new TextEncoder().encode(JSON.stringify({
-      alg: "HS256",
-      kid: "ingestion-test-key",
-    })));
-    await expectUnauthorized(async () => `${header}.${encodedPayload}.${signature}`);
+    const header = base64url.encode(
+      new TextEncoder().encode(
+        JSON.stringify({
+          alg: "HS256",
+          kid: "ingestion-test-key",
+        }),
+      ),
+    );
+    await expectUnauthorized(
+      async () => `${header}.${encodedPayload}.${signature}`,
+    );
   });
 
   it("returns 401 for an expiration more than the clock tolerance in the past", async () => {
-    await expectUnauthorized(() => token({
-      iat: now - 300,
-      exp: now - INGESTION_TOKEN_CLOCK_TOLERANCE_SECONDS - 1,
-    }));
+    await expectUnauthorized(() =>
+      token({
+        iat: now - 300,
+        exp: now - INGESTION_TOKEN_CLOCK_TOLERANCE_SECONDS - 1,
+      }),
+    );
   });
 
   it.each([
@@ -375,32 +405,42 @@ describe("ingestion authorization denial boundary", () => {
     ["overlong lifetime", { iat: now - 100, exp: now + 201 }],
     ["iat too far in the future", { iat: now + 31, exp: now + 331 }],
     ["nbf too far in the future", { nbf: now + 31 }],
-  ])("returns 401 for %s before directory resolution", async (_name, claims) => {
-    const resolveService = vi.fn<IngestionServiceResolver>(findActiveIngestionService);
-    const response = await appFor(verifier(), "true", { resolveService })("", {
-      headers: { Authorization: `Bearer ${await token(claims)}` },
-    });
+  ])(
+    "returns 401 for %s before directory resolution",
+    async (_name, claims) => {
+      const resolveService = vi.fn<IngestionServiceResolver>(
+        findActiveIngestionService,
+      );
+      const response = await appFor(verifier(), "true", { resolveService })(
+        "",
+        {
+          headers: { Authorization: `Bearer ${await token(claims)}` },
+        },
+      );
 
-    expect(response.status).toBe(401);
-    expect(resolveService).not.toHaveBeenCalled();
-    expect(await response.json()).toEqual({
-      error: {
-        code: "ingestion_unauthenticated",
-        message: "Ingestion authentication failed",
-      },
-    });
-  });
+      expect(response.status).toBe(401);
+      expect(resolveService).not.toHaveBeenCalled();
+      expect(await response.json()).toEqual({
+        error: {
+          code: "ingestion_unauthenticated",
+          message: "Ingestion authentication failed",
+        },
+      });
+    },
+  );
 
   it("rejects a revoked jti at the HTTP boundary", async () => {
     await env.CONTROL_DB.prepare(
       "INSERT INTO revoked_tokens (issuer, token_id, principal_id, reason, revoked_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(
-      issuer,
-      "revoked-http-token",
-      "principal_service",
-      "test revocation",
-      "2026-08-29T00:00:00.000Z",
-    ).run();
+    )
+      .bind(
+        issuer,
+        "revoked-http-token",
+        "principal_service",
+        "test revocation",
+        "2026-08-29T00:00:00.000Z",
+      )
+      .run();
 
     await expectUnauthorized(() => token({ jti: "revoked-http-token" }), 404);
   });
@@ -408,28 +448,61 @@ describe("ingestion authorization denial boundary", () => {
   it.each([
     ["human", "principal_ingestion_human", "human-subject", "owner"],
     ["agent", "principal_ingestion_agent", "agent-subject", "member"],
-  ])("rejects a %s principal even when it has tenant membership", async (_kind, id, subject, role) => {
-    await env.CONTROL_DB.prepare(
-      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(id, issuer, subject, _kind, _kind, "active", "2026-08-29T00:00:00.000Z", "2026-08-29T00:00:00.000Z").run();
-    await env.CONTROL_DB.prepare(
-      "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).bind(`membership_${id}`, "tenant_pilot", id, role, "active", "2026-08-29T00:00:00.000Z", "2026-08-29T00:00:00.000Z").run();
+  ])(
+    "rejects a %s principal even when it has tenant membership",
+    async (_kind, id, subject, role) => {
+      await env.CONTROL_DB.prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+        .bind(
+          id,
+          issuer,
+          subject,
+          _kind,
+          _kind,
+          "active",
+          "2026-08-29T00:00:00.000Z",
+          "2026-08-29T00:00:00.000Z",
+        )
+        .run();
+      await env.CONTROL_DB.prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+        .bind(
+          `membership_${id}`,
+          "tenant_pilot",
+          id,
+          role,
+          "active",
+          "2026-08-29T00:00:00.000Z",
+          "2026-08-29T00:00:00.000Z",
+        )
+        .run();
 
-    await expectUnauthorized(() => token({ sub: subject }), 404);
-  });
+      await expectUnauthorized(() => token({ sub: subject }), 404);
+    },
+  );
 
-  it.each(["disabled", "revoked"])('returns 404 for an inactive service principal (%s)', async (status) => {
-    if (status === "disabled") {
-      await env.CONTROL_DB.prepare("UPDATE principals SET status = ? WHERE id = ?")
-        .bind(status, "principal_service").run();
-    } else {
-      await env.CONTROL_DB.prepare("UPDATE principals SET status = 'revoked', revoked_at = ? WHERE id = ?")
-        .bind("2026-08-29T00:00:00.000Z", "principal_service").run();
-    }
+  it.each(["disabled", "revoked"])(
+    "returns 404 for an inactive service principal (%s)",
+    async (status) => {
+      if (status === "disabled") {
+        await env.CONTROL_DB.prepare(
+          "UPDATE principals SET status = ? WHERE id = ?",
+        )
+          .bind(status, "principal_service")
+          .run();
+      } else {
+        await env.CONTROL_DB.prepare(
+          "UPDATE principals SET status = 'revoked', revoked_at = ? WHERE id = ?",
+        )
+          .bind("2026-08-29T00:00:00.000Z", "principal_service")
+          .run();
+      }
 
-    await expectUnauthorized(() => token(), 404);
-  });
+      await expectUnauthorized(() => token(), 404);
+    },
+  );
 
   it("maps an unavailable directory to a fixed 503", async () => {
     const controlDb = {
@@ -451,7 +524,9 @@ describe("ingestion authorization denial boundary", () => {
   });
 
   it("maps an unavailable JWKS to a fixed 503 before directory resolution", async () => {
-    const resolveService = vi.fn<IngestionServiceResolver>(findActiveIngestionService);
+    const resolveService = vi.fn<IngestionServiceResolver>(
+      findActiveIngestionService,
+    );
     const unavailableVerifier = createOidcVerifier(
       { issuer, audience, jwks_url: "https://example.test/jwks" },
       undefined,
@@ -461,7 +536,9 @@ describe("ingestion authorization denial boundary", () => {
         currentDate: new Date(now * 1000),
       },
     );
-    const response = await appFor(unavailableVerifier, "true", { resolveService })("", {
+    const response = await appFor(unavailableVerifier, "true", {
+      resolveService,
+    })("", {
       headers: { Authorization: `Bearer ${await token()}` },
     });
 
@@ -519,7 +596,9 @@ describe("ingestion revocation ordering and disabled zero-work", () => {
       downstream,
       externalTouches: touches,
     })("", {
-      headers: { Authorization: `Bearer ${await token({ ...claims, jti: tokenId })}` },
+      headers: {
+        Authorization: `Bearer ${await token({ ...claims, jti: tokenId })}`,
+      },
     });
 
     expect(response.status).toBe(401);
@@ -539,14 +618,24 @@ describe("ingestion revocation ordering and disabled zero-work", () => {
   it("keeps a revoked principal denied after every allowed reversal attempt", async () => {
     await env.CONTROL_DB.prepare(
       "UPDATE principals SET status = 'revoked', revoked_at = ? WHERE id = ?",
-    ).bind("2026-08-29T00:00:00.000Z", "principal_service").run();
+    )
+      .bind("2026-08-29T00:00:00.000Z", "principal_service")
+      .run();
 
-    await expect(env.CONTROL_DB.prepare(
-      "UPDATE principals SET status = 'active', revoked_at = NULL WHERE id = ?",
-    ).bind("principal_service").run()).rejects.toThrow();
-    await expect(env.CONTROL_DB.prepare(
-      "UPDATE principals SET revoked_at = ? WHERE id = ?",
-    ).bind("2026-08-30T00:00:00.000Z", "principal_service").run()).rejects.toThrow();
+    await expect(
+      env.CONTROL_DB.prepare(
+        "UPDATE principals SET status = 'active', revoked_at = NULL WHERE id = ?",
+      )
+        .bind("principal_service")
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.CONTROL_DB.prepare(
+        "UPDATE principals SET revoked_at = ? WHERE id = ?",
+      )
+        .bind("2026-08-30T00:00:00.000Z", "principal_service")
+        .run(),
+    ).rejects.toThrow();
 
     const downstream = vi.fn();
     const response = await appFor(verifier(), "true", { downstream })("", {
@@ -565,23 +654,37 @@ describe("ingestion revocation ordering and disabled zero-work", () => {
   it("keeps a revoked jti denied after update/delete reversal attempts", async () => {
     await env.CONTROL_DB.prepare(
       "INSERT INTO revoked_tokens (issuer, token_id, principal_id, reason, revoked_at) VALUES (?, ?, ?, ?, ?)",
-    ).bind(
-      issuer,
-      "reversal-token",
-      "principal_service",
-      "test revocation",
-      "2026-08-29T00:00:00.000Z",
-    ).run();
-    await expect(env.CONTROL_DB.prepare(
-      "UPDATE revoked_tokens SET reason = ? WHERE issuer = ? AND token_id = ?",
-    ).bind("reversed", issuer, "reversal-token").run()).rejects.toThrow();
-    await expect(env.CONTROL_DB.prepare(
-      "DELETE FROM revoked_tokens WHERE issuer = ? AND token_id = ?",
-    ).bind(issuer, "reversal-token").run()).rejects.toThrow();
+    )
+      .bind(
+        issuer,
+        "reversal-token",
+        "principal_service",
+        "test revocation",
+        "2026-08-29T00:00:00.000Z",
+      )
+      .run();
+    await expect(
+      env.CONTROL_DB.prepare(
+        "UPDATE revoked_tokens SET reason = ? WHERE issuer = ? AND token_id = ?",
+      )
+        .bind("reversed", issuer, "reversal-token")
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.CONTROL_DB.prepare(
+        "DELETE FROM revoked_tokens WHERE issuer = ? AND token_id = ?",
+      )
+        .bind(issuer, "reversal-token")
+        .run(),
+    ).rejects.toThrow();
 
-    const resolveService = vi.fn<IngestionServiceResolver>(findActiveIngestionService);
+    const resolveService = vi.fn<IngestionServiceResolver>(
+      findActiveIngestionService,
+    );
     const response = await appFor(verifier(), "true", { resolveService })("", {
-      headers: { Authorization: `Bearer ${await token({ jti: "reversal-token" })}` },
+      headers: {
+        Authorization: `Bearer ${await token({ jti: "reversal-token" })}`,
+      },
     });
     expect(response.status).toBe(404);
     expect(resolveService).toHaveBeenCalledOnce();
@@ -606,11 +709,14 @@ describe("ingestion revocation ordering and disabled zero-work", () => {
       queue: vi.fn(),
       durableObject: vi.fn(),
     };
-    const request = new Request("https://example.test/internal/v1/ingestion/batches", {
-      method: "POST",
-      headers: { Authorization: "Bearer ignored" },
-      body: "secret body",
-    });
+    const request = new Request(
+      "https://example.test/internal/v1/ingestion/batches",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer ignored" },
+        body: "secret body",
+      },
+    );
     const response = await appFor({ verify }, "false", {
       resolveService,
       downstream,

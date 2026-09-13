@@ -15,9 +15,12 @@ import { TenantProjectionDO } from "../../projection/tenant-projection";
 type WranglerConfig = {
   exports?: Record<string, unknown>;
   durable_objects?: { bindings?: Array<Record<string, unknown>> };
-  env?: Record<string, {
-    durable_objects?: { bindings?: Array<Record<string, unknown>> };
-  }>;
+  env?: Record<
+    string,
+    {
+      durable_objects?: { bindings?: Array<Record<string, unknown>> };
+    }
+  >;
   migrations?: unknown;
 };
 
@@ -39,9 +42,9 @@ const validStatusInput: ProjectionStatusInput = {
   },
 };
 
-const stub = { marker: "tenant-projection-stub" } as unknown as DurableObjectStub<
-  TenantProjectionDO
->;
+const stub = {
+  marker: "tenant-projection-stub",
+} as unknown as DurableObjectStub<TenantProjectionDO>;
 
 describe("tenant projection routing", () => {
   it("routes a canonical tenant ID through getByName unchanged", () => {
@@ -66,13 +69,19 @@ describe("tenant projection routing", () => {
     ["number", 42],
     ["symbol", Symbol("tenant_pilot")],
     ["array", ["tenant_pilot"]],
-    ["prototype-sensitive object", Object.create({ tenant_id: "tenant_pilot" })],
-    ["getter object", Object.defineProperty({}, "tenant_id", {
-      enumerable: true,
-      get() {
-        throw new Error("tenant getter must not run");
-      },
-    })],
+    [
+      "prototype-sensitive object",
+      Object.create({ tenant_id: "tenant_pilot" }),
+    ],
+    [
+      "getter object",
+      Object.defineProperty({}, "tenant_id", {
+        enumerable: true,
+        get() {
+          throw new Error("tenant getter must not run");
+        },
+      }),
+    ],
     ["invalid resource ID", "tenant-PILOT"],
     ["trailing whitespace", "tenant_pilot "],
   ])("rejects %s before touching the binding", (_label, tenantId) => {
@@ -101,8 +110,11 @@ describe("tenant projection routing", () => {
   });
 
   it("sanitizes ProjectionError public data without an own cause property", () => {
-    const sensitive = "payload=secret auth=Bearer-token cursor=opaque SQL=SELECT-secret";
-    const error = new ProjectionError("projection_invalid", { cause: sensitive });
+    const sensitive =
+      "payload=secret auth=Bearer-token cursor=opaque SQL=SELECT-secret";
+    const error = new ProjectionError("projection_invalid", {
+      cause: sensitive,
+    });
 
     expect(error).toBeInstanceOf(ProjectionError);
     expect(error.name).toBe("ProjectionError");
@@ -123,7 +135,9 @@ describe("tenant projection routing", () => {
     expect(getProjectionErrorCause(error)).toBe(sensitive);
 
     const existing = projectionError("projection_conflict", sensitive);
-    expect(safeProjectionError(existing, "projection_unavailable")).toBe(existing);
+    expect(safeProjectionError(existing, "projection_unavailable")).toBe(
+      existing,
+    );
 
     const rawError = new Error(sensitive);
     const wrapped = safeProjectionError(rawError, "projection_unavailable");
@@ -159,7 +173,9 @@ describe("tenant projection routing", () => {
       message: "projection_not_found",
     });
     expect(Object.keys(rejection as object)).toEqual(["code"]);
-    expect(JSON.stringify(rejection)).not.toContain(JSON.stringify(validStatusInput));
+    expect(JSON.stringify(rejection)).not.toContain(
+      JSON.stringify(validStatusInput),
+    );
   });
 });
 

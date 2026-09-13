@@ -191,7 +191,10 @@ const effectiveMessageTombstone = (
   messageId: string,
   conversationId: string,
 ): ResourceTombstoneRow | undefined =>
-  latestTombstone(messageIsDeleted(sql, messageId), conversationIsDeleted(sql, conversationId));
+  latestTombstone(
+    messageIsDeleted(sql, messageId),
+    conversationIsDeleted(sql, conversationId),
+  );
 
 const initializeCreatedDeliveryTuple = (
   sql: SqlStorage,
@@ -223,10 +226,15 @@ export const projectMessageCreated = (
     throw projectionError("projection_conflict");
   }
   ensureConversationShell(sql, prepared);
-  const tombstone = effectiveMessageTombstone(sql, messageId, owner.conversationId);
-  const senderTombstone = payload.sender_participant_id === null
-    ? undefined
-    : participantIsDeleted(sql, payload.sender_participant_id);
+  const tombstone = effectiveMessageTombstone(
+    sql,
+    messageId,
+    owner.conversationId,
+  );
+  const senderTombstone =
+    payload.sender_participant_id === null
+      ? undefined
+      : participantIsDeleted(sql, payload.sender_participant_id);
   const redacted = tombstone !== undefined;
   insertMessageVersion(
     sql,
@@ -257,15 +265,21 @@ export const projectMessageCreated = (
       owner.conversationId,
       owner.platform,
       payload.direction,
-      redacted || senderTombstone !== undefined ? null : payload.sender_participant_id,
-      redacted || senderTombstone !== undefined ? "Deleted sender" : payload.sender_label,
+      redacted || senderTombstone !== undefined
+        ? null
+        : payload.sender_participant_id,
+      redacted || senderTombstone !== undefined
+        ? "Deleted sender"
+        : payload.sender_label,
       latest.body,
       redacted ? null : payload.reply_to_message_id,
       payload.delivery_status,
       redacted ? 0 : payload.unread ? 1 : 0,
       event.occurred_at,
       prepared.occurredMs,
-      currentIsTombstone ? canonicalObservedAt(tombstone!.observed_ms) : latest.observed_at,
+      currentIsTombstone
+        ? canonicalObservedAt(tombstone!.observed_ms)
+        : latest.observed_at,
       currentIsTombstone ? tombstone!.observed_ms : latest.observed_ms,
       currentIsTombstone ? tombstone!.tombstone_event_id : latest.event_id,
       redacted ? null : event.matrix_room_id,
@@ -278,7 +292,13 @@ export const projectMessageCreated = (
     initializeCreatedDeliveryTuple(sql, messageId);
   } else {
     applyCurrentMessageVersion(sql, message, latest, tombstone);
-    reconcileWinningCreatedFields(sql, messageId, prepared, tombstone, senderTombstone);
+    reconcileWinningCreatedFields(
+      sql,
+      messageId,
+      prepared,
+      tombstone,
+      senderTombstone,
+    );
     initializeCreatedDeliveryTuple(sql, messageId);
   }
 
@@ -303,10 +323,15 @@ export const projectMessageEdited = (
   assertReferencedParticipantOwner(sql, payload.editor_participant_id, owner);
   const message = assertMessageTargetOwner(sql, payload.message_id, owner);
   ensureConversationShell(sql, prepared);
-  const tombstone = effectiveMessageTombstone(sql, payload.message_id, owner.conversationId);
-  const editorTombstone = payload.editor_participant_id === null
-    ? undefined
-    : participantIsDeleted(sql, payload.editor_participant_id);
+  const tombstone = effectiveMessageTombstone(
+    sql,
+    payload.message_id,
+    owner.conversationId,
+  );
+  const editorTombstone =
+    payload.editor_participant_id === null
+      ? undefined
+      : participantIsDeleted(sql, payload.editor_participant_id);
   insertMessageVersion(
     sql,
     prepared,

@@ -25,21 +25,28 @@ export function MessageComposer({
   const queryClient = useQueryClient();
   const idempotencyKey = useRef<string | null>(null);
   const [body, setBody] = useState("");
-  const [deliveryMode, setDeliveryMode] = useState<"direct" | "paced">("direct");
+  const [deliveryMode, setDeliveryMode] = useState<"direct" | "paced">(
+    "direct",
+  );
   const [resultMessage, setResultMessage] = useState<string | null>(null);
   const mutation = useMutation({
-    mutationFn: () => apiClient.sendMessage({
-      conversationId,
-      identityId,
-      body: body.trim(),
-      deliveryMode,
-      idempotencyKey: idempotencyKey.current ?? (idempotencyKey.current = makeIdempotencyKey()),
-    }),
+    mutationFn: () =>
+      apiClient.sendMessage({
+        conversationId,
+        identityId,
+        body: body.trim(),
+        deliveryMode,
+        idempotencyKey:
+          idempotencyKey.current ??
+          (idempotencyKey.current = makeIdempotencyKey()),
+      }),
     onSuccess: () => {
       idempotencyKey.current = null;
       setBody("");
       setResultMessage("Accepted — awaiting messaging confirmation");
-      void queryClient.invalidateQueries({ queryKey: queryKeys.commands(identityId) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.commands(identityId),
+      });
     },
     onError: (error) => {
       if (isDefinitiveRequestRejection(error)) {
@@ -62,7 +69,12 @@ export function MessageComposer({
       }}
     >
       <div className="grid gap-2">
-        <label htmlFor="message-body" className="text-xs font-semibold text-muted-foreground">Message</label>
+        <label
+          htmlFor="message-body"
+          className="text-xs font-semibold text-muted-foreground"
+        >
+          Message
+        </label>
         <Textarea
           id="message-body"
           value={body}
@@ -73,12 +85,19 @@ export function MessageComposer({
       </div>
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="grid gap-1.5">
-          <label htmlFor="delivery-mode" className="text-xs font-semibold text-muted-foreground">Delivery mode</label>
+          <label
+            htmlFor="delivery-mode"
+            className="text-xs font-semibold text-muted-foreground"
+          >
+            Delivery mode
+          </label>
           <select
             id="delivery-mode"
             aria-label="Delivery mode"
             value={deliveryMode}
-            onChange={(event) => setDeliveryMode(event.target.value as "direct" | "paced")}
+            onChange={(event) =>
+              setDeliveryMode(event.target.value as "direct" | "paced")
+            }
             disabled={isDisabled}
             className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
@@ -86,7 +105,9 @@ export function MessageComposer({
             <option value="paced">Human-paced</option>
           </select>
         </div>
-        <Button type="submit" disabled={!canSubmit}>Send message</Button>
+        <Button type="submit" disabled={!canSubmit}>
+          Send message
+        </Button>
       </div>
       {deliveryMode === "paced" && (
         <div className="border-l-2 border-primary/40 pl-3 text-sm">
@@ -102,7 +123,11 @@ export function MessageComposer({
       {!canSend && unavailableReason && (
         <p className="text-sm text-muted-foreground">{unavailableReason}</p>
       )}
-      {resultMessage && <p role="status" className="text-sm">{resultMessage}</p>}
+      {resultMessage && (
+        <p role="status" className="text-sm">
+          {resultMessage}
+        </p>
+      )}
     </form>
   );
 }

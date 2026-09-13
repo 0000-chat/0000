@@ -17,7 +17,10 @@ import {
 import type { DirectoryConnection } from "../control-directory/read-repository";
 import { listConnectionsForIdentity } from "../control-directory/read-repository";
 import type { TenantProjectionDO } from "../projection/tenant-projection";
-import { requireAuthorizedIdentity, toProjectionReadAuthorization } from "./authorization";
+import {
+  requireAuthorizedIdentity,
+  toProjectionReadAuthorization,
+} from "./authorization";
 import { mapReadError, ReadError } from "./errors";
 
 export type ReadHandlerContext = {
@@ -69,9 +72,7 @@ const directorySession = (env: Cloudflare.Env): D1DatabaseSession => {
   }
 };
 
-const projection = (
-  context: ReadHandlerContext,
-): ProjectionReadStub => {
+const projection = (context: ReadHandlerContext): ProjectionReadStub => {
   const namespace = context.env.TENANT_PROJECTION;
   if (namespace === undefined || typeof namespace.getByName !== "function") {
     throw new ReadError("service_unavailable");
@@ -91,8 +92,10 @@ const withReadErrors = async <T>(operation: () => Promise<T>): Promise<T> => {
   }
 };
 
-const publicConnection = ({ sort_position: _sortPosition, ...connection }: DirectoryConnection): Connection =>
-  ConnectionSchema.parse(connection);
+const publicConnection = ({
+  sort_position: _sortPosition,
+  ...connection
+}: DirectoryConnection): Connection => ConnectionSchema.parse(connection);
 
 const listDirectoryConnections = async (
   context: ReadHandlerContext,
@@ -116,9 +119,7 @@ export async function listIdentities(
       kind: identity.kind,
       display_name: identity.display_name,
     }));
-    return IdentitySchema.array()
-      .max(MAX_IDENTITY_CONNECTIONS)
-      .parse(values);
+    return IdentitySchema.array().max(MAX_IDENTITY_CONNECTIONS).parse(values);
   });
 }
 
@@ -132,21 +133,31 @@ export async function listConnections(
       input.identity_id,
       "connection.read",
     );
-    const connections = await listDirectoryConnections(context, input.identity_id);
-    return ConnectionSchema.array().max(MAX_IDENTITY_CONNECTIONS).parse(
-      connections.map(publicConnection),
+    const connections = await listDirectoryConnections(
+      context,
+      input.identity_id,
     );
+    return ConnectionSchema.array()
+      .max(MAX_IDENTITY_CONNECTIONS)
+      .parse(connections.map(publicConnection));
   });
 }
 
 const channelRows = (
   connections: readonly DirectoryConnection[],
-  stats: readonly { connection_id: string; unread_count: number; last_activity_at: string | null }[],
-): ChannelSummary[] => {
-  const statsByConnection = new Map<string, {
+  stats: readonly {
+    connection_id: string;
     unread_count: number;
     last_activity_at: string | null;
-  }>();
+  }[],
+): ChannelSummary[] => {
+  const statsByConnection = new Map<
+    string,
+    {
+      unread_count: number;
+      last_activity_at: string | null;
+    }
+  >();
   for (const stat of stats) {
     if (statsByConnection.has(stat.connection_id)) {
       throw new Error("duplicate projection channel statistic");
@@ -166,24 +177,26 @@ const channelRows = (
 
   return ChannelSummarySchema.array()
     .max(MAX_IDENTITY_CONNECTIONS)
-    .parse(connections.map((connection) => {
-      const stat = statsByConnection.get(connection.id);
-      return {
-        id: connection.id,
-        tenant_id: connection.tenant_id,
-        identity_id: connection.identity_id,
-        provider: connection.provider,
-        display_label: connection.display_label,
-        status: connection.status,
-        capabilities: connection.capabilities,
-        unread_count: stat?.unread_count ?? 0,
-        last_activity_at: stat?.last_activity_at ?? null,
-        sort_position: connection.sort_position,
-        ...(connection.attention_code === undefined
-          ? {}
-          : { attention_code: connection.attention_code }),
-      };
-    }));
+    .parse(
+      connections.map((connection) => {
+        const stat = statsByConnection.get(connection.id);
+        return {
+          id: connection.id,
+          tenant_id: connection.tenant_id,
+          identity_id: connection.identity_id,
+          provider: connection.provider,
+          display_label: connection.display_label,
+          status: connection.status,
+          capabilities: connection.capabilities,
+          unread_count: stat?.unread_count ?? 0,
+          last_activity_at: stat?.last_activity_at ?? null,
+          sort_position: connection.sort_position,
+          ...(connection.attention_code === undefined
+            ? {}
+            : { attention_code: connection.attention_code }),
+        };
+      }),
+    );
 };
 
 export async function listChannels(
@@ -201,7 +214,10 @@ export async function listChannels(
       input.identity_id,
       "connection.read",
     );
-    const connections = await listDirectoryConnections(context, input.identity_id);
+    const connections = await listDirectoryConnections(
+      context,
+      input.identity_id,
+    );
     const stats = await projection(context).listChannelStats({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,

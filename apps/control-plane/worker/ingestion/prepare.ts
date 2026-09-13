@@ -10,9 +10,7 @@ import {
   type MatrixCheckpointDigest,
   type ProjectionEventEnvelope,
 } from "@communicator/contracts";
-import {
-  canonicalJsonBytes,
-} from "../archive/canonical-json";
+import { canonicalJsonBytes } from "../archive/canonical-json";
 import {
   encodeCanonicalEventBatch,
   sha256Hex,
@@ -23,11 +21,7 @@ import type {
   ArchiveCanonicalEventBatchInput,
   ArchiveSourceCheckpoint,
 } from "../archive/writer";
-import {
-  IngestionError,
-  ingestionError,
-  isIngestionError,
-} from "./errors";
+import { IngestionError, ingestionError, isIngestionError } from "./errors";
 
 const PROTOTYPE_SENSITIVE_KEYS = new Set([
   "__proto__",
@@ -38,7 +32,10 @@ const PROTOTYPE_SENSITIVE_KEYS = new Set([
 const BATCH_ID_PATTERN = /^batch_[0-9a-f]{64}$/;
 
 /** The archive writer receives this after the route supplies its R2 bucket. */
-export type PreparedArchiveInput = Omit<ArchiveCanonicalEventBatchInput, "bucket">;
+export type PreparedArchiveInput = Omit<
+  ArchiveCanonicalEventBatchInput,
+  "bucket"
+>;
 
 export type PreparedIngestionBatch = {
   readonly request: IngestionBatchRequest;
@@ -140,7 +137,8 @@ const eventCountAboveLimit = (input: unknown): boolean => {
 const cloneParsedRequest = (input: unknown): IngestionBatchRequest => {
   try {
     const result = IngestionBatchRequestSchema.safeParse(input);
-    if (!result.success) throw ingestionError("ingestion_invalid", result.error);
+    if (!result.success)
+      throw ingestionError("ingestion_invalid", result.error);
     return structuredClone(result.data) as IngestionBatchRequest;
   } catch (error) {
     if (isIngestionError(error)) throw error;
@@ -148,9 +146,7 @@ const cloneParsedRequest = (input: unknown): IngestionBatchRequest => {
   }
 };
 
-const mapArchiveCode = (
-  code: ArchiveError["code"],
-): IngestionError["code"] => {
+const mapArchiveCode = (code: ArchiveError["code"]): IngestionError["code"] => {
   switch (code) {
     case "archive_too_large":
       return "ingestion_too_large";
@@ -169,7 +165,8 @@ const mapArchiveCode = (
 /** Convert internal archive failures to the stable ingestion error contract. */
 export const mapArchiveFailure = (error: unknown): IngestionError => {
   if (isIngestionError(error)) return error;
-  if (isArchiveError(error)) return ingestionError(mapArchiveCode(error.code), error);
+  if (isArchiveError(error))
+    return ingestionError(mapArchiveCode(error.code), error);
   return ingestionError("ingestion_invalid", error);
 };
 
@@ -290,7 +287,10 @@ export const prepareIngestionBatch = async (
     request,
     encoded.canonicalSha256,
   );
-  if (!BATCH_ID_PATTERN.test(recomputedBatchId) || recomputedBatchId !== request.batch_id) {
+  if (
+    !BATCH_ID_PATTERN.test(recomputedBatchId) ||
+    recomputedBatchId !== request.batch_id
+  ) {
     throw ingestionError("ingestion_invalid");
   }
 
@@ -366,7 +366,8 @@ export const buildCommittedArchivePointer = (
     candidate.gateway_route_id = snapshot.gatewayRouteId;
 
     const result = CommittedArchivePointerSchema.safeParse(candidate);
-    if (!result.success) throw ingestionError("ingestion_invalid", result.error);
+    if (!result.success)
+      throw ingestionError("ingestion_invalid", result.error);
     const pointerBytes = canonicalJsonBytes(result.data);
     if (pointerBytes.byteLength > MAX_INGESTION_QUEUE_POINTER_BYTES) {
       throw ingestionError("ingestion_too_large");

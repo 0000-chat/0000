@@ -107,16 +107,18 @@ const DeliveryStatusValues = [
 export const DeliveryStatusSchema = z.enum(DeliveryStatusValues);
 export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>;
 
-const ConversationSummaryObjectSchema = z.object({
-  id: CommunicatorIdSchema,
-  tenant_id: CommunicatorIdSchema,
-  identity_id: CommunicatorIdSchema,
-  connection_id: CommunicatorIdSchema,
-  title: z.string().min(1).max(200),
-  last_message_preview: z.string().max(280),
-  last_activity_at: TimestampSchema,
-  unread_count: z.number().int().nonnegative(),
-}).strict();
+const ConversationSummaryObjectSchema = z
+  .object({
+    id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    connection_id: CommunicatorIdSchema,
+    title: z.string().min(1).max(200),
+    last_message_preview: z.string().max(280),
+    last_activity_at: TimestampSchema,
+    unread_count: z.number().int().nonnegative(),
+  })
+  .strict();
 
 export const ConversationSummarySchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -125,34 +127,40 @@ export const ConversationSummarySchema = z.preprocess(
 
 export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;
 
-const ConversationPageResultObjectSchema = z.object({
-  items: z.preprocess(
-    snapshotStrictArrayInput,
-    z.array(ConversationSummarySchema),
-  ),
-  next_cursor: z.string().min(1).max(2_048).nullable(),
-}).strict();
+const ConversationPageResultObjectSchema = z
+  .object({
+    items: z.preprocess(
+      snapshotStrictArrayInput,
+      z.array(ConversationSummarySchema),
+    ),
+    next_cursor: z.string().min(1).max(2_048).nullable(),
+  })
+  .strict();
 
 export const ConversationPageResultSchema = z.preprocess(
   snapshotStrictObjectInput,
   ConversationPageResultObjectSchema,
 );
 
-export type ConversationPageResult = z.infer<typeof ConversationPageResultSchema>;
+export type ConversationPageResult = z.infer<
+  typeof ConversationPageResultSchema
+>;
 
-const MessageObjectSchema = z.object({
-  id: CommunicatorIdSchema,
-  tenant_id: CommunicatorIdSchema,
-  identity_id: CommunicatorIdSchema,
-  connection_id: CommunicatorIdSchema,
-  conversation_id: CommunicatorIdSchema,
-  direction: z.enum(["inbound", "outbound"]),
-  sender_label: z.string().min(1).max(100),
-  body: z.string().max(20_000),
-  occurred_at: TimestampSchema,
-  delivery_status: DeliveryStatusSchema,
-  attachment_count: z.number().int().nonnegative(),
-}).strict();
+const MessageObjectSchema = z
+  .object({
+    id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    connection_id: CommunicatorIdSchema,
+    conversation_id: CommunicatorIdSchema,
+    direction: z.enum(["inbound", "outbound"]),
+    sender_label: z.string().min(1).max(100),
+    body: z.string().max(20_000),
+    occurred_at: TimestampSchema,
+    delivery_status: DeliveryStatusSchema,
+    attachment_count: z.number().int().nonnegative(),
+  })
+  .strict();
 
 export const MessageSchema = z.preprocess(
   snapshotStrictObjectInput,
@@ -161,13 +169,12 @@ export const MessageSchema = z.preprocess(
 
 export type Message = z.infer<typeof MessageSchema>;
 
-const MessagePageResultObjectSchema = z.object({
-  items: z.preprocess(
-    snapshotStrictArrayInput,
-    z.array(MessageSchema),
-  ),
-  next_cursor: z.string().min(1).max(2_048).nullable(),
-}).strict();
+const MessagePageResultObjectSchema = z
+  .object({
+    items: z.preprocess(snapshotStrictArrayInput, z.array(MessageSchema)),
+    next_cursor: z.string().min(1).max(2_048).nullable(),
+  })
+  .strict();
 
 export const MessagePageResultSchema = z.preprocess(
   snapshotStrictObjectInput,

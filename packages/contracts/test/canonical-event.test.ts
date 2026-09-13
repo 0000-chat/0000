@@ -140,7 +140,9 @@ describe("CanonicalEventEnvelopeSchema", () => {
     const longId = `tenant_${"a".repeat(200)}`;
 
     expect(CommunicatorIdSchema.safeParse(longId).success).toBe(true);
-    expect(CanonicalResourceIdSchema.safeParse("tenant_pilot").success).toBe(true);
+    expect(CanonicalResourceIdSchema.safeParse("tenant_pilot").success).toBe(
+      true,
+    );
     expect(CanonicalResourceIdSchema.safeParse(longId).success).toBe(false);
     expect(CanonicalResourceIdSchema.safeParse("tenant_é").success).toBe(false);
   });
@@ -150,9 +152,19 @@ describe("CanonicalEventEnvelopeSchema", () => {
     const { payload: _payload, ...missingPayload } = validEvent();
     expectRejected(missingPayload);
     expectRejected(validEvent({ schema_version: 2 as 1 }));
-    expectRejected(validEvent({ platform: "signal" as CanonicalEventEnvelope["platform"] }));
-    expectRejected(validEvent({ event_type: "message.sent" as CanonicalEventEnvelope["event_type"] }));
-    expectRejected(validEvent({ event_source: "provider" as CanonicalEventEnvelope["event_source"] }));
+    expectRejected(
+      validEvent({ platform: "signal" as CanonicalEventEnvelope["platform"] }),
+    );
+    expectRejected(
+      validEvent({
+        event_type: "message.sent" as CanonicalEventEnvelope["event_type"],
+      }),
+    );
+    expectRejected(
+      validEvent({
+        event_source: "provider" as CanonicalEventEnvelope["event_source"],
+      }),
+    );
     expectRejected(validEvent({ tenant_id: "tenant" }));
     expectRejected(validEvent({ identity_id: "@identity:server" }));
     expectRejected(validEvent({ account_id: "account-telegram" }));
@@ -179,7 +191,9 @@ describe("CanonicalEventEnvelopeSchema", () => {
       },
     });
 
-    let result: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+    let result:
+      | ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse>
+      | undefined;
     expect(() => {
       result = CanonicalEventEnvelopeSchema.safeParse(input);
     }).not.toThrow();
@@ -196,7 +210,9 @@ describe("CanonicalEventEnvelopeSchema", () => {
       },
     });
 
-    let result: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+    let result:
+      | ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse>
+      | undefined;
     expect(() => {
       result = CanonicalEventEnvelopeSchema.safeParse(input);
     }).not.toThrow();
@@ -213,18 +229,25 @@ describe("CanonicalEventEnvelopeSchema", () => {
         },
       });
 
-      let result: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+      let result:
+        | ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse>
+        | undefined;
       expect(() => {
         result = CanonicalEventEnvelopeSchema.safeParse(input);
       }).not.toThrow();
       expect(result?.success).toBe(false);
-      expect(result?.error?.issues.some((issue) => issue.code === "custom")).toBe(false);
+      expect(
+        result?.error?.issues.some((issue) => issue.code === "custom"),
+      ).toBe(false);
     },
   );
 
   it("trims and bounds opaque IDs while preserving distinct Matrix sigils", () => {
     const trimmed = CanonicalEventEnvelopeSchema.parse(
-      validEvent({ event_id: "  opaque-id  ", remote_message_id: "  remote-id  " }),
+      validEvent({
+        event_id: "  opaque-id  ",
+        remote_message_id: "  remote-id  ",
+      }),
     );
     expect(trimmed.event_id).toBe("opaque-id");
     expect(trimmed.remote_message_id).toBe("remote-id");
@@ -254,7 +277,9 @@ describe("CanonicalJsonValueSchema", () => {
       expect(CanonicalJsonValueSchema.safeParse(value).success).toBe(true);
     }
 
-    expect(CanonicalJsonObjectSchema.safeParse("not-an-object").success).toBe(false);
+    expect(CanonicalJsonObjectSchema.safeParse("not-an-object").success).toBe(
+      false,
+    );
     expect(CanonicalJsonObjectSchema.safeParse(null).success).toBe(false);
   });
 
@@ -269,7 +294,12 @@ describe("CanonicalJsonValueSchema", () => {
     ["set", new Set(["value"])],
     ["function", () => "value"],
     ["symbol", Symbol("value")],
-    ["class instance", new (class PayloadClass { value = 1; })()],
+    [
+      "class instance",
+      new (class PayloadClass {
+        value = 1;
+      })(),
+    ],
   ])("rejects %s payload values", (_name, value) => {
     expectRejected(withPayload({ bad: value }));
   });
@@ -288,9 +318,13 @@ describe("CanonicalJsonValueSchema", () => {
   it("rejects direct and indirect cycles without throwing or leaking RangeError", () => {
     const direct: Record<string, unknown> = {};
     direct.self = direct;
-    let directResult: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+    let directResult:
+      | ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse>
+      | undefined;
     expect(() => {
-      directResult = CanonicalEventEnvelopeSchema.safeParse(withPayload({ direct }));
+      directResult = CanonicalEventEnvelopeSchema.safeParse(
+        withPayload({ direct }),
+      );
     }).not.toThrow();
     expect(directResult?.success).toBe(false);
 
@@ -298,12 +332,18 @@ describe("CanonicalJsonValueSchema", () => {
     const second: Record<string, unknown> = {};
     first.second = second;
     second.first = first;
-    let indirectResult: ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse> | undefined;
+    let indirectResult:
+      | ReturnType<typeof CanonicalEventEnvelopeSchema.safeParse>
+      | undefined;
     expect(() => {
-      indirectResult = CanonicalEventEnvelopeSchema.safeParse(withPayload({ first }));
+      indirectResult = CanonicalEventEnvelopeSchema.safeParse(
+        withPayload({ first }),
+      );
     }).not.toThrow();
     expect(indirectResult?.success).toBe(false);
-    expect(indirectResult?.error?.issues.some((issue) => issue.code === "custom")).toBe(true);
+    expect(
+      indirectResult?.error?.issues.some((issue) => issue.code === "custom"),
+    ).toBe(true);
   });
 
   it("rejects prototype-sensitive own keys at every object depth", () => {
@@ -323,7 +363,9 @@ describe("CanonicalJsonValueSchema", () => {
   });
 
   it("rejects unsupported prototypes, excessive depth, nodes, and collection entries", () => {
-    expectRejected(withPayload({ customPrototype: Object.create({ inherited: true }) }));
+    expectRejected(
+      withPayload({ customPrototype: Object.create({ inherited: true }) }),
+    );
 
     let deep: unknown = "leaf";
     for (let index = 0; index < 33; index += 1) {
@@ -333,7 +375,10 @@ describe("CanonicalJsonValueSchema", () => {
 
     const makeWideTree = (levels: number): unknown => {
       if (levels === 0) return 1;
-      return { left: makeWideTree(levels - 1), right: makeWideTree(levels - 1) };
+      return {
+        left: makeWideTree(levels - 1),
+        right: makeWideTree(levels - 1),
+      };
     };
     expectRejected(withPayload(makeWideTree(16)));
 

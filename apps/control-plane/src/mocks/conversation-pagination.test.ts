@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { paginateConversations, paginateMessages } from "./conversation-pagination";
+import {
+  paginateConversations,
+  paginateMessages,
+} from "./conversation-pagination";
 
 const items = [
   {
@@ -29,16 +32,25 @@ describe("paginateConversations", () => {
     const first = paginateConversations(items, { limit: 1 });
     const second = paginateConversations(items, {
       limit: 1,
-      ...(first.ok && first.page.next_cursor ? { cursor: first.page.next_cursor } : {}),
+      ...(first.ok && first.page.next_cursor
+        ? { cursor: first.page.next_cursor }
+        : {}),
     });
 
-    expect(first.ok && first.page.items.map((item) => item.id)).toEqual(["conversation_a"]);
+    expect(first.ok && first.page.items.map((item) => item.id)).toEqual([
+      "conversation_a",
+    ]);
     expect(first.ok && first.page.next_cursor).toEqual(expect.any(String));
-    expect(second.ok && second.page.items.map((item) => item.id)).toEqual(["conversation_b"]);
+    expect(second.ok && second.page.items.map((item) => item.id)).toEqual([
+      "conversation_b",
+    ]);
   });
 
   it("rejects a cursor that is not in the authorized result", () => {
-    const page = paginateConversations(items, { limit: 1, cursor: "not-a-valid-cursor" });
+    const page = paginateConversations(items, {
+      limit: 1,
+      cursor: "not-a-valid-cursor",
+    });
     expect(page).toEqual({ ok: false });
   });
 });
@@ -75,22 +87,40 @@ describe("paginateMessages", () => {
 
   it("returns newest-first pages and resumes from an opaque message cursor", () => {
     const first = paginateMessages(messages, { limit: 1 });
-    expect(first.ok && first.page.items.map((item) => item.id)).toEqual(["message_newest"]);
+    expect(first.ok && first.page.items.map((item) => item.id)).toEqual([
+      "message_newest",
+    ]);
     expect(first.ok && first.page.next_cursor).toEqual(expect.any(String));
 
     const second = paginateMessages(messages, {
       limit: 1,
-      ...(first.ok && first.page.next_cursor ? { cursor: first.page.next_cursor } : {}),
+      ...(first.ok && first.page.next_cursor
+        ? { cursor: first.page.next_cursor }
+        : {}),
     });
-    expect(second.ok && second.page.items.map((item) => item.id)).toEqual(["message_oldest"]);
+    expect(second.ok && second.page.items.map((item) => item.id)).toEqual([
+      "message_oldest",
+    ]);
     expect(second.ok && second.page.next_cursor).toBeNull();
   });
 
   it("orders by epoch milliseconds, uses the id tie-break, and resumes from its opaque cursor", () => {
     const offsetMessages = [
-      { ...messages[0], id: "message_tie_b", occurred_at: "2026-08-28T03:00:00.000+02:00" },
-      { ...messages[0], id: "message_tie_a", occurred_at: "2026-08-28T01:00:00.000Z" },
-      { ...messages[0], id: "message_newest", occurred_at: "2026-08-28T01:30:00.000Z" },
+      {
+        ...messages[0],
+        id: "message_tie_b",
+        occurred_at: "2026-08-28T03:00:00.000+02:00",
+      },
+      {
+        ...messages[0],
+        id: "message_tie_a",
+        occurred_at: "2026-08-28T01:00:00.000Z",
+      },
+      {
+        ...messages[0],
+        id: "message_newest",
+        occurred_at: "2026-08-28T01:30:00.000Z",
+      },
     ];
     const first = paginateMessages(offsetMessages, { limit: 2 });
 
@@ -102,9 +132,13 @@ describe("paginateMessages", () => {
 
     const second = paginateMessages(offsetMessages, {
       limit: 2,
-      ...(first.ok && first.page.next_cursor ? { cursor: first.page.next_cursor } : {}),
+      ...(first.ok && first.page.next_cursor
+        ? { cursor: first.page.next_cursor }
+        : {}),
     });
-    expect(second.ok && second.page.items.map((item) => item.id)).toEqual(["message_tie_b"]);
+    expect(second.ok && second.page.items.map((item) => item.id)).toEqual([
+      "message_tie_b",
+    ]);
     expect(second.ok && second.page.next_cursor).toBeNull();
   });
 });

@@ -378,18 +378,20 @@ WHERE NOT EXISTS (
 )`,
 ]);
 
-const identityLocalProjectionSequencesMigration: ProjectionMigration = Object.freeze({
-  version: 2,
-  name: "identity_local_projection_sequences",
-  appliedAt: "2026-09-10T00:00:00.000Z",
-  statements: identityLocalProjectionSequencesStatements,
-});
+const identityLocalProjectionSequencesMigration: ProjectionMigration =
+  Object.freeze({
+    version: 2,
+    name: "identity_local_projection_sequences",
+    appliedAt: "2026-09-10T00:00:00.000Z",
+    statements: identityLocalProjectionSequencesStatements,
+  });
 
 /** The complete immutable migration history for the projection database. */
-export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] = Object.freeze([
-  initialTenantProjectionMigration,
-  identityLocalProjectionSequencesMigration,
-]);
+export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
+  Object.freeze([
+    initialTenantProjectionMigration,
+    identityLocalProjectionSequencesMigration,
+  ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */
 export const SCHEMA_MIGRATIONS = PROJECTION_MIGRATIONS;

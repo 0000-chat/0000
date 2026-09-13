@@ -6,4 +6,6 @@ function ConversationRoute() {
   return <ConversationsShell conversationId={conversationId} />;
 }
 
-export const Route = createFileRoute("/conversations/$conversationId")({ component: ConversationRoute });
+export const Route = createFileRoute("/conversations/$conversationId")({
+  component: ConversationRoute,
+});

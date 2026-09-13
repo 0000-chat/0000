@@ -1,6 +1,4 @@
-import {
-  REALTIME_TICKET_TTL_MS,
-} from "@communicator/contracts";
+import { REALTIME_TICKET_TTL_MS } from "@communicator/contracts";
 import {
   revalidateRealtimeAuthorization,
   type AuthorizedRealtimeRequest,
@@ -9,7 +7,11 @@ import {
   RealtimeUpgradeContextSchema,
   type RealtimeUpgradeContext,
 } from "./contracts";
-import { digestRealtimeTicket, generateRealtimeTicket, isRealtimeTicket } from "./token";
+import {
+  digestRealtimeTicket,
+  generateRealtimeTicket,
+  isRealtimeTicket,
+} from "./token";
 
 export const MAX_EXPIRED_REALTIME_TICKET_CLEANUP = 100;
 
@@ -66,7 +68,9 @@ export const safeRealtimeTicketError = (
   error: unknown,
   fallback: RealtimeTicketErrorCode,
 ): RealtimeTicketError =>
-  isRealtimeTicketError(error) ? error : new RealtimeTicketError(fallback, error);
+  isRealtimeTicketError(error)
+    ? error
+    : new RealtimeTicketError(fallback, error);
 
 export const realtimeTicketErrorResponse = (error: RealtimeTicketError) => ({
   error: {
@@ -126,16 +130,18 @@ type StoredRealtimeTicketRow = {
 };
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return null;
   return value as Record<string, unknown>;
 };
 
 const parseNowMilliseconds = (now: RealtimeNow): number | null => {
-  const milliseconds = now instanceof Date
-    ? now.getTime()
-    : typeof now === "number"
-      ? now
-      : Date.parse(now);
+  const milliseconds =
+    now instanceof Date
+      ? now.getTime()
+      : typeof now === "number"
+        ? now
+        : Date.parse(now);
   if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) return null;
   return milliseconds;
 };
@@ -149,10 +155,7 @@ const isoTimestamp = (milliseconds: number): string | null => {
 };
 
 const primarySession = (db: RealtimeTicketDatabase): D1DatabaseSession => {
-  if (
-    "withSession" in db &&
-    typeof db.withSession === "function"
-  ) {
+  if ("withSession" in db && typeof db.withSession === "function") {
     return db.withSession("first-primary");
   }
   return db as D1DatabaseSession;
@@ -235,7 +238,7 @@ export async function issueRealtimeTicket(
   if (createdAt === null || expiresAt === null) throw invalidTicketRequest();
 
   const context = RealtimeUpgradeContextSchema.safeParse({
-    ...(asRecord(authorizedRequest) ?? {}),
+    ...asRecord(authorizedRequest),
     schema_version: 1,
     issued_at: createdAt,
     expires_at: expiresAt,
@@ -253,21 +256,24 @@ export async function issueRealtimeTicket(
 
   try {
     const session = primarySession(db);
-    await session.prepare(EXPIRED_TICKET_CLEANUP_SQL).bind(
-      nowMilliseconds,
-      MAX_EXPIRED_REALTIME_TICKET_CLEANUP,
-    ).run();
-    await session.prepare(INSERT_TICKET_SQL).bind(
-      digest,
-      context.data.tenant_id,
-      context.data.principal_id,
-      context.data.membership_id,
-      JSON.stringify(context.data.subscriptions),
-      JSON.stringify(context.data.resume),
-      context.data.issued_at,
-      context.data.expires_at,
-      nowMilliseconds + REALTIME_TICKET_TTL_MS,
-    ).run();
+    await session
+      .prepare(EXPIRED_TICKET_CLEANUP_SQL)
+      .bind(nowMilliseconds, MAX_EXPIRED_REALTIME_TICKET_CLEANUP)
+      .run();
+    await session
+      .prepare(INSERT_TICKET_SQL)
+      .bind(
+        digest,
+        context.data.tenant_id,
+        context.data.principal_id,
+        context.data.membership_id,
+        JSON.stringify(context.data.subscriptions),
+        JSON.stringify(context.data.resume),
+        context.data.issued_at,
+        context.data.expires_at,
+        nowMilliseconds + REALTIME_TICKET_TTL_MS,
+      )
+      .run();
   } catch (error) {
     throw unavailable(error);
   }
@@ -293,15 +299,16 @@ export async function consumeRealtimeTicket(
 
   try {
     const session = primarySession(db);
-    const row = await session.prepare(CONSUME_TICKET_SQL).bind(
-      digest,
-      nowMilliseconds,
-    ).first<StoredRealtimeTicketRow>();
+    const row = await session
+      .prepare(CONSUME_TICKET_SQL)
+      .bind(digest, nowMilliseconds)
+      .first<StoredRealtimeTicketRow>();
     if (row === null) return null;
 
     const consumed = parseConsumedAuthorization(row, digest, nowMilliseconds);
     if (consumed === null) return null;
-    if (!await revalidateRealtimeAuthorization(session, consumed)) return null;
+    if (!(await revalidateRealtimeAuthorization(session, consumed)))
+      return null;
     return consumed;
   } catch (error) {
     throw unavailable(error);

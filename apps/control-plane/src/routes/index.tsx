@@ -24,25 +24,50 @@ function OverviewRoute() {
     <section className="space-y-6">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Overview</h1>
-      <p className="max-w-2xl text-muted-foreground">
-        Review the active identity&apos;s connection and command summary.
-      </p>
+        <p className="max-w-2xl text-muted-foreground">
+          Review the active identity&apos;s connection and command summary.
+        </p>
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Link to="/connections" className="rounded-xl border bg-card p-4 shadow-sm hover:bg-accent">
+        <Link
+          to="/connections"
+          className="rounded-xl border bg-card p-4 shadow-sm hover:bg-accent"
+        >
           <span className="text-sm text-muted-foreground">Connections</span>
-          <strong className="mt-1 block text-2xl">{identityLoading ? "…" : `${connectionCount} connection${connectionCount === 1 ? "" : "s"}`}</strong>
+          <strong className="mt-1 block text-2xl">
+            {identityLoading
+              ? "…"
+              : `${connectionCount} connection${connectionCount === 1 ? "" : "s"}`}
+          </strong>
         </Link>
-        <Link to="/activity" className="rounded-xl border bg-card p-4 shadow-sm hover:bg-accent">
+        <Link
+          to="/activity"
+          className="rounded-xl border bg-card p-4 shadow-sm hover:bg-accent"
+        >
           <span className="text-sm text-muted-foreground">Commands</span>
-          <strong className="mt-1 block text-2xl">{identityLoading ? "…" : `${commandCount} command${commandCount === 1 ? "" : "s"}`}</strong>
+          <strong className="mt-1 block text-2xl">
+            {identityLoading
+              ? "…"
+              : `${commandCount} command${commandCount === 1 ? "" : "s"}`}
+          </strong>
         </Link>
       </div>
-      <nav aria-label="Overview screens" className="flex flex-wrap gap-4 text-sm">
-        <Link className="text-primary underline" to="/connections">Connections</Link>
-        <Link className="text-primary underline" to="/conversations">Conversations</Link>
-        <Link className="text-primary underline" to="/activity">Activity</Link>
-        <Link className="text-primary underline" to="/system">System</Link>
+      <nav
+        aria-label="Overview screens"
+        className="flex flex-wrap gap-4 text-sm"
+      >
+        <Link className="text-primary underline" to="/connections">
+          Connections
+        </Link>
+        <Link className="text-primary underline" to="/conversations">
+          Conversations
+        </Link>
+        <Link className="text-primary underline" to="/activity">
+          Activity
+        </Link>
+        <Link className="text-primary underline" to="/system">
+          System
+        </Link>
       </nav>
     </section>
   );

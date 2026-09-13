@@ -18,7 +18,6 @@ import {
   seedIngestionFixture,
   expectArchivePairUnchanged,
   snapshotArchivePair,
-  snapshotArchiveObject,
   type IngestionFixture,
 } from "./support";
 
@@ -51,35 +50,37 @@ const familyEvent = (
   eventType: ProjectionEventEnvelope["event_type"],
   payload: Record<string, unknown>,
   observedSecond: number,
-): ProjectionEventEnvelope => ({
-  ...base,
-  event_id: eventId,
-  event_type: eventType,
-  observed_at: `2026-09-08T01:00:${String(observedSecond).padStart(2, "0")}.000Z`,
-  occurred_at: `2026-09-08T00:59:${String(observedSecond).padStart(2, "0")}.000Z`,
-  payload,
-}) as ProjectionEventEnvelope;
+): ProjectionEventEnvelope =>
+  ({
+    ...base,
+    event_id: eventId,
+    event_type: eventType,
+    observed_at: `2026-09-08T01:00:${String(observedSecond).padStart(2, "0")}.000Z`,
+    occurred_at: `2026-09-08T00:59:${String(observedSecond).padStart(2, "0")}.000Z`,
+    payload,
+  }) as ProjectionEventEnvelope;
 
 const waitForRealtimeFrame = (
   socket: WebSocket,
   type: string,
-): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
-  const onMessage = (event: MessageEvent) => {
-    const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
-    if (frame.type !== type) return;
-    cleanup();
-    resolve(frame);
-  };
-  const cleanup = () => {
-    socket.removeEventListener("message", onMessage);
-    clearTimeout(timeout);
-  };
-  const timeout = setTimeout(() => {
-    cleanup();
-    reject(new Error(`Timed out waiting for ${type} realtime frame`));
-  }, 1_000);
-  socket.addEventListener("message", onMessage);
-});
+): Promise<Record<string, unknown>> =>
+  new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent) => {
+      const frame = JSON.parse(String(event.data)) as Record<string, unknown>;
+      if (frame.type !== type) return;
+      cleanup();
+      resolve(frame);
+    };
+    const cleanup = () => {
+      socket.removeEventListener("message", onMessage);
+      clearTimeout(timeout);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for ${type} realtime frame`));
+    }, 1_000);
+    socket.addEventListener("message", onMessage);
+  });
 
 describe("Matrix ingestion end to end", () => {
   it("archives Human WhatsApp ingress, queues a pointer, and projects it into the real tenant DO", async () => {
@@ -114,7 +115,14 @@ describe("Matrix ingestion end to end", () => {
     expect(pointer.gateway_route_id).toBe(fixture.routes.human);
 
     const archiveKeys = await listTenantArchiveKeys(fixture.tenantId);
-    expect(archiveKeys).toEqual([pointer.manifest_key, pointer.manifest_key.replace("manifests/", "events/").replace(".json", ".jsonl.gz")].sort());
+    expect(archiveKeys).toEqual(
+      [
+        pointer.manifest_key,
+        pointer.manifest_key
+          .replace("manifests/", "events/")
+          .replace(".json", ".jsonl.gz"),
+      ].sort(),
+    );
     const manifestObject = await env.EVENT_ARCHIVE.get(pointer.manifest_key);
     expect(manifestObject).not.toBeNull();
     const manifest = JSON.parse(await manifestObject!.text()) as {
@@ -237,17 +245,18 @@ describe("Matrix ingestion end to end", () => {
       tenant_id: fixture.tenantId,
       principal_id: `principal_reader_${fixture.suffix}`,
       membership_id: `membership_reader_${fixture.suffix}`,
-      subscriptions: [{
-        identity_id: fixture.identities.human,
-        families: ["projection"] as const,
-      }],
+      subscriptions: [
+        {
+          identity_id: fixture.identities.human,
+          families: ["projection"] as const,
+        },
+      ],
       resume: [],
       issued_at: issuedAt.toISOString(),
       expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
     };
-    const response = await projection.fetch(new Request(
-      "https://tenant-projection.internal/realtime",
-      {
+    const response = await projection.fetch(
+      new Request("https://tenant-projection.internal/realtime", {
         method: "GET",
         headers: {
           Upgrade: "websocket",
@@ -255,8 +264,8 @@ describe("Matrix ingestion end to end", () => {
           "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
           "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
         },
-      },
-    ));
+      }),
+    );
     expect(response.status).toBe(101);
     const socket = response.webSocket;
     if (socket === null) throw new Error("missing realtime socket");
@@ -272,30 +281,44 @@ describe("Matrix ingestion end to end", () => {
       });
       const request = await requestForEvents(fixture, [event]);
       const { queue } = await postIngestionBatch(fixture, request);
-      await expect(deliverQueueMessages([
-        { id: `queue_realtime_${fixture.suffix}`, body: queue.messages[0]!.body },
-      ])).resolves.toMatchObject({
-        result: { retryMessages: [], explicitAcks: [`queue_realtime_${fixture.suffix}`] },
+      await expect(
+        deliverQueueMessages([
+          {
+            id: `queue_realtime_${fixture.suffix}`,
+            body: queue.messages[0]!.body,
+          },
+        ]),
+      ).resolves.toMatchObject({
+        result: {
+          retryMessages: [],
+          explicitAcks: [`queue_realtime_${fixture.suffix}`],
+        },
       });
 
-      const persisted = await runInDurableObject(projection, async (_instance, state) =>
-        state.storage.sql.exec<{
-          identity_sequence: number;
-          event_type: string;
-          connection_id: string;
-          conversation_id: string;
-          occurred_at: string;
-        }>(
-          "SELECT identity_sequence, event_type, connection_id, conversation_id, occurred_at FROM projection_changes ORDER BY sequence",
-        ).toArray(),
+      const persisted = await runInDurableObject(
+        projection,
+        async (_instance, state) =>
+          state.storage.sql
+            .exec<{
+              identity_sequence: number;
+              event_type: string;
+              connection_id: string;
+              conversation_id: string;
+              occurred_at: string;
+            }>(
+              "SELECT identity_sequence, event_type, connection_id, conversation_id, occurred_at FROM projection_changes ORDER BY sequence",
+            )
+            .toArray(),
       );
-      expect(persisted).toEqual([{
-        identity_sequence: 1,
-        event_type: "message.created",
-        connection_id: fixture.connections.humanWhatsapp,
-        conversation_id: event.conversation_id,
-        occurred_at: event.occurred_at,
-      }]);
+      expect(persisted).toEqual([
+        {
+          identity_sequence: 1,
+          event_type: "message.created",
+          connection_id: fixture.connections.humanWhatsapp,
+          conversation_id: event.conversation_id,
+          occurred_at: event.occurred_at,
+        },
+      ]);
 
       await expect(liveFrame).resolves.toMatchObject({
         tenant_id: fixture.tenantId,
@@ -303,13 +326,15 @@ describe("Matrix ingestion end to end", () => {
         generation: 1,
         from_sequence: 1,
         to_sequence: 2,
-        changes: [{
-          sequence: 1,
-          event_type: "message.created",
-          connection_id: fixture.connections.humanWhatsapp,
-          conversation_id: event.conversation_id,
-          occurred_at: event.occurred_at,
-        }],
+        changes: [
+          {
+            sequence: 1,
+            event_type: "message.created",
+            connection_id: fixture.connections.humanWhatsapp,
+            conversation_id: event.conversation_id,
+            occurred_at: event.occurred_at,
+          },
+        ],
       });
     } finally {
       if (socket.readyState !== 3) socket.close(1000, "test complete");
@@ -339,8 +364,16 @@ describe("Matrix ingestion end to end", () => {
     const agentRequest = await requestForEvents(fixture, [agent], {
       gateway_route_id: fixture.routes.agent,
     });
-    const humanResponse = await postIngestionBatch(fixture, humanRequest, queue);
-    const agentResponse = await postIngestionBatch(fixture, agentRequest, queue);
+    const humanResponse = await postIngestionBatch(
+      fixture,
+      humanRequest,
+      queue,
+    );
+    const agentResponse = await postIngestionBatch(
+      fixture,
+      agentRequest,
+      queue,
+    );
     expect(humanResponse.response.status).toBe(202);
     expect(agentResponse.response.status).toBe(202);
     expect(queue.messages).toHaveLength(2);
@@ -516,8 +549,16 @@ describe("Matrix ingestion end to end", () => {
       tenant_id: fixture.otherTenantId,
       gateway_route_id: fixture.routes.otherTenant,
     });
-    const firstResponse = await postIngestionBatch(fixture, firstRequest, queue);
-    const secondResponse = await postIngestionBatch(fixture, secondRequest, queue);
+    const firstResponse = await postIngestionBatch(
+      fixture,
+      firstRequest,
+      queue,
+    );
+    const secondResponse = await postIngestionBatch(
+      fixture,
+      secondRequest,
+      queue,
+    );
     expect(firstResponse.response.status).toBe(202);
     expect(secondResponse.response.status).toBe(202);
     expect(queue.messages).toHaveLength(2);
@@ -530,13 +571,18 @@ describe("Matrix ingestion end to end", () => {
         body: message.body,
       })),
     );
-    expect(delivered.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_tenant_0_${fixture.suffix}`,
-      `queue_tenant_1_${fixture.suffix}`,
-    ] });
+    expect(delivered.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [
+        `queue_tenant_0_${fixture.suffix}`,
+        `queue_tenant_1_${fixture.suffix}`,
+      ],
+    });
 
     const firstProjection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
-    const secondProjection = env.TENANT_PROJECTION.getByName(fixture.otherTenantId);
+    const secondProjection = env.TENANT_PROJECTION.getByName(
+      fixture.otherTenantId,
+    );
     const firstRead = authorizationFor(
       fixture,
       fixture.tenantId,
@@ -590,23 +636,26 @@ describe("Matrix ingestion end to end", () => {
     expect(firstMessages.items[0]).toMatchObject({ body: "tenant one body" });
     expect(secondMessages.items[0]).toMatchObject({ body: "tenant two body" });
     expect(firstMessages.items[0]!.id).toBe(secondMessages.items[0]!.id);
-    const wrongTenant = await runInDurableObject(secondProjection, async (instance) => {
-      try {
-        await instance.listConversations({
-          schema_version: 1,
-          tenant_id: fixture.tenantId,
-          identity_id: fixture.identities.otherTenantHuman,
-          connection_id: null,
-          authorization: {
-            ...firstRead,
-            allowed_identity_ids: [fixture.identities.otherTenantHuman],
-          },
-        });
-        return undefined;
-      } catch (error) {
-        return error;
-      }
-    });
+    const wrongTenant = await runInDurableObject(
+      secondProjection,
+      async (instance) => {
+        try {
+          await instance.listConversations({
+            schema_version: 1,
+            tenant_id: fixture.tenantId,
+            identity_id: fixture.identities.otherTenantHuman,
+            connection_id: null,
+            authorization: {
+              ...firstRead,
+              allowed_identity_ids: [fixture.identities.otherTenantHuman],
+            },
+          });
+          return undefined;
+        } catch (error) {
+          return error;
+        }
+      },
+    );
     expect(wrongTenant).toMatchObject({ code: "projection_tenant_mismatch" });
   });
 
@@ -618,91 +667,182 @@ describe("Matrix ingestion end to end", () => {
       body: "family-created body",
       observedAt: "2026-09-08T01:00:01.000Z",
     });
-    const event = (eventId: string, eventType: ProjectionEventEnvelope["event_type"], payload: Record<string, unknown>, second: number) =>
-      familyEvent(base, `$${eventId}_${fixture.suffix}:example`, eventType, payload, second);
+    const event = (
+      eventId: string,
+      eventType: ProjectionEventEnvelope["event_type"],
+      payload: Record<string, unknown>,
+      second: number,
+    ) =>
+      familyEvent(
+        base,
+        `$${eventId}_${fixture.suffix}:example`,
+        eventType,
+        payload,
+        second,
+      );
     const events = [
       base,
-      event("family_edited", "message.edited", {
-        message_id: `message_family_${fixture.suffix}`,
-        body: "family-edited body",
-        editor_participant_id: null,
-      }, 2),
-      event("family_participant", "participant.updated", {
-        participant_id: `participant_family_${fixture.suffix}`,
-        display_name: "Family participant",
-        remote_id: "remote-participant",
-        avatar_url: null,
-      }, 3),
-      event("family_reaction", "reaction.added", {
-        reaction_id: `reaction_family_${fixture.suffix}`,
-        message_id: `message_family_${fixture.suffix}`,
-        participant_id: `participant_family_${fixture.suffix}`,
-        emoji: "👍",
-      }, 4),
-      event("family_attachment", "attachment.observed", {
-        attachment_id: `attachment_family_${fixture.suffix}`,
-        message_id: `message_family_${fixture.suffix}`,
-        file_name: "family.txt",
-        mime_type: "text/plain",
-        size_bytes: 4,
-        sha256: null,
-        r2_key: null,
-      }, 5),
-      event("family_receipt", "receipt.read", {
-        message_id: `message_family_${fixture.suffix}`,
-        participant_id: `participant_family_${fixture.suffix}`,
-        local_identity: false,
-      }, 6),
-      event("family_typing", "typing.started", {
-        participant_id: `participant_family_${fixture.suffix}`,
-        expires_at: "2026-09-08T02:00:00.000Z",
-      }, 7),
-      event("family_command", "command.updated", {
-        command_id: `command_family_${fixture.suffix}`,
-        operation: "message.send",
-        delivery_mode: "direct",
-        status: "failed",
-        failure_code: "family-failure",
-      }, 8),
-      event("family_delivery", "bridge.delivery.updated", {
-        message_id: `message_family_${fixture.suffix}`,
-        delivery_status: "delivered",
-        failure_code: null,
-      }, 9),
-      event("family_conversation", "conversation.updated", {
-        title: "Family conversation",
-        archived: false,
-        muted: true,
-      }, 10),
-      event("family_deleted", "message.deleted", {
-        message_id: `message_deleted_${fixture.suffix}`,
-        reason_code: "family-delete",
-      }, 11),
-      event("family_reaction_removed", "reaction.removed", {
-        reaction_id: `reaction_family_${fixture.suffix}`,
-        message_id: `message_family_${fixture.suffix}`,
-      }, 12),
-      event("family_receipt_delivered", "receipt.delivered", {
-        message_id: `message_family_${fixture.suffix}`,
-        participant_id: `participant_family_${fixture.suffix}`,
-        local_identity: false,
-      }, 13),
-      event("family_typing_stopped", "typing.stopped", {
-        participant_id: `participant_family_${fixture.suffix}`,
-      }, 14),
-      event("family_replay_tombstone", "replay.tombstone", {
-        target_event_id: base.event_id,
-        reason_code: "family-replay",
-      }, 15),
-      event("family_correction", "correction.applied", {
-        target_event_id: `$family_edited_${fixture.suffix}:example`,
-        reason_code: "family-correction",
-      }, 16),
-      event("family_deletion", "deletion.tombstone", {
-        resource_type: "participant",
-        resource_id: `participant_deleted_${fixture.suffix}`,
-        reason_code: "family-retention",
-      }, 17),
+      event(
+        "family_edited",
+        "message.edited",
+        {
+          message_id: `message_family_${fixture.suffix}`,
+          body: "family-edited body",
+          editor_participant_id: null,
+        },
+        2,
+      ),
+      event(
+        "family_participant",
+        "participant.updated",
+        {
+          participant_id: `participant_family_${fixture.suffix}`,
+          display_name: "Family participant",
+          remote_id: "remote-participant",
+          avatar_url: null,
+        },
+        3,
+      ),
+      event(
+        "family_reaction",
+        "reaction.added",
+        {
+          reaction_id: `reaction_family_${fixture.suffix}`,
+          message_id: `message_family_${fixture.suffix}`,
+          participant_id: `participant_family_${fixture.suffix}`,
+          emoji: "👍",
+        },
+        4,
+      ),
+      event(
+        "family_attachment",
+        "attachment.observed",
+        {
+          attachment_id: `attachment_family_${fixture.suffix}`,
+          message_id: `message_family_${fixture.suffix}`,
+          file_name: "family.txt",
+          mime_type: "text/plain",
+          size_bytes: 4,
+          sha256: null,
+          r2_key: null,
+        },
+        5,
+      ),
+      event(
+        "family_receipt",
+        "receipt.read",
+        {
+          message_id: `message_family_${fixture.suffix}`,
+          participant_id: `participant_family_${fixture.suffix}`,
+          local_identity: false,
+        },
+        6,
+      ),
+      event(
+        "family_typing",
+        "typing.started",
+        {
+          participant_id: `participant_family_${fixture.suffix}`,
+          expires_at: "2026-09-08T02:00:00.000Z",
+        },
+        7,
+      ),
+      event(
+        "family_command",
+        "command.updated",
+        {
+          command_id: `command_family_${fixture.suffix}`,
+          operation: "message.send",
+          delivery_mode: "direct",
+          status: "failed",
+          failure_code: "family-failure",
+        },
+        8,
+      ),
+      event(
+        "family_delivery",
+        "bridge.delivery.updated",
+        {
+          message_id: `message_family_${fixture.suffix}`,
+          delivery_status: "delivered",
+          failure_code: null,
+        },
+        9,
+      ),
+      event(
+        "family_conversation",
+        "conversation.updated",
+        {
+          title: "Family conversation",
+          archived: false,
+          muted: true,
+        },
+        10,
+      ),
+      event(
+        "family_deleted",
+        "message.deleted",
+        {
+          message_id: `message_deleted_${fixture.suffix}`,
+          reason_code: "family-delete",
+        },
+        11,
+      ),
+      event(
+        "family_reaction_removed",
+        "reaction.removed",
+        {
+          reaction_id: `reaction_family_${fixture.suffix}`,
+          message_id: `message_family_${fixture.suffix}`,
+        },
+        12,
+      ),
+      event(
+        "family_receipt_delivered",
+        "receipt.delivered",
+        {
+          message_id: `message_family_${fixture.suffix}`,
+          participant_id: `participant_family_${fixture.suffix}`,
+          local_identity: false,
+        },
+        13,
+      ),
+      event(
+        "family_typing_stopped",
+        "typing.stopped",
+        {
+          participant_id: `participant_family_${fixture.suffix}`,
+        },
+        14,
+      ),
+      event(
+        "family_replay_tombstone",
+        "replay.tombstone",
+        {
+          target_event_id: base.event_id,
+          reason_code: "family-replay",
+        },
+        15,
+      ),
+      event(
+        "family_correction",
+        "correction.applied",
+        {
+          target_event_id: `$family_edited_${fixture.suffix}:example`,
+          reason_code: "family-correction",
+        },
+        16,
+      ),
+      event(
+        "family_deletion",
+        "deletion.tombstone",
+        {
+          resource_type: "participant",
+          resource_id: `participant_deleted_${fixture.suffix}`,
+          reason_code: "family-retention",
+        },
+        17,
+      ),
     ];
     const request = await requestForEvents(fixture, events);
     const { response, queue } = await postIngestionBatch(fixture, request);
@@ -711,16 +851,23 @@ describe("Matrix ingestion end to end", () => {
     const pointer = queue.messages[0]!.body;
     const manifestObject = await env.EVENT_ARCHIVE.get(pointer.manifest_key);
     expect(manifestObject).not.toBeNull();
-    await expect(manifestObject!.json()).resolves.toMatchObject({ event_count: events.length });
+    await expect(manifestObject!.json()).resolves.toMatchObject({
+      event_count: events.length,
+    });
     const delivered = await deliverQueueMessages([
       { id: `queue_family_${fixture.suffix}`, body: pointer },
     ]);
-    expect(delivered.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_family_${fixture.suffix}`,
-    ] });
+    expect(delivered.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [`queue_family_${fixture.suffix}`],
+    });
 
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
-    const read = authorizationFor(fixture, fixture.tenantId, fixture.identities.human);
+    const read = authorizationFor(
+      fixture,
+      fixture.tenantId,
+      fixture.identities.human,
+    );
     const conversations = await projection.listConversations({
       schema_version: 1,
       tenant_id: fixture.tenantId,
@@ -819,13 +966,22 @@ describe("Matrix ingestion end to end", () => {
     expect(await listTenantArchiveKeys(fixture.tenantId)).toHaveLength(2);
 
     const delivered = await deliverQueueMessages([
-      { id: `queue_duplicate_first_${fixture.suffix}`, body: queue.messages[0]!.body },
-      { id: `queue_duplicate_second_${fixture.suffix}`, body: queue.messages[1]!.body },
+      {
+        id: `queue_duplicate_first_${fixture.suffix}`,
+        body: queue.messages[0]!.body,
+      },
+      {
+        id: `queue_duplicate_second_${fixture.suffix}`,
+        body: queue.messages[1]!.body,
+      },
     ]);
-    expect(delivered.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_duplicate_first_${fixture.suffix}`,
-      `queue_duplicate_second_${fixture.suffix}`,
-    ] });
+    expect(delivered.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [
+        `queue_duplicate_first_${fixture.suffix}`,
+        `queue_duplicate_second_${fixture.suffix}`,
+      ],
+    });
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
     const status = await projection.getStatus({
       schema_version: 1,
@@ -871,8 +1027,14 @@ describe("Matrix ingestion end to end", () => {
       observedAt: "2026-09-08T01:00:03.000Z",
     });
     const queue = createCapturingQueue();
-    const firstRequest = await requestForEvents(fixture, [firstEvent, secondEvent]);
-    const secondRequest = await requestForEvents(fixture, [firstEvent, thirdEvent]);
+    const firstRequest = await requestForEvents(fixture, [
+      firstEvent,
+      secondEvent,
+    ]);
+    const secondRequest = await requestForEvents(fixture, [
+      firstEvent,
+      thirdEvent,
+    ]);
     await postIngestionBatch(fixture, firstRequest, queue);
     await postIngestionBatch(fixture, secondRequest, queue);
     expect(queue.messages).toHaveLength(2);
@@ -884,19 +1046,27 @@ describe("Matrix ingestion end to end", () => {
       { id: `queue_overlap_newer_${fixture.suffix}`, body: secondPointer },
       { id: `queue_overlap_older_${fixture.suffix}`, body: firstPointer },
     ]);
-    expect(reordered.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_overlap_newer_${fixture.suffix}`,
-      `queue_overlap_older_${fixture.suffix}`,
-    ] });
+    expect(reordered.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [
+        `queue_overlap_newer_${fixture.suffix}`,
+        `queue_overlap_older_${fixture.suffix}`,
+      ],
+    });
     const duplicate = await deliverQueueMessages([
       { id: `queue_overlap_duplicate_${fixture.suffix}`, body: firstPointer },
     ]);
-    expect(duplicate.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_overlap_duplicate_${fixture.suffix}`,
-    ] });
+    expect(duplicate.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [`queue_overlap_duplicate_${fixture.suffix}`],
+    });
 
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
-    const read = authorizationFor(fixture, fixture.tenantId, fixture.identities.human);
+    const read = authorizationFor(
+      fixture,
+      fixture.tenantId,
+      fixture.identities.human,
+    );
     const conversations = await projection.listConversations({
       schema_version: 1,
       tenant_id: fixture.tenantId,
@@ -963,7 +1133,9 @@ describe("Matrix ingestion end to end", () => {
       explicitAcks: [validId],
       retryMessages: [{ msgId: invalidId }],
     });
-    expect(delivered.retryOptions.get(invalidId)).toEqual({ delaySeconds: 300 });
+    expect(delivered.retryOptions.get(invalidId)).toEqual({
+      delaySeconds: 300,
+    });
     expect(await listTenantArchiveKeys(fixture.tenantId)).toHaveLength(2);
 
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
@@ -988,7 +1160,11 @@ describe("Matrix ingestion end to end", () => {
   it("keeps a permanent poison pointer retried and never ACKed", async () => {
     const id = `queue_poison_${fixture.suffix}`;
     const delivered = await deliverQueueMessages([
-      { id, body: { schema_version: 1, kind: "archive.batch.committed" }, attempts: 11 },
+      {
+        id,
+        body: { schema_version: 1, kind: "archive.batch.committed" },
+        attempts: 11,
+      },
     ]);
     expect(delivered.result).toMatchObject({
       explicitAcks: [],
@@ -1015,7 +1191,9 @@ describe("Matrix ingestion end to end", () => {
     });
     expect(delivered.retryOptions.get(id)).toEqual({ delaySeconds: 300 });
     expect(await listTenantArchiveKeys(fixture.tenantId)).toEqual([
-      pointer.manifest_key.replace("manifests/", "events/").replace(".json", ".jsonl.gz"),
+      pointer.manifest_key
+        .replace("manifests/", "events/")
+        .replace(".json", ".jsonl.gz"),
     ]);
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
     const error = await runInDurableObject(projection, async (instance) => {
@@ -1048,12 +1226,21 @@ describe("Matrix ingestion end to end", () => {
     const pointer = queue.messages[0]!.body;
     const original = await env.EVENT_ARCHIVE.get(pointer.manifest_key);
     expect(original).not.toBeNull();
-    const originalManifest = JSON.parse(await original!.text()) as { data_key: string };
+    const originalManifest = JSON.parse(await original!.text()) as {
+      data_key: string;
+    };
     await env.EVENT_ARCHIVE.put(pointer.manifest_key, "not a manifest", {
-      ...(original!.httpMetadata === undefined ? {} : { httpMetadata: original!.httpMetadata }),
-      ...(original!.customMetadata === undefined ? {} : { customMetadata: original!.customMetadata }),
+      ...(original!.httpMetadata === undefined
+        ? {}
+        : { httpMetadata: original!.httpMetadata }),
+      ...(original!.customMetadata === undefined
+        ? {}
+        : { customMetadata: original!.customMetadata }),
     });
-    const beforeFailure = await snapshotArchivePair(pointer, originalManifest.data_key);
+    const beforeFailure = await snapshotArchivePair(
+      pointer,
+      originalManifest.data_key,
+    );
     const id = `queue_corrupt_manifest_${fixture.suffix}`;
     const delivered = await deliverQueueMessages([{ id, body: pointer }]);
     expect(delivered.result).toMatchObject({
@@ -1061,7 +1248,11 @@ describe("Matrix ingestion end to end", () => {
       retryMessages: [{ msgId: id }],
     });
     expect(delivered.retryOptions.get(id)).toEqual({ delaySeconds: 300 });
-    await expectArchivePairUnchanged(pointer, beforeFailure, originalManifest.data_key);
+    await expectArchivePairUnchanged(
+      pointer,
+      beforeFailure,
+      originalManifest.data_key,
+    );
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
     const error = await runInDurableObject(projection, async (instance) => {
       try {
@@ -1092,28 +1283,46 @@ describe("Matrix ingestion end to end", () => {
     const { queue } = await postIngestionBatch(fixture, request);
     await env.CONTROL_DB.prepare(
       "UPDATE connection_accounts SET status = 'retired', retired_at = ?, updated_at = ? WHERE account_id = ?",
-    ).bind("2026-09-08T04:00:00.000Z", "2026-09-08T04:00:00.000Z", fixture.accounts.humanWhatsapp).run();
+    )
+      .bind(
+        "2026-09-08T04:00:00.000Z",
+        "2026-09-08T04:00:00.000Z",
+        fixture.accounts.humanWhatsapp,
+      )
+      .run();
     await expect(
-      env.CONTROL_DB.prepare("SELECT status FROM connection_accounts WHERE account_id = ?")
+      env.CONTROL_DB.prepare(
+        "SELECT status FROM connection_accounts WHERE account_id = ?",
+      )
         .bind(fixture.accounts.humanWhatsapp)
         .first<{ status: string }>(),
     ).resolves.toEqual({ status: "retired" });
     const delivered = await deliverQueueMessages([
-      { id: `queue_retired_mapping_${fixture.suffix}`, body: queue.messages[0]!.body },
+      {
+        id: `queue_retired_mapping_${fixture.suffix}`,
+        body: queue.messages[0]!.body,
+      },
     ]);
-    expect(delivered.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_retired_mapping_${fixture.suffix}`,
-    ] });
+    expect(delivered.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [`queue_retired_mapping_${fixture.suffix}`],
+    });
     const projection = env.TENANT_PROJECTION.getByName(fixture.tenantId);
     const conversations = await projection.listConversations({
       schema_version: 1,
       tenant_id: fixture.tenantId,
       identity_id: fixture.identities.human,
       connection_id: fixture.connections.humanWhatsapp,
-      authorization: authorizationFor(fixture, fixture.tenantId, fixture.identities.human),
+      authorization: authorizationFor(
+        fixture,
+        fixture.tenantId,
+        fixture.identities.human,
+      ),
     });
     expect(conversations.items).toHaveLength(1);
-    expect(conversations.items[0]).toMatchObject({ last_message_preview: "retired mapping body" });
+    expect(conversations.items[0]).toMatchObject({
+      last_message_preview: "retired mapping body",
+    });
   });
 
   it("retries a DO transaction failure, leaves the archive intact, and applies atomically on retry", async () => {
@@ -1149,7 +1358,9 @@ describe("Matrix ingestion end to end", () => {
       explicitAcks: [],
       retryMessages: [{ msgId: `queue_do_failure_${fixture.suffix}` }],
     });
-    expect(failed.retryOptions.get(`queue_do_failure_${fixture.suffix}`)).toEqual({ delaySeconds: 60 });
+    expect(
+      failed.retryOptions.get(`queue_do_failure_${fixture.suffix}`),
+    ).toEqual({ delaySeconds: 60 });
     await expectArchivePairUnchanged(pointer, beforeFailure);
     const afterFailure = await projection.getStatus({
       schema_version: 1,
@@ -1174,9 +1385,10 @@ describe("Matrix ingestion end to end", () => {
     const retried = await deliverQueueMessages([
       { id: `queue_do_failure_retry_${fixture.suffix}`, body: pointer },
     ]);
-    expect(retried.result).toMatchObject({ retryMessages: [], explicitAcks: [
-      `queue_do_failure_retry_${fixture.suffix}`,
-    ] });
+    expect(retried.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: [`queue_do_failure_retry_${fixture.suffix}`],
+    });
     const afterRetry = await projection.getStatus({
       schema_version: 1,
       tenant_id: fixture.tenantId,
@@ -1226,12 +1438,14 @@ describe("Matrix ingestion end to end", () => {
       ),
       mode: "live",
       rebuild_id: null,
-      connections: [{
-        account_id: fixture.accounts.humanWhatsapp,
-        connection_id: fixture.connections.humanWhatsapp,
-        identity_id: fixture.identities.human,
-        platform: "whatsapp",
-      }],
+      connections: [
+        {
+          account_id: fixture.accounts.humanWhatsapp,
+          connection_id: fixture.connections.humanWhatsapp,
+          identity_id: fixture.identities.human,
+          platform: "whatsapp",
+        },
+      ],
       events: [staleEvent],
       checkpoint: {
         kind: "live_event_watermark",
@@ -1288,7 +1502,9 @@ describe("Matrix ingestion end to end", () => {
       explicitAcks: [],
       retryMessages: [{ msgId: `queue_rebuilding_${fixture.suffix}` }],
     });
-    expect(rebuilding.retryOptions.get(`queue_rebuilding_${fixture.suffix}`)).toEqual({ delaySeconds: 60 });
+    expect(
+      rebuilding.retryOptions.get(`queue_rebuilding_${fixture.suffix}`),
+    ).toEqual({ delaySeconds: 60 });
     await expectArchivePairUnchanged(pointer, beforeFailure);
 
     const page = await readReplayPage(env.EVENT_ARCHIVE, fixture.tenantId);
@@ -1297,12 +1513,14 @@ describe("Matrix ingestion end to end", () => {
       tenant_id: fixture.tenantId,
       rebuild_id: rebuildId,
       source_cursor: null,
-      connections: [{
-        account_id: fixture.accounts.humanWhatsapp,
-        connection_id: fixture.connections.humanWhatsapp,
-        identity_id: fixture.identities.human,
-        platform: "whatsapp",
-      }],
+      connections: [
+        {
+          account_id: fixture.accounts.humanWhatsapp,
+          connection_id: fixture.connections.humanWhatsapp,
+          identity_id: fixture.identities.human,
+          platform: "whatsapp",
+        },
+      ],
       page,
       authorization: rebuildAuthorization,
     });
@@ -1337,7 +1555,11 @@ describe("Matrix ingestion end to end", () => {
       tenant_id: fixture.tenantId,
       identity_id: fixture.identities.human,
       connection_id: null,
-      authorization: authorizationFor(fixture, fixture.tenantId, fixture.identities.human),
+      authorization: authorizationFor(
+        fixture,
+        fixture.tenantId,
+        fixture.identities.human,
+      ),
     });
     expect(conversations.items).toHaveLength(1);
     expect(conversations.items[0]!.id).toBe(event.conversation_id);
@@ -1350,10 +1572,18 @@ describe("Matrix ingestion end to end", () => {
       tenant_id: fixture.tenantId,
       identity_id: fixture.identities.human,
       conversation_id: event.conversation_id,
-      authorization: authorizationFor(fixture, fixture.tenantId, fixture.identities.human),
+      authorization: authorizationFor(
+        fixture,
+        fixture.tenantId,
+        fixture.identities.human,
+      ),
     });
-    expect(messages.items.map((message) => message.body)).toEqual(["rebuild source body"]);
-    expect(messages.items.map((message) => message.body)).not.toContain("stale projection body");
+    expect(messages.items.map((message) => message.body)).toEqual([
+      "rebuild source body",
+    ]);
+    expect(messages.items.map((message) => message.body)).not.toContain(
+      "stale projection body",
+    );
   });
 
   it("records the later staging smoke gate without simulating hosted DLQ time", () => {

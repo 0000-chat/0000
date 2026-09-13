@@ -17,6 +17,10 @@ export function renderApp(path = "/") {
   return { ...result, router, queryClient };
 }
 
-function RouterHarness({ router }: { router: ReturnType<typeof createAppRouter> }) {
+function RouterHarness({
+  router,
+}: {
+  router: ReturnType<typeof createAppRouter>;
+}) {
   return <RouterProvider router={router} />;
 }

@@ -47,33 +47,34 @@ const requestEnvironment = (overrides: Record<string, unknown> = {}) => {
 const eventFor = (
   index: number,
   overrides: Partial<ProjectionEventEnvelope> = {},
-): ProjectionEventEnvelope => ({
-  schema_version: 1,
-  event_id: `$route-${index}:server`,
-  event_type: "message.created",
-  event_source: "live",
-  tenant_id: TENANT_ID,
-  identity_id: "identity_human",
-  platform: "whatsapp",
-  account_id: ACCOUNT_ID,
-  conversation_id: `conversation_route_${index}`,
-  matrix_room_id: "!route-room:server",
-  matrix_event_id: `$matrix-route-${index}:server`,
-  remote_message_id: `remote-route-${index}`,
-  occurred_at: `2026-08-29T01:00:${String(index % 60).padStart(2, "0")}.000Z`,
-  observed_at: `2026-08-29T01:00:${String(index % 60).padStart(2, "0")}.500Z`,
-  payload: {
-    message_id: `message_route_${index}`,
-    direction: "inbound",
-    sender_participant_id: null,
-    sender_label: "Route test",
-    body: "",
-    reply_to_message_id: null,
-    delivery_status: "unknown",
-    unread: true,
-  },
-  ...overrides,
-} as ProjectionEventEnvelope);
+): ProjectionEventEnvelope =>
+  ({
+    schema_version: 1,
+    event_id: `$route-${index}:server`,
+    event_type: "message.created",
+    event_source: "live",
+    tenant_id: TENANT_ID,
+    identity_id: "identity_human",
+    platform: "whatsapp",
+    account_id: ACCOUNT_ID,
+    conversation_id: `conversation_route_${index}`,
+    matrix_room_id: "!route-room:server",
+    matrix_event_id: `$matrix-route-${index}:server`,
+    remote_message_id: `remote-route-${index}`,
+    occurred_at: `2026-08-29T01:00:${String(index % 60).padStart(2, "0")}.000Z`,
+    observed_at: `2026-08-29T01:00:${String(index % 60).padStart(2, "0")}.500Z`,
+    payload: {
+      message_id: `message_route_${index}`,
+      direction: "inbound",
+      sender_participant_id: null,
+      sender_label: "Route test",
+      body: "",
+      reply_to_message_id: null,
+      delivery_status: "unknown",
+      unread: true,
+    },
+    ...overrides,
+  }) as ProjectionEventEnvelope;
 
 const batchIdFor = async (
   request: Omit<IngestionBatchRequest, "batch_id">,
@@ -215,7 +216,9 @@ const deleteArchiveTenant = async (tenantId: string) => {
         ...(cursor === undefined ? {} : { cursor }),
       });
       if (page.objects.length > 0) {
-        await env.EVENT_ARCHIVE.delete(page.objects.map((object) => object.key));
+        await env.EVENT_ARCHIVE.delete(
+          page.objects.map((object) => object.key),
+        );
       }
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor !== undefined);
@@ -350,14 +353,11 @@ describe("bounded ingestion request body", () => {
     ]) {
       await expect(
         readBoundedRequestBody(
-          new Request(
-            "https://example.test/internal/v1/ingestion/batches",
-            {
-              method: "POST",
-              headers: { "Content-Type": contentType },
-              body: "{}",
-            },
-          ),
+          new Request("https://example.test/internal/v1/ingestion/batches", {
+            method: "POST",
+            headers: { "Content-Type": contentType },
+            body: "{}",
+          }),
         ),
       ).rejects.toMatchObject({ code: "ingestion_invalid" });
     }
@@ -369,14 +369,11 @@ describe("bounded ingestion request body", () => {
     ]) {
       await expect(
         readBoundedRequestBody(
-          new Request(
-            "https://example.test/internal/v1/ingestion/batches",
-            {
-              method: "POST",
-              headers: { "Content-Type": contentType },
-              body: "{}",
-            },
-          ),
+          new Request("https://example.test/internal/v1/ingestion/batches", {
+            method: "POST",
+            headers: { "Content-Type": contentType },
+            body: "{}",
+          }),
         ),
       ).resolves.toEqual(new TextEncoder().encode("{}"));
     }
@@ -471,7 +468,9 @@ describe("POST /internal/v1/ingestion/batches", () => {
       gateway_route_id: ROUTE_ID,
     });
 
-    const pointer = CommittedArchivePointerSchema.parse(sent[0]!.pointer) as CommittedArchivePointer;
+    const pointer = CommittedArchivePointerSchema.parse(
+      sent[0]!.pointer,
+    ) as CommittedArchivePointer;
     expect(canonicalJsonBytes(pointer).byteLength).toBeLessThanOrEqual(
       MAX_INGESTION_QUEUE_POINTER_BYTES,
     );
@@ -499,7 +498,9 @@ describe("POST /internal/v1/ingestion/batches", () => {
     expect(response.status).toBe(202);
     expect(sends).toHaveLength(1);
     expect(sends[0]?.options).toEqual({ contentType: "json" });
-    expect(CommittedArchivePointerSchema.safeParse(sends[0]?.pointer).success).toBe(true);
+    expect(
+      CommittedArchivePointerSchema.safeParse(sends[0]?.pointer).success,
+    ).toBe(true);
   });
 
   it("accepts escaped Unicode and control-heavy JSON through the UTF-8 boundary", async () => {
@@ -526,25 +527,40 @@ describe("POST /internal/v1/ingestion/batches", () => {
     [{ "Content-Type": "text/plain" }, 400],
     [{ "Content-Type": "application/json; charset=iso-8859-1" }, 400],
     [{ "Content-Type": "application/json", "Content-Encoding": "gzip" }, 400],
-    [{ "Content-Type": "application/json", "Content-Length": String(MAX_INGESTION_REQUEST_BYTES + 1) }, 413],
-  ] as const)("rejects an invalid transport header before archive or Queue I/O", async (headers, status) => {
-    const request = await requestFor([eventFor(9)]);
-    const send = async () => {
-      throw new Error("Queue should not be called");
-    };
-    const response = await postRaw(JSON.stringify(request), send, {
-      Authorization: "Bearer route-test-token",
-      ...headers,
-    });
-    expect(response.status).toBe(status);
-    expect(await response.json()).toMatchObject({ error: { code: status === 413 ? "ingestion_too_large" : "ingestion_invalid" } });
-    expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
-    ).toHaveLength(0);
-    expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: "events/tenant_other/" })).objects,
-    ).toHaveLength(0);
-  });
+    [
+      {
+        "Content-Type": "application/json",
+        "Content-Length": String(MAX_INGESTION_REQUEST_BYTES + 1),
+      },
+      413,
+    ],
+  ] as const)(
+    "rejects an invalid transport header before archive or Queue I/O",
+    async (headers, status) => {
+      const request = await requestFor([eventFor(9)]);
+      const send = async () => {
+        throw new Error("Queue should not be called");
+      };
+      const response = await postRaw(JSON.stringify(request), send, {
+        Authorization: "Bearer route-test-token",
+        ...headers,
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: status === 413 ? "ingestion_too_large" : "ingestion_invalid",
+        },
+      });
+      expect(
+        (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+          .objects,
+      ).toHaveLength(0);
+      expect(
+        (await env.EVENT_ARCHIVE.list({ prefix: "events/tenant_other/" }))
+          .objects,
+      ).toHaveLength(0);
+    },
+  );
 
   it("maps canonical archive overflow to 413 before any R2 or Queue write", async () => {
     const oversizedEvents = Array.from({ length: 500 }, (_, index) =>
@@ -583,10 +599,12 @@ describe("POST /internal/v1/ingestion/batches", () => {
       error: { code: "ingestion_too_large" },
     });
     expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
+      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+        .objects,
     ).toHaveLength(0);
     expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: "events/tenant_other/" })).objects,
+      (await env.EVENT_ARCHIVE.list({ prefix: "events/tenant_other/" }))
+        .objects,
     ).toHaveLength(0);
   });
 
@@ -623,7 +641,8 @@ describe("POST /internal/v1/ingestion/batches", () => {
     });
     expect(await env.EVENT_ARCHIVE.get(keys.dataKey)).not.toBeNull();
     expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `manifests/${TENANT_ID}/` })).objects,
+      (await env.EVENT_ARCHIVE.list({ prefix: `manifests/${TENANT_ID}/` }))
+        .objects,
     ).toHaveLength(0);
   });
 
@@ -644,24 +663,33 @@ describe("POST /internal/v1/ingestion/batches", () => {
       },
     });
     expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
+      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+        .objects,
     ).toHaveLength(0);
   });
 
   it.each([
     ["malformed JSON", "{", "ingestion_invalid"],
-    ["unknown request field", JSON.stringify({ unexpected: true }), "ingestion_invalid"],
-  ] as const)("rejects %s before archive or Queue I/O", async (_name, body, code) => {
-    const send = async () => {
-      throw new Error("Queue should not be called");
-    };
-    const response = await postRaw(body, send);
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: { code } });
-    expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
-    ).toHaveLength(0);
-  });
+    [
+      "unknown request field",
+      JSON.stringify({ unexpected: true }),
+      "ingestion_invalid",
+    ],
+  ] as const)(
+    "rejects %s before archive or Queue I/O",
+    async (_name, body, code) => {
+      const send = async () => {
+        throw new Error("Queue should not be called");
+      };
+      const response = await postRaw(body, send);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code } });
+      expect(
+        (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+          .objects,
+      ).toHaveLength(0);
+    },
+  );
 
   it("rejects a mismatched caller batch ID before any archive or Queue write", async () => {
     const request = await requestFor([eventFor(4)]);
@@ -680,7 +708,8 @@ describe("POST /internal/v1/ingestion/batches", () => {
       },
     });
     expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
+      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+        .objects,
     ).toHaveLength(0);
   });
 
@@ -688,32 +717,35 @@ describe("POST /internal/v1/ingestion/batches", () => {
     ["cross tenant", { tenant_id: "tenant_other" }],
     ["unknown account", { account_id: "account_other" }],
     ["platform mismatch", { platform: "telegram" }],
-  ] as const)("denies %s before archive or Queue I/O", async (_name, eventChange) => {
-    const changedTenant = "tenant_id" in eventChange
-      ? eventChange.tenant_id
-      : undefined;
-    const request = await requestFor([
-      eventFor(5, eventChange as Partial<ProjectionEventEnvelope>),
-    ], changedTenant === undefined
-      ? {}
-      : { tenant_id: changedTenant });
-    const send = async () => {
-      throw new Error("Queue should not be called");
-    };
-    const response = await postBatch(request, send);
-    expect(response.status).toBe(404);
-    expect(await response.json()).toMatchObject({
-      error: { code: "ingestion_not_found" },
-    });
-    expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
-    ).toHaveLength(0);
-    if (changedTenant !== undefined) {
+  ] as const)(
+    "denies %s before archive or Queue I/O",
+    async (_name, eventChange) => {
+      const changedTenant =
+        "tenant_id" in eventChange ? eventChange.tenant_id : undefined;
+      const request = await requestFor(
+        [eventFor(5, eventChange as Partial<ProjectionEventEnvelope>)],
+        changedTenant === undefined ? {} : { tenant_id: changedTenant },
+      );
+      const send = async () => {
+        throw new Error("Queue should not be called");
+      };
+      const response = await postBatch(request, send);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        error: { code: "ingestion_not_found" },
+      });
       expect(
-        (await env.EVENT_ARCHIVE.list({ prefix: `events/${changedTenant}/` })).objects,
+        (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+          .objects,
       ).toHaveLength(0);
-    }
-  });
+      if (changedTenant !== undefined) {
+        expect(
+          (await env.EVENT_ARCHIVE.list({ prefix: `events/${changedTenant}/` }))
+            .objects,
+        ).toHaveLength(0);
+      }
+    },
+  );
 
   it("returns 503 after a Queue failure and retries the exact committed archive", async () => {
     const request = await requestFor([eventFor(2)]);
@@ -757,12 +789,16 @@ describe("POST /internal/v1/ingestion/batches", () => {
     const second = await postBatch(request, send);
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
-    expect(await second.json()).toMatchObject({ archive_status: "already_committed" });
+    expect(await second.json()).toMatchObject({
+      archive_status: "already_committed",
+    });
     expect(pointers).toHaveLength(2);
     expect(pointers[1]).toEqual(pointers[0]);
     const keys = [
-      ...(await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
-      ...(await env.EVENT_ARCHIVE.list({ prefix: `manifests/${TENANT_ID}/` })).objects,
+      ...(await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+        .objects,
+      ...(await env.EVENT_ARCHIVE.list({ prefix: `manifests/${TENANT_ID}/` }))
+        .objects,
     ];
     expect(keys).toHaveLength(2);
   });
@@ -770,7 +806,9 @@ describe("POST /internal/v1/ingestion/batches", () => {
   it("denies an inactive route before any R2 or Queue work", async () => {
     await env.CONTROL_DB.prepare(
       "UPDATE gateway_routes SET status = 'disabled' WHERE id = ?",
-    ).bind(ROUTE_ID).run();
+    )
+      .bind(ROUTE_ID)
+      .run();
     const request = await requestFor([eventFor(13)]);
     const send = async () => {
       throw new Error("Queue should not be called");
@@ -781,7 +819,8 @@ describe("POST /internal/v1/ingestion/batches", () => {
       error: { code: "ingestion_not_found" },
     });
     expect(
-      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` })).objects,
+      (await env.EVENT_ARCHIVE.list({ prefix: `events/${TENANT_ID}/` }))
+        .objects,
     ).toHaveLength(0);
   });
 

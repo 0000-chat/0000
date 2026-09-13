@@ -91,16 +91,32 @@ function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const PRIVATE_JWK_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "oth", "priv"] as const;
+const PRIVATE_JWK_MEMBERS = [
+  "d",
+  "p",
+  "q",
+  "dp",
+  "dq",
+  "qi",
+  "oth",
+  "priv",
+] as const;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
-function keyAlgorithm(key: JsonRecord): (typeof allowedAlgorithms)[number] | undefined {
+function keyAlgorithm(
+  key: JsonRecord,
+): (typeof allowedAlgorithms)[number] | undefined {
   if (key.alg !== undefined && typeof key.alg !== "string") return undefined;
-  if (key.alg !== undefined && !allowedAlgorithms.includes(key.alg as (typeof allowedAlgorithms)[number])) {
+  if (
+    key.alg !== undefined &&
+    !allowedAlgorithms.includes(key.alg as (typeof allowedAlgorithms)[number])
+  ) {
     return undefined;
   }
-  if (key.kty === "EC" && (key.alg === undefined || key.alg === "ES256")) return "ES256";
-  if (key.kty === "RSA" && (key.alg === undefined || key.alg === "RS256")) return "RS256";
+  if (key.kty === "EC" && (key.alg === undefined || key.alg === "ES256"))
+    return "ES256";
+  if (key.kty === "RSA" && (key.alg === undefined || key.alg === "RS256"))
+    return "RS256";
   return undefined;
 }
 
@@ -108,7 +124,8 @@ function keyAlgorithm(key: JsonRecord): (typeof allowedAlgorithms)[number] | und
 function isPotentialPublicVerificationKey(key: unknown): key is JsonRecord {
   if (!isRecord(key)) return false;
   if (typeof key.kty !== "string") return false;
-  if (PRIVATE_JWK_MEMBERS.some((member) => Object.hasOwn(key, member))) return false;
+  if (PRIVATE_JWK_MEMBERS.some((member) => Object.hasOwn(key, member)))
+    return false;
   if (key.kid !== undefined && typeof key.kid !== "string") return false;
   if (key.use !== undefined && key.use !== "sig") return false;
   if (key.key_ops !== undefined) {
@@ -165,7 +182,9 @@ async function validateRemoteJwkSet(jwks: unknown): Promise<boolean> {
     const algorithm = keyAlgorithm(key);
     if (algorithm === undefined) continue;
     try {
-      const imported = await importJWK(key as JWK, algorithm, { extractable: false });
+      const imported = await importJWK(key as JWK, algorithm, {
+        extractable: false,
+      });
       if (!(imported instanceof Uint8Array)) usable = true;
     } catch {
       // A different valid key may still serve this set.
@@ -201,7 +220,10 @@ function classifyFailure(
     return "unavailable";
   }
 
-  if (code === "ERR_JWKS_NO_MATCHING_KEY" || code === "ERR_JWKS_MULTIPLE_MATCHING_KEYS") {
+  if (
+    code === "ERR_JWKS_NO_MATCHING_KEY" ||
+    code === "ERR_JWKS_MULTIPLE_MATCHING_KEYS"
+  ) {
     if (remoteState && !remoteState.usable) return "unavailable";
     return "invalid";
   }
@@ -247,7 +269,8 @@ function createRemoteResolver(
   fetchImplementation?: FetchImplementation,
 ): RemoteKeyState {
   let remoteState: RemoteKeyState | undefined;
-  const fetcher: FetchImplementation = fetchImplementation ?? ((url, options) => fetch(url, options));
+  const fetcher: FetchImplementation =
+    fetchImplementation ?? ((url, options) => fetch(url, options));
 
   const guardedFetch: FetchImplementation = async (url, options) => {
     let response: Response;
@@ -303,10 +326,7 @@ function assertIngestionTemporalClaims(
   const now = Math.floor(currentDate.getTime() / 1000);
   const { iat, exp, nbf } = payload;
 
-  if (
-    !Number.isSafeInteger(iat) ||
-    !Number.isSafeInteger(exp)
-  ) {
+  if (!Number.isSafeInteger(iat) || !Number.isSafeInteger(exp)) {
     throw new OidcVerificationError("invalid");
   }
 
@@ -332,7 +352,8 @@ function assertIngestionTemporalClaims(
   }
   if (
     nbf !== undefined &&
-    (!Number.isSafeInteger(nbf) || nbf > now + INGESTION_TOKEN_CLOCK_TOLERANCE_SECONDS)
+    (!Number.isSafeInteger(nbf) ||
+      nbf > now + INGESTION_TOKEN_CLOCK_TOLERANCE_SECONDS)
   ) {
     throw new OidcVerificationError("invalid");
   }
@@ -363,7 +384,8 @@ export function createOidcVerifier(
     remoteState = createRemoteResolver(config, resolved.options.fetch);
     keys = remoteState.resolver;
   }
-  const requireIngestionClaims = resolved.options.requireIngestionClaims === true;
+  const requireIngestionClaims =
+    resolved.options.requireIngestionClaims === true;
   const currentDate = resolved.options.currentDate;
 
   return {
@@ -383,7 +405,11 @@ export function createOidcVerifier(
         });
         const payload = result.payload;
 
-        if (typeof payload.iss !== "string" || typeof payload.sub !== "string" || payload.sub.length === 0) {
+        if (
+          typeof payload.iss !== "string" ||
+          typeof payload.sub !== "string" ||
+          payload.sub.length === 0
+        ) {
           throw new OidcVerificationError(
             "invalid",
             undefined,
@@ -392,7 +418,10 @@ export function createOidcVerifier(
         }
 
         const tokenId = payload.jti;
-        if (requireIngestionClaims && (typeof tokenId !== "string" || tokenId.length === 0)) {
+        if (
+          requireIngestionClaims &&
+          (typeof tokenId !== "string" || tokenId.length === 0)
+        ) {
           throw new OidcVerificationError("invalid");
         }
         if (requireIngestionClaims) {

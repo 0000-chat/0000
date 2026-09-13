@@ -27,17 +27,32 @@ export async function resolveAuthorization(
 ): Promise<AuthorizationResult> {
   try {
     const session = db.withSession("first-primary");
-    const principal = await findActivePrincipal(session, subject.issuer, subject.subject);
+    const principal = await findActivePrincipal(
+      session,
+      subject.issuer,
+      subject.subject,
+    );
     if (!principal) return { ok: false, code: "not_found" };
 
-    if ((principal.principal_type === "agent" || principal.principal_type === "service") && !subject.token_id) {
+    if (
+      (principal.principal_type === "agent" ||
+        principal.principal_type === "service") &&
+      !subject.token_id
+    ) {
       return { ok: false, code: "unauthenticated" };
     }
-    if (subject.token_id && await isTokenRevoked(session, subject.issuer, subject.token_id)) {
+    if (
+      subject.token_id &&
+      (await isTokenRevoked(session, subject.issuer, subject.token_id))
+    ) {
       return { ok: false, code: "unauthenticated" };
     }
 
-    const memberships = await listActiveMemberships(session, principal.id, tenantHint);
+    const memberships = await listActiveMemberships(
+      session,
+      principal.id,
+      tenantHint,
+    );
     if (memberships.length === 0) return { ok: false, code: "not_found" };
     if (memberships.length > 1 && !tenantHint) {
       return { ok: false, code: "tenant_selection_required" };
@@ -45,7 +60,11 @@ export async function resolveAuthorization(
 
     const [membership] = memberships;
     if (!membership) return { ok: false, code: "not_found" };
-    const identities = await listAuthorizedIdentities(session, membership.id, membership.tenant_id);
+    const identities = await listAuthorizedIdentities(
+      session,
+      membership.id,
+      membership.tenant_id,
+    );
     const context = SessionResponseSchema.parse({
       tenant: {
         id: membership.tenant_id,

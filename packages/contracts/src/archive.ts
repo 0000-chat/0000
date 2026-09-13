@@ -44,7 +44,11 @@ const ArchiveKeyStringSchema = z
   .string()
   .max(MAX_ARCHIVE_KEY_CHARS)
   .regex(/^[\x20-\x7E]+$/);
-const PROTOTYPE_SENSITIVE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const PROTOTYPE_SENSITIVE_KEYS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+]);
 
 const snapshotStrictObjectInput = (input: unknown): unknown => {
   try {
@@ -90,7 +94,10 @@ const isCanonicalArrayIndexKey = (key: string, length: number): boolean => {
   );
 };
 
-const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown => {
+const snapshotStrictArrayInput = (
+  input: unknown,
+  maxLength: number,
+): unknown => {
   try {
     if (input === null || typeof input !== "object" || !Array.isArray(input)) {
       return undefined;
@@ -100,11 +107,7 @@ const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown =>
     const lengthDescriptor = Object.getOwnPropertyDescriptor(input, "length");
     if (!lengthDescriptor || !("value" in lengthDescriptor)) return undefined;
     const length = lengthDescriptor.value;
-    if (
-      !Number.isSafeInteger(length) ||
-      length < 0 ||
-      length > maxLength
-    ) {
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxLength) {
       return undefined;
     }
 
@@ -131,7 +134,8 @@ const snapshotStrictArrayInput = (input: unknown, maxLength: number): unknown =>
 
     for (let index = 0; index < length; index += 1) {
       const key = String(index);
-      if (!Object.prototype.hasOwnProperty.call(snapshot, key)) return undefined;
+      if (!Object.prototype.hasOwnProperty.call(snapshot, key))
+        return undefined;
     }
     snapshot.length = length;
     return snapshot;
@@ -149,7 +153,10 @@ type ArchiveKeyParts = {
   batch_id: string;
 };
 
-const parseArchiveKey = (value: string, prefix: "events" | "manifests"): ArchiveKeyParts | null => {
+const parseArchiveKey = (
+  value: string,
+  prefix: "events" | "manifests",
+): ArchiveKeyParts | null => {
   const segments = value.split("/");
   if (segments.length !== 7 || segments[0] !== prefix) return null;
 
@@ -199,21 +206,23 @@ const isValidArchiveKey = (
 
   const parts = parseArchiveKey(value, prefix);
   if (!parts || !isValidUtcPartition(parts)) return false;
-  if (!CanonicalResourceIdSchema.safeParse(parts.tenant_id).success) return false;
+  if (!CanonicalResourceIdSchema.safeParse(parts.tenant_id).success)
+    return false;
   return (
     parts.batch_id.startsWith("batch_") &&
     CanonicalResourceIdSchema.safeParse(parts.batch_id).success
   );
 };
 
-export const ArchiveDataKeySchema = ArchiveKeyStringSchema
-  .refine((value) => isValidArchiveKey(value, "events"), "Invalid archive data key");
+export const ArchiveDataKeySchema = ArchiveKeyStringSchema.refine(
+  (value) => isValidArchiveKey(value, "events"),
+  "Invalid archive data key",
+);
 
-export const ArchiveManifestKeySchema = ArchiveKeyStringSchema
-  .refine(
-    (value) => isValidArchiveKey(value, "manifests"),
-    "Invalid archive manifest key",
-  );
+export const ArchiveManifestKeySchema = ArchiveKeyStringSchema.refine(
+  (value) => isValidArchiveKey(value, "manifests"),
+  "Invalid archive manifest key",
+);
 
 export const ArchiveKeySchema = z.union([
   ArchiveDataKeySchema,
@@ -229,7 +238,10 @@ const ProducerObjectSchema = z
     version: z.string().trim().min(1).max(MAX_PRODUCER_VERSION_CHARS),
   })
   .strict();
-const ProducerSchema = z.preprocess(snapshotStrictObjectInput, ProducerObjectSchema);
+const ProducerSchema = z.preprocess(
+  snapshotStrictObjectInput,
+  ProducerObjectSchema,
+);
 
 const SourceCheckpointObjectSchema = z
   .object({
@@ -303,11 +315,17 @@ const ArchiveBatchManifestObjectSchema = z
         message: "Archive data key batch does not match manifest batch",
       });
     }
-    if (!archivePartitionMatchesObservedAt(manifest.data_key, manifest.first_observed_at)) {
+    if (
+      !archivePartitionMatchesObservedAt(
+        manifest.data_key,
+        manifest.first_observed_at,
+      )
+    ) {
       context.addIssue({
         code: "custom",
         path: ["data_key"],
-        message: "Archive data key partition does not match first observed timestamp",
+        message:
+          "Archive data key partition does not match first observed timestamp",
       });
     }
 
@@ -321,7 +339,8 @@ const ArchiveBatchManifestObjectSchema = z
       context.addIssue({
         code: "custom",
         path: ["last_observed_at"],
-        message: "Last observed timestamp must not precede first observed timestamp",
+        message:
+          "Last observed timestamp must not precede first observed timestamp",
       });
     }
   });

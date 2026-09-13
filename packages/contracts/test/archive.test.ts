@@ -152,18 +152,29 @@ describe("archive contract bounds", () => {
       expectRejected(ArchiveManifestKeySchema, key);
     }
 
-    expectRejected(ArchiveDataKeySchema, `x${"a".repeat(MAX_ARCHIVE_KEY_CHARS)}`);
-    expectRejected(ArchiveManifestKeySchema, `x${"a".repeat(MAX_ARCHIVE_KEY_CHARS)}`);
+    expectRejected(
+      ArchiveDataKeySchema,
+      `x${"a".repeat(MAX_ARCHIVE_KEY_CHARS)}`,
+    );
+    expectRejected(
+      ArchiveManifestKeySchema,
+      `x${"a".repeat(MAX_ARCHIVE_KEY_CHARS)}`,
+    );
   });
 });
 
 describe("ArchiveBatchManifestSchema", () => {
   it("accepts the exact valid manifest shape", () => {
-    expect(ArchiveBatchManifestSchema.parse(validManifest())).toEqual(validManifest());
+    expect(ArchiveBatchManifestSchema.parse(validManifest())).toEqual(
+      validManifest(),
+    );
   });
 
   it("rejects unknown fields and wrong version, compression, or content type", () => {
-    expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), unexpected: true });
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      unexpected: true,
+    });
     expectRejected(ArchiveBatchManifestSchema, {
       ...validManifest(),
       schema_version: 2,
@@ -213,8 +224,14 @@ describe("ArchiveBatchManifestSchema", () => {
   });
 
   it("rejects malformed resource IDs, batch IDs, derived keys, and hashes", () => {
-    expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), tenant_id: "tenant" });
-    expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), batch_id: "batch" });
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      tenant_id: "tenant",
+    });
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      batch_id: "batch",
+    });
     expectRejected(ArchiveBatchManifestSchema, {
       ...validManifest(),
       batch_id: "tenant_01abc",
@@ -242,8 +259,17 @@ describe("ArchiveBatchManifestSchema", () => {
   });
 
   it("enforces event count and positive safe byte bounds", () => {
-    for (const event_count of [0, MAX_ARCHIVE_EVENTS + 1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), event_count });
+    for (const event_count of [
+      0,
+      MAX_ARCHIVE_EVENTS + 1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expectRejected(ArchiveBatchManifestSchema, {
+        ...validManifest(),
+        event_count,
+      });
     }
     for (const uncompressed_bytes of [
       0,
@@ -282,13 +308,22 @@ describe("ArchiveBatchManifestSchema", () => {
     expect(parsed.first_event_id).toBe("first");
     expect(parsed.last_event_id).toBe("last");
 
-    expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), data_etag: "   " });
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      data_etag: "   ",
+    });
     expectRejected(ArchiveBatchManifestSchema, {
       ...validManifest(),
       data_etag: "e".repeat(257),
     });
-    expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), first_event_id: "  " });
-    expectRejected(ArchiveBatchManifestSchema, { ...validManifest(), last_event_id: "" });
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      first_event_id: "  ",
+    });
+    expectRejected(ArchiveBatchManifestSchema, {
+      ...validManifest(),
+      last_event_id: "",
+    });
     expectRejected(ArchiveBatchManifestSchema, {
       ...validManifest(),
       first_observed_at: "2026-09-07T01:02:03.000",
@@ -367,13 +402,20 @@ describe("ArchiveBatchManifestSchema", () => {
         value: "v".repeat(MAX_CHECKPOINT_VALUE_CHARS + 1),
       },
     });
-    expect(ArchiveBatchManifestSchema.parse({ ...validManifest(), source_checkpoint: null }).source_checkpoint).toBeNull();
+    expect(
+      ArchiveBatchManifestSchema.parse({
+        ...validManifest(),
+        source_checkpoint: null,
+      }).source_checkpoint,
+    ).toBeNull();
   });
 });
 
 describe("ArchiveReplayCursorPayloadSchema", () => {
   it("accepts the tenant-bound cursor payload and rejects unknown fields", () => {
-    expect(ArchiveReplayCursorPayloadSchema.parse(validCursor())).toEqual(validCursor());
+    expect(ArchiveReplayCursorPayloadSchema.parse(validCursor())).toEqual(
+      validCursor(),
+    );
     expectRejected(ArchiveReplayCursorPayloadSchema, {
       ...validCursor(),
       unexpected: true,
@@ -419,14 +461,23 @@ describe("ArchiveReplayCursorPayloadSchema", () => {
 describe("ArchiveReplayPageSchema", () => {
   it("accepts the projection-only replay page shape", () => {
     expect(ArchiveReplayPageSchema.parse(validPage())).toEqual(validPage());
-    expect(ArchiveReplayPageSchema.parse({ ...validPage(), next_cursor: "opaque-next" }).next_cursor).toBe(
-      "opaque-next",
-    );
+    expect(
+      ArchiveReplayPageSchema.parse({
+        ...validPage(),
+        next_cursor: "opaque-next",
+      }).next_cursor,
+    ).toBe("opaque-next");
   });
 
   it("rejects unknown fields, wrong versions/mode, and oversized cursors", () => {
-    expectRejected(ArchiveReplayPageSchema, { ...validPage(), unexpected: true });
-    expectRejected(ArchiveReplayPageSchema, { ...validPage(), schema_version: 2 });
+    expectRejected(ArchiveReplayPageSchema, {
+      ...validPage(),
+      unexpected: true,
+    });
+    expectRejected(ArchiveReplayPageSchema, {
+      ...validPage(),
+      schema_version: 2,
+    });
     expectRejected(ArchiveReplayPageSchema, {
       ...validPage(),
       replay_mode: "commands",
@@ -435,7 +486,10 @@ describe("ArchiveReplayPageSchema", () => {
       ...validPage(),
       next_cursor: "x".repeat(4097),
     });
-    expectRejected(ArchiveReplayPageSchema, { ...validPage(), next_cursor: "" });
+    expectRejected(ArchiveReplayPageSchema, {
+      ...validPage(),
+      next_cursor: "",
+    });
   });
 
   it("bounds manifest and event arrays at their locked replay limits", () => {
@@ -475,7 +529,9 @@ describe("ArchiveReplayPageSchema", () => {
         throw new Error("replay array getter fixture must never be exposed");
       },
     });
-    let getterResult: ReturnType<typeof ArchiveReplayPageSchema.safeParse> | undefined;
+    let getterResult:
+      | ReturnType<typeof ArchiveReplayPageSchema.safeParse>
+      | undefined;
     expect(() => {
       getterResult = ArchiveReplayPageSchema.safeParse({
         ...validPage(),
@@ -492,7 +548,9 @@ describe("ArchiveReplayPageSchema", () => {
         throw new Error("replay array Proxy get fixture must never be exposed");
       },
     });
-    let proxyResult: ReturnType<typeof ArchiveReplayPageSchema.safeParse> | undefined;
+    let proxyResult:
+      | ReturnType<typeof ArchiveReplayPageSchema.safeParse>
+      | undefined;
     expect(() => {
       proxyResult = ArchiveReplayPageSchema.safeParse({
         ...validPage(),
@@ -511,7 +569,9 @@ describe("ArchiveReplayPageSchema", () => {
           throw new Error(`replay array ${trap} fixture must be redacted`);
         },
       });
-      let result: ReturnType<typeof ArchiveReplayPageSchema.safeParse> | undefined;
+      let result:
+        | ReturnType<typeof ArchiveReplayPageSchema.safeParse>
+        | undefined;
       expect(() => {
         result = ArchiveReplayPageSchema.safeParse({
           ...validPage(),

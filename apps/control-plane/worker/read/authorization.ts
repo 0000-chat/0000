@@ -35,8 +35,8 @@ export function toProjectionReadAuthorization(
   );
   if (
     identity === undefined ||
-    !identity.scopes.some((scope) =>
-      scope === "conversation.read" || scope === "connection.read"
+    !identity.scopes.some(
+      (scope) => scope === "conversation.read" || scope === "connection.read",
     )
   ) {
     throw new ReadError("not_found");

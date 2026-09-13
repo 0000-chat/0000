@@ -130,16 +130,22 @@ describe("prepareConversationEvent", () => {
 
     const allUpdated = update.updatePages([matchingPage]);
     const telegramUpdated = update.updatePages([matchingPage]);
-    expect(allUpdated?.[0]?.items[0]?.id).toBe("conversation_human_telegram_alex");
+    expect(allUpdated?.[0]?.items[0]?.id).toBe(
+      "conversation_human_telegram_alex",
+    );
     expect(allUpdated?.[0]?.items[0]).toMatchObject({
       last_message_preview: "New reply",
       last_activity_at: "2026-08-28T00:07:00.000Z",
       unread_count: 4,
     });
-    expect(telegramUpdated?.[0]?.items[0]?.id).toBe("conversation_human_telegram_alex");
+    expect(telegramUpdated?.[0]?.items[0]?.id).toBe(
+      "conversation_human_telegram_alex",
+    );
 
     const channelUpdated = update.updateChannels(channels);
-    expect(channelUpdated?.map((channel) => channel.id)).toEqual(channels.map((channel) => channel.id));
+    expect(channelUpdated?.map((channel) => channel.id)).toEqual(
+      channels.map((channel) => channel.id),
+    );
     expect(channelUpdated?.[1]).toMatchObject({
       unread_count: 4,
       last_activity_at: "2026-08-28T00:07:00.000Z",
@@ -149,7 +155,10 @@ describe("prepareConversationEvent", () => {
   it.each([
     ["wrong tenant", { tenant_id: "tenant_other" }],
     ["wrong identity", { identity_id: "identity_agent" }],
-    ["wrong connection ownership", { connection_id: "connection_agent_whatsapp" }],
+    [
+      "wrong connection ownership",
+      { connection_id: "connection_agent_whatsapp" },
+    ],
     ["repeated sequence", { sequence: 6 }],
   ])("rejects %s", (_label, changes) => {
     const changed = { ...event, ...changes } as RealtimeEvent;
@@ -157,11 +166,15 @@ describe("prepareConversationEvent", () => {
   });
 
   it("rejects lower sequences and malformed message data", () => {
-    expect(prepareConversationEvent(scope, { ...event, sequence: 5 })).toBeNull();
-    expect(prepareConversationEvent(scope, {
-      ...event,
-      data: { last_message_preview: "missing fields" },
-    } as RealtimeEvent)).toBeNull();
+    expect(
+      prepareConversationEvent(scope, { ...event, sequence: 5 }),
+    ).toBeNull();
+    expect(
+      prepareConversationEvent(scope, {
+        ...event,
+        data: { last_message_preview: "missing fields" },
+      } as RealtimeEvent),
+    ).toBeNull();
   });
 
   it("leaves paginated caches unchanged for unsafe local rewrites", () => {
@@ -189,13 +202,17 @@ describe("prepareConversationInvalidation", () => {
   });
 
   it("uses a bounded identity fallback when a projection change lacks an identifier", () => {
-    expect(prepareConversationInvalidation(scope, {
-      ...projectionChanges,
-      changes: [{
-        ...projectionChanges.changes[0]!,
-        conversation_id: undefined,
-      }],
-    } as unknown as RealtimeProjectionChangesFrame)).toEqual({
+    expect(
+      prepareConversationInvalidation(scope, {
+        ...projectionChanges,
+        changes: [
+          {
+            ...projectionChanges.changes[0]!,
+            conversation_id: undefined,
+          },
+        ],
+      } as unknown as RealtimeProjectionChangesFrame),
+    ).toEqual({
       identityId: "identity_human",
       channelIds: [],
       conversationIds: [],
@@ -224,13 +241,17 @@ describe("prepareConversationInvalidation", () => {
   });
 
   it("ignores frames outside the active tenant and identity", () => {
-    expect(prepareConversationInvalidation(scope, {
-      ...projectionChanges,
-      tenant_id: "tenant_other",
-    })).toBeNull();
-    expect(prepareConversationInvalidation(scope, {
-      ...projectionChanges,
-      identity_id: "identity_agent",
-    })).toBeNull();
+    expect(
+      prepareConversationInvalidation(scope, {
+        ...projectionChanges,
+        tenant_id: "tenant_other",
+      }),
+    ).toBeNull();
+    expect(
+      prepareConversationInvalidation(scope, {
+        ...projectionChanges,
+        identity_id: "identity_agent",
+      }),
+    ).toBeNull();
   });
 });

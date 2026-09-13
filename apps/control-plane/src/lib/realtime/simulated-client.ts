@@ -59,7 +59,11 @@ export class SimulatedRealtimeClient implements RealtimeClient {
   }
 
   publishCommand(command: Command, statuses: CommandStatus[] = ["accepted"]) {
-    if (!this.connected || !this.isRequested(command.tenant_id, command.identity_id)) return;
+    if (
+      !this.connected ||
+      !this.isRequested(command.tenant_id, command.identity_id)
+    )
+      return;
     for (const status of statuses) {
       const event = RealtimeEventSchema.parse({
         sequence: ++this.sequence,
@@ -87,7 +91,8 @@ export class SimulatedRealtimeClient implements RealtimeClient {
     lastActivityAt: string;
     unreadDelta: number;
   }) {
-    if (!this.connected || !this.isRequested(input.tenantId, input.identityId)) return;
+    if (!this.connected || !this.isRequested(input.tenantId, input.identityId))
+      return;
     const event = RealtimeEventSchema.parse({
       sequence: ++this.sequence,
       type: "message.created",
@@ -118,8 +123,10 @@ export class SimulatedRealtimeClient implements RealtimeClient {
   }
 
   private isRequested(tenantId: string, identityId: string) {
-    return (!this.requestedTenantId || this.requestedTenantId === tenantId)
-      && (!this.requestedIdentityIds || this.requestedIdentityIds.has(identityId));
+    return (
+      (!this.requestedTenantId || this.requestedTenantId === tenantId) &&
+      (!this.requestedIdentityIds || this.requestedIdentityIds.has(identityId))
+    );
   }
 
   private setStatus(status: RealtimeStatus) {

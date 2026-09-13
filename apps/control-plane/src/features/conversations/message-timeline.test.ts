@@ -30,11 +30,9 @@ describe("chronologicalMessages", () => {
       next_cursor: null,
     };
 
-    expect(chronologicalMessages([newestPage, olderPage]).map((item) => item.id)).toEqual([
-      "message_oldest",
-      "message_middle",
-      "message_newest",
-    ]);
+    expect(
+      chronologicalMessages([newestPage, olderPage]).map((item) => item.id),
+    ).toEqual(["message_oldest", "message_middle", "message_newest"]);
     expect(newestPage.items.map((item) => item.id)).toEqual([
       "message_newest",
       "message_middle",
@@ -58,10 +56,8 @@ describe("chronologicalMessages", () => {
       next_cursor: null,
     };
 
-    expect(chronologicalMessages([newestPage, olderPage]).map((item) => item.id)).toEqual([
-      "message_oldest",
-      "message_boundary",
-      "message_newest",
-    ]);
+    expect(
+      chronologicalMessages([newestPage, olderPage]).map((item) => item.id),
+    ).toEqual(["message_oldest", "message_boundary", "message_newest"]);
   });
 });

@@ -71,9 +71,14 @@ export function createApp(services: AppServices = {}) {
       error.status === 400 &&
       error.message === MALFORMED_JSON_MESSAGE
     ) {
-      return decorateRealtimeTicketResponse(context.json({
-        error: { code: "invalid_request", message: "Invalid request" },
-      }, 400));
+      return decorateRealtimeTicketResponse(
+        context.json(
+          {
+            error: { code: "invalid_request", message: "Invalid request" },
+          },
+          400,
+        ),
+      );
     }
     if (error instanceof HTTPException) {
       const response = error.getResponse();
@@ -84,21 +89,29 @@ export function createApp(services: AppServices = {}) {
   });
   let verifier: TokenVerifier | undefined;
   const getVerifier = (runtimeEnv: Cloudflare.Env) => {
-    verifier ??= (services.createTokenVerifier ?? ((env) => createOidcVerifier({
-      issuer: env.COMMUNICATOR_OIDC_ISSUER,
-      audience: env.COMMUNICATOR_OIDC_AUDIENCE,
-      jwks_url: env.COMMUNICATOR_OIDC_JWKS_URL,
-    })))(runtimeEnv);
+    verifier ??= (
+      services.createTokenVerifier ??
+      ((env) =>
+        createOidcVerifier({
+          issuer: env.COMMUNICATOR_OIDC_ISSUER,
+          audience: env.COMMUNICATOR_OIDC_AUDIENCE,
+          jwks_url: env.COMMUNICATOR_OIDC_JWKS_URL,
+        }))
+    )(runtimeEnv);
     return verifier;
   };
 
   let accessVerifier: TokenVerifier | undefined;
   const getAccessVerifier = (runtimeEnv: Cloudflare.Env) => {
-    accessVerifier ??= (services.createAccessTokenVerifier ?? ((env) => createOidcVerifier({
-      issuer: env.COMMUNICATOR_ACCESS_ISSUER,
-      audience: env.COMMUNICATOR_ACCESS_AUDIENCE,
-      jwks_url: env.COMMUNICATOR_ACCESS_JWKS_URL,
-    })))(runtimeEnv);
+    accessVerifier ??= (
+      services.createAccessTokenVerifier ??
+      ((env) =>
+        createOidcVerifier({
+          issuer: env.COMMUNICATOR_ACCESS_ISSUER,
+          audience: env.COMMUNICATOR_ACCESS_AUDIENCE,
+          jwks_url: env.COMMUNICATOR_ACCESS_JWKS_URL,
+        }))
+    )(runtimeEnv);
     return accessVerifier;
   };
 
@@ -106,18 +119,24 @@ export function createApp(services: AppServices = {}) {
   const getIngestionVerifier = (runtimeEnv: Cloudflare.Env) => {
     ingestionVerifier ??= (
       services.createIngestionTokenVerifier ??
-      ((env) => createOidcVerifier(getIngestionOidcConfig(env), {
-        requireIngestionClaims: true,
-      }))
+      ((env) =>
+        createOidcVerifier(getIngestionOidcConfig(env), {
+          requireIngestionClaims: true,
+        }))
     )(runtimeEnv);
     return ingestionVerifier;
   };
 
-  app.openapi(healthRoute, (context) => context.json({
-    status: "ok",
-    service: "communicator-control-plane",
-    data_mode: context.env?.COMMUNICATOR_DATA_MODE ?? "unconfigured",
-  }, 200));
+  app.openapi(healthRoute, (context) =>
+    context.json(
+      {
+        status: "ok",
+        service: "communicator-control-plane",
+        data_mode: context.env?.COMMUNICATOR_DATA_MODE ?? "unconfigured",
+      },
+      200,
+    ),
+  );
 
   app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
     type: "http",
@@ -138,10 +157,12 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/identities/*", productAuthorization);
   app.use("/api/v1/connections", productAuthorization);
   app.use("/api/v1/conversations/*", productAuthorization);
-  app.openapi(sessionRoute, (context) => context.json(
-    SessionResponseSchema.parse(context.get("authorization")),
-    200,
-  ));
+  app.openapi(sessionRoute, (context) =>
+    context.json(
+      SessionResponseSchema.parse(context.get("authorization")),
+      200,
+    ),
+  );
   app.openapi(realtimeTicketRoute, realtimeTicketHandler);
   app.get("/api/v1/realtime", realtimeUpgradeHandler);
 
@@ -159,15 +180,13 @@ export function createApp(services: AppServices = {}) {
 
   app.use(
     "/internal/v1/ingestion/batches",
-    createIngestionAuthorizationMiddleware({ getVerifier: getIngestionVerifier }),
+    createIngestionAuthorizationMiddleware({
+      getVerifier: getIngestionVerifier,
+    }),
   );
   app.post(
     "/internal/v1/ingestion/batches",
-    createIngestionBatchHandler({
-      ...(services.sendIngestionQueue === undefined
-        ? {}
-        : { sendIngestionQueue: services.sendIngestionQueue }),
-    }),
+    createIngestionBatchHandler(services),
   );
 
   return app;

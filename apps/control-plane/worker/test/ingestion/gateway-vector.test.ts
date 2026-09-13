@@ -18,7 +18,8 @@ type IngestionContractVector = {
 // checked-in vector's contract shape explicit at this test boundary so the
 // production encoder and batch identity function are still exercised directly.
 const contractFixture = fixture as unknown as IngestionContractVector;
-const backfillContractFixture = backfillFixture as unknown as IngestionContractVector;
+const backfillContractFixture =
+  backfillFixture as unknown as IngestionContractVector;
 
 describe("matrix gateway ingestion contract vector", () => {
   it("reproduces the canonical JSONL bytes and immutable batch identity", async () => {
@@ -40,7 +41,9 @@ describe("matrix gateway ingestion contract vector", () => {
   });
 
   it("parses the Rust backfill request and reproduces its canonical JSONL and batch identity", async () => {
-    const request = IngestionBatchRequestSchema.parse(backfillContractFixture.request);
+    const request = IngestionBatchRequestSchema.parse(
+      backfillContractFixture.request,
+    );
     expect(request).toEqual(backfillContractFixture.request);
 
     const encoded = await encodeCanonicalEventBatch({
@@ -51,7 +54,9 @@ describe("matrix gateway ingestion contract vector", () => {
     expect(new TextDecoder().decode(encoded.canonicalJsonl)).toBe(
       backfillContractFixture.canonical_jsonl,
     );
-    expect(encoded.canonicalSha256).toBe(backfillContractFixture.canonical_sha256);
+    expect(encoded.canonicalSha256).toBe(
+      backfillContractFixture.canonical_sha256,
+    );
     expect(
       await recomputeIngestionBatchId(request, encoded.canonicalSha256),
     ).toBe(request.batch_id);

@@ -28,33 +28,34 @@ const ARCHIVED_AT = "2026-09-07T02:03:04.000+00:00";
 const eventFor = (
   index: number,
   overrides: Partial<ProjectionEventEnvelope> = {},
-): ProjectionEventEnvelope => ({
-  schema_version: 1,
-  event_id: `$event-${index}:server`,
-  event_type: "message.created",
-  event_source: "live",
-  tenant_id: TENANT_ID,
-  identity_id: "identity_ingestion",
-  platform: "whatsapp",
-  account_id: "account_ingestion_whatsapp",
-  conversation_id: `conversation_ingestion_${String(index).padStart(4, "0")}`,
-  matrix_room_id: "!room:server",
-  matrix_event_id: `$matrix-${index}:server`,
-  remote_message_id: `remote-${index}`,
-  occurred_at: `2026-09-07T01:00:${String(index % 60).padStart(2, "0")}.000Z`,
-  observed_at: `2026-09-07T01:00:${String(index % 60).padStart(2, "0")}.500Z`,
-  payload: {
-    message_id: `message_ingestion_${String(index).padStart(4, "0")}`,
-    direction: "inbound",
-    sender_participant_id: null,
-    sender_label: "Ingestion fixture",
-    body: "",
-    reply_to_message_id: null,
-    delivery_status: "unknown",
-    unread: true,
-  },
-  ...overrides,
-} as ProjectionEventEnvelope);
+): ProjectionEventEnvelope =>
+  ({
+    schema_version: 1,
+    event_id: `$event-${index}:server`,
+    event_type: "message.created",
+    event_source: "live",
+    tenant_id: TENANT_ID,
+    identity_id: "identity_ingestion",
+    platform: "whatsapp",
+    account_id: "account_ingestion_whatsapp",
+    conversation_id: `conversation_ingestion_${String(index).padStart(4, "0")}`,
+    matrix_room_id: "!room:server",
+    matrix_event_id: `$matrix-${index}:server`,
+    remote_message_id: `remote-${index}`,
+    occurred_at: `2026-09-07T01:00:${String(index % 60).padStart(2, "0")}.000Z`,
+    observed_at: `2026-09-07T01:00:${String(index % 60).padStart(2, "0")}.500Z`,
+    payload: {
+      message_id: `message_ingestion_${String(index).padStart(4, "0")}`,
+      direction: "inbound",
+      sender_participant_id: null,
+      sender_label: "Ingestion fixture",
+      body: "",
+      reply_to_message_id: null,
+      delivery_status: "unknown",
+      unread: true,
+    },
+    ...overrides,
+  }) as ProjectionEventEnvelope;
 
 const identityBytesFor = async (
   request: Omit<IngestionBatchRequest, "batch_id"> & { batch_id?: string },
@@ -78,7 +79,10 @@ const requestFor = async (
   events: ProjectionEventEnvelope[],
   overrides: Partial<Omit<IngestionBatchRequest, "events" | "batch_id">> = {},
 ): Promise<IngestionBatchRequest> => {
-  const encoded = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events });
+  const encoded = await encodeCanonicalEventBatch({
+    tenantId: TENANT_ID,
+    events,
+  });
   const requestWithoutBatch = {
     schema_version: 1 as const,
     gateway_route_id: GATEWAY_ROUTE_ID,
@@ -91,11 +95,16 @@ const requestFor = async (
   };
   return {
     ...requestWithoutBatch,
-    batch_id: await identityBytesFor(requestWithoutBatch, encoded.canonicalSha256),
+    batch_id: await identityBytesFor(
+      requestWithoutBatch,
+      encoded.canonicalSha256,
+    ),
   };
 };
 
-const errorFrom = async (operation: Promise<unknown>): Promise<IngestionError> => {
+const errorFrom = async (
+  operation: Promise<unknown>,
+): Promise<IngestionError> => {
   try {
     await operation;
   } catch (error) {
@@ -175,10 +184,16 @@ describe("prepareIngestionBatch", () => {
     expect(new TextDecoder().decode(preparations[0]!.canonicalJsonl)).toBe(
       new TextDecoder().decode(preparations[1]!.canonicalJsonl),
     );
-    expect(preparations[0]!.canonicalSha256).toBe(preparations[1]!.canonicalSha256);
+    expect(preparations[0]!.canonicalSha256).toBe(
+      preparations[1]!.canonicalSha256,
+    );
     expect(preparations[0]!.batchId).toBe(preparations[1]!.batchId);
-    expect(preparations[0]!.canonicalJsonl).toEqual(preparations[2]!.canonicalJsonl);
-    expect(preparations[0]!.archiveInput).toEqual(preparations[1]!.archiveInput);
+    expect(preparations[0]!.canonicalJsonl).toEqual(
+      preparations[2]!.canonicalJsonl,
+    );
+    expect(preparations[0]!.archiveInput).toEqual(
+      preparations[1]!.archiveInput,
+    );
   });
 
   it("changes identity for every immutable field and rejects a caller mismatch", async () => {
@@ -214,7 +229,10 @@ describe("prepareIngestionBatch", () => {
         tenantId: changed.tenant_id,
         events: changed.events,
       });
-      const changedId = await identityBytesFor(changed, encoded.canonicalSha256);
+      const changedId = await identityBytesFor(
+        changed,
+        encoded.canonicalSha256,
+      );
       expect(changedId).not.toBe(prepared.recomputedBatchId);
     }
 
@@ -257,7 +275,9 @@ describe("prepareIngestionBatch", () => {
     firstRead[0] = (firstRead[0] ?? 0) ^ 0xff;
 
     expect(prepared.canonicalJsonl).toEqual(canonicalBefore);
-    expect(await sha256Hex(prepared.canonicalJsonl)).toBe(prepared.canonicalSha256);
+    expect(await sha256Hex(prepared.canonicalJsonl)).toBe(
+      prepared.canonicalSha256,
+    );
     expect(prepared.request).toEqual(requestBefore);
     expect(prepared.events).toEqual(eventsBefore);
     expect(prepared.archiveInput).toEqual(archiveInputBefore);
@@ -267,7 +287,10 @@ describe("prepareIngestionBatch", () => {
     const events = Array.from({ length: MAX_ARCHIVE_EVENTS }, (_, index) =>
       eventFor(index),
     );
-    const base = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events });
+    const base = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events,
+    });
     const target = MAX_PROJECTION_BATCH_BYTES;
     let remaining = target - base.uncompressedBytes;
     expect(remaining).toBeGreaterThan(0);
@@ -289,8 +312,9 @@ describe("prepareIngestionBatch", () => {
   });
 
   it("rejects 501 events and canonical bytes over 4 MiB as ingestion_too_large", async () => {
-    const tooManyEvents = Array.from({ length: MAX_ARCHIVE_EVENTS + 1 }, (_, index) =>
-      eventFor(index),
+    const tooManyEvents = Array.from(
+      { length: MAX_ARCHIVE_EVENTS + 1 },
+      (_, index) => eventFor(index),
     );
     const tooMany = {
       schema_version: 1,
@@ -303,14 +327,19 @@ describe("prepareIngestionBatch", () => {
       events: tooManyEvents,
     };
     expect(IngestionBatchRequestSchema.safeParse(tooMany).success).toBe(false);
-    await expect(errorFrom(prepareIngestionBatch(tooMany))).resolves.toMatchObject({
+    await expect(
+      errorFrom(prepareIngestionBatch(tooMany)),
+    ).resolves.toMatchObject({
       code: "ingestion_too_large",
     });
 
     const events = Array.from({ length: MAX_ARCHIVE_EVENTS }, (_, index) =>
       eventFor(index),
     );
-    const base = await encodeCanonicalEventBatch({ tenantId: TENANT_ID, events });
+    const base = await encodeCanonicalEventBatch({
+      tenantId: TENANT_ID,
+      events,
+    });
     let remaining = MAX_PROJECTION_BATCH_BYTES - base.uncompressedBytes;
     for (const event of events) {
       const currentBody = (event.payload as { body: string }).body;
@@ -341,7 +370,9 @@ describe("prepareIngestionBatch", () => {
       source_checkpoint: SOURCE_CHECKPOINT,
       events,
     };
-    await expect(errorFrom(prepareIngestionBatch(overLimit))).resolves.toMatchObject({
+    await expect(
+      errorFrom(prepareIngestionBatch(overLimit)),
+    ).resolves.toMatchObject({
       code: "ingestion_too_large",
     });
   });

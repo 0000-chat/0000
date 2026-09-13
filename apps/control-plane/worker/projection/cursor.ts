@@ -31,8 +31,8 @@ const encodeBase64Url = (bytes: Uint8Array): string => {
     const first = bytes[index] ?? 0;
     const hasSecond = index + 1 < bytes.length;
     const hasThird = index + 2 < bytes.length;
-    const second = hasSecond ? bytes[index + 1] ?? 0 : 0;
-    const third = hasThird ? bytes[index + 2] ?? 0 : 0;
+    const second = hasSecond ? (bytes[index + 1] ?? 0) : 0;
+    const third = hasThird ? (bytes[index + 2] ?? 0) : 0;
     result += BASE64URL_ALPHABET[first >> 2];
     result += BASE64URL_ALPHABET[((first & 0x03) << 4) | (second >> 4)];
     if (hasSecond) {
@@ -191,7 +191,10 @@ const containsDuplicateObjectKey = (json: string): boolean => {
         return true;
       }
     }
-    if (character === "-" || (character !== undefined && /[0-9]/.test(character))) {
+    if (
+      character === "-" ||
+      (character !== undefined && /[0-9]/.test(character))
+    ) {
       const start = offset;
       while (
         offset < json.length &&
@@ -347,14 +350,15 @@ export function decodeConversationCursor(
     ConversationCursorSchema,
   );
   if (expectedOrTenant !== undefined) {
-    const expected: ConversationCursorContext = typeof expectedOrTenant === "string"
-      ? {
-          tenant_id: expectedOrTenant,
-          identity_id: expectedIdentityId ?? "",
-          connection_id: expectedConnectionId ?? null,
-          generation: expectedGeneration ?? 0,
-        }
-      : expectedOrTenant;
+    const expected: ConversationCursorContext =
+      typeof expectedOrTenant === "string"
+        ? {
+            tenant_id: expectedOrTenant,
+            identity_id: expectedIdentityId ?? "",
+            connection_id: expectedConnectionId ?? null,
+            generation: expectedGeneration ?? 0,
+          }
+        : expectedOrTenant;
     validateConversationContext(parsed, expected);
   }
   return parsed;
@@ -383,14 +387,15 @@ export function decodeMessageCursor(
 ): MessageCursor {
   const parsed = decodePayload<MessageCursor>(cursor, MessageCursorSchema);
   if (expectedOrTenant !== undefined) {
-    const expected: MessageCursorContext = typeof expectedOrTenant === "string"
-      ? {
-          tenant_id: expectedOrTenant,
-          identity_id: expectedIdentityId ?? "",
-          conversation_id: expectedConversationId ?? "",
-          generation: expectedGeneration ?? 0,
-        }
-      : expectedOrTenant;
+    const expected: MessageCursorContext =
+      typeof expectedOrTenant === "string"
+        ? {
+            tenant_id: expectedOrTenant,
+            identity_id: expectedIdentityId ?? "",
+            conversation_id: expectedConversationId ?? "",
+            generation: expectedGeneration ?? 0,
+          }
+        : expectedOrTenant;
     validateMessageContext(parsed, expected);
   }
   return parsed;

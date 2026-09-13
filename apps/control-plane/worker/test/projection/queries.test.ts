@@ -91,7 +91,8 @@ const readTableSnapshots = async (
       .toArray();
     const snapshots: Record<string, Record<string, SqlStorageValue>[]> = {};
     for (const { name } of names) {
-      if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error("unexpected table name");
+      if (!/^[A-Za-z0-9_]+$/.test(name))
+        throw new Error("unexpected table name");
       snapshots[name] = state.storage.sql
         .exec<Record<string, SqlStorageValue>>(
           `SELECT * FROM "${name}" ORDER BY rowid`,
@@ -140,7 +141,10 @@ const encodeRawBase64Url = (value: string): string => {
   const bytes = new TextEncoder().encode(value);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 };
 
 const expectProjectionCode = (operation: () => unknown, code: string): void => {
@@ -160,12 +164,30 @@ describe("tenant projection query RPCs", () => {
     expect(cursor).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(cursor).not.toContain("=");
     expect(decodeConversationCursor(cursor)).toEqual(conversationCursor);
-    expectProjectionCode(() => decodeConversationCursor(""), "projection_invalid");
-    expectProjectionCode(() => decodeConversationCursor(`${cursor}=`), "projection_invalid");
-    expectProjectionCode(() => decodeConversationCursor("!"), "projection_invalid");
-    expectProjectionCode(() => decodeConversationCursor("A"), "projection_invalid");
-    expectProjectionCode(() => decodeConversationCursor("AB"), "projection_invalid");
-    expectProjectionCode(() => decodeConversationCursor("A".repeat(2_049)), "projection_invalid");
+    expectProjectionCode(
+      () => decodeConversationCursor(""),
+      "projection_invalid",
+    );
+    expectProjectionCode(
+      () => decodeConversationCursor(`${cursor}=`),
+      "projection_invalid",
+    );
+    expectProjectionCode(
+      () => decodeConversationCursor("!"),
+      "projection_invalid",
+    );
+    expectProjectionCode(
+      () => decodeConversationCursor("A"),
+      "projection_invalid",
+    );
+    expectProjectionCode(
+      () => decodeConversationCursor("AB"),
+      "projection_invalid",
+    );
+    expectProjectionCode(
+      () => decodeConversationCursor("A".repeat(2_049)),
+      "projection_invalid",
+    );
     expectProjectionCode(
       () => decodeConversationCursor(encodeRawBase64Url("\xff")),
       "projection_invalid",
@@ -186,7 +208,12 @@ describe("tenant projection query RPCs", () => {
       "projection_invalid",
     );
     expectProjectionCode(
-      () => decodeConversationCursor(encodeRawBase64Url('{"schema_version":1,"query_kind":"projection.conversations","tenant_id":"tenant_queries_cursor","identity_id":"identity_a","connection_id":null,"generation":1,"last_activity_ms":1,"last_id":"conversation_a","last_id":"conversation_a"}')),
+      () =>
+        decodeConversationCursor(
+          encodeRawBase64Url(
+            '{"schema_version":1,"query_kind":"projection.conversations","tenant_id":"tenant_queries_cursor","identity_id":"identity_a","connection_id":null,"generation":1,"last_activity_ms":1,"last_id":"conversation_a","last_id":"conversation_a"}',
+          ),
+        ),
       "projection_invalid",
     );
     expectProjectionCode(
@@ -198,7 +225,12 @@ describe("tenant projection query RPCs", () => {
       "projection_invalid",
     );
     expectProjectionCode(
-      () => decodeConversationCursor(encodeRawBase64Url('{"schema_version":1,"query_kind":"projection.conversations","tenant_id":"tenant_queries_cursor","identity_id":"identity_a","connection_id":null,"generation":1,"last_activity_ms":1,"last_id":"conversation_a","extra":true}')),
+      () =>
+        decodeConversationCursor(
+          encodeRawBase64Url(
+            '{"schema_version":1,"query_kind":"projection.conversations","tenant_id":"tenant_queries_cursor","identity_id":"identity_a","connection_id":null,"generation":1,"last_activity_ms":1,"last_id":"conversation_a","extra":true}',
+          ),
+        ),
       "projection_invalid",
     );
     expectProjectionCode(
@@ -273,21 +305,57 @@ describe("tenant projection query RPCs", () => {
       last_id: "message_a",
     };
     const messageEncoded = encodeMessageCursor(message);
-    expect(decodeMessageCursor(messageEncoded, "tenant_queries_cursor", "identity_a", "conversation_a", 1)).toEqual(message);
+    expect(
+      decodeMessageCursor(
+        messageEncoded,
+        "tenant_queries_cursor",
+        "identity_a",
+        "conversation_a",
+        1,
+      ),
+    ).toEqual(message);
     expectProjectionCode(
-      () => decodeMessageCursor(messageEncoded, "tenant_other", "identity_a", "conversation_a", 1),
+      () =>
+        decodeMessageCursor(
+          messageEncoded,
+          "tenant_other",
+          "identity_a",
+          "conversation_a",
+          1,
+        ),
       "projection_tenant_mismatch",
     );
     expectProjectionCode(
-      () => decodeMessageCursor(messageEncoded, "tenant_queries_cursor", "identity_b", "conversation_a", 1),
+      () =>
+        decodeMessageCursor(
+          messageEncoded,
+          "tenant_queries_cursor",
+          "identity_b",
+          "conversation_a",
+          1,
+        ),
       "projection_conflict",
     );
     expectProjectionCode(
-      () => decodeMessageCursor(messageEncoded, "tenant_queries_cursor", "identity_a", "conversation_b", 1),
+      () =>
+        decodeMessageCursor(
+          messageEncoded,
+          "tenant_queries_cursor",
+          "identity_a",
+          "conversation_b",
+          1,
+        ),
       "projection_conflict",
     );
     expectProjectionCode(
-      () => decodeMessageCursor(messageEncoded, "tenant_queries_cursor", "identity_a", "conversation_a", 2),
+      () =>
+        decodeMessageCursor(
+          messageEncoded,
+          "tenant_queries_cursor",
+          "identity_a",
+          "conversation_a",
+          2,
+        ),
       "projection_conflict",
     );
     expectProjectionCode(
@@ -359,13 +427,20 @@ describe("tenant projection query RPCs", () => {
       connection_id: null as string | null,
       authorization: auth(["projection.read"], ["identity_a"], tenant),
     };
-    const callerMutationResult = await runInDurableObject(stub, async (instance) => {
-      const pending = instance.listConversations(callerInput);
-      callerInput.identity_id = "identity_b";
-      callerInput.connection_id = "connection_b";
-      callerInput.authorization = auth(["projection.read"], ["identity_b"], tenant);
-      return pending;
-    });
+    const callerMutationResult = await runInDurableObject(
+      stub,
+      async (instance) => {
+        const pending = instance.listConversations(callerInput);
+        callerInput.identity_id = "identity_b";
+        callerInput.connection_id = "connection_b";
+        callerInput.authorization = auth(
+          ["projection.read"],
+          ["identity_b"],
+          tenant,
+        );
+        return pending;
+      },
+    );
     expect(callerMutationResult.items.map((item) => item.id)).toEqual([
       "conversation_shell",
     ]);
@@ -376,26 +451,29 @@ describe("tenant projection query RPCs", () => {
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(tenant);
     await stub.applyBatch(
-      input([
-        conversationEvent(
-          tenant,
-          "event_channel_early",
-          "conversation_channel_early",
-          "2026-09-07T02:00:00.000+02:00",
-        ),
-        conversationEvent(
-          tenant,
-          "event_channel_latest_a",
-          "conversation_channel_latest_a",
-          "2026-09-07T01:30:00.000Z",
-        ),
-        conversationEvent(
-          tenant,
-          "event_channel_latest_b",
-          "conversation_channel_latest_b",
-          "2026-09-07T03:30:00.000+02:00",
-        ),
-      ], { tenant_id: tenant }),
+      input(
+        [
+          conversationEvent(
+            tenant,
+            "event_channel_early",
+            "conversation_channel_early",
+            "2026-09-07T02:00:00.000+02:00",
+          ),
+          conversationEvent(
+            tenant,
+            "event_channel_latest_a",
+            "conversation_channel_latest_a",
+            "2026-09-07T01:30:00.000Z",
+          ),
+          conversationEvent(
+            tenant,
+            "event_channel_latest_b",
+            "conversation_channel_latest_b",
+            "2026-09-07T03:30:00.000+02:00",
+          ),
+        ],
+        { tenant_id: tenant },
+      ),
     );
 
     await expect(
@@ -420,13 +498,14 @@ describe("tenant projection query RPCs", () => {
     const uninitializedTenant = "tenant_queries_auth_uninitialized";
     await expectQueryCode(
       env.TENANT_PROJECTION.getByName(uninitializedTenant),
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: uninitializedTenant,
-        identity_id: "identity_a",
-        connection_id: null,
-        authorization: queryAuth(uninitializedTenant),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: uninitializedTenant,
+          identity_id: "identity_a",
+          connection_id: null,
+          authorization: queryAuth(uninitializedTenant),
+        }),
       "projection_not_found",
     );
     await initialize(tenant);
@@ -440,27 +519,48 @@ describe("tenant projection query RPCs", () => {
 
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({ ...base, authorization: queryAuth(tenant, ["identity_a"], ["projection.write"]) }),
+      (instance) =>
+        instance.listConversations({
+          ...base,
+          authorization: queryAuth(
+            tenant,
+            ["identity_a"],
+            ["projection.write"],
+          ),
+        }),
       "projection_forbidden",
     );
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({ ...base, authorization: queryAuth(tenant, ["identity_b"]) }),
+      (instance) =>
+        instance.listConversations({
+          ...base,
+          authorization: queryAuth(tenant, ["identity_b"]),
+        }),
       "projection_forbidden",
     );
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({
-        ...base,
-        authorization: queryAuth("tenant_other"),
-      }),
+      (instance) =>
+        instance.listConversations({
+          ...base,
+          authorization: queryAuth("tenant_other"),
+        }),
       "projection_tenant_mismatch",
     );
 
     await setProjectionState(stub, "rebuilding");
-    await expectQueryCode(stub, (instance) => instance.listConversations(base), "projection_rebuilding");
+    await expectQueryCode(
+      stub,
+      (instance) => instance.listConversations(base),
+      "projection_rebuilding",
+    );
     await setProjectionState(stub, "rebuild_failed");
-    await expectQueryCode(stub, (instance) => instance.listConversations(base), "projection_rebuild_failed");
+    await expectQueryCode(
+      stub,
+      (instance) => instance.listConversations(base),
+      "projection_rebuild_failed",
+    );
   });
 
   it("paginates conversations by the exact descending activity and ascending ID tuple", async () => {
@@ -472,18 +572,44 @@ describe("tenant projection query RPCs", () => {
       conversationEvent(tenant, "event_conv_c", "conversation_c", sameTime),
       conversationEvent(tenant, "event_conv_a", "conversation_a", sameTime),
       conversationEvent(tenant, "event_conv_b", "conversation_b", sameTime),
-      conversationEvent(tenant, "event_conv_old", "conversation_old", "2026-09-07T01:00:00.000Z"),
-      conversationEvent(tenant, "event_conv_conn", "conversation_conn", sameTime, {
-        account_id: "account_b",
-      }),
-      conversationEvent(tenant, "event_conv_other", "conversation_other", sameTime, {
-        identity_id: "identity_b",
-        account_id: "account_c",
-      }),
-      conversationEvent(tenant, "event_conv_deleted", "conversation_deleted", sameTime),
+      conversationEvent(
+        tenant,
+        "event_conv_old",
+        "conversation_old",
+        "2026-09-07T01:00:00.000Z",
+      ),
+      conversationEvent(
+        tenant,
+        "event_conv_conn",
+        "conversation_conn",
+        sameTime,
+        {
+          account_id: "account_b",
+        },
+      ),
+      conversationEvent(
+        tenant,
+        "event_conv_other",
+        "conversation_other",
+        sameTime,
+        {
+          identity_id: "identity_b",
+          account_id: "account_c",
+        },
+      ),
+      conversationEvent(
+        tenant,
+        "event_conv_deleted",
+        "conversation_deleted",
+        sameTime,
+      ),
       event(
         "event_conv_delete_tombstone",
-        { resource_type: "conversation", resource_id: "conversation_deleted", reason_code: "retention" },
+        {
+          resource_type: "conversation",
+          resource_id: "conversation_deleted",
+          reason_code: "retention",
+        },
         "deletion.tombstone",
         {
           tenant_id: tenant,
@@ -496,7 +622,11 @@ describe("tenant projection query RPCs", () => {
     await stub.applyBatch(
       input(events, {
         tenant_id: tenant,
-        authorization: auth(["projection.write"], ["identity_a", "identity_b"], tenant),
+        authorization: auth(
+          ["projection.write"],
+          ["identity_a", "identity_b"],
+          tenant,
+        ),
         connections: [
           bindingFor("account_a", "connection_a", "identity_a"),
           bindingFor("account_b", "connection_b", "identity_a"),
@@ -551,28 +681,30 @@ describe("tenant projection query RPCs", () => {
     ]);
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_b",
-        connection_id: null,
-        page_size: 2,
-        cursor: firstCursor!,
-        authorization: queryAuth(tenant, ["identity_a", "identity_b"]),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_b",
+          connection_id: null,
+          page_size: 2,
+          cursor: firstCursor!,
+          authorization: queryAuth(tenant, ["identity_a", "identity_b"]),
+        }),
       "projection_conflict",
     );
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        connection_id: "connection_b",
-        page_size: 2,
-        cursor: firstCursor!,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          connection_id: "connection_b",
+          page_size: 2,
+          cursor: firstCursor!,
+          authorization: queryAuth(tenant),
+        }),
       "projection_conflict",
     );
     await runInDurableObject(stub, async (_instance, state) => {
@@ -580,15 +712,16 @@ describe("tenant projection query RPCs", () => {
     });
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        connection_id: null,
-        page_size: 2,
-        cursor: firstCursor!,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          connection_id: null,
+          page_size: 2,
+          cursor: firstCursor!,
+          authorization: queryAuth(tenant),
+        }),
       "projection_conflict",
     );
 
@@ -600,7 +733,9 @@ describe("tenant projection query RPCs", () => {
       page_size: 100,
       authorization: queryAuth(tenant),
     });
-    expect(filtered.items.map((item) => item.id)).toEqual(["conversation_conn"]);
+    expect(filtered.items.map((item) => item.id)).toEqual([
+      "conversation_conn",
+    ]);
     expect(filtered.items[0]?.connection_id).toBe("connection_b");
 
     const accountAsConnection = await stub.listConversations({
@@ -613,13 +748,14 @@ describe("tenant projection query RPCs", () => {
     expect(accountAsConnection.items).toEqual([]);
     await expectQueryCode(
       stub,
-      (instance) => instance.listMessages({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        conversation_id: "conversation_deleted",
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listMessages({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          conversation_id: "conversation_deleted",
+          authorization: queryAuth(tenant),
+        }),
       "projection_forbidden",
     );
 
@@ -655,26 +791,28 @@ describe("tenant projection query RPCs", () => {
     expect(pageSizeHundred.next_cursor).toBeNull();
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        connection_id: null,
-        page_size: 0,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          connection_id: null,
+          page_size: 0,
+          authorization: queryAuth(tenant),
+        }),
       "projection_invalid",
     );
     await expectQueryCode(
       stub,
-      (instance) => instance.listConversations({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        connection_id: null,
-        page_size: 101,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listConversations({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          connection_id: null,
+          page_size: 101,
+          authorization: queryAuth(tenant),
+        }),
       "projection_invalid",
     );
   });
@@ -684,13 +822,32 @@ describe("tenant projection query RPCs", () => {
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(tenant);
     const messages = [
-      messageCreatedEvent(tenant, "event_message_a", "conversation_messages", "message_a", "2026-09-07T02:00:00.000Z", {
-        matrix_room_id: "!room:test",
-        matrix_event_id: "$event:test",
-        remote_message_id: "remote-secret",
-      }),
-      messageCreatedEvent(tenant, "event_message_b", "conversation_messages", "message_b", "2026-09-07T02:00:00.000Z"),
-      messageCreatedEvent(tenant, "event_message_c", "conversation_messages", "message_c", "2026-09-07T01:00:00.000Z"),
+      messageCreatedEvent(
+        tenant,
+        "event_message_a",
+        "conversation_messages",
+        "message_a",
+        "2026-09-07T02:00:00.000Z",
+        {
+          matrix_room_id: "!room:test",
+          matrix_event_id: "$event:test",
+          remote_message_id: "remote-secret",
+        },
+      ),
+      messageCreatedEvent(
+        tenant,
+        "event_message_b",
+        "conversation_messages",
+        "message_b",
+        "2026-09-07T02:00:00.000Z",
+      ),
+      messageCreatedEvent(
+        tenant,
+        "event_message_c",
+        "conversation_messages",
+        "message_c",
+        "2026-09-07T01:00:00.000Z",
+      ),
       event(
         "event_message_delete",
         { message_id: "message_b", reason_code: "retention" },
@@ -702,15 +859,26 @@ describe("tenant projection query RPCs", () => {
           observed_at: "2026-09-07T03:00:01.000Z",
         },
       ),
-      messageCreatedEvent(tenant, "event_other_identity", "conversation_other_identity", "message_other", "2026-09-07T04:00:00.000Z", {
-        identity_id: "identity_b",
-        account_id: "account_b",
-      }),
+      messageCreatedEvent(
+        tenant,
+        "event_other_identity",
+        "conversation_other_identity",
+        "message_other",
+        "2026-09-07T04:00:00.000Z",
+        {
+          identity_id: "identity_b",
+          account_id: "account_b",
+        },
+      ),
     ];
     await stub.applyBatch(
       input(messages, {
         tenant_id: tenant,
-        authorization: auth(["projection.write"], ["identity_a", "identity_b"], tenant),
+        authorization: auth(
+          ["projection.write"],
+          ["identity_a", "identity_b"],
+          tenant,
+        ),
         connections: [
           bindingFor("account_a", "connection_a", "identity_a"),
           bindingFor("account_b", "connection_b", "identity_b"),
@@ -757,7 +925,10 @@ describe("tenant projection query RPCs", () => {
       cursor: page.next_cursor!,
       authorization: queryAuth(tenant),
     });
-    expect(second.items.map((item) => item.id)).toEqual(["message_b", "message_c"]);
+    expect(second.items.map((item) => item.id)).toEqual([
+      "message_b",
+      "message_c",
+    ]);
     expect(second.items[0]).toMatchObject({
       id: "message_b",
       body: "",
@@ -784,38 +955,41 @@ describe("tenant projection query RPCs", () => {
     }
     await expectQueryCode(
       stub,
-      (instance) => instance.listMessages({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        conversation_id: "conversation_messages",
-        page_size: 0,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listMessages({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          conversation_id: "conversation_messages",
+          page_size: 0,
+          authorization: queryAuth(tenant),
+        }),
       "projection_invalid",
     );
     await expectQueryCode(
       stub,
-      (instance) => instance.listMessages({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        conversation_id: "conversation_messages",
-        page_size: 101,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listMessages({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          conversation_id: "conversation_messages",
+          page_size: 101,
+          authorization: queryAuth(tenant),
+        }),
       "projection_invalid",
     );
 
     await expectQueryCode(
       stub,
-      (instance) => instance.listMessages({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        conversation_id: "conversation_other_identity",
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listMessages({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          conversation_id: "conversation_other_identity",
+          authorization: queryAuth(tenant),
+        }),
       "projection_forbidden",
     );
   });
@@ -825,16 +999,31 @@ describe("tenant projection query RPCs", () => {
     const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(tenant);
     const events = [
-      conversationEvent(tenant, "event_change_a", "conversation_change_a", "2026-09-07T01:00:00.000Z"),
-      conversationEvent(tenant, "event_change_b", "conversation_change_b", "2026-09-07T01:01:00.000Z", {
-        identity_id: "identity_b",
-        account_id: "account_b",
-      }),
+      conversationEvent(
+        tenant,
+        "event_change_a",
+        "conversation_change_a",
+        "2026-09-07T01:00:00.000Z",
+      ),
+      conversationEvent(
+        tenant,
+        "event_change_b",
+        "conversation_change_b",
+        "2026-09-07T01:01:00.000Z",
+        {
+          identity_id: "identity_b",
+          account_id: "account_b",
+        },
+      ),
     ];
     await stub.applyBatch(
       input(events, {
         tenant_id: tenant,
-        authorization: auth(["projection.write"], ["identity_a", "identity_b"], tenant),
+        authorization: auth(
+          ["projection.write"],
+          ["identity_a", "identity_b"],
+          tenant,
+        ),
         connections: [
           bindingFor("account_a", "connection_a", "identity_a"),
           bindingFor("account_b", "connection_b", "identity_b"),
@@ -877,7 +1066,11 @@ describe("tenant projection query RPCs", () => {
     expect(identityB.items.map((item) => item.sequence)).toEqual([1]);
 
     await expect(
-      readRows<{ sequence: number; identity_sequence: number; identity_id: string }>(
+      readRows<{
+        sequence: number;
+        identity_sequence: number;
+        identity_id: string;
+      }>(
         stub,
         "SELECT sequence, identity_sequence, identity_id FROM projection_changes ORDER BY sequence",
       ),
@@ -918,7 +1111,11 @@ describe("tenant projection query RPCs", () => {
         after_sequence: 0,
         authorization: queryAuth(tenant),
       }),
-    ).resolves.toMatchObject({ items: [], latest_sequence: 1, reset_required: true });
+    ).resolves.toMatchObject({
+      items: [],
+      latest_sequence: 1,
+      reset_required: true,
+    });
     await expect(
       stub.listChanges({
         schema_version: 1,
@@ -938,17 +1135,22 @@ describe("tenant projection query RPCs", () => {
         after_sequence: 2,
         authorization: queryAuth(tenant),
       }),
-    ).resolves.toMatchObject({ items: [], latest_sequence: 1, reset_required: false });
+    ).resolves.toMatchObject({
+      items: [],
+      latest_sequence: 1,
+      reset_required: false,
+    });
     await expectQueryCode(
       stub,
-      (instance) => instance.listChanges({
-        schema_version: 1,
-        tenant_id: tenant,
-        identity_id: "identity_a",
-        generation: 2,
-        after_sequence: 1,
-        authorization: queryAuth(tenant),
-      }),
+      (instance) =>
+        instance.listChanges({
+          schema_version: 1,
+          tenant_id: tenant,
+          identity_id: "identity_a",
+          generation: 2,
+          after_sequence: 1,
+          authorization: queryAuth(tenant),
+        }),
       "projection_conflict",
     );
   });
@@ -1037,31 +1239,37 @@ describe("tenant projection query RPCs", () => {
         after_sequence: 0,
         authorization: queryAuth(emptyTenant),
       }),
-    ).resolves.toMatchObject({ items: [], latest_sequence: 0, reset_required: false });
+    ).resolves.toMatchObject({
+      items: [],
+      latest_sequence: 0,
+      reset_required: false,
+    });
     await expectQueryCode(
       emptyStub,
-      (instance) => instance.listChanges({
-        schema_version: 1,
-        tenant_id: emptyTenant,
-        identity_id: "identity_a",
-        generation: 1,
-        after_sequence: 0,
-        limit: 0,
-        authorization: queryAuth(emptyTenant),
-      }),
+      (instance) =>
+        instance.listChanges({
+          schema_version: 1,
+          tenant_id: emptyTenant,
+          identity_id: "identity_a",
+          generation: 1,
+          after_sequence: 0,
+          limit: 0,
+          authorization: queryAuth(emptyTenant),
+        }),
       "projection_invalid",
     );
     await expectQueryCode(
       emptyStub,
-      (instance) => instance.listChanges({
-        schema_version: 1,
-        tenant_id: emptyTenant,
-        identity_id: "identity_a",
-        generation: 1,
-        after_sequence: 0,
-        limit: 101,
-        authorization: queryAuth(emptyTenant),
-      }),
+      (instance) =>
+        instance.listChanges({
+          schema_version: 1,
+          tenant_id: emptyTenant,
+          identity_id: "identity_a",
+          generation: 1,
+          after_sequence: 0,
+          limit: 101,
+          authorization: queryAuth(emptyTenant),
+        }),
       "projection_invalid",
     );
 
@@ -1171,7 +1379,6 @@ describe("tenant projection query RPCs", () => {
 
   it("snapshots strict options and rejects accessor/symbol/prototype inputs", async () => {
     const tenant = "tenant_queries_hostile";
-    const stub = env.TENANT_PROJECTION.getByName(tenant);
     await initialize(tenant);
     const getterInput: Record<string, unknown> = {
       schema_version: 1,
@@ -1187,7 +1394,9 @@ describe("tenant projection query RPCs", () => {
         throw new Error("page size getter must not run");
       },
     });
-    expect(ListProjectionConversationsInputSchema.safeParse(getterInput).success).toBe(false);
+    expect(
+      ListProjectionConversationsInputSchema.safeParse(getterInput).success,
+    ).toBe(false);
 
     const symbolInput = {
       schema_version: 1,
@@ -1198,7 +1407,9 @@ describe("tenant projection query RPCs", () => {
       authorization: queryAuth(tenant),
       [Symbol("bad")]: true,
     };
-    expect(ListProjectionConversationsInputSchema.safeParse(symbolInput).success).toBe(false);
+    expect(
+      ListProjectionConversationsInputSchema.safeParse(symbolInput).success,
+    ).toBe(false);
 
     const prototypeInput = Object.assign(
       Object.create({ page_size: 1 }) as Record<string, unknown>,
@@ -1211,7 +1422,9 @@ describe("tenant projection query RPCs", () => {
         authorization: queryAuth(tenant),
       },
     );
-    expect(ListProjectionConversationsInputSchema.safeParse(prototypeInput).success).toBe(false);
+    expect(
+      ListProjectionConversationsInputSchema.safeParse(prototypeInput).success,
+    ).toBe(false);
   });
 
   it("uses the intended compound indexes for populated query shapes", async () => {
@@ -1221,8 +1434,19 @@ describe("tenant projection query RPCs", () => {
     await stub.applyBatch(
       input(
         [
-          conversationEvent(tenant, "event_plan_conv", "conversation_plan", "2026-09-07T01:00:00.000Z"),
-          messageCreatedEvent(tenant, "event_plan_message", "conversation_plan", "message_plan", "2026-09-07T01:00:00.000Z"),
+          conversationEvent(
+            tenant,
+            "event_plan_conv",
+            "conversation_plan",
+            "2026-09-07T01:00:00.000Z",
+          ),
+          messageCreatedEvent(
+            tenant,
+            "event_plan_message",
+            "conversation_plan",
+            "message_plan",
+            "2026-09-07T01:00:00.000Z",
+          ),
         ],
         {
           tenant_id: tenant,
@@ -1303,15 +1527,31 @@ describe("tenant projection query RPCs", () => {
         .toArray()
         .map((row) => row.detail),
     }));
-    expect(plans.conversations.join(" ")).toContain("idx_conversations_identity_activity");
-    expect(plans.conversationsByConnection.join(" ")).toContain("idx_conversations_identity_connection_activity");
-    expect(plans.conversationsByConnectionSeek.join(" ")).toContain("idx_conversations_identity_connection_activity");
-    expect(plans.conversationsSeek.join(" ")).toContain("idx_conversations_identity_activity");
-    expect(plans.messages.join(" ")).toContain("idx_messages_identity_conversation_occurred");
-    expect(plans.messagesSeek.join(" ")).toContain("idx_messages_identity_conversation_occurred");
-    expect(plans.changes.join(" ")).toContain("idx_projection_changes_identity_sequence");
+    expect(plans.conversations.join(" ")).toContain(
+      "idx_conversations_identity_activity",
+    );
+    expect(plans.conversationsByConnection.join(" ")).toContain(
+      "idx_conversations_identity_connection_activity",
+    );
+    expect(plans.conversationsByConnectionSeek.join(" ")).toContain(
+      "idx_conversations_identity_connection_activity",
+    );
+    expect(plans.conversationsSeek.join(" ")).toContain(
+      "idx_conversations_identity_activity",
+    );
+    expect(plans.messages.join(" ")).toContain(
+      "idx_messages_identity_conversation_occurred",
+    );
+    expect(plans.messagesSeek.join(" ")).toContain(
+      "idx_messages_identity_conversation_occurred",
+    );
+    expect(plans.changes.join(" ")).toContain(
+      "idx_projection_changes_identity_sequence",
+    );
     for (const details of Object.values(plans)) {
-      expect(details.join(" ")).not.toMatch(/SCAN (conversations|messages|projection_changes)/i);
+      expect(details.join(" ")).not.toMatch(
+        /SCAN (conversations|messages|projection_changes)/i,
+      );
       expect(details.join(" ")).not.toMatch(/USE TEMP B-TREE/i);
     }
   });

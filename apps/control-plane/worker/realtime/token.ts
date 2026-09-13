@@ -20,7 +20,10 @@ export function generateRealtimeTicket(
 ): string {
   const bytes = new Uint8Array(32);
   const filled = randomValues(bytes);
-  if (!(filled instanceof Uint8Array) || filled.byteLength !== REALTIME_TICKET_BYTE_LENGTH) {
+  if (
+    !(filled instanceof Uint8Array) ||
+    filled.byteLength !== REALTIME_TICKET_BYTE_LENGTH
+  ) {
     throw new Error("Realtime ticket randomness has an invalid length");
   }
 

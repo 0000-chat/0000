@@ -22,7 +22,10 @@ describe("channel order preferences", () => {
   });
 
   it("returns an empty order for malformed storage", () => {
-    sessionStorage.setItem("communicator:channel-order:principal_pilot:identity_human", "not-json");
+    sessionStorage.setItem(
+      "communicator:channel-order:principal_pilot:identity_human",
+      "not-json",
+    );
     expect(loadChannelOrder("principal_pilot", "identity_human")).toEqual([]);
   });
 

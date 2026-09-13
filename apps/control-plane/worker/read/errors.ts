@@ -83,7 +83,10 @@ const errorCode = (error: unknown): string | undefined => {
 /** Convert internal D1/DO failures into the public read error vocabulary. */
 export const mapReadError = (error: unknown): ReadError => {
   if (isReadError(error)) return error;
-  if (error instanceof DirectoryReadError && DIRECTORY_FAILURES.has(error.code)) {
+  if (
+    error instanceof DirectoryReadError &&
+    DIRECTORY_FAILURES.has(error.code)
+  ) {
     return readError("service_unavailable", error);
   }
 
@@ -101,16 +104,19 @@ export const mapReadError = (error: unknown): ReadError => {
 };
 
 /** Build a response without copying any internal failure detail. */
-export const readErrorResponse = (error: unknown): {
+export const readErrorResponse = (
+  error: unknown,
+): {
   status: 400 | 404 | 503;
   body: ApiErrorResponse;
 } => {
   const mapped = mapReadError(error);
-  const status = mapped.code === "invalid_request"
-    ? 400
-    : mapped.code === "not_found"
-      ? 404
-      : 503;
+  const status =
+    mapped.code === "invalid_request"
+      ? 400
+      : mapped.code === "not_found"
+        ? 404
+        : 503;
   const body = ApiErrorResponseSchema.parse({
     error: {
       code: mapped.code,

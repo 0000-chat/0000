@@ -50,11 +50,11 @@ type IngestionHandlerEnv = {
   Variables: IngestionAuthorizationVariables;
 };
 
-type IngestionRequestContext = Parameters<
-  Handler<IngestionHandlerEnv>
->[0];
+type IngestionRequestContext = Parameters<Handler<IngestionHandlerEnv>>[0];
 
-const statusFor = (error: IngestionError): 400 | 401 | 404 | 409 | 413 | 503 => {
+const statusFor = (
+  error: IngestionError,
+): 400 | 401 | 404 | 409 | 413 | 503 => {
   switch (error.code) {
     case "ingestion_invalid":
       return 400;
@@ -109,7 +109,11 @@ export const readBoundedRequestBody = async (
   if (!contentTypeIsJson(request.headers.get("Content-Type") ?? undefined)) {
     throw ingestionError("ingestion_invalid");
   }
-  if (!contentEncodingIsIdentity(request.headers.get("Content-Encoding") ?? undefined)) {
+  if (
+    !contentEncodingIsIdentity(
+      request.headers.get("Content-Encoding") ?? undefined,
+    )
+  ) {
     throw ingestionError("ingestion_invalid");
   }
 
@@ -162,7 +166,10 @@ export const readBoundedRequestBody = async (
       if (required > body.byteLength) {
         const nextCapacity = Math.min(
           MAX_INGESTION_REQUEST_BYTES,
-          Math.max(required, body.byteLength === 0 ? 64 * 1024 : body.byteLength * 2),
+          Math.max(
+            required,
+            body.byteLength === 0 ? 64 * 1024 : body.byteLength * 2,
+          ),
         );
         const nextBody = new Uint8Array(nextCapacity);
         nextBody.set(body.subarray(0, total));
@@ -197,7 +204,9 @@ const manifestMatchesPreparation = (
   result: ArchiveCanonicalEventBatchResult,
   prepared: Awaited<ReturnType<typeof prepareIngestionBatch>>,
 ) => {
-  const parsed = IngestionCommittedArchiveManifestSchema.safeParse(result.manifest);
+  const parsed = IngestionCommittedArchiveManifestSchema.safeParse(
+    result.manifest,
+  );
   if (!parsed.success) throw ingestionError("ingestion_conflict", parsed.error);
   const manifest = parsed.data;
 
@@ -268,95 +277,99 @@ const sendPointer = async (
   await queue.send(pointer, options);
 };
 
-export const createIngestionBatchHandler = (
-  services: IngestionRouteServices = {},
-): Handler<IngestionHandlerEnv> => async (context) => {
-  let prepared: Awaited<ReturnType<typeof prepareIngestionBatch>>;
-  try {
-    const input = await parseRequestBody(context.req.raw);
-    prepared = await prepareIngestionBatch(input);
-  } catch (error) {
-    const mapped = isIngestionError(error)
-      ? error
-      : ingestionError("ingestion_unavailable", error);
-    return respondWithError(context, mapped);
-  }
+export const createIngestionBatchHandler =
+  (services: IngestionRouteServices = {}): Handler<IngestionHandlerEnv> =>
+  async (context) => {
+    let prepared: Awaited<ReturnType<typeof prepareIngestionBatch>>;
+    try {
+      const input = await parseRequestBody(context.req.raw);
+      prepared = await prepareIngestionBatch(input);
+    } catch (error) {
+      const mapped = isIngestionError(error)
+        ? error
+        : ingestionError("ingestion_unavailable", error);
+      return respondWithError(context, mapped);
+    }
 
-  let archiveResult: ArchiveCanonicalEventBatchResult;
-  try {
-    const authorization = context.get("ingestionAuthorization");
-    const database = context.env.CONTROL_DB;
-    if (database === undefined) throw ingestionError("ingestion_unavailable");
+    let archiveResult: ArchiveCanonicalEventBatchResult;
+    try {
+      const authorization = context.get("ingestionAuthorization");
+      const database = context.env.CONTROL_DB;
+      if (database === undefined) throw ingestionError("ingestion_unavailable");
 
-    const route = await resolveActiveIngestionRoute(
-      database,
-      authorization.service_principal_id,
-      prepared.gatewayRouteId,
-    );
-    if (!route.ok) {
-      throw ingestionError(
-        route.code === "not_found"
-          ? "ingestion_not_found"
-          : "ingestion_unavailable",
+      const route = await resolveActiveIngestionRoute(
+        database,
+        authorization.service_principal_id,
+        prepared.gatewayRouteId,
+      );
+      if (!route.ok) {
+        throw ingestionError(
+          route.code === "not_found"
+            ? "ingestion_not_found"
+            : "ingestion_unavailable",
+        );
+      }
+
+      const accountIds = [
+        ...new Set(prepared.events.map((event) => event.account_id)),
+      ];
+      const bindings = await resolveActiveIngressBindings(
+        database,
+        route.value.gateway_route_id,
+        prepared.tenantId,
+        accountIds,
+      );
+      validateTrustedBindings(
+        prepared.events,
+        bindings,
+        route.value.gateway_route_id,
+      );
+
+      archiveResult = await archiveCanonicalEventBatch({
+        bucket: context.env.EVENT_ARCHIVE,
+        ...prepared.archiveInput,
+      });
+    } catch (error) {
+      const mapped = isIngestionError(error) ? error : mapArchiveFailure(error);
+      return respondWithError(context, mapped);
+    }
+
+    let pointer: CommittedArchivePointer;
+    try {
+      const manifest = manifestMatchesPreparation(archiveResult, prepared);
+      pointer = buildCommittedArchivePointer({
+        tenantId: manifest.tenant_id,
+        batchId: manifest.batch_id,
+        manifestKey: archiveResult.manifestKey,
+        canonicalSha256: manifest.canonical_sha256,
+        gatewayRouteId: prepared.gatewayRouteId,
+      });
+    } catch (error) {
+      const mapped = isIngestionError(error)
+        ? error
+        : ingestionError("ingestion_conflict", error);
+      return respondWithError(context, mapped);
+    }
+
+    try {
+      await sendPointer(context, services, pointer);
+    } catch (error) {
+      return respondWithError(
+        context,
+        isIngestionError(error)
+          ? error
+          : ingestionError("ingestion_unavailable", error),
       );
     }
 
-    const accountIds = [...new Set(prepared.events.map((event) => event.account_id))];
-    const bindings = await resolveActiveIngressBindings(
-      database,
-      route.value.gateway_route_id,
-      prepared.tenantId,
-      accountIds,
-    );
-    validateTrustedBindings(prepared.events, bindings, route.value.gateway_route_id);
-
-    archiveResult = await archiveCanonicalEventBatch({
-      bucket: context.env.EVENT_ARCHIVE,
-      ...prepared.archiveInput,
+    const response = IngestionAcceptedResponseSchema.parse({
+      schema_version: 1,
+      tenant_id: prepared.tenantId,
+      batch_id: prepared.batchId,
+      status: "accepted",
+      archive_status: archiveResult.status,
     });
-  } catch (error) {
-    const mapped = isIngestionError(error)
-      ? error
-      : mapArchiveFailure(error);
-    return respondWithError(context, mapped);
-  }
-
-  let pointer: CommittedArchivePointer;
-  try {
-    const manifest = manifestMatchesPreparation(archiveResult, prepared);
-    pointer = buildCommittedArchivePointer({
-      tenantId: manifest.tenant_id,
-      batchId: manifest.batch_id,
-      manifestKey: archiveResult.manifestKey,
-      canonicalSha256: manifest.canonical_sha256,
-      gatewayRouteId: prepared.gatewayRouteId,
-    });
-  } catch (error) {
-    const mapped = isIngestionError(error)
-      ? error
-      : ingestionError("ingestion_conflict", error);
-    return respondWithError(context, mapped);
-  }
-
-  try {
-    await sendPointer(context, services, pointer);
-  } catch (error) {
-    return respondWithError(
-      context,
-      isIngestionError(error)
-        ? error
-        : ingestionError("ingestion_unavailable", error),
-    );
-  }
-
-  const response = IngestionAcceptedResponseSchema.parse({
-    schema_version: 1,
-    tenant_id: prepared.tenantId,
-    batch_id: prepared.batchId,
-    status: "accepted",
-    archive_status: archiveResult.status,
-  });
-  return context.json(response, 202);
-};
+    return context.json(response, 202);
+  };
 
 export { INGESTION_BATCH_PATH };

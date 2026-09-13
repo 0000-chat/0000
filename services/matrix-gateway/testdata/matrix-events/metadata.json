@@ -1,12 +1,52 @@
 {
   "cases": [
-    {"name":"image","outcome":"events","event_types":["message.created","attachment.observed"],"reason_code":null},
-    {"name":"file","outcome":"events","event_types":["message.created","attachment.observed"],"reason_code":null},
-    {"name":"audio","outcome":"events","event_types":["message.created","attachment.observed"],"reason_code":null},
-    {"name":"video","outcome":"events","event_types":["message.created","attachment.observed"],"reason_code":null},
-    {"name":"room-name","outcome":"events","event_types":["conversation.updated"],"reason_code":null},
-    {"name":"room-topic","outcome":"events","event_types":["conversation.updated"],"reason_code":null},
-    {"name":"room-avatar","outcome":"events","event_types":["conversation.updated"],"reason_code":null},
-    {"name":"membership-profile","outcome":"events","event_types":["participant.updated"],"reason_code":null}
+    {
+      "name": "image",
+      "outcome": "events",
+      "event_types": ["message.created", "attachment.observed"],
+      "reason_code": null
+    },
+    {
+      "name": "file",
+      "outcome": "events",
+      "event_types": ["message.created", "attachment.observed"],
+      "reason_code": null
+    },
+    {
+      "name": "audio",
+      "outcome": "events",
+      "event_types": ["message.created", "attachment.observed"],
+      "reason_code": null
+    },
+    {
+      "name": "video",
+      "outcome": "events",
+      "event_types": ["message.created", "attachment.observed"],
+      "reason_code": null
+    },
+    {
+      "name": "room-name",
+      "outcome": "events",
+      "event_types": ["conversation.updated"],
+      "reason_code": null
+    },
+    {
+      "name": "room-topic",
+      "outcome": "events",
+      "event_types": ["conversation.updated"],
+      "reason_code": null
+    },
+    {
+      "name": "room-avatar",
+      "outcome": "events",
+      "event_types": ["conversation.updated"],
+      "reason_code": null
+    },
+    {
+      "name": "membership-profile",
+      "outcome": "events",
+      "event_types": ["participant.updated"],
+      "reason_code": null
+    }
   ]
 }

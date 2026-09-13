@@ -25,7 +25,10 @@
       "!**/target/**",
       "!**/generated/**",
       "!**/vendor/**",
-      "!**/.wrangler/**"
+      "!**/.wrangler/**",
+      "!apps/control-plane/public/mockServiceWorker.js",
+      "!apps/control-plane/src/routeTree.gen.ts",
+      "!apps/control-plane/worker-configuration.d.ts"
     ],
     "ignoreUnknown": true
   },

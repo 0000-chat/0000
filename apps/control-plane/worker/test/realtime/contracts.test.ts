@@ -22,7 +22,9 @@ const baseContext = {
   principal_id: "principal_human",
   membership_id: "membership_human",
   subscriptions: [{ identity_id: "identity_human", families: ["projection"] }],
-  resume: [{ identity_id: "identity_human", generation: 1, after_sequence: 42 }],
+  resume: [
+    { identity_id: "identity_human", generation: 1, after_sequence: 42 },
+  ],
   issued_at: "2026-09-10T10:00:00.000Z",
   expires_at: "2026-09-10T10:00:30.000Z",
 };
@@ -46,10 +48,13 @@ const largestAttachment = {
   ...baseAttachment,
   tenant_id: `tenant_${"t".repeat(248)}`,
   principal_id: `principal_${"p".repeat(245)}`,
-  subscriptions: Array.from({ length: MAX_REALTIME_IDENTITIES }, (_, index) => ({
-    identity_id: maxId("identity", index),
-    families: ["projection"],
-  })),
+  subscriptions: Array.from(
+    { length: MAX_REALTIME_IDENTITIES },
+    (_, index) => ({
+      identity_id: maxId("identity", index),
+      families: ["projection"],
+    }),
+  ),
   positions: Array.from({ length: MAX_REALTIME_IDENTITIES }, (_, index) => ({
     identity_id: maxId("identity", index),
     generation: 1,
@@ -59,10 +64,12 @@ const largestAttachment = {
 
 describe("internal realtime contracts", () => {
   it("accepts only the server-generated upgrade context shape", () => {
-    expect(RealtimeUpgradeContextSchema.parse(baseContext)).toEqual(baseContext);
-    expect(RealtimeSubscriptionSchema.parse(baseContext.subscriptions[0])).toEqual(
-      baseContext.subscriptions[0],
+    expect(RealtimeUpgradeContextSchema.parse(baseContext)).toEqual(
+      baseContext,
     );
+    expect(
+      RealtimeSubscriptionSchema.parse(baseContext.subscriptions[0]),
+    ).toEqual(baseContext.subscriptions[0]);
     expect(RealtimeResumePositionSchema.parse(baseContext.resume[0])).toEqual(
       baseContext.resume[0],
     );
@@ -77,49 +84,79 @@ describe("internal realtime contracts", () => {
       { remote_id: "remote-secret" },
       { metadata: { arbitrary: true } },
     ]) {
-      expect(RealtimeUpgradeContextSchema.safeParse({ ...baseContext, ...forbidden }).success).toBe(false);
+      expect(
+        RealtimeUpgradeContextSchema.safeParse({ ...baseContext, ...forbidden })
+          .success,
+      ).toBe(false);
     }
   });
 
   it("bounds every internal identity-bearing ID and subscription count", () => {
-    for (const field of ["tenant_id", "principal_id", "membership_id"] as const) {
-      expect(RealtimeUpgradeContextSchema.safeParse({
-        ...baseContext,
-        [field]: `${field}_${"x".repeat(248)}`,
-      }).success).toBe(false);
+    for (const field of [
+      "tenant_id",
+      "principal_id",
+      "membership_id",
+    ] as const) {
+      expect(
+        RealtimeUpgradeContextSchema.safeParse({
+          ...baseContext,
+          [field]: `${field}_${"x".repeat(248)}`,
+        }).success,
+      ).toBe(false);
     }
-    expect(RealtimeUpgradeContextSchema.safeParse({
-      ...baseContext,
-      subscriptions: [{
-        identity_id: `identity_${"x".repeat(247)}`,
-        families: ["projection"],
-      }],
-    }).success).toBe(false);
-    expect(RealtimeUpgradeContextSchema.safeParse({
-      ...baseContext,
-      subscriptions: Array.from({ length: MAX_REALTIME_IDENTITIES + 1 }, (_, index) => ({
-        identity_id: `identity_${String(index).padStart(2, "0")}`,
-        families: ["projection"],
-      })),
-      resume: [],
-    }).success).toBe(false);
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      positions: [{ identity_id: "identity_human", generation: 0, sequence: 0 }],
-    }).success).toBe(false);
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      positions: [baseAttachment.positions[0], baseAttachment.positions[0]],
-    }).success).toBe(false);
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      positions: [{ identity_id: "identity_other", generation: 1, sequence: 42 }],
-    }).success).toBe(false);
-    expect(RealtimePositionSchema.safeParse({
-      identity_id: "identity_human",
-      generation: 1,
-      sequence: Number.MAX_SAFE_INTEGER + 1,
-    }).success).toBe(false);
+    expect(
+      RealtimeUpgradeContextSchema.safeParse({
+        ...baseContext,
+        subscriptions: [
+          {
+            identity_id: `identity_${"x".repeat(247)}`,
+            families: ["projection"],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeUpgradeContextSchema.safeParse({
+        ...baseContext,
+        subscriptions: Array.from(
+          { length: MAX_REALTIME_IDENTITIES + 1 },
+          (_, index) => ({
+            identity_id: `identity_${String(index).padStart(2, "0")}`,
+            families: ["projection"],
+          }),
+        ),
+        resume: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        positions: [
+          { identity_id: "identity_human", generation: 0, sequence: 0 },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        positions: [baseAttachment.positions[0], baseAttachment.positions[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        positions: [
+          { identity_id: "identity_other", generation: 1, sequence: 42 },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimePositionSchema.safeParse({
+        identity_id: "identity_human",
+        generation: 1,
+        sequence: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+    ).toBe(false);
   });
 
   it("requires one position for every subscribed identity", () => {
@@ -128,31 +165,39 @@ describe("internal realtime contracts", () => {
       { identity_id: "identity_agent", families: ["projection"] },
     ];
 
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      subscriptions,
-      positions: [baseAttachment.positions[0]],
-    }).success).toBe(false);
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      subscriptions,
-      positions: [
-        baseAttachment.positions[0],
-        { identity_id: "identity_agent", generation: 1, sequence: 42 },
-      ],
-    }).success).toBe(true);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        subscriptions,
+        positions: [baseAttachment.positions[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        subscriptions,
+        positions: [
+          baseAttachment.positions[0],
+          { identity_id: "identity_agent", generation: 1, sequence: 42 },
+        ],
+      }).success,
+    ).toBe(true);
   });
 
   it("accepts a largest schema-valid attachment below the JSON guard", () => {
     const parsed = RealtimeSocketAttachmentSchema.parse(largestAttachment);
-    expect(realtimeAttachmentJsonBytes(parsed)).toBeLessThan(MAX_REALTIME_ATTACHMENT_JSON_BYTES);
+    expect(realtimeAttachmentJsonBytes(parsed)).toBeLessThan(
+      MAX_REALTIME_ATTACHMENT_JSON_BYTES,
+    );
     expect(serializeRealtimeAttachment(parsed)).toEqual(parsed);
     expect(() => structuredClone(parsed)).not.toThrow();
   });
 
   it("rejects oversized JSON before an attachment can be serialized", () => {
     const rejectedValue = "attachment-value-must-not-appear-in-errors";
-    const oversized = { value: `${rejectedValue}${"x".repeat(MAX_REALTIME_ATTACHMENT_JSON_BYTES)}` };
+    const oversized = {
+      value: `${rejectedValue}${"x".repeat(MAX_REALTIME_ATTACHMENT_JSON_BYTES)}`,
+    };
     let failure: unknown;
     try {
       assertRealtimeAttachmentSize(oversized);
@@ -175,7 +220,10 @@ describe("internal realtime contracts", () => {
     }
     let attachmentFailure: unknown;
     try {
-      parseRealtimeAttachment({ ...baseAttachment, tenant_id: attachmentSecret });
+      parseRealtimeAttachment({
+        ...baseAttachment,
+        tenant_id: attachmentSecret,
+      });
     } catch (error) {
       attachmentFailure = error;
     }
@@ -189,18 +237,24 @@ describe("internal realtime contracts", () => {
   });
 
   it("rejects extra internal fields and returns detached parsed values", () => {
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      membership_id: "membership_human",
-    }).success).toBe(false);
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      headers: { authorization: "Bearer secret" },
-    }).success).toBe(false);
-    expect(RealtimeSocketAttachmentSchema.safeParse({
-      ...baseAttachment,
-      content: "message body",
-    }).success).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        membership_id: "membership_human",
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        headers: { authorization: "Bearer secret" },
+      }).success,
+    ).toBe(false);
+    expect(
+      RealtimeSocketAttachmentSchema.safeParse({
+        ...baseAttachment,
+        content: "message body",
+      }).success,
+    ).toBe(false);
 
     const parsed = parseRealtimeAttachment(baseAttachment);
     expect(parsed).toEqual(baseAttachment);

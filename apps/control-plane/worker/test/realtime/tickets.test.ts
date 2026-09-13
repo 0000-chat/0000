@@ -27,26 +27,30 @@ const humanSession: SessionResponse = {
   tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },
   principal: { id: "principal_human", type: "human", display_name: "Human" },
   membership: { id: "membership_human", role: "owner" },
-  identities: [{
-    identity_id: "identity_human",
-    kind: "human",
-    display_name: "Human",
-    scopes: [
-      "conversation.read",
-      "message.send",
-      "receipt.send",
-      "connection.read",
-      "connection.manage",
-    ],
-  }],
+  identities: [
+    {
+      identity_id: "identity_human",
+      kind: "human",
+      display_name: "Human",
+      scopes: [
+        "conversation.read",
+        "message.send",
+        "receipt.send",
+        "connection.read",
+        "connection.manage",
+      ],
+    },
+  ],
 };
 
 const ticketRequest = {
   schema_version: 1 as const,
-  subscriptions: [{
-    identity_id: "identity_human",
-    families: ["projection" as const],
-  }],
+  subscriptions: [
+    {
+      identity_id: "identity_human",
+      families: ["projection" as const],
+    },
+  ],
 };
 
 const authorizedRequest = () =>
@@ -68,13 +72,13 @@ describe("realtime ticket tokens", () => {
     });
 
     expect(received).toHaveLength(32);
-    expect(ticket).toBe(
-      "rt1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-    );
+    expect(ticket).toBe("rt1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
     expect(ticket).toMatch(/^rt1_[A-Za-z0-9_-]{43}$/);
     expect(ticket.slice(4)).toHaveLength(43);
     expect(await digestRealtimeTicket(ticket)).toMatch(/^[0-9a-f]{64}$/);
-    expect(await digestRealtimeTicket(ticket)).toBe(await digestRealtimeTicket(ticket));
+    expect(await digestRealtimeTicket(ticket)).toBe(
+      await digestRealtimeTicket(ticket),
+    );
   });
 });
 
@@ -93,10 +97,12 @@ describe("realtime ticket authorization", () => {
   it("rejects an identity without conversation.read using a safe error", () => {
     const unauthorized: SessionResponse = {
       ...humanSession,
-      identities: [{
-        ...humanSession.identities[0]!,
-        scopes: ["message.send"],
-      }],
+      identities: [
+        {
+          ...humanSession.identities[0]!,
+          scopes: ["message.send"],
+        },
+      ],
     };
 
     let failure: unknown;
@@ -129,7 +135,9 @@ describe("digest-only realtime ticket storage", () => {
 
     expect(issued).toEqual({
       ticket: issued.ticket,
-      expires_at: new Date(now.getTime() + REALTIME_TICKET_TTL_MS).toISOString(),
+      expires_at: new Date(
+        now.getTime() + REALTIME_TICKET_TTL_MS,
+      ).toISOString(),
     });
     expect(row).toMatchObject({
       ticket_digest: await digestRealtimeTicket(issued.ticket),
@@ -157,11 +165,23 @@ describe("digest-only realtime ticket storage", () => {
   });
 
   it("atomically lets exactly one concurrent consumer use a ticket", async () => {
-    const issued = await issueRealtimeTicket(env.CONTROL_DB, authorizedRequest(), now);
+    const issued = await issueRealtimeTicket(
+      env.CONTROL_DB,
+      authorizedRequest(),
+      now,
+    );
 
     const results = await Promise.all([
-      consumeRealtimeTicket(env.CONTROL_DB, issued.ticket, new Date(now.getTime() + 1_000)),
-      consumeRealtimeTicket(env.CONTROL_DB, issued.ticket, new Date(now.getTime() + 1_000)),
+      consumeRealtimeTicket(
+        env.CONTROL_DB,
+        issued.ticket,
+        new Date(now.getTime() + 1_000),
+      ),
+      consumeRealtimeTicket(
+        env.CONTROL_DB,
+        issued.ticket,
+        new Date(now.getTime() + 1_000),
+      ),
     ]);
 
     expect(results.filter((result) => result !== null)).toHaveLength(1);
@@ -169,24 +189,32 @@ describe("digest-only realtime ticket storage", () => {
   });
 
   it("returns null for malformed, missing, expired, and reused tickets", async () => {
-    expect(await consumeRealtimeTicket(env.CONTROL_DB, "not-a-ticket", now)).toBeNull();
-    expect(await consumeRealtimeTicket(
-      env.CONTROL_DB,
-      `rt1_${"a".repeat(43)}`,
-      now,
-    )).toBeNull();
+    expect(
+      await consumeRealtimeTicket(env.CONTROL_DB, "not-a-ticket", now),
+    ).toBeNull();
+    expect(
+      await consumeRealtimeTicket(env.CONTROL_DB, `rt1_${"a".repeat(43)}`, now),
+    ).toBeNull();
 
-    const issued = await issueRealtimeTicket(env.CONTROL_DB, authorizedRequest(), now);
-    expect(await consumeRealtimeTicket(
+    const issued = await issueRealtimeTicket(
       env.CONTROL_DB,
-      issued.ticket,
-      new Date(now.getTime() + REALTIME_TICKET_TTL_MS),
-    )).toBeNull();
-    expect(await consumeRealtimeTicket(
-      env.CONTROL_DB,
-      issued.ticket,
-      new Date(now.getTime() + REALTIME_TICKET_TTL_MS),
-    )).toBeNull();
+      authorizedRequest(),
+      now,
+    );
+    expect(
+      await consumeRealtimeTicket(
+        env.CONTROL_DB,
+        issued.ticket,
+        new Date(now.getTime() + REALTIME_TICKET_TTL_MS),
+      ),
+    ).toBeNull();
+    expect(
+      await consumeRealtimeTicket(
+        env.CONTROL_DB,
+        issued.ticket,
+        new Date(now.getTime() + REALTIME_TICKET_TTL_MS),
+      ),
+    ).toBeNull();
   });
 
   it("performs bounded cleanup of expired rows before issuing", async () => {
@@ -217,56 +245,82 @@ describe("digest-only realtime ticket storage", () => {
     expect(remaining?.count).toBe(1);
   });
 
-  it.each([
-    "membership",
-    "identity",
-    "grant",
-    "principal",
-    "tenant",
-  ] as const)("fails closed after current %s authorization is revoked", async (revocation) => {
-    const issued = await issueRealtimeTicket(env.CONTROL_DB, authorizedRequest(), now);
+  it.each(["membership", "identity", "grant", "principal", "tenant"] as const)(
+    "fails closed after current %s authorization is revoked",
+    async (revocation) => {
+      const issued = await issueRealtimeTicket(
+        env.CONTROL_DB,
+        authorizedRequest(),
+        now,
+      );
 
-    switch (revocation) {
-      case "membership":
-        await env.CONTROL_DB.prepare(
-          "UPDATE memberships SET status = 'revoked', revoked_at = ? WHERE id = ?",
-        ).bind(timestamp, "membership_human").run();
-        break;
-      case "identity":
-        await env.CONTROL_DB.prepare(
-          "UPDATE identities SET status = 'disabled' WHERE id = ?",
-        ).bind("identity_human").run();
-        break;
-      case "grant":
-        await env.CONTROL_DB.prepare(
-          "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND operation_scope = ?",
-        ).bind("tenant_pilot", "membership_human", "identity_human", "conversation.read").run();
-        break;
-      case "principal":
-        await env.CONTROL_DB.prepare(
-          "UPDATE principals SET status = 'revoked', revoked_at = ? WHERE id = ?",
-        ).bind(timestamp, "principal_human").run();
-        break;
-      case "tenant":
-        await env.CONTROL_DB.prepare(
-          "UPDATE tenants SET status = 'disabled' WHERE id = ?",
-        ).bind("tenant_pilot").run();
-        break;
-    }
+      switch (revocation) {
+        case "membership":
+          await env.CONTROL_DB.prepare(
+            "UPDATE memberships SET status = 'revoked', revoked_at = ? WHERE id = ?",
+          )
+            .bind(timestamp, "membership_human")
+            .run();
+          break;
+        case "identity":
+          await env.CONTROL_DB.prepare(
+            "UPDATE identities SET status = 'disabled' WHERE id = ?",
+          )
+            .bind("identity_human")
+            .run();
+          break;
+        case "grant":
+          await env.CONTROL_DB.prepare(
+            "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND operation_scope = ?",
+          )
+            .bind(
+              "tenant_pilot",
+              "membership_human",
+              "identity_human",
+              "conversation.read",
+            )
+            .run();
+          break;
+        case "principal":
+          await env.CONTROL_DB.prepare(
+            "UPDATE principals SET status = 'revoked', revoked_at = ? WHERE id = ?",
+          )
+            .bind(timestamp, "principal_human")
+            .run();
+          break;
+        case "tenant":
+          await env.CONTROL_DB.prepare(
+            "UPDATE tenants SET status = 'disabled' WHERE id = ?",
+          )
+            .bind("tenant_pilot")
+            .run();
+          break;
+      }
 
-    expect(await consumeRealtimeTicket(
-      env.CONTROL_DB,
-      issued.ticket,
-      new Date(now.getTime() + 1_000),
-    )).toBeNull();
-  });
+      expect(
+        await consumeRealtimeTicket(
+          env.CONTROL_DB,
+          issued.ticket,
+          new Date(now.getTime() + 1_000),
+        ),
+      ).toBeNull();
+    },
+  );
 
   it("fails closed for malformed stored JSON and wrong tenant references", async () => {
-    const malformed = await issueRealtimeTicket(env.CONTROL_DB, authorizedRequest(), now);
+    const malformed = await issueRealtimeTicket(
+      env.CONTROL_DB,
+      authorizedRequest(),
+      now,
+    );
     await env.CONTROL_DB.prepare(
       "UPDATE realtime_tickets SET subscriptions_json = ? WHERE ticket_digest = ?",
-    ).bind("{}", await digestRealtimeTicket(malformed.ticket)).run();
-    expect(await consumeRealtimeTicket(env.CONTROL_DB, malformed.ticket, now)).toBeNull();
+    )
+      .bind("{}", await digestRealtimeTicket(malformed.ticket))
+      .run();
+    expect(
+      await consumeRealtimeTicket(env.CONTROL_DB, malformed.ticket, now),
+    ).toBeNull();
 
     await env.CONTROL_DB.batch([
       env.CONTROL_DB.prepare(
@@ -274,13 +328,33 @@ describe("digest-only realtime ticket storage", () => {
       ).bind("tenant_other", "other", "Other", "active", timestamp, timestamp),
       env.CONTROL_DB.prepare(
         "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).bind("membership_other", "tenant_other", "principal_human", "member", "active", timestamp, timestamp),
+      ).bind(
+        "membership_other",
+        "tenant_other",
+        "principal_human",
+        "member",
+        "active",
+        timestamp,
+        timestamp,
+      ),
     ]);
-    const wrongTenant = await issueRealtimeTicket(env.CONTROL_DB, authorizedRequest(), now);
+    const wrongTenant = await issueRealtimeTicket(
+      env.CONTROL_DB,
+      authorizedRequest(),
+      now,
+    );
     await env.CONTROL_DB.prepare(
       "UPDATE realtime_tickets SET tenant_id = ?, membership_id = ? WHERE ticket_digest = ?",
-    ).bind("tenant_other", "membership_other", await digestRealtimeTicket(wrongTenant.ticket)).run();
-    expect(await consumeRealtimeTicket(env.CONTROL_DB, wrongTenant.ticket, now)).toBeNull();
+    )
+      .bind(
+        "tenant_other",
+        "membership_other",
+        await digestRealtimeTicket(wrongTenant.ticket),
+      )
+      .run();
+    expect(
+      await consumeRealtimeTicket(env.CONTROL_DB, wrongTenant.ticket, now),
+    ).toBeNull();
   });
 
   it("wraps D1 failures in one safe availability error", async () => {

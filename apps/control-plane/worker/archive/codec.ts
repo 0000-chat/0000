@@ -37,7 +37,9 @@ export type DecodeCanonicalJsonlOptions = {
   expectedEventCount?: number;
 };
 
-const asUint8Array = (value: ArrayBuffer | ArrayBufferView | Uint8Array): Uint8Array => {
+const asUint8Array = (
+  value: ArrayBuffer | ArrayBufferView | Uint8Array,
+): Uint8Array => {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -45,7 +47,10 @@ const asUint8Array = (value: ArrayBuffer | ArrayBufferView | Uint8Array): Uint8A
 
 const inputArraySnapshot = (input: unknown): unknown[] => {
   try {
-    if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
+    if (
+      !Array.isArray(input) ||
+      Object.getPrototypeOf(input) !== Array.prototype
+    ) {
       throw archiveError("archive_invalid");
     }
     const lengthDescriptor = Object.getOwnPropertyDescriptor(input, "length");
@@ -104,16 +109,21 @@ const compareEvents = (
   left: CanonicalEventEnvelope,
   right: CanonicalEventEnvelope,
 ): number => {
-  const observed = eventInstant(left.observed_at) - eventInstant(right.observed_at);
+  const observed =
+    eventInstant(left.observed_at) - eventInstant(right.observed_at);
   if (observed !== 0) return observed;
-  const occurred = eventInstant(left.occurred_at) - eventInstant(right.occurred_at);
+  const occurred =
+    eventInstant(left.occurred_at) - eventInstant(right.occurred_at);
   if (occurred !== 0) return occurred;
   if (left.event_id < right.event_id) return -1;
   if (left.event_id > right.event_id) return 1;
   return 0;
 };
 
-const concatChunks = (chunks: readonly Uint8Array[], total: number): Uint8Array => {
+const concatChunks = (
+  chunks: readonly Uint8Array[],
+  total: number,
+): Uint8Array => {
   const output = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -157,10 +167,7 @@ const readStreamBounded = async (
   return concatChunks(chunks, total);
 };
 
-const validateBound = (
-  value: number,
-  maximum: number,
-): void => {
+const validateBound = (value: number, maximum: number): void => {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw archiveError("archive_invalid");
   }
@@ -197,10 +204,9 @@ export const gzipBytes = async (
     if (typeof CompressionStream === "undefined") {
       throw archiveError("archive_unavailable");
     }
-    const compression = new CompressionStream("gzip") as unknown as TransformStream<
-      Uint8Array,
-      Uint8Array
-    >;
+    const compression = new CompressionStream(
+      "gzip",
+    ) as unknown as TransformStream<Uint8Array, Uint8Array>;
     const compressed = streamFromBytes(bytes).pipeThrough(compression);
     return await readStreamBounded(compressed, maxCompressedBytes);
   } catch (error) {
@@ -233,7 +239,8 @@ const validateGzipHeader = (bytes: Uint8Array): void => {
   const flags = bytes[3]!;
   let offset = 10;
   if ((flags & 0x04) !== 0) {
-    if (offset + 2 > bytes.byteLength - 8) throw archiveError("archive_corrupt");
+    if (offset + 2 > bytes.byteLength - 8)
+      throw archiveError("archive_corrupt");
     const extraLength = bytes[offset]! | (bytes[offset + 1]! << 8);
     offset += 2 + extraLength;
     if (offset > bytes.byteLength - 8) throw archiveError("archive_corrupt");
@@ -294,13 +301,13 @@ export const gunzipBytes = async (
     }
     validateGzipHeader(compressedBytes);
     const stream = streamFromBytes(compressedBytes);
-    const decompression = new DecompressionStream("gzip") as unknown as TransformStream<
-      Uint8Array,
-      Uint8Array
-    >;
-    const decompressed = boundedCompressedStream(stream, maxCompressedBytes).pipeThrough(
-      decompression,
-    );
+    const decompression = new DecompressionStream(
+      "gzip",
+    ) as unknown as TransformStream<Uint8Array, Uint8Array>;
+    const decompressed = boundedCompressedStream(
+      stream,
+      maxCompressedBytes,
+    ).pipeThrough(decompression);
     return await readStreamBounded(decompressed, maxDecodedBytes);
   } catch (error) {
     if (error instanceof ArchiveError) throw error;
@@ -361,7 +368,8 @@ export const encodeCanonicalEventBatch = async ({
   const parsedEvents = snapshot.map(parseEvent);
   const seen = new Set<string>();
   for (const event of parsedEvents) {
-    if (event.tenant_id !== tenantId) throw archiveError("archive_tenant_mismatch");
+    if (event.tenant_id !== tenantId)
+      throw archiveError("archive_tenant_mismatch");
     if (seen.has(event.event_id)) throw archiveError("archive_invalid");
     seen.add(event.event_id);
     eventInstant(event.observed_at);
@@ -388,9 +396,13 @@ export const decodeCanonicalJsonl = async (
   input: Uint8Array | ArrayBuffer | ReadableStream<Uint8Array>,
   options: DecodeCanonicalJsonlOptions = {},
 ): Promise<CanonicalEventEnvelope[]> => {
-  const maxDecodedBytes = options.maxDecodedBytes ?? MAX_ARCHIVE_UNCOMPRESSED_BYTES;
+  const maxDecodedBytes =
+    options.maxDecodedBytes ?? MAX_ARCHIVE_UNCOMPRESSED_BYTES;
   validateBound(maxDecodedBytes, MAX_ARCHIVE_UNCOMPRESSED_BYTES);
-  if (options.tenantId !== undefined && !CanonicalResourceIdSchema.safeParse(options.tenantId).success) {
+  if (
+    options.tenantId !== undefined &&
+    !CanonicalResourceIdSchema.safeParse(options.tenantId).success
+  ) {
     throw archiveError("archive_invalid");
   }
   if (
@@ -416,8 +428,12 @@ export const decodeCanonicalJsonl = async (
   if (lines.some((line) => line.includes("\r"))) {
     throw archiveError("archive_corrupt");
   }
-  if (lines.length > MAX_ARCHIVE_EVENTS) throw archiveError("archive_too_large");
-  if (options.expectedEventCount !== undefined && lines.length !== options.expectedEventCount) {
+  if (lines.length > MAX_ARCHIVE_EVENTS)
+    throw archiveError("archive_too_large");
+  if (
+    options.expectedEventCount !== undefined &&
+    lines.length !== options.expectedEventCount
+  ) {
     throw archiveError("archive_corrupt");
   }
 
@@ -438,7 +454,10 @@ export const decodeCanonicalJsonl = async (
     }
     if (!result.success) throw archiveError("archive_corrupt", result.error);
     const event = result.data;
-    if (options.tenantId !== undefined && event.tenant_id !== options.tenantId) {
+    if (
+      options.tenantId !== undefined &&
+      event.tenant_id !== options.tenantId
+    ) {
       throw archiveError("archive_corrupt");
     }
     if (seen.has(event.event_id)) throw archiveError("archive_corrupt");
@@ -456,7 +475,8 @@ export const decodeCanonicalJsonl = async (
   try {
     canonical = buildCanonicalJsonl(events);
   } catch (error) {
-    if (error instanceof ArchiveError && error.code === "archive_too_large") throw error;
+    if (error instanceof ArchiveError && error.code === "archive_too_large")
+      throw error;
     throw archiveError("archive_corrupt", error);
   }
   if (!bytesEqual(bytes, canonical)) throw archiveError("archive_corrupt");

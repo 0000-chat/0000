@@ -1,5 +1,8 @@
 import { Link } from "@tanstack/react-router";
-import type { ChannelSummary, ConversationSummary } from "@communicator/contracts";
+import type {
+  ChannelSummary,
+  ConversationSummary,
+} from "@communicator/contracts";
 import { Badge } from "@/components/ui/badge";
 import { ProviderIcon } from "./provider-icon";
 
@@ -30,8 +33,15 @@ export function ConversationList({
         const channel = channelsById.get(conversation.connection_id);
         if (!channel) {
           return (
-            <li key={conversation.id} data-testid="conversation-row" data-conversation-id={conversation.id}>
-              <p role="alert" className="px-4 py-4 text-sm text-muted-foreground">
+            <li
+              key={conversation.id}
+              data-testid="conversation-row"
+              data-conversation-id={conversation.id}
+            >
+              <p
+                role="alert"
+                className="px-4 py-4 text-sm text-muted-foreground"
+              >
                 This conversation is unavailable.
               </p>
             </li>
@@ -42,21 +52,33 @@ export function ConversationList({
             <Link
               to="/conversations/$conversationId"
               params={{ conversationId: conversation.id }}
-              search={{ identity: identityId, ...(selectedChannelId ? { channel: selectedChannelId } : {}) }}
+              search={{
+                identity: identityId,
+                ...(selectedChannelId ? { channel: selectedChannelId } : {}),
+              }}
               data-testid="conversation-row"
               data-conversation-id={conversation.id}
               data-channel-id={channel.id}
-              aria-current={activeConversationId === conversation.id ? "page" : undefined}
+              aria-current={
+                activeConversationId === conversation.id ? "page" : undefined
+              }
               className="group flex min-h-[4.5rem] items-start gap-3 px-4 py-3 transition-colors hover:bg-accent hover:text-accent-foreground aria-[current=page]:bg-accent/70"
             >
               <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                <ProviderIcon provider={channel.provider} className="size-4.5" />
+                <ProviderIcon
+                  provider={channel.provider}
+                  className="size-4.5"
+                />
               </span>
               <span className="grid min-w-0 flex-1 gap-1">
                 <span className="flex min-w-0 items-center gap-2">
-                  <h2 className="truncate text-sm font-semibold">{conversation.title}</h2>
+                  <h2 className="truncate text-sm font-semibold">
+                    {conversation.title}
+                  </h2>
                   {conversation.unread_count > 0 && (
-                    <Badge aria-label={`${conversation.unread_count} unread`}>{conversation.unread_count}</Badge>
+                    <Badge aria-label={`${conversation.unread_count} unread`}>
+                      {conversation.unread_count}
+                    </Badge>
                   )}
                 </span>
                 <span className="flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground">

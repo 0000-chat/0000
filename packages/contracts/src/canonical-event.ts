@@ -2,7 +2,11 @@ import { z } from "zod";
 import { ProviderSchema } from "./connection";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 
-const PROTOTYPE_SENSITIVE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const PROTOTYPE_SENSITIVE_KEYS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+]);
 
 export const MAX_CANONICAL_JSON_DEPTH = 32;
 export const MAX_CANONICAL_JSON_NODES = 50_000;
@@ -87,7 +91,10 @@ const isCanonicalJsonValue = (root: unknown): root is CanonicalJsonValue => {
         if (Object.getPrototypeOf(value) !== Array.prototype) return false;
 
         const length = value.length;
-        if (!Number.isSafeInteger(length) || length > MAX_CANONICAL_JSON_COLLECTION_ENTRIES) {
+        if (
+          !Number.isSafeInteger(length) ||
+          length > MAX_CANONICAL_JSON_COLLECTION_ENTRIES
+        ) {
           return false;
         }
 
@@ -106,7 +113,11 @@ const isCanonicalJsonValue = (root: unknown): root is CanonicalJsonValue => {
           if (!Object.prototype.hasOwnProperty.call(value, key)) return false;
           const descriptor = Object.getOwnPropertyDescriptor(value, key);
           if (!descriptor || !("value" in descriptor)) return false;
-          stack.push({ kind: "visit", value: descriptor.value, depth: frame.depth + 1 });
+          stack.push({
+            kind: "visit",
+            value: descriptor.value,
+            depth: frame.depth + 1,
+          });
         }
         continue;
       }
@@ -131,7 +142,11 @@ const isCanonicalJsonValue = (root: unknown): root is CanonicalJsonValue => {
         }
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!descriptor || !("value" in descriptor)) return false;
-        stack.push({ kind: "visit", value: descriptor.value, depth: frame.depth + 1 });
+        stack.push({
+          kind: "visit",
+          value: descriptor.value,
+          depth: frame.depth + 1,
+        });
       }
     }
 
@@ -141,7 +156,9 @@ const isCanonicalJsonValue = (root: unknown): root is CanonicalJsonValue => {
   }
 };
 
-const isCanonicalJsonObject = (value: unknown): value is CanonicalJsonObject => {
+const isCanonicalJsonObject = (
+  value: unknown,
+): value is CanonicalJsonObject => {
   try {
     return (
       value !== null &&
@@ -164,9 +181,7 @@ export const CanonicalJsonObjectSchema = z.custom<CanonicalJsonObject>(
   "Expected a bounded JSON-safe object",
 );
 
-export const CanonicalResourceIdSchema = CommunicatorIdSchema
-  .max(128)
-  .regex(/^[\x00-\x7F]+$/);
+export const CanonicalResourceIdSchema = CommunicatorIdSchema.max(128);
 
 export type CanonicalResourceId = z.infer<typeof CanonicalResourceIdSchema>;
 
@@ -273,4 +288,6 @@ export const CanonicalEventEnvelopeSchema = z.preprocess(
 
 export type CanonicalEventType = z.infer<typeof CanonicalEventTypeSchema>;
 export type CanonicalEventSource = z.infer<typeof CanonicalEventSourceSchema>;
-export type CanonicalEventEnvelope = z.infer<typeof CanonicalEventEnvelopeSchema>;
+export type CanonicalEventEnvelope = z.infer<
+  typeof CanonicalEventEnvelopeSchema
+>;

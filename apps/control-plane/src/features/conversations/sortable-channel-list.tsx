@@ -1,5 +1,19 @@
-import { closestCenter, DndContext, PointerSensor, TouchSensor, useSensor, useSensors, type Announcements, type DragEndEvent } from "@dnd-kit/core";
-import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import {
+  closestCenter,
+  DndContext,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type Announcements,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { ChannelSummary } from "@communicator/contracts";
 import { GripVertical, Inbox } from "lucide-react";
@@ -28,15 +42,26 @@ function ChannelStatus({ channel }: { channel: ChannelSummary }) {
   const label = statusLabel(channel);
   if (!label) {
     return (
-      <span className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-300" role="status" aria-label="Ready">
-        <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+      <span
+        className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-300"
+        role="status"
+        aria-label="Ready"
+      >
+        <span
+          className="size-1.5 rounded-full bg-emerald-500"
+          aria-hidden="true"
+        />
         <span>Ready</span>
       </span>
     );
   }
 
   return (
-    <span className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300" role="status" aria-label={label}>
+    <span
+      className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300"
+      role="status"
+      aria-label={label}
+    >
       <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" />
       <span>{label}</span>
     </span>
@@ -52,12 +77,16 @@ export function SortableChannelList({
   manageConnectionHref,
 }: SortableChannelListProps) {
   const connectedIds = channels.map((channel) => channel.id);
-  const [keyboardDrag, setKeyboardDrag] = useState<KeyboardDragState | null>(null);
+  const [keyboardDrag, setKeyboardDrag] = useState<KeyboardDragState | null>(
+    null,
+  );
   const keyboardDragRef = useRef<KeyboardDragState | null>(null);
   const [keyboardAnnouncement, setKeyboardAnnouncement] = useState("");
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 250, tolerance: 5 },
+    }),
   );
   const announcements: Announcements = {
     onDragStart({ active }) {
@@ -82,7 +111,9 @@ export function SortableChannelList({
     },
     onDragCancel({ active }) {
       const channel = channels.find((item) => item.id === active.id);
-      return channel ? `Cancelled sorting ${channel.display_label}.` : "Channel sorting cancelled.";
+      return channel
+        ? `Cancelled sorting ${channel.display_label}.`
+        : "Channel sorting cancelled.";
     },
   };
 
@@ -107,9 +138,11 @@ export function SortableChannelList({
     };
     updateKeyboardDrag(next);
     const channel = channels.find((item) => item.id === id);
-    setKeyboardAnnouncement(channel
-      ? `Picked up ${channel.display_label}. Use the arrow keys to move it, then press Space to drop it.`
-      : "Picked up channel.");
+    setKeyboardAnnouncement(
+      channel
+        ? `Picked up ${channel.display_label}. Use the arrow keys to move it, then press Space to drop it.`
+        : "Picked up channel.",
+    );
   }
 
   function handleKeyboardMove(id: string, direction: -1 | 1) {
@@ -117,23 +150,35 @@ export function SortableChannelList({
     if (!current || current.activeId !== id) return;
     const currentIndex = current.orderedIds.indexOf(id);
     const nextIndex = currentIndex + direction;
-    if (currentIndex === -1 || nextIndex < 0 || nextIndex >= current.orderedIds.length) return;
+    if (
+      currentIndex === -1 ||
+      nextIndex < 0 ||
+      nextIndex >= current.orderedIds.length
+    )
+      return;
     const orderedIds = arrayMove(current.orderedIds, currentIndex, nextIndex);
     updateKeyboardDrag({ ...current, orderedIds });
     const channel = channels.find((item) => item.id === id);
-    setKeyboardAnnouncement(channel
-      ? `${channel.display_label} moved to position ${nextIndex + 1} of ${current.orderedIds.length}.`
-      : "Channel moved.");
+    setKeyboardAnnouncement(
+      channel
+        ? `${channel.display_label} moved to position ${nextIndex + 1} of ${current.orderedIds.length}.`
+        : "Channel moved.",
+    );
   }
 
   function handleKeyboardDrop(id: string) {
     const current = keyboardDragRef.current;
     if (!current || current.activeId !== id) return;
-    const changed = current.orderedIds.length !== current.originalIds.length
-      || current.orderedIds.some((item, index) => item !== current.originalIds[index]);
+    const changed =
+      current.orderedIds.length !== current.originalIds.length ||
+      current.orderedIds.some(
+        (item, index) => item !== current.originalIds[index],
+      );
     if (changed) onReorder(current.orderedIds);
     const channel = channels.find((item) => item.id === id);
-    setKeyboardAnnouncement(channel ? `Dropped ${channel.display_label}.` : "Dropped channel.");
+    setKeyboardAnnouncement(
+      channel ? `Dropped ${channel.display_label}.` : "Dropped channel.",
+    );
     updateKeyboardDrag(null);
   }
 
@@ -151,9 +196,12 @@ export function SortableChannelList({
   return (
     <>
       <p className="sr-only">
-        Use Space to pick up a channel, arrow keys to move it, Space to drop it, and Escape to cancel.
+        Use Space to pick up a channel, arrow keys to move it, Space to drop it,
+        and Escape to cancel.
       </p>
-      <p role="status" aria-live="polite" className="sr-only">{keyboardAnnouncement}</p>
+      <p role="status" aria-live="polite" className="sr-only">
+        {keyboardAnnouncement}
+      </p>
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -167,7 +215,8 @@ export function SortableChannelList({
               variant="ghost"
               className={cn(
                 "h-auto min-h-11 w-full justify-start rounded-none px-4 py-2.5 text-left",
-                !selectedChannelId && "bg-sidebar-accent text-sidebar-accent-foreground",
+                !selectedChannelId &&
+                  "bg-sidebar-accent text-sidebar-accent-foreground",
               )}
               aria-label={`All, ${allUnreadCount} unread`}
               aria-current={!selectedChannelId ? "page" : undefined}
@@ -179,10 +228,15 @@ export function SortableChannelList({
                 </span>
                 <span className="font-medium">All</span>
               </span>
-              <Badge variant={!selectedChannelId ? "default" : "outline"}>{allUnreadCount}</Badge>
+              <Badge variant={!selectedChannelId ? "default" : "outline"}>
+                {allUnreadCount}
+              </Badge>
             </Button>
           </li>
-          <SortableContext items={connectedIds} strategy={verticalListSortingStrategy}>
+          <SortableContext
+            items={connectedIds}
+            strategy={verticalListSortingStrategy}
+          >
             {visibleChannels.map((channel) => (
               <SortableChannelRow
                 key={channel.id}
@@ -231,7 +285,15 @@ function SortableChannelRow({
   onKeyboardDrop: (id: string) => void;
   onKeyboardCancel: (id: string) => void;
 }) {
-  const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging } = useSortable({
+  const {
+    attributes,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
     id: channel.id,
   });
   const warning = statusLabel(channel);
@@ -248,7 +310,10 @@ function SortableChannelRow({
       onKeyboardCancel(channel.id);
       return;
     }
-    if (keyboardActive && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    if (
+      keyboardActive &&
+      (event.key === "ArrowUp" || event.key === "ArrowDown")
+    ) {
       event.preventDefault();
       onKeyboardMove(channel.id, event.key === "ArrowUp" ? -1 : 1);
     }
@@ -258,13 +323,21 @@ function SortableChannelRow({
     <li
       ref={setNodeRef}
       data-channel-id={channel.id}
-      className={cn("relative bg-background", isDragging && "z-10 bg-accent/40 shadow-lg")}
+      className={cn(
+        "relative bg-background",
+        isDragging && "z-10 bg-accent/40 shadow-lg",
+      )}
       style={{
         transform: CSS.Transform.toString(transform),
         transition,
       }}
     >
-      <div className={cn("flex min-h-14 items-center gap-1.5 px-3 py-1.5", selected && "bg-sidebar-accent") }>
+      <div
+        className={cn(
+          "flex min-h-14 items-center gap-1.5 px-3 py-1.5",
+          selected && "bg-sidebar-accent",
+        )}
+      >
         <Button
           type="button"
           variant="ghost"
@@ -273,15 +346,24 @@ function SortableChannelRow({
           aria-current={selected ? "page" : undefined}
           onClick={() => onSelect(channel.id)}
         >
-          <ProviderIcon provider={channel.provider} className="size-4.5 shrink-0 text-primary" />
+          <ProviderIcon
+            provider={channel.provider}
+            className="size-4.5 shrink-0 text-primary"
+          />
           <span className="grid min-w-0 flex-1 gap-0.5">
-            <span className="truncate text-sm font-medium">{channel.display_label}</span>
+            <span className="truncate text-sm font-medium">
+              {channel.display_label}
+            </span>
             <span className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-xs capitalize text-muted-foreground">{channel.provider}</span>
+              <span className="truncate text-xs capitalize text-muted-foreground">
+                {channel.provider}
+              </span>
               <ChannelStatus channel={channel} />
             </span>
           </span>
-          <Badge variant={selected ? "default" : "outline"}>{channel.unread_count}</Badge>
+          <Badge variant={selected ? "default" : "outline"}>
+            {channel.unread_count}
+          </Badge>
         </Button>
         <button
           ref={setActivatorNodeRef}
@@ -298,7 +380,10 @@ function SortableChannelRow({
         </button>
       </div>
       {warning && (
-        <a className="ml-12 block pb-2 text-xs text-primary underline underline-offset-2" href={manageConnectionHref}>
+        <a
+          className="ml-12 block pb-2 text-xs text-primary underline underline-offset-2"
+          href={manageConnectionHref}
+        >
           Manage connection
         </a>
       )}
