@@ -16,6 +16,7 @@ base64 = "=0.22.1"
 chacha20poly1305 = "=0.10.1"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 http.workspace = true
+libc = "=0.2.189"
 futures-util.workspace = true
 matrix-sdk = { workspace = true, features = ["e2e-encryption", "sqlite", "bundled-sqlite"] }
 matrix-sdk-base = { workspace = true, features = ["e2e-encryption"] }

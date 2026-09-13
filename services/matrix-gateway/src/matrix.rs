@@ -570,6 +570,24 @@ pub async fn restore_matrix_processor(
     })
 }
 
+/// Extract the persisted Matrix access token for the receive-only HTTP
+/// transport after validating the stored session identity.  The token is
+/// returned only to the in-process transport constructor and is never
+/// formatted, serialized, or exposed through an administrative command.
+pub fn matrix_access_token(
+    session_bytes: &SecretBytes,
+    expected_user_id: &str,
+) -> Result<SecretBytes, SafeError> {
+    let expected_user_id = parse_matrix_user_id(expected_user_id)?;
+    let session = deserialize_matrix_session(session_bytes)?;
+    if session.meta.user_id != expected_user_id || session.tokens.access_token.is_empty() {
+        return Err(SafeError::new(MATRIX_SESSION_INVALID));
+    }
+    Ok(SecretBytes::from_slice(
+        session.tokens.access_token.as_bytes(),
+    ))
+}
+
 /// The request classes the receive-only daemon is allowed to observe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatrixCryptoRequestKind {

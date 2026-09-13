@@ -462,6 +462,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "http",
+ "libc",
  "matrix-sdk",
  "matrix-sdk-base",
  "matrix-sdk-common",

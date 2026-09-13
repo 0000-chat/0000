@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 use crate::{
     config::GATEWAY_SCHEMA_VERSION,
     crypto::{Keyring, Sealed},
+    health,
     model::Provider,
     registry::{NewRoomBinding, RoomBindingPayload, RoomBindingStatus, valid_binding_id},
     secret::{SafeError, SecretBytes, SecretKind, load_secret},
@@ -52,6 +53,11 @@ pub struct AdminError {
     code: &'static str,
 }
 
+/// Construct the stable invalid-argument error used by top-level dispatch.
+pub const fn invalid_arguments() -> AdminError {
+    AdminError::new(ADMIN_INVALID_ARGUMENTS)
+}
+
 impl AdminError {
     const fn new(code: &'static str) -> Self {
         Self { code }
@@ -60,6 +66,24 @@ impl AdminError {
     /// Return the stable machine-readable error code.
     pub const fn code(self) -> &'static str {
         self.code
+    }
+
+    /// Map one stable administrative failure to the process-level exit class
+    /// used by the command-line contract.
+    pub fn exit_code(self) -> u8 {
+        match self.code {
+            ADMIN_INVALID_ARGUMENTS
+            | ADMIN_INPUT_INVALID
+            | ADMIN_INPUT_TOO_LARGE
+            | ADMIN_STDIN_TTY => 64,
+            ADMIN_OUTPUT_INVALID
+            | ADMIN_NOW_INVALID
+            | ADMIN_KEY_INVALID
+            | ADMIN_REGISTRY_INVALID
+            | ADMIN_REGISTRY_TOO_LARGE => 74,
+            code if code.starts_with("store_") || code.starts_with("health_") => 74,
+            _ => 78,
+        }
     }
 }
 
@@ -200,6 +224,192 @@ pub fn run(args: &[OsString]) -> Result<String, AdminError> {
         Operation::Retire => run_retire(options),
         Operation::ListSummary => run_list_summary(options),
     }
+}
+
+/// Execute the read-only healthcheck command.  The exit class is returned
+/// separately because a blocked state is a valid JSON response with a
+/// non-zero health status, rather than an argument or I/O failure.
+pub fn healthcheck(args: &[OsString]) -> Result<(String, u8), AdminError> {
+    if args.first().and_then(|value| value.to_str()) != Some("healthcheck") {
+        return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+    }
+    let database = parse_single_state_db(args, 1)?;
+    let report = health::inspect_at(&database, current_timestamp()?)
+        .map_err(|error| AdminError::new(error.code()))?;
+    let exit_code = u8::try_from(report.exit_code()).unwrap_or(74);
+    Ok((report.to_json(), exit_code))
+}
+
+/// Execute the bounded quarantine status command while holding the store's
+/// exclusive lock.
+pub fn quarantine_status(args: &[OsString]) -> Result<String, AdminError> {
+    if args.len() < 2
+        || args[0].to_str() != Some("quarantine")
+        || args[1].to_str() != Some("status")
+    {
+        return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+    }
+    let (database, key_file) = parse_state_options(args, 2)?;
+    let key = load_key_material(&key_file)?;
+    let store = Store::open(&database, keyring(&key)?)?;
+    let pressure = store.ledger_pressure()?;
+    let status = if pressure.quarantined_windows() == 0 {
+        "clear"
+    } else {
+        "quarantined"
+    };
+    Ok(format!(
+        r#"{{"schema_version":1,"status":"{status}","pending_batches":{},"pending_bytes":{},"quarantined_windows":{}}}"#,
+        pressure.pending_batches(),
+        pressure.pending_bytes(),
+        pressure.quarantined_windows(),
+    ))
+}
+
+/// Reopen one explicitly named quarantined window.  The store operation is
+/// atomic and leaves accepted sibling batches untouched.
+pub fn quarantine_retry(args: &[OsString]) -> Result<String, AdminError> {
+    if args.len() < 2 || args[0].to_str() != Some("quarantine") || args[1].to_str() != Some("retry")
+    {
+        return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+    }
+    let mut window_id = None;
+    let mut database = None;
+    let mut key_file = None;
+    let mut index = 2;
+    while index < args.len() {
+        let argument = args[index]
+            .to_str()
+            .ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+        let (name, inline_value) = match argument.split_once('=') {
+            Some((name, value)) => (name, Some(OsString::from(value))),
+            None => (argument, None),
+        };
+        index += 1;
+        match name {
+            "--window-id" => {
+                if window_id.is_some() {
+                    return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+                }
+                let value = option_value(args, &mut index, inline_value)?;
+                let value = value
+                    .into_string()
+                    .map_err(|_| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+                if !valid_window_id(&value) {
+                    return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+                }
+                window_id = Some(value);
+            }
+            "--state-db" | "--db" | "--database" => {
+                if database.is_some() {
+                    return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+                }
+                database = Some(parse_path(option_value(args, &mut index, inline_value)?)?);
+            }
+            "--state-key-file" | "--state-key" | "--key-file" | "--key" => {
+                if key_file.is_some() {
+                    return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+                }
+                key_file = Some(parse_path(option_value(args, &mut index, inline_value)?)?);
+            }
+            _ => return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS)),
+        }
+    }
+    let window_id = window_id.ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+    let database = database.ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+    let key_file = key_file.ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+    let key = load_key_material(&key_file)?;
+    let mut store = Store::open(&database, keyring(&key)?)?;
+    store.retry_quarantined_window(&window_id, current_timestamp()?)?;
+    Ok(r#"{"schema_version":1,"status":"retry_scheduled"}"#.to_owned())
+}
+
+/// Return bounded crypto-maintenance state without exposing protected rows.
+pub fn crypto_status(args: &[OsString]) -> Result<String, AdminError> {
+    if args.len() < 2 || args[0].to_str() != Some("crypto") || args[1].to_str() != Some("status") {
+        return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+    }
+    let (database, key_file) = parse_state_options(args, 2)?;
+    let key = load_key_material(&key_file)?;
+    let store = Store::open(&database, keyring(&key)?)?;
+    match store.crypto_maintenance_status()? {
+        Some(status) => Ok(format!(
+            r#"{{"schema_version":1,"status":"maintenance","maintenance_code":"{}"}}"#,
+            status.code().as_str()
+        )),
+        None => Ok(r#"{"schema_version":1,"status":"clear","maintenance_code":null}"#.to_owned()),
+    }
+}
+
+/// Validate and expose a path argument to the binary's run command.
+pub fn absolute_path(value: OsString) -> Result<PathBuf, AdminError> {
+    parse_path(value)
+}
+
+fn parse_single_state_db(args: &[OsString], start: usize) -> Result<PathBuf, AdminError> {
+    let mut database = None;
+    let mut index = start;
+    while index < args.len() {
+        let argument = args[index]
+            .to_str()
+            .ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+        let (name, inline_value) = match argument.split_once('=') {
+            Some((name, value)) => (name, Some(OsString::from(value))),
+            None => (argument, None),
+        };
+        index += 1;
+        if name != "--state-db" {
+            return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+        }
+        if database.is_some() {
+            return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+        }
+        database = Some(parse_path(option_value(args, &mut index, inline_value)?)?);
+    }
+    database.ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))
+}
+
+fn parse_state_options(args: &[OsString], start: usize) -> Result<(PathBuf, PathBuf), AdminError> {
+    let mut database = None;
+    let mut key_file = None;
+    let mut index = start;
+    while index < args.len() {
+        let argument = args[index]
+            .to_str()
+            .ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?;
+        let (name, inline_value) = match argument.split_once('=') {
+            Some((name, value)) => (name, Some(OsString::from(value))),
+            None => (argument, None),
+        };
+        index += 1;
+        match name {
+            "--state-db" => {
+                if database.is_some() {
+                    return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+                }
+                database = Some(parse_path(option_value(args, &mut index, inline_value)?)?);
+            }
+            "--state-key-file" => {
+                if key_file.is_some() {
+                    return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS));
+                }
+                key_file = Some(parse_path(option_value(args, &mut index, inline_value)?)?);
+            }
+            _ => return Err(AdminError::new(ADMIN_INVALID_ARGUMENTS)),
+        }
+    }
+    Ok((
+        database.ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?,
+        key_file.ok_or_else(|| AdminError::new(ADMIN_INVALID_ARGUMENTS))?,
+    ))
+}
+
+fn valid_window_id(value: &str) -> bool {
+    value.len() == "window_".len() + 64
+        && value.starts_with("window_")
+        && value["window_".len()..]
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn parse_options(args: &[OsString]) -> Result<Options, AdminError> {

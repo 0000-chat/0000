@@ -42,8 +42,9 @@ impl ReqwestMatrixTransport {
     /// Construct a production Matrix transport.
     ///
     /// The homeserver must be an HTTPS origin with no credentials, query,
-    /// fragment, or non-root path. Local HTTP is available only to the
-    /// crate's unit-test constructor.
+    /// fragment, or non-root path. The fixed private Synapse origin used by
+    /// the deployment is the sole production HTTP exception; loopback HTTP
+    /// remains available only to the crate's unit-test constructor.
     pub fn new(
         homeserver_url: &str,
         access_token: SecretBytes,
@@ -268,7 +269,9 @@ fn parse_homeserver_url(value: &str, allow_loopback_http: bool) -> Result<Url, S
         && url.scheme() == "http"
         && url.host_str() == Some("127.0.0.1")
         && url.port().is_some();
-    if !https && !loopback_http {
+    let private_synapse_http =
+        url.scheme() == "http" && url.host_str() == Some("synapse") && url.port() == Some(8008);
+    if !https && !loopback_http && !private_synapse_http {
         return Err(SafeError::new(MATRIX_TRANSPORT_INVALID));
     }
     if url.path().is_empty() {
