@@ -141,9 +141,30 @@ export type NormalizedScheduleRemovalExpiryInput = z.output<
   typeof ScheduleRemovalExpiryInputSchema
 >;
 
+/** Archive-only progress is separate from completion of other controlled stores. */
+export const ArchiveRemovalStatusSchema = z
+  .object({
+    operation_id: CommunicatorIdSchema,
+    removal_id: CommunicatorIdSchema,
+    status: z.enum([
+      "planned",
+      "rewritten",
+      "pending_deletion",
+      "complete",
+      "incomplete",
+    ]),
+    safety_deadline: TimestampSchema,
+    failure_code: z.string().trim().min(1).max(1_024).nullable(),
+    updated_at: TimestampSchema,
+    completed_at: TimestampSchema.nullable(),
+  })
+  .strict();
+export type ArchiveRemovalStatus = z.infer<typeof ArchiveRemovalStatusSchema>;
+
 /**
  * Administrator status keeps active suppression separate from physical purge.
- * The active-removal ticket never reports a purge as complete.
+ * Archive progress is visible, while global completion remains owned by the
+ * controlled-store aggregation lifecycle.
  */
 export const RemovalStatusResponseSchema = z
   .object({
@@ -152,6 +173,7 @@ export const RemovalStatusResponseSchema = z
     incomplete: z.array(RemovalAuthoritySchema).max(10_000),
     active_suppression: z.literal("enforced"),
     physical_purge: z.literal("not_implemented"),
+    archive_purge: z.array(ArchiveRemovalStatusSchema).max(10_000),
   })
   .strict();
 export type RemovalStatusResponse = z.infer<typeof RemovalStatusResponseSchema>;

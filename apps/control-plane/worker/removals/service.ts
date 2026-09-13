@@ -13,6 +13,7 @@ import {
   type RemovalExpiryTickResult,
   type RemovalAuthorityLookup,
 } from "./ledger";
+import { listArchivePurgeOperations } from "../archive/purge";
 
 /**
  * Resource identity is the immutable content lineage. A message edit changes
@@ -189,6 +190,17 @@ export const removalStatusForTenant = async (
     ),
     active_suppression: "enforced",
     physical_purge: "not_implemented",
+    archive_purge: (await listArchivePurgeOperations(database, tenantId)).map(
+      (operation) => ({
+        operation_id: operation.id,
+        removal_id: operation.removal_id,
+        status: operation.status,
+        safety_deadline: operation.safety_deadline,
+        failure_code: operation.failure_code,
+        updated_at: operation.updated_at,
+        completed_at: operation.completed_at,
+      }),
+    ),
   });
 };
 

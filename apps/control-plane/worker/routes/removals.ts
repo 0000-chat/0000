@@ -13,10 +13,8 @@ import type { Context, Handler } from "hono";
 import type { AuthorizationVariables } from "../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../auth/ingestion-middleware";
 import { isAdministratorSession } from "../read/authorization";
-import {
-  recordRemovalWithSuppression,
-  removalStatusForTenant,
-} from "../removals/service";
+import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
+import { removalStatusForTenant } from "../removals/service";
 import { scheduleRemovalExpiry } from "../removals/ledger";
 
 type RemovalRouteEnv = {
@@ -146,10 +144,14 @@ export const recordRemovalHandler: Handler<
     const input = context.req.valid("json");
     const tenantId = context.get("authorization").tenant.id;
     if (input.tenant_id !== tenantId) return forbidden(context);
-    return context.json(
-      await recordRemovalWithSuppression(context.env.CONTROL_DB, input),
-      201,
+    const result = await recordRemovalWithArchivePurge(
+      {
+        database: context.env.CONTROL_DB,
+        bucket: context.env.EVENT_ARCHIVE,
+      },
+      input,
     );
+    return context.json(result.authority, 201);
   } catch (error) {
     return unavailable(context, error);
   }

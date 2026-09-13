@@ -4,12 +4,16 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { OpenAPIHono } from "@hono/zod-openapi";
-import type { SessionResponse } from "@communicator/contracts";
+import type {
+  CanonicalEventEnvelope,
+  SessionResponse,
+} from "@communicator/contracts";
 import {
+  RemovalAuthoritySchema,
   RecordRemovalInputSchema,
   ScheduleRemovalExpiryInputSchema,
 } from "../../../../../packages/contracts/src/removals";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../../app";
 import type { VerifiedSubject } from "../../auth/oidc";
 import type { AuthorizationVariables } from "../../auth/middleware";
@@ -31,8 +35,18 @@ import {
   seedAccountAccess,
   seedDirectory,
 } from "../support/directory-fixtures";
+import { archiveCanonicalEventBatch } from "../../archive/writer";
+import {
+  purgeRecordedRemoval,
+  recordRemovalWithArchivePurge,
+} from "../../archive/lifecycle";
+import {
+  cleanupArchiveTenant as cleanupArchiveObjects,
+  makeEvent,
+} from "../archive/support";
 
 const workerEnv = env as typeof env & { CONTROL_DB: D1Database };
+const archiveBucket = (env as Cloudflare.Env).EVENT_ARCHIVE;
 const tenantId = "tenant_pilot";
 const otherTenantId = "tenant_other";
 const fixedNow = "2026-09-14T01:00:00.000Z";
@@ -275,6 +289,34 @@ beforeEach(async () => {
   await seedAccountAccess(workerEnv.CONTROL_DB);
 });
 
+afterEach(async () => {
+  await cleanupArchiveObjects(archiveBucket, tenantId);
+});
+
+const seedArchiveMessage = async (
+  messageId: string,
+  eventId: string,
+  batchId: string,
+): Promise<{ event: CanonicalEventEnvelope; dataKey: string }> => {
+  const event = makeEvent({
+    event_id: eventId,
+    tenant_id: tenantId,
+    account_id: "account_human",
+    conversation_id: "conversation_mcp_admin",
+    payload: { message_id: messageId, body: "archive status secret" },
+  });
+  const committed = await archiveCanonicalEventBatch({
+    bucket: archiveBucket,
+    tenantId,
+    batchId,
+    events: [event],
+    archivedAt: fixedNow,
+    producerVersion: "removal-mcp-test/1",
+    sourceCheckpoint: null,
+  });
+  return { event, dataKey: committed.manifest.data_key };
+};
+
 describe("removal administrator API and MCP boundaries", () => {
   it("allows an administrator through the API and exposes status and expiry state", async () => {
     const record = await apiRequest(adminSession, "/api/v1/removals", {
@@ -310,6 +352,154 @@ describe("removal administrator API and MCP boundaries", () => {
       resource_id: "message_mcp_expiry",
       status: "scheduled",
     });
+  });
+
+  it("exposes completed archive purge through the registered REST and MCP status surfaces", async () => {
+    await seedArchiveMessage(
+      "message_rest_archive",
+      "$rest-archive:server",
+      "batch_rest_archive",
+    );
+    const record = await apiRequest(adminSession, "/api/v1/removals", {
+      method: "POST",
+      body: JSON.stringify(
+        recordInput({
+          resource_id: "message_rest_archive",
+          content_generation: "message_rest_archive",
+          conversation_id: "conversation_mcp_admin",
+        }),
+      ),
+    });
+    expect(record.status).toBe(201);
+    const recordedAuthority = RemovalAuthoritySchema.parse(await record.json());
+
+    const status = await apiRequest(adminSession, "/api/v1/removals");
+    expect(await status.json()).toMatchObject({
+      archive_purge: [
+        expect.objectContaining({
+          removal_id: expect.any(String),
+          status: "pending_deletion",
+        }),
+      ],
+    });
+    await purgeRecordedRemoval(
+      {
+        database: workerEnv.CONTROL_DB,
+        bucket: archiveBucket,
+        safetyWindowMs: 0,
+      },
+      recordedAuthority,
+      new Date("2026-09-16T00:00:00.000Z"),
+    );
+    const completedStatus = await apiRequest(adminSession, "/api/v1/removals");
+    expect(await completedStatus.json()).toMatchObject({
+      archive_purge: expect.arrayContaining([
+        expect.objectContaining({
+          removal_id: recordedAuthority.id,
+          status: "complete",
+        }),
+      ]),
+    });
+
+    await seedArchiveMessage(
+      "message_mcp_archive",
+      "$mcp-archive:server",
+      "batch_mcp_archive",
+    );
+    const mcp = await connectMcp(adminSession);
+    try {
+      const recordResult = await mcp.client.callTool({
+        name: "record_removal",
+        arguments: recordInput({
+          resource_id: "message_mcp_archive",
+          content_generation: "message_mcp_archive",
+          conversation_id: "conversation_mcp_admin",
+        }),
+      });
+      expect(recordResult.isError).not.toBe(true);
+      const mcpAuthority = RemovalAuthoritySchema.parse(
+        structured(recordResult),
+      );
+      await purgeRecordedRemoval(
+        {
+          database: workerEnv.CONTROL_DB,
+          bucket: archiveBucket,
+          safetyWindowMs: 0,
+        },
+        mcpAuthority,
+        new Date("2026-09-16T00:00:00.000Z"),
+      );
+      const statusResult = await mcp.client.callTool({
+        name: "get_removal_status",
+        arguments: {},
+      });
+      expect(structured(statusResult)).toMatchObject({
+        archive_purge: expect.arrayContaining([
+          expect.objectContaining({
+            removal_id: mcpAuthority.id,
+            status: "complete",
+          }),
+        ]),
+      });
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("shows incomplete archive work through REST and MCP while suppression stays active", async () => {
+    const committed = await seedArchiveMessage(
+      "message_archive_status_incomplete",
+      "$archive-status-incomplete:server",
+      "batch_archive_status_incomplete",
+    );
+    const delayedBucket = new Proxy(archiveBucket, {
+      get(target, property, receiver) {
+        if (property === "delete") {
+          return async (key: string | string[]) => {
+            if (key === committed.dataKey) return;
+            return target.delete(key);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    const authorityInput = RecordRemovalInputSchema.parse(
+      recordInput({
+        resource_id: "message_archive_status_incomplete",
+        content_generation: "message_archive_status_incomplete",
+        conversation_id: "conversation_mcp_admin",
+      }),
+    );
+    await recordRemovalWithArchivePurge(
+      {
+        database: workerEnv.CONTROL_DB,
+        bucket: delayedBucket,
+        safetyWindowMs: 0,
+      },
+      authorityInput,
+      new Date(fixedNow),
+    );
+
+    const restStatus = await apiRequest(adminSession, "/api/v1/removals");
+    expect(await restStatus.json()).toMatchObject({
+      archive_purge: [expect.objectContaining({ status: "incomplete" })],
+      active_suppression: "enforced",
+    });
+
+    const mcp = await connectMcp(adminSession);
+    try {
+      const statusResult = await mcp.client.callTool({
+        name: "get_removal_status",
+        arguments: {},
+      });
+      expect(structured(statusResult)).toMatchObject({
+        archive_purge: [expect.objectContaining({ status: "incomplete" })],
+        active_suppression: "enforced",
+      });
+    } finally {
+      await mcp.close();
+    }
   });
 
   it("denies a nonadministrator before any API authority or expiry write", async () => {

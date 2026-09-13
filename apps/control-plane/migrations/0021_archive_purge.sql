@@ -59,3 +59,15 @@ CREATE TABLE archive_purge_objects (
 CREATE INDEX archive_purge_objects_state_idx
   ON archive_purge_objects(operation_id, state, original_manifest_key);
 
+-- A tenant has one canonical archive namespace.  This lease serializes
+-- replacement rewrites for different removals so two authorities cannot
+-- publish sibling replacements that each retain the other authority's data.
+-- Expiry makes the lock recoverable after a crashed worker.
+CREATE TABLE archive_purge_locks (
+  tenant_id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);

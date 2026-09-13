@@ -242,6 +242,95 @@ const readObjects = async (
   return result.results;
 };
 
+type ArchivePurgeCandidateRow = {
+  tenant_id: unknown;
+  removal_id: unknown;
+};
+
+/** Durable wakeups for both incomplete work and late archive batches. */
+export const listArchivePurgeCandidates = async (
+  database: PurgeDatabase,
+  limit = 100,
+): Promise<Array<{ tenantId: string; removalId: string }>> => {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+    throw archiveError("archive_invalid");
+  }
+  const db = primarySession(database);
+  const rows = await db
+    .prepare(
+      `SELECT tenant_id, removal_id
+       FROM archive_purge_operations
+       ORDER BY updated_at ASC, id ASC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<ArchivePurgeCandidateRow>();
+  return rows.results.flatMap((row) => {
+    if (
+      typeof row.tenant_id !== "string" ||
+      typeof row.removal_id !== "string"
+    ) {
+      throw archiveError("archive_corrupt");
+    }
+    return [{ tenantId: row.tenant_id, removalId: row.removal_id }];
+  });
+};
+
+/** Read archive operation progress for an authorized tenant status view. */
+export const listArchivePurgeOperations = async (
+  database: PurgeDatabase,
+  tenantId: string,
+): Promise<ArchivePurgeOperation[]> => {
+  if (!CanonicalResourceIdSchema.safeParse(tenantId).success) {
+    throw archiveError("archive_invalid");
+  }
+  const db = primarySession(database);
+  const rows = await db
+    .prepare(
+      `SELECT ${OPERATION_COLUMNS}
+       FROM archive_purge_operations
+       WHERE tenant_id = ?
+       ORDER BY updated_at ASC, id ASC`,
+    )
+    .bind(tenantId)
+    .all<OperationRow>();
+  return rows.results.flatMap((row) => {
+    const operation = parseOperation(row);
+    if (operation === null) throw archiveError("archive_corrupt");
+    return [operation];
+  });
+};
+
+/**
+ * Read the durable archive-only purge state without changing it.  Removal
+ * status callers use this to show incomplete work while active suppression
+ * remains authoritative in the separate removal ledger.
+ */
+export const readArchivePurgeForRemoval = async (
+  database: PurgeDatabase,
+  tenantId: string,
+  removalId: string,
+): Promise<ArchivePurgeResult | null> => {
+  if (!CanonicalResourceIdSchema.safeParse(tenantId).success) {
+    throw archiveError("archive_invalid");
+  }
+  if (!CanonicalResourceIdSchema.safeParse(removalId).success) {
+    throw archiveError("archive_invalid");
+  }
+  const db = primarySession(database);
+  const operation = await readOperation(
+    db,
+    tenantId,
+    operationIdForRemoval(removalId),
+  );
+  if (operation === null) return null;
+  const rows = await readObjects(db, operation.id);
+  return {
+    operation,
+    objects: rows.map((row) => lineageFromRows(operation, row)),
+  };
+};
+
 const updateOperation = async (
   db: D1DatabaseSession,
   operation: ArchivePurgeOperation,
@@ -311,6 +400,73 @@ const insertOperation = async (
     throw archiveError("archive_conflict");
   }
   return operation;
+};
+
+const PURGE_LOCK_LEASE_MS = 60 * 1_000;
+
+type PurgeLockRenew = () => Promise<void>;
+
+const withPurgeLock = async <T>(
+  db: D1DatabaseSession,
+  tenantId: string,
+  operationId: string,
+  nowDate: Date,
+  work: (renew: PurgeLockRenew) => Promise<T>,
+): Promise<T> => {
+  const leaseToken = `archive_lock_${crypto.randomUUID()}`;
+  const now = timestamp(nowDate);
+  const leaseExpiresAt = new Date(
+    nowDate.getTime() + PURGE_LOCK_LEASE_MS,
+  ).toISOString();
+  const claim = await db
+    .prepare(
+      `INSERT INTO archive_purge_locks (
+         tenant_id, operation_id, lease_token, lease_expires_at,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id) DO UPDATE SET
+         operation_id = excluded.operation_id,
+         lease_token = excluded.lease_token,
+         lease_expires_at = excluded.lease_expires_at,
+         updated_at = excluded.updated_at
+       WHERE archive_purge_locks.lease_expires_at <= excluded.updated_at`,
+    )
+    .bind(tenantId, operationId, leaseToken, leaseExpiresAt, now, now)
+    .run();
+  if ((claim.meta.changes ?? 0) !== 1) {
+    throw archiveError("archive_busy");
+  }
+
+  const renew = async (): Promise<void> => {
+    const renewed = await db
+      .prepare(
+        `UPDATE archive_purge_locks
+         SET lease_expires_at = ?, updated_at = ?
+         WHERE tenant_id = ? AND operation_id = ? AND lease_token = ?`,
+      )
+      .bind(
+        new Date(Date.now() + PURGE_LOCK_LEASE_MS).toISOString(),
+        new Date().toISOString(),
+        tenantId,
+        operationId,
+        leaseToken,
+      )
+      .run();
+    if ((renewed.meta.changes ?? 0) !== 1) {
+      throw archiveError("archive_busy");
+    }
+  };
+
+  try {
+    return await work(renew);
+  } finally {
+    await db
+      .prepare(
+        "DELETE FROM archive_purge_locks WHERE tenant_id = ? AND operation_id = ? AND lease_token = ?",
+      )
+      .bind(tenantId, operationId, leaseToken)
+      .run();
+  }
 };
 
 const insertObjectPlan = async (
@@ -802,15 +958,6 @@ export const purgeArchiveForRemoval = async (
   const safetyWindow = input.safetyWindowMs ?? ARCHIVE_PURGE_SAFETY_WINDOW_MS;
   const operationId = operationIdForRemoval(authority.id);
   let operation = await readOperation(db, authority.tenant_id, operationId);
-  if (operation?.status === "complete") {
-    const rows = await readObjects(db, operation.id);
-    return {
-      operation,
-      objects: rows.map((row) =>
-        lineageFromRows(operation as ArchivePurgeOperation, row),
-      ),
-    };
-  }
   if (operation === null) {
     operation = await insertOperation(
       db,
@@ -819,23 +966,126 @@ export const purgeArchiveForRemoval = async (
       new Date(nowDate.getTime() + safetyWindow).toISOString(),
     );
   }
+  const operationForRun = operation;
 
-  let plans: PurgePlan[] = [];
-  let discoveryError: unknown;
   try {
-    plans = await discoverPlans(input.bucket, authority);
-  } catch (error) {
-    discoveryError = error;
-  }
+    return await withPurgeLock(
+      db,
+      authority.tenant_id,
+      operationForRun.id,
+      nowDate,
+      async (renew) => {
+        let currentOperation = operationForRun;
+        await renew();
+        let plans: PurgePlan[] = [];
+        let discoveryError: unknown;
+        try {
+          plans = await discoverPlans(input.bucket, authority);
+        } catch (error) {
+          discoveryError = error;
+        }
 
-  if (discoveryError !== undefined) {
-    const code = errorCode(discoveryError);
+        if (discoveryError !== undefined) {
+          const code = errorCode(discoveryError);
+          currentOperation = await updateOperation(
+            db,
+            currentOperation,
+            "incomplete",
+            now,
+            code,
+            null,
+          );
+          const rows = await readObjects(db, currentOperation.id);
+          return {
+            operation: currentOperation,
+            objects: rows.map((row) => lineageFromRows(currentOperation, row)),
+          };
+        }
+
+        for (const plan of plans) {
+          await insertObjectPlan(db, currentOperation, plan, now);
+        }
+        const rows = await readObjects(db, currentOperation.id);
+        const plansByKey = new Map(
+          plans.map((plan) => [plan.manifestKey, plan]),
+        );
+        const processed: ObjectRow[] = [];
+        for (const row of rows) {
+          await renew();
+          const updated = await processObject(
+            db,
+            input.bucket,
+            authority,
+            currentOperation,
+            row,
+            plansByKey.get(String(row.original_manifest_key)),
+            nowDate,
+            input.hooks,
+          );
+          processed.push(updated);
+        }
+
+        const hasIncomplete = processed.some(
+          (row) => row.state === "incomplete",
+        );
+        const hasPending = processed.some(
+          (row) =>
+            row.state === "planned" ||
+            row.state === "replacement_written" ||
+            row.state === "manifest_deleted",
+        );
+        if (hasIncomplete) {
+          currentOperation = await updateOperation(
+            db,
+            currentOperation,
+            "incomplete",
+            now,
+            "archive_purge_incomplete",
+            null,
+          );
+        } else if (hasPending) {
+          const status: ArchivePurgeStatus =
+            nowDate.getTime() < Date.parse(currentOperation.safety_deadline)
+              ? "pending_deletion"
+              : "rewritten";
+          currentOperation = await updateOperation(
+            db,
+            currentOperation,
+            status,
+            now,
+            null,
+            null,
+          );
+        } else {
+          currentOperation = await updateOperation(
+            db,
+            currentOperation,
+            "complete",
+            now,
+            null,
+            now,
+          );
+        }
+
+        const finalRows = await readObjects(db, currentOperation.id);
+        return {
+          operation: currentOperation,
+          objects: finalRows.map((row) =>
+            lineageFromRows(currentOperation, row),
+          ),
+        };
+      },
+    );
+  } catch (error) {
+    if (!(error instanceof ArchiveError) || error.code !== "archive_busy") {
+      throw error;
+    }
     operation = await updateOperation(
       db,
       operation,
       "incomplete",
       now,
-      code,
+      "archive_purge_busy",
       null,
     );
     const rows = await readObjects(db, operation.id);
@@ -846,65 +1096,6 @@ export const purgeArchiveForRemoval = async (
       ),
     };
   }
-
-  for (const plan of plans) await insertObjectPlan(db, operation, plan, now);
-  const rows = await readObjects(db, operation.id);
-  const plansByKey = new Map(plans.map((plan) => [plan.manifestKey, plan]));
-  const processed: ObjectRow[] = [];
-  for (const row of rows) {
-    const updated = await processObject(
-      db,
-      input.bucket,
-      authority,
-      operation,
-      row,
-      plansByKey.get(String(row.original_manifest_key)),
-      nowDate,
-      input.hooks,
-    );
-    processed.push(updated);
-  }
-
-  const hasIncomplete = processed.some((row) => row.state === "incomplete");
-  const hasPending = processed.some(
-    (row) =>
-      row.state === "planned" ||
-      row.state === "replacement_written" ||
-      row.state === "manifest_deleted",
-  );
-  if (hasIncomplete) {
-    operation = await updateOperation(
-      db,
-      operation,
-      "incomplete",
-      now,
-      "archive_purge_incomplete",
-      null,
-    );
-  } else if (hasPending) {
-    const status: ArchivePurgeStatus =
-      nowDate.getTime() < Date.parse(operation.safety_deadline)
-        ? "pending_deletion"
-        : "rewritten";
-    operation = await updateOperation(db, operation, status, now, null, null);
-  } else {
-    operation = await updateOperation(
-      db,
-      operation,
-      "complete",
-      now,
-      null,
-      now,
-    );
-  }
-
-  const finalRows = await readObjects(db, operation.id);
-  return {
-    operation,
-    objects: finalRows.map((row) =>
-      lineageFromRows(operation as ArchivePurgeOperation, row),
-    ),
-  };
 };
 
 export const runArchivePurge = purgeArchiveForRemoval;

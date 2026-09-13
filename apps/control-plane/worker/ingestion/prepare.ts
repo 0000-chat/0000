@@ -151,6 +151,7 @@ const mapArchiveCode = (code: ArchiveError["code"]): IngestionError["code"] => {
     case "archive_too_large":
       return "ingestion_too_large";
     case "archive_unavailable":
+    case "archive_busy":
       return "ingestion_unavailable";
     case "archive_conflict":
       return "ingestion_conflict";
