@@ -11,7 +11,9 @@ secret, or license.
 
 Standalone public components do not require hosted platform authentication.
 Cloudflare is the public ingress and normal runtime class. Run
-`./scripts/check`; direct commits on `main` are blocked after bootstrap.
+`./scripts/check`; it validates metadata, formats supported files with Biome,
+and lints supported JavaScript and TypeScript files with pinned tools. Direct
+commits on `main` are blocked after bootstrap.
 
 ## Agent skills
 
