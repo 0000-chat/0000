@@ -15,6 +15,8 @@ import {
   GetProjectionConversationResultSchema,
   GetProjectionAttachmentInputSchema,
   GetProjectionAttachmentResultSchema,
+  GetWebhookMessageInputSchema,
+  WebhookMessageSchema,
   ProjectionAttachmentSchema,
   ListProjectionAttachmentsInputSchema,
   ListProjectionAttachmentsResultSchema,
@@ -24,6 +26,7 @@ import {
   MAX_PROJECTION_CHANGES,
   MAX_PROJECTION_BATCH_BYTES,
   MAX_PROJECTION_BATCH_EVENTS,
+  MAX_ATTACHMENT_COUNT,
   ListProjectionChangesInputSchema,
   ListProjectionConversationsInputSchema,
   ListProjectionMessageSearchInputSchema,
@@ -60,6 +63,8 @@ import {
   type ConversationPageResult,
   type GetProjectionConversationInput,
   type GetProjectionAttachmentInput,
+  type GetWebhookMessageInput,
+  type WebhookMessage,
   type ProjectionAttachment,
   type ListProjectionAttachmentsInput,
   type ListProjectionChannelStatsInput,
@@ -294,6 +299,13 @@ type MessageQueryRow = {
   deleted_at: string | null;
   current_event_id: string;
   sender_participant_id: string | null;
+};
+
+type WebhookMessageQueryRow = MessageQueryRow & {
+  platform: string;
+  remote_message_id: string | null;
+  matrix_room_id: string | null;
+  matrix_event_id: string | null;
 };
 
 type MessageSearchQueryRow = MessageQueryRow & {
@@ -4243,6 +4255,108 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         GetProjectionAttachmentResultSchema.parse(
           row === undefined ? null : mapProjectionAttachment(row),
         ),
+      );
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /**
+   * Read the current message and its non-removed attachment metadata for the
+   * delivery worker. This method deliberately returns the tombstone state so
+   * the worker can cancel pending content without reading the old body.
+   */
+  async getWebhookMessage(
+    input: GetWebhookMessageInput,
+  ): Promise<WebhookMessage | null> {
+    try {
+      const parsed = parseProjectionInput(GetWebhookMessageInputSchema, input);
+      requireAuthorization(
+        parsed.tenant_id,
+        parsed.authorization,
+        "projection.read",
+      );
+      requireIdentityAuthorization(parsed.authorization, parsed.identity_id);
+
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+
+      const scope = accountScopeFilter(
+        parsed.authorization,
+        "messages.account_id",
+        "messages.conversation_id",
+        parsed.account_id,
+      );
+      const row = this.ctx.storage.sql
+        .exec<WebhookMessageQueryRow>(
+          `SELECT messages.id, messages.identity_id, messages.account_id, messages.connection_id, messages.conversation_id, messages.platform, messages.direction, messages.sender_participant_id, messages.sender_label, messages.body, messages.occurred_at, messages.occurred_ms, messages.delivery_status, messages.attachment_count, messages.deleted_at, messages.current_event_id, messages.remote_message_id, messages.matrix_room_id, messages.matrix_event_id FROM messages WHERE messages.id = ? AND messages.identity_id = ? AND messages.account_id = ? AND messages.conversation_id = ?${scope.sql} LIMIT 1`,
+          parsed.message_id,
+          parsed.identity_id,
+          parsed.account_id,
+          parsed.conversation_id,
+          ...scope.bindings,
+        )
+        .toArray()[0];
+      if (row === undefined) return null;
+
+      const attachmentRows =
+        row.deleted_at === null
+          ? this.ctx.storage.sql
+              .exec<ProjectionAttachmentQueryRow>(
+                `${attachmentSelect} WHERE attachments.message_id = ? AND attachments.identity_id = ? AND attachments.account_id = ? AND attachments.connection_id = ? AND attachments.conversation_id = ? AND attachments.deleted_at IS NULL ORDER BY attachments.id ASC LIMIT ?`,
+                row.id,
+                row.identity_id,
+                row.account_id,
+                row.connection_id,
+                row.conversation_id,
+                MAX_ATTACHMENT_COUNT + 1,
+              )
+              .toArray()
+          : [];
+      if (attachmentRows.length > MAX_ATTACHMENT_COUNT) {
+        throw projectionError("projection_too_large");
+      }
+
+      return structuredClone(
+        WebhookMessageSchema.parse({
+          message_id: row.id,
+          tenant_id: parsed.tenant_id,
+          identity_id: row.identity_id,
+          account_id: row.account_id,
+          connection_id: row.connection_id,
+          conversation_id: row.conversation_id,
+          platform: row.platform,
+          direction: row.direction,
+          sender_participant_id:
+            row.deleted_at === null ? row.sender_participant_id : null,
+          sender_label:
+            row.deleted_at === null ? row.sender_label : "Deleted sender",
+          body: row.deleted_at === null ? row.body : "",
+          occurred_at: row.occurred_at,
+          revision: row.current_event_id,
+          remote_message_id:
+            row.deleted_at === null ? row.remote_message_id : null,
+          matrix_room_id: row.deleted_at === null ? row.matrix_room_id : null,
+          matrix_event_id: row.deleted_at === null ? row.matrix_event_id : null,
+          deleted_at: row.deleted_at,
+          attachments: attachmentRows.map((attachment) => ({
+            attachment_id: attachment.id,
+            message_id: attachment.message_id,
+            identity_id: attachment.identity_id,
+            account_id: attachment.account_id,
+            connection_id: attachment.connection_id,
+            conversation_id: attachment.conversation_id,
+            platform: attachment.platform,
+            file_name: attachment.file_name,
+            mime_type: attachment.mime_type,
+            size_bytes: attachment.size_bytes,
+            sha256: attachment.sha256,
+            revision: attachment.last_event_id,
+            expires_at: attachment.expires_at,
+          })),
+        }),
       );
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");

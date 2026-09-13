@@ -352,6 +352,41 @@ describe("committed archive queue consumer", () => {
     ).resolves.toEqual([{ count: 1 }]);
   });
 
+  it("retries the committed pointer when fan-out fails after the projection save", async () => {
+    const fixture = await createMatrixFixture();
+    const fanOutIncomingWebhookDeliveries = vi
+      .fn<
+        NonNullable<
+          IngestionConsumerServices["fanOutIncomingWebhookDeliveries"]
+        >
+      >()
+      .mockRejectedValueOnce(new Error("fanout unavailable"))
+      .mockResolvedValue([]);
+
+    const first = await runInjectedBatchWithRetry(fixture.pointer, {
+      ...fixture.services,
+      fanOutIncomingWebhookDeliveries,
+    });
+    expect(first.result).toMatchObject({
+      retryMessages: [{ msgId: "consumer-injected" }],
+      explicitAcks: [],
+    });
+    expect(first.retryOptions).toEqual({ delaySeconds: 60 });
+    expect(fixture.applyBatch).toHaveBeenCalledTimes(1);
+    expect(fanOutIncomingWebhookDeliveries).toHaveBeenCalledTimes(1);
+
+    const second = await runInjectedBatchWithRetry(fixture.pointer, {
+      ...fixture.services,
+      fanOutIncomingWebhookDeliveries,
+    });
+    expect(second.result).toMatchObject({
+      retryMessages: [],
+      explicitAcks: ["consumer-injected"],
+    });
+    expect(fixture.applyBatch).toHaveBeenCalledTimes(2);
+    expect(fanOutIncomingWebhookDeliveries).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps successful and failed sibling deliveries independent", async () => {
     const { pointer } = await archiveFor();
     const result = await runWorkerBatch([

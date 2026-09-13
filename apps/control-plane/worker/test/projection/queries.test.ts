@@ -1338,6 +1338,7 @@ describe("tenant projection query RPCs", () => {
       "getConversation",
       "listChannelStats",
       "getAttachment",
+      "getWebhookMessage",
       "listAttachments",
       "listMessages",
       "searchMessages",

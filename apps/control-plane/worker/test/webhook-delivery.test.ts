@@ -1,0 +1,667 @@
+import { env } from "cloudflare:test";
+import type {
+  ProjectionEventEnvelope,
+  WebhookMessage,
+  WebhookSubscription,
+} from "@communicator/contracts";
+import { beforeEach, describe, expect, it } from "vitest";
+import {
+  createWebhookCredentialResolver,
+  deliverIncomingWebhookBatch,
+  fanOutIncomingWebhookDeliveries,
+  type WebhookProjection,
+} from "../webhooks/delivery";
+import {
+  clearDirectory,
+  seedAccountAccess,
+  seedDirectory,
+} from "./support/directory-fixtures";
+
+const workerEnv = env as typeof env & { CONTROL_DB: D1Database };
+const fixedNow = new Date("2026-09-14T00:00:00.000Z");
+
+const subscription = (input: {
+  id: string;
+  destinationUrl?: string;
+  credentialRef?: string | null;
+  globalEnabled?: boolean;
+  accountEnabled?: boolean;
+  destinationVersion?: number;
+}): WebhookSubscription => ({
+  id: input.id,
+  tenant_id: "tenant_pilot",
+  owner_installation_id: null,
+  owner_principal_id: "principal_human",
+  creator_principal_id: "principal_human",
+  creator_membership_id: "membership_human",
+  creator_identity_id: "identity_human",
+  logical_agent_id: null,
+  ownership_mode: "human_owner",
+  destination: {
+    url: input.destinationUrl ?? "https://hooks.example.test/destination",
+    credential_ref: input.credentialRef ?? null,
+  },
+  destination_version: input.destinationVersion ?? 1,
+  event_filter: { event_types: ["message.created"] },
+  global_enabled: input.globalEnabled ?? true,
+  account_rules: [
+    { account_id: "account_human", enabled: input.accountEnabled ?? true },
+  ],
+  chat_rules: [],
+  status: "active",
+  created_at: fixedNow.toISOString(),
+  updated_at: fixedNow.toISOString(),
+  revoked_at: null,
+});
+
+const incomingEvent = (
+  eventId = "event_incoming_1",
+): Extract<ProjectionEventEnvelope, { event_type: "message.created" }> => ({
+  schema_version: 1,
+  event_id: eventId,
+  event_type: "message.created",
+  event_source: "live",
+  tenant_id: "tenant_pilot",
+  identity_id: "identity_human",
+  platform: "whatsapp",
+  account_id: "account_human",
+  conversation_id: "conversation_one",
+  matrix_room_id: "!room:example.test",
+  matrix_event_id: "$event:example.test",
+  remote_message_id: "remote_message_1",
+  occurred_at: fixedNow.toISOString(),
+  observed_at: fixedNow.toISOString(),
+  payload: {
+    message_id: "message_incoming_1",
+    direction: "inbound",
+    sender_participant_id: "participant_one",
+    sender_label: "Alice",
+    body: "incoming body",
+    reply_to_message_id: null,
+    delivery_status: "delivered",
+    unread: true,
+  },
+});
+
+const message = (body = "incoming body"): WebhookMessage => ({
+  message_id: "message_incoming_1",
+  tenant_id: "tenant_pilot",
+  identity_id: "identity_human",
+  account_id: "account_human",
+  connection_id: "connection_human_whatsapp",
+  conversation_id: "conversation_one",
+  platform: "whatsapp",
+  direction: "inbound",
+  sender_participant_id: "participant_one",
+  sender_label: "Alice",
+  body,
+  occurred_at: fixedNow.toISOString(),
+  revision: body === "incoming body" ? "event_incoming_1" : "event_edited_2",
+  remote_message_id: "remote_message_1",
+  matrix_room_id: "!room:example.test",
+  matrix_event_id: "$event:example.test",
+  deleted_at: null,
+  attachments: [],
+});
+
+const insertSubscription = async (
+  value: WebhookSubscription,
+): Promise<void> => {
+  const db = workerEnv.CONTROL_DB;
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO webhook_subscriptions
+         (id, tenant_id, creation_idempotency_key, owner_installation_id,
+          owner_principal_id, creator_principal_id, creator_membership_id,
+          creator_identity_id, logical_agent_id, ownership_mode,
+          destination_url, destination_credential_ref, destination_version,
+          event_filter_json, global_enabled, status, created_at, updated_at,
+          revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        value.id,
+        value.tenant_id,
+        `${value.id}_creation`,
+        value.owner_installation_id,
+        value.owner_principal_id,
+        value.creator_principal_id,
+        value.creator_membership_id,
+        value.creator_identity_id,
+        value.logical_agent_id,
+        value.ownership_mode,
+        value.destination.url,
+        value.destination.credential_ref,
+        value.destination_version,
+        JSON.stringify(value.event_filter),
+        value.global_enabled ? 1 : 0,
+        value.status,
+        value.created_at,
+        value.updated_at,
+        value.revoked_at,
+      ),
+    db
+      .prepare(
+        `INSERT INTO webhook_subscription_account_rules
+         (tenant_id, subscription_id, account_id, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        value.tenant_id,
+        value.id,
+        "account_human",
+        value.account_rules[0]?.enabled ? 1 : 0,
+        value.created_at,
+        value.updated_at,
+      ),
+    db
+      .prepare(
+        `INSERT INTO account_grants
+         (id, tenant_id, membership_id, identity_id, account_id,
+          operation_scope, chat_scope, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'webhook.manage', 'all_chats', 'active', ?, ?)
+         ON CONFLICT(tenant_id, membership_id, identity_id, account_id, operation_scope)
+         DO NOTHING`,
+      )
+      .bind(
+        `${value.id}_grant`,
+        value.tenant_id,
+        value.creator_membership_id,
+        value.creator_identity_id,
+        "account_human",
+        value.created_at,
+        value.updated_at,
+      ),
+  ]);
+};
+
+const projectionFor = (
+  current: () => WebhookMessage | null = () => message(),
+): WebhookProjection => ({
+  getWebhookMessage: async () => current(),
+});
+
+const deliveryRow = async (id: string) =>
+  workerEnv.CONTROL_DB.prepare(
+    "SELECT id, status, destination_version, source_revision, http_status, error_code, payload_json, cancellation_reason FROM webhook_deliveries WHERE id = ?",
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      status: string;
+      destination_version: number;
+      source_revision: string | null;
+      http_status: number | null;
+      error_code: string | null;
+      payload_json: string | null;
+      cancellation_reason: string | null;
+    }>();
+
+beforeEach(async () => {
+  await clearDirectory(workerEnv.CONTROL_DB);
+  await seedDirectory(workerEnv.CONTROL_DB);
+  await seedAccountAccess(workerEnv.CONTROL_DB);
+});
+
+describe("durable incoming webhook delivery", () => {
+  it("commits one stable row across duplicate fan-out and records HTTP success", async () => {
+    await insertSubscription(subscription({ id: "webhook_one" }));
+    const event = incomingEvent();
+    const first = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [event],
+      now: () => fixedNow,
+    });
+    const second = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [event],
+      now: () => fixedNow,
+    });
+    expect(first).toEqual(second);
+    expect(first).toHaveLength(1);
+    await expect(
+      workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM webhook_deliveries",
+      ).first<{ count: number }>(),
+    ).resolves.toMatchObject({ count: 1 });
+
+    const requests: Request[] = [];
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: first,
+      services: {
+        now: () => fixedNow,
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+    const row = await deliveryRow(first[0] ?? "");
+    expect(row).toMatchObject({
+      status: "delivered",
+      http_status: 202,
+      error_code: null,
+    });
+    expect(requests).toHaveLength(1);
+    await expect(requests[0]?.json()).resolves.toMatchObject({
+      type: "message.created",
+      text: "incoming body",
+      source_message_id: "message_incoming_1",
+    });
+  });
+
+  it("keeps independent policy filters independent and excludes history/own events", async () => {
+    await insertSubscription(subscription({ id: "webhook_enabled" }));
+    await insertSubscription(
+      subscription({ id: "webhook_disabled", accountEnabled: false }),
+    );
+    const eligible = incomingEvent("event_policy_1");
+    const history = {
+      ...eligible,
+      event_id: "event_history",
+      event_source: "backfill" as const,
+    };
+    const outbound = {
+      ...eligible,
+      event_id: "event_outbound",
+      payload: { ...eligible.payload, direction: "outbound" as const },
+    };
+    const ids = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [eligible, history, outbound],
+      now: () => fixedNow,
+    });
+    expect(ids).toHaveLength(1);
+    const rows = await workerEnv.CONTROL_DB.prepare(
+      "SELECT subscription_id, source_event_id FROM webhook_deliveries",
+    ).all<{ subscription_id: string; source_event_id: string }>();
+    expect(rows.results).toEqual([
+      { subscription_id: "webhook_enabled", source_event_id: "event_policy_1" },
+    ]);
+  });
+
+  it("hydrates the latest revision and cancels when authorization is revoked before HTTP", async () => {
+    await insertSubscription(subscription({ id: "webhook_race" }));
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_race")],
+      now: () => fixedNow,
+    });
+    let latest = message("edited body");
+    let fetchCount = 0;
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => latest),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        beforeFetch: async () => {
+          await workerEnv.CONTROL_DB.prepare(
+            "UPDATE webhook_subscriptions SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+          )
+            .bind(
+              fixedNow.toISOString(),
+              fixedNow.toISOString(),
+              "webhook_race",
+            )
+            .run();
+        },
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 200 });
+        },
+      },
+    });
+    expect(fetchCount).toBe(0);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "subscription_revoked",
+    });
+
+    await insertSubscription(subscription({ id: "webhook_latest" }));
+    const [latestId] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_latest")],
+      now: () => fixedNow,
+    });
+    const requests: Request[] = [];
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => latest),
+      deliveryIds: [latestId ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return new Response(null, { status: 200 });
+        },
+      },
+    });
+    await expect(requests[0]?.json()).resolves.toMatchObject({
+      text: "edited body",
+    });
+  });
+
+  it("rechecks revocation after an owner credential resolver is released", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_credential_race",
+        credentialRef: "owner-ref",
+      }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_credential_race")],
+      now: () => fixedNow,
+    });
+    let enteredResolver!: () => void;
+    let releaseResolver!: (value: string) => void;
+    const resolverEntered = new Promise<void>((resolve) => {
+      enteredResolver = resolve;
+    });
+    const resolverRelease = new Promise<string>((resolve) => {
+      releaseResolver = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        resolveCredential: async () => {
+          enteredResolver();
+          return resolverRelease;
+        },
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 200 });
+        },
+      },
+    });
+    await resolverEntered;
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE webhook_subscriptions SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(
+        fixedNow.toISOString(),
+        fixedNow.toISOString(),
+        "webhook_credential_race",
+      )
+      .run();
+    releaseResolver("Bearer should-not-send");
+    await delivery;
+    expect(fetchCount).toBe(0);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "subscription_revoked",
+    });
+  });
+
+  it("suppresses a tombstone and fences a destination replacement during credential resolution", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_tombstone_race",
+        credentialRef: "owner-ref",
+      }),
+    );
+    const [tombstoneId] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_tombstone_race")],
+      now: () => fixedNow,
+    });
+    let currentMessage: WebhookMessage | null = message();
+    let enterTombstoneResolver!: () => void;
+    let releaseTombstoneResolver!: (value: string) => void;
+    const tombstoneEntered = new Promise<void>((resolve) => {
+      enterTombstoneResolver = resolve;
+    });
+    const tombstoneRelease = new Promise<string>((resolve) => {
+      releaseTombstoneResolver = resolve;
+    });
+    const tombstoneDelivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => currentMessage),
+      deliveryIds: [tombstoneId ?? ""],
+      services: {
+        now: () => fixedNow,
+        resolveCredential: async () => {
+          enterTombstoneResolver();
+          return tombstoneRelease;
+        },
+        fetch: async () => new Response(null, { status: 200 }),
+      },
+    });
+    await tombstoneEntered;
+    currentMessage = {
+      ...message(),
+      body: "",
+      sender_label: "Deleted sender",
+      deleted_at: fixedNow.toISOString(),
+    };
+    releaseTombstoneResolver("Bearer should-not-send");
+    await tombstoneDelivery;
+    expect(await deliveryRow(tombstoneId ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "source_tombstoned_or_unavailable",
+    });
+
+    await insertSubscription(
+      subscription({
+        id: "webhook_destination_race",
+        credentialRef: "owner-ref",
+      }),
+    );
+    const [destinationId] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_destination_race")],
+      now: () => fixedNow,
+    });
+    let enterDestinationResolver!: () => void;
+    let releaseDestinationResolver!: (value: string) => void;
+    const destinationEntered = new Promise<void>((resolve) => {
+      enterDestinationResolver = resolve;
+    });
+    const destinationRelease = new Promise<string>((resolve) => {
+      releaseDestinationResolver = resolve;
+    });
+    const destinationDelivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [destinationId ?? ""],
+      services: {
+        now: () => fixedNow,
+        resolveCredential: async () => {
+          enterDestinationResolver();
+          return destinationRelease;
+        },
+        fetch: async () => new Response(null, { status: 200 }),
+      },
+    });
+    await destinationEntered;
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE webhook_subscriptions SET destination_url = ?, destination_version = destination_version + 1, updated_at = ? WHERE id = ?",
+    )
+      .bind(
+        "https://hooks.example.test/replaced",
+        fixedNow.toISOString(),
+        "webhook_destination_race",
+      )
+      .run();
+    releaseDestinationResolver("Bearer should-not-send");
+    await destinationDelivery;
+    expect(await deliveryRow(destinationId ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "destination_version_mismatch",
+    });
+  });
+
+  it("fences credential resolution by owner and stores authenticated attachment refs", async () => {
+    const resolver = createWebhookCredentialResolver({
+      get: async () =>
+        JSON.stringify({
+          credentials: [
+            {
+              tenant_id: "tenant_pilot",
+              owner_principal_id: "principal_human",
+              owner_installation_id: null,
+              credential_ref: "owner-ref",
+              authorization: "Bearer test-webhook-token",
+            },
+          ],
+        }),
+    });
+    await expect(
+      resolver({
+        tenantId: "tenant_pilot",
+        subscriptionId: "webhook_one",
+        ownerPrincipalId: "principal_other",
+        ownerInstallationId: null,
+        credentialRef: "owner-ref",
+      }),
+    ).resolves.toBeNull();
+
+    await insertSubscription(
+      subscription({ id: "webhook_attachment", credentialRef: "owner-ref" }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_attachment")],
+      now: () => fixedNow,
+    });
+    const attachmentMessage: WebhookMessage = {
+      ...message(),
+      attachments: [
+        {
+          attachment_id: "attachment_one",
+          message_id: "message_incoming_1",
+          identity_id: "identity_human",
+          account_id: "account_human",
+          connection_id: "connection_human_whatsapp",
+          conversation_id: "conversation_one",
+          platform: "whatsapp",
+          file_name: "photo.jpg",
+          mime_type: "image/jpeg",
+          size_bytes: 42,
+          sha256: "a".repeat(64),
+          revision: "event_attachment",
+          expires_at: null,
+        },
+      ],
+    };
+    const requests: Request[] = [];
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => attachmentMessage),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        resolveCredential: resolver,
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return new Response(null, { status: 200 });
+        },
+      },
+    });
+    expect(requests[0]?.headers.get("authorization")).toBe(
+      "Bearer test-webhook-token",
+    );
+    const payload = (await requests[0]?.json()) as {
+      attachments: Array<Record<string, unknown>>;
+    };
+    expect(payload.attachments[0]).toMatchObject({
+      download_path: "/api/v1/attachments/attachment_one/download",
+    });
+    expect(String(payload.attachments[0]?.download_grant)).toMatch(/^adg_/u);
+    expect(payload.attachments[0]).not.toHaveProperty("media_key");
+  });
+
+  it("keeps HTTP failures durable and does not acknowledge a live lease", async () => {
+    await insertSubscription(subscription({ id: "webhook_failure" }));
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_failure")],
+      now: () => fixedNow,
+    });
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => new Response(null, { status: 503 }),
+      },
+    });
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "failed",
+      http_status: 503,
+      error_code: "http_503",
+    });
+
+    const [busyId] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_busy")],
+      now: () => fixedNow,
+    });
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE webhook_deliveries SET status = 'leased', lease_id = ?, lease_expires_at = ? WHERE id = ?",
+    )
+      .bind(
+        "lease_held",
+        new Date(fixedNow.getTime() + 30_000).toISOString(),
+        busyId,
+      )
+      .run();
+    await expect(
+      deliverIncomingWebhookBatch({
+        database: workerEnv.CONTROL_DB,
+        tenantId: "tenant_pilot",
+        projection: projectionFor(),
+        deliveryIds: [busyId ?? ""],
+        services: { now: () => fixedNow },
+      }),
+    ).rejects.toThrow("webhook delivery lease is active");
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE webhook_deliveries SET lease_expires_at = ? WHERE id = ?",
+    )
+      .bind(new Date(fixedNow.getTime() - 1).toISOString(), busyId)
+      .run();
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [busyId ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => new Response(null, { status: 200 }),
+      },
+    });
+    expect(await deliveryRow(busyId ?? "")).toMatchObject({
+      status: "delivered",
+      http_status: 200,
+    });
+  });
+});

@@ -233,3 +233,67 @@ export const WebhookSubscriptionEvaluationSchema = z
 export type WebhookSubscriptionEvaluation = z.infer<
   typeof WebhookSubscriptionEvaluationSchema
 >;
+
+export const WebhookDeliveryStatusSchema = z.enum([
+  "pending",
+  "leased",
+  "delivered",
+  "failed",
+  "cancelled",
+]);
+export type WebhookDeliveryStatus = z.infer<typeof WebhookDeliveryStatusSchema>;
+
+const WebhookAttachmentReferenceSchema = z
+  .object({
+    attachment_id: CommunicatorIdSchema,
+    message_id: CommunicatorIdSchema,
+    file_name: z.string().max(512).nullable(),
+    mime_type: z.string().max(255).nullable(),
+    size_bytes: z.number().int().safe().nonnegative().nullable(),
+    sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable(),
+    revision: z.string().min(1).max(1_024),
+    download_path: z.string().min(1).max(2_048),
+    download_grant: z.string().min(32).max(512).nullable(),
+    download_grant_expires_at: TimestampSchema.nullable(),
+  })
+  .strict();
+export type WebhookAttachmentReference = z.infer<
+  typeof WebhookAttachmentReferenceSchema
+>;
+
+export const WebhookDeliveryPayloadSchema = z
+  .object({
+    schema_version: z.literal(1),
+    type: z.literal("message.created"),
+    delivery_id: CommunicatorIdSchema,
+    source_event_id: z.string().min(1).max(1_024),
+    source_message_id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    account_id: CommunicatorIdSchema,
+    chat_id: CommunicatorIdSchema,
+    revision: z.string().min(1).max(1_024),
+    timestamp: TimestampSchema,
+    sender: z
+      .object({
+        participant_id: CommunicatorIdSchema.nullable(),
+        label: z.string().min(1).max(100),
+      })
+      .strict(),
+    text: z.string().max(20_000),
+    source: z
+      .object({
+        remote_message_id: z.string().min(1).max(1_024).nullable(),
+        matrix_room_id: z.string().min(1).max(1_024).nullable(),
+        matrix_event_id: z.string().min(1).max(1_024).nullable(),
+      })
+      .strict(),
+    attachments: z.array(WebhookAttachmentReferenceSchema).max(100),
+  })
+  .strict();
+export type WebhookDeliveryPayload = z.infer<
+  typeof WebhookDeliveryPayloadSchema
+>;

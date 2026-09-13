@@ -844,6 +844,70 @@ export type ListProjectionMessagesInput = z.infer<
   typeof ListProjectionMessagesInputSchema
 >;
 
+const WebhookMessageAttachmentSchema = strictObject({
+  attachment_id: CanonicalResourceIdSchema,
+  message_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema,
+  connection_id: CanonicalResourceIdSchema,
+  conversation_id: CanonicalResourceIdSchema,
+  platform: ProviderSchema,
+  file_name: z.string().max(512).nullable(),
+  mime_type: z.string().min(1).max(255).nullable(),
+  size_bytes: z.number().int().safe().nonnegative().nullable(),
+  sha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .nullable(),
+  revision: OpaqueEventIdSchema,
+  expires_at: TimestampSchema.nullable(),
+});
+
+export type WebhookMessageAttachment = z.infer<
+  typeof WebhookMessageAttachmentSchema
+>;
+
+const WebhookMessageObjectSchema = strictObject({
+  message_id: CanonicalResourceIdSchema,
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema,
+  connection_id: CanonicalResourceIdSchema,
+  conversation_id: CanonicalResourceIdSchema,
+  platform: ProviderSchema,
+  direction: z.enum(["inbound", "outbound"]),
+  sender_participant_id: CanonicalResourceIdSchema.nullable(),
+  sender_label: z.string().min(1).max(100),
+  body: z.string().max(20_000),
+  occurred_at: TimestampSchema,
+  revision: OpaqueEventIdSchema,
+  remote_message_id: OpaqueEventIdSchema.nullable(),
+  matrix_room_id: z.string().min(1).max(1_024).nullable(),
+  matrix_event_id: z.string().min(1).max(1_024).nullable(),
+  deleted_at: TimestampSchema.nullable(),
+  attachments: strictArray(
+    WebhookMessageAttachmentSchema,
+    MAX_ATTACHMENT_COUNT,
+  ),
+});
+
+export const WebhookMessageSchema = WebhookMessageObjectSchema;
+export type WebhookMessage = z.infer<typeof WebhookMessageSchema>;
+
+export const GetWebhookMessageInputSchema = strictObject({
+  schema_version: z.literal(1),
+  tenant_id: CanonicalResourceIdSchema,
+  identity_id: CanonicalResourceIdSchema,
+  account_id: CanonicalResourceIdSchema,
+  conversation_id: CanonicalResourceIdSchema,
+  message_id: CanonicalResourceIdSchema,
+  authorization: ProjectionAuthorizationContextSchema,
+});
+
+export type GetWebhookMessageInput = z.infer<
+  typeof GetWebhookMessageInputSchema
+>;
+
 export const ListProjectionMessageSearchInputSchema = strictObject({
   schema_version: z.literal(1),
   tenant_id: CanonicalResourceIdSchema,

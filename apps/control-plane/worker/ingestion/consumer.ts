@@ -26,6 +26,12 @@ import {
 import { getTenantProjection } from "../projection/routing";
 import { isProjectionError, type ProjectionError } from "../projection/errors";
 import type { TenantProjectionDO } from "../projection/tenant-projection";
+import {
+  deliverIncomingWebhookBatch,
+  fanOutIncomingWebhookDeliveries,
+  type WebhookCredentialResolver,
+  type WebhookCredentialStore,
+} from "../webhooks/delivery";
 
 export const INGESTION_UNAVAILABLE_RETRY_DELAY_SECONDS = 60 as const;
 export const INGESTION_POISON_RETRY_DELAY_SECONDS = 300 as const;
@@ -358,12 +364,45 @@ export type IngestionConsumerServices = {
   resolveArchivedIngestionRoute?: typeof resolveArchivedIngestionRoute;
   resolveArchivedBindings?: typeof resolveArchivedBindings;
   getTenantProjection?: typeof getTenantProjection;
+  fanOutIncomingWebhookDeliveries?: typeof fanOutIncomingWebhookDeliveries;
+  deliverIncomingWebhookBatch?: typeof deliverIncomingWebhookBatch;
+  fetchWebhookDestination?: typeof fetch;
+  resolveWebhookCredential?: WebhookCredentialResolver;
+  webhookCredentialStore?: WebhookCredentialStore;
+  webhookNow?: () => Date;
+  beforeWebhookFetch?: (deliveryId: string) => Promise<void>;
 };
 
 type ConsumerEnvironment = Pick<
   Cloudflare.Env,
   "CONTROL_DB" | "EVENT_ARCHIVE" | "TENANT_PROJECTION"
 >;
+
+const runtimeWebhookCredentialStore = (
+  environment: ConsumerEnvironment,
+): WebhookCredentialStore | undefined => {
+  // Production may provision COMMUNICATOR_WEBHOOK_CREDENTIALS_JSON as a
+  // Wrangler secret. Its entries are matched against the subscription tenant,
+  // owner principal, owner installation, and opaque credential reference.
+  const candidate = (
+    environment as unknown as {
+      COMMUNICATOR_WEBHOOK_CREDENTIALS_JSON?: unknown;
+    }
+  ).COMMUNICATOR_WEBHOOK_CREDENTIALS_JSON;
+  if (typeof candidate === "string") {
+    return { get: async () => candidate };
+  }
+  if (
+    candidate !== null &&
+    typeof candidate === "object" &&
+    "get" in candidate &&
+    typeof candidate.get === "function"
+  ) {
+    const getter = (candidate as { get: () => Promise<string> }).get;
+    return { get: () => getter.call(candidate) };
+  }
+  return undefined;
+};
 
 const processMessage = async (
   body: unknown,
@@ -491,6 +530,33 @@ const processMessage = async (
       events,
       checkpoint,
     });
+
+    const deliveryIds = await (
+      services.fanOutIncomingWebhookDeliveries ??
+      fanOutIncomingWebhookDeliveries
+    )({
+      database: environment.CONTROL_DB,
+      tenantId: pointer.tenant_id,
+      events,
+      now: services.webhookNow,
+    });
+    await (services.deliverIncomingWebhookBatch ?? deliverIncomingWebhookBatch)(
+      {
+        database: environment.CONTROL_DB,
+        tenantId: pointer.tenant_id,
+        projection,
+        deliveryIds,
+        services: {
+          now: services.webhookNow,
+          fetch: services.fetchWebhookDestination,
+          resolveCredential: services.resolveWebhookCredential,
+          credentialStore:
+            services.webhookCredentialStore ??
+            runtimeWebhookCredentialStore(environment),
+          beforeFetch: services.beforeWebhookFetch,
+        },
+      },
+    );
   } catch (error) {
     const failureCode = codeFromUnknownError(error);
     throw consumerFailure(failureCode ?? "unavailable");
