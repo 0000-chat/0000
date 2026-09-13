@@ -11,7 +11,7 @@ update the existing row with the worker's final commit and verification.
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
 | Tooling baseline | `/tmp/communicator-implementation/tooling-baseline/0000-communicator` | `codex/communicator-tooling-baseline` | `8dcd2acfa396a6ff8a1223d699b9aa7a5e910f47` | Clean source branch merged as aggregate commit `e4b8ede`; 191 authored files mechanically formatted, 46 Oxlint warnings fixed minimally, and three generated artifacts excluded from Biome. |
-| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `f9e16b` | Clean checkpoint preserved but held: UI and realtime acceptance blockers remain; implementer resumed a bounded follow-up. |
+| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `bc80a6a7130c6fd0979142c2517277f43f6b27a5` | Repair checkpoint atop `f9e16bc` preserved but held; targeted suites pass while three full-suite failures remain under investigation. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
@@ -155,5 +155,18 @@ aggregate merge conflicts.
 The realtime old-socket-normal-revalidation claim also remains unproven: the
 helper is covered, but the actual tenant-socket path needs inspection and
 regressions. The implementer is resuming the bounded fix and new UI behavior
-tests. Keep `f9e16b` preserved; do not merge #12 until those findings have
-accepted evidence.
+tests. Keep `f9e16b` and the repair checkpoint preserved; do not merge #12
+until those findings have accepted evidence.
+
+## Grants repair checkpoint
+
+The worker preserved repair commit `bc80a6a7130c6fd0979142c2517277f43f6b27a5`
+atop `f9e16bc`. Targeted read/socket (39), UI (4), grants (5), and TypeScript
+checks passed. The full 590-test suite still has three failures under exact
+failure investigation, so #12 remains held and no code has entered the
+aggregate.
+
+The dependency-related failures were traced to the worker removing a temporary
+untracked root `node_modules` symlink after validation; no source or lockfile
+changes were lost. The worker must retain the dependency links through final
+validation and report or fix the three failures before another merge decision.
