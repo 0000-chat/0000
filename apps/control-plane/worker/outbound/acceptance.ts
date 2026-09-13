@@ -16,6 +16,12 @@ export type OutboundAcceptanceContext = {
 };
 
 export type OutboundAcceptanceServices = {
+  /** Controlled test seam before the DO transaction is entered. */
+  beforeCommit?: () => void | Promise<void>;
+  /** Controlled test seam after the DO transaction commits. */
+  afterCommit?: (result: AcceptTextReplyResult) => void | Promise<void>;
+  /** Controlled test seam immediately before an adapter wakeup. */
+  beforeWakeup?: (dispatch: OutboundDispatch) => void | Promise<void>;
   /** Wake a controlled adapter after the durable transaction commits. */
   wakeDispatch?: (dispatch: OutboundDispatch) => Promise<void>;
 };
@@ -82,6 +88,10 @@ export async function acceptTextReply(
   }
   if (!granted) throw new ReadError("forbidden");
 
+  if (services.beforeCommit !== undefined) {
+    await services.beforeCommit();
+  }
+
   const accepted = await projection.acceptTextReply(
     AcceptTextReplyInputSchema.parse({
       schema_version: 1,
@@ -99,12 +109,20 @@ export async function acceptTextReply(
 
   // The DO transaction is the source of truth. A wakeup is advisory and may
   // fail after commit; the pending dispatch row remains recoverable by T07+.
-  if (!accepted.replayed && services.wakeDispatch !== undefined) {
-    try {
-      await services.wakeDispatch(accepted.dispatch);
-    } catch {
-      // Keep the durable acceptance visible. Provider I/O is outside the DO
-      // transaction and must never turn a saved command into a false failure.
+  if (!accepted.replayed) {
+    if (services.afterCommit !== undefined) {
+      await services.afterCommit(accepted);
+    }
+    if (services.beforeWakeup !== undefined) {
+      await services.beforeWakeup(accepted.dispatch);
+    }
+    if (services.wakeDispatch !== undefined) {
+      try {
+        await services.wakeDispatch(accepted.dispatch);
+      } catch {
+        // Keep the durable acceptance visible. Provider I/O is outside the DO
+        // transaction and must never turn a saved command into a false failure.
+      }
     }
   }
   return accepted;

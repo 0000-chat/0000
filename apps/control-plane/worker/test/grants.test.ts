@@ -1,4 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   AccountGrantSchema,
   ApiErrorResponseSchema,
@@ -7,7 +9,7 @@ import {
   ConversationPageResultSchema,
 } from "@communicator/contracts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createApp } from "../app";
+import { createApp, type AppServices } from "../app";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   auth,
@@ -21,8 +23,9 @@ import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
 const workerEnv = env as typeof env & { CONTROL_DB: D1Database };
 const tenantId = "tenant_pilot";
 
-const createTestApp = () =>
+const createTestApp = (services: AppServices = {}) =>
   createApp({
+    ...services,
     createTokenVerifier: () => ({
       verify: async (token: string): Promise<VerifiedSubject> => {
         if (token === "human-token")
@@ -47,12 +50,13 @@ const createTestApp = () =>
     }),
   });
 
-const request = async (
+const requestForApp = async (
+  app: ReturnType<typeof createApp>,
   path: string,
   token = "human-token",
   init: RequestInit = {},
 ) =>
-  createTestApp().request(
+  app.request(
     `http://example.test${path}`,
     {
       ...init,
@@ -64,6 +68,41 @@ const request = async (
     },
     workerEnv,
   );
+
+const request = async (
+  path: string,
+  token = "human-token",
+  init: RequestInit = {},
+) => requestForApp(createTestApp(), path, token, init);
+
+const connectMcpClient = async (
+  app: ReturnType<typeof createApp>,
+  token: string,
+) => {
+  const client = new Client({
+    name: "durable-acceptance-test-client",
+    version: "1.0.0",
+  });
+  const transport = new StreamableHTTPClientTransport(
+    new URL("http://example.test/mcp"),
+    {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Origin: "http://example.test",
+        },
+      },
+      fetch: async (input, init) => {
+        const url = input instanceof URL ? input.href : input.toString();
+        return app.request(url, init, workerEnv);
+      },
+    },
+  );
+  await client.connect(
+    transport as unknown as Parameters<Client["connect"]>[0],
+  );
+  return { client, transport };
+};
 
 const grantBody = (overrides: Record<string, unknown> = {}) => ({
   membership_id: "membership_human",
@@ -346,6 +385,117 @@ describe("account-scoped grant API", () => {
     expect(new Set(audit.results.map((row) => row.target_id))).toEqual(
       new Set([grant.id]),
     );
+  });
+
+  it("accepts and replays a text reply through the official MCP tool", async () => {
+    const create = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          idempotency_key: `mcp-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(create.status).toBe(201);
+
+    const app = createTestApp();
+    const { client, transport } = await connectMcpClient(app, "agent-token");
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toContain(
+        "send_text_reply",
+      );
+
+      const idempotencyKey = `mcp-send-${crypto.randomUUID()}`;
+      const input = {
+        identity_id: "identity_agent",
+        conversation_id: "conversation_human_one",
+        body: "Saved through MCP",
+        delivery_mode: "direct",
+        idempotency_key: idempotencyKey,
+      } as const;
+      const first = await client.callTool({
+        name: "send_text_reply",
+        arguments: input,
+      });
+      expect(first.isError).not.toBe(true);
+      const firstValue = first.structuredContent as {
+        command: {
+          id: string;
+          status: string;
+          message_id?: string;
+          event_id?: string;
+          dispatch_id?: string;
+        };
+        message: { id: string };
+        dispatch: { id: string; status: string; idempotency_key: string };
+        replayed: boolean;
+      };
+      expect(firstValue.replayed).toBe(false);
+      expect(firstValue.command.status).toBe("accepted");
+      expect(firstValue.command.message_id).toBe(firstValue.message.id);
+      expect(firstValue.command.dispatch_id).toBe(firstValue.dispatch.id);
+      expect(firstValue.dispatch.status).toBe("pending");
+      expect(firstValue.dispatch.idempotency_key).toBe(idempotencyKey);
+
+      const replay = await client.callTool({
+        name: "send_text_reply",
+        arguments: input,
+      });
+      expect(replay.isError).not.toBe(true);
+      const replayValue = replay.structuredContent as typeof firstValue;
+      expect(replayValue.replayed).toBe(true);
+      expect(replayValue.command.id).toBe(firstValue.command.id);
+      expect(replayValue.message.id).toBe(firstValue.message.id);
+      expect(replayValue.dispatch.id).toBe(firstValue.dispatch.id);
+
+      const apiReplay = await requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Saved through MCP",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+      expect(apiReplay.status).toBe(202);
+      const apiCommand = (await apiReplay.json()) as { id: string };
+      expect(apiCommand.id).toBe(firstValue.command.id);
+
+      const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+      expect(
+        await rows(
+          projection,
+          "SELECT id FROM outbound_dispatches WHERE idempotency_key = ?",
+          idempotencyKey,
+        ),
+      ).toHaveLength(1);
+      expect(
+        await rows(
+          projection,
+          "SELECT id FROM commands WHERE id = ?",
+          firstValue.command.id,
+        ),
+      ).toHaveLength(1);
+      expect(
+        await rows(
+          projection,
+          "SELECT id FROM messages WHERE id = ?",
+          firstValue.message.id,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await client.close();
+      await transport.close();
+    }
   });
 
   it("denies an agent grant, cross-account reads, and cross-tenant account binding", async () => {

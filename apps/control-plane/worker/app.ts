@@ -35,6 +35,7 @@ import { sessionRoute } from "./routes/session";
 import { realtimeTicketRoute } from "./routes/realtime";
 import { textReplyRoute, textReplyHandler } from "./routes/outbound";
 import type { OutboundDispatch } from "@communicator/contracts";
+import type { OutboundAcceptanceServices } from "./outbound/acceptance";
 import {
   accountsRoute,
   accountsHandler,
@@ -92,6 +93,8 @@ export type AppServices = {
   sendIngestionQueue?: IngestionQueueSender;
   /** Controlled adapter wakeup after an outbound acceptance commits. */
   wakeDispatch?: (dispatch: OutboundDispatch) => Promise<void>;
+  /** Controlled outbound acceptance seams used by adapter/runtime tests. */
+  outboundAcceptance?: OutboundAcceptanceServices;
   resolveOAuthHumanSession?: (
     request: Request,
     env: Cloudflare.Env,
@@ -314,6 +317,12 @@ export function createApp(services: AppServices = {}) {
   if (services.signOAuthAccessToken)
     oauthServices.signAccessToken = services.signOAuthAccessToken;
   registerOAuthRoutes(app, oauthServices);
+  const outboundAcceptanceServices: OutboundAcceptanceServices = {
+    ...(services.outboundAcceptance ?? {}),
+    ...(services.wakeDispatch === undefined
+      ? {}
+      : { wakeDispatch: services.wakeDispatch }),
+  };
   app.use(REALTIME_TICKET_PATH, async (context, next) => {
     await next();
     if (context.finalized) decorateRealtimeTicketResponse(context.res);
@@ -339,7 +348,9 @@ export function createApp(services: AppServices = {}) {
   );
   app.openapi(realtimeTicketRoute, realtimeTicketHandler);
   app.get("/api/v1/realtime", realtimeUpgradeHandler);
-  app.post("/mcp", handleMcpRequest);
+  app.post("/mcp", (context) =>
+    handleMcpRequest(context, outboundAcceptanceServices),
+  );
   app.get("/mcp", handleMcpGet);
 
   app.openapi(identitiesRoute, identitiesHandler);
@@ -350,11 +361,7 @@ export function createApp(services: AppServices = {}) {
   app.openapi(messagesRoute, messagesHandler);
   app.openapi(
     textReplyRoute,
-    textReplyHandler(
-      services.wakeDispatch === undefined
-        ? {}
-        : { wakeDispatch: services.wakeDispatch },
-    ),
+    textReplyHandler(outboundAcceptanceServices),
   );
   app.openapi(accountConversationsRoute, accountConversationsHandler);
   app.openapi(accountsRoute, accountsHandler);
