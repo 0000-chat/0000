@@ -95,6 +95,11 @@ type CapabilityRow = {
 
 type EventHashRow = { source_event_id: string; event_hash: string };
 
+// Keep each D1 statement below the lowest documented SQLite bind-parameter
+// limit while retaining the provider's supported 500-event page size.
+const EVENT_HASH_LOOKUP_CHUNK_SIZE = 90;
+const EVENT_HASH_INSERT_CHUNK_SIZE = 100;
+
 export type HistoryImportCreateInput = {
   import_id: string;
   range_id: string;
@@ -779,14 +784,27 @@ export async function listExistingEventHashes(
 ): Promise<EventHashRow[]> {
   if (sourceEventIds.length === 0) return [];
   try {
-    const result = await primarySession(db)
-      .prepare(
-        `SELECT source_event_id, event_hash FROM history_import_events
-          WHERE import_id = ? AND source_event_id IN (${sourceEventIds.map(() => "?").join(",")})`,
-      )
-      .bind(importId, ...sourceEventIds)
-      .all<EventHashRow>();
-    return result.results;
+    const session = primarySession(db);
+    const rows: EventHashRow[] = [];
+    for (
+      let offset = 0;
+      offset < sourceEventIds.length;
+      offset += EVENT_HASH_LOOKUP_CHUNK_SIZE
+    ) {
+      const chunk = sourceEventIds.slice(
+        offset,
+        offset + EVENT_HASH_LOOKUP_CHUNK_SIZE,
+      );
+      const result = await session
+        .prepare(
+          `SELECT source_event_id, event_hash FROM history_import_events
+            WHERE import_id = ? AND source_event_id IN (${chunk.map(() => "?").join(",")})`,
+        )
+        .bind(importId, ...chunk)
+        .all<EventHashRow>();
+      rows.push(...result.results);
+    }
+    return rows;
   } catch (error) {
     throw historyError("history_unavailable", error);
   }
@@ -805,24 +823,31 @@ export async function insertEventHashes(
 ): Promise<void> {
   if (rows.length === 0) return;
   try {
-    await db.batch(
-      rows.map((row) =>
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO history_import_events
-              (import_id, range_id, source_event_id, event_hash, occurred_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            row.import_id,
-            row.range_id,
-            row.source_event_id,
-            row.event_hash,
-            row.occurred_at,
-            row.created_at,
-          ),
-      ),
-    );
+    for (
+      let offset = 0;
+      offset < rows.length;
+      offset += EVENT_HASH_INSERT_CHUNK_SIZE
+    ) {
+      const chunk = rows.slice(offset, offset + EVENT_HASH_INSERT_CHUNK_SIZE);
+      await db.batch(
+        chunk.map((row) =>
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO history_import_events
+                (import_id, range_id, source_event_id, event_hash, occurred_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              row.import_id,
+              row.range_id,
+              row.source_event_id,
+              row.event_hash,
+              row.occurred_at,
+              row.created_at,
+            ),
+        ),
+      );
+    }
   } catch (error) {
     throw historyError("history_conflict", error);
   }
@@ -837,7 +862,7 @@ export async function historyCoverage(
   try {
     const row = await primarySession(db)
       .prepare(
-        `SELECT import_id, status, gap_count
+        `SELECT import_id, status, requested_start_at, requested_end_at, gap_count
            FROM history_imports
           WHERE tenant_id = ? AND account_id = ?
           ORDER BY updated_at DESC, import_id DESC LIMIT 1`,
@@ -846,6 +871,8 @@ export async function historyCoverage(
       .first<{
         import_id: string;
         status: string;
+        requested_start_at: string;
+        requested_end_at: string;
         gap_count: number;
       }>();
     const state: HistoryCoverage["state"] =
@@ -868,6 +895,8 @@ export async function historyCoverage(
       state,
       account_id: accountId,
       latest_import_id: row?.import_id ?? null,
+      requested_start_at: row?.requested_start_at ?? null,
+      requested_end_at: row?.requested_end_at ?? null,
       known_gap_count: row?.gap_count ?? 0,
     });
   } catch (error) {

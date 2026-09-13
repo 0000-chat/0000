@@ -8,6 +8,8 @@ import {
   type ProviderEvidence,
   type ProjectionEventEnvelope,
 } from "@communicator/contracts";
+import { canonicalJsonStringify } from "../archive/canonical-json";
+import { sha256Hex } from "../archive/codec";
 
 export type HistoryImportProviderOwner = {
   tenant_id: string;
@@ -77,8 +79,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
-const nullableString = (value: unknown): string | null =>
-  value === null ? null : isString(value) ? value : (() => { throw new HistoryProviderError("provider_error"); })();
+const nullableString = (value: unknown): string | null => {
+  if (value === null) return null;
+  if (isString(value)) return value;
+  throw new HistoryProviderError("provider_error");
+};
+
+const optionalNullableString = (value: unknown): string | null =>
+  value === undefined ? null : nullableString(value);
 
 const parseProviderEvidence = (value: unknown): ProviderEvidence => {
   const parsed = ProviderEvidenceSchema.safeParse(value);
@@ -115,7 +123,7 @@ const parseStart = (value: unknown): HistoryProviderStartResult => {
       : HistoryImportFailureCodeSchema.safeParse(value.error_code).success
         ? (value.error_code as HistoryImportFailureCode)
         : (() => { throw new HistoryProviderError("provider_error"); })();
-  const providerVersion = nullableString(value.provider_version);
+  const providerVersion = optionalNullableString(value.provider_version);
   const proofSource = value.proof_source;
   if (!isString(proofSource)) throw new HistoryProviderError("provider_error");
   const evidence = parseProviderEvidence(value.provider_evidence);
@@ -124,8 +132,8 @@ const parseStart = (value: unknown): HistoryProviderStartResult => {
     provider_version: providerVersion,
     proof_source: proofSource,
     provider_evidence: evidence,
-    source_start_at: nullableString(value.source_start_at),
-    source_end_at: nullableString(value.source_end_at),
+    source_start_at: optionalNullableString(value.source_start_at),
+    source_end_at: optionalNullableString(value.source_end_at),
     ranges,
     error_code: errorCode,
   };
@@ -159,11 +167,21 @@ const parseAdvance = (value: unknown): HistoryProviderAdvanceResult => {
       : HistoryImportFailureCodeSchema.safeParse(value.error_code).success
         ? (value.error_code as HistoryImportFailureCode)
         : (() => { throw new HistoryProviderError("provider_error"); })();
+  if (!Object.prototype.hasOwnProperty.call(value, "next_cursor"))
+    throw new HistoryProviderError("provider_error");
+  const nextCursor = nullableString(value.next_cursor);
+  if (value.status === "active" && nextCursor === null)
+    throw new HistoryProviderError("provider_error");
+  if (
+    (value.status === "completed" || value.status === "failed") &&
+    nextCursor !== null
+  )
+    throw new HistoryProviderError("provider_error");
   return {
     status: value.status,
     events,
-    next_cursor: nullableString(value.next_cursor),
-    gap_code: nullableString(value.gap_code),
+    next_cursor: nextCursor,
+    gap_code: optionalNullableString(value.gap_code),
     error_code: errorCode,
   };
 };
@@ -210,10 +228,13 @@ export class HttpHistoryImportProvider implements HistoryImportProvider {
     parse: (value: unknown) => T,
   ): Promise<T> {
     const requestId = crypto.randomUUID();
-    const importId =
-      isRecord(body) && typeof body.import_id === "string"
-        ? body.import_id
-        : requestId;
+    const idempotencyMaterial = canonicalJsonStringify({
+      path,
+      body,
+    });
+    const idempotencyDigest = await sha256Hex(
+      new TextEncoder().encode(idempotencyMaterial),
+    );
     let response: Response;
     try {
       response = await this.fetcher(`${this.baseUrl}${path}`, {
@@ -223,7 +244,7 @@ export class HttpHistoryImportProvider implements HistoryImportProvider {
           "content-type": "application/json",
           "cache-control": "no-store",
           "x-request-id": requestId,
-          "idempotency-key": `history-${importId}-${path.split("/").at(-1) ?? "request"}`,
+          "idempotency-key": `history-${idempotencyDigest}`,
         },
         body: JSON.stringify(body),
       });

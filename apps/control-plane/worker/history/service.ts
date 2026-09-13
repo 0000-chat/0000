@@ -369,13 +369,28 @@ const updateFailed = async (
     range_id: range.range_id,
     status: exhausted ? "failed" : "active",
     attempt_count: nextAttempts,
-    error_code: exhausted ? errorCode : errorCode,
+    error_code: errorCode,
     updated_at: now,
     completed_at: exhausted ? now : null,
   });
+  const ranges = await getRanges(db, item.import_id);
+  const completed = ranges.filter(
+    (candidate) => candidate.status === "completed",
+  ).length;
+  const gaps = ranges.filter(
+    (candidate) =>
+      candidate.status === "gap" ||
+      candidate.status === "partial" ||
+      candidate.status === "failed",
+  ).length;
+  const hasPending = ranges.some(
+    (candidate) =>
+      candidate.status === "pending" || candidate.status === "active",
+  );
+  const importFailed = exhausted && !hasPending;
   await updateImport(db, {
     import_id: item.import_id,
-    status: exhausted ? "failed" : "active",
+    status: importFailed ? "failed" : "active",
     availability: errorCode === "runtime_unavailable" ? "unavailable" : "blocked",
     attempt_count: nextAttempts,
     last_error_code: exhausted
@@ -383,8 +398,11 @@ const updateFailed = async (
         ? "bounded_retry_exhausted"
         : errorCode
       : errorCode,
+    completed_range_count: completed,
+    total_range_count: ranges.length,
+    gap_count: gaps,
     updated_at: now,
-    completed_at: exhausted ? now : null,
+    completed_at: importFailed ? now : null,
   });
 };
 
@@ -685,19 +703,24 @@ const createService = (
       });
       const allRanges = await getRanges(input.env.CONTROL_DB, item.import_id);
       const completed = allRanges.filter((candidate) => candidate.status === "completed").length;
-      const gaps = allRanges.filter((candidate) => candidate.status === "gap" || candidate.status === "partial").length;
+      const gaps = allRanges.filter(
+        (candidate) =>
+          candidate.status === "gap" ||
+          candidate.status === "partial" ||
+          candidate.status === "failed",
+      ).length;
       const failed = allRanges.some((candidate) => candidate.status === "failed");
       const hasPending = allRanges.some((candidate) => candidate.status === "pending" || candidate.status === "active");
       const importStatus: HistoryImport["status"] =
-        failed || result.status === "failed"
-          ? "failed"
-          : hasPending
-              ? "active"
-              : result.status === "partial" || gaps > 0
-                ? "partial"
-                : completed === allRanges.length
-                  ? "completed"
-                  : "active";
+        hasPending
+          ? "active"
+          : failed || result.status === "failed"
+            ? "failed"
+            : result.status === "partial" || gaps > 0
+              ? "partial"
+              : completed === allRanges.length
+                ? "completed"
+                : "active";
       await updateImport(input.env.CONTROL_DB, {
         import_id: item.import_id,
         status: importStatus,

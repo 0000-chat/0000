@@ -207,6 +207,8 @@ export const HistoryCoverageSchema = z
     state: HistoryCoverageStateSchema,
     account_id: CommunicatorIdSchema,
     latest_import_id: CommunicatorIdSchema.nullable(),
+    requested_start_at: TimestampSchema.nullable(),
+    requested_end_at: TimestampSchema.nullable(),
     known_gap_count: z.number().int().safe().nonnegative(),
   })
   .strict();
