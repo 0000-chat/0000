@@ -7,6 +7,10 @@ import {
   AccountGrantPageSchema,
   AccountGrantSchema,
   AccountGrantUpdateSchema,
+  HistoryImportAdvanceRequestSchema,
+  HistoryImportDetailSchema,
+  HistoryImportStartRequestSchema,
+  ProviderCapabilitySchema,
   LinkSessionActionRequestSchema,
   LinkSessionStartSchema,
   MAX_PROJECTION_CURSOR_CHARS,
@@ -190,6 +194,102 @@ export const handlers = [
       pageByCursor(items, cursor, limit, (item) => item.account_id),
     );
   }),
+
+  http.get("*/api/v1/accounts/:accountId/capabilities", ({ request, params }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["identity_id"]))
+      return errorResponse(400, "invalid_request");
+    const identityId = parseSingleQueryValue(search, "identity_id", boundedId);
+    if (!identityId) return errorResponse(400, "invalid_request");
+    const capabilities = simulatedStore.historyCapabilities(String(params.accountId));
+    if (
+      capabilities.length === 0 ||
+      capabilities[0]?.identity_id !== identityId
+    ) {
+      return errorResponse(404, "not_found");
+    }
+    return HttpResponse.json(
+      capabilities.map((capability) => ProviderCapabilitySchema.parse(capability)),
+    );
+  }),
+
+  http.get("*/api/v1/accounts/:accountId/history-imports", ({ request, params }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["identity_id", "cursor", "limit"]))
+      return errorResponse(400, "invalid_request");
+    const identityId = parseSingleQueryValue(search, "identity_id", boundedId);
+    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+    if (!identityId || cursor === null || limit === null)
+      return errorResponse(400, "invalid_request");
+    const details = simulatedStore.historyImportPage(
+      String(params.accountId),
+      identityId,
+    );
+    if (details === null) return errorResponse(404, "not_found");
+    const page = pageByCursor(
+      details,
+      cursor,
+      limit,
+      (detail) => detail.import.import_id,
+    );
+    return HttpResponse.json({
+      items: page.items.map((detail) => detail.import),
+      next_cursor: page.next_cursor,
+    });
+  }),
+
+  http.post(
+    "*/api/v1/accounts/:accountId/history-imports",
+    async ({ request, params }) => {
+      const idempotencyKey = request.headers.get("Idempotency-Key");
+      if (!idempotencyKey) return errorResponse(400, "invalid_request");
+      const parsed = HistoryImportStartRequestSchema.safeParse(
+        await request.json(),
+      );
+      if (!parsed.success) return errorResponse(400, "invalid_request");
+      const detail = simulatedStore.startHistoryImport(
+        String(params.accountId),
+        parsed.data,
+        idempotencyKey,
+      );
+      return detail
+        ? HttpResponse.json(HistoryImportDetailSchema.parse(detail), { status: 201 })
+        : errorResponse(404, "not_found");
+    },
+  ),
+
+  http.get("*/api/v1/history-imports/:importId", ({ request, params }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["identity_id"]))
+      return errorResponse(400, "invalid_request");
+    const identityId = parseSingleQueryValue(search, "identity_id", boundedId);
+    if (!identityId) return errorResponse(400, "invalid_request");
+    const detail = simulatedStore.historyImport(
+      String(params.importId),
+      identityId,
+    );
+    return detail
+      ? HttpResponse.json(HistoryImportDetailSchema.parse(detail))
+      : errorResponse(404, "not_found");
+  }),
+
+  http.post(
+    "*/api/v1/history-imports/:importId/advance",
+    async ({ request, params }) => {
+      const parsed = HistoryImportAdvanceRequestSchema.safeParse(
+        await request.json(),
+      );
+      if (!parsed.success) return errorResponse(400, "invalid_request");
+      const detail = simulatedStore.advanceHistoryImport(
+        String(params.importId),
+        parsed.data,
+      );
+      return detail
+        ? HttpResponse.json(HistoryImportDetailSchema.parse(detail))
+        : errorResponse(404, "not_found");
+    },
+  ),
 
   http.get("*/api/v1/grant-targets", ({ request }) => {
     const search = new URL(request.url).searchParams;

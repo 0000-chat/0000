@@ -3,6 +3,12 @@ export const queryKeys = {
   connections: (identityId: string) => ["connections", identityId] as const,
   connectedAccounts: (identityId: string) =>
     ["connected-accounts", identityId] as const,
+  historyCapabilities: (accountId: string, identityId: string) =>
+    ["history-capabilities", accountId, identityId] as const,
+  historyImports: (accountId: string, identityId: string) =>
+    ["history-imports", accountId, identityId] as const,
+  historyImport: (importId: string, identityId: string) =>
+    ["history-import", importId, identityId] as const,
   accountGrants: ["account-grants"] as const,
   grantTargets: ["grant-targets"] as const,
   grantChats: (identityId: string, accountId: string) =>

@@ -9,8 +9,13 @@ import {
   AccountGrantTargetPageSchema,
   AccountGrantUpdateSchema,
   ConnectedAccountPageSchema,
+  HistoryImportAdvanceRequestSchema,
+  HistoryImportDetailSchema,
+  HistoryImportPageSchema,
+  HistoryImportStartRequestSchema,
   PermissionRequestCreateSchema,
   PermissionRequestSchema,
+  ProviderCapabilitySchema,
   ConversationPageResultSchema,
   ConversationSummarySchema,
   IdentitySchema,
@@ -29,6 +34,10 @@ import {
   type AccountGrantMutation,
   type AccountGrantUpdate,
   type ConnectedAccountPage,
+  type HistoryImportAdvanceRequest,
+  type HistoryImportDetail,
+  type HistoryImportPage,
+  type HistoryImportStartRequest,
   type PermissionRequestCreate,
   type PermissionRequest,
   type ChannelSummary,
@@ -43,6 +52,7 @@ import {
   type RealtimeTicketRequest,
   type RealtimeTicketResponse,
   type SessionResponse,
+  type ProviderCapability,
 } from "@communicator/contracts";
 
 const ResetResponseSchema = z
@@ -213,6 +223,83 @@ export class ApiClient {
     return this.request(
       `/api/v1/accounts?${search}`,
       ConnectedAccountPageSchema,
+    );
+  }
+
+  getProviderCapabilities(
+    accountId: string,
+    identityId: string,
+  ): Promise<ProviderCapability[]> {
+    const search = new URLSearchParams({ identity_id: identityId });
+    return this.request(
+      `/api/v1/accounts/${encodeURIComponent(accountId)}/capabilities?${search}`,
+      ProviderCapabilitySchema.array().max(20),
+    );
+  }
+
+  getHistoryImports(
+    accountId: string,
+    identityId: string,
+    cursor?: string,
+    limit = 50,
+  ): Promise<HistoryImportPage> {
+    const search = new URLSearchParams({
+      identity_id: identityId,
+      limit: String(limit),
+    });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/accounts/${encodeURIComponent(accountId)}/history-imports?${search}`,
+      HistoryImportPageSchema,
+    );
+  }
+
+  getHistoryImport(
+    importId: string,
+    identityId: string,
+  ): Promise<HistoryImportDetail> {
+    const search = new URLSearchParams({ identity_id: identityId });
+    return this.request(
+      `/api/v1/history-imports/${encodeURIComponent(importId)}?${search}`,
+      HistoryImportDetailSchema,
+    );
+  }
+
+  startHistoryImport(
+    accountId: string,
+    input: HistoryImportStartRequest,
+    idempotencyKey: string,
+  ): Promise<HistoryImportDetail> {
+    return this.request(
+      `/api/v1/accounts/${encodeURIComponent(accountId)}/history-imports`,
+      HistoryImportDetailSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(HistoryImportStartRequestSchema.parse(input)),
+      },
+    );
+  }
+
+  advanceHistoryImport(
+    importId: string,
+    input: HistoryImportAdvanceRequest,
+    idempotencyKey: string,
+  ): Promise<HistoryImportDetail> {
+    return this.request(
+      `/api/v1/history-imports/${encodeURIComponent(importId)}/advance`,
+      HistoryImportDetailSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(HistoryImportAdvanceRequestSchema.parse(input)),
+      },
     );
   }
 
