@@ -4,6 +4,7 @@ import {
   CommandSchema,
   CommunicatorIdSchema,
   OutboundDecisionResultSchema,
+  OutboundEvidenceRecordSchema,
   OutboundEvidenceInputSchema,
   TextReplyRequestSchema,
 } from "@communicator/contracts";
@@ -15,6 +16,7 @@ import {
   acceptTextReply,
   decideOutboundCommand,
   listOutboundCommands,
+  listOutboundEvidence,
   reconcileOutboundCommand,
   type OutboundAcceptanceServices,
 } from "../outbound/acceptance";
@@ -38,6 +40,7 @@ const DecisionBodySchema = z
   })
   .strict();
 const EvidenceBodySchema = OutboundEvidenceInputSchema;
+const EvidenceListSchema = OutboundEvidenceRecordSchema.array().max(100);
 
 export const textReplyRoute = createRoute({
   method: "post",
@@ -175,6 +178,27 @@ export const outboundEvidenceRoute = createRoute({
   responses: commandRouteResponse,
 });
 
+export const outboundEvidenceListRoute = createRoute({
+  method: "get",
+  path: "/api/v1/commands/{command_id}/evidence",
+  security: [{ bearerAuth: [] }],
+  request: { params: commandPath },
+  responses: {
+    200: {
+      description: "Durable outbound stage evidence",
+      content: { "application/json": { schema: EvidenceListSchema } },
+    },
+    400: { description: "Invalid request", content: errorContent },
+    401: { description: "Authentication required", content: errorContent },
+    403: {
+      description: "Administrator permission required",
+      content: errorContent,
+    },
+    404: { description: "Command not found", content: errorContent },
+    503: { description: "Projection unavailable", content: errorContent },
+  },
+});
+
 export const confirmOutboundRoute = createRoute({
   method: "post",
   path: "/api/v1/commands/{command_id}/confirm",
@@ -276,6 +300,28 @@ export const evidenceOutboundHandler =
         body,
       );
       return context.json(result, 200);
+    } catch (error) {
+      return outboundFailure(context, error);
+    }
+  };
+
+export const evidenceListOutboundHandler =
+  (): Handler<
+    CommandRouteEnv,
+    string,
+    { out: { param: { command_id: string } } }
+  > =>
+  async (context) => {
+    try {
+      const params = context.req.valid("param");
+      const result = await listOutboundEvidence(
+        {
+          env: context.env,
+          authorization: context.get("authorization"),
+        },
+        params.command_id,
+      );
+      return context.json(EvidenceListSchema.parse(result), 200);
     } catch (error) {
       return outboundFailure(context, error);
     }

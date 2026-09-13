@@ -149,6 +149,87 @@ export const OutboundDispatchSchema = z
   })
   .strict();
 
+/**
+ * Internal payload released to the adapter only after a live dispatch lease
+ * has been claimed.  The public dispatch and command projections deliberately
+ * do not contain the saved message body.
+ */
+export const OutboundDispatchPayloadSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    dispatch_id: CommunicatorIdSchema,
+    message_id: CommunicatorIdSchema,
+    event_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    resource_identity_id: CommunicatorIdSchema,
+    account_id: CommunicatorIdSchema,
+    connection_id: CommunicatorIdSchema,
+    conversation_id: CommunicatorIdSchema,
+    provider: ProviderSchema,
+    body: z.string().min(1).max(20_000),
+    transaction_id: CommunicatorIdSchema,
+    request_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    projection_generation: z.number().int().positive(),
+    dispatch_lease_id: CommunicatorIdSchema,
+    dispatch_lease_expires_at: TimestampSchema,
+    created_at: TimestampSchema,
+  })
+  .strict();
+
+export const GetOutboundDispatchPayloadInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    lease_id: CommunicatorIdSchema,
+    now: TimestampSchema,
+  })
+  .strict();
+
+export const FailOutboundDispatchInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    lease_id: CommunicatorIdSchema,
+    now: TimestampSchema,
+    failure_code: z.string().trim().min(1).max(100),
+  })
+  .strict();
+
+export const OutboundEvidenceRecordSchema = z
+  .object({
+    id: z.string().trim().min(1).max(400),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    dispatch_id: CommunicatorIdSchema,
+    source: OutboundEvidenceSourceSchema,
+    evidence_id: z.string().trim().min(1).max(200),
+    transaction_id: CommunicatorIdSchema,
+    request_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    account_id: CommunicatorIdSchema,
+    conversation_id: CommunicatorIdSchema,
+    generation: z.number().int().positive(),
+    status: OutboundEvidenceStatusSchema,
+    observed_at: TimestampSchema,
+    provider_operation_id: z.string().trim().min(1).max(200).nullable(),
+    provider_message_id: z.string().trim().min(1).max(200).nullable(),
+    remote_echo_id: z.string().trim().min(1).max(200).nullable(),
+    reason: z.string().trim().min(1).max(200).nullable(),
+    created_at: TimestampSchema,
+  })
+  .strict();
+
+export const ListOutboundEvidenceInputSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+  })
+  .strict();
+
 export const AcceptTextReplyInputSchema = z
   .object({
     schema_version: z.literal(1),
@@ -287,6 +368,21 @@ export type OutboundDispatchStatus = z.infer<
   typeof OutboundDispatchStatusSchema
 >;
 export type OutboundDispatch = z.infer<typeof OutboundDispatchSchema>;
+export type OutboundDispatchPayload = z.infer<
+  typeof OutboundDispatchPayloadSchema
+>;
+export type GetOutboundDispatchPayloadInput = z.infer<
+  typeof GetOutboundDispatchPayloadInputSchema
+>;
+export type FailOutboundDispatchInput = z.infer<
+  typeof FailOutboundDispatchInputSchema
+>;
+export type OutboundEvidenceRecord = z.infer<
+  typeof OutboundEvidenceRecordSchema
+>;
+export type ListOutboundEvidenceInput = z.infer<
+  typeof ListOutboundEvidenceInputSchema
+>;
 export type TextReplyRequest = z.infer<typeof TextReplyRequestSchema>;
 export type AcceptTextReplyInput = z.infer<typeof AcceptTextReplyInputSchema>;
 export type AcceptTextReplyResult = z.infer<typeof AcceptTextReplyResultSchema>;

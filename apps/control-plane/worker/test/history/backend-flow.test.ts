@@ -797,7 +797,10 @@ describe("history import production route", () => {
       capability: string;
       status: string;
     }>;
-    expect(capabilities).toHaveLength(5);
+    expect(capabilities).toHaveLength(7);
+    expect(capabilities.map((capability) => capability.capability)).toEqual(
+      expect.arrayContaining(["message.send.text", "account.route"]),
+    );
     expect(
       capabilities.find(
         (capability) => capability.capability === "history.import",

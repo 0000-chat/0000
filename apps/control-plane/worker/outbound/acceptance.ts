@@ -2,6 +2,7 @@ import {
   AcceptTextReplyInputSchema,
   type AcceptTextReplyResult,
   type OutboundDispatch,
+  type OutboundDispatchPayload,
   type OutboundEvidenceInput,
   type OutboundEvidenceSource,
   type OutboundEvidenceStatus,
@@ -16,6 +17,7 @@ import { getTenantProjection } from "../projection/routing";
 import { hasAccountOperationGrant } from "../control-directory/grants";
 import { mapReadError, ReadError } from "../read/errors";
 import { isAdministratorSession } from "../read/authorization";
+import { defaultWhatsAppTextAdapter } from "./whatsapp-adapter";
 
 export type OutboundAcceptanceContext = {
   env: Cloudflare.Env;
@@ -36,7 +38,19 @@ export type OutboundAcceptanceServices = {
   /** Controlled adapter boundary, reached only after a durable lease claim. */
   dispatchOutbound?: (
     dispatch: OutboundDispatch,
+    payload: OutboundDispatchPayload,
   ) => Promise<OutboundAdapterResult>;
+};
+
+export type OutboundAdapterEvidence = {
+  source: OutboundEvidenceSource;
+  status: OutboundEvidenceStatus;
+  evidence_id: string;
+  observed_at?: string | undefined;
+  reason?: string | undefined;
+  provider_operation_id?: string | undefined;
+  provider_message_id?: string | undefined;
+  remote_echo_id?: string | undefined;
 };
 
 export type OutboundAdapterResult =
@@ -54,6 +68,26 @@ export type OutboundAdapterResult =
       provider_operation_id?: string;
       provider_message_id?: string;
       remote_echo_id?: string;
+      observed_at?: string;
+    }
+  | {
+      type: "evidence_batch";
+      evidences: OutboundAdapterEvidence[];
+    }
+  | {
+      type: "failure";
+      failure_code:
+        | "missing_capability"
+        | "authorization_revoked"
+        | "account_mismatch"
+        | "connection_unavailable"
+        | "session_expired"
+        | "provider_rejected"
+        | "rate_limited"
+        | "provider_unavailable"
+        | "provider_protocol_error"
+        | "deleted_message";
+      reason: string;
     };
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
@@ -174,9 +208,10 @@ export async function acceptTextReply(
     if (services.afterCommit !== undefined) {
       await services.afterCommit(accepted);
     }
+    const configuredAdapter = configuredOutboundAdapter(context, services);
     if (
       accepted.dispatch.status === "pending" &&
-      services.dispatchOutbound !== undefined
+      configuredAdapter !== undefined
     ) {
       const now = acceptanceNow(services);
       const leaseExpiresAt = new Date(Date.parse(now) + 30_000).toISOString();
@@ -188,29 +223,13 @@ export async function acceptTextReply(
         now,
       });
       if (claimed.status === "dispatching") {
-        let adapterResult: OutboundAdapterResult;
-        try {
-          adapterResult = await services.dispatchOutbound(claimed);
-        } catch (error) {
-          adapterResult = {
-            type: "uncertain",
-            reason:
-              error instanceof Error ? "adapter_error" : "adapter_timeout",
-          };
-        }
-        const reconciled = await projection.reconcileOutbound({
-          schema_version: 1,
-          tenant_id: context.authorization.tenant.id,
-          command_id: accepted.command.id,
+        const reconciled = await dispatchClaimedOutbound(
+          context,
+          accepted.command.id,
+          claimed,
+          configuredAdapter,
           now,
-          evidence: adapterResultEvidence(
-            adapterResult,
-            context,
-            accepted.command.id,
-            claimed,
-            now,
-          ),
-        });
+        );
         return {
           ...accepted,
           command: reconciled.command,
@@ -226,7 +245,7 @@ export async function acceptTextReply(
     if (
       accepted.dispatch.status === "pending" &&
       services.wakeDispatch !== undefined &&
-      services.dispatchOutbound === undefined
+      configuredAdapter === undefined
     ) {
       try {
         await services.wakeDispatch(accepted.dispatch);
@@ -242,54 +261,164 @@ export async function acceptTextReply(
 const acceptanceNow = (services: OutboundAcceptanceServices): string =>
   (services.now === undefined ? new Date() : services.now()).toISOString();
 
+const configuredOutboundAdapter = (
+  context: OutboundAcceptanceContext,
+  services: OutboundAcceptanceServices,
+): DispatchAdapter | undefined =>
+  services.dispatchOutbound ??
+  (() => {
+    const adapter = defaultWhatsAppTextAdapter(context);
+    return adapter === undefined
+      ? undefined
+      : (dispatch: OutboundDispatch, payload: OutboundDispatchPayload) =>
+          adapter.dispatch(dispatch, payload);
+  })();
+
+type DispatchAdapter = (
+  dispatch: OutboundDispatch,
+  payload: OutboundDispatchPayload,
+) => Promise<OutboundAdapterResult>;
+
+const dispatchClaimedOutbound = async (
+  context: OutboundAcceptanceContext,
+  commandId: string,
+  claimed: OutboundDispatch,
+  adapter: DispatchAdapter,
+  now: string,
+): Promise<OutboundDecisionResult> => {
+  const projection = getTenantProjection(
+    context.env,
+    context.authorization.tenant.id,
+  );
+  let payload: OutboundDispatchPayload;
+  try {
+    payload = await projection.getOutboundDispatchPayload({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      command_id: commandId,
+      lease_id: claimed.dispatch_lease_id ?? "",
+      now,
+    });
+  } catch {
+    return projection.failOutboundDispatch({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      command_id: commandId,
+      lease_id: claimed.dispatch_lease_id ?? "",
+      now,
+      failure_code: "deleted_message",
+    });
+  }
+  let adapterResult: OutboundAdapterResult;
+  try {
+    adapterResult = await adapter(claimed, payload);
+  } catch (error) {
+    adapterResult = {
+      type: "uncertain",
+      reason: error instanceof Error ? "adapter_error" : "adapter_timeout",
+    };
+  }
+  if (adapterResult.type === "failure") {
+    return projection.failOutboundDispatch({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      command_id: commandId,
+      lease_id: claimed.dispatch_lease_id ?? "",
+      now,
+      failure_code: adapterResult.failure_code,
+    });
+  }
+  const evidences = adapterResultEvidence(
+    adapterResult,
+    context,
+    commandId,
+    claimed,
+    now,
+  );
+  const effectiveEvidences =
+    evidences.length > 0
+      ? evidences
+      : adapterResultEvidence(
+          {
+            type: "uncertain",
+            reason: "adapter_returned_no_evidence",
+          },
+          context,
+          commandId,
+          claimed,
+          now,
+        );
+  let reconciled: OutboundDecisionResult | undefined;
+  for (const evidence of effectiveEvidences) {
+    reconciled = await projection.reconcileOutbound({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      command_id: commandId,
+      now,
+      evidence,
+    });
+  }
+  if (reconciled === undefined) throw new ReadError("service_unavailable");
+  return reconciled;
+};
+
 const adapterResultEvidence = (
   result: OutboundAdapterResult,
   context: OutboundAcceptanceContext,
   commandId: string,
   dispatch: OutboundDispatch,
   observedAt: string,
-): OutboundEvidenceInput => {
+): OutboundEvidenceInput[] => {
   if (result.type === "uncertain") {
-    return {
-      schema_version: 1,
-      tenant_id: context.authorization.tenant.id,
-      command_id: commandId,
-      source: "provider",
-      evidence_id: result.evidence_id ?? `uncertain_${dispatch.transaction_id}`,
-      transaction_id: dispatch.transaction_id,
-      request_digest: dispatch.request_digest,
-      account_id: dispatch.account_id,
-      conversation_id: dispatch.conversation_id,
-      generation: dispatch.projection_generation ?? 1,
-      status: "uncertain",
-      observed_at: observedAt,
-      reason: result.reason,
-    };
+    return [
+      {
+        schema_version: 1,
+        tenant_id: context.authorization.tenant.id,
+        command_id: commandId,
+        source: "provider",
+        evidence_id:
+          result.evidence_id ?? `uncertain_${dispatch.transaction_id}`,
+        transaction_id: dispatch.transaction_id,
+        request_digest: dispatch.request_digest,
+        account_id: dispatch.account_id,
+        conversation_id: dispatch.conversation_id,
+        generation: dispatch.projection_generation ?? 1,
+        status: "uncertain",
+        observed_at: observedAt,
+        reason: result.reason,
+      },
+    ];
   }
-  return {
+  const sourceEvidence =
+    result.type === "evidence"
+      ? [result]
+      : result.type === "evidence_batch"
+        ? result.evidences
+        : [];
+  return sourceEvidence.map((evidence) => ({
     schema_version: 1,
     tenant_id: context.authorization.tenant.id,
     command_id: commandId,
-    source: result.source,
-    evidence_id: result.evidence_id,
+    source: evidence.source,
+    evidence_id: evidence.evidence_id,
     transaction_id: dispatch.transaction_id,
     request_digest: dispatch.request_digest,
     account_id: dispatch.account_id,
     conversation_id: dispatch.conversation_id,
     generation: dispatch.projection_generation ?? 1,
-    status: result.status,
-    observed_at: observedAt,
-    ...(result.provider_operation_id === undefined
+    status: evidence.status,
+    observed_at: evidence.observed_at ?? observedAt,
+    ...(evidence.provider_operation_id === undefined
       ? {}
-      : { provider_operation_id: result.provider_operation_id }),
-    ...(result.provider_message_id === undefined
+      : { provider_operation_id: evidence.provider_operation_id }),
+    ...(evidence.provider_message_id === undefined
       ? {}
-      : { provider_message_id: result.provider_message_id }),
-    ...(result.remote_echo_id === undefined
+      : { provider_message_id: evidence.provider_message_id }),
+    ...(evidence.remote_echo_id === undefined
       ? {}
-      : { remote_echo_id: result.remote_echo_id }),
-    ...(result.reason === undefined ? {} : { reason: result.reason }),
-  };
+      : { remote_echo_id: evidence.remote_echo_id }),
+    ...(evidence.reason === undefined ? {} : { reason: evidence.reason }),
+  }));
 };
 
 export async function reconcileOutboundCommand(
@@ -331,6 +460,28 @@ export async function listOutboundCommands(
     return await projection.listOutboundCommands({
       schema_version: 1,
       tenant_id: context.authorization.tenant.id,
+    });
+  } catch (error) {
+    throw mapReadError(error);
+  }
+}
+
+export async function listOutboundEvidence(
+  context: OutboundAcceptanceContext,
+  commandId: string,
+) {
+  if (!isAdministratorSession(context.authorization)) {
+    throw new ReadError("forbidden");
+  }
+  const projection = getTenantProjection(
+    context.env,
+    context.authorization.tenant.id,
+  );
+  try {
+    return await projection.listOutboundEvidence({
+      schema_version: 1,
+      tenant_id: context.authorization.tenant.id,
+      command_id: commandId,
     });
   } catch (error) {
     throw mapReadError(error);
@@ -389,7 +540,7 @@ export async function decideOutboundCommand(
     context.authorization.tenant.id,
   );
   try {
-    return OutboundDecisionResultSchema.parse(
+    const result = OutboundDecisionResultSchema.parse(
       await projection.decideOutbound({
         schema_version: 1,
         tenant_id: context.authorization.tenant.id,
@@ -402,6 +553,37 @@ export async function decideOutboundCommand(
         duplicate_risk_acknowledged: duplicateRiskAcknowledged,
       }),
     );
+    const adapter = configuredOutboundAdapter(context, services);
+    if (
+      decision === "confirm" &&
+      !result.replayed &&
+      result.dispatch.status === "pending" &&
+      adapter !== undefined
+    ) {
+      const now = acceptanceNow(services);
+      const claimed = await projection.claimOutboundDispatch({
+        tenant_id: context.authorization.tenant.id,
+        command_id: commandId,
+        lease_id: `lease_${result.dispatch.transaction_id}_${Date.parse(now)}`,
+        lease_expires_at: new Date(Date.parse(now) + 30_000).toISOString(),
+        now,
+      });
+      if (claimed.status === "dispatching") {
+        const dispatched = await dispatchClaimedOutbound(
+          context,
+          commandId,
+          claimed,
+          adapter,
+          now,
+        );
+        return {
+          ...result,
+          command: dispatched.command,
+          dispatch: dispatched.dispatch,
+        };
+      }
+    }
+    return result;
   } catch (error) {
     throw mapReadError(error);
   }

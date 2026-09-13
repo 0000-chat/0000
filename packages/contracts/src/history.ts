@@ -8,6 +8,8 @@ export const ProviderCapabilityNameSchema = z.enum([
   "contact.lookup",
   "group.manage",
   "receipt.read",
+  "message.send.text",
+  "account.route",
 ]);
 
 export type ProviderCapabilityName = z.infer<

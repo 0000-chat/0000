@@ -4,6 +4,7 @@ import type {
   CommandStatus,
   ConfirmationDecision,
   OutboundAction,
+  OutboundEvidenceRecord,
 } from "@communicator/contracts";
 
 const phaseLabels: Record<CommandStatus, string> = {
@@ -39,12 +40,20 @@ export function CommandTimeline({
   identityLabels,
   canDecide = false,
   isDeciding = false,
+  evidenceByCommand,
+  evidenceCommandId = null,
+  isLoadingEvidence = false,
+  onEvidenceRequest,
   onDecision,
 }: {
   commands: Command[];
   identityLabels?: ReadonlyMap<string, string>;
   canDecide?: boolean;
   isDeciding?: boolean;
+  evidenceByCommand?: ReadonlyMap<string, OutboundEvidenceRecord[]>;
+  evidenceCommandId?: string | null;
+  isLoadingEvidence?: boolean;
+  onEvidenceRequest?: (commandId: string) => void;
   onDecision?: (
     commandId: string,
     decision: ConfirmationDecision | OutboundAction,
@@ -236,6 +245,66 @@ export function CommandTimeline({
               </div>
             )}
           </dl>
+          {onEvidenceRequest && (
+            <div className="mt-4">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                aria-expanded={evidenceCommandId === command.id}
+                onClick={() => onEvidenceRequest(command.id)}
+              >
+                {evidenceCommandId === command.id
+                  ? "Hide provider evidence"
+                  : "View provider evidence"}
+              </Button>
+              {evidenceCommandId === command.id && (
+                <div className="mt-3 rounded-md border p-3 text-sm">
+                  {isLoadingEvidence && <p role="status">Loading evidence…</p>}
+                  {!isLoadingEvidence &&
+                    (evidenceByCommand?.get(command.id)?.length ?? 0) === 0 && (
+                      <p className="text-muted-foreground">
+                        No durable stage evidence has been recorded.
+                      </p>
+                    )}
+                  {!isLoadingEvidence &&
+                    (evidenceByCommand?.get(command.id)?.length ?? 0) > 0 && (
+                      <ol
+                        aria-label="Outbound stage evidence"
+                        className="grid gap-3"
+                      >
+                        {evidenceByCommand?.get(command.id)?.map((evidence) => (
+                          <li key={evidence.id} className="grid gap-1">
+                            <span className="font-medium">
+                              {evidence.source}: {evidence.status}
+                            </span>
+                            <span>Evidence ID: {evidence.evidence_id}</span>
+                            <span>
+                              Observed: {formatTimestamp(evidence.observed_at)}
+                            </span>
+                            <span>Transaction: {evidence.transaction_id}</span>
+                            {evidence.provider_operation_id && (
+                              <span>
+                                Provider operation:{" "}
+                                {evidence.provider_operation_id}
+                              </span>
+                            )}
+                            {evidence.provider_message_id && (
+                              <span>
+                                Provider message: {evidence.provider_message_id}
+                              </span>
+                            )}
+                            {evidence.reason && (
+                              <span>Reason: {evidence.reason}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                </div>
+              )}
+            </div>
+          )}
           {command.status === "waiting_for_connection" && (
             <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm">
               Waiting for the saved account connection. The original save time
