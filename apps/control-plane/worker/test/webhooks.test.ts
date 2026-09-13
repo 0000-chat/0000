@@ -322,6 +322,230 @@ describe("webhook subscription production entrypoints", () => {
     );
   });
 
+  it("allocates unique versions for concurrent cutovers and keeps same-key retries idempotent", async () => {
+    const create = await request("/api/v1/webhook-subscriptions", {
+      method: "POST",
+      body: JSON.stringify({
+        destination: { url: "https://hooks.example.test/concurrent-v1" },
+        idempotency_key: "webhook-concurrent-create",
+      }),
+    });
+    expect(create.status).toBe(201);
+    const subscription = WebhookSubscriptionSchema.parse(await create.json());
+
+    let batchCount = 0;
+    let releaseBatch!: () => void;
+    const bothBatchesEntered = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+    let fallbackReleased = false;
+    const releaseFallback = setTimeout(() => {
+      fallbackReleased = true;
+      releaseBatch();
+    }, 5_000);
+    const gatedDb = new Proxy(workerEnv.CONTROL_DB, {
+      get(target, property, receiver) {
+        if (property !== "batch") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (statements: Parameters<D1Database["batch"]>[0]) => {
+          batchCount += 1;
+          if (batchCount === 2) releaseBatch();
+          await bothBatchesEntered;
+          return target.batch(statements);
+        };
+      },
+    }) as D1Database;
+    const gatedRequest = (path: string, init: RequestInit) =>
+      app.request(
+        `http://example.test${path}`,
+        {
+          ...init,
+          headers: {
+            Authorization: "Bearer human-token",
+            "Content-Type": "application/json",
+            ...init.headers,
+          },
+        },
+        { ...workerEnv, CONTROL_DB: gatedDb },
+      );
+    let cutovers: Response[];
+    try {
+      cutovers = await Promise.all([
+        gatedRequest(
+          `/api/v1/webhook-subscriptions/${subscription.id}/cutover`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              destination: { url: "https://hooks.example.test/concurrent-a" },
+              idempotency_key: "webhook-concurrent-a",
+            }),
+          },
+        ),
+        gatedRequest(
+          `/api/v1/webhook-subscriptions/${subscription.id}/cutover`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              destination: { url: "https://hooks.example.test/concurrent-b" },
+              idempotency_key: "webhook-concurrent-b",
+            }),
+          },
+        ),
+      ]);
+    } finally {
+      clearTimeout(releaseFallback);
+    }
+    expect(fallbackReleased).toBe(false);
+    expect(batchCount).toBe(2);
+    expect(cutovers.map((response) => response.status)).toEqual([200, 200]);
+
+    const stored = await workerEnv.CONTROL_DB.prepare(
+      "SELECT destination_url, destination_version FROM webhook_subscriptions WHERE id = ?",
+    )
+      .bind(subscription.id)
+      .first<{ destination_url: string; destination_version: number }>();
+    expect(stored?.destination_version).toBe(3);
+    expect([
+      "https://hooks.example.test/concurrent-a",
+      "https://hooks.example.test/concurrent-b",
+    ]).toContain(stored?.destination_url);
+
+    const audits = await workerEnv.CONTROL_DB.prepare(
+      "SELECT metadata_json FROM audit_events WHERE target_type = 'webhook_subscription' AND target_id = ? AND action = 'webhook.subscription.cutover'",
+    )
+      .bind(subscription.id)
+      .all<{ metadata_json: string }>();
+    const auditPayloads = audits.results.map((row) =>
+      JSON.parse(row.metadata_json),
+    );
+    expect(
+      auditPayloads.map((payload) => payload.destination_version).sort(),
+    ).toEqual([2, 3]);
+    expect(
+      new Set(auditPayloads.map((payload) => payload.destination_version)).size,
+    ).toBe(2);
+
+    const duplicate = await request(
+      `/api/v1/webhook-subscriptions/${subscription.id}/cutover`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          destination: { url: "https://hooks.example.test/concurrent-a" },
+          idempotency_key: "webhook-concurrent-a",
+        }),
+      },
+    );
+    expect(duplicate.status).toBe(200);
+    const afterDuplicate = await workerEnv.CONTROL_DB.prepare(
+      "SELECT destination_url, destination_version FROM webhook_subscriptions WHERE id = ?",
+    )
+      .bind(subscription.id)
+      .first<{ destination_url: string; destination_version: number }>();
+    expect(afterDuplicate).toEqual(stored);
+    const auditCount = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE target_type = 'webhook_subscription' AND target_id = ? AND action = 'webhook.subscription.cutover'",
+    )
+      .bind(subscription.id)
+      .first<{ count: number }>();
+    expect(auditCount?.count).toBe(2);
+
+    const changedPayload = await request(
+      `/api/v1/webhook-subscriptions/${subscription.id}/cutover`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          destination: { url: "https://hooks.example.test/duplicate" },
+          idempotency_key: "webhook-concurrent-a",
+        }),
+      },
+    );
+    expect(changedPayload.status).toBe(409);
+    const afterChangedPayload = await workerEnv.CONTROL_DB.prepare(
+      "SELECT destination_url, destination_version FROM webhook_subscriptions WHERE id = ?",
+    )
+      .bind(subscription.id)
+      .first<{ destination_url: string; destination_version: number }>();
+    expect(afterChangedPayload).toEqual(stored);
+    const afterChangedAuditCount = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE target_type = 'webhook_subscription' AND target_id = ? AND action = 'webhook.subscription.cutover'",
+    )
+      .bind(subscription.id)
+      .first<{ count: number }>();
+    expect(afterChangedAuditCount?.count).toBe(2);
+  });
+
+  it("does not record a cutover when revocation wins before the guarded update", async () => {
+    const create = await request("/api/v1/webhook-subscriptions", {
+      method: "POST",
+      body: JSON.stringify({
+        destination: { url: "https://hooks.example.test/revoke-race-v1" },
+        idempotency_key: "webhook-revoke-race-create",
+      }),
+    });
+    expect(create.status).toBe(201);
+    const subscription = WebhookSubscriptionSchema.parse(await create.json());
+    let revoked = false;
+    const revokingDb = new Proxy(workerEnv.CONTROL_DB, {
+      get(target, property, receiver) {
+        if (property !== "batch") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (statements: Parameters<D1Database["batch"]>[0]) => {
+          if (!revoked) {
+            revoked = true;
+            await target
+              .prepare(
+                "UPDATE webhook_subscriptions SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+              )
+              .bind(
+                fixedNow.toISOString(),
+                fixedNow.toISOString(),
+                subscription.id,
+              )
+              .run();
+          }
+          return target.batch(statements);
+        };
+      },
+    }) as D1Database;
+    const response = await app.request(
+      `http://example.test/api/v1/webhook-subscriptions/${subscription.id}/cutover`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer human-token",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          destination: { url: "https://hooks.example.test/revoke-race-v2" },
+          idempotency_key: "webhook-revoke-race-cutover",
+        }),
+      },
+      { ...workerEnv, CONTROL_DB: revokingDb },
+    );
+    expect(response.status).toBe(409);
+
+    const stored = await workerEnv.CONTROL_DB.prepare(
+      "SELECT status, destination_version FROM webhook_subscriptions WHERE id = ?",
+    )
+      .bind(subscription.id)
+      .first<{ status: string; destination_version: number }>();
+    expect(stored).toEqual({ status: "revoked", destination_version: 1 });
+    const mutation = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM directory_mutations WHERE idempotency_key = ?",
+    )
+      .bind("webhook-revoke-race-cutover")
+      .first<{ count: number }>();
+    expect(mutation?.count).toBe(0);
+    const audit = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE target_id = ? AND action = 'webhook.subscription.cutover'",
+    )
+      .bind(subscription.id)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
   it("keeps OAuth installation ownership separate from the human and uses shared mode without a Bot claim", async () => {
     const token = await installationToken(
       "communicator.read communicator.webhook.manage",
