@@ -299,6 +299,7 @@ const liveCheckpointFor = (
 const archiveFailureCode = (error: ArchiveError): ConsumerFailureCode => {
   switch (error.code) {
     case "archive_unavailable":
+    case "archive_busy":
       return "unavailable";
     case "archive_conflict":
     case "archive_tenant_mismatch":

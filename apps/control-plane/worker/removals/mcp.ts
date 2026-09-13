@@ -5,10 +5,8 @@ import {
   ScheduleRemovalExpiryInputSchema,
 } from "../../../../packages/contracts/src/removals";
 import { isAdministratorSession } from "../read/authorization";
-import {
-  recordRemovalWithSuppression,
-  removalStatusForTenant,
-} from "./service";
+import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
+import { removalStatusForTenant } from "./service";
 import { scheduleRemovalExpiry } from "./ledger";
 
 /** The authenticated context passed from the shared MCP transport. */
@@ -123,7 +121,14 @@ export const registerRemovalMcpTools = (
       withRemovalErrors(async () => {
         const parsed = RecordRemovalInputSchema.parse(input);
         requireAdministrator(context, parsed.tenant_id);
-        return recordRemovalWithSuppression(databaseFor(context), parsed);
+        const result = await recordRemovalWithArchivePurge(
+          {
+            database: databaseFor(context),
+            bucket: context.env.EVENT_ARCHIVE,
+          },
+          parsed,
+        );
+        return result.authority;
       }),
   );
 

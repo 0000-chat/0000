@@ -143,6 +143,13 @@ const readAuthorityById = async (
   return parseAuthority(row);
 };
 
+export const readRemovalAuthorityById = async (
+  database: RemovalDatabase,
+  tenantId: string,
+  id: string,
+): Promise<RemovalAuthority | null> =>
+  readAuthorityById(primarySession(database), tenantId, id);
+
 const scopeMatches = (
   authority: RemovalAuthority,
   input: NormalizedRecordRemovalInput,

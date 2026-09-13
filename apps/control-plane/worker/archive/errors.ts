@@ -5,6 +5,7 @@ export type ArchiveErrorCode =
   | "archive_conflict"
   | "archive_not_found"
   | "archive_corrupt"
+  | "archive_busy"
   | "archive_unavailable";
 
 const SAFE_MESSAGES: Record<ArchiveErrorCode, string> = {
@@ -14,6 +15,7 @@ const SAFE_MESSAGES: Record<ArchiveErrorCode, string> = {
   archive_conflict: "Archive object conflicts with existing content",
   archive_not_found: "Archive object not found",
   archive_corrupt: "Archive content is corrupt",
+  archive_busy: "Archive purge is already in progress",
   archive_unavailable: "Archive storage is unavailable",
 };
 
