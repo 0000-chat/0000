@@ -12,8 +12,10 @@ Standalone public components do not require hosted platform authentication.
 When application code is added, this boundary can expose an authentication
 adapter without choosing a provider in this scaffold.
 
-Run `./scripts/check` from this repository before committing. Work on a task
-branch; direct commits on `main` are blocked after bootstrap.
+Run `./scripts/check` from this repository before committing. The check
+validates metadata, formats supported files with Biome, and lints supported
+JavaScript and TypeScript files with pinned tools. Work on a task branch;
+direct commits on `main` are blocked after bootstrap.
 
 ## Agent skills
 

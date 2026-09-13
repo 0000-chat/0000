@@ -7,6 +7,26 @@
     "defaultBranch": "main"
   },
   "files": {
+    "includes": [
+      "**/*.json",
+      "**/*.jsonc",
+      "**/*.js",
+      "**/*.jsx",
+      "**/*.mjs",
+      "**/*.cjs",
+      "**/*.ts",
+      "**/*.tsx",
+      "!**/.agents/**",
+      "!**/.cache/**",
+      "!**/node_modules/**",
+      "!**/dist/**",
+      "!**/build/**",
+      "!**/coverage/**",
+      "!**/target/**",
+      "!**/generated/**",
+      "!**/vendor/**",
+      "!**/.wrangler/**"
+    ],
     "ignoreUnknown": true
   },
   "formatter": {

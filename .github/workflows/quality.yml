@@ -10,12 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run scaffold checks
-        run: ./scripts/check
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Validate Biome configuration
-        run: npx --yes @biomejs/biome@2.5.13 format --no-errors-on-unmatched biome.json .oxlintrc.json
-      - name: Validate Oxlint configuration
-        run: npx --yes oxlint@1.82.0 --print-config --config .oxlintrc.json
+      - name: Run scaffold and source checks
+        run: ./scripts/check
