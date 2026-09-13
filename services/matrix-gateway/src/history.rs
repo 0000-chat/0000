@@ -19,11 +19,13 @@ use tokio::{
 
 use crate::{
     batch::{self, BackfillCheckpoint, WindowSource},
-    ledger::{NewBackfillJob, STORE_BACKFILL_NOT_READY},
-    matrix::MatrixTransport,
+    canonical,
+    ledger::{BackfillState, NewBackfillJob, STORE_BACKFILL_NOT_READY},
+    matrix::{MatrixTransport, observed_backfill_state_event, observed_backfill_timeline_event},
     model::{self, Provider},
     provisioning::{HttpRequest, read_http_request, response, write_http_response},
     secret::{SafeError, SecretBytes},
+    service::normalize_backfill_events,
     store::Store,
 };
 
@@ -31,7 +33,6 @@ const MAX_ID_BYTES: usize = 512;
 const MAX_RANGE_ID_BYTES: usize = 128;
 const MAX_PAGE_EVENTS: u64 = 500;
 const PAGE_LIMIT: u64 = MAX_PAGE_EVENTS;
-const HISTORY_UNAVAILABLE: &str = "runtime_unavailable";
 const HISTORY_PROVIDER_ERROR: &str = "provider_error";
 const HISTORY_MALFORMED_RANGE: &str = "malformed_range";
 const HISTORY_CONFLICT: &str = "history_conflict";
@@ -44,6 +45,9 @@ struct HistoryPagination {
     input_cursor: Option<String>,
     source_cursor: String,
     public_cursor: String,
+    page_start: u64,
+    page_length: u64,
+    history_terminal: bool,
 }
 
 /// The exact Worker owner tuple used to resolve a Matrix room.
@@ -219,6 +223,14 @@ impl HistoryGatewayServer {
                     }
                     match store.begin_or_resume_backfill_job(&owner.import_id) {
                         Ok(stored) => stored,
+                        Err(error) if error.code() == STORE_BACKFILL_NOT_READY => {
+                            match store.load_backfill_job_for_history(&owner.import_id) {
+                                Ok(stored) => stored,
+                                Err(error) => {
+                                    return response(503, json!({ "error": error.code() }));
+                                }
+                            }
+                        }
                         Err(error) => return response(503, json!({ "error": error.code() })),
                     }
                 }
@@ -281,6 +293,12 @@ impl HistoryGatewayServer {
             };
             let stored = match store.begin_or_resume_backfill_job(&request.owner.import_id) {
                 Ok(stored) => stored,
+                Err(error) if error.code() == STORE_BACKFILL_NOT_READY => {
+                    match store.load_backfill_job_for_history(&request.owner.import_id) {
+                        Ok(stored) => stored,
+                        Err(error) => return response(409, json!({ "error": error.code() })),
+                    }
+                }
                 Err(error) => return response(409, json!({ "error": error.code() })),
             };
             if !job_matches_owner(stored.job(), &request.owner, binding.matrix_room_id())
@@ -296,22 +314,58 @@ impl HistoryGatewayServer {
             if let Some(cursor) = stored_pagination(stored.pagination())
                 && cursor.input_cursor.as_deref() == request.source_cursor.as_deref()
             {
+                let events = match store.backfill_page_events(
+                    &request.owner.import_id,
+                    cursor.page_start,
+                    cursor.page_length,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return response(503, json!({ "error": error.code() })),
+                };
+                let events = match events
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(value) => value,
+                    Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
+                };
                 return response(
                     200,
                     json!({
-                        "status": "active",
-                        "events": [],
-                        "next_cursor": cursor.public_cursor,
+                        "status": if cursor.history_terminal {
+                            "completed"
+                        } else {
+                            "active"
+                        },
+                        "events": events,
+                        "next_cursor": if cursor.history_terminal {
+                            Value::Null
+                        } else {
+                            json!(cursor.public_cursor)
+                        },
                         "gap_code": Value::Null,
                         "error_code": Value::Null,
                     }),
                 );
             }
+            if stored.state() == BackfillState::Completed {
+                return response(409, json!({ "error": HISTORY_CONFLICT }));
+            }
+            if stored_pagination(stored.pagination()).is_some_and(|cursor| cursor.history_terminal)
+            {
+                return response(409, json!({ "error": HISTORY_CONFLICT }));
+            }
             (binding, stored)
         };
 
-        let from = stored_pagination(stored.pagination())
-            .map(|value| SecretBytes::new(value.source_cursor.into_bytes()));
+        let stored_cursor = stored_pagination(stored.pagination());
+        let from_source = stored_cursor
+            .as_ref()
+            .map(|value| value.source_cursor.clone());
+        let from = from_source
+            .as_ref()
+            .map(|value| SecretBytes::new(value.as_bytes().to_vec()));
         let page = match self
             .transport
             .backfill_page(binding.matrix_room_id(), from.as_ref(), PAGE_LIMIT)
@@ -323,68 +377,142 @@ impl HistoryGatewayServer {
         if page.chunk().len() > MAX_PAGE_EVENTS as usize {
             return response(502, json!({ "error": HISTORY_PROVIDER_ERROR }));
         }
-        // The first gateway checkpoint intentionally refuses to advance past
-        // raw events until the shared Matrix normalizer is wired into this
-        // path. Empty Matrix pages are safe to checkpoint and prove cursor
-        // replay without silently dropping history.
-        if !page.chunk().is_empty() || !page.state().is_empty() {
-            return response(503, json!({ "error": HISTORY_UNAVAILABLE }));
+        if from_source
+            .as_deref()
+            .is_some_and(|value| value != page.start())
+        {
+            return response(502, json!({ "error": HISTORY_PROVIDER_ERROR }));
         }
 
+        let room_lookup = {
+            let store = self.store.lock().await;
+            match store.matrix_room_lookup(binding.matrix_room_id()) {
+                Ok(value) => value,
+                Err(error) => return response(503, json!({ "error": error.code() })),
+            }
+        };
+        let mut seed_events = Vec::with_capacity(page.state().len());
+        for event in page.state() {
+            match observed_backfill_state_event(binding.matrix_room_id(), event) {
+                Ok(value) => seed_events.push(value),
+                Err(error) => return history_partial_response(error.code()),
+            }
+        }
+        let mut timeline_events = Vec::with_capacity(page.chunk().len());
+        for event in page.chunk() {
+            match observed_backfill_timeline_event(binding.matrix_room_id(), event) {
+                Ok(value) => timeline_events.push(value),
+                Err(error) => return history_partial_response(error.code()),
+            }
+        }
+        let checkpoint_digest =
+            format!("sha256:{}", canonical::sha256_hex(page.start().as_bytes()));
+        let routed = match normalize_backfill_events(
+            &seed_events,
+            &timeline_events,
+            binding.matrix_room_id(),
+            room_lookup,
+            &binding,
+            &checkpoint_digest,
+            utc_now(),
+        ) {
+            Ok(value) => value,
+            Err(error) => return history_partial_response(error.code()),
+        };
+        let start_at =
+            parse_utc_millis(&request.owner.start_at).expect("validated history start timestamp");
+        let end_at =
+            parse_utc_millis(&request.owner.end_at).expect("validated history end timestamp");
+        let routed = routed
+            .into_iter()
+            .filter(|value| {
+                parse_utc_millis(&value.event.occurred_at)
+                    .is_some_and(|occurred_at| occurred_at >= start_at && occurred_at < end_at)
+            })
+            .collect::<Vec<_>>();
+        if routed.len() > MAX_PAGE_EVENTS as usize {
+            return response(502, json!({ "error": HISTORY_PROVIDER_ERROR }));
+        }
+        let events = match routed
+            .iter()
+            .map(|value| serde_json::to_value(value.event()))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(value) => value,
+            Err(_) => return history_partial_response(HISTORY_PROVIDER_ERROR),
+        };
+
+        let batch_ordinal = {
+            let mut store = self.store.lock().await;
+            match store.backfill_batch_count(&request.owner.import_id) {
+                Ok(value) => value,
+                Err(error) => return response(503, json!({ "error": error.code() })),
+            }
+        };
         let checkpoint = match BackfillCheckpoint::new(
             stored.job().job_id(),
             stored.job().room_id(),
             stored.job().start_at(),
             stored.job().end_at(),
             stored.job().max_events(),
-            0,
+            batch_ordinal,
         ) {
             Ok(value) => value,
             Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
         };
-        let window = match batch::build_window(WindowSource::backfill(checkpoint), utc_now(), &[]) {
-            Ok(window) => window,
-            Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
+        let window =
+            match batch::build_window(WindowSource::backfill(checkpoint), utc_now(), &routed) {
+                Ok(window) => window,
+                Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
+            };
+        let accepted_events = match stored
+            .accepted_events()
+            .checked_add(u64::try_from(routed.len()).unwrap_or(u64::MAX))
+        {
+            Some(value) if value <= stored.job().max_events() => value,
+            _ => return response(502, json!({ "error": HISTORY_PROVIDER_ERROR })),
         };
         let now = utc_now();
         let mut next_cursor = None;
         {
             let mut store = self.store.lock().await;
-            let pagination = match page.end() {
-                Some(source_cursor) => {
-                    let public_cursor = match store.history_cursor_token(
-                        &request.owner.import_id,
-                        &request.range_id,
-                        source_cursor,
-                    ) {
-                        Ok(value) => value,
-                        Err(error) => return response(503, json!({ "error": error.code() })),
-                    };
-                    next_cursor = Some(public_cursor.clone());
-                    let value = HistoryPagination {
-                        schema_version: 1,
-                        range_id: request.range_id.clone(),
-                        input_cursor: request.source_cursor.clone(),
-                        source_cursor: source_cursor.to_owned(),
-                        public_cursor,
-                    };
-                    match serde_json::to_vec(&value) {
-                        Ok(value) => Some(SecretBytes::new(value)),
-                        Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
-                    }
-                }
-                None => None,
+            let source_cursor = page.end().unwrap_or_else(|| page.start());
+            let public_cursor = match store.history_cursor_token(
+                &request.owner.import_id,
+                &request.range_id,
+                source_cursor,
+            ) {
+                Ok(value) => value,
+                Err(error) => return response(503, json!({ "error": error.code() })),
+            };
+            if page.end().is_some() {
+                next_cursor = Some(public_cursor.clone());
+            }
+            let value = HistoryPagination {
+                schema_version: 1,
+                range_id: request.range_id.clone(),
+                input_cursor: request.source_cursor.clone(),
+                source_cursor: source_cursor.to_owned(),
+                public_cursor,
+                page_start: batch_ordinal,
+                page_length: u64::try_from(window.batches.len()).unwrap_or(u64::MAX),
+                history_terminal: page.end().is_none(),
+            };
+            let pagination = match serde_json::to_vec(&value) {
+                Ok(value) => Some(SecretBytes::new(value)),
+                Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
             };
             if let Err(error) = store.checkpoint_backfill_page(
                 &request.owner.import_id,
                 pagination.as_ref(),
                 &window,
-                stored.accepted_events(),
+                accepted_events,
             ) {
                 return response(503, json!({ "error": error.code() }));
             }
             if page.end().is_none()
                 && let Err(error) = store.complete_backfill_job(&request.owner.import_id, now)
+                && error.code() != STORE_BACKFILL_NOT_READY
             {
                 return response(503, json!({ "error": error.code() }));
             }
@@ -395,7 +523,7 @@ impl HistoryGatewayServer {
             200,
             json!({
                 "status": if completed { "completed" } else { "active" },
-                "events": [],
+                "events": events,
                 "next_cursor": next_cursor,
                 "gap_code": Value::Null,
                 "error_code": Value::Null,
@@ -453,6 +581,19 @@ fn cursor_matches(stored: Option<&SecretBytes>, range_id: &str, requested: Optio
     }
 }
 
+fn history_partial_response(reason_code: &str) -> (u16, Vec<u8>) {
+    response(
+        200,
+        json!({
+            "status": "partial",
+            "events": [],
+            "next_cursor": Value::Null,
+            "gap_code": reason_code,
+            "error_code": HISTORY_PROVIDER_ERROR,
+        }),
+    )
+}
+
 fn parse_utc_millis(value: &str) -> Option<DateTime<Utc>> {
     let parsed = DateTime::parse_from_rfc3339(value)
         .ok()?
@@ -479,6 +620,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::TimeZone;
+    use ruma::{events::AnyTimelineEvent, serde::Raw};
     use tempfile::tempdir;
 
     use super::*;
@@ -491,6 +633,8 @@ mod tests {
 
     struct ControlledHistoryTransport {
         calls: AtomicUsize,
+        nonempty: bool,
+        encrypted: bool,
     }
 
     #[async_trait]
@@ -502,14 +646,39 @@ mod tests {
         async fn backfill_page(
             &self,
             _room_id: &str,
-            _from: Option<&SecretBytes>,
+            from: Option<&SecretBytes>,
             _limit: u64,
         ) -> Result<RawBackfillPage, SafeError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let start = from
+                .map(|value| String::from_utf8(value.as_bytes().to_vec()).expect("cursor UTF-8"))
+                .unwrap_or_else(|| format!("matrix-start-{call}"));
+            let chunk = if self.nonempty && call == 0 {
+                vec![
+                    Raw::<AnyTimelineEvent>::from_json_string(
+                        json!({
+                            "event_id": "$history-message:example.test",
+                            "origin_server_ts": 1_767_225_600_000_i64,
+                            "sender": "@owner:example.test",
+                            "type": if self.encrypted { "m.room.encrypted" } else { "m.room.message" },
+                            "room_id": "!history:example.test",
+                            "content": if self.encrypted {
+                                json!({"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "redacted"})
+                            } else {
+                                json!({"msgtype": "m.text", "body": "historical message"})
+                            }
+                        })
+                        .to_string(),
+                    )
+                    .expect("history raw event"),
+                ]
+            } else {
+                Vec::new()
+            };
             RawBackfillPage::new(
-                format!("matrix-start-{call}"),
+                start,
                 (call == 0).then_some("matrix-end-1".to_owned()),
-                Vec::new(),
+                chunk,
                 Vec::new(),
             )
         }
@@ -569,7 +738,10 @@ mod tests {
         }
     }
 
-    async fn server() -> (
+    async fn server(
+        nonempty: bool,
+        encrypted: bool,
+    ) -> (
         HistoryGatewayServer,
         Arc<ControlledHistoryTransport>,
         tempfile::TempDir,
@@ -600,6 +772,8 @@ mod tests {
             .expect("append binding");
         let transport = Arc::new(ControlledHistoryTransport {
             calls: AtomicUsize::new(0),
+            nonempty,
+            encrypted,
         });
         let server = HistoryGatewayServer::new(
             store,
@@ -612,7 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_page_checkpoints_and_start_replays_cursor() {
-        let (server, transport, _directory) = server().await;
+        let (server, transport, _directory) = server(false, false).await;
         let owner = owner();
         assert_eq!(owner.validate(), Ok(()));
         let started = server
@@ -660,6 +834,94 @@ mod tests {
         let second: Value = serde_json::from_slice(&second.1).expect("terminal JSON");
         assert_eq!(second["status"], "completed");
         assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+
+        let terminal_retry = server
+            .handle_request(request(
+                "/v1/history-imports/advance",
+                &owner,
+                Some(public_cursor),
+            ))
+            .await;
+        assert_eq!(terminal_retry.0, 200);
+        let terminal_retry: Value =
+            serde_json::from_slice(&terminal_retry.1).expect("terminal retry JSON");
+        assert_eq!(terminal_retry["status"], "completed");
+        assert_eq!(terminal_retry["events"].as_array().map(Vec::len), Some(0));
+        assert_eq!(terminal_retry["next_cursor"], Value::Null);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn nonempty_page_normalizes_backfill_events_and_replays_without_refetch() {
+        let (server, transport, _directory) = server(true, false).await;
+        let owner = owner();
+        let started = server
+            .handle_request(request("/v1/history-imports/start", &owner, None))
+            .await;
+        assert_eq!(started.0, 200, "{}", String::from_utf8_lossy(&started.1));
+
+        let first = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(first.0, 200, "{}", String::from_utf8_lossy(&first.1));
+        let first: Value = serde_json::from_slice(&first.1).expect("advance JSON");
+        assert_eq!(first["status"], "active");
+        assert_eq!(first["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(first["events"][0]["event_source"], "backfill");
+        assert_eq!(first["events"][0]["payload"]["body"], "historical message");
+        let public_cursor = first["next_cursor"].as_str().expect("opaque cursor");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        let retry = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(retry.0, 200, "{}", String::from_utf8_lossy(&retry.1));
+        let retry: Value = serde_json::from_slice(&retry.1).expect("retry JSON");
+        assert_eq!(retry["events"], first["events"]);
+        assert_eq!(retry["next_cursor"], public_cursor);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        let second = server
+            .handle_request(request(
+                "/v1/history-imports/advance",
+                &owner,
+                Some(public_cursor),
+            ))
+            .await;
+        assert_eq!(second.0, 200, "{}", String::from_utf8_lossy(&second.1));
+        let second: Value = serde_json::from_slice(&second.1).expect("terminal JSON");
+        assert_eq!(second["status"], "completed");
+        assert_eq!(second["events"].as_array().map(Vec::len), Some(0));
+        assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn encrypted_page_surfaces_gap_without_checkpointing() {
+        let (server, transport, _directory) = server(true, true).await;
+        let owner = owner();
+        let started = server
+            .handle_request(request("/v1/history-imports/start", &owner, None))
+            .await;
+        assert_eq!(started.0, 200, "{}", String::from_utf8_lossy(&started.1));
+
+        let advance = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(advance.0, 200, "{}", String::from_utf8_lossy(&advance.1));
+        let advance: Value = serde_json::from_slice(&advance.1).expect("gap JSON");
+        assert_eq!(advance["status"], "partial");
+        assert_eq!(advance["events"].as_array().map(Vec::len), Some(0));
+        assert_eq!(advance["next_cursor"], Value::Null);
+        assert_eq!(advance["gap_code"], "matrix_unable_to_decrypt");
+        assert_eq!(advance["error_code"], "provider_error");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+        let retry = server
+            .handle_request(request("/v1/history-imports/advance", &owner, None))
+            .await;
+        assert_eq!(retry.0, 200, "{}", String::from_utf8_lossy(&retry.1));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
     }
 }

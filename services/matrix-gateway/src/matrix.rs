@@ -1661,6 +1661,38 @@ fn observed_event(
     )?))
 }
 
+/// Convert one raw `/messages` timeline event into the same protected
+/// observation boundary used by the receive-only sync path. Encrypted raw
+/// events are retained as an explicit retry marker and can never be silently
+/// checkpointed as if they were clear text.
+pub(crate) fn observed_backfill_timeline_event(
+    room_id: &str,
+    event: &Raw<AnyTimelineEvent>,
+) -> Result<ObservedMatrixEvent, SafeError> {
+    let event_type = event
+        .get_field::<String>("type")
+        .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?
+        .ok_or_else(|| SafeError::new(MATRIX_RESPONSE_INVALID))?;
+    Ok(ObservedMatrixEvent::Timeline(ObservedRoomEvent::new(
+        SecretBytes::from_slice(room_id.as_bytes()),
+        event_json(event)?,
+        event_type == "m.room.encrypted",
+    )?))
+}
+
+/// Convert one raw `/messages` state event into the existing protected state
+/// observation boundary.
+pub(crate) fn observed_backfill_state_event(
+    room_id: &str,
+    event: &Raw<AnyStateEvent>,
+) -> Result<ObservedMatrixEvent, SafeError> {
+    Ok(ObservedMatrixEvent::State(ObservedRoomEvent::new(
+        SecretBytes::from_slice(room_id.as_bytes()),
+        event_json(event)?,
+        false,
+    )?))
+}
+
 fn observed_state_event(
     room_id: &str,
     event: &Raw<AnySyncStateEvent>,

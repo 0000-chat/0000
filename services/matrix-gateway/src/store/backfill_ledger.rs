@@ -87,6 +87,22 @@ enum StoredPagination {
     Terminal(TerminalPageMarker),
 }
 
+/// The authenticated history gateway's persisted cursor envelope. Keep this
+/// shape local to the ledger so terminal detection cannot be triggered by an
+/// arbitrary JSON field in provider pagination bytes.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryPaginationEnvelope {
+    schema_version: u8,
+    range_id: String,
+    input_cursor: Option<String>,
+    source_cursor: String,
+    public_cursor: String,
+    page_start: u64,
+    page_length: u64,
+    history_terminal: bool,
+}
+
 fn checked_backfill_checkpoint_recovery_bytes<I>(
     existing_request_ciphertext_bytes: u64,
     request_plaintext_lengths: I,
@@ -455,6 +471,131 @@ impl Store {
         .map_err(|_| backfill_corrupt())?;
         transaction.commit().map_err(|_| backfill_corrupt())?;
         Ok(stored)
+    }
+
+    /// Return the authenticated number of durable batches already checkpointed
+    /// for one explicit history job. The count is the next backfill checkpoint
+    /// ordinal and lets a resumed history page reuse the existing seek model.
+    pub fn backfill_batch_count(&mut self, job_id: &str) -> Result<u64, SafeError> {
+        validate_job_id(job_id)?;
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let row = load_backfill_row(&transaction, job_id)?.ok_or_else(backfill_not_ready)?;
+        validate_explicit_job_shape(&row)?;
+        let verified = verify_backfill_row(keyring, &row)?;
+        let count = load_backfill_outbox_rows(&transaction, keyring, &verified.job)?;
+        transaction.commit().map_err(|_| backfill_corrupt())?;
+        Ok(count)
+    }
+
+    /// Load one authenticated explicit history job without changing its
+    /// lifecycle state. History response replay uses this after a terminal
+    /// page has already completed the durable ledger transition.
+    pub fn load_backfill_job_for_history(
+        &mut self,
+        job_id: &str,
+    ) -> Result<StoredBackfillJob, SafeError> {
+        validate_job_id(job_id)?;
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let row = load_backfill_row(&transaction, job_id)?.ok_or_else(backfill_not_ready)?;
+        validate_explicit_job_shape(&row)?;
+        let mut verified = verify_backfill_row(keyring, &row)?;
+        let parameters = std::mem::take(&mut *verified.parameters);
+        let pagination = verified
+            .pagination
+            .as_mut()
+            .map(|value| std::mem::take(&mut **value));
+        let stored = StoredBackfillJob::from_verified_parts(
+            verified.job,
+            verified.state,
+            parameters,
+            pagination,
+            verified.accepted_events,
+        )
+        .map_err(|_| backfill_corrupt())?;
+        transaction.commit().map_err(|_| backfill_corrupt())?;
+        Ok(stored)
+    }
+
+    /// Re-read one already checkpointed page from the authenticated encrypted
+    /// outbox. This is used by a retried history request after the first
+    /// response was lost, so the gateway can replay the exact canonical events
+    /// without fetching Matrix again.
+    pub fn backfill_page_events(
+        &mut self,
+        job_id: &str,
+        page_start: u64,
+        page_length: u64,
+    ) -> Result<Vec<crate::model::CanonicalEvent>, SafeError> {
+        validate_job_id(job_id)?;
+        let page_end = page_start
+            .checked_add(page_length)
+            .ok_or_else(backfill_invalid)?;
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| backfill_corrupt())?;
+        let row = load_backfill_row(&transaction, job_id)?.ok_or_else(backfill_not_ready)?;
+        validate_explicit_job_shape(&row)?;
+        let verified = verify_backfill_row(keyring, &row)?;
+        let count = load_backfill_outbox_rows(&transaction, keyring, &verified.job)?;
+        if page_end > count {
+            return Err(backfill_not_ready());
+        }
+        let page_start_sql = i64::try_from(page_start).map_err(|_| backfill_invalid())?;
+        let page_end_sql = i64::try_from(page_end).map_err(|_| backfill_invalid())?;
+        let limit = page_length
+            .checked_add(1)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(backfill_invalid)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT batch_row_id, source_kind, window_id, backfill_job_id,
+                        ordinal, state, request_cipher, request_nonce, request_key_version,
+                        request_sha256, byte_count, attempt_count, next_attempt_at,
+                        accepted_at, terminal_code
+                 FROM outbox_batches
+                 WHERE backfill_job_id = ?1 AND ordinal >= ?2 AND ordinal < ?3
+                 ORDER BY ordinal ASC LIMIT ?4",
+            )
+            .map_err(|_| backfill_corrupt())?;
+        let mut rows = statement
+            .query(params![job_id, page_start_sql, page_end_sql, limit])
+            .map_err(|_| backfill_corrupt())?;
+        let mut output = Vec::new();
+        let mut offset = 0_u64;
+        while let Some(row) = rows.next().map_err(|_| backfill_corrupt())? {
+            if offset >= page_length {
+                return Err(backfill_corrupt());
+            }
+            let stored =
+                verify_backfill_outbox_row(keyring, &verified.job, read_backfill_outbox_row(row)?)?;
+            let expected_ordinal = page_start
+                .checked_add(offset)
+                .ok_or_else(backfill_corrupt)?;
+            if stored.ordinal != expected_ordinal {
+                return Err(backfill_corrupt());
+            }
+            let request = batch::reparse_and_verify_request(stored.request.as_slice())
+                .map_err(|_| backfill_corrupt())?;
+            output.extend(request.events);
+            offset = offset.checked_add(1).ok_or_else(backfill_corrupt)?;
+        }
+        if offset != page_length {
+            return Err(backfill_corrupt());
+        }
+        drop(rows);
+        drop(statement);
+        transaction.commit().map_err(|_| backfill_corrupt())?;
+        Ok(output)
     }
 
     /// Persist one exact page for a running explicit backfill job.
@@ -1407,6 +1548,20 @@ fn is_exhausted_pagination(job: &VerifiedBackfillRow) -> bool {
             || value
                 .as_slice()
                 .starts_with(BACKFILL_TERMINAL_MARKER_PREFIX)
+            || serde_json::from_slice::<HistoryPaginationEnvelope>(value.as_slice())
+                .ok()
+                .is_some_and(|value| {
+                    value.schema_version == 1
+                        && !value.range_id.is_empty()
+                        && value
+                            .input_cursor
+                            .as_deref()
+                            .is_none_or(|cursor| !cursor.is_empty())
+                        && !value.source_cursor.is_empty()
+                        && value.public_cursor.starts_with("history_")
+                        && value.page_start.checked_add(value.page_length).is_some()
+                        && value.history_terminal
+                })
     })
 }
 

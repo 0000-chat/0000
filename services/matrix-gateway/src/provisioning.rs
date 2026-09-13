@@ -17,7 +17,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::ingestion::SecretString;
+use crate::{history::HistoryGatewayServer, ingestion::SecretString};
 
 const PROVISIONING_ROOT: &str = "/_matrix/provision/v3";
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
@@ -459,6 +459,7 @@ pub struct ProvisioningGatewayServer {
     gateway_token: SecretString,
     route: GatewayRouteMetadata,
     sessions: Arc<Mutex<HashMap<String, GatewaySession>>>,
+    history: Option<Arc<HistoryGatewayServer>>,
 }
 
 impl fmt::Debug for ProvisioningGatewayServer {
@@ -481,7 +482,15 @@ impl ProvisioningGatewayServer {
             gateway_token,
             route,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            history: None,
         })
+    }
+
+    /// Add the authenticated Matrix history adapter to the same private
+    /// listener used by the provider-linking routes.
+    pub fn with_history(mut self, history: HistoryGatewayServer) -> Self {
+        self.history = Some(Arc::new(history));
+        self
     }
 
     /// Serve the private gateway on a caller-supplied listener.  The caller
@@ -504,6 +513,12 @@ impl ProvisioningGatewayServer {
     }
 
     async fn handle_request(&self, request: HttpRequest) -> (u16, Vec<u8>) {
+        if request.path.starts_with("/v1/history-imports/") {
+            return match &self.history {
+                Some(history) => history.handle_request(request).await,
+                None => response(404, json!({ "error": "not_found" })),
+            };
+        }
         if request.authorization.as_deref() != Some(self.gateway_token.as_str()) {
             return response(401, json!({ "error": "unauthorized" }));
         }

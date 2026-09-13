@@ -19,6 +19,7 @@ use communicator_matrix_gateway::{
     admin::{self, AdminError},
     config::{GatewayConfig, MAX_CONFIG_JSON_BYTES},
     crypto::Keyring,
+    history::HistoryGatewayServer,
     ingestion::{IngestionClient, OAuthTokenProvider, SecretString},
     matrix::{
         MATRIX_SESSION_INVALID, MatrixProcessor, matrix_access_token, restore_matrix_processor,
@@ -227,7 +228,21 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         .provisioning()
         .ok_or_else(|| SafeError::new("provisioning_config_missing"))?;
     let bridge_secret = load_text(provisioning.bridge_shared_secret_file())?;
-    let gateway_secret = load_text(provisioning.gateway_shared_secret_file())?;
+    let gateway_secret = SecretString::new(load_text(provisioning.gateway_shared_secret_file())?);
+    let keyring = load_keyring(config.state_key_file())?;
+    let store = Store::open(config.state_db_path(), keyring)
+        .map_err(|error| SafeError::new(error.code()))?;
+    let session = store
+        .matrix_session()?
+        .ok_or_else(|| SafeError::new(MATRIX_SESSION_INVALID))?;
+    let access_token = matrix_access_token(&session, config.matrix_user_id())?;
+    let transport = ReqwestMatrixTransport::new(
+        config.homeserver_url(),
+        access_token,
+        Duration::from_secs(config.request_timeout_secs()),
+        Duration::from_secs(config.sync_timeout_secs()),
+    )?;
+    let history = HistoryGatewayServer::new(store, Arc::new(transport), gateway_secret.as_str())?;
     let client = WhatsAppProvisioningClient::new(
         provisioning.bridge_url(),
         SecretString::new(bridge_secret),
@@ -237,7 +252,7 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
     .map_err(|error| SafeError::new(error.code()))?;
     let server = ProvisioningGatewayServer::new(
         client,
-        SecretString::new(gateway_secret),
+        gateway_secret,
         GatewayRouteMetadata {
             gateway_route_id: provisioning.gateway_route_id().to_owned(),
             bridge_instance_id: provisioning.bridge_instance_id().to_owned(),
@@ -246,6 +261,7 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         },
     )
     .map_err(|error| SafeError::new(error.code()))?;
+    let server = server.with_history(history);
     serve_private_gateway(server, provisioning.listen_addr())
         .await
         .map_err(|_| SafeError::new("provisioning_listen_failed"))
