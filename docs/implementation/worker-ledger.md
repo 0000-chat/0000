@@ -114,6 +114,18 @@ progress. Readiness is recorded here by dependency and worker evidence; an
 open GitHub issue or a future `Closes` reference is not treated as proof that
 the ticket is complete.
 
+## Preparation designs
+
+The OAuth and WhatsApp linking designs are preserved at
+[`oauth-implementation-design.md`](oauth-implementation-design.md) and
+[`linking-implementation-design.md`](linking-implementation-design.md). They
+are nonempty implementation preparation documents, not acceptance evidence,
+live registration, deployment, or phone-scan proof. The missing private
+provisioning gateway for #14 remains implementation scope: it requires a
+runnable authenticated gateway/configuration boundary and controlled HTTP
+integration tests. Later deployment and phone scanning require separate
+authorization.
+
 ## Grants worker checkpoint
 
 The #12 parent is paused for a final test report and bounded authorization fix;
