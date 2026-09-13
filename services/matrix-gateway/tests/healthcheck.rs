@@ -4,7 +4,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use communicator_matrix_gateway::{
     config::{MAX_PENDING_AGE_SECS, MAX_PENDING_REQUEST_ROWS, MAX_SYNC_RESPONSE_BYTES},
     crypto::Keyring,
-    health::inspect_at,
+    health::{HEALTH_DATABASE_BUSY, HEALTH_DATABASE_UNAVAILABLE, inspect_at},
     store::Store,
     store_types::NewBootstrapState,
 };
@@ -601,7 +601,7 @@ fn maintenance_code_persists_across_health_reopen() {
         for report in [first, second] {
             let json = report.to_json();
             assert!(json.contains(&format!("\"maintenance_code\":\"{code}\"")));
-            assert!(json.contains("\"terminal_quarantine\":false"));
+            assert!(json.contains("\"terminal_quarantine\":true"));
             assert!(!report.is_healthy());
         }
     }
@@ -736,4 +736,117 @@ fn invalid_terminal_code_is_corrupt_without_quarantine_flag() {
     assert!(json.contains("\"inbox_state\":\"corrupt\""));
     assert!(json.contains("\"terminal_quarantine\":false"));
     assert!(!report.is_healthy());
+}
+
+#[test]
+fn invalid_schema_version_or_required_column_blocks_as_corrupt() {
+    let (_directory, path, store) = bootstrap_store();
+    drop(store);
+    let connection = Connection::open(&path).expect("open schema fixture");
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .expect("disable schema fixture constraints");
+    connection
+        .execute("UPDATE schema_meta SET version = 2", [])
+        .expect("corrupt schema version");
+    let report = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect schema version");
+    let json = report.to_json();
+    assert!(json.contains("\"inbox_state\":\"corrupt\""));
+    assert!(json.contains("\"outbox_state\":\"corrupt\""));
+    assert!(!report.is_healthy());
+    drop(connection);
+
+    let (_directory, path, store) = bootstrap_store();
+    drop(store);
+    let connection = Connection::open(&path).expect("open column fixture");
+    connection
+        .execute(
+            "ALTER TABLE outbox_batches RENAME COLUMN next_attempt_at TO next_attempt_removed",
+            [],
+        )
+        .expect("remove required column");
+    let report = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect missing column");
+    let json = report.to_json();
+    assert!(json.contains("\"inbox_state\":\"corrupt\""));
+    assert!(json.contains("\"outbox_state\":\"corrupt\""));
+    assert!(!report.is_healthy());
+}
+
+#[test]
+fn malformed_session_metadata_blocks_without_reading_payload() {
+    let updates = [
+        "UPDATE gateway_state SET session_cipher = NULL",
+        "UPDATE gateway_state SET session_cipher = 'cipher-text'",
+        "UPDATE gateway_state SET session_nonce = zeroblob(23)",
+        "UPDATE gateway_state SET session_key_version = 'one'",
+        "UPDATE gateway_state SET session_cipher = zeroblob(15)",
+        "UPDATE gateway_state SET session_cipher = zeroblob(1048593)",
+        "UPDATE gateway_state SET singleton = 2",
+    ];
+    for update in updates {
+        let (_directory, path, store) = bootstrap_store();
+        drop(store);
+        let connection = Connection::open(&path).expect("open session fixture");
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .expect("disable session fixture constraints");
+        connection
+            .execute(update, [])
+            .expect("corrupt session metadata");
+        let report = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect session");
+        let json = report.to_json();
+        assert!(json.contains("\"session\":\"missing\""));
+        assert!(json.contains("\"inbox_state\":\"corrupt\""));
+        assert!(json.contains("\"outbox_state\":\"corrupt\""));
+        assert!(!report.is_healthy());
+    }
+}
+
+#[test]
+fn missing_health_database_is_stable_and_does_not_create_file() {
+    let directory = tempdir().expect("create missing database directory");
+    let path = directory.path().join("missing.sqlite3");
+    let error = match inspect_at(&path, timestamp(1_700_000_001_000)) {
+        Ok(_) => panic!("missing database unexpectedly inspected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), HEALTH_DATABASE_UNAVAILABLE);
+    assert!(!path.exists());
+}
+
+#[test]
+fn busy_health_database_returns_bounded_stable_error() {
+    let (_directory, path, store) = bootstrap_store();
+    drop(store);
+    let connection = Connection::open(&path).expect("open lock fixture");
+    connection
+        .execute_batch("PRAGMA journal_mode = DELETE; BEGIN EXCLUSIVE")
+        .expect("hold exclusive lock");
+    let started = std::time::Instant::now();
+    let error = match inspect_at(&path, timestamp(1_700_000_001_000)) {
+        Ok(_) => panic!("busy database unexpectedly inspected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), HEALTH_DATABASE_BUSY);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    connection.execute_batch("ROLLBACK").expect("release lock");
+}
+
+#[test]
+fn inspection_is_read_only_while_store_and_secret_file_are_unavailable() {
+    let (directory, path, _store) = bootstrap_store();
+    let secret_path = directory.path().join("gateway-secret.key");
+    assert!(!secret_path.exists());
+    let db_before = fs::read(&path).expect("read database before inspection");
+    let wal_path = path.with_extension("sqlite3-wal");
+    let wal_before = fs::read(&wal_path).ok();
+
+    let report = inspect_at(&path, timestamp(1_700_000_001_000)).expect("inspect live store");
+    assert!(report.is_healthy());
+
+    assert_eq!(
+        fs::read(&path).expect("read database after inspection"),
+        db_before
+    );
+    assert_eq!(fs::read(&wal_path).ok(), wal_before);
 }
