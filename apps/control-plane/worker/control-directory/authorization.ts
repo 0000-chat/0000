@@ -98,6 +98,7 @@ export async function resolveAuthorization(
 export async function resolveOAuthInstallationAuthorization(
   db: D1Database,
   subject: VerifiedSubject,
+  tenantHint?: string,
 ): Promise<AuthorizationResult> {
   if (!subject.installation_id || !subject.client_id || !subject.resource) {
     return { ok: false, code: "unauthenticated" };
@@ -114,6 +115,7 @@ export async function resolveOAuthInstallationAuthorization(
       installation === null ||
       installation.client_id !== subject.client_id ||
       installation.resource !== subject.resource ||
+      (tenantHint !== undefined && installation.tenant_id !== tenantHint) ||
       installation.principal_id !== subject.subject ||
       (await isTokenRevoked(session, subject.issuer, subject.token_id))
     ) {

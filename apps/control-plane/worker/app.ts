@@ -62,6 +62,7 @@ import {
   type OAuthRouteServices,
   type OAuthUpstreamLoginInput,
 } from "./oauth/routes";
+import { completeConfiguredOAuthUpstreamLogin } from "./oauth/upstream";
 import {
   createOAuthAccessTokenVerifier,
   getOAuthRuntimeConfig,
@@ -101,6 +102,8 @@ export type AppServices = {
     config: OAuthRuntimeConfig,
     claims: OAuthAccessTokenClaims,
   ) => Promise<string>;
+  /** Controlled fetch for the configured upstream token/JWKS exchange. */
+  fetchOAuthUpstream?: typeof fetch;
 };
 
 export function createApp(services: AppServices = {}) {
@@ -180,18 +183,40 @@ export function createApp(services: AppServices = {}) {
 
   const resolveOAuthHumanSession =
     services.resolveOAuthHumanSession ??
-    (async (request: Request, env: Cloudflare.Env): Promise<OAuthHumanSession | null> => {
+    (async (
+      request: Request,
+      env: Cloudflare.Env,
+    ): Promise<OAuthHumanSession | null> => {
       const header = request.headers.get("Authorization");
       if (!header) return null;
       try {
-        const subject = await getVerifier(env).verify(parseBearerToken(header));
+        const token = parseBearerToken(header);
+        // A valid local installation token is never a human login shortcut,
+        // even when the upstream verifier configuration overlaps.
+        try {
+          await getOAuthVerifier(env).verify(token);
+          return null;
+        } catch {
+          // Continue with the configured human verifier.
+        }
+        const subject = await getVerifier(env).verify(token);
         if (subject.installation_id) return null;
         const database = env.CONTROL_DB;
-        if (!database || typeof database.withSession !== "function") return null;
-        const tenantHint = request.headers.get("X-Communicator-Tenant") ?? undefined;
-        const result = await resolveAuthorization(database, subject, tenantHint);
+        if (!database || typeof database.withSession !== "function")
+          return null;
+        const tenantHint =
+          request.headers.get("X-Communicator-Tenant") ?? undefined;
+        const result = await resolveAuthorization(
+          database,
+          subject,
+          tenantHint,
+        );
         if (!result.ok) return null;
-        if (result.context.principal.type !== "human" && result.context.principal.type !== "operator") return null;
+        if (
+          result.context.principal.type !== "human" &&
+          result.context.principal.type !== "operator"
+        )
+          return null;
         return {
           issuer: subject.issuer,
           subject: subject.subject,
@@ -242,8 +267,46 @@ export function createApp(services: AppServices = {}) {
   };
   if (services.oauthConfig) oauthServices.getConfig = services.oauthConfig;
   if (services.oauthClock) oauthServices.clock = services.oauthClock;
-  if (services.completeOAuthUpstreamLogin)
+  if (services.completeOAuthUpstreamLogin) {
     oauthServices.completeUpstreamLogin = services.completeOAuthUpstreamLogin;
+  } else {
+    oauthServices.completeUpstreamLogin = async (input) => {
+      let config: OAuthRuntimeConfig;
+      try {
+        config = (services.oauthConfig ?? getOAuthRuntimeConfig)(input.env);
+      } catch {
+        return null;
+      }
+      const verified = await completeConfiguredOAuthUpstreamLogin(
+        input,
+        config,
+        services.fetchOAuthUpstream ?? fetch,
+        services.oauthClock?.() ?? new Date(),
+      );
+      if (!verified) return null;
+      const database = input.env.CONTROL_DB;
+      if (!database || typeof database.withSession !== "function") return null;
+      const result = await resolveAuthorization(
+        database,
+        { issuer: verified.issuer, subject: verified.subject },
+        input.tenantHint,
+      );
+      if (!result.ok) return null;
+      if (
+        result.context.principal.type !== "human" &&
+        result.context.principal.type !== "operator"
+      ) {
+        return null;
+      }
+      return {
+        issuer: verified.issuer,
+        subject: verified.subject,
+        tenantId: result.context.tenant.id,
+        membershipId: result.context.membership.id,
+        principalId: result.context.principal.id,
+      };
+    };
+  }
   if (services.signOAuthAccessToken)
     oauthServices.signAccessToken = services.signOAuthAccessToken;
   registerOAuthRoutes(app, oauthServices);

@@ -1,4 +1,5 @@
-const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const BASE64URL =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 export function base64url(bytes: Uint8Array): string {
   let output = "";
@@ -59,13 +60,10 @@ async function encryptionKey(secret: string): Promise<CryptoKey> {
     "SHA-256",
     new TextEncoder().encode(secret),
   );
-  return crypto.subtle.importKey(
-    "raw",
-    digest,
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"],
-  );
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 export async function encryptVerifier(
@@ -79,7 +77,10 @@ export async function encryptVerifier(
     await encryptionKey(secret),
     new TextEncoder().encode(verifier),
   );
-  return { ciphertext: base64url(new Uint8Array(ciphertext)), iv: base64url(iv) };
+  return {
+    ciphertext: base64url(new Uint8Array(ciphertext)),
+    iv: base64url(iv),
+  };
 }
 
 const decodeBase64url = (value: string): Uint8Array => {

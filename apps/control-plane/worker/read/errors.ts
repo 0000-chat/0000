@@ -118,9 +118,9 @@ export const readErrorResponse = (
       ? 400
       : mapped.code === "forbidden"
         ? 403
-      : mapped.code === "not_found"
-        ? 404
-        : 503;
+        : mapped.code === "not_found"
+          ? 404
+          : 503;
   const body = ApiErrorResponseSchema.parse({
     error: {
       code: mapped.code,

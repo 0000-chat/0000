@@ -1,7 +1,13 @@
-import type { SessionResponse } from "@communicator/contracts";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CommunicatorIdSchema } from "@communicator/contracts";
 import type { Context } from "hono";
+import { z } from "zod/v4";
 import type { AuthorizationVariables } from "./auth/middleware";
+import {
+  isAdministratorSession,
+  toGrantedProjectionReadAuthorization,
+} from "./read/authorization";
 import {
   getConversation,
   listChannels,
@@ -9,132 +15,49 @@ import {
   listConversations,
   listIdentities,
   listMessages,
+  type GetConversationInput,
+  type ListConversationsInput,
+  type ListMessagesInput,
   type ReadHandlerContext,
 } from "./read/handlers";
-import {
-  toGrantedProjectionReadAuthorization,
-} from "./read/authorization";
 import { ReadError, readErrorResponse } from "./read/errors";
+import { listConnectedAccounts } from "./control-directory/grants";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
   Variables: AuthorizationVariables;
 }>;
 
-type JsonRpcRequest = {
-  jsonrpc?: unknown;
-  id?: unknown;
-  method?: unknown;
-  params?: unknown;
+const boundedId = CommunicatorIdSchema.max(128);
+const optionalId = boundedId.optional();
+const optionalCursor = z.string().min(1).max(2_048).optional();
+const optionalLimit = z.number().int().min(1).max(100).optional();
+
+const listConnectionsInput = { identity_id: boundedId };
+const listChannelsInput = { identity_id: boundedId };
+const listAccountsInput = {
+  identity_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
 };
-
-const tools = [
-  {
-    name: "list_identities",
-    description: "List identities authorized for this tenant",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-  },
-  {
-    name: "list_connections",
-    description: "List granted connected accounts for an identity",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["identity_id"],
-      properties: { identity_id: { type: "string" } },
-    },
-  },
-  {
-    name: "list_channels",
-    description: "List granted channel summaries for an identity",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["identity_id"],
-      properties: { identity_id: { type: "string" } },
-    },
-  },
-  {
-    name: "list_conversations",
-    description: "List stored conversations for an identity or account",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["identity_id"],
-      properties: {
-        identity_id: { type: "string" },
-        account_id: { type: "string" },
-        channel_id: { type: "string" },
-        cursor: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 100 },
-      },
-    },
-  },
-  {
-    name: "get_conversation",
-    description: "Read one stored conversation",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["identity_id", "conversation_id"],
-      properties: {
-        identity_id: { type: "string" },
-        conversation_id: { type: "string" },
-        account_id: { type: "string" },
-      },
-    },
-  },
-  {
-    name: "list_messages",
-    description: "Read paginated stored messages",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["identity_id", "conversation_id"],
-      properties: {
-        identity_id: { type: "string" },
-        conversation_id: { type: "string" },
-        account_id: { type: "string" },
-        cursor: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 100 },
-      },
-    },
-  },
-] as const;
-
-const rpcError = (
-  id: unknown,
-  code: number,
-  message: string,
-): Record<string, unknown> => ({
-  jsonrpc: "2.0",
-  id: id ?? null,
-  error: { code, message },
-});
-
-const rpcResult = (id: unknown, result: unknown): Record<string, unknown> => ({
-  jsonrpc: "2.0",
-  id: id ?? null,
-  result,
-});
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const stringValue = (value: unknown, name: string): string => {
-  if (typeof value !== "string") throw new Error(`${name} must be a string`);
-  return CommunicatorIdSchema.max(128).parse(value);
+const listConversationsInput = {
+  identity_id: boundedId,
+  account_id: optionalId,
+  channel_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
 };
-
-const optionalStringValue = (value: unknown, name: string): string | undefined =>
-  value === undefined ? undefined : stringValue(value, name);
-
-const inputObject = (params: unknown): Record<string, unknown> => {
-  if (!isRecord(params)) return {};
-  const argumentsValue = params.arguments;
-  if (argumentsValue === undefined) return {};
-  if (!isRecord(argumentsValue)) throw new Error("arguments must be an object");
-  return argumentsValue;
+const getConversationInput = {
+  identity_id: boundedId,
+  conversation_id: boundedId,
+  account_id: optionalId,
+};
+const listMessagesInput = {
+  identity_id: boundedId,
+  conversation_id: boundedId,
+  account_id: optionalId,
+  cursor: optionalCursor,
+  limit: optionalLimit,
 };
 
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
@@ -143,151 +66,282 @@ const contextForRead = (context: McpContext): ReadHandlerContext => ({
   delegated: context.get("delegated"),
 });
 
-async function requireDelegatedGrant(
+const requireDelegatedGrant = async (
   context: ReadHandlerContext,
   identityId: string,
-): Promise<void> {
+): Promise<void> => {
   if (!context.delegated) return;
-  const authorization = await toGrantedProjectionReadAuthorization(
+  // Every delegated identity starts with identity grants only. Account reads
+  // become available only after an explicit conversation.read account grant.
+  await toGrantedProjectionReadAuthorization(
     context.env,
     context.authorization,
     identityId,
+    true,
   );
-  if (authorization.allowed_account_ids?.length === 0) {
-    throw new ReadError("forbidden");
-  }
-}
+};
 
-async function callTool(
-  context: ReadHandlerContext,
-  name: string,
-  params: unknown,
-): Promise<unknown> {
-  const input = inputObject(params);
-  switch (name) {
-    case "list_identities":
-      return listIdentities(context);
-    case "list_connections": {
-      const identityId = stringValue(input.identity_id, "identity_id");
-      await requireDelegatedGrant(context, identityId);
-      return listConnections(context, { identity_id: identityId });
-    }
-    case "list_channels": {
-      const identityId = stringValue(input.identity_id, "identity_id");
-      await requireDelegatedGrant(context, identityId);
-      return listChannels(context, { identity_id: identityId });
-    }
-    case "list_conversations": {
-      const identityId = stringValue(input.identity_id, "identity_id");
-      await requireDelegatedGrant(context, identityId);
-      return listConversations(context, {
-        identity_id: identityId,
-        ...(input.account_id === undefined
-          ? {}
-          : { account_id: stringValue(input.account_id, "account_id") }),
-        ...(input.channel_id === undefined
-          ? {}
-          : { channel_id: stringValue(input.channel_id, "channel_id") }),
-        ...(input.cursor === undefined
-          ? {}
-          : { cursor: stringValue(input.cursor, "cursor") }),
-        ...(input.limit === undefined ? {} : { limit: Number(input.limit) }),
-      });
-    }
-    case "get_conversation": {
-      const identityId = stringValue(input.identity_id, "identity_id");
-      await requireDelegatedGrant(context, identityId);
-      return getConversation(context, {
-        identity_id: identityId,
-        conversation_id: stringValue(input.conversation_id, "conversation_id"),
-        ...(input.account_id === undefined
-          ? {}
-          : { account_id: stringValue(input.account_id, "account_id") }),
-      });
-    }
-    case "list_messages": {
-      const identityId = stringValue(input.identity_id, "identity_id");
-      await requireDelegatedGrant(context, identityId);
-      return listMessages(context, {
-        identity_id: identityId,
-        conversation_id: stringValue(input.conversation_id, "conversation_id"),
-        ...(input.account_id === undefined
-          ? {}
-          : { account_id: stringValue(input.account_id, "account_id") }),
-        ...(input.cursor === undefined
-          ? {}
-          : { cursor: stringValue(input.cursor, "cursor") }),
-        ...(input.limit === undefined ? {} : { limit: Number(input.limit) }),
-      });
-    }
-    default:
-      throw new TypeError("Unknown MCP tool");
-  }
-}
+const errorResult = (error: unknown) => {
+  const mapped = readErrorResponse(error);
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: JSON.stringify(mapped.body) }],
+  };
+};
 
-const toolText = (value: unknown): Array<Record<string, string>> => [
-  { type: "text", text: JSON.stringify(value) },
-];
+const toolResult = (value: unknown) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(value) }],
+  // MCP structuredContent is an object. Preserve the API payload in the text
+  // block and use an items envelope for the three list endpoints that return
+  // arrays.
+  structuredContent: (Array.isArray(value)
+    ? { items: value }
+    : value) as Record<string, unknown>,
+});
 
-export async function handleMcpRequest(context: McpContext): Promise<Response> {
-  let body: JsonRpcRequest;
+const withReadErrors = async (operation: () => Promise<unknown>) => {
   try {
-    body = await context.req.json<JsonRpcRequest>();
-  } catch {
-    return context.json(rpcError(null, -32700, "Invalid JSON"), 400);
-  }
-  if (body.jsonrpc !== "2.0" || typeof body.method !== "string") {
-    return context.json(rpcError(body.id, -32600, "Invalid JSON-RPC request"), 400);
-  }
-  const id = body.id ?? null;
-  if (body.method === "initialize") {
-    return context.json(
-      rpcResult(id, {
-        protocolVersion: "2025-11-25",
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "communicator", version: "1.0.0" },
-      }),
-      200,
-    );
-  }
-  if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
-  if (body.method === "tools/list") return context.json(rpcResult(id, { tools }), 200);
-  if (body.method !== "tools/call") {
-    return context.json(rpcError(id, -32601, "Method not found"), 200);
-  }
-  if (!isRecord(body.params) || typeof body.params.name !== "string") {
-    return context.json(rpcError(id, -32602, "Tool name is required"), 200);
-  }
-  try {
-    const result = await callTool(
-      contextForRead(context),
-      body.params.name,
-      body.params,
-    );
-    return context.json(rpcResult(id, { content: toolText(result), structuredContent: result }), 200);
+    return toolResult(await operation());
   } catch (error) {
-    if (error instanceof TypeError) return context.json(rpcError(id, -32602, error.message), 200);
-    if (error instanceof ReadError) {
-      const mapped = readErrorResponse(error);
-      return context.json(
-        rpcResult(id, {
-          isError: true,
-          content: toolText(mapped.body),
+    return errorResult(error);
+  }
+};
+
+const listAccounts = async (
+  context: ReadHandlerContext,
+  input: {
+    identity_id: string | undefined;
+    cursor: string | undefined;
+    limit: number | undefined;
+  },
+) => {
+  const targetIdentityId =
+    input.identity_id ?? context.authorization.identities[0]?.identity_id;
+  if (targetIdentityId === undefined) {
+    return { items: [], next_cursor: null };
+  }
+  await requireDelegatedGrant(context, targetIdentityId);
+
+  const administrator = isAdministratorSession(context.authorization);
+  if (!administrator && input.identity_id !== undefined) {
+    const ownsIdentity = context.authorization.identities.some(
+      (identity) => identity.identity_id === input.identity_id,
+    );
+    if (!ownsIdentity) throw new ReadError("forbidden");
+  }
+
+  const database = context.env.CONTROL_DB;
+  if (database === undefined || typeof database.withSession !== "function") {
+    throw new ReadError("service_unavailable");
+  }
+  try {
+    return await listConnectedAccounts(database.withSession("first-primary"), {
+      tenantId: context.authorization.tenant.id,
+      ...(administrator && input.identity_id !== undefined
+        ? { identityId: input.identity_id }
+        : {}),
+      ...(!administrator
+        ? {
+            grantMembershipId: context.authorization.membership.id,
+            grantIdentityId: targetIdentityId,
+          }
+        : {}),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    });
+  } catch (error) {
+    throw new ReadError("service_unavailable", error);
+  }
+};
+
+const registerTools = (
+  server: McpServer,
+  context: ReadHandlerContext,
+): void => {
+  server.registerTool(
+    "list_identities",
+    {
+      description: "List identities authorized for this tenant",
+    },
+    () => withReadErrors(() => listIdentities(context)),
+  );
+
+  server.registerTool(
+    "list_accounts",
+    {
+      description: "List paginated connected accounts granted to an identity",
+      inputSchema: listAccountsInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        listAccounts(context, {
+          identity_id: input.identity_id,
+          cursor: input.cursor,
+          limit: input.limit,
         }),
-        200,
-      );
-    }
-    return context.json(
-      rpcResult(id, {
-        isError: true,
-        content: toolText({ error: { code: "service_unavailable", message: "Service unavailable" } }),
+      ),
+  );
+
+  server.registerTool(
+    "list_connections",
+    {
+      description: "List connection summaries owned by an identity",
+      inputSchema: listConnectionsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        return listConnections(context, input);
       }),
-      200,
+  );
+
+  server.registerTool(
+    "list_channels",
+    {
+      description: "List channel summaries owned by an identity",
+      inputSchema: listChannelsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        return listChannels(context, input);
+      }),
+  );
+
+  server.registerTool(
+    "list_conversations",
+    {
+      description: "List stored conversations for an identity or account",
+      inputSchema: listConversationsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: ListConversationsInput = {
+          identity_id: input.identity_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+          ...(input.channel_id === undefined
+            ? {}
+            : { channel_id: input.channel_id }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        };
+        return listConversations(context, value);
+      }),
+  );
+
+  server.registerTool(
+    "get_conversation",
+    {
+      description: "Read one stored conversation",
+      inputSchema: getConversationInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: GetConversationInput = {
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+        };
+        return getConversation(context, value);
+      }),
+  );
+
+  server.registerTool(
+    "list_messages",
+    {
+      description: "Read paginated stored messages",
+      inputSchema: listMessagesInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        await requireDelegatedGrant(context, input.identity_id);
+        const value: ListMessagesInput = {
+          identity_id: input.identity_id,
+          conversation_id: input.conversation_id,
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        };
+        return listMessages(context, value);
+      }),
+  );
+};
+
+const validMcpRequestHeaders = (request: Request): boolean => {
+  const origin = request.headers.get("Origin");
+  if (origin === null) return true;
+  try {
+    return origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Handle one stateless MCP request using the official SDK transport. A new
+ * server/transport is intentionally created per request because the Worker
+ * instance is not a durable session store; the SDK still validates the full
+ * initialize/tools/call protocol and request headers.
+ */
+export async function handleMcpRequest(context: McpContext): Promise<Response> {
+  if (!validMcpRequestHeaders(context.req.raw)) {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Invalid Origin header" },
+        id: null,
+      }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  const server = new McpServer({ name: "communicator", version: "1.0.0" });
+  registerTools(server, contextForRead(context));
+  const requestUrl = new URL(context.req.url);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    allowedOrigins: [requestUrl.origin],
+    enableDnsRebindingProtection: true,
+  });
+  try {
+    await server.connect(transport);
+    const response = await transport.handleRequest(context.req.raw);
+    await transport.close();
+    await server.close();
+    return response;
+  } catch {
+    await transport.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }
 }
 
 export function handleMcpGet(context: McpContext): Response {
+  if (!validMcpRequestHeaders(context.req.raw)) {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Invalid Origin header" },
+        id: null,
+      }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
+  }
   return context.body(null, 405, {
     Allow: "POST",
     "Cache-Control": "no-store",

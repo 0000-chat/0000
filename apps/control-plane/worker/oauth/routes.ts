@@ -47,6 +47,7 @@ export type OAuthUpstreamLoginInput = {
   nonce: string;
   clientId: string;
   redirectUri: string;
+  tenantHint?: string;
 };
 
 export type OAuthRouteServices = {
@@ -139,7 +140,9 @@ async function createAuthorizationTransaction(
     current: Date;
   },
 ): Promise<{ transactionId: string; consentToken: string; expiresAt: string }> {
-  const expiresAt = new Date(input.current.getTime() + AUTHORIZATION_CODE_TTL_MS);
+  const expiresAt = new Date(
+    input.current.getTime() + AUTHORIZATION_CODE_TTL_MS,
+  );
   const transactionId = randomIdentifier("oauth_tx");
   const consentToken = randomBase64url(32);
   await insertOAuthTransaction(db, {
@@ -163,14 +166,16 @@ async function createAuthorizationTransaction(
 }
 
 const escapeHtml = (value: string): string =>
-  value.replace(/[&<>"']/g, (character) =>
-    ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    })[character] ?? character,
+  value.replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[character] ?? character,
   );
 
 function consentPage(
@@ -188,7 +193,8 @@ function consentPage(
   return context.html(html, 200, {
     "Cache-Control": "no-store",
     Pragma: "no-cache",
-    "Content-Security-Policy": "default-src 'none'; form-action 'self'; base-uri 'none'",
+    "Content-Security-Policy":
+      "default-src 'none'; form-action 'self'; base-uri 'none'",
   });
 }
 
@@ -231,14 +237,22 @@ async function beginUpstreamLogin(
   }
   const database = context.env.CONTROL_DB;
   if (!database || typeof database.withSession !== "function") {
-    return oauthError(context, "temporarily_unavailable", "OAuth directory unavailable", 503);
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "OAuth directory unavailable",
+      503,
+    );
   }
   const current = now(services);
   const expiresAt = new Date(current.getTime() + AUTHORIZATION_CODE_TTL_MS);
   const upstreamState = randomBase64url(32);
   const upstreamNonce = randomBase64url(24);
   const upstreamVerifier = randomBase64url(48);
-  const encrypted = await encryptVerifier(upstreamVerifier, config.signingSecret);
+  const encrypted = await encryptVerifier(
+    upstreamVerifier,
+    config.signingSecret,
+  );
   await insertOAuthUpstreamLogin(database.withSession("first-primary"), {
     id: randomIdentifier("oauth_upstream"),
     stateHash: await sha256Base64url(upstreamState),
@@ -261,7 +275,10 @@ async function beginUpstreamLogin(
   upstreamUrl.searchParams.set("scope", config.humanScope ?? "openid profile");
   upstreamUrl.searchParams.set("state", upstreamState);
   upstreamUrl.searchParams.set("nonce", upstreamNonce);
-  upstreamUrl.searchParams.set("code_challenge", await sha256Base64url(upstreamVerifier));
+  upstreamUrl.searchParams.set(
+    "code_challenge",
+    await sha256Base64url(upstreamVerifier),
+  );
   upstreamUrl.searchParams.set("code_challenge_method", "S256");
   return context.redirect(upstreamUrl.href, 302);
 }
@@ -325,7 +342,10 @@ async function authorize(
   const db = database.withSession("first-primary");
   const client = await findOAuthClient(db, clientId, redirectUri);
   if (!client) return oauthError(context, "invalid_client", "Unknown client");
-  const human = await services.resolveHumanSession(context.req.raw, context.env);
+  const human = await services.resolveHumanSession(
+    context.req.raw,
+    context.env,
+  );
   if (!human)
     return beginUpstreamLogin(context, services, config, {
       clientId,
@@ -365,23 +385,45 @@ async function upstreamCallback(
   const state = stringParam(params, "state");
   const authorizationCode = stringParam(params, "code");
   if (!state || !validState(state) || !authorizationCode) {
-    return oauthError(context, "invalid_request", "Upstream callback is incomplete");
+    return oauthError(
+      context,
+      "invalid_request",
+      "Upstream callback is incomplete",
+    );
   }
   let config: OAuthRuntimeConfig;
   try {
     config = runtimeConfig(services, context.env);
   } catch {
-    return oauthError(context, "temporarily_unavailable", "OAuth service is not configured", 503);
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "OAuth service is not configured",
+      503,
+    );
   }
   const database = context.env.CONTROL_DB;
   if (!database || typeof database.withSession !== "function") {
-    return oauthError(context, "temporarily_unavailable", "OAuth directory unavailable", 503);
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "OAuth directory unavailable",
+      503,
+    );
   }
   const db = database.withSession("first-primary");
   const row = await findOAuthUpstreamLogin(db, await sha256Base64url(state));
   const current = now(services);
-  if (!row || row.completed_at !== null || Date.parse(row.expires_at) <= current.getTime()) {
-    return oauthError(context, "invalid_request", "Upstream login state is invalid");
+  if (
+    !row ||
+    row.completed_at !== null ||
+    Date.parse(row.expires_at) <= current.getTime()
+  ) {
+    return oauthError(
+      context,
+      "invalid_request",
+      "Upstream login state is invalid",
+    );
   }
   let verifier: string;
   try {
@@ -391,10 +433,19 @@ async function upstreamCallback(
       config.signingSecret,
     );
   } catch {
-    return oauthError(context, "invalid_request", "Upstream login transaction is invalid");
+    return oauthError(
+      context,
+      "invalid_request",
+      "Upstream login transaction is invalid",
+    );
   }
   if (!services.completeUpstreamLogin) {
-    return oauthError(context, "temporarily_unavailable", "Human sign-in exchange is not configured", 503);
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "Human sign-in exchange is not configured",
+      503,
+    );
   }
   const human = await services.completeUpstreamLogin({
     request: context.req.raw,
@@ -404,9 +455,16 @@ async function upstreamCallback(
     nonce: row.upstream_nonce,
     clientId: row.client_id,
     redirectUri: row.redirect_uri,
+    ...(row.tenant_hint === null ? {} : { tenantHint: row.tenant_hint }),
   });
   await completeOAuthUpstreamLogin(db, row.id, current.toISOString());
-  if (!human) return oauthError(context, "access_denied", "Human sign-in was not accepted", 401);
+  if (!human)
+    return oauthError(
+      context,
+      "access_denied",
+      "Human sign-in was not accepted",
+      401,
+    );
   const transaction = await createAuthorizationTransaction(db, {
     clientId: row.client_id,
     redirectUri: row.redirect_uri,
@@ -434,11 +492,16 @@ async function consent(
   services: OAuthRouteServices,
 ): Promise<Response> {
   const form = await readForm(context.req.raw);
-  if (!form) return oauthError(context, "invalid_request", "Invalid consent form");
+  if (!form)
+    return oauthError(context, "invalid_request", "Invalid consent form");
   const transactionId = stringParam(form, "transaction_id");
   const consentToken = stringParam(form, "consent_token");
   const action = stringParam(form, "action");
-  if (!transactionId || !consentToken || (action !== "approve" && action !== "cancel")) {
+  if (
+    !transactionId ||
+    !consentToken ||
+    (action !== "approve" && action !== "cancel")
+  ) {
     return oauthError(context, "invalid_request", "Invalid consent action");
   }
   const config = (() => {
@@ -448,10 +511,21 @@ async function consent(
       return null;
     }
   })();
-  if (!config) return oauthError(context, "temporarily_unavailable", "OAuth service is not configured", 503);
+  if (!config)
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "OAuth service is not configured",
+      503,
+    );
   const database = context.env.CONTROL_DB;
   if (!database || typeof database.withSession !== "function") {
-    return oauthError(context, "temporarily_unavailable", "OAuth directory unavailable", 503);
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "OAuth directory unavailable",
+      503,
+    );
   }
   const db = database.withSession("first-primary");
   const transaction = await findOAuthTransaction(db, transactionId);
@@ -466,7 +540,11 @@ async function consent(
       transaction.consent_hash,
     ))
   ) {
-    return oauthError(context, "invalid_request", "Consent transaction is invalid or expired");
+    return oauthError(
+      context,
+      "invalid_request",
+      "Consent transaction is invalid or expired",
+    );
   }
   const client = await findOAuthClient(
     db,
@@ -524,7 +602,11 @@ async function token(
     !validPkceValue(verifier) ||
     !resource
   ) {
-    return oauthError(context, "invalid_request", "Invalid authorization-code request");
+    return oauthError(
+      context,
+      "invalid_request",
+      "Invalid authorization-code request",
+    );
   }
   let config: OAuthRuntimeConfig;
   try {
@@ -537,10 +619,16 @@ async function token(
       503,
     );
   }
-  if (resource !== config.resource) return oauthError(context, "invalid_target", "Unknown resource");
+  if (resource !== config.resource)
+    return oauthError(context, "invalid_target", "Unknown resource");
   const database = context.env.CONTROL_DB;
   if (!database || typeof database.withSession !== "function") {
-    return oauthError(context, "temporarily_unavailable", "OAuth directory unavailable", 503);
+    return oauthError(
+      context,
+      "temporarily_unavailable",
+      "OAuth directory unavailable",
+      503,
+    );
   }
   const db = database.withSession("first-primary");
   const client = await findOAuthClient(db, clientId, redirectUri);
@@ -556,7 +644,11 @@ async function token(
     Date.parse(row.code_expires_at) <= current.getTime() ||
     Date.parse(row.transaction_expires_at) <= current.getTime()
   ) {
-    return oauthError(context, "invalid_grant", "Authorization code is invalid or expired");
+    return oauthError(
+      context,
+      "invalid_grant",
+      "Authorization code is invalid or expired",
+    );
   }
   const challenge = await sha256Base64url(verifier);
   if (!(await constantTimeEqual(challenge, row.code_challenge))) {
@@ -613,12 +705,16 @@ async function token(
   const accessToken = services.signAccessToken
     ? await services.signAccessToken(context.env, config, claims)
     : await signOAuthAccessToken(config, claims);
-  return json(context, {
-    access_token: accessToken,
-    token_type: "Bearer",
-    expires_in: config.accessTokenTtlSeconds,
-    scope: row.scope,
-  }, 200);
+  return json(
+    context,
+    {
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: config.accessTokenTtlSeconds,
+      scope: row.scope,
+    },
+    200,
+  );
 }
 
 export function registerOAuthRoutes(
@@ -629,31 +725,49 @@ export function registerOAuthRoutes(
     try {
       const config = runtimeConfig(services, context.env);
       const origin = new URL(context.req.url).origin;
-      return json(context, {
-        issuer: config.issuer,
-        authorization_endpoint: `${origin}/oauth/authorize`,
-        token_endpoint: `${origin}/oauth/token`,
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
-        code_challenge_methods_supported: ["S256"],
-        scopes_supported: [OAUTH_SCOPE],
-      }, 200);
+      return json(
+        context,
+        {
+          issuer: config.issuer,
+          authorization_endpoint: `${origin}/oauth/authorize`,
+          token_endpoint: `${origin}/oauth/token`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code"],
+          code_challenge_methods_supported: ["S256"],
+          scopes_supported: [OAUTH_SCOPE],
+        },
+        200,
+      );
     } catch {
-      return oauthError(context, "temporarily_unavailable", "OAuth service is not configured", 503);
+      return oauthError(
+        context,
+        "temporarily_unavailable",
+        "OAuth service is not configured",
+        503,
+      );
     }
   });
   app.get("/.well-known/oauth-protected-resource", (context) => {
     try {
       const config = runtimeConfig(services, context.env);
       const origin = new URL(context.req.url).origin;
-      return json(context, {
-        resource: config.resource,
-        authorization_servers: [config.issuer],
-        scopes_supported: [OAUTH_SCOPE],
-        resource_documentation: `${origin}/api/v1/openapi.json`,
-      }, 200);
+      return json(
+        context,
+        {
+          resource: config.resource,
+          authorization_servers: [config.issuer],
+          scopes_supported: [OAUTH_SCOPE],
+          resource_documentation: `${origin}/api/v1/openapi.json`,
+        },
+        200,
+      );
     } catch {
-      return oauthError(context, "temporarily_unavailable", "OAuth service is not configured", 503);
+      return oauthError(
+        context,
+        "temporarily_unavailable",
+        "OAuth service is not configured",
+        503,
+      );
     }
   });
   app.get("/oauth/authorize", (context) => authorize(context, services));

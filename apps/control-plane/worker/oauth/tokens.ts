@@ -11,6 +11,11 @@ export type OAuthRuntimeConfig = {
   humanClientId?: string;
   humanRedirectUri?: string;
   humanScope?: string;
+  humanTokenUrl?: string;
+  humanIssuer?: string;
+  humanJwksUrl?: string;
+  humanAudience?: string;
+  humanClientSecret?: string;
 };
 
 const asRecord = (env: Cloudflare.Env): Record<string, unknown> =>
@@ -48,6 +53,11 @@ export function getOAuthRuntimeConfig(env: Cloudflare.Env): OAuthRuntimeConfig {
   const humanClientId = values.COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID;
   const humanRedirectUri = values.COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI;
   const humanScope = values.COMMUNICATOR_OAUTH_HUMAN_SCOPE;
+  const humanTokenUrl = values.COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL;
+  const humanIssuer = values.COMMUNICATOR_OAUTH_HUMAN_ISSUER;
+  const humanJwksUrl = values.COMMUNICATOR_OAUTH_HUMAN_JWKS_URL;
+  const humanAudience = values.COMMUNICATOR_OAUTH_HUMAN_AUDIENCE;
+  const humanClientSecret = values.COMMUNICATOR_OAUTH_HUMAN_CLIENT_SECRET;
   return {
     issuer,
     resource,
@@ -64,6 +74,21 @@ export function getOAuthRuntimeConfig(env: Cloudflare.Env): OAuthRuntimeConfig {
       : {}),
     ...(typeof humanScope === "string" && humanScope.length > 0
       ? { humanScope }
+      : {}),
+    ...(typeof humanTokenUrl === "string" && humanTokenUrl.length > 0
+      ? { humanTokenUrl }
+      : {}),
+    ...(typeof humanIssuer === "string" && humanIssuer.length > 0
+      ? { humanIssuer }
+      : {}),
+    ...(typeof humanJwksUrl === "string" && humanJwksUrl.length > 0
+      ? { humanJwksUrl }
+      : {}),
+    ...(typeof humanAudience === "string" && humanAudience.length > 0
+      ? { humanAudience }
+      : {}),
+    ...(typeof humanClientSecret === "string" && humanClientSecret.length > 0
+      ? { humanClientSecret }
       : {}),
   };
 }
@@ -121,14 +146,18 @@ export function createOAuthAccessTokenVerifier(
   return {
     async verify(token: string): Promise<VerifiedSubject> {
       try {
-        const verified = await jwtVerify(token, secretBytes(config.signingSecret), {
-          issuer: config.issuer,
-          audience: config.resource,
-          algorithms: ["HS256"],
-          ...(options.currentDate === undefined
-            ? {}
-            : { currentDate: options.currentDate }),
-        });
+        const verified = await jwtVerify(
+          token,
+          secretBytes(config.signingSecret),
+          {
+            issuer: config.issuer,
+            audience: config.resource,
+            algorithms: ["HS256"],
+            ...(options.currentDate === undefined
+              ? {}
+              : { currentDate: options.currentDate }),
+          },
+        );
         const payload = verified.payload;
         const subject = requiredString(payload, "sub");
         const tokenId = requiredString(payload, "jti");
@@ -136,7 +165,10 @@ export function createOAuthAccessTokenVerifier(
         const clientId = requiredString(payload, "client_id");
         const resource = requiredString(payload, "resource");
         const scope = requiredString(payload, "scope");
-        if (resource !== config.resource || !scope.split(" ").includes("communicator.read")) {
+        if (
+          resource !== config.resource ||
+          !scope.split(" ").includes("communicator.read")
+        ) {
           throw new OidcVerificationError("invalid");
         }
         return {

@@ -1,4 +1,5 @@
 import type { SessionResponse } from "@communicator/contracts";
+import { decodeJwt } from "jose";
 import type { MiddlewareHandler } from "hono";
 import { parseAccessAssertion, parseBearerToken } from "./bearer";
 import type { TokenVerifier, VerifiedSubject } from "./oidc";
@@ -22,6 +23,30 @@ type AuthorizationMiddlewareOptions = {
 function logAuthorizationFailure(status: number, requestId: string) {
   console.error({ event: "auth_denied", status, request_id: requestId });
 }
+
+/**
+ * Local installation tokens carry a distinct signed claim shape. Decode is
+ * used only to decide which verifier owns a token; the OAuth verifier still
+ * validates the signature, issuer, audience, expiry, and installation claims.
+ * A token that presents this shape is never retried through the human OIDC
+ * verifier after OAuth validation fails.
+ */
+const hasInstallationTokenShape = (token: string): boolean => {
+  try {
+    const payload = decodeJwt(token);
+    return [
+      payload.iss,
+      payload.sub,
+      payload.jti,
+      payload.installation_id,
+      payload.client_id,
+      payload.resource,
+      payload.scope,
+    ].every((value) => typeof value === "string" && value.length > 0);
+  } catch {
+    return false;
+  }
+};
 
 export function createAuthorizationMiddleware(
   options: AuthorizationMiddlewareOptions,
@@ -48,16 +73,33 @@ export function createAuthorizationMiddleware(
       const authorization = context.req.header("Authorization");
       const accessAssertion = context.req.header("Cf-Access-Jwt-Assertion");
       let delegated = false;
-      let subject: VerifiedSubject;
+      let subject: VerifiedSubject | undefined;
       if (authorization !== undefined) {
         const token = parseBearerToken(authorization);
-        try {
-          subject = await options.getVerifier(context.env).verify(token);
-        } catch (humanError) {
-          if (!options.getOAuthVerifier) throw humanError;
-          subject = await options.getOAuthVerifier(context.env).verify(token);
-          delegated = true;
+        let oauthError: unknown;
+        let oauthVerified = false;
+        if (options.getOAuthVerifier) {
+          try {
+            subject = await options.getOAuthVerifier(context.env).verify(token);
+            delegated = true;
+            oauthVerified = true;
+          } catch (error) {
+            oauthError = error;
+            // Never allow an invalid, expired, revoked, or mis-targeted local
+            // installation token to fall through to a human verifier when the
+            // verifier configurations happen to overlap.
+            if (hasInstallationTokenShape(token)) throw error;
+          }
         }
+        if (!oauthVerified) {
+          try {
+            subject = await options.getVerifier(context.env).verify(token);
+          } catch (humanError) {
+            throw oauthError ?? humanError;
+          }
+        }
+        if (!subject)
+          throw new Error("authentication verifier returned no subject");
       } else {
         subject = await options
           .getAccessVerifier(context.env)
@@ -73,7 +115,11 @@ export function createAuthorizationMiddleware(
       const tenantHint =
         context.req.header("X-Communicator-Tenant") ?? undefined;
       const result = delegated
-        ? await resolveOAuthInstallationAuthorization(database, subject)
+        ? await resolveOAuthInstallationAuthorization(
+            database,
+            subject,
+            tenantHint,
+          )
         : await resolveAuthorization(database, subject, tenantHint);
       if (result.ok) {
         context.set("authorization", result.context);
