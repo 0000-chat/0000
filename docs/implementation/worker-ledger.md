@@ -6,12 +6,12 @@ update the existing row with the worker's final commit and verification.
 
 | Scope | Worktree | Branch | HEAD | Status / dirty evidence |
 | --- | --- | --- | --- | --- |
-| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `e4b8ede` | Health #5, runtime #9, and tooling baseline merged serially; focused suites and restored `scripts/check` pass; grants #12 remains held. |
+| Aggregate | `/tmp/communicator-implementation/aggregate/0000-communicator` | `codex/implement-agent-messaging` | `c86c9b0` | Health #5, runtime #9, tooling baseline, and grants #12 integration checkpoint merged serially; focused grants/UI/type checks and restored `scripts/check` pass, while full Worker acceptance is held by a reproduced teardown error. |
 | Existing health work | `/tmp/0000-communicator-health` | `codex/gateway-health-inspection` | `bac77da77d8d8280d672a7402faf2c77adbbc1c9` | Dirty and protected: `services/matrix-gateway/src/health.rs`, `services/matrix-gateway/tests/healthcheck.rs`; preserved diff SHA-256 `b4968e9c176d598ef2bf2667007f2408f6ff6406b3ff8d7f69d9e4012356d303`. |
 | Health worker (#5) | `/tmp/0000-communicator-worker-5` | `codex/implement-health-5` | `870a24e21c91c4611d0ecd557e9fe8dcc0f5310a` | Clean source branch merged as aggregate commit `c16c12a`; pending no further worker action. |
 | Runtime worker (#9) | `/tmp/communicator-implementation/worker-9/0000-communicator` | `codex/implement-runtime-9` | `659f02b683bd3583652b5575b0a74f9035387988` | Clean source branch merged as aggregate commit `f681496`; source branch preserved for evidence. |
 | Tooling baseline | `/tmp/communicator-implementation/tooling-baseline/0000-communicator` | `codex/communicator-tooling-baseline` | `8dcd2acfa396a6ff8a1223d699b9aa7a5e910f47` | Clean source branch merged as aggregate commit `e4b8ede`; 191 authored files mechanically formatted, 46 Oxlint warnings fixed minimally, and three generated artifacts excluded from Biome. |
-| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `bc80a6a7130c6fd0979142c2517277f43f6b27a5` | Repair checkpoint atop `f9e16bc` preserved but held; targeted suites pass while three full-suite failures remain under investigation. |
+| Grants worker (T01/#12) | `/tmp/0000-communicator-worker-12` | `codex/implement-grants-12` | `823642f42dacab3ba24f75c57203f94b03125896` | Source branch integrated at aggregate checkpoint `c86c9b0`; worker retains only three untracked dependency links; source/lockfile changes are clean, but aggregate acceptance remains held by Worker teardown evidence. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
 | Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
@@ -33,9 +33,10 @@ Tickets are initially `planned`; workers must change a ticket to `in review`,
 | --- | --- | --- |
 | #5 | Gateway health | verified and merged as `c16c12a`; issue remains open until aggregate PR merge |
 | #9 | Runtime | verified and merged as `f681496`; issue remains open until aggregate PR merge |
-| #11 | Agent messaging specification | aggregate parent / planned |
-| #12 | T01 account grants | held at clean checkpoint `f9e16b` on `codex/implement-grants-12`; source preserved while UI/realtime acceptance fixes and regression evidence are collected |
-| #13–#36 | T02–T25 child tickets | planned; dependencies in aggregate plan |
+| #11 | Agent messaging specification | aggregate parent active; #12 is integrated at checkpoint `c86c9b0` but held pending full Worker teardown repair; #13/#14 remain gated |
+| #12 | T01 account grants | integration checkpoint `c86c9b0` from `codex/implement-grants-12` at `823642f`; focused checks pass but full Worker acceptance is held by a repeated teardown error; issue remains open |
+| #13/#14 | T02 OAuth and T24 WhatsApp linking | dependency code is present in checkpoint `c86c9b0`, but dispatch remains gated while #12 acceptance is held; issues remain open |
+| #15–#36 | T03–T25 child tickets | planned; dependencies in aggregate plan |
 
 Architecture decision #7 is tracked at
 [`decision-07-connection-status.md`](decision-07-connection-status.md). It is
@@ -191,3 +192,24 @@ resolves only the requested account. Focused regressions pass: grants 6/6,
 cross-owner 1/1, and TypeScript. The final full Worker/UI runs are still in
 progress; the follow-up is not committed or merged, and #12 remains held until
 clean committed full-suite results are reported.
+
+## Grants aggregate integration checkpoint
+
+The accepted worker source `823642f42dacab3ba24f75c57203f94b03125896`, including
+the `f9e16bc` and `bc80a6a` repair history, was integrated as aggregate commit
+`c86c9b0`. Conflict resolution preserved the grants behavior alongside the
+aggregate runtime, tooling, and documentation; 33 changed source files were
+normalized with the pinned formatter. Focused grants/read/socket verification
+passed 45/45 tests, the isolated socket suite passed 28/28, the UI suite passed
+109/109, TypeScript and both Vite builds passed, and `scripts/check` passed its
+233-file application/tooling check.
+
+Two isolated full Worker runs each exercised 41 files and 591 passing tests but
+exited with one `EnvironmentTeardownError` in
+`worker/test/realtime/socket.test.ts`: workerd/Vitest closed an RPC while
+`onUserConsoleLog`/`resolve` was pending. The hypothesis is a pending RPC and
+console-log teardown race. The attempt was to rerun the full Worker alone, with
+the temporary dependency links retained, after the earlier concurrent run. The
+same teardown signature reproduced, so this is an integration checkpoint rather
+than acceptance evidence. #12 remains held; no PR-ready or issue-closure claim
+is made, and #13/#14 remain gated.
