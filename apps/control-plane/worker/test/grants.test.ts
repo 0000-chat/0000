@@ -1748,6 +1748,40 @@ describe("account-scoped grant API", () => {
     expect(reconnectDispatch[0]?.confirmation_due_at).toBe(
       "2026-09-14T05:00:00.000Z",
     );
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    now = new Date("2026-09-14T05:00:00.000Z");
+    const droppedAfterReconnect = await requestForApp(
+      app,
+      `/api/v1/commands/${reconnectCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(droppedAfterReconnect.status).toBe(200);
+    expect(
+      ((await droppedAfterReconnect.json()) as { dispatch: { status: string } })
+        .dispatch.status,
+    ).toBe("confirmation_required");
+    const droppedDispatch = await rows<{
+      status: string;
+      created_at: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT status, created_at, confirmation_due_at FROM outbound_dispatches WHERE idempotency_key = ?",
+      reconnectKey,
+    );
+    expect(droppedDispatch).toEqual([
+      {
+        status: "confirmation_required",
+        created_at: "2026-09-14T01:00:00.000Z",
+        confirmation_due_at: "2026-09-14T05:00:00.000Z",
+      },
+    ]);
   });
 
   it("promotes a waiting command from the durable alarm and keeps stale confirmation human-only", async () => {

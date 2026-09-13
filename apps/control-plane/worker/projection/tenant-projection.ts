@@ -146,6 +146,7 @@ import {
   type RealtimeUpgradeContext,
 } from "../realtime/contracts";
 import { revalidateRealtimeSocketAuthorization } from "../realtime/authorization";
+import { transitionOutboundLifecycle } from "../outbound/lifecycle";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -1985,7 +1986,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   async #processOutboundAlarm(now: number): Promise<void> {
     const rows = this.ctx.storage.sql
       .exec<OutboundDispatchRow>(
-        "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE status = 'waiting_for_connection' ORDER BY confirmation_due_at ASC, id ASC",
+        "SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches WHERE status IN ('waiting_for_connection', 'pending', 'confirmation_required') ORDER BY confirmation_due_at ASC, id ASC",
       )
       .toArray();
     for (const row of rows) {
@@ -2008,38 +2009,40 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         ) {
           return;
         }
-        let nextDispatchStatus: OutboundDispatchRow["status"] = current.status;
-        let nextCommandStatus = command.status;
-        if (current.confirmation_decision === "confirm" && available) {
-          nextDispatchStatus = "pending";
-          nextCommandStatus = "accepted";
-        } else if (current.confirmation_decision === null) {
-          const dueMs =
-            current.confirmation_due_at === null
-              ? Number.NaN
-              : Date.parse(current.confirmation_due_at);
-          if (Number.isSafeInteger(dueMs) && now >= dueMs) {
-            nextDispatchStatus = "confirmation_required";
-            nextCommandStatus = "confirmation_required";
-          } else if (available) {
-            nextDispatchStatus = "pending";
-            nextCommandStatus = "accepted";
-          }
+        const transition = transitionOutboundLifecycle({
+          dispatchStatus: current.status,
+          commandStatus: command.status,
+          confirmationDecision: current.confirmation_decision,
+          confirmationDueAt: current.confirmation_due_at,
+          createdAt: current.created_at,
+          now: new Date(now).toISOString(),
+          connectionAvailable: available,
+        });
+        if (
+          transition.dispatchStatus === current.status &&
+          transition.commandStatus === command.status &&
+          transition.confirmationDueAt === current.confirmation_due_at
+        ) {
+          return;
         }
-        if (nextDispatchStatus === current.status) return;
         const updatedAt = new Date(now).toISOString();
         this.ctx.storage.sql.exec(
-          "UPDATE outbound_dispatches SET status = ?, updated_at = ? WHERE id = ? AND status = 'waiting_for_connection'",
-          nextDispatchStatus,
+          "UPDATE outbound_dispatches SET status = ?, confirmation_due_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+          transition.dispatchStatus,
+          transition.confirmationDueAt,
           updatedAt,
           current.id,
+          current.status,
         );
-        this.ctx.storage.sql.exec(
-          "UPDATE commands SET status = ?, updated_at = ? WHERE id = ?",
-          nextCommandStatus,
-          updatedAt,
-          command.id,
-        );
+        if (transition.commandStatus !== command.status) {
+          this.ctx.storage.sql.exec(
+            "UPDATE commands SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            transition.commandStatus,
+            updatedAt,
+            command.id,
+            command.status,
+          );
+        }
       });
     }
   }
@@ -2047,13 +2050,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   #nextOutboundAlarm(): number | null {
     const rows = this.ctx.storage.sql
       .exec<{ confirmation_due_at: string | null }>(
-        "SELECT confirmation_due_at FROM outbound_dispatches WHERE status = 'waiting_for_connection' AND confirmation_due_at IS NOT NULL ORDER BY confirmation_due_at ASC LIMIT 1",
+        "SELECT confirmation_due_at FROM outbound_dispatches WHERE status IN ('waiting_for_connection', 'pending') AND confirmation_decision IS NULL AND confirmation_due_at IS NOT NULL ORDER BY confirmation_due_at ASC LIMIT 1",
       )
       .toArray();
     const due = rows[0]?.confirmation_due_at;
     if (due === undefined || due === null) return null;
     const dueMs = Date.parse(due);
-    return Number.isSafeInteger(dueMs) ? dueMs : null;
+    return Number.isSafeInteger(dueMs) && dueMs > Date.now() ? dueMs : null;
   }
 
   async #scheduleCombinedAlarm(
@@ -3112,7 +3115,6 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           readOutboundDispatchByCommand(this.ctx.storage, parsed.command_id)
             ?.connection_id ?? "",
         ));
-      const nowMs = parseStoredMilliseconds(parsed.now);
       const result = this.ctx.storage.transactionSync(() => {
         const dispatch = readOutboundDispatchByCommand(
           this.ctx.storage,
@@ -3125,45 +3127,38 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           throw projectionError("projection_not_found");
         }
 
-        let nextDispatchStatus = dispatch.status;
-        let nextCommandStatus = command.status;
-        if (dispatch.status === "waiting_for_connection") {
-          if (dispatch.confirmation_decision === "confirm" && available) {
-            nextDispatchStatus = "pending";
-            nextCommandStatus = "accepted";
-          } else if (dispatch.confirmation_decision === null) {
-            const dueMs =
-              dispatch.confirmation_due_at === null
-                ? Number.NaN
-                : Date.parse(dispatch.confirmation_due_at);
-            if (Number.isSafeInteger(dueMs) && nowMs >= dueMs) {
-              nextDispatchStatus = "confirmation_required";
-              nextCommandStatus = "confirmation_required";
-            } else if (available) {
-              nextDispatchStatus = "pending";
-              nextCommandStatus = "accepted";
-            }
-          }
-        }
+        const transition = transitionOutboundLifecycle({
+          dispatchStatus: dispatch.status,
+          commandStatus: command.status,
+          confirmationDecision: dispatch.confirmation_decision,
+          confirmationDueAt: dispatch.confirmation_due_at,
+          createdAt: dispatch.created_at,
+          now: parsed.now,
+          connectionAvailable: available,
+        });
 
         if (
-          nextDispatchStatus !== dispatch.status ||
-          nextCommandStatus !== command.status
+          transition.dispatchStatus !== dispatch.status ||
+          transition.commandStatus !== command.status ||
+          transition.confirmationDueAt !== dispatch.confirmation_due_at
         ) {
           this.ctx.storage.sql.exec(
-            "UPDATE outbound_dispatches SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-            nextDispatchStatus,
+            "UPDATE outbound_dispatches SET status = ?, confirmation_due_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+            transition.dispatchStatus,
+            transition.confirmationDueAt,
             parsed.now,
             dispatch.id,
             dispatch.status,
           );
-          this.ctx.storage.sql.exec(
-            "UPDATE commands SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-            nextCommandStatus,
-            parsed.now,
-            command.id,
-            command.status,
-          );
+          if (transition.commandStatus !== command.status) {
+            this.ctx.storage.sql.exec(
+              "UPDATE commands SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+              transition.commandStatus,
+              parsed.now,
+              command.id,
+              command.status,
+            );
+          }
         }
         const updatedDispatch = readOutboundDispatchByCommand(
           this.ctx.storage,
@@ -3265,18 +3260,15 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           throw projectionError("projection_conflict");
         }
 
-        const nextStatus =
-          parsed.decision === "cancel"
-            ? "cancelled"
-            : available
-              ? "pending"
-              : "waiting_for_connection";
-        const nextCommandStatus =
-          nextStatus === "cancelled"
-            ? "cancelled"
-            : nextStatus === "waiting_for_connection"
-              ? "waiting_for_connection"
-              : "accepted";
+        const transition = transitionOutboundLifecycle({
+          dispatchStatus: dispatch.status,
+          commandStatus: command.status,
+          confirmationDecision: parsed.decision,
+          confirmationDueAt: dispatch.confirmation_due_at,
+          createdAt: dispatch.created_at,
+          now: parsed.decided_at,
+          connectionAvailable: available,
+        });
         const decisionId = `decision_outbound_${parsed.command_id}`;
         this.ctx.storage.sql.exec(
           "INSERT INTO outbound_command_decisions (id, tenant_id, command_id, dispatch_id, decision, idempotency_key, actor_principal_id, actor_identity_id, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3291,8 +3283,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           parsed.decided_at,
         );
         this.ctx.storage.sql.exec(
-          "UPDATE outbound_dispatches SET status = ?, confirmation_decision = ?, confirmation_actor_principal_id = ?, confirmation_actor_identity_id = ?, confirmation_decided_at = ?, updated_at = ? WHERE id = ?",
-          nextStatus,
+          "UPDATE outbound_dispatches SET status = ?, confirmation_due_at = ?, confirmation_decision = ?, confirmation_actor_principal_id = ?, confirmation_actor_identity_id = ?, confirmation_decided_at = ?, updated_at = ? WHERE id = ?",
+          transition.dispatchStatus,
+          transition.confirmationDueAt,
           parsed.decision,
           parsed.actor_principal_id,
           parsed.actor_identity_id,
@@ -3302,7 +3295,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         );
         this.ctx.storage.sql.exec(
           "UPDATE commands SET status = ?, updated_at = ? WHERE id = ?",
-          nextCommandStatus,
+          transition.commandStatus,
           parsed.decided_at,
           command.id,
         );
