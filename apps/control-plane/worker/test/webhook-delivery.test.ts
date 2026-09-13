@@ -630,7 +630,9 @@ describe("durable incoming webhook delivery", () => {
       http_status: 503,
       error_code: "http_503",
       first_pending_at: fixedNow.toISOString(),
-      retry_deadline: new Date(fixedNow.getTime() + 24 * 60 * 60 * 1_000).toISOString(),
+      retry_deadline: new Date(
+        fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+      ).toISOString(),
       attempt_count: 1,
     });
 
@@ -662,7 +664,9 @@ describe("durable incoming webhook delivery", () => {
     const tick = await runWebhookRetryTick({
       database: workerEnv.CONTROL_DB,
       projectionForTenant: () => projectionFor(),
-      services: { now: () => new Date(fixedNow.getTime() + 24 * 60 * 60 * 1_000) },
+      services: {
+        now: () => new Date(fixedNow.getTime() + 24 * 60 * 60 * 1_000),
+      },
     });
     expect(tick).toEqual({ scanned: 1, attempted: 1 });
     expect(await deliveryRow(id ?? "")).toMatchObject({
@@ -826,6 +830,59 @@ describe("durable incoming webhook delivery", () => {
         response_size: 8_192,
       },
     ]);
+  });
+
+  it("keeps a 4xx response retryable until the fixed deadline", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_client_failure",
+        destinationUrl: "https://hooks.example.test/client-failure",
+      }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_client_failure")],
+      now: () => fixedNow,
+    });
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => new Response("rate limited", { status: 429 }),
+      },
+    });
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "pending",
+      http_status: 429,
+      error_code: "http_429",
+      first_pending_at: fixedNow.toISOString(),
+      retry_deadline: new Date(
+        fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+      ).toISOString(),
+      attempt_count: 1,
+      last_response_body: "rate limited",
+    });
+
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => new Date(fixedNow.getTime() + 24 * 60 * 60 * 1_000),
+        },
+      }),
+    ).resolves.toEqual({ scanned: 1, attempted: 1 });
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "failed",
+      error_code: "retry_deadline_exceeded",
+      attempt_count: 1,
+      first_pending_at: fixedNow.toISOString(),
+      last_response_body: "rate limited",
+    });
   });
 
   it("records an in-flight cutover as uncertain without resending to the replacement", async () => {

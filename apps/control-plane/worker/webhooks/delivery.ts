@@ -212,14 +212,19 @@ const nowFor = (services: WebhookDeliveryServices): Date => {
 
 const retryDeadlineFor = (firstPendingAt: string): string => {
   const parsed = Date.parse(firstPendingAt);
-  if (!Number.isFinite(parsed)) throw new Error("webhook delivery timestamp invalid");
+  if (!Number.isFinite(parsed))
+    throw new Error("webhook delivery timestamp invalid");
   return new Date(parsed + RETRY_WINDOW_MS).toISOString();
 };
 
 const retryDelayFor = (attemptCount: number): number => {
-  const index = Math.max(0, Math.min(attemptCount - 1, RETRY_BACKOFF_MS.length - 1));
+  const index = Math.max(
+    0,
+    Math.min(attemptCount - 1, RETRY_BACKOFF_MS.length - 1),
+  );
   const fallback = RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1];
-  if (fallback === undefined) throw new Error("webhook retry backoff unavailable");
+  if (fallback === undefined)
+    throw new Error("webhook retry backoff unavailable");
   return RETRY_BACKOFF_MS[index] ?? fallback;
 };
 
@@ -301,7 +306,10 @@ const fetchWithTimeout = async (
     }, timeoutMs);
   });
   try {
-    return await Promise.race([fetcher(url, { ...init, signal: controller.signal }), timeout]);
+    return await Promise.race([
+      fetcher(url, { ...init, signal: controller.signal }),
+      timeout,
+    ]);
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
@@ -727,7 +735,8 @@ const finishFailedDelivery = async (
   },
 ): Promise<void> => {
   const deadlineMs = Date.parse(input.retryDeadline);
-  const retryable = Number.isFinite(deadlineMs) && input.now.getTime() < deadlineMs;
+  const retryable =
+    Number.isFinite(deadlineMs) && input.now.getTime() < deadlineMs;
   const nextAttemptAt = retryable
     ? new Date(
         Math.min(
@@ -1030,7 +1039,9 @@ const deliverOne = async (
       tenantId,
       lease.subscription_id,
     );
-    if (!(await authorizationMatches(latest, latest?.destination.credential_ref))) {
+    if (
+      !(await authorizationMatches(latest, latest?.destination.credential_ref))
+    ) {
       await finishUncertainDelivery(database, {
         tenantId,
         deliveryId,
@@ -1067,7 +1078,10 @@ const deliverOne = async (
     );
     if (
       subscription === null ||
-      !(await authorizationMatches(subscription, subscription.destination.credential_ref))
+      !(await authorizationMatches(
+        subscription,
+        subscription.destination.credential_ref,
+      ))
     ) {
       await cancelFor(subscription, subscription?.destination.credential_ref);
       return;

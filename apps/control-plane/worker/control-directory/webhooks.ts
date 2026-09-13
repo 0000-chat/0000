@@ -1471,7 +1471,8 @@ export async function retryWebhookDelivery(
       existingRow.subscription_id,
     );
     await requireSubscriptionAuthority(database, actor, subscription);
-    if (subscription.status !== "active") throw webhookError("webhook_conflict");
+    if (subscription.status !== "active")
+      throw webhookError("webhook_conflict");
     const payload = {
       operation: "retry",
       delivery_id: deliveryId,
@@ -1510,12 +1511,7 @@ export async function retryWebhookDelivery(
            WHERE tenant_id = ? AND id = ?
              AND status IN ('failed', 'uncertain')`,
         )
-        .bind(
-          occurredAt,
-          occurredAt,
-          actor.tenantId,
-          deliveryId,
-        ),
+        .bind(occurredAt, occurredAt, actor.tenantId, deliveryId),
       ...deliveryAuditStatements(db, {
         key: idempotencyKey,
         actor,

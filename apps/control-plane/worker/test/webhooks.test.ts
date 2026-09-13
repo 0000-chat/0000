@@ -387,7 +387,10 @@ describe("webhook subscription production entrypoints", () => {
     };
     await insertFailedDelivery("delivery_manual_api", apiSubscription.id);
     await insertFailedDelivery("delivery_manual_mcp", mcpSubscription.id);
-    await insertFailedDelivery("delivery_manual_cutover", cutoverSubscription.id);
+    await insertFailedDelivery(
+      "delivery_manual_cutover",
+      cutoverSubscription.id,
+    );
 
     const inspection = await request(
       "/api/v1/webhook-deliveries/delivery_manual_api",
@@ -516,7 +519,9 @@ describe("webhook subscription production entrypoints", () => {
       "/api/v1/webhook-deliveries/delivery_manual_cutover/retry",
       {
         method: "POST",
-        body: JSON.stringify({ idempotency_key: "webhook-manual-cutover-retry" }),
+        body: JSON.stringify({
+          idempotency_key: "webhook-manual-cutover-retry",
+        }),
       },
     );
     expect(fencedRetry.status).toBe(409);
