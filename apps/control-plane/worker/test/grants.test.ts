@@ -328,6 +328,48 @@ describe("account-scoped grant API", () => {
       .toEqual(["connection_agent_whatsapp"]);
   });
 
+  it("paginates more than one hundred delegated account grants without an account-list cap", async () => {
+    const rows: D1PreparedStatement[] = [];
+    for (let index = 0; index < 105; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      const connectionId = `connection_agent_bulk_${suffix}`;
+      const accountId = `account_agent_bulk_${suffix}`;
+      rows.push(
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, 'identity_agent', 'telegram', ?, 'ready', ?, ?)",
+        ).bind(connectionId, tenantId, `Agent bulk ${suffix}`, "2026-09-07T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, 'gateway_route_agent', ?, ?, ?, ?, ?)",
+        ).bind(connectionId, `bridge-agent-bulk-${suffix}`, `route-user-agent-bulk-${suffix}`, `route-room-agent-bulk-${suffix}`, "2026-09-07T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+        ).bind(accountId, connectionId, "2026-09-07T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, 'membership_agent', 'identity_agent', ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
+        ).bind(`grant_agent_bulk_${suffix}`, tenantId, accountId, "2026-09-07T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
+      );
+    }
+    await workerEnv.CONTROL_DB.batch(rows);
+
+    const accountIds: string[] = [];
+    const pageSizes: number[] = [];
+    let cursor: string | undefined;
+    do {
+      const query = new URLSearchParams({ identity_id: "identity_agent", limit: "50" });
+      if (cursor !== undefined) query.set("cursor", cursor);
+      const response = await request(`/api/v1/accounts?${query}`, "agent-token");
+      expect(response.status).toBe(200);
+      const page = ConnectedAccountPageSchema.parse(await response.json());
+      pageSizes.push(page.items.length);
+      accountIds.push(...page.items.map((account) => account.account_id));
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor !== undefined);
+
+    expect(pageSizes).toEqual([50, 50, 5]);
+    expect(new Set(accountIds).size).toBe(105);
+    expect(accountIds).toContain("account_agent_bulk_104");
+  });
+
   it("denies retained projection rows when the last account is retired or the account table is empty", async () => {
     await workerEnv.CONTROL_DB.prepare(
       "UPDATE connection_accounts SET status = 'retired', retired_at = ? WHERE account_id = ?",

@@ -129,7 +129,8 @@ export type ListAccountGrantTargetsInput = {
 type ListConnectedAccountsInput = {
   tenantId: string;
   identityId?: string;
-  accountIds?: readonly string[];
+  grantMembershipId?: string;
+  grantIdentityId?: string;
   cursor?: string;
   limit?: number;
 };
@@ -711,11 +712,25 @@ export async function resolveAccountReadScope(
   tenantId: string,
   membershipId: string,
   identityId: string,
+  accountId?: string,
 ): Promise<AccountReadScope> {
   try {
+    const bindings: (string | number)[] = [tenantId, membershipId, identityId];
+    const accountFilter = accountId === undefined ? "" : " AND g.account_id = ?";
+    if (accountId !== undefined) bindings.push(accountId);
     const result = await db.prepare(
-      "SELECT g.account_id, g.chat_scope, gc.chat_id FROM account_grants AS g JOIN connection_accounts AS ca ON ca.account_id = g.account_id AND ca.status = 'active' LEFT JOIN account_grant_chats AS gc ON gc.tenant_id = g.tenant_id AND gc.grant_id = g.id WHERE g.tenant_id = ? AND g.membership_id = ? AND g.identity_id = ? AND g.operation_scope = 'conversation.read' AND g.status = 'active' ORDER BY g.account_id ASC, gc.chat_id ASC",
-    ).bind(tenantId, membershipId, identityId).all<AccountReadGrantRow>();
+      `SELECT g.account_id, g.chat_scope, gc.chat_id
+       FROM account_grants AS g
+       JOIN connection_accounts AS ca ON ca.account_id = g.account_id AND ca.status = 'active'
+       LEFT JOIN account_grant_chats AS gc ON gc.tenant_id = g.tenant_id AND gc.grant_id = g.id
+       WHERE g.tenant_id = ?
+         AND g.membership_id = ?
+         AND g.identity_id = ?
+         AND g.operation_scope = 'conversation.read'
+         AND g.status = 'active'
+         ${accountFilter}
+       ORDER BY g.account_id ASC, gc.chat_id ASC`,
+    ).bind(...bindings).all<AccountReadGrantRow>();
     const allowed = new Set<string>();
     const all = new Set<string>();
     const chats = new Set<string>();
@@ -745,12 +760,23 @@ export async function listConnectedAccounts(
     conditions.push("c.identity_id = ?");
     bindings.push(input.identityId);
   }
-  if (input.accountIds !== undefined) {
-    if (input.accountIds.length === 0) {
+  if (input.grantMembershipId !== undefined || input.grantIdentityId !== undefined) {
+    if (input.grantMembershipId === undefined || input.grantIdentityId === undefined) {
       return ConnectedAccountPageSchema.parse({ items: [], next_cursor: null });
     }
-    conditions.push(`ca.account_id IN (${input.accountIds.map(() => "?").join(", ")})`);
-    bindings.push(...input.accountIds);
+    conditions.push(
+      `EXISTS (
+         SELECT 1
+         FROM account_grants AS ag
+         WHERE ag.tenant_id = c.tenant_id
+           AND ag.account_id = ca.account_id
+           AND ag.membership_id = ?
+           AND ag.identity_id = ?
+           AND ag.operation_scope = 'conversation.read'
+           AND ag.status = 'active'
+       )`,
+    );
+    bindings.push(input.grantMembershipId, input.grantIdentityId);
   }
   if (input.cursor !== undefined) {
     conditions.push("ca.account_id > ?");

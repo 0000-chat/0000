@@ -155,7 +155,13 @@ export async function toGrantedAccountReadAuthorization(
         allowedAllAccountIds: [accountId],
         allowedConversationIds: [],
       }
-      : await resolveAccountReadScope(db, session.tenant.id, session.membership.id, targetIdentityId);
+      : await resolveAccountReadScope(
+        db,
+        session.tenant.id,
+        session.membership.id,
+        targetIdentityId,
+        accountId,
+      );
     if (!administrator && !scope.allowedAccountIds.includes(accountId)) {
       throw new ReadError("not_found");
     }

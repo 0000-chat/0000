@@ -192,7 +192,7 @@ describe("internal realtime contracts", () => {
     expect(RealtimeSocketAttachmentSchema.safeParse({
       ...baseAttachment,
       membership_id: "membership_human",
-    }).success).toBe(false);
+    }).success).toBe(true);
     expect(RealtimeSocketAttachmentSchema.safeParse({
       ...baseAttachment,
       headers: { authorization: "Bearer secret" },

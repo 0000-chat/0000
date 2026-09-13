@@ -1140,7 +1140,7 @@ describe("tenant projection full-domain convergence proof", () => {
 
     const domainsSource = projectorDomainsSource;
     const applyPreparedBatchSource = tenantProjectionSource.slice(
-      tenantProjectionSource.indexOf("  #applyPreparedBatch("),
+      tenantProjectionSource.indexOf("  async #applyPreparedBatch("),
       tenantProjectionSource.indexOf("  #writeReplayCheckpoint("),
     );
     expect(applyPreparedBatchSource.match(/new Set<string>\(\)/g) ?? []).toHaveLength(1);

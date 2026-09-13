@@ -28,7 +28,6 @@ import {
   listConnectedAccounts,
   listPermissionRequests,
   revokeAccountGrant,
-  resolveAccountReadScope,
   updateAccountGrant,
 } from "../control-directory/grants";
 
@@ -290,14 +289,6 @@ export const accountsHandler: Handler<GrantRouteEnv, string, { out: { query: { i
     if (!admin && targetIdentityId === undefined) {
       return context.json({ items: [], next_cursor: null }, 200);
     }
-    const accountScope = admin || targetIdentityId === undefined
-      ? undefined
-      : await resolveAccountReadScope(
-        context.env.CONTROL_DB.withSession("first-primary"),
-        context.get("authorization").tenant.id,
-        context.get("authorization").membership.id,
-        targetIdentityId,
-      );
     return context.json(await listConnectedAccounts(
       context.env.CONTROL_DB.withSession("first-primary"),
       {
@@ -306,7 +297,12 @@ export const accountsHandler: Handler<GrantRouteEnv, string, { out: { query: { i
         // the account scope is resolved, filtering again by the target
         // identity would hide the very account the grant authorizes.
         ...(admin && query.identity_id !== undefined ? { identityId: query.identity_id } : {}),
-        ...(accountScope === undefined ? {} : { accountIds: accountScope.allowedAccountIds }),
+        ...(!admin && targetIdentityId !== undefined
+          ? {
+            grantMembershipId: context.get("authorization").membership.id,
+            grantIdentityId: targetIdentityId,
+          }
+          : {}),
         ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
         ...(query.limit === undefined ? {} : { limit: query.limit }),
       },
