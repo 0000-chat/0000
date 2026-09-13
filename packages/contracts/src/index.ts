@@ -13,3 +13,4 @@ export * from "./projection";
 export * from "./ingestion";
 export * from "./grants";
 export * from "./linking";
+export * from "./history";

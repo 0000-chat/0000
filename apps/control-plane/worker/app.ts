@@ -82,6 +82,15 @@ import {
   linkSessionStartRoute,
   type LinkingServices,
 } from "./linking/routes";
+import {
+  createHistoryHandlers,
+  historyImportAdvanceRoute,
+  historyImportDetailRoute,
+  historyImportListRoute,
+  historyImportStartRoute,
+  providerCapabilitiesRoute,
+  type HistoryRouteServices,
+} from "./history/routes";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -117,6 +126,9 @@ export type AppServices = {
   fetchOAuthUpstream?: typeof fetch;
   createConnectionGateway?: LinkingServices["createConnectionGateway"];
   linkingNow?: LinkingServices["now"];
+  createHistoryImportProvider?: HistoryRouteServices["createProvider"];
+  historyNow?: HistoryRouteServices["now"];
+  applyHistoryEvents?: HistoryRouteServices["applyEvents"];
 };
 
 export function createApp(services: AppServices = {}) {
@@ -342,6 +354,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/conversations/*", productAuthorization);
   app.use("/api/v1/identities/*/link-sessions", productAuthorization);
   app.use("/api/v1/link-sessions/*", productAuthorization);
+  app.use("/api/v1/history-imports/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -383,6 +396,18 @@ export function createApp(services: AppServices = {}) {
     linkSessionCancelRoute,
     createCancelLinkSessionHandler(linkingServices),
   );
+  const historyServices: HistoryRouteServices = {};
+  if (services.createHistoryImportProvider !== undefined)
+    historyServices.createProvider = services.createHistoryImportProvider;
+  if (services.historyNow !== undefined) historyServices.now = services.historyNow;
+  if (services.applyHistoryEvents !== undefined)
+    historyServices.applyEvents = services.applyHistoryEvents;
+  const historyHandlers = createHistoryHandlers(historyServices);
+  app.openapi(historyImportStartRoute, historyHandlers.start);
+  app.openapi(historyImportListRoute, historyHandlers.list);
+  app.openapi(historyImportDetailRoute, historyHandlers.detail);
+  app.openapi(historyImportAdvanceRoute, historyHandlers.advance);
+  app.openapi(providerCapabilitiesRoute, historyHandlers.capabilities);
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",
