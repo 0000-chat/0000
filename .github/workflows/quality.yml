@@ -10,5 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run scaffold checks
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install development tooling
+        run: pnpm install --frozen-lockfile
+      - name: Run scaffold and quality checks
         run: ./scripts/check

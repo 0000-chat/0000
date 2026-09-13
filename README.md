@@ -19,3 +19,9 @@ This service is responsible for:
 
 It is not responsible for user experiences, communication channels, reasoning,
 or coordinating the hosted platform.
+
+Install the pinned development tooling with `pnpm install --frozen-lockfile`.
+`pnpm lint` runs Oxlint correctness checks and `pnpm format:check` verifies
+Biome formatting without changing files. Use `pnpm lint:fix` or `pnpm format`
+when an intentional local fix is needed. `./scripts/check` runs the
+nonmutating checks used by CI.
