@@ -8,6 +8,21 @@ ALTER TABLE webhook_deliveries
 ALTER TABLE webhook_deliveries
   ADD COLUMN provider_request_started_at TEXT;
 
+-- Rows leased before this marker existed may already have crossed provider
+-- I/O.  Do not make an unknown external result retryable during the upgrade;
+-- retain the row, evidence, attempt count, and original deadline as explicit
+-- uncertainty instead.
+UPDATE webhook_deliveries
+SET status = 'uncertain',
+    uncertain_at = COALESCE(last_attempt_at, first_pending_at),
+    uncertainty_reason = 'legacy_lease_unknown_provider_state',
+    error_code = 'delivery_uncertain',
+    lease_id = NULL,
+    lease_expires_at = NULL,
+    next_attempt_at = NULL,
+    manual_retry_at = NULL
+WHERE status = 'leased';
+
 -- Rows created before this fence existed must retain the epoch that was
 -- current at migration time.  A source-specific authority check still
 -- suppresses rows whose source was already removed.

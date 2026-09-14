@@ -129,6 +129,8 @@ export type WebhookDeliveryServices = {
   beforeClaim?: ((deliveryId: string) => Promise<void>) | undefined;
   /** Test-only seam for revocation/edit races immediately before HTTP. */
   beforeFetch?: ((deliveryId: string) => Promise<void>) | undefined;
+  /** Test-only seam for a removal race after the response fence. */
+  beforeTerminalWrite?: ((deliveryId: string) => Promise<void>) | undefined;
 };
 
 export type WebhookRetryTickServices = Pick<
@@ -139,6 +141,7 @@ export type WebhookRetryTickServices = Pick<
   | "credentialStore"
   | "beforeClaim"
   | "beforeFetch"
+  | "beforeTerminalWrite"
 >;
 
 export type WebhookRetryTickResult = {
@@ -1119,9 +1122,10 @@ const finishSuccessfulDelivery = async (
     httpStatus: number | null;
     payloadJson: string | null;
     responseBody: string | null;
+    removalEpoch: number;
   },
-): Promise<void> => {
-  await database
+): Promise<boolean> => {
+  const result = await database
     .prepare(
       `UPDATE webhook_deliveries
        SET status = 'delivered', delivered_at = ?, http_status = ?,
@@ -1129,7 +1133,17 @@ const finishSuccessfulDelivery = async (
            lease_id = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
            manual_retry_at = NULL, uncertain_at = NULL, uncertainty_reason = NULL,
            provider_request_started_at = NULL
-       WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
+       WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?
+         AND provider_request_started_at IS NOT NULL
+         AND removal_epoch = ?
+         AND ? = COALESCE(
+           (
+             SELECT MAX(authority.deletion_epoch)
+             FROM removal_authority AS authority
+             WHERE authority.tenant_id = webhook_deliveries.tenant_id
+           ),
+           0
+         )`,
     )
     .bind(
       input.now,
@@ -1139,8 +1153,11 @@ const finishSuccessfulDelivery = async (
       input.tenantId,
       input.deliveryId,
       input.leaseId,
+      input.removalEpoch,
+      input.removalEpoch,
     )
     .run();
+  return (result.meta.changes ?? 0) === 1;
 };
 
 const finishFailedDelivery = async (
@@ -1156,8 +1173,10 @@ const finishFailedDelivery = async (
     errorCode: string;
     payloadJson: string | null;
     responseBody: string | null;
+    providerRequestStarted: boolean;
+    removalEpoch: number;
   },
-): Promise<void> => {
+): Promise<boolean> => {
   const deadlineMs = Date.parse(input.retryDeadline);
   const retryable =
     Number.isFinite(deadlineMs) && input.now.getTime() < deadlineMs;
@@ -1169,7 +1188,7 @@ const finishFailedDelivery = async (
         ),
       ).toISOString()
     : null;
-  await database
+  const result = await database
     .prepare(
       `UPDATE webhook_deliveries
        SET status = ?, next_attempt_at = ?,
@@ -1178,7 +1197,17 @@ const finishFailedDelivery = async (
            lease_expires_at = NULL, manual_retry_at = NULL,
            uncertain_at = NULL, uncertainty_reason = NULL,
            provider_request_started_at = NULL
-       WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?`,
+       WHERE tenant_id = ? AND id = ? AND status = 'leased' AND lease_id = ?
+         AND (? = 0 OR provider_request_started_at IS NOT NULL)
+         AND removal_epoch = ?
+         AND ? = COALESCE(
+           (
+             SELECT MAX(authority.deletion_epoch)
+             FROM removal_authority AS authority
+             WHERE authority.tenant_id = webhook_deliveries.tenant_id
+           ),
+           0
+         )`,
     )
     .bind(
       retryable ? "pending" : "failed",
@@ -1190,8 +1219,12 @@ const finishFailedDelivery = async (
       input.tenantId,
       input.deliveryId,
       input.leaseId,
+      input.providerRequestStarted ? 1 : 0,
+      input.removalEpoch,
+      input.removalEpoch,
     )
     .run();
+  if ((result.meta.changes ?? 0) !== 1) return false;
   if (!retryable) {
     await database
       .prepare(
@@ -1202,6 +1235,7 @@ const finishFailedDelivery = async (
       .bind(input.tenantId, input.deliveryId)
       .run();
   }
+  return true;
 };
 
 const finishUncertainDelivery = async (
@@ -1764,6 +1798,40 @@ const deliverOne = async (
     fence.changed ||
     (!isWebhookRemovalDelivery(lease.event_type) && fence.authority !== null);
 
+  const finishUncertainAfterRemovalRace = async (
+    httpStatus: number | null,
+    responseBody: string | null,
+  ): Promise<boolean> => {
+    let removal: Awaited<ReturnType<typeof removalFence>>;
+    try {
+      removal = await removalFence();
+    } catch {
+      await finishUncertainDelivery(database, {
+        tenantId,
+        deliveryId,
+        leaseId: lease.lease_id,
+        now: nowFor(services).toISOString(),
+        httpStatus,
+        reason: "removal_fence_unavailable_in_flight",
+        payloadJson,
+        responseBody,
+      });
+      return true;
+    }
+    if (!removalBecameUncertain(removal)) return false;
+    await finishUncertainDelivery(database, {
+      tenantId,
+      deliveryId,
+      leaseId: lease.lease_id,
+      now: nowFor(services).toISOString(),
+      httpStatus,
+      reason: removalUncertaintyReason(),
+      payloadJson,
+      responseBody,
+    });
+    return true;
+  };
+
   const initialRemoval = await removalFence();
   if (
     (isWebhookRemovalDelivery(lease.event_type) &&
@@ -1838,7 +1906,7 @@ const deliverOne = async (
       });
       return;
     }
-    await finishFailedDelivery(database, {
+    const finished = await finishFailedDelivery(database, {
       tenantId,
       deliveryId,
       leaseId: lease.lease_id,
@@ -1849,7 +1917,12 @@ const deliverOne = async (
       errorCode,
       payloadJson,
       responseBody,
+      providerRequestStarted,
+      removalEpoch,
     });
+    if (!finished && providerRequestStarted) {
+      await finishUncertainAfterRemovalRace(httpStatus, responseBody);
+    }
   };
   try {
     const subscription = await currentSubscription(
@@ -2174,8 +2247,9 @@ const deliverOne = async (
       });
       return;
     }
+    await services.beforeTerminalWrite?.(deliveryId);
     if (response.ok) {
-      await finishSuccessfulDelivery(database, {
+      const finished = await finishSuccessfulDelivery(database, {
         tenantId,
         deliveryId,
         leaseId: lease.lease_id,
@@ -2183,10 +2257,14 @@ const deliverOne = async (
         httpStatus: response.status,
         payloadJson,
         responseBody,
+        removalEpoch,
       });
+      if (!finished) {
+        await finishUncertainAfterRemovalRace(response.status, responseBody);
+      }
       return;
     }
-    await finishFailedDelivery(database, {
+    const finished = await finishFailedDelivery(database, {
       tenantId,
       deliveryId,
       leaseId: lease.lease_id,
@@ -2197,7 +2275,12 @@ const deliverOne = async (
       errorCode: `http_${response.status}`,
       payloadJson,
       responseBody,
+      providerRequestStarted,
+      removalEpoch,
     });
+    if (!finished) {
+      await finishUncertainAfterRemovalRace(response.status, responseBody);
+    }
   } catch {
     try {
       await markNetworkFailure("delivery_unavailable", null, null);

@@ -999,6 +999,49 @@ describe("durable incoming webhook delivery", () => {
     });
   });
 
+  it("keeps missing credentials retryable without starting a provider request", async () => {
+    await insertSubscription(
+      subscription({
+        id: "webhook_missing_credential",
+        credentialRef: "missing-ref",
+      }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_missing_credential")],
+      now: () => fixedNow,
+    });
+    let fetchCount = 0;
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        resolveCredential: async () => null,
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    expect(fetchCount).toBe(0);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "pending",
+      error_code: "credential_unavailable",
+      http_status: null,
+      attempt_count: 1,
+      first_pending_at: fixedNow.toISOString(),
+      retry_deadline: new Date(
+        fixedNow.getTime() + 24 * 60 * 60 * 1_000,
+      ).toISOString(),
+      provider_request_started_at: null,
+    });
+  });
+
   it("records removal after provider request entry as uncertain without retry", async () => {
     await insertSubscription(subscription({ id: "webhook_removal_in_flight" }));
     const [id] = await fanOutIncomingWebhookDeliveries({
@@ -1051,6 +1094,82 @@ describe("durable incoming webhook delivery", () => {
       removed_at: fixedNow.toISOString(),
     });
     releaseFetch();
+    await delivery;
+
+    expect(fetchCount).toBe(1);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "uncertain",
+      http_status: 202,
+      error_code: "delivery_uncertain",
+      uncertainty_reason: "source_removed_in_flight",
+      provider_request_started_at: fixedNow.toISOString(),
+    });
+    await expect(
+      runWebhookRetryTick({
+        database: workerEnv.CONTROL_DB,
+        projectionForTenant: () => projectionFor(),
+        services: {
+          now: () => new Date(fixedNow.getTime() + 60 * 60 * 1_000),
+          fetch: async () => {
+            fetchCount += 1;
+            return new Response(null, { status: 202 });
+          },
+        },
+      }),
+    ).resolves.toEqual({ scanned: 0, attempted: 0 });
+    expect(fetchCount).toBe(1);
+  });
+
+  it("fences the terminal write when removal wins after the response check", async () => {
+    await insertSubscription(subscription({ id: "webhook_removal_terminal" }));
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_removal_terminal")],
+      now: () => fixedNow,
+    });
+
+    let enterTerminal!: () => void;
+    let releaseTerminal!: () => void;
+    const terminalEntered = new Promise<void>((resolve) => {
+      enterTerminal = resolve;
+    });
+    const terminalRelease = new Promise<void>((resolve) => {
+      releaseTerminal = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        beforeTerminalWrite: async () => {
+          enterTerminal();
+          await terminalRelease;
+        },
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await terminalEntered;
+    await recordRemoval(workerEnv.CONTROL_DB, {
+      tenant_id: "tenant_pilot",
+      resource_type: "message",
+      resource_id: "message_incoming_1",
+      content_generation: "message_incoming_1",
+      account_id: "account_human",
+      conversation_id: "conversation_one",
+      source_event_id: "event_removal_terminal",
+      source_object_key: null,
+      reason: "requested",
+      removed_at: fixedNow.toISOString(),
+    });
+    releaseTerminal();
     await delivery;
 
     expect(fetchCount).toBe(1);
