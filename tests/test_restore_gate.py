@@ -37,6 +37,24 @@ def _authority(
     tenant="tenant_restore_gate",
     epoch=2,
 ):
+    records = [] if authorities is None else authorities
+    inventory_ids = list(dict.fromkeys(item["id"] for item in records)) or [tenant]
+    copies_by_store = {
+        store: [
+            {
+                "reference": (
+                    "restic:fixture-snapshot"
+                    if store == "restic_snapshot"
+                    else f"fixture:{inventory_id}:{store}"
+                ),
+                "copy_created_at": "2026-09-14T00:00:00Z",
+                "resource_id": inventory_id,
+                "content_generation": "generation-2",
+            }
+            for inventory_id in inventory_ids
+        ]
+        for store in GATE.ALL_STORES
+    }
     if stores is None:
         stores = [
             {
@@ -46,14 +64,50 @@ def _authority(
                 "content_present": store in {"session_credentials", "account_keys"},
                 "evidence_source": f"fixture-{store}",
                 "detail": None,
+                "references": [copy["reference"] for copy in copies_by_store[store]],
+                "copies": copies_by_store[store],
             }
             for store in GATE.ALL_STORES
         ]
+    inventory = [
+        {
+            "authority_id": inventory_id,
+            "targets": next(
+                (
+                    [dict(target) for target in item.get("targets", [])]
+                    for item in records
+                    if item["id"] == inventory_id
+                ),
+                [],
+            ) if inventory_id in {item["id"] for item in records} else [],
+            "stores": [
+                {
+                    "store": store,
+                    "complete": True,
+                    "evidence_source": f"fixture-{store}",
+                    "detail": None,
+                    "references": [
+                        copy["reference"]
+                        for copy in copies_by_store[store]
+                        if copy["resource_id"] == inventory_id
+                    ],
+                    "copies": [
+                        copy
+                        for copy in copies_by_store[store]
+                        if copy["resource_id"] == inventory_id
+                    ],
+                }
+                for store in GATE.ALL_STORES
+            ],
+        }
+        for inventory_id in inventory_ids
+    ]
     return {
         "version": 1,
         "tenant_id": tenant,
         "deletion_epoch": epoch,
-        "authorities": [] if authorities is None else authorities,
+        "authorities": records,
+        "inventory": inventory,
         "stores": stores,
         "archive": {
             "status": "complete",
@@ -61,6 +115,22 @@ def _authority(
             "evidence_source": "fixture-archive",
         },
     }
+
+
+def _set_store_reference(authority: dict, store_name: str, reference: str) -> None:
+    for store in authority["stores"]:
+        if store["store"] == store_name:
+            existing = store["copies"][0]
+            copy = {**existing, "reference": reference}
+            store["references"] = [reference]
+            store["copies"] = [copy]
+    for inventory in authority["inventory"]:
+        for store in inventory["stores"]:
+            if store["store"] == store_name:
+                existing = store["copies"][0]
+                copy = {**existing, "reference": reference}
+                store["references"] = [reference]
+                store["copies"] = [copy]
 
 
 class RestoreGateTests(unittest.TestCase):
@@ -89,6 +159,110 @@ class RestoreGateTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "escapes"):
                 GATE.validate_payload(root)
 
+    def test_restored_snapshot_id_must_match_authority_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload"
+            (payload / "retention").mkdir(parents=True)
+            for filename in (
+                "synapse.pgdump",
+                "whatsapp.pgdump",
+                "messenger.pgdump",
+                "telegram.pgdump",
+            ):
+                (payload / filename).write_bytes(b"")
+            (payload / "retention/controlled-copy-layout.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "format": "communicator-core-pgdump-v1",
+                        "databases": [
+                            {
+                                "name": database,
+                                "path": filename,
+                                "contract": contract,
+                            }
+                            for database, filename, contract in (
+                                ("synapse", "synapse.pgdump", "synapse-event-json-v1"),
+                                ("whatsapp_bridge", "whatsapp.pgdump", "mautrix-bridge-message-v1"),
+                                ("messenger_bridge", "messenger.pgdump", "mautrix-bridge-message-v1"),
+                                ("telegram_bridge", "telegram.pgdump", "mautrix-bridge-message-v1"),
+                            )
+                        ],
+                        "files": [
+                            "synapse.pgdump",
+                            "whatsapp.pgdump",
+                            "messenger.pgdump",
+                            "telegram.pgdump",
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            authority = _authority(epoch=0)
+            _set_store_reference(authority, "restic_snapshot", "restic:expected-snapshot")
+            authority_path = root / "authority.json"
+            authority_path.write_text(json.dumps(authority), encoding="utf-8")
+            report = root / "report.json"
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(GATE_PATH),
+                    "--authority",
+                    str(authority_path),
+                    "--tenant",
+                    authority["tenant_id"],
+                    "--payload",
+                    str(payload),
+                    "--restic-snapshot-id",
+                    "wrong-snapshot",
+                    "--report",
+                    str(report),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("outside the current authority generation", result.stderr)
+            self.assertEqual("blocked", json.loads(report.read_text())["state"])
+
+    def test_inventory_bound_authority_head_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority = _authority(epoch=0)
+            authority["ledger_head"] = GATE._sha256_json(
+                {
+                    "tenant_id": authority["tenant_id"],
+                    "deletion_epoch": authority["deletion_epoch"],
+                    "authorities": authority["authorities"],
+                    "inventory": authority["inventory"],
+                }
+            )
+            source = root / "authority.json"
+            report = root / "report.json"
+            source.write_text(json.dumps(authority), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(GATE_PATH),
+                    "--authority",
+                    str(source),
+                    "--tenant",
+                    authority["tenant_id"],
+                    "--report",
+                    str(report),
+                    "--authority-only",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual("authority_ready", json.loads(report.read_text())["state"])
+
     def test_authenticated_current_endpoint_rechecks_head_before_ready(self):
         authority = _authority(epoch=0)
         authority["issued_at"] = datetime.now(timezone.utc).isoformat().replace(
@@ -102,6 +276,7 @@ class RestoreGateTests(unittest.TestCase):
                 "tenant_id": authority["tenant_id"],
                 "deletion_epoch": authority["deletion_epoch"],
                 "authorities": authority["authorities"],
+                "inventory": authority["inventory"],
             }
         )
         changed_epoch = {**authority, "deletion_epoch": 1}
@@ -110,6 +285,7 @@ class RestoreGateTests(unittest.TestCase):
                 "tenant_id": changed_epoch["tenant_id"],
                 "deletion_epoch": changed_epoch["deletion_epoch"],
                 "authorities": changed_epoch["authorities"],
+                "inventory": changed_epoch["inventory"],
             }
         )
         responses = [dict(authority), changed_epoch]
@@ -189,6 +365,8 @@ class RestoreGateTests(unittest.TestCase):
                         authority["tenant_id"],
                         "--payload",
                         str(payload),
+                        "--restic-snapshot-id",
+                        "fixture-snapshot",
                         "--report",
                         str(report),
                     ],
@@ -205,6 +383,195 @@ class RestoreGateTests(unittest.TestCase):
                     ["Bearer restore-test-token", "Bearer restore-test-token"],
                     seen_authorizations,
                 )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_activation_revalidation_blocks_changed_or_unavailable_authority(self):
+        base = _authority(epoch=0)
+        base["issued_at"] = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        base["expires_at"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=60)
+        ).isoformat().replace("+00:00", "Z")
+        base["ledger_head"] = GATE._sha256_json(
+            {
+                "tenant_id": base["tenant_id"],
+                "deletion_epoch": base["deletion_epoch"],
+                "authorities": base["authorities"],
+                "inventory": base["inventory"],
+            }
+        )
+        changed = {**base, "deletion_epoch": 1}
+        changed["ledger_head"] = GATE._sha256_json(
+            {
+                "tenant_id": changed["tenant_id"],
+                "deletion_epoch": changed["deletion_epoch"],
+                "authorities": changed["authorities"],
+                "inventory": changed["inventory"],
+            }
+        )
+        normalized_base = GATE._validate_authority_document(
+            base, base["tenant_id"], require_current=True
+        )
+        responses = [base, changed, None]
+        request_count = 0
+        seen_authorizations = []
+        lease_requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                nonlocal request_count
+                seen_authorizations.append(self.headers.get("Authorization"))
+                response = responses[min(request_count, len(responses) - 1)]
+                request_count += 1
+                if response is None:
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                body = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                if self.headers.get("Authorization") != "Bearer restore-test-token":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                lease_requests.append(json.loads(self.rfile.read(length).decode("utf-8")))
+                body = json.dumps(
+                    {
+                        "lease_id": "restore_lease_test",
+                        "tenant_id": base["tenant_id"],
+                        "lease_token": "t" * 40,
+                        "deletion_epoch": base["deletion_epoch"],
+                        "ledger_head": base["ledger_head"],
+                        "expires_at": (
+                            datetime.now(timezone.utc) + timedelta(minutes=10)
+                        ).isoformat().replace("+00:00", "Z"),
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                sanitized = root / "restore-gate.json"
+                sanitized.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "state": "ready",
+                            "tenant_id": base["tenant_id"],
+                            "deletion_epoch": base["deletion_epoch"],
+                            "ledger_head": base["ledger_head"],
+                            "authority_fingerprint": GATE._authority_fingerprint(
+                                normalized_base
+                            ),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                endpoint = (
+                    f"http://127.0.0.1:{server.server_address[1]}/restore-authority"
+                )
+                command_prefix = [
+                    "python3",
+                    str(GATE_PATH),
+                    "--authority-url",
+                    endpoint,
+                    "--authority-token",
+                    "restore-test-token",
+                    "--tenant",
+                    base["tenant_id"],
+                    "--activation-report",
+                    str(sanitized),
+                    "--activation-lease-url",
+                    f"http://127.0.0.1:{server.server_address[1]}/restore-activation-lease",
+                    "--activation-lease-id",
+                    "restore_lease_test",
+                ]
+
+                def command(report_path: Path):
+                    return [
+                        *command_prefix,
+                        "--report",
+                        str(report_path),
+                    ]
+
+                environment = {
+                    **os.environ,
+                    "COMMUNICATOR_RESTORE_ALLOW_HTTP": "1",
+                }
+
+                result = subprocess.run(
+                    command(root / "activation-report.json"),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=environment,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                activation_result = json.loads(
+                    (root / "activation-report.json").read_text()
+                )
+                self.assertEqual("activation_ready", activation_result["state"])
+                self.assertEqual(
+                    "restore_lease_test",
+                    activation_result["activation_lease"]["lease_id"],
+                )
+
+                result = subprocess.run(
+                    command(root / "changed-report.json"),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=environment,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("changed before Synapse activation", result.stderr)
+                self.assertEqual(
+                    "blocked",
+                    json.loads((root / "changed-report.json").read_text())["state"],
+                )
+
+                result = subprocess.run(
+                    command(root / "unavailable-report.json"),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=environment,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("endpoint was unavailable", result.stderr)
+                self.assertEqual(
+                    "blocked",
+                    json.loads((root / "unavailable-report.json").read_text())["state"],
+                )
+                self.assertEqual(
+                    ["Bearer restore-test-token"] * 3,
+                    seen_authorizations,
+                )
+                self.assertEqual(1, len(lease_requests))
         finally:
             server.shutdown()
             server.server_close()
@@ -369,7 +736,11 @@ class RestoreGateTests(unittest.TestCase):
             (payload / "synapse-data/media_store/remove.bin").write_bytes(b"remove")
             (payload / "synapse-data/media_store/keep.bin").write_bytes(b"keep")
 
-            socket_dir = root / "sockets"
+            # PostgreSQL Unix socket paths are capped at 107 bytes.  Keep the
+            # socket directory short even when TMPDIR points at the project
+            # cache, as required by the restore test runner.
+            socket_dir = Path("/tmp/communicator-restore33-pg")
+            socket_dir.mkdir(parents=True, exist_ok=True)
             with patch.dict(
                 os.environ,
                 {
@@ -456,6 +827,8 @@ class RestoreGateTests(unittest.TestCase):
                         "tenant_restore_gate",
                         "--payload",
                         str(payload),
+                        "--restic-snapshot-id",
+                        "fixture-snapshot",
                         "--report",
                         str(report),
                     ],

@@ -5,6 +5,7 @@ import {
   ControlledCopyAuxiliaryStoreSchema,
   ControlledCopyStoreSchema,
 } from "./controlled-copies";
+import { ProjectionStatusSchema } from "./projection";
 
 export const RESTORE_GATE_STAGES = [
   "authority_loaded",
@@ -25,6 +26,18 @@ export const RestoreGateStateSchema = z.enum([
 ]);
 export type RestoreGateState = z.infer<typeof RestoreGateStateSchema>;
 
+export const RestoreInventoryCopySchema = z
+  .object({
+    reference: z.string().trim().min(1).max(2_048),
+    copy_created_at: TimestampSchema,
+    resource_id: z.string().trim().min(1).max(2_048),
+    content_generation: z.string().trim().min(1).max(256),
+  })
+  .strict();
+export type RestoreInventoryCopy = z.infer<
+  typeof RestoreInventoryCopySchema
+>;
+
 export const RestoreStoreStatusSchema = z
   .object({
     store: z.union([
@@ -42,6 +55,10 @@ export const RestoreStoreStatusSchema = z
     content_present: z.boolean(),
     evidence_source: z.string().trim().min(1).max(256),
     detail: z.string().trim().min(1).max(4_096).nullable(),
+    /** Concrete provider copy/snapshot references covered by this status. */
+    references: z.array(z.string().trim().min(1).max(2_048)).max(10_000),
+    /** Metadata binding each reference to the exact copied generation. */
+    copies: z.array(z.lazy(() => RestoreInventoryCopySchema)).max(10_000),
   })
   .strict();
 export type RestoreStoreStatus = z.infer<typeof RestoreStoreStatusSchema>;
@@ -100,6 +117,51 @@ export const RestoreReplayEvidenceSchema = z
   })
   .strict();
 export type RestoreReplayEvidence = z.infer<typeof RestoreReplayEvidenceSchema>;
+
+/** Result of the real control-plane archive-to-projection restore caller. */
+export const RestoreProjectionActivationResultSchema = z
+  .object({
+    tenant_id: CommunicatorIdSchema,
+    rebuild_id: CommunicatorIdSchema,
+    deletion_epoch: z.number().int().safe().nonnegative(),
+    page_count: z.number().int().safe().nonnegative(),
+    removed_event_ids: z
+      .array(z.string().trim().min(1).max(2_048))
+      .max(100_000),
+    changed_event_ids: z
+      .array(z.string().trim().min(1).max(2_048))
+      .max(100_000),
+    readiness: RestoreReadinessSchema,
+    projection: ProjectionStatusSchema,
+  })
+  .strict();
+export type RestoreProjectionActivationResult = z.infer<
+  typeof RestoreProjectionActivationResultSchema
+>;
+
+export const RestoreActivationLeaseSchema = z
+  .object({
+    lease_id: CommunicatorIdSchema,
+    tenant_id: CommunicatorIdSchema,
+    lease_token: z.string().trim().min(32).max(256),
+    deletion_epoch: z.number().int().safe().nonnegative(),
+    ledger_head: z.string().trim().min(1).max(256),
+    expires_at: TimestampSchema,
+  })
+  .strict();
+export type RestoreActivationLease = z.infer<
+  typeof RestoreActivationLeaseSchema
+>;
+
+export const RestoreActivationLeaseReleaseSchema = z
+  .object({
+    released: z.boolean(),
+    lease_id: CommunicatorIdSchema,
+  })
+  .strict();
+export type RestoreActivationLeaseRelease = z.infer<
+  typeof RestoreActivationLeaseReleaseSchema
+>;
 
 /**
  * Exact host-side locations are part of the current authority export.  A
@@ -162,6 +224,31 @@ export type RestoreAuthorityRecord = z.infer<
   typeof RestoreAuthorityRecordSchema
 >;
 
+const RestoreInventoryStoreSchema = z
+  .object({
+    store: z.union([
+      ControlledCopyStoreSchema,
+      ControlledCopyAuxiliaryStoreSchema,
+    ]),
+    complete: z.boolean(),
+    evidence_source: z.string().trim().min(1).max(256),
+    detail: z.string().trim().min(1).max(4_096).nullable(),
+    references: z.array(z.string().trim().min(1).max(2_048)).max(10_000),
+    copies: z.array(RestoreInventoryCopySchema).max(10_000),
+  })
+  .strict();
+
+export const RestoreAuthorityInventorySchema = z
+  .object({
+    authority_id: CommunicatorIdSchema,
+    targets: z.array(RestoreDatabaseTargetSchema).max(10_000),
+    stores: z.array(RestoreInventoryStoreSchema).max(10_000),
+  })
+  .strict();
+export type RestoreAuthorityInventory = z.infer<
+  typeof RestoreAuthorityInventorySchema
+>;
+
 export const RestoreArchiveEvidenceSchema = z
   .object({
     status: z.enum(["complete", "incomplete", "missing"]),
@@ -186,6 +273,7 @@ export const RestoreAuthorityExportSchema = z
     authority_ids: z.array(CommunicatorIdSchema).max(10_000),
     authority_count: z.number().int().safe().nonnegative(),
     authorities: z.array(RestoreAuthorityRecordSchema).max(10_000),
+    inventory: z.array(RestoreAuthorityInventorySchema).max(10_000),
     ledger_head: z.string().regex(/^[a-f0-9]{64}$/u),
     stores: z.array(RestoreStoreStatusSchema).max(10_000),
     archive: RestoreArchiveEvidenceSchema,

@@ -11,6 +11,7 @@ import { createRestoreAuthorityExport } from "../../restore/authority";
 import { archiveCanonicalEventBatch } from "../../archive/writer";
 import { cleanupArchiveTenant, makeEvent } from "../archive/support";
 import type { RestoreStoreStatus } from "@communicator/contracts";
+import type { ControlledCopyAdapter } from "../../retention/adapters";
 
 const workerEnv = env as Cloudflare.Env & { CONTROL_DB: D1Database };
 const bucket = (env as Cloudflare.Env).EVENT_ARCHIVE;
@@ -127,6 +128,76 @@ describe("restore authority gate", () => {
     });
   });
 
+  it("keeps unavailable store inventory incomplete even with one exact target", async () => {
+    const tenantId = tenant("per_store_inventory");
+    await recordRemoval(
+      workerEnv.CONTROL_DB,
+      inputFor(tenantId, "message_restore33_inventory"),
+      fixedNow,
+    );
+    const synapseAdapter: ControlledCopyAdapter = {
+      store: "synapse",
+      owner: "restore-test-synapse",
+      default_content_class: "message",
+      deletion_method: "delete",
+      required: true,
+      inventory: async () => ({
+        complete: true,
+        evidence_source: "restore-test-synapse-inventory",
+        copies: [
+          {
+            reference: "synapse:message_restore33_inventory",
+            copy_created_at: fixedNow.toISOString(),
+            resource_id: "message_restore33_inventory",
+            content_generation: "message_restore33_inventory",
+            restore_target: {
+              database: "synapse",
+              contract: "synapse-event-json-v1",
+              room_id: "!restore:example.test",
+              event_id: "$restore33-inventory:example.test",
+              event_type: "m.room.message",
+              media_paths: [],
+              media_paths_complete: true,
+            },
+          },
+        ],
+      }),
+      cleanup: async () => ({
+        status: "deleted",
+        content_present: false,
+        evidence_source: "restore-test-synapse-cleanup",
+        object_reference: "synapse:message_restore33_inventory",
+        detail: null,
+      }),
+    };
+    const exported = await createRestoreAuthorityExport(
+      workerEnv.CONTROL_DB,
+      tenantId,
+      fixedNow,
+      [synapseAdapter],
+    );
+    expect(exported.authorities[0]?.targets).toHaveLength(1);
+    expect(
+      exported.stores.find((store) => store.store === "synapse"),
+    ).toMatchObject({
+      status: "incomplete",
+      evidence_source: "synapse_inventory",
+    });
+    expect(
+      exported.stores.find((store) => store.store === "queue"),
+    ).toMatchObject({
+      status: "incomplete",
+      evidence_source: "queue_inventory_unavailable",
+      detail: "No configured inventory adapter is available",
+    });
+    expect(
+      exported.stores.find((store) => store.store === "restic_snapshot"),
+    ).toMatchObject({
+      status: "incomplete",
+      evidence_source: "restic_snapshot_inventory_unavailable",
+    });
+  });
+
   it("rejects missing or duplicate store evidence before readiness", () => {
     const storeNames = [
       "projection_backup",
@@ -139,6 +210,20 @@ describe("restore authority gate", () => {
       "account_keys",
     ] as const;
     const complete: RestoreStoreStatus[] = storeNames.map((store) => ({
+      ...(() => {
+        const reference = `fixture:${store}`;
+        return {
+          references: [reference],
+          copies: [
+            {
+              reference,
+              copy_created_at: fixedNow.toISOString(),
+              resource_id: `resource:${store}`,
+              content_generation: "generation-1",
+            },
+          ],
+        };
+      })(),
       store,
       generation: "generation-1",
       status:
@@ -209,5 +294,48 @@ describe("restore authority gate", () => {
       rejected_event_ids: [removed.event_id],
       tombstones_reapplied: [authority.id],
     });
+  });
+
+  it("rechecks the removal epoch after the archive page is fetched", async () => {
+    const tenantId = tenant("replay_race");
+    const event = makeEvent({
+      tenant_id: tenantId,
+      account_id: "account_restore33",
+      conversation_id: "conversation_restore33",
+      event_id: "$restore33-race:example.test",
+      payload: { body: "race" },
+    });
+    await archiveCanonicalEventBatch({
+      bucket,
+      tenantId,
+      batchId: "batch_restore33_replay_race",
+      events: [event],
+      archivedAt: fixedNow.toISOString(),
+      producerVersion: "restore-gate-test/1",
+      sourceCheckpoint: null,
+    });
+    let recorded = false;
+    const racedBucket = {
+      list: async (...args: Parameters<R2Bucket["list"]>) => {
+        const page = await bucket.list(...args);
+        if (!recorded) {
+          recorded = true;
+          await recordRemoval(
+            workerEnv.CONTROL_DB,
+            {
+              ...inputFor(tenantId, "command_restore33_race"),
+              resource_type: "command",
+            },
+            fixedNow,
+          );
+        }
+        return page;
+      },
+      get: (...args: Parameters<R2Bucket["get"]>) => bucket.get(...args),
+    } as unknown as R2Bucket;
+
+    await expect(
+      readRestoreReplayPage(racedBucket, workerEnv.CONTROL_DB, tenantId),
+    ).rejects.toMatchObject({ code: "archive_conflict" });
   });
 });

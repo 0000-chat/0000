@@ -1,6 +1,7 @@
 import {
   CONTROLLED_COPY_STORES,
   RestoreReadinessSchema,
+  RestoreInventoryCopySchema,
   RestoreStoreStatusSchema,
   type ControlledCopyStore,
   type RestoreReadiness,
@@ -32,6 +33,13 @@ export type RestoreStoreObservation = {
   content_present: boolean;
   evidence_source: string;
   detail?: string | null;
+  references?: readonly string[];
+  copies?: readonly {
+    reference: string;
+    copy_created_at: string;
+    resource_id: string;
+    content_generation: string;
+  }[];
 };
 
 const isoNow = (now: Date): string => {
@@ -127,6 +135,10 @@ const checkedStoreStatus = (
     content_present: observation.content_present,
     evidence_source: observation.evidence_source,
     detail: observation.detail ?? null,
+    references: [...(observation.references ?? [])],
+    copies: (observation.copies ?? []).map((copy) =>
+      RestoreInventoryCopySchema.parse(copy),
+    ),
   });
 
 /** Validate an externally produced restore inventory before startup. */
@@ -176,6 +188,8 @@ const statusForStore = (
     detail: complete
       ? null
       : "The controlled-copy completion ledger does not prove this store is safe to restore",
+    references: [],
+    copies: [],
   });
 };
 

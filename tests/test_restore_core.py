@@ -26,6 +26,26 @@ class RestoreCoreTests(unittest.TestCase):
             source.index('chown -R 991:991 "$restore_root/runtime/synapse"'),
             source.index("docker compose --env-file deploy/images.lock.env up -d synapse"),
         )
+        activation = source.index('--activation-report "$restore_root/restore-evidence/restore-gate.json"')
+        synapse_start = source.index(
+            "docker compose --env-file deploy/images.lock.env up -d synapse"
+        )
+        self.assertLess(source.index('echo "telegram_config=PASS"'), activation)
+        self.assertLess(activation, synapse_start)
+        self.assertIn(
+            '--report "$restore_root/restore-evidence/activation-authority.json"',
+            source[activation:synapse_start],
+        )
+        self.assertIn(
+            '--activation-lease-url "$COMMUNICATOR_RESTORE_ACTIVATION_LEASE_URL"',
+            source[activation:synapse_start],
+        )
+        self.assertIn('activation_lease_token=$(run_bounded', source)
+        self.assertLess(
+            source.index('activation_lease_token=$(run_bounded'),
+            synapse_start,
+        )
+        self.assertIn('--activation-lease-action release', source)
 
     def test_restores_and_validates_whatsapp_without_starting_live_session(self):
         source = SCRIPT.read_text()

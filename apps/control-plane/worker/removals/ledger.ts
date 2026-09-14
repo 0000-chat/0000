@@ -240,7 +240,12 @@ export const recordRemoval = async (
         COALESCE(MAX(deletion_epoch), 0) + 1,
         'active', 'not_started', NULL, NULL, ?, ?
       FROM removal_authority
-      WHERE tenant_id = ?`,
+      WHERE tenant_id = ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM restore_activation_leases
+          WHERE tenant_id = ? AND status = 'active' AND expires_at > ?
+        )`,
     )
     .bind(
       id,
@@ -257,6 +262,8 @@ export const recordRemoval = async (
       createdAt,
       createdAt,
       normalized.tenant_id,
+      normalized.tenant_id,
+      createdAt,
     )
     .run();
 

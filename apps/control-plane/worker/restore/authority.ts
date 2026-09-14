@@ -1,6 +1,10 @@
 import {
+  CONTROLLED_COPY_STORES,
+  type ControlledCopyAuxiliaryStore,
+  type ControlledCopyStore,
   RestoreAuthorityExportSchema,
   RestoreDatabaseTargetSchema,
+  RestoreInventoryCopySchema,
   RestoreStoreStatusSchema,
   type RestoreAuthorityExport,
   type RestoreDatabaseTarget,
@@ -13,6 +17,39 @@ import type { ControlledCopyAdapter } from "../retention/adapters";
 import { loadRestoreAuthority } from "./gate";
 
 type RestoreAuthorityDatabase = D1Database | D1DatabaseSession;
+type RestoreStore = ControlledCopyStore | ControlledCopyAuxiliaryStore;
+type InventoryScope = {
+  id: string;
+  tenant_id: string;
+  resource_type: string;
+  resource_id: string;
+  content_generation: string;
+  deletion_epoch: number;
+};
+
+type InventoryObservation = {
+  complete: boolean;
+  evidence_source: string;
+  detail: string | null;
+  references: string[];
+  copies: Array<{
+    reference: string;
+    copy_created_at: string;
+    resource_id: string;
+    content_generation: string;
+  }>;
+};
+
+type AuthorityInventory = {
+  targets: RestoreDatabaseTarget[];
+  stores: Map<RestoreStore, InventoryObservation>;
+};
+
+const RESTORE_STORES: readonly RestoreStore[] = [
+  ...CONTROLLED_COPY_STORES,
+  "session_credentials",
+  "account_keys",
+];
 
 const RESTORE_AUTHORITY_TTL_MS = 120_000;
 
@@ -56,6 +93,11 @@ const statusForStore = ({
   completions,
   generation,
   targetCoverageComplete,
+  inventoryComplete,
+  inventoryDetail,
+  inventorySource,
+  references,
+  copies,
 }: {
   store: RestoreStoreStatus["store"];
   required: boolean;
@@ -64,18 +106,35 @@ const statusForStore = ({
   >[];
   generation: string;
   targetCoverageComplete: boolean;
+  inventoryComplete: boolean;
+  inventoryDetail: string | null;
+  inventorySource: string;
+  references: readonly string[];
+  copies: readonly {
+    reference: string;
+    copy_created_at: string;
+    resource_id: string;
+    content_generation: string;
+  }[];
 }): RestoreStoreStatus => {
   if (completions.length === 0) {
     return RestoreStoreStatusSchema.parse({
       store,
       generation,
-      status: required ? "complete" : "preserved",
-      content_present: !required,
-      evidence_source: "current_removal_ledger",
-      detail: null,
+      status: inventoryComplete
+        ? required
+          ? "complete"
+          : "preserved"
+        : "incomplete",
+      content_present: !required || !inventoryComplete,
+      evidence_source: inventorySource,
+      detail: inventoryComplete ? null : inventoryDetail,
+      references: [...references],
+      copies: [...copies],
     });
   }
   const complete =
+    inventoryComplete &&
     targetCoverageComplete &&
     completions.every((completion) =>
       required
@@ -98,12 +157,15 @@ const statusForStore = ({
     generation,
     status,
     content_present: !required || !complete,
-    evidence_source: "current_removal_ledger",
+    evidence_source: inventorySource,
     detail: complete
       ? null
-      : targetCoverageComplete
-        ? "Current controlled-copy evidence does not prove this store is safe to restore"
-        : "Exact restore targets are unavailable for one or more removal authorities",
+      : (inventoryDetail ??
+        (targetCoverageComplete
+          ? "Current controlled-copy evidence does not prove this store is safe to restore"
+        : "Exact restore targets are unavailable for one or more removal authorities")),
+    references: [...references],
+    copies: [...copies],
   });
 };
 
@@ -141,15 +203,63 @@ const archiveEvidenceFor = (
   } as const;
 };
 
-const targetsForAuthority = async (
+const inventoryDetail = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.trim().slice(0, 4_096) || "controlled-copy inventory failed";
+};
+
+const inventoryCopies = (
+  copies: readonly {
+    reference: string;
+    copy_created_at: Date | string;
+    resource_id?: string;
+    content_generation?: string;
+  }[],
+  scope: { resource_id: string; content_generation: string },
+) =>
+  copies
+    .map((copy) =>
+      RestoreInventoryCopySchema.parse({
+        reference: copy.reference,
+        copy_created_at:
+          copy.copy_created_at instanceof Date
+            ? copy.copy_created_at.toISOString()
+            : new Date(copy.copy_created_at).toISOString(),
+        resource_id: copy.resource_id ?? scope.resource_id,
+        content_generation:
+          copy.content_generation ?? scope.content_generation,
+      }),
+    )
+    .sort((left, right) =>
+      JSON.stringify(left).localeCompare(JSON.stringify(right)),
+    );
+
+const inventoryForAuthority = async (
   adapters: readonly ControlledCopyAdapter[],
-  authority: RemovalAuthority,
+  authority: InventoryScope,
   now: Date,
-): Promise<RestoreDatabaseTarget[]> => {
+  targetAuthority?: RemovalAuthority,
+): Promise<AuthorityInventory> => {
   const targets: RestoreDatabaseTarget[] = [];
   const seen = new Set<string>();
+  const stores = new Map<RestoreStore, InventoryObservation>();
+  const byStore = new Map<RestoreStore, ControlledCopyAdapter>();
   for (const adapter of adapters) {
-    if (adapter.store !== "synapse" && adapter.store !== "bridge_database") {
+    if (byStore.has(adapter.store)) {
+      throw new Error(`duplicate controlled-copy adapter: ${adapter.store}`);
+    }
+    byStore.set(adapter.store, adapter);
+  }
+  for (const store of RESTORE_STORES) {
+    const adapter = byStore.get(store);
+    if (adapter === undefined) {
+      stores.set(store, {
+        complete: false,
+        evidence_source: `${store}_inventory_unavailable`,
+        detail: "No configured inventory adapter is available",
+        references: [],
+        copies: [],
+      });
       continue;
     }
     let inventory;
@@ -163,25 +273,47 @@ const targetsForAuthority = async (
         deletion_epoch: authority.deletion_epoch,
         now,
       });
-    } catch {
+    } catch (error) {
+      stores.set(store, {
+        complete: false,
+        evidence_source: `${store}_inventory_error`,
+        detail: inventoryDetail(error),
+        references: [],
+        copies: [],
+      });
       continue;
     }
+    const copies = inventoryCopies(inventory.copies, authority);
+    stores.set(store, {
+      complete: inventory.complete,
+      evidence_source: inventory.evidence_source,
+      detail: inventory.complete
+        ? null
+        : (inventory.detail ?? "Inventory is incomplete"),
+      references: copies.map((copy) => copy.reference),
+      copies,
+    });
+    if (
+      targetAuthority === undefined ||
+      (store !== "synapse" && store !== "bridge_database")
+    )
+      continue;
     for (const copy of inventory.copies) {
       const raw = copy.restore_target;
       if (raw === undefined) continue;
       const parsed = RestoreDatabaseTargetSchema.safeParse({
         ...raw,
         resource_id:
-          raw.resource_id ?? copy.resource_id ?? authority.resource_id,
+          raw.resource_id ?? copy.resource_id ?? targetAuthority.resource_id,
         content_generation:
           raw.content_generation ??
           copy.content_generation ??
-          authority.content_generation,
+          targetAuthority.content_generation,
       });
       if (!parsed.success) continue;
       if (
-        parsed.data.resource_id !== authority.resource_id ||
-        parsed.data.content_generation !== authority.content_generation
+        parsed.data.resource_id !== targetAuthority.resource_id ||
+        parsed.data.content_generation !== targetAuthority.content_generation
       ) {
         continue;
       }
@@ -191,8 +323,20 @@ const targetsForAuthority = async (
       targets.push(parsed.data);
     }
   }
-  return targets;
+  return { targets, stores };
 };
+
+const inventoryScopeForTenant = (
+  tenantId: string,
+  deletionEpoch: number,
+): InventoryScope => ({
+  id: `restore_inventory_${tenantId}`,
+  tenant_id: tenantId,
+  resource_type: "tenant",
+  resource_id: tenantId,
+  content_generation: `ledger_${deletionEpoch}`,
+  deletion_epoch: deletionEpoch,
+});
 
 /**
  * Publish the current primary removal ledger for an isolated host restore.
@@ -240,21 +384,71 @@ export const createRestoreAuthorityExport = async (
       }),
     ),
   );
-  const exportAuthorities = await Promise.all(
+  const authorityInventories = await Promise.all(
     authorities.map(async (authority) => ({
+      authority,
+      inventory: await inventoryForAuthority(adapters, authority, now, authority),
+    })),
+  );
+  const ledgerInventory =
+    authorities.length === 0
+      ? await inventoryForAuthority(
+          adapters,
+          inventoryScopeForTenant(tenantId, deletionEpoch),
+          now,
+        )
+      : undefined;
+  const exportAuthorities = authorityInventories.map(
+    ({ authority, inventory }) => ({
       ...authority,
       // A real inventory backend publishes exact room/event or bridge row and
       // exhaustive media mappings.  An unavailable backend leaves this empty;
       // the host gate blocks instead of inferring from an opaque id.
-      targets: await targetsForAuthority(adapters, authority, now),
-    })),
+      targets: inventory.targets,
+    }),
   );
   const authorityIds = exportAuthorities.map((authority) => authority.id);
+  const inventoryEvidence =
+    authorities.length === 0
+      ? [
+          {
+            // A tenant with no removal rows still needs an explicit current
+            // ledger inventory. This synthetic entry keeps the zero-row
+            // ledger head bound to every provider copy observed for it.
+            authority_id: tenantId,
+            targets: [],
+            stores: RESTORE_STORES.map((store) => ({
+              store,
+              ...(ledgerInventory?.stores.get(store) ?? {
+                complete: false,
+                evidence_source: `${store}_inventory_unavailable`,
+                detail: "No configured inventory adapter is available",
+                references: [],
+                copies: [],
+              }),
+            })),
+          },
+        ]
+      : authorityInventories.map(({ authority, inventory }) => ({
+          authority_id: authority.id,
+          targets: inventory.targets,
+          stores: RESTORE_STORES.map((store) => ({
+            store,
+            ...(inventory.stores.get(store) ?? {
+              complete: false,
+              evidence_source: `${store}_inventory_unavailable`,
+              detail: "No configured inventory adapter is available",
+              references: [],
+              copies: [],
+            }),
+          })),
+        }));
   const head = await hexDigest(
     canonicalJson({
       tenant_id: tenantId,
       deletion_epoch: deletionEpoch,
       authorities: exportAuthorities,
+      inventory: inventoryEvidence,
     }),
   );
   const current = await loadRestoreAuthority(primary, tenantId);
@@ -263,6 +457,99 @@ export const createRestoreAuthorityExport = async (
     canonicalJson(current.authorities) !== canonicalJson(authorities)
   ) {
     throw new Error("restore authority changed while it was being exported");
+  }
+  const storeEvidence = new Map<
+    RestoreStore,
+    {
+      complete: boolean;
+      evidence_source: string;
+      detail: string | null;
+      references: string[];
+      copies: Array<{
+        reference: string;
+        copy_created_at: string;
+        resource_id: string;
+        content_generation: string;
+      }>;
+    }
+  >();
+  for (const store of RESTORE_STORES) {
+    const observations =
+      authorities.length === 0
+        ? [ledgerInventory?.stores.get(store)]
+        : authorityInventories.map(({ inventory }) =>
+            inventory.stores.get(store),
+          );
+    const missing = observations.some(
+      (observation) => observation === undefined,
+    );
+    const incomplete = observations.some(
+      (observation) =>
+        observation === undefined || observation.complete !== true,
+    );
+    const firstIncomplete = observations.find(
+      (observation) =>
+        observation === undefined || observation.complete !== true,
+    );
+    storeEvidence.set(store, {
+      complete: !missing && !incomplete,
+      evidence_source: firstIncomplete?.evidence_source ?? `${store}_inventory`,
+      detail:
+        firstIncomplete === undefined
+          ? null
+          : (firstIncomplete.detail ?? "Inventory is incomplete"),
+      references: [
+        ...new Set(
+          observations.flatMap((observation) => observation?.references ?? []),
+        ),
+      ].sort(),
+      copies: observations
+        .flatMap((observation) => observation?.copies ?? [])
+        .sort((left, right) =>
+          JSON.stringify(left).localeCompare(JSON.stringify(right)),
+        ),
+    });
+  }
+  const storeGeneration = async (
+    store: RestoreStore,
+    ledgerHead: string,
+    evidence: ReadonlyMap<
+      RestoreStore,
+      {
+        complete: boolean;
+        evidence_source: string;
+        detail: string | null;
+        references: string[];
+        copies: Array<{
+          reference: string;
+          copy_created_at: string;
+          resource_id: string;
+          content_generation: string;
+        }>;
+      }
+    >,
+  ): Promise<string> => {
+    const observation = evidence.get(store);
+    if (observation === undefined)
+      throw new Error("restore store evidence missing");
+    return hexDigest(
+      canonicalJson({
+        ledger_head: ledgerHead,
+        store,
+        complete: observation.complete,
+        evidence_source: observation.evidence_source,
+        detail: observation.detail,
+        references: observation.references,
+        copies: observation.copies,
+      }),
+    );
+  };
+  const storeGenerations = new Map<RestoreStore, string>();
+  for (const store of RESTORE_STORES) {
+    storeGenerations.set(
+      store,
+      await storeGeneration(store, head, storeEvidence),
+    );
   }
   const stores: RestoreStoreStatus[] = [
     ...(
@@ -275,24 +562,44 @@ export const createRestoreAuthorityExport = async (
         "restic_snapshot",
       ] as const
     ).map((store) =>
-      statusForStore({
-        store,
-        required: true,
-        completions,
-        generation: head,
-        targetCoverageComplete: exportAuthorities.every(
-          (authority) => authority.targets.length > 0,
-        ),
-      }),
+      (() => {
+        const evidence = storeEvidence.get(store);
+        if (evidence === undefined)
+          throw new Error("restore store evidence missing");
+        return statusForStore({
+          store,
+          required: true,
+          completions,
+          generation: storeGenerations.get(store)!,
+          targetCoverageComplete: exportAuthorities.every(
+            (authority) => authority.targets.length > 0,
+          ),
+          inventoryComplete: evidence.complete,
+          inventoryDetail: evidence.detail,
+          inventorySource: evidence.evidence_source,
+          references: evidence.references,
+          copies: evidence.copies,
+        });
+      })(),
     ),
     ...(["session_credentials", "account_keys"] as const).map((store) =>
-      statusForStore({
-        store,
-        required: false,
-        completions,
-        generation: head,
-        targetCoverageComplete: true,
-      }),
+      (() => {
+        const evidence = storeEvidence.get(store);
+        if (evidence === undefined)
+          throw new Error("restore store evidence missing");
+        return statusForStore({
+          store,
+          required: false,
+          completions,
+          generation: storeGenerations.get(store)!,
+          targetCoverageComplete: true,
+          inventoryComplete: evidence.complete,
+          inventoryDetail: evidence.detail,
+          inventorySource: evidence.evidence_source,
+          references: evidence.references,
+          copies: evidence.copies,
+        });
+      })(),
     ),
   ];
   const archive = {
@@ -313,6 +620,7 @@ export const createRestoreAuthorityExport = async (
     authority_ids: authorityIds,
     authority_count: exportAuthorities.length,
     authorities: exportAuthorities,
+    inventory: inventoryEvidence,
     ledger_head: head,
     stores,
     archive,

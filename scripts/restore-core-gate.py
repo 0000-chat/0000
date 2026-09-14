@@ -115,18 +115,17 @@ def _parse_timestamp(value: Any, name: str) -> str:
 
 def _authority_fingerprint(authority: Mapping[str, Any]) -> str:
     """Return the current ledger/evidence view used at activation."""
-    return json.dumps(
+    return _sha256_json(
         {
             "tenant_id": authority["tenant_id"],
             "deletion_epoch": authority["deletion_epoch"],
             "authority_ids": [item["id"] for item in authority["authorities"]],
             "authorities": authority["authorities"],
             "ledger_head": authority["ledger_head"],
+            "inventory": authority.get("inventory", []),
             "stores": list(authority["stores"].values()),
             "archive": authority["archive"],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+        }
     )
 
 
@@ -226,6 +225,118 @@ def _validate_authority_document(
 
     authorities.sort(key=lambda item: (item["deletion_epoch"], item["id"]))
 
+    raw_inventory = value.get("inventory")
+    if not isinstance(raw_inventory, list):
+        raise RestoreGateError("restore store inventory is missing")
+    inventory: list[dict[str, Any]] = []
+    by_authority: dict[str, dict[str, Any]] = {}
+    expected_authority_ids = {item["id"] for item in authorities}
+    # A zero-row removal ledger still has to bind its provider inventory to
+    # the current tenant ledger.  The synthetic entry is never a tombstone
+    # target; it only carries the exact current copy generations.
+    inventory_ids = expected_authority_ids or {actual_tenant}
+    for raw_entry in raw_inventory:
+        if not isinstance(raw_entry, dict):
+            raise RestoreGateError("restore store inventory entry is invalid")
+        authority_id = _required_string(
+            raw_entry.get("authority_id"), "inventory authority id"
+        )
+        if authority_id not in inventory_ids or authority_id in by_authority:
+            raise RestoreGateError("restore store inventory authority is duplicated or unknown")
+        raw_targets = raw_entry.get("targets")
+        raw_store_entries = raw_entry.get("stores")
+        if not isinstance(raw_targets, list) or not isinstance(raw_store_entries, list):
+            raise RestoreGateError("restore store inventory coverage is invalid")
+        stores_for_authority: list[dict[str, Any]] = []
+        seen_stores: set[str] = set()
+        for raw_store in raw_store_entries:
+            if not isinstance(raw_store, dict):
+                raise RestoreGateError("restore store inventory status is invalid")
+            store = _required_string(raw_store.get("store"), "inventory store")
+            if store not in ALL_STORES or store in seen_stores:
+                raise RestoreGateError("restore store inventory store is duplicated or unknown")
+            if not isinstance(raw_store.get("complete"), bool):
+                raise RestoreGateError("restore store inventory completion is invalid")
+            evidence_source = _required_string(
+                raw_store.get("evidence_source"), "inventory evidence source"
+            )
+            detail = raw_store.get("detail")
+            if detail is not None and (
+                not isinstance(detail, str) or not detail.strip()
+            ):
+                raise RestoreGateError("restore store inventory detail is invalid")
+            raw_references = raw_store.get("references", [])
+            if not isinstance(raw_references, list) or any(
+                not isinstance(reference, str) or not reference.strip()
+                for reference in raw_references
+            ):
+                raise RestoreGateError("restore store inventory references are invalid")
+            raw_copies = raw_store.get("copies")
+            if not isinstance(raw_copies, list):
+                raise RestoreGateError("restore store inventory copies are missing")
+            copies: list[dict[str, str]] = []
+            for raw_copy in raw_copies:
+                if not isinstance(raw_copy, dict):
+                    raise RestoreGateError("restore store inventory copy is invalid")
+                copy_reference = _required_string(
+                    raw_copy.get("reference"), "inventory copy reference"
+                )
+                copy_created_at = _parse_timestamp(
+                    raw_copy.get("copy_created_at"), "inventory copy_created_at"
+                )
+                copy_resource_id = _required_string(
+                    raw_copy.get("resource_id"), "inventory copy resource id"
+                )
+                copy_generation = _required_string(
+                    raw_copy.get("content_generation"),
+                    "inventory copy content generation",
+                )
+                copies.append(
+                    {
+                        "reference": copy_reference,
+                        "copy_created_at": copy_created_at,
+                        "resource_id": copy_resource_id,
+                        "content_generation": copy_generation,
+                    }
+                )
+            references = [reference.strip() for reference in raw_references]
+            if sorted(set(references)) != sorted(
+                {copy["reference"] for copy in copies}
+            ):
+                raise RestoreGateError("restore store inventory references do not match copies")
+            seen_stores.add(store)
+            stores_for_authority.append(
+                {
+                    "store": store,
+                    "complete": raw_store["complete"],
+                    "evidence_source": evidence_source,
+                    "detail": detail,
+                    "references": references,
+                    "copies": copies,
+                }
+            )
+        if set(seen_stores) != set(ALL_STORES):
+            raise RestoreGateError("restore store inventory is incomplete")
+        by_authority[authority_id] = {
+            "authority_id": authority_id,
+            "targets": [dict(target) for target in raw_targets],
+            "stores": [
+                next(
+                    entry
+                    for entry in stores_for_authority
+                    if entry["store"] == store
+                )
+                for store in ALL_STORES
+            ],
+        }
+    if set(by_authority) != inventory_ids:
+        raise RestoreGateError("restore store inventory is incomplete")
+    inventory = (
+        [by_authority[item["id"]] for item in authorities]
+        if authorities
+        else [by_authority[actual_tenant]]
+    )
+
     raw_stores = value.get("stores")
     if not isinstance(raw_stores, list):
         raise RestoreGateError("restore controlled-store evidence is missing")
@@ -243,6 +354,43 @@ def _validate_authority_document(
         if not isinstance(raw.get("content_present"), bool):
             raise RestoreGateError(f"restore {store} content presence is invalid")
         _required_string(raw.get("evidence_source"), f"{store} evidence source")
+        raw_references = raw.get("references", [])
+        if not isinstance(raw_references, list) or any(
+            not isinstance(reference, str) or not reference.strip()
+            for reference in raw_references
+        ):
+            raise RestoreGateError(f"restore {store} references are invalid")
+        raw_copies = raw.get("copies")
+        if not isinstance(raw_copies, list):
+            raise RestoreGateError(f"restore {store} copy metadata is missing")
+        copies: list[dict[str, str]] = []
+        for raw_copy in raw_copies:
+            if not isinstance(raw_copy, dict):
+                raise RestoreGateError(f"restore {store} copy metadata is invalid")
+            copies.append(
+                {
+                    "reference": _required_string(
+                        raw_copy.get("reference"), f"{store} copy reference"
+                    ),
+                    "copy_created_at": _parse_timestamp(
+                        raw_copy.get("copy_created_at"), f"{store} copy_created_at"
+                    ),
+                    "resource_id": _required_string(
+                        raw_copy.get("resource_id"), f"{store} copy resource id"
+                    ),
+                    "content_generation": _required_string(
+                        raw_copy.get("content_generation"),
+                        f"{store} copy content generation",
+                    ),
+                }
+            )
+        references = [reference.strip() for reference in raw_references]
+        if sorted(set(references)) != sorted(
+            {copy["reference"] for copy in copies}
+        ):
+            raise RestoreGateError(f"restore {store} references do not match copy metadata")
+        if status in STORE_STATUSES and not references:
+            raise RestoreGateError(f"restore {store} copy references are missing")
         stores[store] = {
             "store": store,
             "generation": generation,
@@ -250,12 +398,28 @@ def _validate_authority_document(
             "content_present": raw["content_present"],
             "evidence_source": raw["evidence_source"],
             "detail": raw.get("detail"),
+            "references": references,
+            "copies": copies,
         }
     missing = set(ALL_STORES) - set(stores)
     if missing:
         raise RestoreGateError(
             "restore controlled-store evidence missing: " + ",".join(sorted(missing))
         )
+    for store in ALL_STORES:
+        inventory_copies = [
+            copy
+            for entry in inventory
+            for inventory_store in entry["stores"]
+            if inventory_store["store"] == store
+            for copy in inventory_store["copies"]
+        ]
+        if sorted(inventory_copies, key=lambda copy: json.dumps(copy, sort_keys=True)) != sorted(
+            stores[store]["copies"], key=lambda copy: json.dumps(copy, sort_keys=True)
+        ):
+            raise RestoreGateError(
+                f"restore {store} status does not match inventory copy generations"
+            )
     for store in REQUIRED_STORES:
         if stores[store]["status"] != "complete" or stores[store]["content_present"]:
             raise RestoreGateError(f"restore controlled store is not complete: {store}")
@@ -290,6 +454,7 @@ def _validate_authority_document(
             "tenant_id": actual_tenant,
             "deletion_epoch": raw_epoch,
             "authorities": authorities,
+            **({"inventory": inventory} if raw_inventory is not None else {}),
         }
     )
     if supplied_head is not None and supplied_head != expected_head:
@@ -324,6 +489,7 @@ def _validate_authority_document(
         "authority_ids": expected_ids,
         "authority_count": len(expected_ids),
         "ledger_head": supplied_head,
+        "inventory": inventory,
         "issued_at": issued_at,
         "expires_at": expires_at,
     }
@@ -342,6 +508,47 @@ def load_authority(path: Path, tenant_id: str | None = None) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise RestoreGateError("restore authority export is unreadable") from error
     return _validate_authority_document(value, tenant_id)
+
+
+def verify_activation_report(
+    report: Path,
+    authority: Mapping[str, Any],
+    tenant_id: str,
+) -> None:
+    """Require the freshly fetched authority to match sanitized restore state."""
+    try:
+        document = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RestoreGateError("sanitized restore report is unreadable") from error
+    if not isinstance(document, dict) or document.get("state") != "ready":
+        raise RestoreGateError("sanitized restore report is not ready")
+    if document.get("tenant_id") != tenant_id:
+        raise RestoreGateError("sanitized restore report tenant is inconsistent")
+    if document.get("deletion_epoch") != authority["deletion_epoch"]:
+        raise RestoreGateError("restore authority changed before Synapse activation")
+    if document.get("ledger_head") != authority["ledger_head"]:
+        raise RestoreGateError("restore authority changed before Synapse activation")
+    expected_fingerprint = document.get("authority_fingerprint")
+    if (
+        not isinstance(expected_fingerprint, str)
+        or len(expected_fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in expected_fingerprint)
+    ):
+        raise RestoreGateError("sanitized restore report has no authority fingerprint")
+    if expected_fingerprint != _authority_fingerprint(authority):
+        raise RestoreGateError("restore authority changed before Synapse activation")
+
+
+def verify_restic_snapshot_reference(
+    authority: Mapping[str, Any], snapshot_id: str | None
+) -> None:
+    """Bind the bytes being restored to the inventory generation observed by D1."""
+    expected = authority["stores"]["restic_snapshot"].get("references", [])
+    if not expected:
+        raise RestoreGateError("restore restic snapshot inventory reference is missing")
+    actual = _required_string(snapshot_id, "restic snapshot id")
+    if f"restic:{actual}" not in expected:
+        raise RestoreGateError("restic snapshot is outside the current authority generation")
 
 
 def fetch_authority(
@@ -387,6 +594,111 @@ def fetch_authority(
     if not isinstance(value, dict) or "ledger_head" not in value:
         raise RestoreGateError("restore authority endpoint did not provide a current ledger head")
     return _validate_authority_document(value, tenant_id, require_current=True)
+
+
+def _post_json(
+    url: str,
+    token: str,
+    body: Mapping[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as error:
+        raise RestoreGateError("restore activation lease endpoint is invalid") from error
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise RestoreGateError("restore activation lease endpoint must be HTTP(S)")
+    if parsed.scheme == "http" and os.environ.get("COMMUNICATOR_RESTORE_ALLOW_HTTP") != "1":
+        raise RestoreGateError("restore activation lease endpoint must use HTTPS")
+    if not token.strip():
+        raise RestoreGateError("restore activation lease endpoint token is required")
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(dict(body), separators=(",", ":")).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            if response.status != 200:
+                raise RestoreGateError("restore activation lease endpoint was unavailable")
+            response_body = response.read(2_000_001)
+    except RestoreGateError:
+        raise
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as error:
+        raise RestoreGateError("restore activation lease endpoint was unavailable") from error
+    if len(response_body) > 2_000_000:
+        raise RestoreGateError("restore activation lease response is too large")
+    try:
+        value = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RestoreGateError("restore activation lease response is invalid") from error
+    if not isinstance(value, dict):
+        raise RestoreGateError("restore activation lease response is invalid")
+    return value
+
+
+def acquire_activation_lease(
+    url: str,
+    token: str,
+    tenant_id: str,
+    lease_id: str,
+    authority: Mapping[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    value = _post_json(
+        url,
+        token,
+        {
+            "lease_id": lease_id,
+            "expected_deletion_epoch": authority["deletion_epoch"],
+            "expected_ledger_head": authority["ledger_head"],
+            "ttl_seconds": 600,
+        },
+        timeout_seconds,
+    )
+    if (
+        value.get("tenant_id") != tenant_id
+        or value.get("lease_id") != lease_id
+        or value.get("deletion_epoch") != authority["deletion_epoch"]
+        or value.get("ledger_head") != authority["ledger_head"]
+    ):
+        raise RestoreGateError("restore activation lease is bound to a different authority")
+    lease_token = value.get("lease_token")
+    if not isinstance(lease_token, str) or len(lease_token.strip()) < 32:
+        raise RestoreGateError("restore activation lease token is invalid")
+    _parse_timestamp(value.get("expires_at"), "restore activation lease expiry")
+    return {
+        "lease_id": lease_id,
+        "tenant_id": tenant_id,
+        "lease_token": lease_token,
+        "deletion_epoch": authority["deletion_epoch"],
+        "ledger_head": authority["ledger_head"],
+        "expires_at": value["expires_at"],
+    }
+
+
+def release_activation_lease(
+    url: str,
+    token: str,
+    lease_id: str,
+    lease_token: str,
+    timeout_seconds: float,
+) -> bool:
+    value = _post_json(
+        url,
+        token,
+        {"lease_id": lease_id, "lease_token": lease_token},
+        timeout_seconds,
+    )
+    if value.get("lease_id") != lease_id or not isinstance(value.get("released"), bool):
+        raise RestoreGateError("restore activation lease release response is invalid")
+    return bool(value["released"])
 
 
 def _exact_payload_files(root: Path) -> set[str]:
@@ -645,6 +957,8 @@ def run_payload_gate(
         "state": "ready",
         "tenant_id": authority["tenant_id"],
         "deletion_epoch": authority["deletion_epoch"],
+        "ledger_head": authority["ledger_head"],
+        "authority_fingerprint": _authority_fingerprint(authority),
         "authority_ids": [item["id"] for item in authority["authorities"]],
         "stores": list(authority["stores"].values()),
         "archive": authority["archive"],
@@ -657,7 +971,7 @@ def run_payload_gate(
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    authority_sources = parser.add_mutually_exclusive_group(required=True)
+    authority_sources = parser.add_mutually_exclusive_group(required=False)
     authority_sources.add_argument("--authority", type=Path)
     authority_sources.add_argument("--authority-url")
     parser.add_argument("--authority-token", default="")
@@ -665,12 +979,60 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--payload", type=Path)
+    parser.add_argument("--restic-snapshot-id")
     parser.add_argument("--authority-only", action="store_true")
+    parser.add_argument("--activation-lease-url")
+    parser.add_argument("--activation-lease-release-url")
+    parser.add_argument("--activation-lease-id")
+    parser.add_argument("--activation-lease-token")
+    parser.add_argument(
+        "--activation-lease-action",
+        choices=("release",),
+        help="release a previously acquired activation lease without reading an authority export",
+    )
+    parser.add_argument(
+        "--activation-report",
+        type=Path,
+        help="require the freshly fetched authority to match this sanitized report",
+    )
     args = parser.parse_args(argv)
     try:
         _failpoint("authority_load", before=True)
         if args.authority_timeout <= 0 or args.authority_timeout > 300:
             raise RestoreGateError("restore authority timeout is invalid")
+        if args.activation_lease_action == "release":
+            if (
+                not args.activation_lease_url
+                and not args.activation_lease_release_url
+            ):
+                raise RestoreGateError("restore activation lease release endpoint is required")
+            lease_id = _required_string(args.activation_lease_id, "activation lease id")
+            lease_token = _required_string(
+                args.activation_lease_token, "activation lease token"
+            )
+            release_url = args.activation_lease_release_url or (
+                args.activation_lease_url.rstrip("/") + "/release"
+            )
+            released = release_activation_lease(
+                release_url,
+                args.authority_token,
+                lease_id,
+                lease_token,
+                args.authority_timeout,
+            )
+            _atomic_write(
+                args.report,
+                {
+                    "version": 1,
+                    "state": "activation_lease_released",
+                    "lease_id": lease_id,
+                    "released": released,
+                    "completed_at": _now(),
+                },
+            )
+            return 0
+        if args.authority is None and args.authority_url is None:
+            raise RestoreGateError("restore authority source is required")
         if args.authority_url is not None:
             authority_loader = lambda: fetch_authority(
                 args.authority_url,
@@ -685,6 +1047,34 @@ def main(argv: list[str]) -> int:
             authority_loader = lambda: load_authority(args.authority, args.tenant)
             authority = authority_loader()
         _failpoint("authority_load")
+        if args.activation_report is not None:
+            if args.authority_url is None or args.activation_lease_url is None:
+                raise RestoreGateError(
+                    "restore activation requires authenticated authority and lease endpoints"
+                )
+            lease_id = _required_string(args.activation_lease_id, "activation lease id")
+            verify_activation_report(args.activation_report, authority, args.tenant)
+            lease = acquire_activation_lease(
+                args.activation_lease_url,
+                args.authority_token,
+                args.tenant,
+                lease_id,
+                authority,
+                args.authority_timeout,
+            )
+            result = {
+                "version": 1,
+                "state": "activation_ready",
+                "tenant_id": authority["tenant_id"],
+                "deletion_epoch": authority["deletion_epoch"],
+                "ledger_head": authority["ledger_head"],
+                "authority_fingerprint": _authority_fingerprint(authority),
+                "sanitized_report": "verified",
+                "activation_lease": lease,
+                "completed_at": _now(),
+            }
+            _atomic_write(args.report, result)
+            return 0
         if args.authority_only:
             result = {
                 "version": 1,
@@ -693,6 +1083,8 @@ def main(argv: list[str]) -> int:
                 "deletion_epoch": authority["deletion_epoch"],
                 "authority_ids": [item["id"] for item in authority["authorities"]],
                 "ledger_head": authority["ledger_head"],
+                "authority_fingerprint": _authority_fingerprint(authority),
+                "inventory": authority.get("inventory", []),
                 "stores": list(authority["stores"].values()),
                 "archive": authority["archive"],
                 "issued_at": authority["issued_at"],
@@ -703,6 +1095,7 @@ def main(argv: list[str]) -> int:
             return 0
         if args.payload is None:
             raise RestoreGateError("restore payload is required")
+        verify_restic_snapshot_reference(authority, args.restic_snapshot_id)
         run_payload_gate(
             args.payload,
             authority,

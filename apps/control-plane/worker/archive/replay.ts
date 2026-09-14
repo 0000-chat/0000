@@ -334,6 +334,17 @@ export const readRestoreReplayPage = async (
 }> => {
   const authority = await loadRestoreAuthority(database, tenantId);
   const page = await readReplayPage(bucket, tenantId, options);
+  // A removal may be recorded while the R2 page is being listed and decoded.
+  // Re-read the primary ledger after the page fetch and refuse to expose even
+  // a sanitized page if the authority changed during that window.
+  const currentAuthority = await loadRestoreAuthority(database, tenantId);
+  if (
+    currentAuthority.deletion_epoch !== authority.deletion_epoch ||
+    JSON.stringify(currentAuthority.authorities) !==
+      JSON.stringify(authority.authorities)
+  ) {
+    throw archiveError("archive_conflict");
+  }
   let events = page.events;
   const removedEventIds: string[] = [];
   const changedEventIds: string[] = [];

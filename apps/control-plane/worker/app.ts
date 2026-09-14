@@ -104,6 +104,14 @@ import {
 import {
   removalStatusRoute,
   removalStatusHandler,
+  restoreAuthorityRoute,
+  restoreAuthorityHandler,
+  restoreProjectionActivationRoute,
+  restoreProjectionActivationHandler,
+  restoreActivationLeaseRoute,
+  restoreActivationLeaseHandler,
+  restoreActivationLeaseReleaseRoute,
+  restoreActivationLeaseReleaseHandler,
   recordRemovalRoute,
   recordRemovalHandler,
   scheduleRemovalExpiryRoute,
@@ -468,6 +476,9 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/webhook-subscriptions/*", productAuthorization);
   app.use("/api/v1/webhook-deliveries/*", productAuthorization);
   app.use("/api/v1/removals", productAuthorization);
+  app.use("/api/v1/removals/restore-authority", productAuthorization);
+  app.use("/api/v1/removals/restore-projection", productAuthorization);
+  app.use("/api/v1/removals/restore-activation-lease", productAuthorization);
   app.use("/api/v1/removal-expiries", productAuthorization);
   app.use("/api/v1/history-imports/*", productAuthorization);
   app.use("/api/v1/attachments/*", productAuthorization);
@@ -570,6 +581,16 @@ export function createApp(services: AppServices = {}) {
   app.openapi(webhookDeliveryRoute, webhookDeliveryHandler);
   app.openapi(retryWebhookDeliveryRoute, retryWebhookDeliveryHandler);
   app.openapi(removalStatusRoute, removalStatusHandler);
+  app.openapi(restoreAuthorityRoute, restoreAuthorityHandler);
+  app.openapi(
+    restoreProjectionActivationRoute,
+    restoreProjectionActivationHandler,
+  );
+  app.openapi(restoreActivationLeaseRoute, restoreActivationLeaseHandler);
+  app.openapi(
+    restoreActivationLeaseReleaseRoute,
+    restoreActivationLeaseReleaseHandler,
+  );
   app.openapi(recordRemovalRoute, recordRemovalHandler);
   app.openapi(scheduleRemovalExpiryRoute, scheduleRemovalExpiryHandler);
   const historyServices: HistoryRouteServices = {};

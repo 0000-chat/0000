@@ -19,6 +19,10 @@ run_bounded() {
 : "${COMMUNICATOR_RESTORE_AUTHORITY_URL:?COMMUNICATOR_RESTORE_AUTHORITY_URL is required}"
 : "${COMMUNICATOR_RESTORE_AUTHORITY_TOKEN:?COMMUNICATOR_RESTORE_AUTHORITY_TOKEN is required}"
 : "${COMMUNICATOR_RESTORE_TENANT_ID:?COMMUNICATOR_RESTORE_TENANT_ID is required}"
+: "${COMMUNICATOR_RESTORE_ACTIVATION_LEASE_URL:?COMMUNICATOR_RESTORE_ACTIVATION_LEASE_URL is required}"
+
+activation_lease_id="restore_lease_$$"
+activation_lease_token=""
 
 [[ -f "$gate_script" ]]
 if [[ -e "$restore_root" ]]; then
@@ -36,7 +40,13 @@ run_bounded 300s python3 "$gate_script" \
   --report "$restore_root/restore-evidence/authority-preflight.json" \
   --authority-only
 
-run_bounded 300s restic restore latest --tag communicator-core --target "$restore_root/restic"
+run_bounded 60s restic snapshots --json --latest 1 --tag communicator-core \
+  > "$restore_root/restore-evidence/restic-snapshot.json"
+restic_snapshot_id=$(run_bounded 30s python3 -c \
+  'import json, sys; document=json.load(open(sys.argv[1], encoding="utf-8")); rows=document if isinstance(document, list) else document.get("snapshots", []); ids={row.get("id") for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("id")}; assert len(ids) == 1, "restic snapshot selection was not exact"; print(next(iter(ids)))' \
+  "$restore_root/restore-evidence/restic-snapshot.json")
+[[ "$restic_snapshot_id" =~ ^[A-Za-z0-9]+$ ]]
+run_bounded 300s restic restore "$restic_snapshot_id" --target "$restore_root/restic"
 
 payload=$(run_bounded 30s find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n' -quit)
 [[ -n "$payload" ]]
@@ -45,6 +55,7 @@ run_bounded 900s python3 "$gate_script" \
   --authority-token "$COMMUNICATOR_RESTORE_AUTHORITY_TOKEN" \
   --tenant "$COMMUNICATOR_RESTORE_TENANT_ID" \
   --payload "$payload" \
+  --restic-snapshot-id "$restic_snapshot_id" \
   --report "$restore_root/restore-evidence/restore-gate.json"
 [[ -f "$payload/retention/controlled-copy-layout.json" ]]
 [[ -f "$payload/whatsapp.pgdump" ]]
@@ -97,6 +108,16 @@ export COMPOSE_PROJECT_NAME="$project"
 cleanup() {
   cd "$repo_dir"
   run_bounded 120s docker compose --env-file deploy/images.lock.env stop synapse postgres >/dev/null 2>&1 || true
+  if [[ -n "$activation_lease_token" ]]; then
+    run_bounded 300s python3 "$gate_script" \
+      --authority-token "$COMMUNICATOR_RESTORE_AUTHORITY_TOKEN" \
+      --tenant "$COMMUNICATOR_RESTORE_TENANT_ID" \
+      --report "$restore_root/restore-evidence/activation-lease-release.json" \
+      --activation-lease-url "$COMMUNICATOR_RESTORE_ACTIVATION_LEASE_URL" \
+      --activation-lease-id "$activation_lease_id" \
+      --activation-lease-token "$activation_lease_token" \
+      --activation-lease-action release >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -189,10 +210,31 @@ run_bounded 300s docker run --rm --network none \
 run_bounded 30s rm -rf -- "$restore_root/telegram-validation"
 echo "telegram_config=PASS"
 
+run_bounded 300s python3 "$gate_script" \
+  --authority-url "$COMMUNICATOR_RESTORE_AUTHORITY_URL" \
+  --authority-token "$COMMUNICATOR_RESTORE_AUTHORITY_TOKEN" \
+  --tenant "$COMMUNICATOR_RESTORE_TENANT_ID" \
+  --activation-report "$restore_root/restore-evidence/restore-gate.json" \
+  --report "$restore_root/restore-evidence/activation-authority.json" \
+  --activation-lease-url "$COMMUNICATOR_RESTORE_ACTIVATION_LEASE_URL" \
+  --activation-lease-id "$activation_lease_id"
+activation_lease_token=$(run_bounded 30s python3 -c \
+  'import json, sys; document=json.load(open(sys.argv[1], encoding="utf-8")); lease=document.get("activation_lease", {}); token=lease.get("lease_token"); assert isinstance(token, str) and len(token) >= 32, "activation lease token missing"; print(token)' \
+  "$restore_root/restore-evidence/activation-authority.json")
+[[ ${#activation_lease_token} -ge 32 ]]
 run_bounded 300s docker compose --env-file deploy/images.lock.env up -d synapse
 wait_for_healthy synapse
 run_bounded 60s docker compose --env-file deploy/images.lock.env exec -T synapse \
   python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8008/health", timeout=5)'
+run_bounded 300s python3 "$gate_script" \
+  --authority-token "$COMMUNICATOR_RESTORE_AUTHORITY_TOKEN" \
+  --tenant "$COMMUNICATOR_RESTORE_TENANT_ID" \
+  --report "$restore_root/restore-evidence/activation-lease-release.json" \
+  --activation-lease-url "$COMMUNICATOR_RESTORE_ACTIVATION_LEASE_URL" \
+  --activation-lease-id "$activation_lease_id" \
+  --activation-lease-token "$activation_lease_token" \
+  --activation-lease-action release
+activation_lease_token=""
 run_bounded 120s docker compose --env-file deploy/images.lock.env stop synapse postgres
 trap - EXIT
 echo "restore_test=PASS path=$restore_root"
