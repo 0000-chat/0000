@@ -3368,26 +3368,14 @@ mod tests {
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
                 .with_history(history);
-        let body = |old: &str, new: &str| {
-            serde_json::to_vec(&json!({
-                "schema_version": 1,
-                "tenant_id": "tenant_relink",
-                "account_id": "account_relink",
-                "connection_id": "connection_relink",
-                "identity_id": "identity_relink",
-                "provider": "whatsapp",
-                "old_session_generation": old,
-                "new_session_generation": new,
-                "route": {
-                    "gateway_route_id": "gateway_route_whatsapp",
-                    "bridge_instance_id": "whatsapp-primary",
-                    "matrix_user_id": MATRIX_USER,
-                    "matrix_room_namespace": "communicator.0000.gold",
-                    "provider_login_id": "login-relink"
-                }
-            }))
-            .expect("request JSON")
-        };
+        // This vector is captured from the Worker HttpConnectionGateway
+        // adapter regression. Keeping the first request on those exact bytes
+        // proves the real adapter envelope reaches this deserializer.
+        let worker_body = include_bytes!("../testdata/relink-room-rebind-v1.json").to_vec();
+        let mut stale_body: Value =
+            serde_json::from_slice(&worker_body).expect("Worker rebind request vector JSON");
+        stale_body["new_session_generation"] = Value::String("2026-09-14T00:00:02.000Z".to_owned());
+        let stale_body = serde_json::to_vec(&stale_body).expect("stale request JSON");
         let request = |idempotency_key: &str, body: Vec<u8>| HttpRequest {
             path: "/v1/connections/rebind-rooms".to_owned(),
             authorization: Some(GATEWAY_SECRET.to_owned()),
@@ -3396,10 +3384,7 @@ mod tests {
             body,
         };
         let (status, bytes) = server
-            .handle_request(request(
-                "rebind-room-1",
-                body(old_generation, new_generation),
-            ))
+            .handle_request(request("rebind-room-1", worker_body))
             .await;
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
         let response: Value = serde_json::from_slice(&bytes).expect("rebind response JSON");
@@ -3427,10 +3412,7 @@ mod tests {
         assert_eq!(rebound.matrix_room_id(), "!relink-room:example.test");
         assert_eq!(rebound.session_generation(), Some(new_generation));
         let (stale_status, _) = server
-            .handle_request(request(
-                "rebind-room-stale",
-                body(old_generation, "2026-09-14T00:00:02.000Z"),
-            ))
+            .handle_request(request("rebind-room-stale", stale_body))
             .await;
         assert_eq!(stale_status, 409);
         assert!(

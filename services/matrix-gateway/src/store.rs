@@ -2821,7 +2821,8 @@ impl Store {
             .prepare(
                 "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
                         payload_nonce, key_version, status, created_at, retired_at
-                 FROM room_bindings WHERE account_lookup = ?1
+                 FROM room_bindings
+                 WHERE account_lookup = ?1 AND status = 'active'
                  ORDER BY binding_id",
             )
             .map_err(|_| room_binding_invalid())?;
@@ -5535,7 +5536,7 @@ fn seal_optional_outbound_value(
 mod tests {
     use super::*;
     use crate::ledger::NewLiveWindow;
-    use chrono::TimeZone;
+    use chrono::{Duration as ChronoDuration, TimeZone};
     use rusqlite::types::Value;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
@@ -5627,7 +5628,7 @@ mod tests {
     }
 
     #[test]
-    fn room_binding_rebind_preserves_identity_and_rejects_a_stale_replay() {
+    fn room_binding_rebind_ignores_retired_rows_and_rejects_a_stale_replay() {
         let directory = tempdir().expect("create room rebind directory");
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
             .expect("secure room rebind directory");
@@ -5640,6 +5641,38 @@ mod tests {
         let new_generation = "2026-09-14T00:00:01.000Z";
         let mut store = Store::open(&path, Keyring::new([0x3a; 32], 1).expect("test keyring"))
             .expect("open room rebind store");
+        let retired_binding_id = "binding_2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a";
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    retired_binding_id,
+                    "!retired-rebind:example.test",
+                    "tenant_rebind",
+                    "identity_rebind",
+                    "connection_rebind",
+                    "account_rebind",
+                    model::Provider::Whatsapp,
+                    "gateway_route_rebind",
+                    "conversation_retired",
+                    "@rebind:example.test",
+                    old_generation,
+                    created_at,
+                )
+                .expect("create retired room binding"),
+            )
+            .expect("append retired room binding");
+        store
+            .retire_room_binding(retired_binding_id, created_at + ChronoDuration::seconds(1))
+            .expect("retire room binding");
+        let retired_before: (Vec<u8>, Vec<u8>, String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT payload_cipher, payload_nonce, status, retired_at
+                   FROM room_bindings WHERE binding_id = ?1",
+                params![retired_binding_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read retired room binding");
         store
             .append_room_binding(
                 NewRoomBinding::new_with_session_generation(
@@ -5705,6 +5738,17 @@ mod tests {
         assert_eq!(after.matrix_room_id(), before_room);
         assert_eq!(after.conversation_id(), "conversation_rebind");
         assert_eq!(after.session_generation(), Some(new_generation));
+        let retired_after: (Vec<u8>, Vec<u8>, String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT payload_cipher, payload_nonce, status, retired_at
+                   FROM room_bindings WHERE binding_id = ?1",
+                params![retired_binding_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read retired room binding after rebind");
+        assert_eq!(retired_after, retired_before);
+        assert_eq!(retired_after.2, "retired");
         assert!(
             store
                 .rebind_room_bindings(

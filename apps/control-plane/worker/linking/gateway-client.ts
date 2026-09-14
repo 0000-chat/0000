@@ -383,7 +383,24 @@ export class HttpConnectionGateway implements ConnectionGateway {
     ) {
       throw new ConnectionGatewayError("provider_error");
     }
-    return this.request("/v1/connections/rebind-rooms", input, parseRoomRebind);
+    return this.request(
+      "/v1/connections/rebind-rooms",
+      {
+        schema_version: 1,
+        tenant_id: input.tenant_id,
+        account_id: input.account_id,
+        connection_id: input.connection_id,
+        identity_id: input.target_identity_id,
+        provider: input.provider,
+        old_session_generation: input.old_session_generation,
+        new_session_generation: input.new_session_generation,
+        route: {
+          ...input.route,
+          provider_login_id: input.provider_login_id,
+        },
+      },
+      parseRoomRebind,
+    );
   }
 }
 
