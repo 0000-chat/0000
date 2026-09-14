@@ -97,11 +97,14 @@ message-only snapshot per retained lineage and separate protected snapshots
 for session credentials and account keys. It forgets the old snapshot only
 after every replacement returns an exact snapshot id, and atomically records
 the new references. The removed lineage is deliberately absent from the
-replacement set. A legacy custom dump without the core layout contract remains
-`lifecycle_pending`; it cannot be treated as a file-per-message archive. New
-`backup-core.sh` snapshots use the database rewrite path above, while unknown
-or unsupported database schemas remain visible as an administrator alert and
-never become a false completion claim.
+replacement set. A pre-layout `backup-core.sh` snapshot may use
+`format: "communicator-core-pgdump-v0"` in the migration manifest. The host
+adapter recognizes and validates the original fixed runtime tree, enumerates
+its media subtree, synthesizes the v1 layout on the replacement, and then uses
+the same exact database rewrite and second-restore proof. It still requires
+explicit target row and exhaustive media mappings. Unknown shapes, arbitrary
+custom dumps, and unsupported database schemas remain visible as an
+administrator alert and never become a false completion claim.
 
 The Worker always persists unavailable or unsupported stores as incomplete
 operations. Configure all required private endpoints before relying on a

@@ -55,6 +55,14 @@ def _pg_client(socket_dir: Path, port: int, database: str, sql: str) -> str:
     return result.stdout.strip()
 
 
+def _write_legacy_core_tree(root: Path, dump_bytes: bytes = b"fixture-dump") -> None:
+    for relative in RETENTION.LEGACY_CORE_REQUIRED_FILES:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(dump_bytes)
+    (root / "synapse-data/media_store").mkdir(parents=True, exist_ok=True)
+
+
 class ControlledCopyRetentionTests(unittest.TestCase):
     def test_media_inventory_and_cleanup_remove_only_the_exact_manifest_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1377,6 +1385,332 @@ class ControlledCopyRetentionTests(unittest.TestCase):
             self.assertEqual("keep bridge content", bridge_retained)
             self.assertEqual("0", target_reactions)
             self.assertEqual("1", retained_reactions)
+
+    @unittest.skipUnless(PG_BIN.exists(), "the controlled PostgreSQL fixture is unavailable")
+    def test_legacy_core_pgdump_without_layout_is_sanitized_and_gets_a_replacement_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "snapshot-root"
+            _write_legacy_core_tree(fixture)
+            (fixture / "retention/controlled-copy-manifest.json").write_text(
+                json.dumps({"version": 1, "stores": {}}), encoding="utf-8"
+            )
+            (fixture / "synapse-data/media_store/target.bin").write_bytes(b"remove")
+            (fixture / "synapse-data/media_store/retained.bin").write_bytes(b"keep")
+            (fixture / "secrets/synapse_registration_shared_secret").write_text(
+                "session-secret", encoding="utf-8"
+            )
+            (fixture / "secrets/postgres.env").write_text(
+                "POSTGRES_PASSWORD=preserve", encoding="utf-8"
+            )
+
+            with RETENTION.IsolatedPostgres(root / "source-pg") as postgres:
+                postgres.create_database("source")
+                postgres.execute(
+                    "source",
+                    """
+                    CREATE TABLE events (
+                      room_id TEXT NOT NULL,
+                      event_id TEXT NOT NULL,
+                      type TEXT NOT NULL,
+                      PRIMARY KEY (room_id, event_id)
+                    );
+                    CREATE TABLE event_json (
+                      room_id TEXT NOT NULL,
+                      event_id TEXT NOT NULL,
+                      json JSONB NOT NULL,
+                      PRIMARY KEY (room_id, event_id)
+                    );
+                    CREATE TABLE credentials (id TEXT PRIMARY KEY, secret TEXT NOT NULL);
+                    INSERT INTO events VALUES
+                      ('!legacy:example.test', '$legacy-target:example.test', 'm.room.message'),
+                      ('!legacy:example.test', '$legacy-retained:example.test', 'm.room.message');
+                    INSERT INTO event_json VALUES
+                      ('!legacy:example.test', '$legacy-target:example.test', '{"event_id":"$legacy-target:example.test","room_id":"!legacy:example.test","type":"m.room.message","content":{"body":"remove legacy"}}'),
+                      ('!legacy:example.test', '$legacy-retained:example.test', '{"event_id":"$legacy-retained:example.test","room_id":"!legacy:example.test","type":"m.room.message","content":{"body":"keep legacy"}}');
+                    INSERT INTO credentials VALUES ('session-legacy', 'credential-preserved');
+                    """,
+                )
+                for dump_path in RETENTION.CORE_DATABASE_DUMP_PATHS.values():
+                    postgres.dump("source", fixture / dump_path)
+
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "stores": {
+                            "restic_snapshot": {
+                                "enumeration_complete": True,
+                                "copies": [
+                                    {
+                                        "reference": "restic:legacy-v0",
+                                        "snapshot_id": "legacy-v0",
+                                        "resource_id": "*",
+                                        "content_generation": "*",
+                                        "copy_created_at": "2026-08-01T00:00:00Z",
+                                        "content_classes": [
+                                            "message",
+                                            "session_credential",
+                                            "account_key",
+                                        ],
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            migration_manifest = root / "migration.json"
+            migration_manifest.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "snapshots": {
+                            "legacy-v0": {
+                                "complete": True,
+                                "format": RETENTION.LEGACY_CORE_BACKUP_FORMAT,
+                                "restored_prefix": "snapshot-root",
+                                "targets": [
+                                    {
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
+                                        "database": "synapse",
+                                        "contract": "synapse-event-json-v1",
+                                        "room_id": "!legacy:example.test",
+                                        "event_id": "$legacy-target:example.test",
+                                        "event_type": "m.room.message",
+                                        "media_paths": [
+                                            "synapse-data/media_store/target.bin"
+                                        ],
+                                        "media_paths_complete": True,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            replacements = root / "replacements"
+            invocations = root / "invocations.jsonl"
+            state = root / "restic-state.json"
+            state.write_text(
+                json.dumps({"snapshots": [{"id": "legacy-v0", "tags": ["communicator-core"]}]}),
+                encoding="utf-8",
+            )
+            fake_restic = root / "restic"
+            fake_restic.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, shutil, sys\n"
+                f"fixture = pathlib.Path({str(fixture)!r})\n"
+                f"replacements = pathlib.Path({str(replacements)!r})\n"
+                f"invocations = pathlib.Path({str(invocations)!r})\n"
+                f"state_path = pathlib.Path({str(state)!r})\n"
+                "state = json.loads(state_path.read_text())\n"
+                "command = sys.argv[1]\n"
+                "if command == 'restore':\n"
+                "    target = pathlib.Path(sys.argv[sys.argv.index('--target') + 1])\n"
+                "    shutil.copytree(fixture, target / 'snapshot-root')\n"
+                "elif command == 'backup':\n"
+                "    source = pathlib.Path(sys.argv[-1])\n"
+                "    replacement = 'replacement-v0'\n"
+                "    shutil.copytree(source, replacements / replacement, dirs_exist_ok=True)\n"
+                "    state['snapshots'].append({'id': replacement, 'tags': ['communicator-core-migrated']})\n"
+                "    state_path.write_text(json.dumps(state))\n"
+                "    invocations.open('a').write(json.dumps({'command': 'backup'}) + '\\n')\n"
+                "    print(json.dumps({'message_type': 'summary', 'snapshot_id': replacement}))\n"
+                "elif command == 'snapshots':\n"
+                "    print(json.dumps(state['snapshots']))\n"
+                "elif command == 'forget':\n"
+                "    state['snapshots'] = [item for item in state['snapshots'] if item['id'] != sys.argv[2]]\n"
+                "    state_path.write_text(json.dumps(state))\n"
+                "    invocations.open('a').write(json.dumps({'command': 'forget', 'snapshot': sys.argv[2]}) + '\\n')\n",
+                encoding="utf-8",
+            )
+            fake_restic.chmod(0o700)
+            password = root / "password"
+            password.write_text("fixture-password", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "COMMUNICATOR_RETENTION_MANIFEST": str(manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_MIGRATION_MANIFEST": str(migration_manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_BIN": str(fake_restic),
+                    "RESTIC_REPOSITORY": "fixture-repository",
+                    "RESTIC_PASSWORD_FILE": str(password),
+                },
+                clear=False,
+            ):
+                evidence = RETENTION.process_request(
+                    "cleanup",
+                    {
+                        "protocol": RETENTION.PROTOCOL,
+                        "store": "restic_snapshot",
+                        "resource_id": "message_one",
+                        "content_generation": "generation_one",
+                        "reference": "restic:legacy-v0",
+                    },
+                )
+
+            self.assertEqual("aged_out", evidence["status"], evidence)
+            replacement = replacements / "replacement-v0"
+            self.assertFalse((replacement / "synapse-data/media_store/target.bin").exists())
+            self.assertTrue((replacement / "synapse-data/media_store/retained.bin").exists())
+            self.assertEqual(
+                "session-secret",
+                (replacement / "secrets/synapse_registration_shared_secret").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            layout = json.loads(
+                (replacement / "retention/controlled-copy-layout.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("communicator-core-pgdump-v1", layout["format"])
+            calls = [json.loads(line) for line in invocations.read_text().splitlines()]
+            self.assertEqual(["backup", "forget"], [call["command"] for call in calls])
+
+            with RETENTION.IsolatedPostgres(root / "verify-pg") as postgres:
+                postgres.create_database("verify")
+                postgres.restore("verify", replacement / "synapse.pgdump")
+                self.assertEqual(
+                    "",
+                    postgres.query(
+                        "verify",
+                        "SELECT json->'content'->>'body' FROM event_json WHERE event_id='$legacy-target:example.test'",
+                    ),
+                )
+                self.assertEqual(
+                    "keep legacy",
+                    postgres.query(
+                        "verify",
+                        "SELECT json->'content'->>'body' FROM event_json WHERE event_id='$legacy-retained:example.test'",
+                    ),
+                )
+                self.assertEqual(
+                    "credential-preserved",
+                    postgres.query(
+                        "verify",
+                        "SELECT secret FROM credentials WHERE id='session-legacy'",
+                    ),
+                )
+
+    def test_legacy_core_pgdump_rejects_an_unexpected_file_before_database_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "snapshot-root"
+            _write_legacy_core_tree(fixture)
+            (fixture / "retention/controlled-copy-manifest.json").write_text(
+                json.dumps({"version": 1, "stores": {}}), encoding="utf-8"
+            )
+            migration_manifest = root / "migration.json"
+            migration_manifest.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "snapshots": {
+                            "legacy-unexpected": {
+                                "complete": True,
+                                "format": RETENTION.LEGACY_CORE_BACKUP_FORMAT,
+                                "restored_prefix": "snapshot-root",
+                                "targets": [
+                                    {
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
+                                        "database": "synapse",
+                                        "contract": "synapse-event-json-v1",
+                                        "room_id": "!legacy:example.test",
+                                        "event_id": "$legacy-target:example.test",
+                                        "event_type": "m.room.message",
+                                        "media_paths": [],
+                                        "media_paths_complete": True,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "stores": {
+                            "restic_snapshot": {
+                                "enumeration_complete": True,
+                                "copies": [
+                                    {
+                                        "reference": "restic:legacy-unexpected",
+                                        "snapshot_id": "legacy-unexpected",
+                                        "resource_id": "*",
+                                        "content_generation": "*",
+                                        "copy_created_at": "2026-08-01T00:00:00Z",
+                                        "content_classes": [
+                                            "message",
+                                            "session_credential",
+                                            "account_key",
+                                        ],
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            invocations = root / "invocations.jsonl"
+            fake_restic = root / "restic"
+            fake_restic.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, shutil, sys\n"
+                f"fixture = pathlib.Path({str(fixture)!r})\n"
+                f"invocations = pathlib.Path({str(invocations)!r})\n"
+                "command = sys.argv[1]\n"
+                "if command == 'restore':\n"
+                "    target = pathlib.Path(sys.argv[sys.argv.index('--target') + 1])\n"
+                "    shutil.copytree(fixture, target / 'snapshot-root')\n"
+                "    (target / 'unexpected.txt').write_text('outside-prefix')\n"
+                "elif command == 'backup':\n"
+                "    invocations.write_text('backup\\n')\n"
+                "    print('{\"message_type\":\"summary\",\"snapshot_id\":\"should-not-exist\"}')\n"
+                "elif command == 'forget':\n"
+                "    invocations.write_text('forget\\n')\n",
+                encoding="utf-8",
+            )
+            fake_restic.chmod(0o700)
+            password = root / "password"
+            password.write_text("fixture-password", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "COMMUNICATOR_RETENTION_MANIFEST": str(manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_MIGRATION_MANIFEST": str(migration_manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_BIN": str(fake_restic),
+                    "RESTIC_REPOSITORY": "fixture-repository",
+                    "RESTIC_PASSWORD_FILE": str(password),
+                },
+                clear=False,
+            ):
+                evidence = RETENTION.process_request(
+                    "cleanup",
+                    {
+                        "protocol": RETENTION.PROTOCOL,
+                        "store": "restic_snapshot",
+                        "resource_id": "message_one",
+                        "content_generation": "generation_one",
+                        "reference": "restic:legacy-unexpected",
+                    },
+                )
+
+            self.assertEqual("lifecycle_pending", evidence["status"])
+            self.assertTrue(evidence["content_present"])
+            self.assertIn("enumerate", evidence["detail"])
+            self.assertFalse(invocations.exists())
 
     def test_cloudflare_queue_peek_and_purge_only_use_the_exact_lineage_reference(self):
         seen: list[tuple[str, dict]] = []

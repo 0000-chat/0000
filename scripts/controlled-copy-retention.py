@@ -70,7 +70,50 @@ CORE_DATABASE_CONTRACTS = {
     "messenger_bridge": "mautrix-bridge-message-v1",
     "telegram_bridge": "mautrix-bridge-message-v1",
 }
+CORE_DATABASE_DUMP_PATHS = {
+    "synapse": "synapse.pgdump",
+    "whatsapp_bridge": "whatsapp.pgdump",
+    "messenger_bridge": "messenger.pgdump",
+    "telegram_bridge": "telegram.pgdump",
+}
 CORE_EVENT_TYPES = {"m.room.message", "m.room.encrypted"}
+# Before the layout sidecar was introduced, backup-core.sh always emitted this
+# fixed runtime tree.  The media store is the only subtree whose regular-file
+# members are intentionally variable; every other path is part of the pinned
+# backup shape and must be enumerated exactly before migration.
+LEGACY_CORE_BACKUP_FORMAT = "communicator-core-pgdump-v0"
+LEGACY_CORE_REQUIRED_FILES = frozenset(
+    {
+        "synapse.pgdump",
+        "whatsapp.pgdump",
+        "messenger.pgdump",
+        "telegram.pgdump",
+        "synapse-data/homeserver.yaml",
+        "synapse-data/log.config",
+        "synapse-data/communicator.0000.gold.signing.key",
+        "synapse-data/whatsapp-registration.yaml",
+        "synapse-data/messenger-registration.yaml",
+        "whatsapp-data/config.yaml",
+        "whatsapp-data/registration.yaml",
+        "messenger-data/config.yaml",
+        "messenger-data/registration.yaml",
+        "telegram-data/config.yaml",
+        "telegram-data/registration.yaml",
+        "telegram-data/synapse-registration.yaml",
+        "telegram-secrets/telegram-db.password",
+        "telegram-secrets/telegram-db.env",
+        "telegram-secrets/telegram-api-id",
+        "telegram-secrets/telegram-api-hash",
+        "secrets/postgres.env",
+        "secrets/synapse_registration_shared_secret",
+        "secrets/whatsapp-db.password",
+        "secrets/whatsapp-db.env",
+        "secrets/messenger-db.password",
+        "secrets/messenger-db.env",
+        "retention/controlled-copy-manifest.json",
+    }
+)
+LEGACY_CORE_MEDIA_PREFIX = "synapse-data/media_store/"
 
 
 class RetentionError(Exception):
@@ -1158,7 +1201,7 @@ def read_legacy_migration_spec(
         raise RetentionError("restic legacy migration restored prefix is invalid")
     normalized_prefix = "" if prefix == "" else safe_relative_path(prefix, "restored prefix")
 
-    if spec.get("format") == CORE_BACKUP_FORMAT:
+    if spec.get("format") in {CORE_BACKUP_FORMAT, LEGACY_CORE_BACKUP_FORMAT}:
         raw_databases = spec.get("databases")
         databases: list[dict[str, str]] | None = None
         if raw_databases is not None:
@@ -1263,6 +1306,7 @@ def read_legacy_migration_spec(
                 raise RetentionError("core migration file coverage is duplicated")
         return {
             "kind": "core",
+            "format": spec.get("format"),
             "restored_prefix": normalized_prefix,
             "databases": databases,
             "targets": targets,
@@ -1619,11 +1663,86 @@ def core_layout_from_tree(
                 raise RetentionError("core migration and backup database contracts differ")
         return databases, files, True
 
+    if spec.get("format") == LEGACY_CORE_BACKUP_FORMAT:
+        return legacy_core_layout_from_tree(restored_content)
+
     databases = parse_core_database_contracts(spec.get("databases"))
     files = spec.get("files")
     if not isinstance(files, list) or not files:
         raise RetentionError("legacy core migration requires exhaustive file coverage")
     return databases, [safe_relative_path(value, "core migration file") for value in files], False
+
+
+def legacy_core_layout_from_tree(
+    restored_content: Path,
+) -> tuple[list[dict[str, str]], list[str], bool]:
+    """Build a layout for a pre-sidecar backup-core snapshot.
+
+    This recognizes only the exact tree emitted by the original script.  The
+    four database dumps and runtime/credential files are fixed; media files
+    may vary only below Synapse's media store.  The caller still compares the
+    resulting list with the entire restore target so a sibling outside the
+    declared prefix cannot be silently preserved.
+    """
+    actual = exact_files_under(restored_content)
+    missing = LEGACY_CORE_REQUIRED_FILES - actual
+    if missing:
+        raise RetentionError("legacy communicator core backup is missing required files")
+    unexpected = {
+        path
+        for path in actual - LEGACY_CORE_REQUIRED_FILES
+        if not path.startswith(LEGACY_CORE_MEDIA_PREFIX)
+    }
+    if unexpected:
+        raise RetentionError("legacy communicator core backup contains unexpected files")
+
+    required_directories = {
+        str(Path(path).parent).replace("\\", "/")
+        for path in LEGACY_CORE_REQUIRED_FILES
+        if "/" in path
+    }
+    for current, directories, _files in os.walk(restored_content, followlinks=False):
+        current_path = Path(current)
+        for directory in directories:
+            relative = (current_path / directory).relative_to(restored_content).as_posix()
+            if relative == "synapse-data/media_store" or relative.startswith(
+                LEGACY_CORE_MEDIA_PREFIX
+            ):
+                continue
+            if relative not in required_directories:
+                raise RetentionError(
+                    "legacy communicator core backup contains unexpected directories"
+                )
+
+    return (
+        [
+            {
+                "name": name,
+                "path": CORE_DATABASE_DUMP_PATHS[name],
+                "contract": contract,
+            }
+            for name, contract in CORE_DATABASE_CONTRACTS.items()
+        ],
+        sorted(actual),
+        False,
+    )
+
+
+def write_core_layout_sidecar(restored_content: Path) -> None:
+    """Persist the validated layout on a migrated pre-sidecar replacement."""
+    writer = Path(__file__).with_name("write-controlled-copy-layout.py")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(writer), str(restored_content)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RetentionError("legacy core layout sidecar could not be written") from error
+    if result.returncode != 0:
+        raise RetentionError("legacy core layout sidecar could not be written")
 
 
 def parse_core_database_contracts(value: Any) -> list[dict[str, str]]:
@@ -2015,6 +2134,8 @@ def migrate_core_restic_copy(
             os.replace(replacement_dump, dump)
 
     remove_core_media(restored_content, targets)
+    if not has_layout:
+        write_core_layout_sidecar(restored_content)
     replacement_tag = "communicator-core-migrated"
     replacement_id = run_restic_backup(
         binary,
