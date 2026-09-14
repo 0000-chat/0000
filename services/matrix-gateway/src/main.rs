@@ -17,6 +17,7 @@ use rand_core::{OsRng, RngCore};
 
 use communicator_matrix_gateway::{
     admin::{self, AdminError},
+    authority::AuthorityClaimClient,
     config::{GatewayConfig, MAX_CONFIG_JSON_BYTES},
     crypto::Keyring,
     history::HistoryGatewayServer,
@@ -259,6 +260,12 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         Duration::from_secs(config.sync_timeout_secs()),
     )?;
     let history = HistoryGatewayServer::new(store, Arc::new(transport), gateway_secret.as_str())?;
+    let authority = AuthorityClaimClient::new(
+        provisioning.authority_base_url(),
+        gateway_secret.clone(),
+        Duration::from_secs(config.request_timeout_secs()),
+    )
+    .map_err(|error| SafeError::new(error.code()))?;
     let client = WhatsAppProvisioningClient::new(
         provisioning.bridge_url(),
         SecretString::new(bridge_secret),
@@ -286,7 +293,8 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         .with_group_manager(Arc::new(MatrixSdkGroupManager::new(
             matrix_client,
             Duration::from_secs(config.request_timeout_secs()),
-        )));
+        )))
+        .with_outbound_authority(Arc::new(authority));
     serve_private_gateway(server, provisioning.listen_addr())
         .await
         .map_err(|_| SafeError::new("provisioning_listen_failed"))

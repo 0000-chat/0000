@@ -5,6 +5,7 @@ import {
   type GroupManagementEvidence,
   type GroupEvidenceSource,
 } from "@communicator/contracts";
+import type { OutboundCapability } from "@communicator/contracts";
 import { z } from "zod";
 import type { ContactRoute } from "../contacts/provider";
 
@@ -13,6 +14,12 @@ export type GroupProviderInput = {
   operation_id: string;
   conversation_id: string;
   idempotency_key: string;
+  membership_id?: string;
+  actor_identity_id?: string;
+  reservation_id?: string;
+  capability?: OutboundCapability;
+  request_hash?: string;
+  operation_scope?: "group.create" | "group.manage";
 };
 
 export type GroupManagementProviderInput = GroupProviderInput & {
@@ -86,6 +93,7 @@ export class GroupProviderError extends Error {
       | "unsupported"
       | "unavailable"
       | "session_expired"
+      | "authorization_revoked"
       | "rejected"
       | "uncertain"
       | "not_found",
@@ -459,6 +467,19 @@ export class HttpGroupProvider implements GroupProvider {
             provider_login_id: input.route.provider_login_id,
           },
           operation_id: input.operation_id,
+          ...(input.membership_id === undefined ||
+          input.actor_identity_id === undefined ||
+          input.reservation_id === undefined ||
+          input.capability === undefined ||
+          input.request_hash === undefined
+            ? {}
+            : {
+                membership_id: input.membership_id,
+                actor_identity_id: input.actor_identity_id,
+                reservation_id: input.reservation_id,
+                capability: input.capability,
+                request_hash: input.request_hash,
+              }),
           operation_created_at:
             "operation_created_at" in input
               ? input.operation_created_at
@@ -473,7 +494,22 @@ export class HttpGroupProvider implements GroupProvider {
     }
     if (response.status === 501)
       throw new GroupProviderError("unsupported", response.status);
-    if (response.status === 401 || response.status === 403)
+    if (response.status === 403) {
+      try {
+        const value = (await response.clone().json()) as {
+          error?: unknown;
+        };
+        if (value.error === "authorization_revoked")
+          throw new GroupProviderError(
+            "authorization_revoked",
+            response.status,
+          );
+      } catch (error) {
+        if (error instanceof GroupProviderError) throw error;
+      }
+      throw new GroupProviderError("session_expired", response.status);
+    }
+    if (response.status === 401)
       throw new GroupProviderError("session_expired", response.status);
     if (response.status === 404)
       throw new GroupProviderError("not_found", response.status);

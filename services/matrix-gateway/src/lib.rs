@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod attachments;
+pub mod authority;
 pub mod batch;
 pub mod canonical;
 pub mod config;

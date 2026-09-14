@@ -175,6 +175,7 @@ import {
   createReceiptHandlers,
 } from "./routes/receipts";
 import type { ReceiptServices } from "./receipts/service";
+import { dispatchClaimHandler } from "./outbound/dispatch-claim-route";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -631,6 +632,7 @@ export function createApp(services: AppServices = {}) {
     "/internal/v1/ingestion/batches",
     createIngestionBatchHandler(services),
   );
+  app.post("/internal/v1/outbound/dispatch-claims", dispatchClaimHandler);
 
   return app;
 }

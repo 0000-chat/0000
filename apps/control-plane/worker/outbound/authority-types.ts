@@ -183,3 +183,90 @@ export type MarkDispatchClaimUncertainResult =
       status: "denied";
       reason: "claim_not_found" | "claim_already_uncertain" | "invalid_input";
     };
+
+/** Provider operations with durable records outside the message ledger. */
+export type PrivateAuthorityScope =
+  | "receipt.send"
+  | "group.create"
+  | "group.manage";
+
+export type PrivateAuthorityReservationInput = OutboundTuple & {
+  operation_scope: PrivateAuthorityScope;
+  operation_id: string;
+  request_hash: string;
+  capability: OutboundCapability;
+  reservation_id?: string;
+  now: string;
+};
+
+export type PrivateAuthorityReservation = OutboundCapabilityTuple & {
+  id: string;
+  operation_scope: PrivateAuthorityScope;
+  operation_id: string;
+  request_hash: string;
+  status: "reserved" | "committed" | "uncertain";
+  uncertain_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PrivateAuthorityReservationResult =
+  | {
+      status: "reserved";
+      replayed: boolean;
+      reservation: PrivateAuthorityReservation;
+    }
+  | {
+      status: "denied";
+      reason:
+        | "authorization_revoked"
+        | "idempotency_conflict"
+        | "invalid_input";
+    };
+
+export type PrivateAuthorityClaimInput = OutboundCapabilityTuple & {
+  operation_scope: PrivateAuthorityScope;
+  reservation_id: string;
+  operation_id: string;
+  request_hash: string;
+  claim_id?: string;
+  now: string;
+  expires_at: string;
+};
+
+export type PrivateAuthorityClaim = OutboundCapabilityTuple & {
+  id: string;
+  operation_scope: PrivateAuthorityScope;
+  reservation_id: string;
+  operation_id: string;
+  request_hash: string;
+  status: "claimed" | "uncertain";
+  uncertain_reason: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PrivateAuthorityClaimResult =
+  | {
+      status: "claimed";
+      replayed: false;
+      provider_allowed: true;
+      claim: PrivateAuthorityClaim;
+    }
+  | {
+      status: "replayed";
+      replayed: true;
+      provider_allowed: false;
+      claim: PrivateAuthorityClaim;
+    }
+  | {
+      status: "denied";
+      reason:
+        | "authorization_revoked"
+        | "reservation_not_found"
+        | "reservation_not_committed"
+        | "tuple_mismatch"
+        | "claim_conflict"
+        | "invalid_input";
+    };

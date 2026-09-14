@@ -7,8 +7,8 @@ import {
   type ReadReceiptResult,
 } from "@communicator/contracts";
 import type { SessionResponse } from "@communicator/contracts";
+import type { OutboundCapability } from "@communicator/contracts";
 import { getTenantProjection } from "../projection/routing";
-import { hasAccountOperationGrant } from "../control-directory/grants";
 import { isAdministratorSession } from "../read/authorization";
 import { mapReadError, ReadError } from "../read/errors";
 import {
@@ -28,6 +28,7 @@ import {
   type ReceiptProvider,
   type ReceiptRoute,
 } from "./provider";
+import { reservePrivateAuthority } from "../outbound/private-authority";
 
 export type ReceiptServiceContext = {
   env: Cloudflare.Env;
@@ -37,7 +38,7 @@ export type ReceiptServiceContext = {
 export type ReceiptServices = {
   now?: () => Date;
   createProvider?: (context: ReceiptServiceContext) => ReceiptProvider;
-  /** Called before the final grant check, so revocation can be tested. */
+  /** Called before the receipt reservation, so revocation can be tested. */
   beforeFinalAuthorization?: () => void | Promise<void>;
   dispatchReceipt?: (
     payload: ReceiptDispatchPayload,
@@ -60,6 +61,13 @@ type ReceiptRouteRow = {
   has_receipt_capability: number;
   has_provider_identity: number;
 };
+
+type ReceiptCapabilityRow = {
+  grant_id: string;
+  authorization_epoch: number;
+};
+
+type ReceiptAuthorityEpochRow = { authority_epoch: number };
 
 const usableStatuses = new Set(["connected", "syncing", "ready"]);
 
@@ -161,6 +169,75 @@ const requestHash = async (request: ReadReceiptRequest): Promise<string> => {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+};
+
+const readReceiptCapability = async (
+  database: D1DatabaseSession,
+  context: ReceiptServiceContext,
+  identityId: string,
+  accountId: string,
+  connectionId: string,
+  conversationId: string,
+): Promise<OutboundCapability | null> => {
+  if (isAdministratorSession(context.authorization)) {
+    const authority = await database
+      .prepare(
+        `SELECT authority_epoch FROM memberships
+          WHERE tenant_id = ? AND id = ? AND status = 'active'
+            AND role IN ('owner', 'admin') LIMIT 1`,
+      )
+      .bind(
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+      )
+      .first<ReceiptAuthorityEpochRow>();
+    return authority === null
+      ? null
+      : {
+          kind: "owner_admin",
+          authority_id: context.authorization.membership.id,
+          authority_epoch: authority.authority_epoch,
+        };
+  }
+  const grant = await database
+    .prepare(
+      `SELECT g.id AS grant_id, g.authorization_epoch
+         FROM account_grants AS g
+         JOIN identity_grants AS ig
+           ON ig.tenant_id = g.tenant_id
+          AND ig.membership_id = g.membership_id
+          AND ig.identity_id = g.identity_id
+          AND ig.operation_scope = 'receipt.send'
+         JOIN connection_accounts AS ca
+           ON ca.account_id = g.account_id AND ca.status = 'active'
+         JOIN connections AS c
+           ON c.tenant_id = g.tenant_id AND c.id = ca.connection_id AND c.id = ?
+        WHERE g.tenant_id = ? AND g.membership_id = ? AND g.identity_id = ?
+          AND g.account_id = ? AND g.operation_scope = 'receipt.send'
+          AND g.status = 'active'
+          AND (g.chat_scope = 'all_chats' OR EXISTS (
+            SELECT 1 FROM account_grant_chats AS gc
+             WHERE gc.tenant_id = g.tenant_id AND gc.grant_id = g.id
+               AND gc.account_id = g.account_id AND gc.chat_id = ?
+          ))
+        ORDER BY g.id LIMIT 1`,
+    )
+    .bind(
+      connectionId,
+      context.authorization.tenant.id,
+      context.authorization.membership.id,
+      identityId,
+      accountId,
+      conversationId,
+    )
+    .first<ReceiptCapabilityRow>();
+  return grant === null
+    ? null
+    : {
+        kind: "account_grant",
+        grant_id: grant.grant_id,
+        authorization_epoch: grant.authorization_epoch,
+      };
 };
 
 const operationIdFor = (hash: string): string => `receipt_${hash.slice(0, 48)}`;
@@ -369,21 +446,20 @@ export async function requestReadReceipt(
     throw error;
   }
 
-  let granted: boolean;
+  let capability: OutboundCapability | null;
   try {
-    granted = await hasAccountOperationGrant(
+    capability = await readReceiptCapability(
       database.withSession("first-primary"),
-      context.authorization.tenant.id,
-      context.authorization.membership.id,
+      context,
       request.identity_id,
       request.account_id,
+      target.connection_id,
       request.conversation_id,
-      "receipt.send",
     );
   } catch (error) {
     throw mapRepositoryError(error);
   }
-  if (!granted) throw new ReadError("forbidden");
+  if (capability === null) throw new ReadError("forbidden");
 
   let created: { operation: ReadReceiptOperation; inserted: boolean };
   try {
@@ -415,36 +491,42 @@ export async function requestReadReceipt(
 
   if (services.beforeFinalAuthorization !== undefined)
     await services.beforeFinalAuthorization();
-  try {
-    const finalGranted = await hasAccountOperationGrant(
+  const reservation = await reservePrivateAuthority(
+    database.withSession("first-primary"),
+    {
+      tenant_id: context.authorization.tenant.id,
+      membership_id: context.authorization.membership.id,
+      identity_id: request.identity_id,
+      account_id: request.account_id,
+      conversation_id: request.conversation_id,
+      connection_id: target.connection_id,
+      operation_scope: "receipt.send",
+      operation_id: operationId,
+      request_hash: hash,
+      capability,
+      now: nowFor(services),
+    },
+  );
+  if (reservation.status === "denied") {
+    const rejected = await updateReceiptOperation(
       database.withSession("first-primary"),
       context.authorization.tenant.id,
-      context.authorization.membership.id,
-      request.identity_id,
-      request.account_id,
-      request.conversation_id,
-      "receipt.send",
+      operationId,
+      {
+        status: "rejected",
+        matrixStage: "unknown",
+        bridgeStage: "unknown",
+        providerStage: "unknown",
+        failureCode:
+          reservation.reason === "authorization_revoked"
+            ? "authorization_revoked"
+            : "receipt_conflict",
+        failureReason: "The receipt authority reservation was denied",
+        evidence: [],
+        updatedAt: nowFor(services),
+      },
     );
-    if (!finalGranted) {
-      const rejected = await updateReceiptOperation(
-        database.withSession("first-primary"),
-        context.authorization.tenant.id,
-        operationId,
-        {
-          status: "rejected",
-          matrixStage: "unknown",
-          bridgeStage: "unknown",
-          providerStage: "unknown",
-          failureCode: "authorization_revoked",
-          failureReason: "The receipt grant was revoked before provider I/O",
-          evidence: [],
-          updatedAt: nowFor(services),
-        },
-      );
-      return resultFor(rejected, false);
-    }
-  } catch (error) {
-    throw mapRepositoryError(error);
+    return resultFor(rejected, false);
   }
 
   let finalRoute: ReceiptRoute;
@@ -481,6 +563,11 @@ export async function requestReadReceipt(
 
   const payload: ReceiptDispatchPayload = {
     route: finalRoute,
+    membership_id: context.authorization.membership.id,
+    actor_identity_id: request.identity_id,
+    reservation_id: reservation.reservation.id,
+    capability: reservation.reservation.capability,
+    request_hash: hash,
     operation_id: operationId,
     operation_created_at: created.operation.requested_at,
     conversation_id: request.conversation_id,

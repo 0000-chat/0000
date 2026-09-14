@@ -3,6 +3,7 @@ import {
   ReceiptOperationStatusSchema,
   type ReceiptEvidence,
   type ReceiptOperationStatus,
+  type OutboundCapability,
 } from "@communicator/contracts";
 import { z } from "zod";
 
@@ -22,6 +23,11 @@ export type ReceiptRoute = {
 
 export type ReceiptDispatchPayload = {
   route: ReceiptRoute;
+  membership_id?: string;
+  actor_identity_id?: string;
+  reservation_id?: string;
+  capability?: OutboundCapability;
+  request_hash?: string;
   operation_id: string;
   operation_created_at: string;
   conversation_id: string;
@@ -38,6 +44,7 @@ export type ReceiptAdapterResult = {
   provider_stage: "unknown" | "confirmed";
   evidence: ReceiptEvidence[];
   failure_code?:
+    | "authorization_revoked"
     | "provider_rejected"
     | "provider_unavailable"
     | "provider_timeout"
@@ -81,6 +88,7 @@ const responseSchema = z
         "provider_timeout",
         "provider_protocol_error",
         "matrix_rejected",
+        "authorization_revoked",
       ])
       .optional(),
     failure_reason: z.string().trim().min(1).max(200).optional(),
@@ -124,10 +132,15 @@ export class HttpWhatsAppReceiptProvider implements ReceiptProvider {
           identity_id: input.route.identity_id,
           account_id: input.route.account_id,
           connection_id: input.route.connection_id,
+          membership_id: input.membership_id,
+          actor_identity_id: input.actor_identity_id,
           provider: input.route.provider,
           session_generation: input.route.session_generation,
           route: input.route,
           operation_id: input.operation_id,
+          reservation_id: input.reservation_id,
+          capability: input.capability,
+          request_hash: input.request_hash,
           operation_created_at: input.operation_created_at,
           conversation_id: input.conversation_id,
           message_id: input.message_id,
