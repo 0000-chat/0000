@@ -135,9 +135,15 @@ import { resolveAuthorization } from "./control-directory/authorization";
 import { handleMcpGet, handleMcpRequest } from "./mcp";
 import {
   createCancelLinkSessionHandler,
+  createConnectionDisconnectHandler,
   createLinkSessionActionHandler,
   createLinkSessionHandler,
+  createRelinkSessionHandler,
+  getConnectionLifecycleOperationHandler,
   getLinkSessionHandler,
+  connectionDisconnectRoute,
+  connectionLifecycleOperationRoute,
+  connectionRelinkSessionStartRoute,
   linkSessionActionRoute,
   linkSessionCancelRoute,
   linkSessionGetRoute,
@@ -453,6 +459,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/identities", productAuthorization);
   app.use("/api/v1/identities/*", productAuthorization);
   app.use("/api/v1/connections", productAuthorization);
+  app.use("/api/v1/connections/*", productAuthorization);
   app.use("/api/v1/accounts", productAuthorization);
   app.use("/api/v1/accounts/*", productAuthorization);
   app.use("/api/v1/grant-targets", productAuthorization);
@@ -556,6 +563,18 @@ export function createApp(services: AppServices = {}) {
   if (services.linkingNow !== undefined)
     linkingServices.now = services.linkingNow;
   app.openapi(linkSessionStartRoute, createLinkSessionHandler(linkingServices));
+  app.openapi(
+    connectionRelinkSessionStartRoute,
+    createRelinkSessionHandler(linkingServices),
+  );
+  app.openapi(
+    connectionDisconnectRoute,
+    createConnectionDisconnectHandler(linkingServices),
+  );
+  app.openapi(
+    connectionLifecycleOperationRoute,
+    getConnectionLifecycleOperationHandler,
+  );
   app.openapi(linkSessionGetRoute, getLinkSessionHandler);
   app.openapi(
     linkSessionActionRoute,

@@ -151,6 +151,59 @@ export const handlers = [
     },
   ),
 
+  http.post(
+    "*/api/v1/connections/:connectionId/relink-sessions",
+    async ({ request, params }) => {
+      if (!request.headers.get("Idempotency-Key"))
+        return errorResponse(400, "invalid_request");
+      const input = LinkSessionStartSchema.safeParse(await request.json());
+      const connectionId = String(params.connectionId);
+      const connection = simulatedStore
+        .identities()
+        .flatMap((identity) => simulatedStore.connections(identity.id))
+        .find((item) => item.id === connectionId);
+      if (
+        !input.success ||
+        !connection ||
+        input.data.confirmed_identity_id !== connection.identity_id
+      )
+        return errorResponse(400, "invalid_request");
+      const session = simulatedStore.startLinkSession(
+        connection.identity_id,
+        input.data,
+      );
+      return session
+        ? HttpResponse.json(
+            { ...session, connection_id: connectionId },
+            { status: 201 },
+          )
+        : errorResponse(403, "forbidden");
+    },
+  ),
+
+  http.post(
+    "*/api/v1/connections/:connectionId/disconnect",
+    ({ request, params }) => {
+      if (!request.headers.get("Idempotency-Key"))
+        return errorResponse(400, "invalid_request");
+      const connectionId = String(params.connectionId);
+      if (!simulatedStore.disconnectConnection(connectionId))
+        return errorResponse(404, "not_found");
+      return HttpResponse.json({
+        operation_id: `sim_disconnect_${connectionId}`,
+        kind: "disconnect",
+        connection_id: connectionId,
+        provider: "whatsapp",
+        status: "succeeded",
+        session_generation: new Date().toISOString(),
+        replacement_connection_id: null,
+        error_code: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    },
+  ),
+
   http.get("*/api/v1/link-sessions/:sessionId", ({ params }) => {
     const session = simulatedStore.linkSession(String(params.sessionId));
     return session

@@ -66,6 +66,7 @@ const applicationTables = [
   "outbound_authority_heads",
   "outbound_acceptance_intents",
   "outbound_dispatch_claims",
+  "connection_lifecycle_operations",
   "group_authority_intents",
   "group_dispatch_claims",
 ];
@@ -137,6 +138,7 @@ async function dropControlDirectorySchema(db: D1Database) {
     "receipt_operations",
     "outbound_dispatch_claims",
     "outbound_acceptance_intents",
+    "connection_lifecycle_operations",
     "outbound_authority_heads",
     "attachment_download_grants",
     "direct_chat_creation_operations",
