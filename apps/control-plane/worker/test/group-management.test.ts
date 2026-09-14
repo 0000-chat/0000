@@ -480,6 +480,103 @@ describe("group management operation boundaries", () => {
     });
   });
 
+  it("keeps provider denial and timeout uncertain instead of claiming success", async () => {
+    const deniedState: ManagementState = {
+      mode: "rejected",
+      providerCalls: [],
+      observeCalls: [],
+      refreshCalls: [],
+    };
+    const deniedResponse = await request(
+      createTestApp(deniedState),
+      `/api/v1/groups/${conversationId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(renameBody("rename-denied")),
+      },
+    );
+    const denied = (await deniedResponse.json()) as Record<string, any>;
+    expect(deniedResponse.status, JSON.stringify(denied)).toBe(200);
+    expect(denied).toMatchObject({
+      status: "failed",
+      duplicate_risk: false,
+      human_action_required: false,
+      failure_code: "provider_rejected",
+    });
+    expect(deniedState.providerCalls).toHaveLength(1);
+
+    await clearDirectory(env.CONTROL_DB);
+    await seedDirectory(env.CONTROL_DB);
+    await seedAccountAccess(env.CONTROL_DB);
+    await seedManagementDirectory();
+    const timeoutState: ManagementState = {
+      mode: "timeout",
+      providerCalls: [],
+      observeCalls: [],
+      refreshCalls: [],
+    };
+    const timeoutResponse = await request(
+      createTestApp(timeoutState),
+      `/api/v1/groups/${conversationId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(renameBody("rename-timeout")),
+      },
+    );
+    const timeout = (await timeoutResponse.json()) as Record<string, any>;
+    expect(timeoutResponse.status, JSON.stringify(timeout)).toBe(200);
+    expect(timeout).toMatchObject({
+      status: "human_action_required",
+      duplicate_risk: true,
+      failure_code: "group_management_evidence_unresolved",
+    });
+    expect(timeoutState.providerCalls).toHaveLength(1);
+    expect(timeoutState.observeCalls).toHaveLength(1);
+    expect(timeoutState.refreshCalls).toHaveLength(1);
+  });
+
+  it("applies a final authority fence after provider I/O", async () => {
+    const state: ManagementState = {
+      mode: "provider",
+      providerCalls: [],
+      observeCalls: [],
+      refreshCalls: [],
+      beforeProvider: async () => {
+        await env.CONTROL_DB.prepare(
+          "UPDATE account_grants SET status = 'revoked', revoked_at = ? WHERE id = 'grant_group_manage'",
+        )
+          .bind(timestamp)
+          .run();
+      },
+    };
+    const response = await request(
+      createTestApp(state),
+      `/api/v1/groups/${conversationId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(renameBody("rename-final-fence")),
+      },
+    );
+    const result = (await response.json()) as Record<string, any>;
+    expect(response.status, JSON.stringify(result)).toBe(200);
+    expect(result).toMatchObject({
+      status: "human_action_required",
+      duplicate_risk: true,
+      failure_code: "group_management_authority_revoked",
+    });
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT name, current_revision, active_operation_id FROM group_management_groups WHERE tenant_id = ? AND conversation_id = ?",
+      )
+        .bind(tenantId, conversationId)
+        .first(),
+    ).toEqual({
+      name: "Team",
+      current_revision: "1",
+      active_operation_id: null,
+    });
+  });
+
   it("rejects stale revisions and never reports a lost claim as success", async () => {
     const staleState: ManagementState = {
       mode: "provider",

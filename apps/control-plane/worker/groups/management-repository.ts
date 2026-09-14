@@ -601,7 +601,59 @@ export async function finishGroupManagementOperation(
                     active_operation_id = NULL, active_claim_expires_at = NULL,
                     updated_at = ?
               WHERE tenant_id = ? AND conversation_id = ?
-                AND current_revision = ? AND active_operation_id = ?`,
+                AND current_revision = ? AND active_operation_id = ?
+                AND EXISTS (
+                  SELECT 1
+                    FROM account_grants AS ag
+                    JOIN connections AS c
+                      ON c.tenant_id = ag.tenant_id
+                    JOIN connection_accounts AS ca
+                      ON ca.connection_id = c.id
+                     AND ca.account_id = ag.account_id
+                     AND ca.status = 'active'
+                   WHERE ag.tenant_id = ?
+                     AND ag.membership_id = ?
+                     AND ag.identity_id = ?
+                     AND ag.account_id = ?
+                     AND ag.operation_scope = 'group.manage'
+                     AND ag.status = 'active'
+                     AND (
+                       ag.chat_scope = 'all_chats'
+                       OR EXISTS (
+                         SELECT 1
+                           FROM account_grant_chats AS gc
+                          WHERE gc.tenant_id = ag.tenant_id
+                            AND gc.grant_id = ag.id
+                            AND gc.chat_id = ?
+                       )
+                     )
+                )
+                AND EXISTS (
+                  SELECT 1
+                    FROM account_grants AS ag
+                    JOIN connections AS c
+                      ON c.tenant_id = ag.tenant_id
+                    JOIN connection_accounts AS ca
+                      ON ca.connection_id = c.id
+                     AND ca.account_id = ag.account_id
+                     AND ca.status = 'active'
+                   WHERE ag.tenant_id = ?
+                     AND ag.membership_id = ?
+                     AND ag.identity_id = ?
+                     AND ag.account_id = ?
+                     AND ag.operation_scope = 'conversation.read'
+                     AND ag.status = 'active'
+                     AND (
+                       ag.chat_scope = 'all_chats'
+                       OR EXISTS (
+                         SELECT 1
+                           FROM account_grant_chats AS gc
+                          WHERE gc.tenant_id = ag.tenant_id
+                            AND gc.grant_id = ag.id
+                            AND gc.chat_id = ?
+                       )
+                     )
+                )`,
           )
           .bind(
             completion.evidence.name,
@@ -613,6 +665,16 @@ export async function finishGroupManagementOperation(
             operation.conversation_id,
             operation.expected_revision,
             operation.operation_id,
+            operation.tenant_id,
+            operation.membership_id,
+            operation.identity_id,
+            operation.account_id,
+            operation.conversation_id,
+            operation.tenant_id,
+            operation.membership_id,
+            operation.identity_id,
+            operation.account_id,
+            operation.conversation_id,
           ),
       );
       statements.push(

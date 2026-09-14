@@ -358,6 +358,28 @@ const completeFailure = async (
     now: nowFor(services),
   });
 
+const authorityFailure = async (
+  context: ContactServiceContext,
+  operation: GroupManagementOperation,
+  route: GroupRoute,
+  services: GroupManagementRouteServices,
+): Promise<GroupManagementOperation | null> => {
+  try {
+    await requireAuthority(context, route, operation.conversation_id);
+    return null;
+  } catch (error) {
+    if (error instanceof ReadError && error.code === "forbidden") {
+      return completeFailure(
+        context,
+        operation,
+        "group_management_authority_revoked",
+        services,
+      );
+    }
+    throw error;
+  }
+};
+
 const completeManaged = async (
   context: ContactServiceContext,
   operation: GroupManagementOperation,
@@ -411,6 +433,8 @@ const reconcileManagementOperation = async (
   provider: GroupProvider,
   services: GroupManagementRouteServices,
 ): Promise<GroupManagementOperation> => {
+  const authority = await authorityFailure(context, operation, route, services);
+  if (authority !== null) return authority;
   const input = providerInput(operation, route);
   if (provider.observeManagedGroup !== undefined) {
     try {
@@ -503,6 +527,13 @@ const dispatchProvider = async (
         operation.requested_member_provider_ids,
       );
     }
+    const authority = await authorityFailure(
+      context,
+      operation,
+      route,
+      services,
+    );
+    if (authority !== null) return authority;
     return completeManaged(context, operation, result, "provider", services);
   } catch (error) {
     if (!isReconciliationError(error)) {
@@ -531,7 +562,8 @@ const dispatchOwner = async (
   provider: GroupProvider,
   services: GroupManagementRouteServices,
 ): Promise<GroupManagementOperation> => {
-  await requireAuthority(context, route, operation.conversation_id);
+  const authority = await authorityFailure(context, operation, route, services);
+  if (authority !== null) return authority;
   await checkCapability(
     databaseFor(context).withSession("first-primary"),
     operation.tenant_id,
