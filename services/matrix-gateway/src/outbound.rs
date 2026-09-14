@@ -256,6 +256,15 @@ impl fmt::Debug for MatrixSdkGroupManager {
     }
 }
 
+fn requested_members_have_fresh_evidence(
+    requested_provider_ids: &[String],
+    fresh_provider_ids: &HashSet<String>,
+) -> bool {
+    requested_provider_ids
+        .iter()
+        .all(|provider_id| fresh_provider_ids.contains(provider_id))
+}
+
 impl MatrixSdkGroupManager {
     pub fn new(client: Client, request_timeout: Duration) -> Self {
         Self {
@@ -440,11 +449,10 @@ impl MatrixSdkGroupManager {
                 }) {
                     return Ok(None);
                 }
-                if request
-                    .participant_provider_ids
-                    .iter()
-                    .any(|provider_id| !fresh_member_provider_ids.contains(provider_id))
-                {
+                if !requested_members_have_fresh_evidence(
+                    &request.participant_provider_ids,
+                    &fresh_member_provider_ids,
+                ) {
                     return Ok(None);
                 }
             }
@@ -454,6 +462,12 @@ impl MatrixSdkGroupManager {
                         .iter()
                         .any(|member| member == provider_id)
                 }) {
+                    return Ok(None);
+                }
+                if !requested_members_have_fresh_evidence(
+                    &request.participant_provider_ids,
+                    &fresh_member_provider_ids,
+                ) {
                     return Ok(None);
                 }
             }
@@ -630,7 +644,20 @@ impl MatrixGroupManager for MatrixSdkGroupManager {
 mod tests {
     use std::collections::HashSet;
 
-    use super::correlate_bridge_success;
+    use super::{correlate_bridge_success, requested_members_have_fresh_evidence};
+
+    #[test]
+    fn removal_requires_fresh_evidence_for_every_requested_target() {
+        let fresh = HashSet::from(["member-a".to_owned()]);
+        assert!(!requested_members_have_fresh_evidence(
+            &["member-a".to_owned(), "member-b".to_owned()],
+            &fresh,
+        ));
+        assert!(requested_members_have_fresh_evidence(
+            &["member-a".to_owned()],
+            &fresh,
+        ));
+    }
 
     #[test]
     fn bridge_success_requires_every_submitted_target_and_ignores_unrelated_events() {
