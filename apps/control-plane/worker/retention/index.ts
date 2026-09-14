@@ -13,6 +13,7 @@ export {
   createStoreAdapter,
   createSynapseAdapter,
   createUnavailableAdapter,
+  createUnavailableAuxiliaryAdapter,
   type ControlledCopyAdapter,
   type RetentionBackendCopy,
   type RetentionCleanupContext,
@@ -21,15 +22,28 @@ export {
   type RetentionStoreBackend,
 } from "./adapters";
 export {
+  CONTROLLED_COPY_BACKEND_ENV,
+  CONTROLLED_COPY_RUNTIME_PROTOCOL,
+  createConfiguredControlledCopyAdapters,
+  createHttpRetentionBackend,
+  type RetentionRuntimeEnvironment,
+  type RetentionRuntimeFetcher,
+} from "./runtime";
+export {
   CONTROLLED_COPY_WORKER_LEASE_MS,
   MAX_CONTROLLED_COPY_BATCH,
   controlledCopyDeadlines,
   createControlledCopyRetentionPlan,
   evaluateControlledCopyCompletion,
+  runControlledCopyRetentionForRemoval,
+  runControlledCopyRetentionSweep,
   readControlledCopyEvidence,
   readControlledCopyOperations,
   recordControlledCopyEvidence,
   runControlledCopyRetentionWorker,
   type ControlledCopyPlanResult,
+  type ControlledCopyRetentionSweepResult,
+  type ControlledCopyRunResult,
   type ControlledCopyWorkerResult,
+  type RetentionDatabase,
 } from "./service";

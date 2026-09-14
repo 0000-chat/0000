@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
+import { ControlledCopyCompletionSchema } from "./controlled-copies";
 
 /**
  * Removal records are intentionally provider-neutral.  A resource id may be
@@ -174,6 +175,11 @@ export const RemovalStatusResponseSchema = z
     active_suppression: z.literal("enforced"),
     physical_purge: z.literal("not_implemented"),
     archive_purge: z.array(ArchiveRemovalStatusSchema).max(10_000),
+    /** Combined canonical-archive and required controlled-copy progress. */
+    controlled_copy: z
+      .array(ControlledCopyCompletionSchema)
+      .max(10_000)
+      .default([]),
   })
   .strict();
 export type RemovalStatusResponse = z.infer<typeof RemovalStatusResponseSchema>;

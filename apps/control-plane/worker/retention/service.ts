@@ -15,14 +15,17 @@ import {
   type ControlledCopyStore,
 } from "@communicator/contracts";
 import { randomIdentifier } from "../oauth/crypto";
+import { listAllRemovalAuthorities } from "../removals/ledger";
+import type { RemovalAuthority } from "../../../../packages/contracts/src/removals";
 import {
   createUnavailableAdapter,
+  createUnavailableAuxiliaryAdapter,
   type ControlledCopyAdapter,
   type RetentionInventoryResult,
   type RetentionInventoryScope,
 } from "./adapters";
 
-type RetentionDatabase = D1Database | D1DatabaseSession;
+export type RetentionDatabase = D1Database | D1DatabaseSession;
 
 export const CONTROLLED_COPY_WORKER_LEASE_MS = 60_000;
 export const MAX_CONTROLLED_COPY_BATCH = 100;
@@ -422,10 +425,14 @@ const appendEvidence = async (
   const nextStatus = operationStatusForEvidence(operation, evidence);
   const terminal = nextStatus === "complete" || nextStatus === "preserved";
   const statement = leaseRequired
-    ? `UPDATE controlled_copy_operations
-       SET status = ?, lease_token = NULL, lease_expires_at = NULL,
-           last_error = ?, completed_at = ?, updated_at = ?
-       WHERE id = ? AND tenant_id = ? AND status = 'leased' AND lease_token = ?`
+    ? terminal
+      ? `UPDATE controlled_copy_operations
+         SET status = ?, lease_token = NULL, lease_expires_at = NULL,
+             last_error = ?, completed_at = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ? AND status = 'leased' AND lease_token = ?`
+      : `UPDATE controlled_copy_operations
+         SET status = ?, last_error = ?, completed_at = NULL, updated_at = ?
+         WHERE id = ? AND tenant_id = ? AND status = 'leased' AND lease_token = ?`
     : `UPDATE controlled_copy_operations
        SET status = ?, lease_token = NULL, lease_expires_at = NULL,
            last_error = ?, completed_at = ?, updated_at = ?
@@ -433,15 +440,24 @@ const appendEvidence = async (
          AND status IN ('planned', 'incomplete', 'failed')
          AND lease_token IS NULL`;
   const bindings = leaseRequired
-    ? [
-        nextStatus,
-        terminal ? null : evidence.detail,
-        terminal ? observedAt : null,
-        observedAt,
-        operation.id,
-        operation.tenant_id,
-        workerToken,
-      ]
+    ? terminal
+      ? [
+          nextStatus,
+          null,
+          observedAt,
+          observedAt,
+          operation.id,
+          operation.tenant_id,
+          workerToken,
+        ]
+      : [
+          nextStatus,
+          evidence.detail,
+          observedAt,
+          operation.id,
+          operation.tenant_id,
+          workerToken,
+        ]
     : [
         nextStatus,
         terminal ? null : evidence.detail,
@@ -479,6 +495,79 @@ const recordInventoryResult = async (
     now,
     false,
   );
+};
+
+/**
+ * A removal can be recorded before a provider endpoint is configured.  That
+ * first pass creates an unavailable inventory operation.  When a later
+ * scheduled pass reaches a real provider, preserve that original evidence
+ * but move the operation's current owner to the configured adapter and let
+ * the provider's inventory close the old placeholder.  Without this bridge,
+ * a valid provider would be permanently blocked by its own earlier absence.
+ */
+const reconcileUnavailableInventory = async (
+  db: D1DatabaseSession,
+  lineage: ControlledCopyLineage,
+  adapter: ControlledCopyAdapter,
+  scope: RetentionInventoryScope,
+  now: string,
+): Promise<boolean> => {
+  const row = await db
+    .prepare(
+      `SELECT ${OPERATION_COLUMNS}
+       FROM controlled_copy_operations
+       WHERE tenant_id = ? AND removal_id = ? AND store = ?
+         AND resource_id = ? AND content_generation = ? AND reference = ?
+       LIMIT 1`,
+    )
+    .bind(
+      lineage.tenant_id,
+      lineage.removal_id,
+      adapter.store,
+      scope.resource_id,
+      scope.content_generation,
+      inventoryReference(adapter.store, scope.resource_id),
+    )
+    .first<OperationRow>();
+  if (row === null) return false;
+  const operation = parseOperation(row);
+  const nowMs = Date.parse(now);
+  const leaseExpiryMs =
+    operation.lease_expires_at === null
+      ? null
+      : Date.parse(operation.lease_expires_at);
+  const leaseActive =
+    operation.lease_token !== null &&
+    (leaseExpiryMs === null || leaseExpiryMs > nowMs);
+  if (
+    operation.content_class !== "inventory" ||
+    (!operation.owner.endsWith("-unavailable") &&
+      !operation.owner.endsWith("-configuration")) ||
+    leaseActive ||
+    ["complete", "preserved"].includes(operation.status)
+  ) {
+    return false;
+  }
+  await db
+    .prepare(
+      `UPDATE controlled_copy_operations
+       SET status = 'incomplete', owner = ?, deletion_method = ?, required = ?,
+           lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+       WHERE id = ? AND tenant_id = ?
+         AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)
+         AND status IN ('planned', 'incomplete', 'failed', 'leased')`,
+    )
+    .bind(
+      adapter.owner,
+      adapter.deletion_method,
+      adapter.required ? 1 : 0,
+      now,
+      operation.id,
+      operation.tenant_id,
+      now,
+    )
+    .run();
+  return true;
 };
 
 const safeInventory = async (
@@ -539,13 +628,10 @@ export const createControlledCopyRetentionPlan = async ({
   const allAdapters = CONTROLLED_COPY_STORES.map(
     (store) => byStore.get(store) ?? createUnavailableAdapter(store),
   );
-  for (const adapter of adapters) {
-    if (
-      adapter.store === "session_credentials" ||
-      adapter.store === "account_keys"
-    ) {
-      allAdapters.push(adapter);
-    }
+  for (const store of ["session_credentials", "account_keys"] as const) {
+    allAdapters.push(
+      byStore.get(store) ?? createUnavailableAuxiliaryAdapter(store),
+    );
   }
 
   const operations: ControlledCopyOperation[] = [];
@@ -558,21 +644,35 @@ export const createControlledCopyRetentionPlan = async ({
         error: result.detail ?? "inventory incomplete",
       });
     }
+    const reconciledUnavailable = await reconcileUnavailableInventory(
+      db,
+      lineage,
+      adapter,
+      scope,
+      nowIso,
+    );
     const copies =
       result.copies.length > 0
         ? result.copies.map((copy) => inventoryItemFor(adapter, copy, scope))
         : [inventoryPlaceholder(adapter, scope)];
     for (const item of copies) {
       const operation = await insertOrReadOperation(db, lineage, item, nowIso);
-      if (result.copies.length === 0 || !result.complete) {
+      if (result.copies.length === 0) {
         operations.push(
           await recordInventoryResult(db, operation, result, now),
         );
       } else {
+        // A provider may prove an exact reference while honestly reporting
+        // that its bounded scan did not enumerate every historical copy.
+        // Keep the known copy actionable; the separate inventory placeholder
+        // below remains incomplete and blocks aggregate completion.
         operations.push(operation);
       }
     }
-    if (!result.complete && result.copies.length > 0) {
+    if (
+      (result.complete && result.copies.length > 0 && reconciledUnavailable) ||
+      (!result.complete && result.copies.length > 0)
+    ) {
       const inventoryGap = await insertOrReadOperation(
         db,
         lineage,
@@ -602,7 +702,8 @@ const claimOperation = async (
        SET status = 'leased', lease_token = ?, lease_expires_at = ?,
            last_error = NULL, updated_at = ?
        WHERE id = ? AND tenant_id = ? AND (
-         status IN ('planned', 'incomplete', 'failed') OR
+         (status IN ('planned', 'incomplete', 'failed') AND
+           (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)) OR
          (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
        )`,
     )
@@ -612,6 +713,7 @@ const claimOperation = async (
       nowIso,
       candidate.id,
       candidate.tenant_id,
+      nowIso,
       nowIso,
     )
     .run();
@@ -632,12 +734,14 @@ export const runControlledCopyRetentionWorker = async ({
   now = new Date(),
   limit = MAX_CONTROLLED_COPY_BATCH,
   leaseMs = CONTROLLED_COPY_WORKER_LEASE_MS,
+  scope,
 }: {
   database: RetentionDatabase;
   adapters: readonly ControlledCopyAdapter[];
   now?: Date;
   limit?: number;
   leaseMs?: number;
+  scope?: Pick<ControlledCopyLineage, "tenant_id" | "removal_id">;
 }): Promise<ControlledCopyWorkerResult> => {
   if (
     !Number.isSafeInteger(limit) ||
@@ -651,15 +755,21 @@ export const runControlledCopyRetentionWorker = async ({
   }
   const db = primarySession(database);
   const nowIso = timestamp(now);
+  const scopeClause =
+    scope === undefined ? "" : " AND tenant_id = ? AND removal_id = ?";
   const candidates = await db
     .prepare(
       `SELECT ${OPERATION_COLUMNS}
        FROM controlled_copy_operations
-       WHERE status IN ('planned', 'incomplete', 'failed') OR
-         (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+       WHERE (status IN ('planned', 'incomplete', 'failed') OR
+         (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))${scopeClause}
        ORDER BY cleanup_deadline ASC, id ASC LIMIT ?`,
     )
-    .bind(nowIso, limit)
+    .bind(
+      ...(scope === undefined
+        ? [nowIso, limit]
+        : [nowIso, scope.tenant_id, scope.removal_id, limit]),
+    )
     .all<OperationRow>();
   const result: ControlledCopyWorkerResult = {
     claimed: 0,
@@ -884,6 +994,21 @@ export const evaluateControlledCopyCompletion = async ({
         : "canonical_archive_incomplete",
     );
   }
+  for (const operation of operations.filter((item) => !item.required)) {
+    if (!["complete", "preserved"].includes(operation.status)) {
+      alerts.push(`controlled_copy_auxiliary_${operation.store}_incomplete`);
+    }
+    if (Date.parse(timestamp(now)) > Date.parse(operation.cleanup_deadline)) {
+      alerts.push(
+        `controlled_copy_auxiliary_${operation.store}_cleanup_deadline_missed`,
+      );
+    }
+    if (Date.parse(timestamp(now)) > Date.parse(operation.retention_deadline)) {
+      alerts.push(
+        `controlled_copy_auxiliary_${operation.store}_hard_deadline_missed`,
+      );
+    }
+  }
   const status =
     missingStores.length === 0 &&
     incompleteStores.length === 0 &&
@@ -907,6 +1032,128 @@ export const evaluateControlledCopyCompletion = async ({
     alerts: [...new Set(alerts)],
     checked_at: timestamp(now),
   });
+};
+
+export type ControlledCopyRunResult = {
+  plan: ControlledCopyPlanResult;
+  worker: ControlledCopyWorkerResult;
+  completion: ControlledCopyCompletion;
+};
+
+/**
+ * Run the complete per-removal lifecycle.  The worker is scoped to the
+ * removal so a user-triggered removal cannot opportunistically clean another
+ * tenant's due copies; the cron sweep uses the same function for each row.
+ */
+export const runControlledCopyRetentionForRemoval = async ({
+  database,
+  lineage,
+  adapters,
+  canonicalArchive = "missing",
+  now = new Date(),
+}: {
+  database: RetentionDatabase;
+  lineage: ControlledCopyLineage;
+  adapters: readonly ControlledCopyAdapter[];
+  canonicalArchive?: "complete" | "incomplete" | "missing";
+  now?: Date;
+}): Promise<ControlledCopyRunResult> => {
+  const plan = await createControlledCopyRetentionPlan({
+    database,
+    lineage,
+    adapters,
+    now,
+  });
+  const worker = await runControlledCopyRetentionWorker({
+    database,
+    adapters,
+    now,
+    scope: lineage,
+  });
+  const completion = await evaluateControlledCopyCompletion({
+    database,
+    tenantId: lineage.tenant_id,
+    removalId: lineage.removal_id,
+    resourceId: lineage.resource_id,
+    contentGeneration: lineage.content_generation,
+    deletionEpoch: lineage.deletion_epoch,
+    canonicalArchive,
+    now,
+  });
+  return { plan, worker, completion };
+};
+
+export type ControlledCopyRetentionSweepResult = {
+  processed: number;
+  complete: ControlledCopyCompletion[];
+  incomplete: ControlledCopyCompletion[];
+  errors: Array<{ removal_id: string; error: string }>;
+};
+
+const retentionErrorMessage = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.trim().slice(0, 4_096) || "controlled copy sweep failed";
+};
+
+/**
+ * Reconcile every durable removal authority during the scheduled wakeup.  A
+ * missing archive callback is deliberately represented as `missing`, so the
+ * aggregate can never infer archive completion from controlled-store success.
+ */
+export const runControlledCopyRetentionSweep = async ({
+  database,
+  adapters,
+  now = new Date(),
+  limit = MAX_CONTROLLED_COPY_BATCH,
+  canonicalArchiveFor,
+}: {
+  database: RetentionDatabase;
+  adapters: readonly ControlledCopyAdapter[];
+  now?: Date;
+  limit?: number;
+  canonicalArchiveFor?: (
+    authority: RemovalAuthority,
+  ) => Promise<"complete" | "incomplete" | "missing">;
+}): Promise<ControlledCopyRetentionSweepResult> => {
+  const authorities = await listAllRemovalAuthorities(database, limit);
+  const result: ControlledCopyRetentionSweepResult = {
+    processed: 0,
+    complete: [],
+    incomplete: [],
+    errors: [],
+  };
+  for (const authority of authorities) {
+    try {
+      const canonicalArchive =
+        (await canonicalArchiveFor?.(authority)) ?? "missing";
+      const run = await runControlledCopyRetentionForRemoval({
+        database,
+        adapters,
+        lineage: {
+          tenant_id: authority.tenant_id,
+          removal_id: authority.id,
+          resource_type: authority.resource_type,
+          resource_id: authority.resource_id,
+          content_generation: authority.content_generation,
+          deletion_epoch: authority.deletion_epoch,
+        },
+        canonicalArchive,
+        now,
+      });
+      result.processed += 1;
+      if (run.completion.status === "complete") {
+        result.complete.push(run.completion);
+      } else {
+        result.incomplete.push(run.completion);
+      }
+    } catch (error: unknown) {
+      result.errors.push({
+        removal_id: authority.id,
+        error: retentionErrorMessage(error),
+      });
+    }
+  }
+  return result;
 };
 
 export const recordControlledCopyEvidence = async ({

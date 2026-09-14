@@ -1,0 +1,79 @@
+# Controlled-copy retention boundary
+
+The control-plane Worker cannot open the host PostgreSQL volumes, Synapse
+media directory, or restic repository. It invokes the private
+`controlled-copy-v1` boundary through the configured
+`COMMUNICATOR_RETENTION_*_URL` and `COMMUNICATOR_RETENTION_*_TOKEN` pairs.
+The repository-owned implementation is
+[`scripts/controlled-copy-retention.py`](../../scripts/controlled-copy-retention.py).
+Run it on the core host with `COMMUNICATOR_RETENTION_SERVICE_TOKEN` and a
+private listener; do not publish it through Caddy.
+
+The service reads the non-secret manifest at
+`$COMMUNICATOR_RUNTIME_DIR/retention/controlled-copy-manifest.json` (or
+`COMMUNICATOR_RETENTION_MANIFEST`). File-backed stores use a store-specific
+`COMMUNICATOR_RETENTION_<STORE>_ROOT` and remove only an exact manifest path
+under that root. The manifest must match the removal resource and generation;
+an unscoped directory is incomplete and cannot be deleted by guesswork.
+
+Synapse inventory entries may carry an exact `room_id` and Matrix `event_id`.
+Configure the actual homeserver separately as
+`COMMUNICATOR_RETENTION_SYNAPSE_HOMESERVER_URL` and provide its access token in
+`COMMUNICATOR_RETENTION_SYNAPSE_ACCESS_TOKEN`; the Worker-facing
+`COMMUNICATOR_RETENTION_SYNAPSE_URL` remains the controlled-copy service URL.
+With those host credentials, inventory checks the exact event through
+`/_matrix/client/v3/rooms/<room_id>/event/<event_id>`; a 404 proves that mapped
+event is absent, while other failures remain incomplete. Cleanup uses Synapse's
+supported Matrix redaction endpoint to redact that event. It records
+`quarantined` with `content_present: true`: Synapse's
+supported purge-history endpoint is room/event-prefix based and retains its
+cutoff event, so it cannot prove physical removal of one event without risking
+unrelated room history. This is useful suppression evidence, but it cannot
+complete the controlled-copy gate. An exact room/event mapping is required;
+the communicator removal record does not invent one.
+
+For the pinned `v26.08` Mautrix bridge-v2 images, bridge inventory entries must
+carry `bridge_id`, `message_id`, and `part_id`. Configure the bridge database
+connection in `COMMUNICATOR_RETENTION_BRIDGE_DATABASE_URL` (and optionally a
+test or wrapper binary in `COMMUNICATOR_RETENTION_BRIDGE_PSQL_BIN`). The host
+service checks the common bridge-v2 `message` table, then deletes that exact
+message part and matching `reaction` rows in one transaction. It never deletes
+a portal, account, session, or key row. An absent exact mapping or database
+connection remains incomplete.
+
+The configured Cloudflare Queue uses the real API when
+`COMMUNICATOR_RETENTION_QUEUE_ACCOUNT_ID`, `COMMUNICATOR_RETENTION_QUEUE_ID`,
+and `COMMUNICATOR_RETENTION_QUEUE_API_TOKEN` are present. Inventory calls the
+Queue `messages/peek` endpoint with `{ "batch_size": N }` and accepts an item
+only when its body carries the same resource id and content generation;
+cleanup calls `messages/purge` with `{ "refs": [{ "ref": "..." }] }`, using
+the opaque peek reference exactly as returned by Cloudflare. The service
+refuses to infer a resource from the Communicator ingestion pointer, and a
+full/ambiguous peek page remains incomplete. `COMMUNICATOR_RETENTION_QUEUE_API_URL`
+is only a test/private API base override. The generic command hook remains an
+explicit provider escape hatch for other configured stores, but it cannot turn
+an unscoped mapping into completion.
+
+Restic is handled directly only for an exclusive message-only snapshot. The
+cleanup invokes `restic forget <snapshot> --prune` after checking the manifest
+class and `exclusive_resource_id`. The existing [`backup-core.sh`](../../scripts/backup-core.sh)
+records its mixed database/media/session/key snapshot explicitly and merges a
+sidecar entry using the exact `snapshot_id` from that backup's JSON summary;
+historical entries and other store inventories are retained, while the sidecar
+does not claim complete historical enumeration. The service returns
+`lifecycle_pending` and preserves that mixed snapshot. This keeps session
+credentials and account keys outside message deletion and prevents a whole
+mixed snapshot from being treated as a per-message copy.
+
+The Worker always persists unavailable or unsupported stores as incomplete
+operations. Configure all required private endpoints before relying on a
+completion status; credentials and session-key adapters use `preserved` and
+are reported separately from the six required message-copy stores.
+
+The remaining shared registration seam is intentionally small: the HTTP
+removal handler and the removal MCP tool must pass
+`retentionAdapters: createConfiguredControlledCopyAdapters(context.env as
+Record<string, unknown>)` into `recordRemovalWithArchivePurge`. The scheduled
+Worker entry point already constructs and passes the same adapters. Status
+reads use the durable controlled-copy rows and therefore do not need a second
+provider call.

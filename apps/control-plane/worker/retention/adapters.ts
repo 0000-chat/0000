@@ -363,6 +363,7 @@ export const createAccountKeyAdapter = (
 export const createUnavailableAdapter = (
   store: ControlledCopyStore,
   owner = `${store}-unavailable`,
+  reason = "No controlled cleanup adapter is configured",
 ): ControlledCopyAdapter =>
   createStoreAdapter({
     store,
@@ -375,14 +376,48 @@ export const createUnavailableAdapter = (
         complete: false,
         copies: [],
         evidence_source: `${store}_adapter_unavailable`,
-        detail: "No controlled cleanup adapter is configured",
+        detail: reason,
       }),
       cleanup: async () => ({
         status: "unknown",
         content_present: true,
         evidence_source: `${store}_adapter_unavailable`,
         object_reference: null,
-        detail: "No controlled cleanup adapter is configured",
+        detail: reason,
+      }),
+    },
+  });
+
+/**
+ * An unavailable auxiliary store is visible in the same durable ledger, but
+ * its lifecycle remains preservation-only and never becomes a required
+ * message-copy deletion target.
+ */
+export const createUnavailableAuxiliaryAdapter = (
+  store: "session_credentials" | "account_keys",
+  owner = `${store}-unavailable`,
+  reason = "No controlled credential lifecycle adapter is configured",
+): ControlledCopyAdapter =>
+  createStoreAdapter({
+    store,
+    owner,
+    defaultContentClass:
+      store === "session_credentials" ? "session_credential" : "account_key",
+    deletionMethod: "preserve",
+    required: false,
+    backend: {
+      inventory: async () => ({
+        complete: false,
+        copies: [],
+        evidence_source: `${store}_adapter_unavailable`,
+        detail: reason,
+      }),
+      cleanup: async () => ({
+        status: "unknown",
+        content_present: true,
+        evidence_source: `${store}_adapter_unavailable`,
+        object_reference: null,
+        detail: reason,
       }),
     },
   });

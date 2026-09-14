@@ -6,7 +6,14 @@ import {
   runWebhookRetryTick,
   type WebhookCredentialStore,
 } from "./webhooks/delivery";
-import { runRemovalExpiryAndArchive } from "./archive/lifecycle";
+import {
+  readArchiveStatusForRemoval,
+  runRemovalExpiryAndArchive,
+} from "./archive/lifecycle";
+import {
+  createConfiguredControlledCopyAdapters,
+  runControlledCopyRetentionSweep,
+} from "./retention";
 
 const webhookCredentialStore = (
   env: Cloudflare.Env,
@@ -22,6 +29,9 @@ const worker: ExportedHandler<Cloudflare.Env, unknown> = {
   fetch: app.fetch.bind(app),
   queue: consumeIngestionQueue,
   scheduled: (_controller, env, context) => {
+    const retentionAdapters = createConfiguredControlledCopyAdapters(
+      env as unknown as Record<string, unknown>,
+    );
     const history = runHistoryImportTick(env).catch((error: unknown) => {
       console.error({
         event: "history_import_schedule_error",
@@ -41,12 +51,45 @@ const worker: ExportedHandler<Cloudflare.Env, unknown> = {
     const removals = runRemovalExpiryAndArchive({
       database: env.CONTROL_DB,
       bucket: env.EVENT_ARCHIVE,
-    }).catch((error: unknown) => {
-      console.error({
-        event: "removal_expiry_schedule_error",
-        error: error instanceof Error ? error.name : "unknown",
+      retentionAdapters,
+    })
+      .catch((error: unknown) => {
+        console.error({
+          event: "removal_expiry_schedule_error",
+          error: error instanceof Error ? error.name : "unknown",
+        });
+        return undefined;
+      })
+      .then(async (expiry) => {
+        const sweep = await runControlledCopyRetentionSweep({
+          database: env.CONTROL_DB,
+          adapters: retentionAdapters,
+          canonicalArchiveFor: async (authority) => {
+            const archive = await readArchiveStatusForRemoval(
+              { database: env.CONTROL_DB },
+              authority.tenant_id,
+              authority.id,
+            );
+            if (archive === null) return "missing";
+            return archive.operation.status === "complete"
+              ? "complete"
+              : "incomplete";
+          },
+        });
+        if (sweep.errors.length > 0) {
+          console.error({
+            event: "controlled_copy_retention_sweep_incomplete",
+            failed_removals: sweep.errors.length,
+          });
+        }
+        return { expiry, sweep };
+      })
+      .catch((error: unknown) => {
+        console.error({
+          event: "controlled_copy_retention_schedule_error",
+          error: error instanceof Error ? error.name : "unknown",
+        });
       });
-    });
     context.waitUntil(Promise.all([history, webhooks, removals]));
   },
 };

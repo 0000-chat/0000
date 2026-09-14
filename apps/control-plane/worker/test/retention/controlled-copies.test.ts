@@ -179,13 +179,15 @@ describe("controlled-copy retention", () => {
       now: fixedNow,
     });
 
-    expect(plan.operations).toHaveLength(6);
+    expect(plan.operations).toHaveLength(8);
     expect(plan.operations.map((operation) => operation.store).sort()).toEqual([
+      "account_keys",
       "bridge_database",
       "media_store",
       "projection_backup",
       "queue",
       "restic_snapshot",
+      "session_credentials",
       "synapse",
     ]);
     for (const operation of plan.operations) {
@@ -208,8 +210,9 @@ describe("controlled-copy retention", () => {
       adapters,
       now: fixedNow,
     });
-    expect(worker.claimed).toBe(6);
+    expect(worker.claimed).toBe(8);
     expect(worker.complete).toHaveLength(6);
+    expect(worker.incomplete).toHaveLength(2);
     expect(fixtures.every((fixture) => fixture.references.size === 0)).toBe(
       true,
     );
@@ -219,9 +222,26 @@ describe("controlled-copy retention", () => {
       lineage.tenant_id,
       lineage.removal_id,
     );
-    expect(evidence).toHaveLength(6);
-    expect(new Set(evidence.map((item) => item.operation_id)).size).toBe(6);
-    expect(evidence.every((item) => item.content_present === false)).toBe(true);
+    expect(evidence).toHaveLength(10);
+    expect(new Set(evidence.map((item) => item.operation_id)).size).toBe(8);
+    const requiredStoreNames = new Set([
+      "projection_backup",
+      "synapse",
+      "bridge_database",
+      "media_store",
+      "queue",
+      "restic_snapshot",
+    ]);
+    expect(
+      evidence
+        .filter((item) => requiredStoreNames.has(item.store))
+        .every((item) => item.content_present === false),
+    ).toBe(true);
+    expect(
+      evidence
+        .filter((item) => !requiredStoreNames.has(item.store))
+        .every((item) => item.content_present === true),
+    ).toBe(true);
 
     const withoutArchive = await evaluateControlledCopyCompletion({
       database: workerEnv.CONTROL_DB,
@@ -344,7 +364,7 @@ describe("controlled-copy retention", () => {
         now: fixedNow,
       }),
     ]);
-    expect(first.claimed + second.claimed).toBe(6);
+    expect(first.claimed + second.claimed).toBe(8);
     expect(
       fixtures.every((fixture) => fixture.cleanup.mock.calls.length === 1),
     ).toBe(true);
@@ -354,7 +374,14 @@ describe("controlled-copy retention", () => {
       lineage.removal_id,
     );
     expect(
-      operations.every((operation) => operation.status === "complete"),
+      operations
+        .filter((operation) => operation.required)
+        .every((operation) => operation.status === "complete"),
+    ).toBe(true);
+    expect(
+      operations
+        .filter((operation) => !operation.required)
+        .every((operation) => operation.status === "incomplete"),
     ).toBe(true);
   });
 
@@ -572,10 +599,24 @@ describe("controlled-copy retention", () => {
       now: fixedNow,
     });
     expect(result.status).toBe("complete");
-    expect(result.auxiliary_operations).toHaveLength(1);
-    expect(result.auxiliary_operations[0]).toMatchObject({
+    expect(result.auxiliary_operations).toHaveLength(2);
+    expect(
+      result.auxiliary_operations.find(
+        (operation) => operation.store === "session_credentials",
+      ),
+    ).toMatchObject({
       store: "session_credentials",
       status: "preserved",
+      required: false,
+      deletion_method: "preserve",
+    });
+    expect(
+      result.auxiliary_operations.find(
+        (operation) => operation.store === "account_keys",
+      ),
+    ).toMatchObject({
+      store: "account_keys",
+      status: "incomplete",
       required: false,
       deletion_method: "preserve",
     });

@@ -4,6 +4,7 @@ set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 runtime_dir=${COMMUNICATOR_RUNTIME_DIR:-/srv/communicator}
 staging=$(mktemp -d "$runtime_dir/backups/core.XXXXXX")
+restic_result=$(mktemp "$runtime_dir/backups/core-result.XXXXXX")
 
 restart_core() {
   docker compose --env-file deploy/images.lock.env up -d --wait --wait-timeout 180 synapse whatsapp messenger telegram
@@ -11,6 +12,7 @@ restart_core() {
 
 cleanup() {
   rm -rf -- "$staging"
+  rm -f -- "$restic_result"
   cd "$repo_dir"
   restart_core >/dev/null 2>&1 || true
 }
@@ -61,7 +63,40 @@ cp -a "$runtime_dir/secrets/telegram-db.env" "$staging/telegram-secrets/"
 cp -a "$runtime_dir/secrets/telegram-api-id" "$staging/telegram-secrets/"
 cp -a "$runtime_dir/secrets/telegram-api-hash" "$staging/telegram-secrets/"
 
-restic backup "$staging" --tag communicator-core
+# Keep a non-secret inventory record inside the snapshot. The core backup is
+# intentionally mixed: database dumps, media, bridge state, and session/account
+# credentials share one restic snapshot. Its in-snapshot marker is descriptive;
+# the sidecar written after restic returns is authoritative because only restic
+# can assign the actual snapshot id.
+backup_id=$(basename "$staging")
+backup_created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+install -d -m 0700 "$staging/retention"
+cat > "$staging/retention/controlled-copy-manifest.json" <<EOF
+{
+  "version": 1,
+  "stores": {
+    "restic_snapshot": {
+      "enumeration_complete": true,
+      "copies": [
+        {
+          "reference": "restic:${backup_id}",
+          "resource_id": "*",
+          "content_generation": "*",
+          "copy_created_at": "${backup_created_at}",
+          "content_classes": ["message", "session_credential", "account_key"]
+        }
+      ]
+    }
+  }
+}
+EOF
+
+restic backup --json --tag communicator-core "$staging" > "$restic_result"
+install -d -m 0700 "$runtime_dir/retention"
+python3 "$repo_dir/scripts/merge-controlled-copy-manifest.py" \
+  "$restic_result" \
+  "$runtime_dir/retention/controlled-copy-manifest.json" \
+  "$backup_created_at"
 restic check
 restart_core
 trap - EXIT
