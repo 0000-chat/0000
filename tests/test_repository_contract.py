@@ -355,6 +355,37 @@ def _config_key_paths(value, key, path=()):
             yield from _config_key_paths(child_value, key, (*path, str(index)))
 
 
+_CREDENTIAL_KEY_PATTERN = re.compile(
+    r"(?:secret|password|credential|cookie|private[_-]?key|access[_-]?key|"
+    r"token(?![_-]?(?:url|ttl)))",
+    flags=re.IGNORECASE,
+)
+_CREDENTIAL_VALUE_PATTERN = re.compile(
+    r"(?:-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|"
+    r"\b(?:bearer|basic)\s+[^\s]+|"
+    r"\b(?:client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"password|credential)\s*[:=]|"
+    r"\b(?:eyJ[A-Za-z0-9_-]+\.){2})",
+    flags=re.IGNORECASE,
+)
+
+
+def _credential_material_findings(value, path=()):
+    """Yield paths containing credential-shaped keys or values."""
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = (*path, str(key))
+            if _CREDENTIAL_KEY_PATTERN.search(str(key)):
+                yield ("key", child_path)
+            yield from _credential_material_findings(child, child_path)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _credential_material_findings(child, (*path, str(index)))
+    elif isinstance(value, str) and _CREDENTIAL_VALUE_PATTERN.search(value):
+        yield ("value", path)
+
+
 class RepositoryContractTests(unittest.TestCase):
     def test_generated_member_parser_handles_all_property_key_forms_and_nested_types(self):
         interface_body = r'''
@@ -502,9 +533,20 @@ class RepositoryContractTests(unittest.TestCase):
 
         serialized = json.dumps(config)
         self.assertNotIn("matrix.communicator.0000.gold", serialized)
-        self.assertNotRegex(serialized, re.compile(r"(?i)(secret|password|credential|token|cookie|session|phone|provider|account|matrix)"))
+        self.assertEqual([], list(_credential_material_findings(config)))
         self.assertNotRegex(serialized, re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"))
         self.assertNotRegex(serialized, re.compile(r"@[A-Za-z0-9._=-]+:[A-Za-z0-9.-]+"))
+
+    def test_configuration_credential_scanner_rejects_credential_shaped_fixtures(self):
+        fixtures = [
+            {"COMMUNICATOR_CLIENT_SECRET": "fixture-secret"},
+            {"authorization": "Bearer fixture-token"},
+            {"private_key": "-----BEGIN PRIVATE KEY-----\\nfixture\\n-----END PRIVATE KEY-----"},
+            {"opaque": "eyJfixture-header.eyJfixture-payload.signature"},
+        ]
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture):
+                self.assertTrue(list(_credential_material_findings(fixture)))
 
     def test_communicator_staging_runbook_has_approval_gate_and_safe_order(self):
         runbook = (ROOT / "docs/runbooks/backoffice-staging.md").read_text()
@@ -533,12 +575,17 @@ class RepositoryContractTests(unittest.TestCase):
         )
         config = json.loads(config_text)
         class_name = "TenantProjectionDO"
+        link_class_name = "LinkSessionDO"
         expected_binding = [
             {"name": "TENANT_PROJECTION", "class_name": class_name},
+            {"name": "LINK_SESSIONS", "class_name": link_class_name},
         ]
 
         self.assertEqual(
-            {class_name: {"type": "durable-object", "storage": "sqlite"}},
+            {
+                class_name: {"type": "durable-object", "storage": "sqlite"},
+                link_class_name: {"type": "durable-object", "storage": "sqlite"},
+            },
             config["exports"],
         )
         self.assertEqual(expected_binding, config["durable_objects"]["bindings"])
@@ -553,6 +600,9 @@ class RepositoryContractTests(unittest.TestCase):
         generated_header = generated.split("// Begin runtime types", 1)[0]
         projection_namespace_type = (
             'DurableObjectNamespace<import("./worker/index").TenantProjectionDO>'
+        )
+        link_session_namespace_type = (
+            'DurableObjectNamespace<import("./worker/index").LinkSessionDO>'
         )
         common_environment_bindings = [
             ("EVENT_ARCHIVE", False, "R2Bucket"),
@@ -588,27 +638,108 @@ class RepositoryContractTests(unittest.TestCase):
                 False,
                 '"https://ingestion-auth.local.invalid/.well-known/jwks.json"',
             ),
+            (
+                "COMMUNICATOR_OAUTH_ISSUER",
+                False,
+                '"https://communicator-staging.local.invalid/" | '
+                '"https://communicator-production.local.invalid/" | '
+                '"https://communicator.local.invalid/"',
+            ),
+            (
+                "COMMUNICATOR_OAUTH_RESOURCE",
+                False,
+                '"https://communicator-staging.local.invalid/mcp" | '
+                '"https://communicator-production.local.invalid/mcp" | '
+                '"https://communicator.local.invalid/mcp"',
+            ),
+            ("COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS", False, '"900"'),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL",
+                False,
+                '"https://auth.local.invalid/authorize"',
+            ),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID",
+                False,
+                '"communicator-staging" | "communicator-production" | "communicator-local"',
+            ),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI",
+                False,
+                '"https://communicator-staging.local.invalid/oauth/callback" | '
+                '"https://communicator-production.local.invalid/oauth/callback" | '
+                '"https://communicator.local.invalid/oauth/callback"',
+            ),
+            ("COMMUNICATOR_OAUTH_HUMAN_SCOPE", False, '"openid profile"'),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL",
+                False,
+                '"https://auth.local.invalid/token"',
+            ),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_ISSUER",
+                False,
+                '"https://auth.local.invalid/"',
+            ),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE",
+                False,
+                '"communicator-api-staging" | "communicator-api-production" | "communicator-api"',
+            ),
+            (
+                "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL",
+                False,
+                '"https://auth.local.invalid/.well-known/jwks.json"',
+            ),
+            (
+                "CONNECTION_GATEWAY_URL",
+                False,
+                '"https://matrix-gateway.internal.example.invalid"',
+            ),
             ("TENANT_PROJECTION", False, projection_namespace_type),
+            ("LINK_SESSIONS", False, link_session_namespace_type),
         ]
+        environment_specific_types = {
+            "StagingEnv": {
+                "COMMUNICATOR_OAUTH_ISSUER": '"https://communicator-staging.local.invalid/"',
+                "COMMUNICATOR_OAUTH_RESOURCE": '"https://communicator-staging.local.invalid/mcp"',
+                "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID": '"communicator-staging"',
+                "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI": '"https://communicator-staging.local.invalid/oauth/callback"',
+                "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": '"communicator-api-staging"',
+            },
+            "ProductionEnv": {
+                "COMMUNICATOR_OAUTH_ISSUER": '"https://communicator-production.local.invalid/"',
+                "COMMUNICATOR_OAUTH_RESOURCE": '"https://communicator-production.local.invalid/mcp"',
+                "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID": '"communicator-production"',
+                "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI": '"https://communicator-production.local.invalid/oauth/callback"',
+                "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE": '"communicator-api-production"',
+            },
+        }
+
+        def expected_environment_bindings(interface_name, environment_type, data_mode):
+            overrides = environment_specific_types.get(interface_name, {})
+            return [
+                *common_environment_bindings[:3],
+                ("COMMUNICATOR_ENV", False, environment_type),
+                ("COMMUNICATOR_DATA_MODE", False, data_mode),
+                *[
+                    (name, optional, overrides.get(name, type_name))
+                    for name, optional, type_name in common_environment_bindings[3:]
+                ],
+            ]
+
         expected_bindings = {
-            "__BaseEnv_Env": [
-                *common_environment_bindings[:3],
-                ("COMMUNICATOR_ENV", False, '"staging" | "production" | "development"'),
-                ("COMMUNICATOR_DATA_MODE", False, '"simulated" | "live"'),
-                *common_environment_bindings[3:],
-            ],
-            "StagingEnv": [
-                *common_environment_bindings[:3],
-                ("COMMUNICATOR_ENV", False, '"staging"'),
-                ("COMMUNICATOR_DATA_MODE", False, '"simulated"'),
-                *common_environment_bindings[3:],
-            ],
-            "ProductionEnv": [
-                *common_environment_bindings[:3],
-                ("COMMUNICATOR_ENV", False, '"production"'),
-                ("COMMUNICATOR_DATA_MODE", False, '"live"'),
-                *common_environment_bindings[3:],
-            ],
+            "__BaseEnv_Env": expected_environment_bindings(
+                "__BaseEnv_Env",
+                '"staging" | "production" | "development"',
+                '"simulated" | "live"',
+            ),
+            "StagingEnv": expected_environment_bindings(
+                "StagingEnv", '"staging"', '"simulated"'
+            ),
+            "ProductionEnv": expected_environment_bindings(
+                "ProductionEnv", '"production"', '"live"'
+            ),
         }
         for interface_name, expected in expected_bindings.items():
             bodies = _interface_bodies(generated_header, interface_name)
@@ -618,11 +749,11 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertEqual(len(members), len({member[0] for member in members}), interface_name)
             self.assertEqual(sorted(expected), sorted(members), interface_name)
             self.assertEqual(
-                ["TENANT_PROJECTION"],
+                ["LINK_SESSIONS", "TENANT_PROJECTION"],
                 sorted(
                     name
                     for name in _generated_member_names(body)
-                    if "PROJECTION" in name
+                    if name in {"LINK_SESSIONS", "TENANT_PROJECTION"}
                 ),
                 interface_name,
             )
@@ -644,6 +775,10 @@ class RepositoryContractTests(unittest.TestCase):
         worker_index = (ROOT / "apps/control-plane/worker/index.ts").read_text()
         self.assertIn(
             'export { TenantProjectionDO } from "./projection/tenant-projection";',
+            worker_index,
+        )
+        self.assertIn(
+            'export { LinkSessionDO } from "./linking/session";',
             worker_index,
         )
 
@@ -692,7 +827,10 @@ class RepositoryContractTests(unittest.TestCase):
         for pattern in side_effect_patterns:
             self.assertIsNone(re.search(pattern, projection_code, flags=re.IGNORECASE), pattern)
         self.assertIsNone(
-            re.search(r"\b(?:EVENT_ARCHIVE|CONTROL_DB|R2Bucket|R2Object)\b", projection_code)
+            re.search(
+                r"\b(?:EVENT_ARCHIVE|INGESTION_QUEUE|Queue|R2Bucket|R2Object)\b",
+                projection_code,
+            )
         )
 
         for pattern in (
