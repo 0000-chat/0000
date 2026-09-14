@@ -62,6 +62,9 @@ class SynapseRetentionConfigTests(unittest.TestCase):
         self.assertIn("COMMUNICATOR_RETENTION_SYNAPSE_DATABASE_URL", source)
         self.assertIn("redactions.have_censored", source)
         self.assertIn("event_json", source)
+        self.assertIn("content == {}", source)
+        self.assertIn("intact_censored", source)
+        self.assertIn("synapse_event_json_inconsistent", source)
         self.assertIn("synapse_event_json_censor", source)
 
 

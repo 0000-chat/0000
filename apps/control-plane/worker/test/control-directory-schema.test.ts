@@ -31,6 +31,8 @@ const applicationTables = [
   "revoked_tokens",
   "directory_mutations",
   "control_event_outbox",
+  "controlled_copy_operations",
+  "controlled_copy_evidence",
   "audit_events",
   "realtime_tickets",
   "oauth_clients",

@@ -32,6 +32,7 @@ class RestoreCoreTests(unittest.TestCase):
         db_init = DB_INIT.read_text()
 
         self.assertIn('[[ -f "$payload/whatsapp.pgdump" ]]', source)
+        self.assertIn('[[ -f "$payload/retention/controlled-copy-layout.json" ]]', source)
         self.assertIn('cp -a "$payload/whatsapp-data/." "$restore_root/runtime/whatsapp/"', source)
         self.assertIn('chown -R 1337:1337 "$restore_root/runtime/whatsapp"', source)
         self.assertIn('[[ "$(stat -c \'%a\' "$restore_root/runtime/whatsapp/config.yaml")" == 600 ]]', source)

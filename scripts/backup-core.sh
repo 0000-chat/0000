@@ -91,6 +91,12 @@ cat > "$staging/retention/controlled-copy-manifest.json" <<EOF
 }
 EOF
 
+# Describe the actual custom-format database payload before restic assigns its
+# snapshot id.  The retention worker uses this non-secret contract to restore
+# and rewrite exact supported rows in an isolated PostgreSQL cluster; it never
+# treats a pgdump as a file-per-message archive.
+python3 "$repo_dir/scripts/write-controlled-copy-layout.py" "$staging"
+
 restic backup --json --tag communicator-core "$staging" > "$restic_result"
 install -d -m 0700 "$runtime_dir/retention"
 python3 "$repo_dir/scripts/merge-controlled-copy-manifest.py" \

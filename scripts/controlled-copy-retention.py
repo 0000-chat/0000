@@ -58,6 +58,20 @@ STORE_ENV_NAMES = {
     "account_keys": "ACCOUNT_KEYS",
 }
 
+# ``backup-core.sh`` uses PostgreSQL custom-format dumps.  A custom dump is a
+# database image, not a file-per-message archive: one dump can contain event
+# bodies, bridge rows, credentials, and unrelated tenants.  The migration
+# path below therefore accepts only these explicit database contracts and
+# rewrites a restored database in an isolated local PostgreSQL cluster.
+CORE_BACKUP_FORMAT = "communicator-core-pgdump-v1"
+CORE_DATABASE_CONTRACTS = {
+    "synapse": "synapse-event-json-v1",
+    "whatsapp_bridge": "mautrix-bridge-message-v1",
+    "messenger_bridge": "mautrix-bridge-message-v1",
+    "telegram_bridge": "mautrix-bridge-message-v1",
+}
+CORE_EVENT_TYPES = {"m.room.message", "m.room.encrypted"}
+
 
 class RetentionError(Exception):
     """An operator-visible, secret-free backend error."""
@@ -71,6 +85,22 @@ def required_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RetentionError(f"controlled-copy {name} is required")
     return value.strip()
+
+
+def sql_literal(value: str, name: str = "SQL value") -> str:
+    """Render one validated value without relying on psql variable expansion."""
+    if "\x00" in value:
+        raise RetentionError(f"controlled-copy {name} contains an invalid character")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def render_sql_variables(query: str, variables: Mapping[str, str]) -> str:
+    rendered = query
+    for name, value in variables.items():
+        rendered = rendered.replace(
+            f":'{name}'", sql_literal(value, f"SQL variable {name}")
+        )
+    return rendered
 
 
 def safe_segment(value: str, name: str) -> str:
@@ -293,30 +323,50 @@ def synapse_database_configuration() -> tuple[str, str] | None:
 
 
 SYNAPSE_EVENT_STATE_QUERY = """
+WITH target AS (
+  SELECT
+    events.room_id,
+    events.event_id,
+    events.type,
+    event_json.json::jsonb AS body
+  FROM events
+  INNER JOIN event_json
+    ON event_json.room_id = events.room_id
+   AND event_json.event_id = events.event_id
+  WHERE events.room_id = :'room_id'
+    AND events.event_id = :'event_id'
+),
+redaction AS (
+  SELECT redactions.have_censored
+  FROM redactions
+  WHERE redactions.redacts = :'event_id'
+  ORDER BY redactions.event_id DESC
+  LIMIT 1
+)
 SELECT CASE
-  WHEN EXISTS (
-    SELECT 1
-    FROM redactions
-    INNER JOIN event_json ON event_json.event_id = redactions.redacts
-    WHERE redactions.redacts = :'event_id'
-      AND redactions.have_censored IS TRUE
-  ) THEN 'censored'
-  WHEN EXISTS (
-    SELECT 1
-    FROM redactions
-    INNER JOIN event_json ON event_json.event_id = redactions.redacts
-    WHERE redactions.redacts = :'event_id'
-  ) THEN 'redacted'
-  WHEN EXISTS (
-    SELECT 1 FROM event_json WHERE event_json.event_id = :'event_id'
-  ) THEN 'present'
-  ELSE 'missing'
+  WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'missing'
+  WHEN (SELECT type FROM target) <> :'event_type' THEN 'type_mismatch'
+  WHEN (SELECT type FROM target) NOT IN ('m.room.message', 'm.room.encrypted')
+    THEN 'unsupported'
+  WHEN COALESCE((SELECT body FROM target)->'content', 'null'::jsonb) <> '{}'::jsonb
+    THEN CASE
+      WHEN EXISTS (SELECT 1 FROM redaction WHERE have_censored IS TRUE)
+        THEN 'intact_censored'
+      ELSE 'present'
+    END
+  WHEN EXISTS (SELECT 1 FROM redaction WHERE have_censored IS TRUE)
+    THEN 'censored'
+  ELSE 'redacted'
 END;
 """
 
 
 def run_synapse_psql(
-    database_url: str, binary: str, event_id: str
+    database_url: str,
+    binary: str,
+    room_id: str,
+    event_id: str,
+    event_type: str,
 ) -> str:
     command = [
         binary,
@@ -324,11 +374,12 @@ def run_synapse_psql(
         "--tuples-only",
         "--no-align",
         "--quiet",
-        "--set",
-        f"event_id={event_id}",
         database_url,
         "--command",
-        SYNAPSE_EVENT_STATE_QUERY,
+        render_sql_variables(
+            SYNAPSE_EVENT_STATE_QUERY,
+            {"room_id": room_id, "event_id": event_id, "event_type": event_type},
+        ),
     ]
     try:
         result = subprocess.run(
@@ -343,17 +394,33 @@ def run_synapse_psql(
     if result.returncode != 0:
         raise RetentionError("controlled-copy Synapse database query failed")
     state = result.stdout.strip().splitlines()
-    if not state or state[-1].strip() not in {"censored", "redacted", "present", "missing"}:
+    if not state or state[-1].strip() not in {
+        "censored",
+        "redacted",
+        "present",
+        "missing",
+        "intact_censored",
+        "type_mismatch",
+        "unsupported",
+    }:
         raise RetentionError("controlled-copy Synapse event state is invalid")
     return state[-1].strip()
 
 
-def synapse_event_state(event_id: str) -> str | None:
+def synapse_event_state(
+    event_id: str, room_id: str | None = None, event_type: str | None = None
+) -> str | None:
     configuration = synapse_database_configuration()
     if configuration is None:
         return None
     database_url, binary = configuration
-    return run_synapse_psql(database_url, binary, event_id)
+    if not isinstance(room_id, str) or not room_id.strip():
+        raise RetentionError("controlled-copy Synapse room mapping is required")
+    if event_type is None:
+        event_type = "m.room.message"
+    if event_type not in CORE_EVENT_TYPES:
+        raise RetentionError("controlled-copy Synapse event type is unsupported")
+    return run_synapse_psql(database_url, binary, room_id, event_id, event_type)
 
 
 def synapse_event_endpoint(base_url: str, room_id: str, event_id: str) -> str:
@@ -406,20 +473,22 @@ def inventory_synapse_from_server(scope: Mapping[str, Any]) -> dict[str, Any]:
     for copy in entries:
         room_id = copy.get("room_id")
         event_id = copy.get("event_id")
+        event_type = copy.get("event_type", "m.room.message")
         if (
             not isinstance(room_id, str)
             or not room_id.strip()
             or not isinstance(event_id, str)
             or not event_id.strip()
+            or event_type not in CORE_EVENT_TYPES
         ):
             invalid_mapping = True
             continue
-        state = synapse_event_state(event_id)
+        state = synapse_event_state(event_id, room_id, event_type)
         if state is None:
             state = "present" if synapse_event_exists(
                 base_url, access_token, room_id, event_id
             ) else "missing"
-        if state in {"present", "redacted"}:
+        if state in {"present", "redacted", "intact_censored"}:
             copies.append(copy)
     complete = manifest_complete and not invalid_mapping
     return {
@@ -432,7 +501,7 @@ def inventory_synapse_from_server(scope: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "detail": None
         if complete
-        else "Synapse manifest mapping is incomplete for this resource lineage",
+        else "Synapse manifest mapping or stored event JSON is incomplete for this resource lineage",
     }
 
 
@@ -637,9 +706,7 @@ def run_bridge_psql(
     database_url: str, binary: str, query: str, variables: Mapping[str, str]
 ) -> str:
     flattened = [binary, "--no-psqlrc", "--tuples-only", "--no-align", "--quiet"]
-    for name, value in variables.items():
-        flattened.extend(["--set", f"{name}={value}"])
-    flattened.extend([database_url, "--command", query])
+    flattened.extend([database_url, "--command", render_sql_variables(query, variables)])
     try:
         result = subprocess.run(
             flattened,
@@ -1090,6 +1157,118 @@ def read_legacy_migration_spec(
     if not isinstance(prefix, str):
         raise RetentionError("restic legacy migration restored prefix is invalid")
     normalized_prefix = "" if prefix == "" else safe_relative_path(prefix, "restored prefix")
+
+    if spec.get("format") == CORE_BACKUP_FORMAT:
+        raw_databases = spec.get("databases")
+        databases: list[dict[str, str]] | None = None
+        if raw_databases is not None:
+            if not isinstance(raw_databases, list) or not raw_databases:
+                raise RetentionError("core migration database contracts are invalid")
+            seen_databases: set[str] = set()
+            seen_paths: set[str] = set()
+            for raw_database in raw_databases:
+                if not isinstance(raw_database, dict):
+                    raise RetentionError("core migration database contract is invalid")
+                name = required_string(raw_database.get("name"), "core database name")
+                path = safe_relative_path(raw_database.get("path"), "core database dump path")
+                contract = required_string(
+                    raw_database.get("contract"), "core database contract"
+                )
+                if name not in CORE_DATABASE_CONTRACTS or CORE_DATABASE_CONTRACTS[name] != contract:
+                    raise RetentionError("core migration database contract is unsupported")
+                if name in seen_databases or path in seen_paths:
+                    raise RetentionError("core migration database contract is duplicated")
+                seen_databases.add(name)
+                seen_paths.add(path)
+                databases.append({"name": name, "path": path, "contract": contract})
+
+        raw_targets = spec.get("targets")
+        if not isinstance(raw_targets, list) or not raw_targets:
+            raise RetentionError("core migration target rows are required")
+        targets: list[dict[str, Any]] = []
+        seen_target_keys: set[tuple[str, str, str]] = set()
+        for raw_target in raw_targets:
+            if not isinstance(raw_target, dict):
+                raise RetentionError("core migration target row is invalid")
+            resource_id = required_string(
+                raw_target.get("resource_id"), "core target resource id"
+            )
+            content_generation = required_string(
+                raw_target.get("content_generation"), "core target content generation"
+            )
+            database = required_string(raw_target.get("database"), "core target database")
+            contract = required_string(
+                raw_target.get("contract"), "core target contract"
+            )
+            if database not in CORE_DATABASE_CONTRACTS or CORE_DATABASE_CONTRACTS[database] != contract:
+                raise RetentionError("core target database contract is unsupported")
+            target_key = (resource_id, content_generation, database)
+            if target_key in seen_target_keys:
+                raise RetentionError("core migration target row is duplicated")
+            seen_target_keys.add(target_key)
+            target: dict[str, Any] = {
+                "resource_id": resource_id,
+                "content_generation": content_generation,
+                "database": database,
+                "contract": contract,
+            }
+            if contract == "synapse-event-json-v1":
+                room_id = required_string(raw_target.get("room_id"), "core Synapse room id")
+                event_id = required_string(raw_target.get("event_id"), "core Synapse event id")
+                event_type = required_string(
+                    raw_target.get("event_type"), "core Synapse event type"
+                )
+                if event_type not in CORE_EVENT_TYPES:
+                    raise RetentionError("core Synapse event type is unsupported")
+                target.update(
+                    {"room_id": room_id, "event_id": event_id, "event_type": event_type}
+                )
+            else:
+                target.update(
+                    {
+                        "bridge_id": required_string(
+                            raw_target.get("bridge_id"), "core bridge id"
+                        ),
+                        "message_id": required_string(
+                            raw_target.get("message_id"), "core bridge message id"
+                        ),
+                        "part_id": required_string(
+                            raw_target.get("part_id"), "core bridge part id"
+                        ),
+                    }
+                )
+            raw_media_paths = raw_target.get("media_paths", [])
+            if not isinstance(raw_media_paths, list):
+                raise RetentionError("core target media paths are invalid")
+            media_paths = [
+                safe_relative_path(value, "core target media path")
+                for value in raw_media_paths
+            ]
+            if len(media_paths) != len(set(media_paths)):
+                raise RetentionError("core target media paths are duplicated")
+            if raw_target.get("media_paths_complete") is not True:
+                raise RetentionError(
+                    "core target media paths must be explicitly exhaustive"
+                )
+            target["media_paths"] = media_paths
+            targets.append(target)
+
+        raw_files = spec.get("files")
+        files: list[str] | None = None
+        if raw_files is not None:
+            if not isinstance(raw_files, list) or not raw_files:
+                raise RetentionError("core migration file coverage is invalid")
+            files = [safe_relative_path(value, "core migration file") for value in raw_files]
+            if len(files) != len(set(files)):
+                raise RetentionError("core migration file coverage is duplicated")
+        return {
+            "kind": "core",
+            "restored_prefix": normalized_prefix,
+            "databases": databases,
+            "targets": targets,
+            "files": files,
+        }
+
     raw_entries = spec.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise RetentionError("restic legacy migration entries are required")
@@ -1121,7 +1300,7 @@ def read_legacy_migration_spec(
                 "content_generation": content_generation,
             }
         )
-    return {"restored_prefix": normalized_prefix, "entries": entries}
+    return {"kind": "files", "restored_prefix": normalized_prefix, "entries": entries}
 
 
 def copy_tree_entry(source: Path, destination_root: Path, relative: str) -> None:
@@ -1152,6 +1331,36 @@ def exact_files_under(root: Path) -> set[str]:
     return found
 
 
+def validate_restored_prefix_coverage(
+    restored_root: Path,
+    restored_prefix: str,
+    listed_paths: Iterable[str],
+    include_layout: bool = False,
+) -> Path:
+    """Require the declared file set to cover the entire restored tree.
+
+    A previous version walked only ``restored_root/restored_prefix``.  That
+    allowed an unexpected sibling outside the prefix to survive a migration,
+    which is unsafe for a whole restic snapshot.  The comparison below uses
+    paths relative to the restore target, so both omitted files and files
+    outside the declared prefix fail closed.
+    """
+    listed = set(listed_paths)
+    prefix = f"{restored_prefix}/" if restored_prefix else ""
+    expected = {prefix + path for path in listed}
+    if include_layout:
+        expected.add(f"{restored_prefix}/retention/controlled-copy-layout.json")
+    actual = exact_files_under(restored_root)
+    if actual != expected:
+        raise RetentionError(
+            "restic legacy migration does not enumerate the restored snapshot exactly"
+        )
+    restored_content = restored_root / restored_prefix
+    if not restored_content.is_dir():
+        raise RetentionError("restic legacy migration restored prefix is missing")
+    return restored_content
+
+
 def run_restic_backup(
     binary: str,
     repository: str,
@@ -1173,6 +1382,682 @@ def run_restic_backup(
     if result.returncode != 0:
         raise RetentionError("restic migration backup returned a failure")
     return restic_result_snapshot_id(result.stdout)
+
+
+def postgres_binary(name: str) -> str:
+    environment_name = "COMMUNICATOR_RETENTION_" + name.upper() + "_BIN"
+    configured = os.environ.get(environment_name, "").strip()
+    if configured:
+        return configured
+    discovered = shutil.which(name)
+    if discovered:
+        return discovered
+    for version in ("18", "17", "16", "15"):
+        candidate = Path("/usr/lib/postgresql") / version / "bin" / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return name
+
+
+def run_postgres_tool(
+    command: list[str], label: str, stdout: int | Any = subprocess.PIPE
+) -> subprocess.CompletedProcess[str]:
+    try:
+        if stdout == subprocess.PIPE:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+                stdin=subprocess.DEVNULL,
+            )
+        else:
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stdout,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RetentionError(f"controlled-copy PostgreSQL {label} is unavailable") from error
+    if result.returncode != 0:
+        raise RetentionError(f"controlled-copy PostgreSQL {label} failed")
+    return result
+
+
+class IsolatedPostgres:
+    """A throwaway local PostgreSQL cluster for rewriting one core backup."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.data = root / "data"
+        configured_socket = os.environ.get(
+            "COMMUNICATOR_RETENTION_PG_SOCKET_DIR", "/tmp"
+        ).strip()
+        self.socket = Path(configured_socket or "/tmp")
+        self.socket.mkdir(parents=True, exist_ok=True)
+        self.port = self._free_port()
+        self.user = "communicator_retention"
+        self.started = False
+
+    @staticmethod
+    def _free_port() -> int:
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            return int(probe.getsockname()[1])
+
+    def __enter__(self) -> "IsolatedPostgres":
+        run_postgres_tool(
+            [
+                postgres_binary("initdb"),
+                "--no-locale",
+                "--encoding=UTF8",
+                "--username",
+                self.user,
+                str(self.data),
+            ],
+            "initdb",
+        )
+        run_postgres_tool(
+            [
+                postgres_binary("pg_ctl"),
+                "--pgdata",
+                str(self.data),
+                "--log",
+                str(self.root / "postgres.log"),
+                "--wait",
+                "start",
+                "--options",
+                f"-F -p {self.port} -k {self.socket} -c listen_addresses=''",
+            ],
+            "server start",
+            stdout=subprocess.DEVNULL,
+        )
+        self.started = True
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
+        if self.started:
+            try:
+                run_postgres_tool(
+                    [
+                        postgres_binary("pg_ctl"),
+                        "--pgdata",
+                        str(self.data),
+                        "--wait",
+                        "stop",
+                        "--mode",
+                        "fast",
+                    ],
+                    "server stop",
+                    stdout=subprocess.DEVNULL,
+                )
+            finally:
+                self.started = False
+
+    def _client(self, database: str, sql: str, variables: Mapping[str, str]) -> list[str]:
+        command = [
+            postgres_binary("psql"),
+            "--no-psqlrc",
+            "--tuples-only",
+            "--no-align",
+            "--quiet",
+            "--host",
+            str(self.socket),
+            "--port",
+            str(self.port),
+            "--username",
+            self.user,
+        ]
+        command.extend(
+            [
+                "--dbname",
+                database,
+                "--command",
+                render_sql_variables(sql, variables),
+            ]
+        )
+        return command
+
+    def create_database(self, database: str) -> None:
+        run_postgres_tool(
+            [
+                postgres_binary("createdb"),
+                "--host",
+                str(self.socket),
+                "--port",
+                str(self.port),
+                "--username",
+                self.user,
+                database,
+            ],
+            "database create",
+        )
+
+    def restore(self, database: str, dump: Path) -> None:
+        run_postgres_tool(
+            [
+                postgres_binary("pg_restore"),
+                "--exit-on-error",
+                "--no-owner",
+                "--no-acl",
+                "--host",
+                str(self.socket),
+                "--port",
+                str(self.port),
+                "--username",
+                self.user,
+                "--dbname",
+                database,
+                str(dump),
+            ],
+            "dump restore",
+        )
+
+    def query(self, database: str, sql: str, variables: Mapping[str, str] = {}) -> str:
+        result = run_postgres_tool(self._client(database, sql, variables), "query")
+        return result.stdout.strip()
+
+    def execute(self, database: str, sql: str, variables: Mapping[str, str] = {}) -> None:
+        run_postgres_tool(self._client(database, sql, variables), "mutation")
+
+    def dump(self, database: str, destination: Path) -> None:
+        run_postgres_tool(
+            [
+                postgres_binary("pg_dump"),
+                "--format=custom",
+                "--no-owner",
+                "--no-acl",
+                "--host",
+                str(self.socket),
+                "--port",
+                str(self.port),
+                "--username",
+                self.user,
+                "--dbname",
+                database,
+                "--file",
+                str(destination),
+            ],
+            "dump export",
+        )
+
+
+def core_layout_from_tree(
+    restored_content: Path, spec: Mapping[str, Any]
+) -> tuple[list[dict[str, str]], list[str], bool]:
+    layout_path = restored_content / "retention/controlled-copy-layout.json"
+    layout: dict[str, Any] | None = None
+    if layout_path.is_file():
+        try:
+            parsed = json.loads(layout_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RetentionError("core backup layout is unreadable") from error
+        if not isinstance(parsed, dict):
+            raise RetentionError("core backup layout is invalid")
+        layout = parsed
+    if layout is not None:
+        if layout.get("version") != 1 or layout.get("format") != CORE_BACKUP_FORMAT:
+            raise RetentionError("core backup layout format is unsupported")
+        raw_databases = layout.get("databases")
+        raw_files = layout.get("files")
+        if not isinstance(raw_databases, list) or not isinstance(raw_files, list):
+            raise RetentionError("core backup layout coverage is invalid")
+        databases = parse_core_database_contracts(raw_databases)
+        files = [safe_relative_path(value, "core backup layout file") for value in raw_files]
+        if len(files) != len(set(files)):
+            raise RetentionError("core backup layout file coverage is duplicated")
+        declared = spec.get("databases")
+        if declared is not None:
+            if parse_core_database_contracts(declared) != databases:
+                raise RetentionError("core migration and backup database contracts differ")
+        return databases, files, True
+
+    databases = parse_core_database_contracts(spec.get("databases"))
+    files = spec.get("files")
+    if not isinstance(files, list) or not files:
+        raise RetentionError("legacy core migration requires exhaustive file coverage")
+    return databases, [safe_relative_path(value, "core migration file") for value in files], False
+
+
+def parse_core_database_contracts(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise RetentionError("core database contracts are required")
+    parsed: list[dict[str, str]] = []
+    names: set[str] = set()
+    paths: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise RetentionError("core database contract is invalid")
+        name = required_string(raw.get("name"), "core database name")
+        path = safe_relative_path(raw.get("path"), "core database dump path")
+        contract = required_string(raw.get("contract"), "core database contract")
+        if name not in CORE_DATABASE_CONTRACTS or CORE_DATABASE_CONTRACTS[name] != contract:
+            raise RetentionError("core database contract is unsupported")
+        if name in names or path in paths:
+            raise RetentionError("core database contract is duplicated")
+        names.add(name)
+        paths.add(path)
+        parsed.append({"name": name, "path": path, "contract": contract})
+    return parsed
+
+
+SYNAPSE_CORE_EVENT_QUERY = """
+SELECT events.type, event_json.json::jsonb::text
+FROM events
+INNER JOIN event_json
+  ON event_json.room_id = events.room_id
+ AND event_json.event_id = events.event_id
+WHERE events.room_id = :'room_id' AND events.event_id = :'event_id'
+"""
+
+BRIDGE_CORE_COLUMN_QUERY = """
+SELECT count(*)
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = :'table_name'
+  AND column_name = ANY(string_to_array(:'columns', ','))
+"""
+
+
+def one_query_line(value: str, label: str) -> str:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise RetentionError(f"core migration {label} is not unique")
+    return lines[0]
+
+
+def core_synapse_event(
+    postgres: IsolatedPostgres, database: str, target: Mapping[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    output = postgres.query(
+        database,
+        SYNAPSE_CORE_EVENT_QUERY,
+        {
+            "room_id": required_string(target.get("room_id"), "core Synapse room id"),
+            "event_id": required_string(target.get("event_id"), "core Synapse event id"),
+        },
+    )
+    line = one_query_line(output, "Synapse event mapping")
+    try:
+        event_type, event_json = line.split("|", 1)
+        value = json.loads(event_json)
+    except (ValueError, json.JSONDecodeError) as error:
+        raise RetentionError("core Synapse event JSON is invalid") from error
+    if not isinstance(value, dict):
+        raise RetentionError("core Synapse event JSON is not an object")
+    if value.get("event_id") != target.get("event_id") or value.get("room_id") != target.get("room_id"):
+        raise RetentionError("core Synapse event JSON identity does not match the target")
+    expected_type = required_string(target.get("event_type"), "core Synapse event type")
+    if event_type != expected_type or event_type not in CORE_EVENT_TYPES:
+        raise RetentionError("core Synapse event type does not match the supported contract")
+    return event_type, value
+
+
+def synapse_event_content_is_redacted(value: Mapping[str, Any]) -> bool:
+    content = value.get("content")
+    # The supported message contracts are deliberately strict.  A denylist
+    # would let a provider-specific body field survive a retention pass.
+    return content == {}
+
+
+def rewrite_core_synapse(
+    postgres: IsolatedPostgres, database: str, target: Mapping[str, Any]
+) -> None:
+    event_type, event_json = core_synapse_event(postgres, database, target)
+    if synapse_event_content_is_redacted(event_json):
+        return
+    redacted = dict(event_json)
+    redacted["content"] = {}
+    postgres.execute(
+        database,
+        """
+        UPDATE event_json
+        SET json = :'redacted_json'
+        WHERE room_id = :'room_id' AND event_id = :'event_id'
+          AND EXISTS (
+            SELECT 1 FROM events
+            WHERE events.room_id = event_json.room_id
+              AND events.event_id = event_json.event_id
+              AND events.type = :'event_type'
+          )
+        """,
+        {
+            "redacted_json": json.dumps(redacted, separators=(",", ":")),
+            "room_id": required_string(target.get("room_id"), "core Synapse room id"),
+            "event_id": required_string(target.get("event_id"), "core Synapse event id"),
+            "event_type": event_type,
+        },
+    )
+    _event_type, updated = core_synapse_event(postgres, database, target)
+    if not synapse_event_content_is_redacted(updated):
+        raise RetentionError("core Synapse event JSON still contains message content")
+
+
+def verify_core_synapse(
+    postgres: IsolatedPostgres, database: str, target: Mapping[str, Any]
+) -> None:
+    _event_type, event_json = core_synapse_event(postgres, database, target)
+    if not synapse_event_content_is_redacted(event_json):
+        raise RetentionError("rewritten core Synapse dump still contains message content")
+
+
+def bridge_column_count(
+    postgres: IsolatedPostgres, database: str, table: str, columns: str
+) -> int:
+    output = postgres.query(
+        database,
+        BRIDGE_CORE_COLUMN_QUERY,
+        {"table_name": table, "columns": columns},
+    )
+    try:
+        return int(one_query_line(output, "bridge schema contract"))
+    except ValueError as error:
+        raise RetentionError("core bridge schema contract count is invalid") from error
+
+
+def bridge_target_count(
+    postgres: IsolatedPostgres, database: str, target: Mapping[str, Any]
+) -> int:
+    output = postgres.query(
+        database,
+        """
+        SELECT count(*) FROM message
+        WHERE bridge_id = :'bridge_id'
+          AND id = :'message_id'
+          AND part_id = :'part_id'
+        """,
+        {
+            "bridge_id": required_string(target.get("bridge_id"), "core bridge id"),
+            "message_id": required_string(target.get("message_id"), "core bridge message id"),
+            "part_id": required_string(target.get("part_id"), "core bridge part id"),
+        },
+    )
+    try:
+        return int(one_query_line(output, "bridge target count"))
+    except ValueError as error:
+        raise RetentionError("core bridge target count is invalid") from error
+
+
+def rewrite_core_bridge(
+    postgres: IsolatedPostgres, database: str, target: Mapping[str, Any]
+) -> None:
+    if bridge_column_count(postgres, database, "message", "bridge_id,id,part_id") != 3:
+        raise RetentionError("core bridge message schema is unsupported")
+    if bridge_column_count(
+        postgres, database, "reaction", "bridge_id,message_id,message_part_id"
+    ) != 3:
+        raise RetentionError("core bridge reaction schema is unsupported")
+    if bridge_target_count(postgres, database, target) != 1:
+        raise RetentionError("core bridge target mapping is not unique")
+    postgres.execute(
+        database,
+        """
+        BEGIN;
+        DELETE FROM reaction
+        WHERE bridge_id = :'bridge_id'
+          AND message_id = :'message_id'
+          AND message_part_id = :'part_id';
+        DELETE FROM message
+        WHERE bridge_id = :'bridge_id'
+          AND id = :'message_id'
+          AND part_id = :'part_id';
+        COMMIT;
+        """,
+        {
+            "bridge_id": required_string(target.get("bridge_id"), "core bridge id"),
+            "message_id": required_string(target.get("message_id"), "core bridge message id"),
+            "part_id": required_string(target.get("part_id"), "core bridge part id"),
+        },
+    )
+    if bridge_target_count(postgres, database, target) != 0:
+        raise RetentionError("core bridge target row remains after rewrite")
+
+
+def verify_core_bridge(
+    postgres: IsolatedPostgres, database: str, target: Mapping[str, Any]
+) -> None:
+    if bridge_target_count(postgres, database, target) != 0:
+        raise RetentionError("rewritten core bridge dump still contains target row")
+
+
+def rewrite_core_database(
+    postgres: IsolatedPostgres,
+    database: str,
+    contract: str,
+    targets: Iterable[Mapping[str, Any]],
+) -> None:
+    for target in targets:
+        if target.get("contract") != contract:
+            raise RetentionError("core target contract differs from dump contract")
+        if contract == "synapse-event-json-v1":
+            rewrite_core_synapse(postgres, database, target)
+        elif contract == "mautrix-bridge-message-v1":
+            rewrite_core_bridge(postgres, database, target)
+        else:
+            raise RetentionError("core database contract is unsupported")
+
+
+def verify_core_database(
+    postgres: IsolatedPostgres,
+    database: str,
+    contract: str,
+    targets: Iterable[Mapping[str, Any]],
+) -> None:
+    for target in targets:
+        if contract == "synapse-event-json-v1":
+            verify_core_synapse(postgres, database, target)
+        elif contract == "mautrix-bridge-message-v1":
+            verify_core_bridge(postgres, database, target)
+        else:
+            raise RetentionError("core database contract is unsupported")
+
+
+def remove_core_media(restored_content: Path, targets: Iterable[Mapping[str, Any]]) -> None:
+    seen: set[str] = set()
+    for target in targets:
+        for relative in target.get("media_paths", []):
+            path = safe_path(restored_content, required_string(relative, "core media path"))
+            normalized = path.relative_to(restored_content).as_posix()
+            if normalized in seen:
+                raise RetentionError("core media path is duplicated across targets")
+            seen.add(normalized)
+            if not normalized.startswith("synapse-data/media_store/"):
+                raise RetentionError("core media path is outside the Synapse media store")
+            if not path.is_file() or path.is_symlink():
+                raise RetentionError("core media path is not an ordinary file")
+            path.unlink()
+
+
+def verify_restic_snapshot(
+    binary: str, repository: str, password_file: str, snapshot_id: str, tag: str
+) -> None:
+    try:
+        result = subprocess.run(
+            [binary, "snapshots", "--json", "--tag", tag],
+            env=restic_environment(repository, password_file),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RetentionError("restic replacement inventory is unavailable") from error
+    if result.returncode != 0:
+        raise RetentionError("restic replacement inventory failed")
+    try:
+        snapshots = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RetentionError("restic replacement inventory is not JSON") from error
+    if not isinstance(snapshots, list):
+        raise RetentionError("restic replacement inventory response is invalid")
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        candidate = snapshot.get("id")
+        tags = snapshot.get("tags", [])
+        if (
+            isinstance(candidate, str)
+            and candidate == snapshot_id
+            and isinstance(tags, list)
+            and tag in tags
+        ):
+            return
+    raise RetentionError("restic replacement snapshot was not verified")
+
+
+def replace_manifest_after_core_migration(
+    old_reference: str, snapshot_id: str, migrated_at: str
+) -> None:
+    replace_manifest_after_migration(
+        old_reference=old_reference,
+        message_entries=[
+            {
+                "reference": f"restic:{snapshot_id}",
+                "snapshot_id": snapshot_id,
+                "resource_id": "*",
+                "content_generation": "*",
+                "copy_created_at": migrated_at,
+                "content_classes": [
+                    "message",
+                    "session_credential",
+                    "account_key",
+                ],
+                "format": CORE_BACKUP_FORMAT,
+                "detail": (
+                    "communicator-core custom-format databases were rewritten in an "
+                    "isolated PostgreSQL cluster; credentials and unrelated rows were preserved"
+                ),
+            }
+        ],
+        auxiliary_entries={},
+    )
+
+
+def migrate_core_restic_copy(
+    copy: Mapping[str, Any],
+    target_scope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    restored_root: Path,
+    restored_content: Path,
+    repository: str,
+    password_file: str,
+    binary: str,
+    restored_parent: Path,
+) -> dict[str, Any]:
+    databases, layout_files, has_layout = core_layout_from_tree(restored_content, spec)
+    validate_restored_prefix_coverage(
+        restored_root,
+        str(spec.get("restored_prefix", "")),
+        layout_files,
+        include_layout=has_layout,
+    )
+    database_by_name = {database["name"]: database for database in databases}
+    target_resource = required_string(target_scope.get("resource_id"), "migration target resource id")
+    target_generation = required_string(
+        target_scope.get("content_generation"), "migration target content generation"
+    )
+    targets = [
+        target
+        for target in spec["targets"]
+        if target["resource_id"] == target_resource
+        and target["content_generation"] == target_generation
+    ]
+    if not targets:
+        raise RetentionError("core migration does not map the removed message lineage")
+    for target in targets:
+        if target["database"] not in database_by_name:
+            raise RetentionError("core migration target database dump is missing")
+        dump = restored_content / database_by_name[target["database"]]["path"]
+        if not dump.is_file() or dump.is_symlink():
+            raise RetentionError("core migration database dump is not an ordinary file")
+        for media_path in target.get("media_paths", []):
+            candidate = safe_path(restored_content, media_path)
+            if not candidate.is_file() or candidate.is_symlink():
+                raise RetentionError("core migration media mapping is incomplete")
+
+    targets_by_database: dict[str, list[Mapping[str, Any]]] = {}
+    for target in targets:
+        targets_by_database.setdefault(target["database"], []).append(target)
+
+    with IsolatedPostgres(restored_parent / "postgres") as postgres:
+        for index, (database_name, database_targets) in enumerate(targets_by_database.items()):
+            database_spec = database_by_name[database_name]
+            database = f"retention_{index}"
+            postgres.create_database(database)
+            dump = restored_content / database_spec["path"]
+            postgres.restore(database, dump)
+            rewrite_core_database(
+                postgres,
+                database,
+                database_spec["contract"],
+                database_targets,
+            )
+            replacement_dump = restored_parent / database_spec["path"]
+            replacement_dump.parent.mkdir(parents=True, exist_ok=True)
+            postgres.dump(database, replacement_dump)
+
+            verify_database = f"verify_{index}"
+            postgres.create_database(verify_database)
+            postgres.restore(verify_database, replacement_dump)
+            verify_core_database(
+                postgres,
+                verify_database,
+                database_spec["contract"],
+                database_targets,
+            )
+            os.replace(replacement_dump, dump)
+
+    remove_core_media(restored_content, targets)
+    replacement_tag = "communicator-core-migrated"
+    replacement_id = run_restic_backup(
+        binary,
+        repository,
+        password_file,
+        restored_content,
+        replacement_tag,
+    )
+    if replacement_id == required_string(copy.get("snapshot_id"), "restic snapshot id"):
+        raise RetentionError("restic migration returned the legacy snapshot id")
+    verify_restic_snapshot(
+        binary, repository, password_file, replacement_id, replacement_tag
+    )
+    snapshot_id = required_string(copy.get("snapshot_id"), "restic snapshot id")
+    try:
+        result = subprocess.run(
+            [binary, "forget", snapshot_id, "--prune"],
+            env=restic_environment(repository, password_file),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RetentionError("restic core migration forget is unavailable") from error
+    if result.returncode != 0:
+        raise RetentionError("restic core migration forget returned a failure")
+    migrated_at = utc_now()
+    replace_manifest_after_core_migration(
+        required_string(copy.get("reference"), "copy reference"),
+        replacement_id,
+        migrated_at,
+    )
+    return {
+        "status": "aged_out",
+        "content_present": False,
+        "evidence_source": "restic_core_database_rewrite",
+        "object_reference": copy.get("reference"),
+        "detail": (
+            "Communicator core custom-format database dumps were restored, rewritten "
+            "by supported row contracts, re-dumped, verified, and snapshotted before prune"
+        ),
+    }
 
 
 def migrate_legacy_restic_copy(
@@ -1220,12 +2105,26 @@ def migrate_legacy_restic_copy(
                 raise RetentionError("restic legacy restore returned a failure")
 
             restored_content = restored_root / str(spec["restored_prefix"])
+            if spec.get("kind") == "core":
+                return migrate_core_restic_copy(
+                    copy,
+                    target_scope,
+                    spec,
+                    restored_root,
+                    restored_content,
+                    repository,
+                    password_file,
+                    binary,
+                    restored_parent,
+                )
+
             entries = spec["entries"]
             listed_paths = {entry["path"] for entry in entries}
-            if exact_files_under(restored_content) != listed_paths:
-                raise RetentionError(
-                    "restic legacy migration does not enumerate the restored snapshot exactly"
-                )
+            validate_restored_prefix_coverage(
+                restored_root,
+                str(spec["restored_prefix"]),
+                listed_paths,
+            )
 
             target_resource = target_scope.get("resource_id")
             target_generation = target_scope.get("content_generation")
@@ -1515,9 +2414,11 @@ def cleanup_synapse_copy(copy: Mapping[str, Any]) -> dict[str, Any]:
 
     The public Matrix event API can apply redaction virtually while the
     unredacted JSON remains in Synapse.  When the host database is configured,
-    ``redactions.have_censored`` joined to ``event_json`` is the authoritative
-    completion signal.  Without it, the adapter records only quarantine
-    evidence and never claims physical removal.
+    the exact room/event row and its stored JSON are inspected.  The
+    ``redactions.have_censored`` bit is supporting evidence only: a censored
+    bit with intact sensitive JSON remains quarantined.  Without an exact
+    database observation, the adapter records only quarantine evidence and
+    never claims physical removal.
     """
     room_id = copy.get("room_id")
     event_id = copy.get("event_id")
@@ -1531,18 +2432,40 @@ def cleanup_synapse_copy(copy: Mapping[str, Any]) -> dict[str, Any]:
         }
 
     database_configuration = synapse_database_configuration()
-    initial_state = synapse_event_state(event_id)
-    if initial_state in {"censored", "missing"}:
+    event_type = copy.get("event_type", "m.room.message")
+    if event_type not in CORE_EVENT_TYPES:
+        return {
+            "status": "unknown",
+            "content_present": True,
+            "evidence_source": "synapse_event_type_unsupported",
+            "object_reference": copy.get("reference"),
+            "detail": "The mapped Synapse event type is outside the supported message contract",
+        }
+    initial_state = synapse_event_state(event_id, room_id, event_type)
+    if initial_state in {"censored", "redacted", "missing"}:
         remove_manifest_entry("synapse", required_string(copy.get("reference"), "copy reference"))
         return {
-            "status": "expired" if initial_state == "censored" else "missing",
+            "status": "expired" if initial_state in {"censored", "redacted"} else "missing",
             "content_present": False,
             "evidence_source": "synapse_event_json_censor",
             "object_reference": copy.get("reference"),
             "detail": (
-                "Synapse redactions.have_censored confirms event_json content is censored"
-                if initial_state == "censored"
+                "Synapse stored event_json has no sensitive message content"
+                if initial_state in {"censored", "redacted"}
                 else "Synapse event_json no longer contains the mapped event"
+            ),
+        }
+    if initial_state in {"intact_censored", "type_mismatch", "unsupported"}:
+        return {
+            "status": "quarantined",
+            "content_present": True,
+            "evidence_source": "synapse_event_json_inconsistent",
+            "object_reference": copy.get("reference"),
+            "detail": (
+                "Synapse redactions.have_censored is set while stored event_json still "
+                "contains message content"
+                if initial_state == "intact_censored"
+                else "Synapse stored event does not match the exact supported lineage contract"
             ),
         }
 
@@ -1628,20 +2551,33 @@ def cleanup_synapse_copy(copy: Mapping[str, Any]) -> dict[str, Any]:
         }
 
     if database_configuration is not None:
-        final_state = synapse_event_state(event_id)
-        if final_state in {"censored", "missing"}:
+        final_state = synapse_event_state(event_id, room_id, event_type)
+        if final_state in {"censored", "redacted", "missing"}:
             remove_manifest_entry(
                 "synapse", required_string(copy.get("reference"), "copy reference")
             )
             return {
-                "status": "expired" if final_state == "censored" else "missing",
+                "status": "expired" if final_state in {"censored", "redacted"} else "missing",
                 "content_present": False,
                 "evidence_source": "synapse_event_json_censor",
                 "object_reference": copy.get("reference"),
                 "detail": (
-                    "Synapse redactions.have_censored confirms event_json content is censored"
-                    if final_state == "censored"
+                    "Synapse stored event_json has no sensitive message content"
+                    if final_state in {"censored", "redacted"}
                     else "Synapse event_json no longer contains the mapped event"
+                ),
+            }
+        if final_state in {"intact_censored", "type_mismatch", "unsupported"}:
+            return {
+                "status": "quarantined",
+                "content_present": True,
+                "evidence_source": "synapse_event_json_inconsistent",
+                "object_reference": copy.get("reference"),
+                "detail": (
+                    "Synapse redactions.have_censored is set while stored event_json still "
+                    "contains message content"
+                    if final_state == "intact_censored"
+                    else "Synapse stored event does not match the exact supported lineage contract"
                 ),
             }
         return {

@@ -7,6 +7,7 @@ import unittest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "backup-core.sh"
 MANIFEST_MERGER = Path(__file__).parents[1] / "scripts" / "merge-controlled-copy-manifest.py"
+LAYOUT_WRITER = Path(__file__).parents[1] / "scripts" / "write-controlled-copy-layout.py"
 
 
 class BackupCoreTests(unittest.TestCase):
@@ -95,9 +96,45 @@ class BackupCoreTests(unittest.TestCase):
             source.index('restic backup --json --tag communicator-core "$staging"'),
         )
         self.assertIn('restic backup --json --tag communicator-core "$staging"', source)
+        self.assertIn('"$repo_dir/scripts/write-controlled-copy-layout.py" "$staging"', source)
         self.assertIn('"$repo_dir/scripts/merge-controlled-copy-manifest.py"', source)
         self.assertIn('"$runtime_dir/retention/controlled-copy-manifest.json"', source)
         self.assertNotIn('unresolved-', source)
+
+    def test_core_layout_records_all_regular_files_and_supported_dump_contracts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for dump in (
+                "synapse.pgdump",
+                "whatsapp.pgdump",
+                "messenger.pgdump",
+                "telegram.pgdump",
+            ):
+                (root / dump).write_bytes(b"custom-dump-fixture")
+            (root / "secrets").mkdir()
+            (root / "secrets/session.key").write_text("fixture", encoding="utf-8")
+            subprocess.run(["python3", str(LAYOUT_WRITER), str(root)], check=True)
+
+            layout_path = root / "retention/controlled-copy-layout.json"
+            layout = json.loads(layout_path.read_text(encoding="utf-8"))
+            self.assertEqual(1, layout["version"])
+            self.assertEqual("communicator-core-pgdump-v1", layout["format"])
+            self.assertEqual(
+                ["synapse", "whatsapp_bridge", "messenger_bridge", "telegram_bridge"],
+                [database["name"] for database in layout["databases"]],
+            )
+            self.assertEqual(
+                [
+                    "messenger.pgdump",
+                    "secrets/session.key",
+                    "synapse.pgdump",
+                    "telegram.pgdump",
+                    "whatsapp.pgdump",
+                ],
+                layout["files"],
+            )
+            self.assertNotIn("retention/controlled-copy-layout.json", layout["files"])
+            self.assertEqual(0o600, layout_path.stat().st_mode & 0o777)
 
     def test_merges_exact_backup_result_without_losing_other_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:

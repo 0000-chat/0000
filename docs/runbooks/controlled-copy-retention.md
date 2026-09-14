@@ -26,13 +26,16 @@ endpoint to redact that exact event. The pinned `v1.159.0` homeserver template
 sets `redaction_retention_period: 7d`. Configure the host-side database
 connection separately with `COMMUNICATOR_RETENTION_SYNAPSE_DATABASE_URL` and,
 for tests or a root-owned wrapper, `COMMUNICATOR_RETENTION_SYNAPSE_PSQL_BIN`.
-The adapter inspects Synapse's `redactions.have_censored` state joined to the
-stored `event_json`; it records `expired` only after the censor job has replaced
-the unredacted event body. Synapse checks this job every five minutes, so the
-seven-day period plus the Worker's 24-hour cleanup margin stays below the
-30-day ceiling. If the database boundary is absent, the adapter records only
-`quarantined` or `unknown` evidence and cannot complete the controlled-copy
-gate. The public event endpoint is not used as physical-deletion evidence.
+The adapter joins the exact room and event rows, checks the expected message or
+encrypted event type, and requires the stored `event_json.content` object to be
+exactly empty before recording `expired`. `redactions.have_censored` is
+supporting evidence only: Synapse can set it when a redaction was not allowed,
+so an intact stored body remains `quarantined`. Synapse checks this job every
+five minutes, so the seven-day period plus the Worker's 24-hour cleanup margin
+stays below the 30-day ceiling. If the database boundary is absent, the
+adapter records only `quarantined` or `unknown` evidence and cannot complete
+the controlled-copy gate. The public event endpoint is not used as
+physical-deletion evidence.
 Synapse WAL and restic backups are separate controlled stores and must also
 complete their own evidence.
 
@@ -58,6 +61,20 @@ is only a test/private API base override. The generic command hook remains an
 explicit provider escape hatch for other configured stores, but it cannot turn
 an unscoped mapping into completion.
 
+The core backup contains PostgreSQL custom-format images for Synapse and each
+bridge. `backup-core.sh` writes
+`retention/controlled-copy-layout.json`, which declares those four database
+contracts and exhaustively lists every regular file in the staged tree. A
+core mixed-copy migration restores each target dump in a throwaway local
+PostgreSQL cluster, rewrites only the exact Synapse event or bridge message
+part (including matching reaction rows), re-dumps it, restores the replacement
+dump into a second database, and verifies the target is absent while unrelated
+rows remain. It removes only explicitly mapped Synapse media files. Unknown
+schemas, missing row mappings, incomplete media mappings, or unexpected files
+are rejected before the old snapshot can be forgotten. Session credentials,
+account keys, unrelated database rows, and other bridge state remain in the
+replacement snapshot.
+
 Restic is handled directly for an exclusive message-only snapshot. The cleanup
 invokes `restic forget <snapshot> --prune` after checking the manifest class and
 `exclusive_resource_id`. The existing [`backup-core.sh`](../../scripts/backup-core.sh)
@@ -74,17 +91,17 @@ An operator can migrate a legacy mixed snapshot by setting
 that exhaustively maps every restored regular file to one exact message
 lineage, `session_credential`, or `account_key`. The host adapter restores the
 snapshot into a temporary directory, rejects omissions, symlinks, wildcard
-message lineages, and mixed file classes, then creates one replacement
+message lineages, unexpected files outside the declared prefix, and mixed file
+classes, then creates one replacement
 message-only snapshot per retained lineage and separate protected snapshots
 for session credentials and account keys. It forgets the old snapshot only
 after every replacement returns an exact snapshot id, and atomically records
 the new references. The removed lineage is deliberately absent from the
-replacement set. A current `backup-core.sh` pgdump or media tree whose file
-contents mix several classes cannot be mapped safely at this boundary; it
-remains `lifecycle_pending` and visible as an administrator alert until an
-exhaustive, class-separated fixture or operational mapping exists. That
-fail-closed state is the explicit legacy limitation and never becomes a false
-completion claim.
+replacement set. A legacy custom dump without the core layout contract remains
+`lifecycle_pending`; it cannot be treated as a file-per-message archive. New
+`backup-core.sh` snapshots use the database rewrite path above, while unknown
+or unsupported database schemas remain visible as an administrator alert and
+never become a false completion claim.
 
 The Worker always persists unavailable or unsupported stores as incomplete
 operations. Configure all required private endpoints before relying on a
