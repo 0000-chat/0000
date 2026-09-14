@@ -46,7 +46,13 @@ const MessageClaimSchema = TupleSchema.extend({
 }).strict();
 
 const OperationClaimSchema = TupleSchema.extend({
-  operation: z.enum(["receipt.send", "group.create", "group.manage"]),
+  operation: z.enum([
+    "conversation.create",
+    "receipt.send",
+    "group.create",
+    "group.manage",
+  ]),
+  session_generation: TimestampSchema,
   claim_id: CommunicatorIdSchema.optional(),
 }).strict();
 
@@ -181,6 +187,7 @@ const claimOperation = async (
     reservation_id: value.reservation_id,
     operation_id: value.operation_id,
     request_hash: value.request_hash,
+    session_generation: value.session_generation,
     ...(value.claim_id === undefined ? {} : { claim_id: value.claim_id }),
     now: value.now,
     expires_at: value.expires_at,

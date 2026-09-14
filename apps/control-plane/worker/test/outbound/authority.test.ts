@@ -297,6 +297,7 @@ type PrivateOperationFixture = {
   scope: PrivateAuthorityScope;
   operation_id: string;
   request_hash: string;
+  session_generation: string;
   tuple: OutboundTuple;
   capability: OutboundCapability;
 };
@@ -367,9 +368,9 @@ async function seedPrivateOperation(
              connection_id, conversation_id, message_id, matrix_room_id,
              matrix_event_id, request_hash, idempotency_key, status,
              matrix_stage, bridge_stage, provider_stage, failure_code,
-             failure_reason, evidence_json, requested_at, updated_at
+             failure_reason, evidence_json, requested_at, updated_at, session_generation
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 'requested',
-                     'unknown', 'unknown', 'unknown', NULL, NULL, '[]', ?, ?)`,
+                     'unknown', 'unknown', 'unknown', NULL, NULL, '[]', ?, ?, ?)`,
       ).bind(
         operationId,
         tuple.tenant_id,
@@ -383,6 +384,7 @@ async function seedPrivateOperation(
         `receipt_key_${suffix}`,
         timestamp,
         timestamp,
+        timestamp,
       ),
     );
   } else if (scope === "group.create") {
@@ -394,10 +396,11 @@ async function seedPrivateOperation(
              request_hash, name, participant_contacts_json,
              participant_provider_ids_json, status, provider_group_id,
              matrix_room_id, evidence_json, evidence_path, duplicate_risk,
-             human_action_required, failure_code, created_at, updated_at
+             human_action_required, failure_code, created_at, updated_at,
+             session_generation
            ) VALUES (?, ?, ?, ?, ?, ?, 'whatsapp', ?, ?, ?, 'Test group',
                      '[]', '[]', 'pending', NULL, NULL, NULL, NULL, 0, 0,
-                     NULL, ?, ?)`,
+                     NULL, ?, ?, ?)`,
       ).bind(
         operationId,
         tuple.tenant_id,
@@ -408,6 +411,7 @@ async function seedPrivateOperation(
         tuple.conversation_id,
         `group_create_key_${suffix}`,
         requestHash,
+        timestamp,
         timestamp,
         timestamp,
       ),
@@ -443,10 +447,10 @@ async function seedPrivateOperation(
              request_hash, idempotency_key, status, result_revision,
              result_member_provider_ids_json, evidence_json, evidence_path,
              duplicate_risk, human_action_required, failure_code, created_at,
-             updated_at
+             updated_at, session_generation
            ) VALUES (?, ?, ?, ?, ?, ?, 'whatsapp', ?, ?, ?, 'rename', 'New name',
                      '[]', 'r1', ?, ?, 'pending', NULL, NULL, NULL, NULL, 0,
-                     0, NULL, ?, ?)`,
+                     0, NULL, ?, ?, ?)`,
       ).bind(
         operationId,
         tuple.tenant_id,
@@ -461,6 +465,7 @@ async function seedPrivateOperation(
         `group_manage_key_${suffix}`,
         timestamp,
         timestamp,
+        timestamp,
       ),
     );
   }
@@ -469,6 +474,7 @@ async function seedPrivateOperation(
     scope,
     operation_id: operationId,
     request_hash: requestHash,
+    session_generation: timestamp,
     tuple,
     capability: effectiveCapability,
   };
@@ -482,6 +488,7 @@ const privateReserveInput = (
   operation_scope: operation.scope,
   operation_id: operation.operation_id,
   request_hash: operation.request_hash,
+  session_generation: operation.session_generation,
   capability: operation.capability,
   reservation_id: `reservation_${operation.operation_id}`,
   now: timestamp,
@@ -501,6 +508,7 @@ const privateClaimInput = (
   operation_scope: operation.scope,
   operation_id: operation.operation_id,
   request_hash: operation.request_hash,
+  session_generation: operation.session_generation,
   capability: operation.capability,
   reservation_id: reservationId,
   now: later,

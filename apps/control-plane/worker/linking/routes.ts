@@ -22,6 +22,7 @@ import {
   type ConnectionGateway,
   type GatewayOwner,
   type GatewayPollResult,
+  type GatewayRoomRebind,
 } from "./gateway-client";
 import {
   LINK_SESSION_TTL_MS,
@@ -462,6 +463,49 @@ const gatewayOwnerFor = (state: LinkSessionState): GatewayOwner => ({
     ? { provider_login_id: state.provider_login_id }
     : {}),
 });
+
+const rebindRelinkRooms = async (
+  env: Cloudflare.Env,
+  gateway: ConnectionGateway,
+  state: LinkSessionState,
+): Promise<void> => {
+  if (
+    state.status !== "connected" ||
+    !state.lifecycle_operation_id ||
+    !state.connection_id ||
+    !state.account_id ||
+    !state.provider_login_id ||
+    typeof gateway.rebindRooms !== "function"
+  )
+    return;
+  const operation = await getLifecycleOperation(
+    (env as Cloudflare.Env & { CONTROL_DB: D1Database }).CONTROL_DB,
+    state.tenant_id,
+    state.lifecycle_operation_id,
+  );
+  if (
+    !operation ||
+    operation.kind !== "relink" ||
+    operation.replacement_connection_id !== null
+  )
+    return;
+  const connection = await getLifecycleConnection(
+    (env as Cloudflare.Env & { CONTROL_DB: D1Database }).CONTROL_DB,
+    state.tenant_id,
+    state.connection_id,
+  );
+  if (!connection) throw new ConnectionGatewayError("provider_error");
+  const input: GatewayRoomRebind = {
+    ...gatewayOwnerFor(state),
+    connection_id: connection.connection_id,
+    account_id: connection.account_id,
+    provider_login_id: connection.provider_login_id,
+    old_session_generation: operation.session_generation,
+    new_session_generation: connection.session_generation,
+    route: connection.route,
+  };
+  await gateway.rebindRooms(input);
+};
 
 const publicSession = (
   state: LinkSessionState,
@@ -1021,8 +1065,11 @@ export const createLinkSessionActionHandler =
         state.status === "connected" ||
         state.status === "relink_required" ||
         state.status === "reconciliation_required"
-      )
+      ) {
+        if (state.status === "connected")
+          await rebindRelinkRooms(context.env, gateway, state);
         return context.json(publicSession(state), 200);
+      }
       const begun = await command(context.env, sessionId, {
         command: "begin",
         owner: ownerFor(state),
@@ -1087,6 +1134,7 @@ export const createLinkSessionActionHandler =
         );
       if (committed.commit_error)
         throw new LinkingRepositoryError(committed.commit_error);
+      await rebindRelinkRooms(context.env, gateway, committed.state);
       return context.json(publicSession(committed.state), 200);
     } catch (error) {
       return errorResponse(context, error);

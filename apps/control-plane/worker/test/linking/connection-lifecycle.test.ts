@@ -130,6 +130,11 @@ describe("administrator connection relink and disconnect", () => {
 
   it("relinks the same verified identity in place and fences duplicate starts", async () => {
     const owners: GatewayOwner[] = [];
+    const roomRebinds: Array<{
+      old_session_generation: string;
+      new_session_generation: string;
+      connection_id: string;
+    }> = [];
     let pollCalls = 0;
     const gateway: ConnectionGateway = {
       async start(owner) {
@@ -147,6 +152,14 @@ describe("administrator connection relink and disconnect", () => {
         return connected("login-one");
       },
       async cancel() {},
+      async rebindRooms(input) {
+        roomRebinds.push({
+          old_session_generation: input.old_session_generation,
+          new_session_generation: input.new_session_generation,
+          connection_id: input.connection_id,
+        });
+        return { status: "rebound", rebound: 1 };
+      },
     };
     const app = appFor(gateway);
 
@@ -193,6 +206,10 @@ describe("administrator connection relink and disconnect", () => {
       "connected",
     );
     expect(pollCalls).toBe(1);
+    expect(roomRebinds).toHaveLength(1);
+    expect(roomRebinds[0]?.connection_id).toBe("connection_human_whatsapp");
+    expect(roomRebinds[0]?.old_session_generation).toBe(before?.updated_at);
+    expect(roomRebinds[0]?.new_session_generation).not.toBe(before?.updated_at);
 
     const after = await workerEnv.CONTROL_DB.prepare(
       `SELECT c.status, c.updated_at, ca.account_id, cr.gateway_route_id,

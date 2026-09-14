@@ -2780,6 +2780,123 @@ impl Store {
         Ok(())
     }
 
+    /// Rebind every active room owned by one exact connection authority to a
+    /// newly committed session generation.  The encrypted mapping, binding
+    /// identifier, Matrix room, conversation, and creation timestamp remain
+    /// stable; only the server-owned generation in the protected payload is
+    /// replaced.  The transaction is immediate so a concurrent outbound
+    /// lookup cannot observe a partially rebound account.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebind_room_bindings(
+        &mut self,
+        tenant_id: &str,
+        account_id: &str,
+        connection_id: &str,
+        identity_id: &str,
+        platform: model::Provider,
+        gateway_route_id: &str,
+        owner_matrix_user_id: &str,
+        old_session_generation: &str,
+        new_session_generation: &str,
+    ) -> Result<usize, SafeError> {
+        if !model::valid_resource_id(tenant_id)
+            || !model::valid_resource_id(account_id)
+            || !model::valid_resource_id(connection_id)
+            || !model::valid_resource_id(identity_id)
+            || !model::valid_resource_id(gateway_route_id)
+            || owner_matrix_user_id.is_empty()
+            || !model::valid_timestamp(old_session_generation)
+            || !model::valid_timestamp(new_session_generation)
+            || old_session_generation == new_session_generation
+        {
+            return Err(room_binding_invalid());
+        }
+        let account_lookup = registry_account_lookup(&self.keyring, platform, account_id)?;
+        let keyring = &self.keyring;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| room_binding_invalid())?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT binding_id, room_lookup, account_lookup, payload_cipher,
+                        payload_nonce, key_version, status, created_at, retired_at
+                 FROM room_bindings WHERE account_lookup = ?1
+                 ORDER BY binding_id",
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let rows = statement
+            .query_map(
+                params![account_lookup.as_slice()],
+                read_stored_room_binding_row,
+            )
+            .map_err(|_| room_binding_invalid())?;
+        let mut existing = Vec::new();
+        for row in rows {
+            existing.push(row.map_err(|_| room_binding_invalid())?);
+        }
+        drop(statement);
+
+        let mut rebound = 0_usize;
+        for row in existing {
+            if row.account_lookup.as_slice() != account_lookup.as_slice() {
+                return Err(room_binding_invalid());
+            }
+            let binding = verify_active_room_binding(keyring, &row)?;
+            if binding.tenant_id() != tenant_id
+                || binding.account_id() != account_id
+                || binding.connection_id() != connection_id
+                || binding.identity_id() != identity_id
+                || binding.platform() != platform
+                || binding.gateway_route_id() != gateway_route_id
+                || binding.owner_matrix_user_id() != owner_matrix_user_id
+            {
+                continue;
+            }
+            if binding.session_generation() != Some(old_session_generation) {
+                return Err(room_binding_invalid());
+            }
+            let replacement = NewRoomBinding::new_with_session_generation(
+                binding.binding_id().to_owned(),
+                binding.matrix_room_id().to_owned(),
+                binding.tenant_id().to_owned(),
+                binding.identity_id().to_owned(),
+                binding.connection_id().to_owned(),
+                binding.account_id().to_owned(),
+                binding.platform(),
+                binding.gateway_route_id().to_owned(),
+                binding.conversation_id().to_owned(),
+                binding.owner_matrix_user_id().to_owned(),
+                new_session_generation.to_owned(),
+                *binding.created_at(),
+            )
+            .map_err(|_| room_binding_invalid())?;
+            let payload = replacement.payload_json()?;
+            let sealed = keyring
+                .seal("room_bindings", binding.binding_id(), "payload", &payload)
+                .map_err(|_| room_binding_invalid())?;
+            let updated = transaction
+                .execute(
+                    "UPDATE room_bindings
+                        SET payload_cipher = ?2, payload_nonce = ?3, key_version = ?4
+                      WHERE binding_id = ?1 AND status = 'active'",
+                    params![
+                        binding.binding_id(),
+                        sealed.ciphertext.as_slice(),
+                        sealed.nonce.as_slice(),
+                        i64::from(sealed.key_version),
+                    ],
+                )
+                .map_err(|_| room_binding_invalid())?;
+            if updated != 1 {
+                return Err(room_binding_invalid());
+            }
+            rebound = rebound.saturating_add(1);
+        }
+        transaction.commit().map_err(|_| room_binding_invalid())?;
+        Ok(rebound)
+    }
+
     /// Retire one active protected room binding without rewriting its payload.
     pub fn retire_room_binding(
         &mut self,
@@ -5507,6 +5624,103 @@ mod tests {
                 Err(store_sync_corrupt())
             );
         }
+    }
+
+    #[test]
+    fn room_binding_rebind_preserves_identity_and_rejects_a_stale_replay() {
+        let directory = tempdir().expect("create room rebind directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure room rebind directory");
+        let path = directory.path().join("gateway.sqlite3");
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid binding timestamp");
+        let old_generation = "2026-09-14T00:00:00.000Z";
+        let new_generation = "2026-09-14T00:00:01.000Z";
+        let mut store = Store::open(&path, Keyring::new([0x3a; 32], 1).expect("test keyring"))
+            .expect("open room rebind store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    "binding_3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+                    "!rebind:example.test",
+                    "tenant_rebind",
+                    "identity_rebind",
+                    "connection_rebind",
+                    "account_rebind",
+                    model::Provider::Whatsapp,
+                    "gateway_route_rebind",
+                    "conversation_rebind",
+                    "@rebind:example.test",
+                    old_generation,
+                    created_at,
+                )
+                .expect("create room binding"),
+            )
+            .expect("append room binding");
+
+        let before = store
+            .active_room_binding_for_outbound(
+                "tenant_rebind",
+                "account_rebind",
+                "connection_rebind",
+                "identity_rebind",
+                model::Provider::Whatsapp,
+                "conversation_rebind",
+            )
+            .expect("resolve original binding")
+            .expect("original binding");
+        let before_id = before.binding_id().to_owned();
+        let before_room = before.matrix_room_id().to_owned();
+
+        assert_eq!(
+            store
+                .rebind_room_bindings(
+                    "tenant_rebind",
+                    "account_rebind",
+                    "connection_rebind",
+                    "identity_rebind",
+                    model::Provider::Whatsapp,
+                    "gateway_route_rebind",
+                    "@rebind:example.test",
+                    old_generation,
+                    new_generation,
+                )
+                .expect("rebind active room"),
+            1
+        );
+        let after = store
+            .active_room_binding_for_outbound(
+                "tenant_rebind",
+                "account_rebind",
+                "connection_rebind",
+                "identity_rebind",
+                model::Provider::Whatsapp,
+                "conversation_rebind",
+            )
+            .expect("resolve rebound binding")
+            .expect("rebound binding");
+        assert_eq!(after.binding_id(), before_id);
+        assert_eq!(after.matrix_room_id(), before_room);
+        assert_eq!(after.conversation_id(), "conversation_rebind");
+        assert_eq!(after.session_generation(), Some(new_generation));
+        assert!(
+            store
+                .rebind_room_bindings(
+                    "tenant_rebind",
+                    "account_rebind",
+                    "connection_rebind",
+                    "identity_rebind",
+                    model::Provider::Whatsapp,
+                    "gateway_route_rebind",
+                    "@rebind:example.test",
+                    old_generation,
+                    "2026-09-14T00:00:02.000Z",
+                )
+                .is_err(),
+            "a stale old-generation replay must not rewrite the room again"
+        );
     }
 
     fn sqlite_values(connection: &Connection, query: &str, columns: usize) -> Vec<Vec<Value>> {

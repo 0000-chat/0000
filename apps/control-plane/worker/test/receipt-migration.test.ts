@@ -61,6 +61,8 @@ async function resetSchema(): Promise<void> {
     "outbound_acceptance_intents",
     "outbound_authority_heads",
     "attachment_download_grants",
+    "contact_dispatch_claims",
+    "contact_authority_intents",
     "direct_chat_creation_operations",
     "contact_resolution_candidates",
     "group_creation_webhook_evaluations",

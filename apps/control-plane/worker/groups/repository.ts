@@ -47,6 +47,7 @@ type GroupOperationRow = {
   identity_id: string;
   account_id: string;
   connection_id: string;
+  session_generation: string;
   provider: string;
   conversation_id: string;
   idempotency_key: string;
@@ -101,7 +102,7 @@ const groupOperationQuery = `
          participant_contacts_json, participant_provider_ids_json, status,
          provider_group_id, matrix_room_id, evidence_json, evidence_path,
          duplicate_risk, human_action_required, failure_code, created_at,
-         updated_at
+         updated_at, session_generation
     FROM group_creation_operations
 `;
 
@@ -210,6 +211,7 @@ export type GroupCreationOperationInput = {
   name: string;
   participants: readonly GroupParticipant[];
   participantProviderIds: readonly string[];
+  sessionGeneration: string;
   now: string;
 };
 
@@ -285,9 +287,9 @@ export async function beginGroupCreationOperation(
            participant_contacts_json, participant_provider_ids_json, status,
            provider_group_id, matrix_room_id, evidence_json, evidence_path,
            duplicate_risk, human_action_required, failure_code, created_at,
-           updated_at
+           updated_at, session_generation
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL,
-                   NULL, NULL, 0, 0, NULL, ?, ?)`,
+                   NULL, NULL, 0, 0, NULL, ?, ?, ?)`,
       )
       .bind(
         input.operationId,
@@ -305,6 +307,7 @@ export async function beginGroupCreationOperation(
         JSON.stringify(input.participantProviderIds),
         input.now,
         input.now,
+        input.sessionGeneration,
       )
       .run();
     const operation = await readOperationWithChildren(

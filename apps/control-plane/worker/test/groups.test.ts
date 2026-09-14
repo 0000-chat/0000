@@ -429,6 +429,20 @@ describe("group creation account and evidence boundaries", () => {
     expect(state.createAttempts).toBe(2);
     await mcp.client.close();
     await mcp.transport.close();
+
+    const authority = await env.CONTROL_DB.prepare(
+      "SELECT session_generation FROM group_authority_intents WHERE tenant_id = ? AND operation_kind = 'group.create' AND operation_id = ?",
+    )
+      .bind(tenantId, body.operation_id)
+      .first<{ session_generation: string }>();
+    const connection = await env.CONTROL_DB.prepare(
+      "SELECT updated_at FROM connections WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .first<{ updated_at: string }>();
+    expect(authority).toEqual({
+      session_generation: connection?.updated_at,
+    });
   });
 
   it("requires the distinct group.create grants and an active candidate revision", async () => {

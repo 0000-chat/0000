@@ -186,6 +186,7 @@ export type MarkDispatchClaimUncertainResult =
 
 /** Provider operations with durable records outside the message ledger. */
 export type PrivateAuthorityScope =
+  | "conversation.create"
   | "receipt.send"
   | "group.create"
   | "group.manage";
@@ -194,6 +195,7 @@ export type PrivateAuthorityReservationInput = OutboundTuple & {
   operation_scope: PrivateAuthorityScope;
   operation_id: string;
   request_hash: string;
+  session_generation: string;
   capability: OutboundCapability;
   reservation_id?: string;
   now: string;
@@ -204,6 +206,7 @@ export type PrivateAuthorityReservation = OutboundCapabilityTuple & {
   operation_scope: PrivateAuthorityScope;
   operation_id: string;
   request_hash: string;
+  session_generation: string;
   status: "reserved" | "committed" | "uncertain";
   uncertain_reason: string | null;
   created_at: string;
@@ -229,6 +232,7 @@ export type PrivateAuthorityClaimInput = OutboundCapabilityTuple & {
   reservation_id: string;
   operation_id: string;
   request_hash: string;
+  session_generation: string;
   claim_id?: string;
   now: string;
   expires_at: string;
@@ -240,6 +244,7 @@ export type PrivateAuthorityClaim = OutboundCapabilityTuple & {
   reservation_id: string;
   operation_id: string;
   request_hash: string;
+  session_generation: string;
   status: "claimed" | "uncertain";
   uncertain_reason: string | null;
   expires_at: string;

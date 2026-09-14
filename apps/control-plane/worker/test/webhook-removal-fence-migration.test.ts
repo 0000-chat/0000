@@ -38,6 +38,8 @@ const resetSchema = async (): Promise<void> => {
     "group_creation_webhook_evaluations",
     "group_creation_access_grants",
     "group_creation_operations",
+    "contact_dispatch_claims",
+    "contact_authority_intents",
     "removal_expiry_schedule",
     "removal_authority",
     "direct_chat_creation_operations",

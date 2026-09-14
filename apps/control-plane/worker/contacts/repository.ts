@@ -81,6 +81,7 @@ type CandidateRow = {
 type OperationRow = {
   operation_id: string;
   tenant_id: string;
+  membership_id: string;
   identity_id: string;
   account_id: string;
   connection_id: string;
@@ -90,6 +91,7 @@ type OperationRow = {
   conversation_id: string;
   idempotency_key: string;
   request_hash: string;
+  session_generation: string;
   status: string;
   provider_id: string;
   current_lid: string | null;
@@ -265,6 +267,7 @@ export async function getContactCandidate(
 export type DirectChatOperationInput = {
   operationId: string;
   tenantId: string;
+  membershipId: string;
   identityId: string;
   accountId: string;
   connectionId: string;
@@ -274,6 +277,7 @@ export type DirectChatOperationInput = {
   conversationId: string;
   idempotencyKey: string;
   requestHash: string;
+  sessionGeneration: string;
   providerId: string;
   currentLid: string | null;
   now: string;
@@ -301,6 +305,7 @@ const mapOperation = (row: OperationRow): DirectChatOperation => {
   return {
     operationId: row.operation_id,
     tenantId: row.tenant_id,
+    membershipId: row.membership_id,
     identityId: row.identity_id,
     accountId: row.account_id,
     connectionId: row.connection_id,
@@ -310,6 +315,7 @@ const mapOperation = (row: OperationRow): DirectChatOperation => {
     conversationId: row.conversation_id,
     idempotencyKey: row.idempotency_key,
     requestHash: row.request_hash,
+    sessionGeneration: row.session_generation,
     status,
     providerId: row.provider_id,
     currentLid: row.current_lid,
@@ -332,9 +338,9 @@ export async function readDirectChatOperation(
   try {
     const row = await db
       .prepare(
-        `SELECT operation_id, tenant_id, identity_id, account_id, connection_id,
+        `SELECT operation_id, tenant_id, membership_id, identity_id, account_id, connection_id,
                 provider, contact_id, candidate_revision, conversation_id,
-                idempotency_key, request_hash, status, provider_id, current_lid,
+                idempotency_key, request_hash, session_generation, status, provider_id, current_lid,
                 matrix_room_id, evidence_json, failure_code, created_at, updated_at
            FROM direct_chat_creation_operations
           WHERE tenant_id = ? AND idempotency_key = ?
@@ -358,9 +364,9 @@ export async function readCreatedChatForContact(
   try {
     const row = await db
       .prepare(
-        `SELECT operation_id, tenant_id, identity_id, account_id, connection_id,
+        `SELECT operation_id, tenant_id, membership_id, identity_id, account_id, connection_id,
                 provider, contact_id, candidate_revision, conversation_id,
-                idempotency_key, request_hash, status, provider_id, current_lid,
+                idempotency_key, request_hash, session_generation, status, provider_id, current_lid,
                 matrix_room_id, evidence_json, failure_code, created_at, updated_at
            FROM direct_chat_creation_operations
           WHERE tenant_id = ? AND account_id = ? AND contact_id = ?
@@ -395,15 +401,16 @@ export async function beginDirectChatOperation(
     await db
       .prepare(
         `INSERT INTO direct_chat_creation_operations (
-           operation_id, tenant_id, identity_id, account_id, connection_id,
+           operation_id, tenant_id, membership_id, identity_id, account_id, connection_id,
            provider, contact_id, candidate_revision, conversation_id,
-           idempotency_key, request_hash, status, provider_id, current_lid,
+           idempotency_key, request_hash, session_generation, status, provider_id, current_lid,
            matrix_room_id, evidence_json, failure_code, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL, NULL, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL, NULL, ?, ?)`,
       )
       .bind(
         input.operationId,
         input.tenantId,
+        input.membershipId,
         input.identityId,
         input.accountId,
         input.connectionId,
@@ -413,6 +420,7 @@ export async function beginDirectChatOperation(
         input.conversationId,
         input.idempotencyKey,
         input.requestHash,
+        input.sessionGeneration,
         input.providerId,
         input.currentLid,
         input.now,
@@ -498,9 +506,9 @@ export async function finishDirectChatOperation(
     const updated = await db
       .withSession("first-primary")
       .prepare(
-        `SELECT operation_id, tenant_id, identity_id, account_id, connection_id,
+        `SELECT operation_id, tenant_id, membership_id, identity_id, account_id, connection_id,
                 provider, contact_id, candidate_revision, conversation_id,
-                idempotency_key, request_hash, status, provider_id, current_lid,
+                idempotency_key, request_hash, session_generation, status, provider_id, current_lid,
                 matrix_room_id, evidence_json, failure_code, created_at, updated_at
            FROM direct_chat_creation_operations
           WHERE tenant_id = ? AND operation_id = ?

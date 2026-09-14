@@ -103,11 +103,22 @@ const providerFor = (state: ProviderState): ContactProvider => ({
     providerId,
     conversationId,
   ): Promise<ProviderDirectChat> {
-    state.createCalls.push(input);
-    state.createAttempts += 1;
     if (state.createStarted !== undefined) state.createStarted();
     if (state.blockCreate && state.releaseCreate !== undefined)
       await state.releaseCreate;
+    if (input.reservation_id !== undefined) {
+      const current = await env.CONTROL_DB.prepare(
+        `SELECT 1 AS available
+           FROM connections
+          WHERE id = ? AND status IN ('connected', 'syncing', 'ready')
+            AND updated_at = ?`,
+      )
+        .bind(input.route.connection_id, input.route.session_generation)
+        .first<{ available: number }>();
+      if (current === null) throw new ContactProviderError("unavailable");
+    }
+    state.createCalls.push(input);
+    state.createAttempts += 1;
     if (state.timeoutCreates || providerId === "contact_timeout")
       throw new ContactProviderError("unavailable");
     if (state.mismatchCreate) {
@@ -419,6 +430,11 @@ describe("contact resolution REST and MCP boundaries", () => {
     expect(mismatch.status).toBe(404);
 
     await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'member', updated_at = ? WHERE id = ?",
+    )
+      .bind(observedAt, "membership_human")
+      .run();
+    await env.CONTROL_DB.prepare(
       "UPDATE account_grants SET status = 'revoked', revoked_at = ? WHERE id = ?",
     )
       .bind(observedAt, "grant_contact_create")
@@ -428,6 +444,59 @@ describe("contact resolution REST and MCP boundaries", () => {
       body: JSON.stringify(body),
     });
     expect(revoked.status).toBe(403);
+  });
+
+  it("does not call the direct-chat provider after a disconnect wins the create race", async () => {
+    let createStartedResolve: (() => void) | undefined;
+    const createStarted = new Promise<void>((resolve) => {
+      createStartedResolve = resolve;
+    });
+    let releaseResolve: (() => void) | undefined;
+    const release = new Promise<void>((resolve) => {
+      releaseResolve = resolve;
+    });
+    const state: ProviderState = {
+      searchCalls: [],
+      resolveCalls: [],
+      createCalls: [],
+      createAttempts: 0,
+      timeoutCreates: false,
+      blockCreate: true,
+      createStarted: () => createStartedResolve?.(),
+      releaseCreate: release,
+    };
+    const app = createTestApp(state);
+    const resolved = await request(app, "/api/v1/contacts/resolve", {
+      method: "POST",
+      body: JSON.stringify({
+        identity_id: "identity_human",
+        account_id: "account_human",
+        phone: "+15550000001",
+      }),
+    });
+    const resolvedBody = (await resolved.json()) as {
+      candidate: { contact_id: string; candidate_revision: string };
+    };
+    const createRequest = request(app, "/api/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify(
+        createBody(
+          resolvedBody.candidate.contact_id,
+          resolvedBody.candidate.candidate_revision,
+          "create-after-disconnect",
+        ),
+      ),
+    });
+    await createStarted;
+    await env.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected', updated_at = ? WHERE id = ?",
+    )
+      .bind("2026-09-14T00:00:01.000Z", "connection_human_whatsapp")
+      .run();
+    releaseResolve?.();
+    const rejected = await createRequest;
+    expect(rejected.status).toBe(503);
+    expect(state.createAttempts).toBe(0);
   });
 
   it("reports malformed and unresolved phones, provider timeout, and idempotent duplicate creation", async () => {
@@ -674,7 +743,7 @@ describe("contact resolution REST and MCP boundaries", () => {
       body: JSON.stringify(body),
     });
     expect(duplicate.status).toBe(503);
-    expect(state.createAttempts).toBe(1);
+    expect(state.createAttempts).toBe(0);
 
     releaseCreate();
     const first = await firstRequest;

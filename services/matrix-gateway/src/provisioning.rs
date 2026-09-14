@@ -936,6 +936,43 @@ struct ContactRouteRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConnectionRebindRequest {
+    schema_version: u8,
+    tenant_id: String,
+    account_id: String,
+    connection_id: String,
+    identity_id: String,
+    provider: Provider,
+    old_session_generation: String,
+    new_session_generation: String,
+    route: ContactRouteRequest,
+}
+
+impl ConnectionRebindRequest {
+    fn validate(&self, route: &GatewayRouteMetadata) -> Result<(), &'static str> {
+        if self.schema_version != 1
+            || self.provider != Provider::Whatsapp
+            || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.account_id)
+            || !valid_resource_id(&self.connection_id)
+            || !valid_resource_id(&self.identity_id)
+            || !valid_provider_login_id(&self.route.provider_login_id)
+            || DateTime::parse_from_rfc3339(&self.old_session_generation).is_err()
+            || DateTime::parse_from_rfc3339(&self.new_session_generation).is_err()
+            || self.old_session_generation == self.new_session_generation
+            || self.route.gateway_route_id != route.gateway_route_id
+            || self.route.bridge_instance_id != route.bridge_instance_id
+            || self.route.matrix_user_id != route.matrix_user_id
+            || self.route.matrix_room_namespace != route.matrix_room_namespace
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContactRequest {
     schema_version: u8,
     tenant_id: String,
@@ -946,6 +983,16 @@ struct ContactRequest {
     session_generation: String,
     route: ContactRouteRequest,
     operation_id: String,
+    #[serde(default)]
+    membership_id: Option<String>,
+    #[serde(default)]
+    actor_identity_id: Option<String>,
+    #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
+    capability: Option<OutboundCapability>,
+    #[serde(default)]
+    request_hash: Option<String>,
     query: Option<String>,
     provider_id: Option<String>,
     conversation_id: Option<String>,
@@ -1028,6 +1075,38 @@ impl ContactRequest {
             return Err(INVALID_REQUEST);
         }
         Ok(())
+    }
+
+    fn authority_claim(&self) -> Result<OperationAuthorityClaim, &'static str> {
+        let membership_id = self.membership_id.clone().ok_or(INVALID_REQUEST)?;
+        let actor_identity_id = self.actor_identity_id.clone().ok_or(INVALID_REQUEST)?;
+        let reservation_id = self.reservation_id.clone().ok_or(INVALID_REQUEST)?;
+        let capability = self.capability.clone().ok_or(INVALID_REQUEST)?;
+        let request_hash = self.request_hash.clone().ok_or(INVALID_REQUEST)?;
+        let conversation_id = self.conversation_id.clone().ok_or(INVALID_REQUEST)?;
+        if !valid_resource_id(&membership_id)
+            || !valid_resource_id(&actor_identity_id)
+            || !valid_resource_id(&reservation_id)
+            || !valid_authority_capability(&capability)
+            || !valid_digest(&request_hash)
+            || !valid_resource_id(&conversation_id)
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(OperationAuthorityClaim {
+            operation: PrivateAuthorityOperation::ConversationCreate,
+            tenant_id: self.tenant_id.clone(),
+            membership_id,
+            actor_identity_id,
+            account_id: self.account_id.clone(),
+            conversation_id,
+            connection_id: self.connection_id.clone(),
+            reservation_id,
+            operation_id: self.operation_id.clone(),
+            request_hash,
+            session_generation: self.session_generation.clone(),
+            capability,
+        })
     }
 }
 
@@ -1485,9 +1564,23 @@ impl ProvisioningGatewayServer {
             }
             return self.group_create(parsed).await;
         }
+        if request.path == "/v1/connections/rebind-rooms" {
+            let parsed = match serde_json::from_slice::<ConnectionRebindRequest>(&request.body) {
+                Ok(parsed) => parsed,
+                Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            if let Err(error) = parsed.validate(&self.route) {
+                return response(400, json!({ "error": error }));
+            }
+            return self.rebind_rooms(parsed).await;
+        }
         let management_source = if request.path == "/v1/groups/management/event" {
             Some("event")
         } else if request.path == "/v1/groups/management/refresh" {
+            Some("refresh")
+        } else if request.path == "/v1/groups/event" {
+            Some("event")
+        } else if request.path == "/v1/groups/refresh" {
             Some("refresh")
         } else if request.path == "/v1/groups/rename" {
             Some("provider")
@@ -1546,11 +1639,14 @@ impl ProvisioningGatewayServer {
             "/v1/link-sessions/poll" => self.poll(parsed, owner).await,
             "/v1/link-sessions/cancel" => self.cancel(parsed, owner).await,
             "/v1/connections/disconnect" => {
-                if parsed.connection_id.as_deref().is_none_or(|value| {
-                    !valid_resource_id(value)
-                }) || parsed.provider_login_id.as_deref().is_none_or(|value| {
-                    !valid_provider_login_id(value) || value.eq_ignore_ascii_case("all")
-                }) {
+                if parsed
+                    .connection_id
+                    .as_deref()
+                    .is_none_or(|value| !valid_resource_id(value))
+                    || parsed.provider_login_id.as_deref().is_none_or(|value| {
+                        !valid_provider_login_id(value) || value.eq_ignore_ascii_case("all")
+                    })
+                {
                     return response(400, json!({ "error": INVALID_REQUEST }));
                 }
                 self.disconnect(parsed, owner).await
@@ -1592,6 +1688,7 @@ impl ProvisioningGatewayServer {
                 reservation_id: request.reservation_id.clone(),
                 operation_id: request.operation_id.clone(),
                 request_hash: request.request_hash.clone(),
+                session_generation: request.session_generation.clone(),
                 capability: request.capability.clone(),
             }))
             .await
@@ -1654,6 +1751,36 @@ impl ProvisioningGatewayServer {
             200,
             group_response(&request, &provider_group_id, &matrix_room_id),
         )
+    }
+
+    async fn rebind_rooms(&self, request: ConnectionRebindRequest) -> (u16, Vec<u8>) {
+        let Some(store_handle) = self.outbound_store.as_ref() else {
+            return response(503, json!({ "error": "connection_registry_unavailable" }));
+        };
+        let mut store = store_handle.lock().await;
+        match store.rebind_room_bindings(
+            &request.tenant_id,
+            &request.account_id,
+            &request.connection_id,
+            &request.identity_id,
+            request.provider,
+            &request.route.gateway_route_id,
+            &request.route.matrix_user_id,
+            &request.old_session_generation,
+            &request.new_session_generation,
+        ) {
+            Ok(rebound) => response(
+                200,
+                json!({
+                    "status": "rebound",
+                    "rebound": rebound,
+                    "connection_id": request.connection_id,
+                    "old_session_generation": request.old_session_generation,
+                    "session_generation": request.new_session_generation,
+                }),
+            ),
+            Err(_) => response(409, json!({ "error": "connection_rebind_conflict" })),
+        }
     }
 
     async fn group_manage(&self, request: GroupManagementRequest, source: &str) -> (u16, Vec<u8>) {
@@ -1724,6 +1851,7 @@ impl ProvisioningGatewayServer {
                     reservation_id: request.reservation_id.clone(),
                     operation_id: request.operation_id.clone(),
                     request_hash: request.request_hash.clone(),
+                    session_generation: request.session_generation.clone(),
                     capability: request.capability.clone(),
                 }))
                 .await
@@ -1778,6 +1906,10 @@ impl ProvisioningGatewayServer {
         let Some(conversation_id) = request.conversation_id.as_deref() else {
             return response(400, json!({ "error": INVALID_REQUEST }));
         };
+        let authority = match request.authority_claim() {
+            Ok(value) => value,
+            Err(error) => return response(400, json!({ "error": error })),
+        };
         let Some(store_handle) = self.outbound_store.as_ref() else {
             return response(503, json!({ "error": CONTACT_MISSING_STORE }));
         };
@@ -1816,6 +1948,17 @@ impl ProvisioningGatewayServer {
                 200,
                 contact_chat_response(&request, matrix_room_id.as_str(), "already_exists"),
             );
+        }
+
+        if let Err(reason) = self
+            .claim_provider(AuthorityClaimRequest::Operation(authority))
+            .await
+        {
+            return if reason == AUTHORITY_DENIED {
+                response(403, json!({ "error": AUTHORITY_DENIED }))
+            } else {
+                response(502, json!({ "error": CONTACT_UNCERTAIN }))
+            };
         }
 
         let provider_value = match self
@@ -2268,6 +2411,7 @@ impl ProvisioningGatewayServer {
                 reservation_id: request.reservation_id.clone(),
                 operation_id: request.operation_id.clone(),
                 request_hash: request.request_hash.clone(),
+                session_generation: request.session_generation.clone(),
                 capability: request.capability.clone(),
             }))
             .await
@@ -2611,9 +2755,9 @@ mod tests {
         },
         normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
         outbound::{
-            MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
-            MatrixGroupObservation, MatrixGroupObservationRequest, MatrixReadReceiptResult,
-            MatrixReadReceiptSender, MatrixSendResult, OutboundTextSender,
+            MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager, MatrixGroupObservation,
+            MatrixGroupObservationRequest, MatrixReadReceiptResult, MatrixReadReceiptSender,
+            MatrixSendResult, OutboundTextSender,
         },
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
@@ -3014,11 +3158,12 @@ mod tests {
             GATEWAY_SECRET,
         )
         .expect("history gateway");
+        let authority = Arc::new(SwitchableAuthority::new(AUTHORITY_DENY));
         let server =
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
                 .with_history(history)
-                .with_outbound_authority(allowing_authority());
+                .with_outbound_authority(Arc::clone(&authority) as Arc<dyn OutboundAuthority>);
         let session_generation = "2026-09-14T00:00:00.000Z";
         let request = |path: &str, idempotency_key: &str, body: Value| HttpRequest {
             path: path.to_owned(),
@@ -3061,6 +3206,15 @@ mod tests {
         let create_body = json!({
             "schema_version": 1,
             "tenant_id": "tenant_contact",
+            "membership_id": "membership_contact",
+            "actor_identity_id": "identity_contact_actor",
+            "reservation_id": "reservation_contact_create",
+            "capability": {
+                "kind": "account_grant",
+                "grant_id": "grant_contact_create",
+                "authorization_epoch": 1
+            },
+            "request_hash": "d".repeat(64),
             "account_id": "account_two",
             "connection_id": "connection_two",
             "identity_id": "identity_contact",
@@ -3071,6 +3225,24 @@ mod tests {
             "provider_id": "contact-two",
             "conversation_id": "conversation_contact_two"
         });
+        let (denied_status, _) = server
+            .handle_request(request(
+                "/v1/conversations/direct",
+                "contact-create-denied",
+                create_body.clone(),
+            ))
+            .await;
+        assert_eq!(denied_status, 403);
+        assert!(
+            bridge
+                .received_requests()
+                .await
+                .expect("bridge requests")
+                .iter()
+                .all(|request| !request.url.path().contains("create_dm")),
+            "a denied private claim must precede provider create_dm"
+        );
+        authority.set_mode(AUTHORITY_ALLOW);
         let (created_status, created_bytes) = server
             .handle_request(request(
                 "/v1/conversations/direct",
@@ -3136,6 +3308,138 @@ mod tests {
             requests
                 .iter()
                 .all(|request| !request.url.query_pairs().any(|(name, _)| name == "user_id"))
+        );
+    }
+
+    #[tokio::test]
+    async fn relink_room_endpoint_rebinds_the_encrypted_mapping_and_rejects_stale_replay() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid binding timestamp");
+        let old_generation = "2026-09-14T00:00:00.000Z";
+        let new_generation = "2026-09-14T00:00:01.000Z";
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x69; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    "binding_69696969696969696969696969696969",
+                    "!relink-room:example.test",
+                    "tenant_relink",
+                    "identity_relink",
+                    "connection_relink",
+                    "account_relink",
+                    Provider::Whatsapp,
+                    "gateway_route_whatsapp",
+                    "conversation_relink",
+                    MATRIX_USER,
+                    old_generation,
+                    created_at,
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::new(SharedHistoryTransport {
+                calls: AtomicUsize::new(0),
+                event_count: 0,
+            }),
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history);
+        let body = |old: &str, new: &str| {
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant_id": "tenant_relink",
+                "account_id": "account_relink",
+                "connection_id": "connection_relink",
+                "identity_id": "identity_relink",
+                "provider": "whatsapp",
+                "old_session_generation": old,
+                "new_session_generation": new,
+                "route": {
+                    "gateway_route_id": "gateway_route_whatsapp",
+                    "bridge_instance_id": "whatsapp-primary",
+                    "matrix_user_id": MATRIX_USER,
+                    "matrix_room_namespace": "communicator.0000.gold",
+                    "provider_login_id": "login-relink"
+                }
+            }))
+            .expect("request JSON")
+        };
+        let request = |idempotency_key: &str, body: Vec<u8>| HttpRequest {
+            path: "/v1/connections/rebind-rooms".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some(format!("request-{idempotency_key}")),
+            idempotency_key: Some(idempotency_key.to_owned()),
+            body,
+        };
+        let (status, bytes) = server
+            .handle_request(request(
+                "rebind-room-1",
+                body(old_generation, new_generation),
+            ))
+            .await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+        let response: Value = serde_json::from_slice(&bytes).expect("rebind response JSON");
+        assert_eq!(response["status"], "rebound");
+        assert_eq!(response["rebound"], 1);
+        let rebound = {
+            let store = server
+                .outbound_store
+                .as_ref()
+                .expect("outbound store")
+                .lock()
+                .await;
+            store
+                .active_room_binding_for_outbound(
+                    "tenant_relink",
+                    "account_relink",
+                    "connection_relink",
+                    "identity_relink",
+                    Provider::Whatsapp,
+                    "conversation_relink",
+                )
+                .expect("binding lookup")
+                .expect("rebound binding")
+        };
+        assert_eq!(rebound.matrix_room_id(), "!relink-room:example.test");
+        assert_eq!(rebound.session_generation(), Some(new_generation));
+        let (stale_status, _) = server
+            .handle_request(request(
+                "rebind-room-stale",
+                body(old_generation, "2026-09-14T00:00:02.000Z"),
+            ))
+            .await;
+        assert_eq!(stale_status, 409);
+        assert!(
+            bridge
+                .received_requests()
+                .await
+                .expect("bridge requests")
+                .is_empty(),
+            "rebind must not call the provider"
         );
     }
 
@@ -3538,7 +3842,10 @@ mod tests {
                 .with_group_manager(Arc::clone(&manager) as Arc<dyn MatrixGroupManager>)
                 .with_outbound_authority(allowing_authority());
         let request = HttpRequest {
-            path: "/v1/groups/rename".to_owned(),
+            // This is the same route used by the Worker recovery provider;
+            // keeping the test on the public private-listener path catches a
+            // registration drift from the provider client.
+            path: "/v1/groups/event".to_owned(),
             authorization: Some(GATEWAY_SECRET.to_owned()),
             request_id: Some("request-group-management".to_owned()),
             idempotency_key: Some("group-management-idempotency".to_owned()),
@@ -3581,7 +3888,7 @@ mod tests {
         let (status, bytes) = server.handle_request(request).await;
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
         let body: Value = serde_json::from_slice(&bytes).expect("management response JSON");
-        assert_eq!(body["evidence"]["source"], "provider");
+        assert_eq!(body["evidence"]["source"], "event");
         assert_eq!(
             body["evidence"]["evidence_id"],
             "$bridge-group-name:example.test"
@@ -3591,10 +3898,7 @@ mod tests {
             json!(["15551234567", "lid-42"])
         );
         let changes = changes.lock().expect("group change lock");
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].action, MatrixGroupAction::Rename);
-        assert_eq!(changes[0].room_id, "!group-management:example.test");
-        assert_eq!(changes[0].name.as_deref(), Some("Renamed operations"));
+        assert!(changes.is_empty(), "event recovery observes Matrix state");
         drop(changes);
         assert!(
             bridge

@@ -69,6 +69,8 @@ const applicationTables = [
   "connection_lifecycle_operations",
   "group_authority_intents",
   "group_dispatch_claims",
+  "contact_authority_intents",
+  "contact_dispatch_claims",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -132,6 +134,8 @@ async function dropControlDirectorySchema(db: D1Database) {
   for (const table of [
     "group_dispatch_claims",
     "group_authority_intents",
+    "contact_dispatch_claims",
+    "contact_authority_intents",
     "receipt_dispatch_claims",
     "receipt_authority_intents",
     "receipt_operation_evidence",

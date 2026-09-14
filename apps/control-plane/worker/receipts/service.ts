@@ -318,6 +318,7 @@ const operationIdentity = (
   identity_id: request.identity_id,
   account_id: request.account_id,
   connection_id: target.connection_id,
+  session_generation: "",
   conversation_id: request.conversation_id,
   message_id: request.message_id,
   matrix_room_id: target.matrix_room_id,
@@ -431,7 +432,8 @@ export async function requestReadReceipt(
   );
   if (routeRow === null) throw new ReadError("not_found");
   try {
-    routeFor(routeRow);
+    const route = routeFor(routeRow);
+    identity.session_generation = route.session_generation;
   } catch (error) {
     if (error instanceof ReadError && error.code === "invalid_request") {
       const rejected = await rejectOperation(
@@ -504,6 +506,7 @@ export async function requestReadReceipt(
       operation_id: operationId,
       request_hash: hash,
       capability,
+      session_generation: routeRow.session_generation,
       now: nowFor(services),
     },
   );

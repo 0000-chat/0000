@@ -32,6 +32,8 @@ async function resetSchema() {
   for (const table of [
     "group_dispatch_claims",
     "group_authority_intents",
+    "contact_dispatch_claims",
+    "contact_authority_intents",
     "receipt_dispatch_claims",
     "receipt_authority_intents",
     "connection_lifecycle_operations",

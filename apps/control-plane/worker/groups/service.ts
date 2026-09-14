@@ -444,6 +444,7 @@ const recoveryProviderInput = async (
     operation.operation_id,
   );
   if (reservation === null) return null;
+  if (reservation.session_generation !== route.session_generation) return null;
   return {
     ...providerInput(
       route,
@@ -620,6 +621,7 @@ export async function createGroup(
     participantProviderIds: canonicalParticipants.map(
       (participant) => participant.provider_id,
     ),
+    sessionGeneration: route.session_generation,
     now: nowFor(services),
   };
   const begun = await beginGroupCreationOperation(database, operationInput);
@@ -702,6 +704,7 @@ export async function createGroup(
       operation_scope: "group.create",
       operation_id: operation.operation_id,
       request_hash: operationInput.requestHash,
+      session_generation: route.session_generation,
       capability,
       now: nowFor(services),
     },

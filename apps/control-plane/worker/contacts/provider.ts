@@ -7,6 +7,7 @@ import {
   type Provider,
 } from "@communicator/contracts";
 import { z } from "zod";
+import type { OutboundCapability } from "../outbound/authority-types";
 
 export type ContactRoute = {
   tenant_id: string;
@@ -39,6 +40,12 @@ export type ContactProviderInput = {
   route: ContactRoute;
   operation_id: string;
   idempotency_key: string;
+  membership_id?: string;
+  actor_identity_id?: string;
+  reservation_id?: string;
+  capability?: OutboundCapability;
+  request_hash?: string;
+  operation_scope?: "conversation.create";
 };
 
 export interface ContactProvider {
@@ -303,6 +310,21 @@ export class HttpContactProvider implements ContactProvider {
             provider_login_id: input.route.provider_login_id,
           },
           operation_id: input.operation_id,
+          ...(input.membership_id === undefined
+            ? {}
+            : { membership_id: input.membership_id }),
+          ...(input.actor_identity_id === undefined
+            ? {}
+            : { actor_identity_id: input.actor_identity_id }),
+          ...(input.reservation_id === undefined
+            ? {}
+            : { reservation_id: input.reservation_id }),
+          ...(input.capability === undefined
+            ? {}
+            : { capability: input.capability }),
+          ...(input.request_hash === undefined
+            ? {}
+            : { request_hash: input.request_hash }),
           ...(body === undefined ? {} : body),
         }),
         signal: AbortSignal.timeout(30_000),

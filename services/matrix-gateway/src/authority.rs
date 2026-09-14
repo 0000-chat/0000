@@ -64,11 +64,13 @@ pub struct OperationAuthorityClaim {
     pub reservation_id: String,
     pub operation_id: String,
     pub request_hash: String,
+    pub session_generation: String,
     pub capability: OutboundCapability,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrivateAuthorityOperation {
+    ConversationCreate,
     ReceiptSend,
     GroupCreate,
     GroupManage,
@@ -77,6 +79,7 @@ pub enum PrivateAuthorityOperation {
 impl PrivateAuthorityOperation {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::ConversationCreate => "conversation.create",
             Self::ReceiptSend => "receipt.send",
             Self::GroupCreate => "group.create",
             Self::GroupManage => "group.manage",
@@ -123,6 +126,7 @@ impl AuthorityClaimRequest {
                 connection_id: &value.connection_id,
                 reservation_id: &value.reservation_id,
                 request_hash: &value.request_digest,
+                session_generation: None,
                 capability: &value.capability,
             },
             Self::Operation(value) => AuthorityClaimCommon {
@@ -134,6 +138,7 @@ impl AuthorityClaimRequest {
                 connection_id: &value.connection_id,
                 reservation_id: &value.reservation_id,
                 request_hash: &value.request_hash,
+                session_generation: Some(&value.session_generation),
                 capability: &value.capability,
             },
         }
@@ -149,6 +154,7 @@ struct AuthorityClaimCommon<'a> {
     connection_id: &'a str,
     reservation_id: &'a str,
     request_hash: &'a str,
+    session_generation: Option<&'a str>,
     capability: &'a OutboundCapability,
 }
 
@@ -292,6 +298,9 @@ impl AuthorityClaimClient {
             "expires_at": expires_at,
             "claim_id": request.claim_id(),
         });
+        if let Some(session_generation) = common.session_generation {
+            body["session_generation"] = Value::String(session_generation.to_owned());
+        }
         if let AuthorityClaimRequest::Message(value) = request {
             body["command_id"] = Value::String(value.command_id.clone());
             body["dispatch_id"] = Value::String(value.dispatch_id.clone());
@@ -394,6 +403,8 @@ struct ResponseClaim {
     #[serde(default)]
     request_hash: Option<String>,
     #[serde(default)]
+    session_generation: Option<String>,
+    #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     uncertain_reason: Option<String>,
@@ -478,6 +489,7 @@ fn validate_claim(
                 OutboundCapability::OwnerAdmin { .. } => None,
             }
         || claim.capability != *common.capability
+        || claim.session_generation.as_deref() != common.session_generation
     {
         return Err(AuthorityClaimFailure::Uncertain);
     }

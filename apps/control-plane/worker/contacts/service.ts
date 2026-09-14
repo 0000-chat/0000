@@ -16,12 +16,11 @@ import {
   type DirectChat,
   type SessionResponse,
 } from "@communicator/contracts";
-import {
-  hasAccountOperationGrant,
-  hasAccountOperationGrantForAccount,
-} from "../control-directory/grants";
+import { hasAccountOperationGrantForAccount } from "../control-directory/grants";
 import { ReadError } from "../read/errors";
 import { isAdministratorSession } from "../read/authorization";
+import type { OutboundCapability } from "../outbound/authority-types";
+import { reservePrivateAuthority } from "../outbound/private-authority";
 import {
   beginDirectChatOperation,
   directChatResult,
@@ -231,6 +230,94 @@ const accountReadAuthorized = async (
     throw new ReadError("forbidden");
 };
 
+const readContactCapability = async (
+  context: ContactServiceContext,
+  route: ContactRouteRow & { provider: "whatsapp"; provider_login_id: string },
+  identityId: string,
+  accountId: string,
+  conversationId: string,
+): Promise<OutboundCapability | null> => {
+  const db = databaseFor(context).withSession("first-primary");
+  if (isAdministratorSession(context.authorization)) {
+    const row = await db
+      .prepare(
+        `SELECT m.authority_epoch
+           FROM memberships AS m
+           JOIN tenants AS t ON t.id = m.tenant_id
+           JOIN principals AS p ON p.id = m.principal_id
+           JOIN identities AS i
+             ON i.tenant_id = m.tenant_id AND i.id = ?
+           JOIN connections AS c
+             ON c.tenant_id = m.tenant_id AND c.id = ?
+            AND c.identity_id = i.id
+           JOIN connection_accounts AS ca
+             ON ca.connection_id = c.id AND ca.account_id = ?
+            AND ca.status = 'active'
+          WHERE m.tenant_id = ? AND m.id = ?
+            AND t.status = 'active'
+            AND m.status = 'active' AND m.role IN ('owner', 'admin')
+            AND p.status = 'active' AND p.revoked_at IS NULL
+            AND p.principal_type IN ('human', 'operator')
+            AND i.status = 'active' AND i.identity_kind = 'human'
+          LIMIT 1`,
+      )
+      .bind(
+        identityId,
+        route.connection_id,
+        accountId,
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+      )
+      .first<{ authority_epoch: number }>();
+    return row === null
+      ? null
+      : {
+          kind: "owner_admin",
+          authority_id: context.authorization.membership.id,
+          authority_epoch: row.authority_epoch,
+        };
+  }
+  const row = await db
+    .prepare(
+      `SELECT g.id AS grant_id, g.authorization_epoch
+         FROM account_grants AS g
+         JOIN identity_grants AS ig
+           ON ig.tenant_id = g.tenant_id
+          AND ig.membership_id = g.membership_id
+          AND ig.identity_id = g.identity_id
+          AND ig.operation_scope = 'conversation.create'
+         JOIN connection_accounts AS ca
+           ON ca.account_id = g.account_id AND ca.status = 'active'
+         JOIN connections AS c
+           ON c.tenant_id = g.tenant_id AND c.id = ca.connection_id AND c.id = ?
+        WHERE g.tenant_id = ? AND g.membership_id = ? AND g.identity_id = ?
+          AND g.account_id = ? AND g.operation_scope = 'conversation.create'
+          AND g.status = 'active'
+          AND (g.chat_scope = 'all_chats' OR EXISTS (
+            SELECT 1 FROM account_grant_chats AS gc
+             WHERE gc.tenant_id = g.tenant_id AND gc.grant_id = g.id
+               AND gc.account_id = g.account_id AND gc.chat_id = ?
+          ))
+        ORDER BY g.id LIMIT 1`,
+    )
+    .bind(
+      route.connection_id,
+      context.authorization.tenant.id,
+      context.authorization.membership.id,
+      identityId,
+      accountId,
+      conversationId,
+    )
+    .first<{ grant_id: string; authorization_epoch: number }>();
+  return row === null
+    ? null
+    : {
+        kind: "account_grant",
+        grant_id: row.grant_id,
+        authorization_epoch: row.authorization_epoch,
+      };
+};
+
 const ensureRoute = async (
   context: ContactServiceContext,
   identityId: string,
@@ -397,16 +484,14 @@ export async function createDirectChat(
       ].join("\u001f"),
     )
   ).slice(0, 40)}`;
-  const granted = await hasAccountOperationGrant(
-    database.withSession("first-primary"),
-    context.authorization.tenant.id,
-    context.authorization.membership.id,
+  const capability = await readContactCapability(
+    context,
+    route,
     parsed.identity_id,
     parsed.account_id,
     conversationId,
-    "conversation.create",
   );
-  if (!granted) throw new ReadError("forbidden");
+  if (capability === null) throw new ReadError("forbidden");
 
   const existingChat = await readCreatedChatForContact(
     database.withSession("first-primary"),
@@ -417,6 +502,7 @@ export async function createDirectChat(
   if (existingChat !== null) return directChatResult(existingChat);
 
   const operationId = `chat_create_${crypto.randomUUID().replaceAll("-", "")}`;
+  const requestHash = await sha256Hex(JSON.stringify(parsed));
   let resolved: ProviderContact;
   try {
     resolved = await providerFor(context, services).resolve(
@@ -460,12 +546,14 @@ export async function createDirectChat(
     identityId: parsed.identity_id,
     accountId: parsed.account_id,
     connectionId: route.connection_id,
+    membershipId: context.authorization.membership.id,
     provider: route.provider,
     contactId: candidate.contact_id,
     candidateRevision: refreshed.candidate.candidate_revision,
     conversationId,
     idempotencyKey: parsed.idempotency_key,
-    requestHash: await sha256Hex(JSON.stringify(parsed)),
+    requestHash,
+    sessionGeneration: route.session_generation,
     providerId: refreshed.candidate.provider_id,
     currentLid: refreshed.candidate.current_lid,
     now: nowFor(services),
@@ -477,10 +565,49 @@ export async function createDirectChat(
   if (operation.status !== "pending")
     throw new ReadError("service_unavailable");
 
+  const reservation = await reservePrivateAuthority(
+    database.withSession("first-primary"),
+    {
+      tenant_id: operation.tenantId,
+      membership_id: operation.membershipId,
+      identity_id: operation.identityId,
+      account_id: operation.accountId,
+      conversation_id: operation.conversationId,
+      connection_id: operation.connectionId,
+      operation_scope: "conversation.create",
+      operation_id: operation.operationId,
+      request_hash: operation.requestHash,
+      session_generation: route.session_generation,
+      capability,
+      now: nowFor(services),
+    },
+  );
+  if (reservation.status === "denied") {
+    await finishDirectChatOperation(
+      database,
+      operation,
+      { status: "failed", failureCode: "authorization_revoked" },
+      nowFor(services),
+    );
+    throw new ReadError(
+      reservation.reason === "authorization_revoked"
+        ? "forbidden"
+        : "service_unavailable",
+    );
+  }
+
   let created: ProviderDirectChat;
   try {
     created = await providerFor(context, services).createDirectChat(
-      providerInput(route, operation.operationId, parsed.idempotency_key),
+      {
+        ...providerInput(route, operation.operationId, parsed.idempotency_key),
+        membership_id: reservation.reservation.membership_id,
+        actor_identity_id: reservation.reservation.identity_id,
+        reservation_id: reservation.reservation.id,
+        capability: reservation.reservation.capability,
+        request_hash: reservation.reservation.request_hash,
+        operation_scope: "conversation.create",
+      },
       refreshed.candidate.provider_id,
       conversationId,
     );

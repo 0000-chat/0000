@@ -41,6 +41,7 @@ export type ReceiptOperationRow = {
   identity_id: string;
   account_id: string;
   connection_id: string;
+  session_generation: string;
   conversation_id: string;
   message_id: string;
   matrix_room_id: string | null;
@@ -65,6 +66,7 @@ export type ReceiptOperationIdentity = Pick<
   | "identity_id"
   | "account_id"
   | "connection_id"
+  | "session_generation"
   | "conversation_id"
   | "message_id"
   | "matrix_room_id"
@@ -122,7 +124,7 @@ const mapOperation = (row: ReceiptOperationRow): ReadReceiptOperation => {
 };
 
 const operationColumns =
-  "operation_id, tenant_id, membership_id, identity_id, account_id, connection_id, conversation_id, message_id, matrix_room_id, matrix_event_id, request_hash, idempotency_key, status, matrix_stage, bridge_stage, provider_stage, failure_code, failure_reason, evidence_json, requested_at, updated_at";
+  "operation_id, tenant_id, membership_id, identity_id, account_id, connection_id, session_generation, conversation_id, message_id, matrix_room_id, matrix_event_id, request_hash, idempotency_key, status, matrix_stage, bridge_stage, provider_stage, failure_code, failure_reason, evidence_json, requested_at, updated_at";
 
 const readRow = async (
   db: D1DatabaseSession,
@@ -155,11 +157,11 @@ export async function createOrReadReceiptOperation(
       .prepare(
         `INSERT OR IGNORE INTO receipt_operations (
           operation_id, tenant_id, membership_id, identity_id, account_id,
-          connection_id, conversation_id, message_id, matrix_room_id,
+          connection_id, session_generation, conversation_id, message_id, matrix_room_id,
           matrix_event_id, request_hash, idempotency_key, status, matrix_stage,
           bridge_stage, provider_stage, failure_code, failure_reason,
           evidence_json, requested_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 'unknown',
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 'unknown',
           'unknown', 'unknown', NULL, NULL, '[]', ?, ?)`,
       )
       .bind(
@@ -169,6 +171,7 @@ export async function createOrReadReceiptOperation(
         input.identity_id,
         input.account_id,
         input.connection_id,
+        input.session_generation,
         input.conversation_id,
         input.message_id,
         input.matrix_room_id,

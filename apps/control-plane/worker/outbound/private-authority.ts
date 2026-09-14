@@ -21,6 +21,7 @@ type ReservationRow = {
   account_id: string;
   conversation_id: string;
   connection_id: string;
+  session_generation: string;
   grant_id: string | null;
   capability_kind: string;
   capability_id: string;
@@ -75,12 +76,19 @@ const validWindow = (now: string, expiresAt: string): boolean => {
 const intentTable = (scope: PrivateAuthorityScope): string =>
   scope === "receipt.send"
     ? "receipt_authority_intents"
-    : "group_authority_intents";
+    : scope === "conversation.create"
+      ? "contact_authority_intents"
+      : "group_authority_intents";
 
 const claimTable = (scope: PrivateAuthorityScope): string =>
   scope === "receipt.send"
     ? "receipt_dispatch_claims"
-    : "group_dispatch_claims";
+    : scope === "conversation.create"
+      ? "contact_dispatch_claims"
+      : "group_dispatch_claims";
+
+const usesOperationKind = (scope: PrivateAuthorityScope): boolean =>
+  scope === "group.create" || scope === "group.manage";
 
 const operationPredicate = (
   scope: PrivateAuthorityScope,
@@ -89,9 +97,11 @@ const operationPredicate = (
   const table =
     scope === "receipt.send"
       ? "receipt_operations"
-      : scope === "group.create"
-        ? "group_creation_operations"
-        : "group_management_operations";
+      : scope === "conversation.create"
+        ? "direct_chat_creation_operations"
+        : scope === "group.create"
+          ? "group_creation_operations"
+          : "group_management_operations";
   return `EXISTS (
     SELECT 1 FROM ${table} AS ${alias}
     WHERE ${alias}.tenant_id = ?
@@ -102,6 +112,7 @@ const operationPredicate = (
       AND ${alias}.connection_id = ?
       AND ${alias}.conversation_id = ?
       AND ${alias}.request_hash = ?
+      AND ${alias}.session_generation = ?
   )`;
 };
 
@@ -198,6 +209,7 @@ const mapReservation = (
   account_id: row.account_id,
   conversation_id: row.conversation_id,
   connection_id: row.connection_id,
+  session_generation: row.session_generation,
   grant_id: row.grant_id,
   capability:
     row.capability_kind === "account_grant"
@@ -231,6 +243,7 @@ const mapClaim = (
   account_id: row.account_id,
   conversation_id: row.conversation_id,
   connection_id: row.connection_id,
+  session_generation: row.session_generation,
   grant_id: row.grant_id,
   capability:
     row.capability_kind === "account_grant"
@@ -264,6 +277,7 @@ const sameReservationInput = (
   row.account_id === input.account_id &&
   row.conversation_id === input.conversation_id &&
   row.connection_id === input.connection_id &&
+  row.session_generation === input.session_generation &&
   row.request_hash === input.request_hash &&
   row.capability_kind === input.capability.kind &&
   row.capability_id ===
@@ -294,6 +308,7 @@ const operationBindings = (input: {
   connection_id: string;
   conversation_id: string;
   request_hash: string;
+  session_generation: string;
 }): string[] => [
   input.tenant_id,
   input.operation_id,
@@ -303,6 +318,7 @@ const operationBindings = (input: {
   input.connection_id,
   input.conversation_id,
   input.request_hash,
+  input.session_generation,
 ];
 
 const baseBindings = (
@@ -330,13 +346,13 @@ const reservationColumns = `
   id, tenant_id, operation_id, membership_id, identity_id, account_id,
   conversation_id, connection_id, grant_id, capability_kind, capability_id,
   capability_epoch, authority_id, request_hash, status, uncertain_reason,
-  created_at, updated_at`;
+  session_generation, created_at, updated_at`;
 
 const claimColumns = `
   id, tenant_id, reservation_id, operation_id, membership_id, identity_id,
   account_id, conversation_id, connection_id, grant_id, capability_kind,
   capability_id, capability_epoch, authority_id, request_hash, status,
-  uncertain_reason, expires_at, created_at, updated_at`;
+  uncertain_reason, session_generation, expires_at, created_at, updated_at`;
 
 const validReservationInput = (
   input: PrivateAuthorityReservationInput,
@@ -345,6 +361,7 @@ const validReservationInput = (
   validCapability(input.capability) &&
   isNonEmpty(input.operation_id) &&
   isDigest(input.request_hash) &&
+  Number.isFinite(Date.parse(input.session_generation)) &&
   isNonEmpty(input.now);
 
 /** Read the operation's saved reservation for crash recovery. */
@@ -355,20 +372,17 @@ export async function readPrivateAuthorityReservation(
   operationId: string,
 ): Promise<PrivateAuthorityReservation | null> {
   const table = intentTable(operationScope);
+  const operationKind = usesOperationKind(operationScope);
   const row = await database
     .prepare(
       `SELECT ${reservationColumns}
          FROM ${table}
         WHERE tenant_id = ? AND operation_id = ?${
-          operationScope === "receipt.send" ? "" : " AND operation_kind = ?"
+          operationKind ? " AND operation_kind = ?" : ""
         }
         LIMIT 1`,
     )
-    .bind(
-      tenantId,
-      operationId,
-      ...(operationScope === "receipt.send" ? [] : [operationScope]),
-    )
+    .bind(tenantId, operationId, ...(operationKind ? [operationScope] : []))
     .first<ReservationRow>();
   return row === null ? null : mapReservation(row, operationScope);
 }
@@ -386,15 +400,16 @@ export async function reservePrivateAuthority(
   const columns = capabilityColumns(input.capability);
   const table = intentTable(input.operation_scope);
   const operationSql = operationPredicate(input.operation_scope, "op");
+  const operationKind = usesOperationKind(input.operation_scope);
   const insert = database
     .prepare(`
       INSERT INTO ${table} (
-        id, tenant_id, ${input.operation_scope === "receipt.send" ? "" : "operation_kind, "}operation_id, membership_id, identity_id, account_id,
-        conversation_id, connection_id, grant_id, capability_kind,
+        id, tenant_id, ${operationKind ? "operation_kind, " : ""}operation_id, membership_id, identity_id, account_id,
+        conversation_id, connection_id, session_generation, grant_id, capability_kind,
         capability_id, capability_epoch, authority_id, request_hash, status,
         uncertain_reason, created_at, updated_at
       )
-      SELECT ?, ?, ${input.operation_scope === "receipt.send" ? "" : "?, "}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'committed', NULL, ?, ?
+      SELECT ?, ?, ${operationKind ? "?, " : ""}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'committed', NULL, ?, ?
       FROM memberships AS m
       JOIN tenants AS t ON t.id = m.tenant_id
       JOIN principals AS p ON p.id = m.principal_id
@@ -402,6 +417,7 @@ export async function reservePrivateAuthority(
       JOIN connection_accounts AS ca ON ca.account_id = ? AND ca.status = 'active'
       JOIN connections AS c
         ON c.tenant_id = m.tenant_id AND c.id = ca.connection_id AND c.id = ?
+       AND c.updated_at = ?
       WHERE m.tenant_id = ? AND m.id = ?
         AND t.status = 'active' AND m.status = 'active'
         AND p.status = 'active' AND p.revoked_at IS NULL
@@ -415,15 +431,14 @@ export async function reservePrivateAuthority(
     .bind(
       id,
       input.tenant_id,
-      ...(input.operation_scope === "receipt.send"
-        ? []
-        : [input.operation_scope]),
+      ...(operationKind ? [input.operation_scope] : []),
       input.operation_id,
       input.membership_id,
       input.identity_id,
       input.account_id,
       input.conversation_id,
       input.connection_id,
+      input.session_generation,
       columns.grantId,
       columns.kind,
       columns.id,
@@ -433,6 +448,7 @@ export async function reservePrivateAuthority(
       input.now,
       input.now,
       ...baseBindings(input, input.capability).slice(0, 3),
+      input.session_generation,
       input.tenant_id,
       input.membership_id,
       ...operationBindings(input),
@@ -440,14 +456,12 @@ export async function reservePrivateAuthority(
     );
   const selected = database
     .prepare(
-      `SELECT ${reservationColumns} FROM ${table} WHERE tenant_id = ? AND operation_id = ?${input.operation_scope === "receipt.send" ? "" : " AND operation_kind = ?"}`,
+      `SELECT ${reservationColumns} FROM ${table} WHERE tenant_id = ? AND operation_id = ?${operationKind ? " AND operation_kind = ?" : ""}`,
     )
     .bind(
       input.tenant_id,
       input.operation_id,
-      ...(input.operation_scope === "receipt.send"
-        ? []
-        : [input.operation_scope]),
+      ...(operationKind ? [input.operation_scope] : []),
     );
   const batchResults = await database.batch<ReservationRow>([insert, selected]);
   const inserted = batchResults[0];
@@ -473,6 +487,7 @@ const validClaimInput = (input: PrivateAuthorityClaimInput): boolean =>
   isNonEmpty(input.operation_id) &&
   isNonEmpty(input.reservation_id) &&
   isDigest(input.request_hash) &&
+  Number.isFinite(Date.parse(input.session_generation)) &&
   validWindow(input.now, input.expires_at);
 
 /** Claim the receipt/group provider boundary exactly once. */
@@ -488,31 +503,36 @@ export async function claimPrivateAuthority(
   const table = claimTable(input.operation_scope);
   const intent = intentTable(input.operation_scope);
   const operationSql = operationPredicate(input.operation_scope, "op");
+  const operationKind = usesOperationKind(input.operation_scope);
   const insert = database
     .prepare(`
       INSERT INTO ${table} (
-        id, tenant_id, reservation_id, ${input.operation_scope === "receipt.send" ? "" : "operation_kind, "}
+        id, tenant_id, reservation_id, ${operationKind ? "operation_kind, " : ""}
         operation_id, membership_id, identity_id, account_id, conversation_id,
-        connection_id, grant_id, capability_kind, capability_id,
+        connection_id, session_generation, grant_id, capability_kind, capability_id,
         capability_epoch, authority_id, request_hash, status, uncertain_reason,
         expires_at, created_at, updated_at
       )
-      SELECT ?, ?, ?, ${input.operation_scope === "receipt.send" ? "" : "?, "}
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', NULL, ?, ?, ?
+      SELECT ?, ?, ?, ${operationKind ? "?, " : ""}
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', NULL, ?, ?, ?
       FROM ${intent} AS ai
       JOIN memberships AS m ON m.tenant_id = ai.tenant_id AND m.id = ai.membership_id
       JOIN tenants AS t ON t.id = m.tenant_id
       JOIN principals AS p ON p.id = m.principal_id
       JOIN identities AS i ON i.tenant_id = m.tenant_id AND i.id = ai.identity_id
       JOIN connection_accounts AS ca ON ca.account_id = ai.account_id AND ca.status = 'active'
-      JOIN connections AS c ON c.tenant_id = m.tenant_id AND c.id = ca.connection_id
+      JOIN connections AS c
+        ON c.tenant_id = m.tenant_id
+       AND c.id = ca.connection_id
+       AND c.updated_at = ai.session_generation
       WHERE ai.tenant_id = ? AND ai.id = ? AND ai.operation_id = ?
         AND ai.status = 'committed'
-        ${input.operation_scope === "receipt.send" ? "" : "AND ai.operation_kind = ?"}
+        ${operationKind ? "AND ai.operation_kind = ?" : ""}
         AND ai.membership_id = ? AND ai.identity_id = ? AND ai.account_id = ?
         AND ai.conversation_id = ? AND ai.connection_id = ?
         AND ai.capability_kind = ? AND ai.capability_id = ?
         AND ai.capability_epoch = ? AND ai.request_hash = ?
+        AND ai.session_generation = ?
         AND t.status = 'active' AND m.status = 'active'
         AND p.status = 'active' AND p.revoked_at IS NULL AND i.status = 'active'
         AND c.id = ? AND c.status IN ('connected', 'syncing', 'ready')
@@ -524,15 +544,14 @@ export async function claimPrivateAuthority(
       id,
       input.tenant_id,
       input.reservation_id,
-      ...(input.operation_scope === "receipt.send"
-        ? []
-        : [input.operation_scope]),
+      ...(operationKind ? [input.operation_scope] : []),
       input.operation_id,
       input.membership_id,
       input.identity_id,
       input.account_id,
       input.conversation_id,
       input.connection_id,
+      input.session_generation,
       columns.grantId,
       columns.kind,
       columns.id,
@@ -545,9 +564,7 @@ export async function claimPrivateAuthority(
       input.tenant_id,
       input.reservation_id,
       input.operation_id,
-      ...(input.operation_scope === "receipt.send"
-        ? []
-        : [input.operation_scope]),
+      ...(operationKind ? [input.operation_scope] : []),
       input.membership_id,
       input.identity_id,
       input.account_id,
@@ -557,6 +574,7 @@ export async function claimPrivateAuthority(
       columns.id,
       columns.epoch,
       input.request_hash,
+      input.session_generation,
       input.connection_id,
       ...operationBindings(input),
       ...baseBindings(input, input.capability).slice(5),

@@ -603,6 +603,14 @@ const reconcileManagementOperation = async (
       services,
     );
   }
+  if (savedReservation.session_generation !== route.session_generation) {
+    return completeFailure(
+      context,
+      operation,
+      "group_management_authority_revoked",
+      services,
+    );
+  }
   const input: GroupManagementProviderInput = {
     ...providerInput(operation, route),
     membership_id: savedReservation.membership_id,
@@ -824,6 +832,7 @@ const dispatchOwner = async (
       operation_scope: "group.manage",
       operation_id: operation.operation_id,
       request_hash: requestHash,
+      session_generation: route.session_generation,
       capability,
       now,
     },
@@ -926,6 +935,7 @@ const runManagement = async (
     expectedRevision: input.expected_revision,
     idempotencyKey: input.idempotency_key,
     requestHash,
+    sessionGeneration: route.session_generation,
     now: nowFor(services),
   };
   // An exact replay must be answered from the durable operation even after

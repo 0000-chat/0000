@@ -66,6 +66,7 @@ type ManagementOperationRow = {
   identity_id: string;
   account_id: string;
   connection_id: string;
+  session_generation: string;
   provider: string;
   conversation_id: string;
   provider_group_id: string;
@@ -105,6 +106,7 @@ export type GroupManagementOperationInput = {
   expectedRevision: string;
   idempotencyKey: string;
   requestHash: string;
+  sessionGeneration: string;
   now: string;
 };
 
@@ -144,7 +146,7 @@ const operationQuery = `
          idempotency_key, status, result_revision,
          result_member_provider_ids_json, evidence_json, evidence_path,
          duplicate_risk, human_action_required, failure_code, created_at,
-         updated_at
+         updated_at, session_generation
     FROM group_management_operations
 `;
 
@@ -413,9 +415,9 @@ export async function beginGroupManagementOperation(
            idempotency_key, status, result_revision,
            result_member_provider_ids_json, evidence_json, evidence_path,
            duplicate_risk, human_action_required, failure_code, created_at,
-           updated_at
+           updated_at, session_generation
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
-                   NULL, NULL, NULL, NULL, 0, 0, NULL, ?, ?)`,
+                   NULL, NULL, NULL, NULL, 0, 0, NULL, ?, ?, ?)`,
       )
       .bind(
         input.operationId,
@@ -436,6 +438,7 @@ export async function beginGroupManagementOperation(
         input.idempotencyKey,
         input.now,
         input.now,
+        input.sessionGeneration,
       )
       .run();
     const operation = await readOperationWithState(

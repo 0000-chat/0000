@@ -60,6 +60,20 @@ export type GatewayDisconnectResult = {
   provider_login_id: string;
 };
 
+export type GatewayRoomRebind = GatewayOwner & {
+  connection_id: string;
+  account_id: string;
+  provider_login_id: string;
+  old_session_generation: string;
+  new_session_generation: string;
+  route: GatewayRoute;
+};
+
+export type GatewayRoomRebindResult = {
+  status: "rebound";
+  rebound: number;
+};
+
 export interface ConnectionGateway {
   start(owner: GatewayOwner): Promise<GatewayStartResult>;
   poll(
@@ -72,6 +86,7 @@ export interface ConnectionGateway {
       provider_login_id: string;
     },
   ) => Promise<GatewayDisconnectResult>;
+  rebindRooms?: (input: GatewayRoomRebind) => Promise<GatewayRoomRebindResult>;
 }
 
 export class ConnectionGatewayError extends Error {
@@ -202,6 +217,21 @@ const parseDisconnect = (value: unknown): GatewayDisconnectResult => {
     status: "disconnected",
     provider_login_id: typed.provider_login_id,
   };
+};
+
+const parseRoomRebind = (value: unknown): GatewayRoomRebindResult => {
+  if (typeof value !== "object" || value === null) {
+    throw new ConnectionGatewayError("provider_error");
+  }
+  const typed = value as Record<string, unknown>;
+  if (
+    typed.status !== "rebound" ||
+    !Number.isSafeInteger(typed.rebound) ||
+    Number(typed.rebound) < 0
+  ) {
+    throw new ConnectionGatewayError("provider_error");
+  }
+  return { status: "rebound", rebound: Number(typed.rebound) };
 };
 
 const validateOwner = (owner: GatewayOwner): void => {
@@ -335,6 +365,25 @@ export class HttpConnectionGateway implements ConnectionGateway {
       throw new ConnectionGatewayError("provider_error");
     }
     return result;
+  }
+
+  async rebindRooms(
+    input: GatewayRoomRebind,
+  ): Promise<GatewayRoomRebindResult> {
+    validateOwner(input);
+    if (
+      !isString(input.connection_id) ||
+      !isString(input.account_id) ||
+      !isString(input.provider_login_id) ||
+      input.provider_login_id.trim().toLowerCase() === "all" ||
+      !isString(input.old_session_generation) ||
+      !isString(input.new_session_generation) ||
+      input.old_session_generation === input.new_session_generation ||
+      parseRoute(input.route) === null
+    ) {
+      throw new ConnectionGatewayError("provider_error");
+    }
+    return this.request("/v1/connections/rebind-rooms", input, parseRoomRebind);
   }
 }
 
