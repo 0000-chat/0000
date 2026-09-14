@@ -485,12 +485,10 @@ impl MatrixSdkGroupManager {
                     .origin_server_ts()
                     .map(|timestamp| timestamp.get().into())
                     .is_some_and(|timestamp: u64| timestamp >= started_at)
+                && let Some(event_id) = name_event.event_id()
+                && required_source_event_ids.is_empty()
             {
-                if let Some(event_id) = name_event.event_id() {
-                    if required_source_event_ids.is_empty() {
-                        required_source_event_ids.insert(event_id.to_string());
-                    }
-                }
+                required_source_event_ids.insert(event_id.to_string());
             }
         }
 
@@ -516,17 +514,15 @@ impl MatrixSdkGroupManager {
                     .origin_server_ts()
                     .map(|timestamp| timestamp.get().into())
                     .is_some_and(|timestamp: u64| timestamp >= started_at)
-            {
-                if request
+                && request
                     .participant_provider_ids
                     .iter()
                     .any(|requested| requested == &provider_id)
-                {
-                    if let Some(event_id) = event.event_id().map(|event_id| event_id.to_string()) {
-                        required_source_event_ids.insert(event_id);
-                    }
-                    fresh_member_provider_ids.insert(provider_id);
+            {
+                if let Some(event_id) = event.event_id().map(|event_id| event_id.to_string()) {
+                    required_source_event_ids.insert(event_id);
                 }
+                fresh_member_provider_ids.insert(provider_id);
             }
         }
 
@@ -696,7 +692,7 @@ impl MatrixGroupManager for MatrixSdkGroupManager {
             }
             MatrixGroupAction::AddParticipants => {
                 for provider_id in &change.participant_provider_ids {
-                    let user_id = self.provider_user_id(&provider_id)?;
+                    let user_id = self.provider_user_id(provider_id)?;
                     timeout(self.request_timeout, room.invite_user_by_id(&user_id))
                         .await
                         .map_err(|_| MatrixGroupFailure::MatrixRequest)?
@@ -705,7 +701,7 @@ impl MatrixGroupManager for MatrixSdkGroupManager {
             }
             MatrixGroupAction::RemoveParticipants => {
                 for provider_id in &change.participant_provider_ids {
-                    let user_id = self.provider_user_id(&provider_id)?;
+                    let user_id = self.provider_user_id(provider_id)?;
                     timeout(
                         self.request_timeout,
                         room.kick_user(&user_id, Some("communicator group management")),
