@@ -90,11 +90,13 @@ The operation then names its actor, transport, request, accepted HTTP
 statuses, and typed evidence fields. The case contract checks the exact REST
 route, method, request headers, JSON body shape, and response pointers, or the
 exact MCP tool and its published response pointers. A REST operation uses a
-relative path; mutating routes must declare their JSON body, and linking
-disconnect additionally requires an `Idempotency-Key`. An MCP operation uses a
-declared tool or the `initialize` method. A tool without a published canonical
-response mapping remains unverified and cannot pass through an arbitrary
-successful response. Template values use `${target...}`, `${binding...}`,
+relative path; mutating routes must declare their exact JSON body for the
+method and path, and linking disconnect additionally requires an
+`Idempotency-Key`. An MCP operation uses a declared tool or the `initialize`
+method. The current Worker-bound mappings cover `list_messages`,
+`send_text_reply`, and `get_text_reply_status`; a tool without a published
+canonical response mapping remains unverified and cannot pass through an
+arbitrary successful response. Template values use `${target...}`, `${binding...}`,
 `${vars...}`, and validated IDs from earlier passing operations as
 `${observed...}`. The runner hashes request bodies and stores only bounded
 scalar response fields.
@@ -103,9 +105,9 @@ The existing Communicator entrypoints used by the plan include:
 
 | Acceptance area | REST entrypoint examples | MCP entrypoint examples |
 | --- | --- | --- |
-| Stored read and context | `GET /api/v1/identities/{id}/conversations`, `GET /api/v1/conversations/{id}/messages`, `GET /api/v1/search/messages` | `list_messages` (the currently published canonical MCP evidence mapping) |
+| Stored read and context | `GET /api/v1/identities/{id}/conversations`, `GET /api/v1/conversations/{id}/messages`, `GET /api/v1/search/messages` | `list_messages` |
 | Attachment access | `GET /api/v1/attachments/{id}`, `GET /api/v1/attachments/{id}/download` | Use the documented attachment read tool when the target exposes it |
-| Text and direct chat | `POST /api/v1/conversations/{id}/messages`, `POST /api/v1/contacts/resolve`, `POST /api/v1/conversations` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |
+| Text and direct chat | `POST /api/v1/conversations/{id}/messages`, `POST /api/v1/contacts/resolve`, `POST /api/v1/conversations` | `send_text_reply`, `get_text_reply_status` |
 | Groups | `POST /api/v1/groups`, `PATCH /api/v1/groups/{conversation_id}`, `POST/DELETE /api/v1/groups/{conversation_id}/participants` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |
 | Webhooks | `/api/v1/webhook-subscriptions` and `/api/v1/webhook-deliveries/{id}` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |
 | Receipts and removals | `POST /api/v1/conversations/{id}/receipts/read`, `/api/v1/receipts`, `/api/v1/removals` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |

@@ -221,6 +221,8 @@ class RestRequestContract:
     body_keys: frozenset[str] | None = None
     required_body_keys: frozenset[str] = frozenset()
     idempotency_key_min_length: int = 1
+    methods: tuple[str, ...] = ()
+    path_pattern: str | None = None
 
 
 def _requirement(
@@ -924,10 +926,10 @@ REST_ROUTE_CONTRACTS: dict[tuple[str, str, str], tuple[RouteContract, ...]] = {
     ("oauth_connection", "protected_resource", "response"): (("GET", r"/\.well-known/oauth-protected-resource"),),
     ("oauth_connection", "authorization_server", "response"): (("GET", r"/\.well-known/oauth-authorization-server"),),
     ("linking_identity_lifecycle", "unlinked_start", "response"): (("POST", r"/api/v1/identities/[^/]+/link-sessions"),),
-    ("linking_identity_lifecycle", "identity_grant", "grant_result"): (("POST", r"/api/v1/grants(?:/[^/]+)?"), ("PATCH", r"/api/v1/grants/[^/]+")),
+    ("linking_identity_lifecycle", "identity_grant", "grant_result"): (("POST", r"/api/v1/grants"), ("PATCH", r"/api/v1/grants/[^/]+")),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): (("POST", r"/api/v1/connections/[^/]+/relink-sessions"),),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_operation"): (("GET", r"/api/v1/connections/[^/]+/lifecycle-operations/[^/]+"),),
-    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): (("POST", r"/api/v1/grants(?:/[^/]+)?"), ("PATCH", r"/api/v1/grants/[^/]+")),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): (("POST", r"/api/v1/grants"), ("PATCH", r"/api/v1/grants/[^/]+")),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_chat"): (("GET", r"/api/v1/identities/[^/]+/conversations/[^/]+"),),
     ("linking_identity_lifecycle", "disconnect_preserves_history", "disconnect_result"): (("POST", r"/api/v1/connections/[^/]+/disconnect"),),
     ("linking_identity_lifecycle", "disconnect_preserves_history", "history_after_disconnect"): (("GET", r"/api/v1/conversations/[^/]+/messages"),),
@@ -967,7 +969,9 @@ REST_ROUTE_CONTRACTS: dict[tuple[str, str, str], tuple[RouteContract, ...]] = {
 # proof that the configured client can perform the action.  Body values are
 # intentionally not copied into evidence; validation records only their
 # presence and top-level keys.
-REST_REQUEST_CONTRACTS: dict[tuple[str, str, str], RestRequestContract] = {
+REST_REQUEST_CONTRACTS: dict[
+    tuple[str, str, str], RestRequestContract | tuple[RestRequestContract, ...]
+] = {
     ("linking_identity_lifecycle", "unlinked_start", "response"): RestRequestContract(
         required_headers=("idempotency-key",),
         body_required=True,
@@ -975,29 +979,46 @@ REST_REQUEST_CONTRACTS: dict[tuple[str, str, str], RestRequestContract] = {
         required_body_keys=frozenset({"provider", "method", "confirmed_identity_id"}),
         idempotency_key_min_length=8,
     ),
-    ("linking_identity_lifecycle", "identity_grant", "grant_result"): RestRequestContract(
-        body_required=True,
-        body_keys=frozenset(
-            {
-                "membership_id",
-                "identity_id",
-                "account_id",
-                "operation_scope",
-                "chat_scope",
-                "chat_ids",
-                "idempotency_key",
-            }
+    # Grant creation and update are separate Worker schemas.  Keep the
+    # create-only membership, identity, and account fields off PATCH requests.
+    ("linking_identity_lifecycle", "identity_grant", "grant_result"): (
+        RestRequestContract(
+            body_required=True,
+            body_keys=frozenset(
+                {
+                    "membership_id",
+                    "identity_id",
+                    "account_id",
+                    "operation_scope",
+                    "chat_scope",
+                    "chat_ids",
+                    "idempotency_key",
+                }
+            ),
+            required_body_keys=frozenset(
+                {
+                    "membership_id",
+                    "identity_id",
+                    "account_id",
+                    "operation_scope",
+                    "chat_scope",
+                    "chat_ids",
+                    "idempotency_key",
+                }
+            ),
+            methods=("POST",),
+            path_pattern=r"/api/v1/grants",
         ),
-        required_body_keys=frozenset(
-            {
-                "membership_id",
-                "identity_id",
-                "account_id",
-                "operation_scope",
-                "chat_scope",
-                "chat_ids",
-                "idempotency_key",
-            }
+        RestRequestContract(
+            body_required=True,
+            body_keys=frozenset(
+                {"operation_scope", "chat_scope", "chat_ids", "idempotency_key"}
+            ),
+            required_body_keys=frozenset(
+                {"operation_scope", "chat_scope", "chat_ids", "idempotency_key"}
+            ),
+            methods=("PATCH",),
+            path_pattern=r"/api/v1/grants/[^/]+",
         ),
     ),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): RestRequestContract(
@@ -1009,29 +1030,44 @@ REST_REQUEST_CONTRACTS: dict[tuple[str, str, str], RestRequestContract] = {
         required_body_keys=frozenset({"provider", "method", "confirmed_identity_id"}),
         idempotency_key_min_length=8,
     ),
-    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): RestRequestContract(
-        body_required=True,
-        body_keys=frozenset(
-            {
-                "membership_id",
-                "identity_id",
-                "account_id",
-                "operation_scope",
-                "chat_scope",
-                "chat_ids",
-                "idempotency_key",
-            }
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): (
+        RestRequestContract(
+            body_required=True,
+            body_keys=frozenset(
+                {
+                    "membership_id",
+                    "identity_id",
+                    "account_id",
+                    "operation_scope",
+                    "chat_scope",
+                    "chat_ids",
+                    "idempotency_key",
+                }
+            ),
+            required_body_keys=frozenset(
+                {
+                    "membership_id",
+                    "identity_id",
+                    "account_id",
+                    "operation_scope",
+                    "chat_scope",
+                    "chat_ids",
+                    "idempotency_key",
+                }
+            ),
+            methods=("POST",),
+            path_pattern=r"/api/v1/grants",
         ),
-        required_body_keys=frozenset(
-            {
-                "membership_id",
-                "identity_id",
-                "account_id",
-                "operation_scope",
-                "chat_scope",
-                "chat_ids",
-                "idempotency_key",
-            }
+        RestRequestContract(
+            body_required=True,
+            body_keys=frozenset(
+                {"operation_scope", "chat_scope", "chat_ids", "idempotency_key"}
+            ),
+            required_body_keys=frozenset(
+                {"operation_scope", "chat_scope", "chat_ids", "idempotency_key"}
+            ),
+            methods=("PATCH",),
+            path_pattern=r"/api/v1/grants/[^/]+",
         ),
     ),
     # The Worker requires this header even though the JSON action body is
@@ -1075,21 +1111,59 @@ REST_REQUEST_CONTRACTS: dict[tuple[str, str, str], RestRequestContract] = {
             {"identity_id", "account_id", "name", "participants", "idempotency_key"}
         ),
     ),
-    ("direct_chat_and_group", "group_management", "response"): RestRequestContract(
-        body_required=True,
-        body_keys=frozenset(
-            {
-                "identity_id",
-                "account_id",
-                "conversation_id",
-                "expected_revision",
-                "idempotency_key",
-                "name",
-                "participants",
-            }
+    # Group management has three strict action schemas.  A common union would
+    # accept a PATCH rename with participant data (or a participant mutation
+    # with a name), even though the Worker rejects both requests.
+    ("direct_chat_and_group", "group_management", "response"): (
+        RestRequestContract(
+            body_required=True,
+            body_keys=frozenset(
+                {
+                    "identity_id",
+                    "account_id",
+                    "conversation_id",
+                    "expected_revision",
+                    "idempotency_key",
+                    "name",
+                }
+            ),
+            required_body_keys=frozenset(
+                {
+                    "identity_id",
+                    "account_id",
+                    "conversation_id",
+                    "expected_revision",
+                    "idempotency_key",
+                    "name",
+                }
+            ),
+            methods=("PATCH",),
+            path_pattern=r"/api/v1/groups/[^/]+",
         ),
-        required_body_keys=frozenset(
-            {"identity_id", "account_id", "conversation_id", "expected_revision", "idempotency_key"}
+        RestRequestContract(
+            body_required=True,
+            body_keys=frozenset(
+                {
+                    "identity_id",
+                    "account_id",
+                    "conversation_id",
+                    "expected_revision",
+                    "idempotency_key",
+                    "participants",
+                }
+            ),
+            required_body_keys=frozenset(
+                {
+                    "identity_id",
+                    "account_id",
+                    "conversation_id",
+                    "expected_revision",
+                    "idempotency_key",
+                    "participants",
+                }
+            ),
+            methods=("POST", "DELETE"),
+            path_pattern=r"/api/v1/groups/[^/]+/participants",
         ),
     ),
     ("webhook_subscriptions", "subscription_one_initial", "response"): RestRequestContract(
@@ -1234,13 +1308,74 @@ MCP_CANONICAL_POINTERS: dict[tuple[str, str, str, str], dict[str, Any]] = {
         "chat_id": "/result/structuredContent/items/0/conversation_id",
         "message_id": "/result/structuredContent/items/0/id",
     },
+    # The Grok read surface uses the same Worker list_messages tool and the
+    # same MessagePageResult response as the OAuth connection case.
+    ("grok_surface_read", "surface_scoped_read", "response", "list_messages"): {
+        "account_id": "/result/structuredContent/items/0/account_id",
+        "chat_id": "/result/structuredContent/items/0/conversation_id",
+        "message_id": "/result/structuredContent/items/0/id",
+    },
+    # send_text_reply returns AcceptTextReplyResult: Command, Message, and
+    # OutboundDispatch.  Provider message IDs are deliberately absent from
+    # this public result and therefore cannot be used as provider proof.
+    ("grok_surface_send", "surface_text_send", "response", "send_text_reply"): {
+        "command_id": "/result/structuredContent/command/id",
+        "message_id": "/result/structuredContent/message/id",
+        "account_id": "/result/structuredContent/dispatch/account_id",
+        "chat_id": "/result/structuredContent/dispatch/conversation_id",
+        "saved_status": "/result/structuredContent/command/status",
+        "dispatch_status": "/result/structuredContent/dispatch/status",
+        "provider_status": "/result/structuredContent/dispatch/provider_stage",
+    },
+    ("grok_failure_matrix", "duplicate_request", "response", "send_text_reply"): {
+        "command_id": "/result/structuredContent/command/id",
+        "idempotency_key": "/result/structuredContent/dispatch/idempotency_key",
+        "second_request_reused": "/result/structuredContent/replayed",
+    },
+    ("grok_failure_matrix", "timeout_uncertainty", "response", "get_text_reply_status"): {
+        "command_id": "/result/structuredContent/command/id",
+        "uncertainty_status": "/result/structuredContent/dispatch/status",
+        "chat_paused": "/result/structuredContent/dispatch/chat_paused",
+        "provider_status": "/result/structuredContent/dispatch/provider_stage",
+    },
+    ("grok_failure_matrix", "reconnect", "response", "get_text_reply_status"): {
+        "command_id": "/result/structuredContent/command/id",
+        "saved_at": "/result/structuredContent/command/created_at",
+        "confirmation_status": "/result/structuredContent/command/confirmation_decision",
+    },
+    ("grok_failure_matrix", "provider_rejection", "response", "send_text_reply"): {
+        "command_id": "/result/structuredContent/command/id",
+        "error_code": "/result/structuredContent/command/failure_code",
+        "provider_status": "/result/structuredContent/dispatch/provider_stage",
+    },
 }
 
 # Compatibility name retained for callers that inspect the contract catalog.
 REQUEST_CONTRACTS = REST_ROUTE_CONTRACTS
 MCP_CONTRACTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("oauth_connection", "mcp_scoped_read"): ("list_messages",),
+    ("grok_surface_read", "surface_scoped_read"): ("list_messages",),
+    ("grok_surface_send", "surface_text_send"): ("send_text_reply",),
+    ("grok_failure_matrix", "duplicate_request"): ("send_text_reply",),
+    ("grok_failure_matrix", "timeout_uncertainty"): ("get_text_reply_status",),
+    ("grok_failure_matrix", "reconnect"): ("get_text_reply_status",),
+    ("grok_failure_matrix", "provider_rejection"): ("send_text_reply",),
 }
+
+# The Worker exposes no canonical Bot-identity binding response schema.  Keep
+# the declared acceptance case visible as an explicit unverified observation
+# using the actual list_identities tool; it must never pass on an invented
+# member field.
+MCP_UNVERIFIED_CONTRACTS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("grok_bot_identity", "bot_member_binding"): ("list_identities",),
+}
+
+
+def _mcp_contract_tools(scenario: str, requirement: Requirement) -> tuple[str, ...]:
+    return requirement.mcp_tools or MCP_CONTRACTS.get(
+        (scenario, requirement.identifier),
+        MCP_UNVERIFIED_CONTRACTS.get((scenario, requirement.identifier), ()),
+    )
 
 
 def utc_now() -> str:
@@ -1465,13 +1600,45 @@ def _route_contracts_for(
     )
 
 
-def _rest_request_contract(
+def _rest_request_contract_candidates(
     scenario: str, requirement: Requirement, observation: str
-) -> RestRequestContract | None:
-    return REST_REQUEST_CONTRACTS.get(
+) -> tuple[RestRequestContract, ...]:
+    value = REST_REQUEST_CONTRACTS.get(
         (scenario, requirement.identifier, observation),
         REST_REQUEST_CONTRACTS.get((scenario, requirement.identifier, "response")),
     )
+    if value is None:
+        return ()
+    return value if isinstance(value, tuple) else (value,)
+
+
+def _rest_request_contract(
+    scenario: str,
+    requirement: Requirement,
+    observation: str,
+    request: dict[str, Any] | None = None,
+) -> RestRequestContract | None:
+    """Select the exact action schema for a REST request.
+
+    Some semantic observations intentionally cover more than one route (for
+    example grant create/update and group rename/member mutations).  The
+    caller must therefore select by method and path before validating body
+    keys.  With no request, return the first declared variant for callers that
+    need a representative contract to construct a fixture.
+    """
+
+    candidates = _rest_request_contract_candidates(scenario, requirement, observation)
+    if request is None:
+        return candidates[0] if candidates else None
+    method = str(request.get("method", "")).upper()
+    path = _route_path_for_matching(str(request.get("path", "")))
+    for candidate in candidates:
+        if candidate.methods and method not in candidate.methods:
+            continue
+        if candidate.path_pattern and not re.fullmatch(candidate.path_pattern, path):
+            continue
+        return candidate
+    return None
 
 
 def _request_headers(request: dict[str, Any]) -> dict[str, str]:
@@ -1556,7 +1723,9 @@ def _request_contract_errors(
             path = str(request.get("path", "")).lower()
             if not any(fragment.lower() == path for fragment in requirement.path_fragments):
                 errors.append(f"route is not the declared {requirement.case} entrypoint")
-        action_contract = _rest_request_contract(scenario, requirement, observation)
+        action_contract = _rest_request_contract(
+            scenario, requirement, observation, request
+        )
         if action_contract is not None:
             headers = _request_headers(request)
             for header in action_contract.required_headers:
@@ -1591,7 +1760,7 @@ def _request_contract_errors(
             if request.get("method") != "initialize":
                 errors.append("MCP initialize proof must invoke initialize")
         else:
-            tools = requirement.mcp_tools or MCP_CONTRACTS.get((scenario, requirement.identifier), ())
+            tools = _mcp_contract_tools(scenario, requirement)
             tool = request.get("tool")
             if not tools or tool not in tools:
                 errors.append(f"MCP tool {tool!r} is not a {requirement.case} entrypoint")
@@ -2574,8 +2743,11 @@ def evaluate_scenario(
                     "observed_fields": sorted(observed),
                 }
             )
-            if obs_status == "pass":
-                passing_records.extend(passing)
+            # Keep fields from individually passing operations in coverage even
+            # when the named observation is incomplete.  A partial response is
+            # useful evidence for review, while the observation/case remains
+            # unverified until every declared field is present.
+            passing_records.extend(passing)
 
         aggregate: dict[str, Any] = {}
         conflicts: set[str] = set()

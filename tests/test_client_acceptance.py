@@ -122,7 +122,7 @@ class FakeTransport:
             "download_grant": "download_grant_one",
             "command_id": "command_one",
             "dispatch_id": "dispatch_one",
-            "saved_status": "saved",
+            "saved_status": "accepted",
             "saved_at": "2026-09-14T00:00:00Z",
             "matrix_status": "accepted",
             "bridge_status": "delivered",
@@ -184,7 +184,7 @@ class FakeTransport:
             "chat_paused": True,
             "reconnect_status": "reconnected",
             "age_preserved": True,
-            "confirmation_status": "confirmed",
+            "confirmation_status": "confirm",
         }
         if subscription_followup:
             body["subscription_id"] = "subscription_one"
@@ -260,6 +260,10 @@ class FakeTransport:
     def mcp(self, request: dict[str, Any], token: str | None, client: dict[str, str]) -> client_acceptance.HttpResponse:
         del token, client
         self.mcp_calls.append(request.get("tool") or request.get("method"))
+        arguments = request.get("arguments", {})
+        provider_rejection = (
+            arguments.get("idempotency_key") == "acceptance-provider_rejection-001"
+        )
         if self.mcp_error:
             response_body = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "failed"}}
         elif request.get("method") == "initialize":
@@ -284,9 +288,32 @@ class FakeTransport:
                     ],
                     "next_cursor": None,
                 }
+            elif request.get("tool") in {"send_text_reply", "get_text_reply_status"}:
+                body = {
+                    "command": {
+                        "id": body["command_id"],
+                        "status": body["saved_status"],
+                        "created_at": body["saved_at"],
+                        "confirmation_decision": body["confirmation_status"],
+                        "failure_code": body["error_code"]
+                        if provider_rejection
+                        else None,
+                    },
+                    "message": {"id": body["message_id"]},
+                    "dispatch": {
+                        "command_id": body["command_id"],
+                        "account_id": body["account_id"],
+                        "conversation_id": body["chat_id"],
+                        "idempotency_key": body["idempotency_key"],
+                        "status": body["uncertainty_status"],
+                        "provider_stage": body["provider_status"],
+                        "chat_paused": body["chat_paused"],
+                    },
+                    "replayed": body["second_request_reused"],
+                }
             response_body = {"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": body}}
         raw = client_acceptance.canonical_bytes(response_body)
-        status = 400 if request.get("arguments", {}).get("acceptance_case") == "provider_rejection" else 200
+        status = 400 if provider_rejection else 200
         return client_acceptance.HttpResponse(status, {"content-type": "application/json"}, response_body, raw)
 
 
@@ -366,7 +393,7 @@ def operation_for_requirement(
         if selected_observation == "history_after_disconnect":
             request["query"] = {"acceptance_case": req.case}
         request_contract = client_acceptance._rest_request_contract(
-            scenario, req, selected_observation
+            scenario, req, selected_observation, request
         )
         if headers is not None:
             request["headers"] = headers
@@ -440,13 +467,15 @@ def operation_for_requirement(
                 "server_version": "/result/serverInfo/version",
             }
         else:
-            allowed = client_acceptance.MCP_CONTRACTS.get((scenario, requirement_identifier), ())
+            allowed = client_acceptance._mcp_contract_tools(
+                scenario, req
+            )
             if not allowed:
                 raise client_acceptance.ConfigError(
                     f"no canonical MCP contract is published for {scenario}/{requirement_identifier}"
                 )
             chosen_tool = tool or allowed[0]
-            request = {"tool": chosen_tool, "arguments": {"acceptance_case": req.case}}
+            request = {"tool": chosen_tool, "arguments": {}}
             if chosen_tool == "list_messages":
                 request["arguments"].update(
                     {
@@ -456,13 +485,31 @@ def operation_for_requirement(
                         "limit": 1,
                     }
                 )
-            pointers = dict(
-                client_acceptance.MCP_CANONICAL_POINTERS.get(
-                    (scenario, requirement_identifier, selected_observation, chosen_tool),
-                    {name: f"/result/structuredContent/{name}" for name in observation_fields},
+            elif chosen_tool == "send_text_reply":
+                request["arguments"].update(
+                    {
+                        "identity_id": "identity_one",
+                        "conversation_id": "chat_one",
+                        "account_id": "account_one",
+                        "body": "controlled acceptance body",
+                        "delivery_mode": "direct",
+                        "idempotency_key": f"acceptance-{req.case}-001",
+                    }
                 )
+            elif chosen_tool == "get_text_reply_status":
+                request["arguments"].update({"command_id": "command_one"})
+            canonical = client_acceptance.MCP_CANONICAL_POINTERS.get(
+                (scenario, requirement_identifier, selected_observation, chosen_tool),
+                {},
             )
-    operation_evidence = evidence or {"extract": pointers, "required": list(observation_fields)}
+            pointers = dict(
+                canonical
+                or {name: f"/result/structuredContent/{name}" for name in observation_fields}
+            )
+    operation_evidence = evidence or {
+        "extract": pointers,
+        "required": [name for name in observation_fields if name in pointers],
+    }
     operation_expect = {"statuses": statuses or list(req.statuses)}
     if expect:
         operation_expect.update(expect)
@@ -482,15 +529,21 @@ def all_scenario_operations() -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
     for scenario in client_acceptance.SCENARIOS:
         for req in scenario.requirements:
-            if req.transports == ("mcp",) and req.identifier != "mcp_initialize":
-                if not client_acceptance.MCP_CONTRACTS.get((scenario.identifier, req.identifier)):
-                    continue
             for observation in client_acceptance._declared_observations(req):
                 operation_expect = None
                 if req.identifier == "provider_delivery":
                     operation_expect = {
                         "outcome": "unverified",
                         "reason": "provider delivery requires an external evidence artifact",
+                    }
+                if (
+                    req.transports == ("mcp",)
+                    and (scenario.identifier, req.identifier)
+                    in client_acceptance.MCP_UNVERIFIED_CONTRACTS
+                ):
+                    operation_expect = {
+                        "outcome": "unverified",
+                        "reason": "Worker exposes no canonical Bot identity binding response schema",
                     }
                 operations.append(
                     operation_for_requirement(
@@ -564,6 +617,7 @@ class ClientAcceptanceTest(unittest.TestCase):
             "linking_identity_lifecycle",
             "same_identity_relink",
             observation="relink_grant",
+            method="PATCH",
             path="/api/v1/grants/${observed.grant.account_id}",
         )
         transport = FakeTransport()
@@ -905,6 +959,141 @@ class ClientAcceptanceTest(unittest.TestCase):
         )
         with self.assertRaises(client_acceptance.ConfigError):
             client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_mcp_only_declared_cases_use_actual_worker_tools(self) -> None:
+        operations = all_scenario_operations()
+        operation_keys = {
+            (operation["scenario"], operation["proof"]["case"])
+            for operation in operations
+        }
+        self.assertTrue(
+            {
+                ("grok_surface_read", "scoped_read"),
+                ("grok_surface_send", "text_send"),
+                ("grok_failure_matrix", "duplicate_request"),
+                ("grok_failure_matrix", "timeout_uncertainty"),
+                ("grok_failure_matrix", "reconnect"),
+                ("grok_failure_matrix", "provider_rejection"),
+                ("grok_bot_identity", "member_binding"),
+            }.issubset(operation_keys)
+        )
+        self.assertEqual(
+            operations[
+                next(
+                    index
+                    for index, operation in enumerate(operations)
+                    if operation["scenario"] == "grok_surface_read"
+                )
+            ]["request"]["tool"],
+            "list_messages",
+        )
+        self.assertEqual(
+            client_acceptance.MCP_CONTRACTS[
+                ("grok_surface_send", "surface_text_send")
+            ],
+            ("send_text_reply",),
+        )
+        self.assertEqual(
+            client_acceptance.MCP_CONTRACTS[
+                ("grok_failure_matrix", "timeout_uncertainty")
+            ],
+            ("get_text_reply_status",),
+        )
+        client_acceptance.validate_config(config_with_operations(operations))
+
+    def test_group_management_request_contract_matches_worker_action_schemas(self) -> None:
+        common = {
+            "identity_id": "identity_one",
+            "account_id": "account_one",
+            "conversation_id": "chat_one",
+            "expected_revision": "revision_one",
+            "idempotency_key": "group-action-001",
+        }
+        rename = {**common, "name": "Renamed group"}
+        participants = {
+            **common,
+            "participants": [
+                {
+                    "contact_id": "contact_one",
+                    "candidate_revision": "a" * 64,
+                }
+            ],
+        }
+        for method, path, body in (
+            ("PATCH", "/api/v1/groups/chat_one", rename),
+            ("POST", "/api/v1/groups/chat_one/participants", participants),
+            ("DELETE", "/api/v1/groups/chat_one/participants", participants),
+        ):
+            operation = operation_for_requirement(
+                "direct_chat_and_group",
+                "group_management",
+                method=method,
+                path=path,
+                body=body,
+            )
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+        for method, path, body in (
+            ("PATCH", "/api/v1/groups/chat_one", {**rename, "participants": participants["participants"]}),
+            ("POST", "/api/v1/groups/chat_one/participants", {**participants, "name": "invalid"}),
+            ("DELETE", "/api/v1/groups/chat_one/participants", {**participants, "name": "invalid"}),
+        ):
+            operation = operation_for_requirement(
+                "direct_chat_and_group",
+                "group_management",
+                method=method,
+                path=path,
+                body=body,
+            )
+            with self.assertRaises(client_acceptance.ConfigError):
+                client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_grant_request_contract_matches_worker_create_and_update_schemas(self) -> None:
+        create_body = {
+            "membership_id": "membership_one",
+            "identity_id": "identity_one",
+            "account_id": "account_one",
+            "operation_scope": "conversation.read",
+            "chat_scope": "all_chats",
+            "chat_ids": [],
+            "idempotency_key": "grant-create-001",
+        }
+        update_body = {
+            "operation_scope": "conversation.read",
+            "chat_scope": "all_chats",
+            "chat_ids": [],
+            "idempotency_key": "grant-update-001",
+        }
+        for method, path, body in (
+            ("POST", "/api/v1/grants", create_body),
+            ("PATCH", "/api/v1/grants/grant_one", update_body),
+        ):
+            operation = operation_for_requirement(
+                "linking_identity_lifecycle",
+                "identity_grant",
+                observation="grant_result",
+                method=method,
+                path=path,
+                body=body,
+            )
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+        invalid_update = {**update_body, "membership_id": "membership_one"}
+        invalid_create = {**create_body, "grant_id": "grant_one"}
+        for method, path, body in (
+            ("PATCH", "/api/v1/grants/grant_one", invalid_update),
+            ("POST", "/api/v1/grants", invalid_create),
+        ):
+            operation = operation_for_requirement(
+                "linking_identity_lifecycle",
+                "identity_grant",
+                observation="grant_result",
+                method=method,
+                path=path,
+                body=body,
+            )
+            with self.assertRaises(client_acceptance.ConfigError):
+                client_acceptance.validate_config(config_with_operations([operation]))
 
     def test_every_advertised_mcp_tool_has_bound_schema_and_rejects_pointer_aliases(self) -> None:
         for (scenario, requirement_identifier), tools in client_acceptance.MCP_CONTRACTS.items():
