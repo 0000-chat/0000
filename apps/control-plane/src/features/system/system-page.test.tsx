@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -94,11 +94,19 @@ describe("diagnostic surfaces", () => {
   it("shows command phases and an overview summary with links to every screen", async () => {
     renderApp("/activity");
 
-    expect(await screen.findByText("message.send")).toBeVisible();
-    expect(screen.getByText("Human")).toBeVisible();
-    expect(screen.getByText("Direct")).toBeVisible();
-    expect(screen.getByText("Delivered")).toBeVisible();
-    expect(screen.queryByText(/matrix/i)).not.toBeInTheDocument();
+    const activity = await screen.findByRole("list", {
+      name: "Command activity",
+    });
+    expect(await within(activity).findAllByText("message.send")).toHaveLength(
+      2,
+    );
+    expect(within(activity).getByText("Human")).toBeVisible();
+    expect(within(activity).getByText("Agent")).toBeVisible();
+    expect(within(activity).getByText("Direct")).toBeVisible();
+    expect(within(activity).getByText("Human-paced")).toBeVisible();
+    expect(within(activity).getByText("Delivered")).toBeVisible();
+    expect(within(activity).getByText("Scheduled")).toBeVisible();
+    expect(within(activity).queryByText(/matrix/i)).not.toBeInTheDocument();
 
     renderApp("/");
     expect(await screen.findByText("3 connections")).toBeVisible();
