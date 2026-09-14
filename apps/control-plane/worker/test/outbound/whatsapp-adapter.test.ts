@@ -14,6 +14,7 @@ import {
 } from "../support/directory-fixtures";
 
 const env = runtimeEnv as typeof runtimeEnv & { CONTROL_DB: D1Database };
+const gatewayUrl = "https://matrix-gateway.internal.example.invalid";
 const session: SessionResponse = {
   tenant: { id: "tenant_pilot", slug: "pilot", display_name: "Pilot" },
   principal: { id: "principal_human", type: "human", display_name: "Human" },
@@ -81,7 +82,7 @@ const dispatch = OutboundDispatchSchema.parse({
 const context = (): OutboundAcceptanceContext => ({
   env: {
     ...runtimeEnv,
-    CONNECTION_GATEWAY_URL: "https://gateway.example.test",
+    CONNECTION_GATEWAY_URL: gatewayUrl,
     CONNECTION_GATEWAY_TOKEN: "adapter-test-secret-123",
   } as Cloudflare.Env,
   authorization: session,
@@ -165,9 +166,7 @@ describe("HttpWhatsAppTextAdapter", () => {
       ],
     });
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(requests[0]?.url).toBe(
-      "https://gateway.example.test/v1/outbound/text",
-    );
+    expect(requests[0]?.url).toBe(`${gatewayUrl}/v1/outbound/text`);
     expect(requests[0]?.headers.get("idempotency-key")).toBe(
       "outbound-transaction_adapter_test",
     );
