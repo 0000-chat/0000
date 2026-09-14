@@ -10,6 +10,8 @@ import {
   AccountGrantTargetPageSchema,
   AccountGrantUpdateSchema,
   ConnectedAccountPageSchema,
+  GroupManagementEvidenceSchema,
+  GroupManagementPageSchema,
   HistoryImportAdvanceRequestSchema,
   HistoryImportDetailSchema,
   HistoryImportPageSchema,
@@ -37,6 +39,8 @@ import {
   type AccountGrantMutation,
   type AccountGrantUpdate,
   type ConnectedAccountPage,
+  type GroupManagementEvidence,
+  type GroupManagementPage,
   type HistoryImportAdvanceRequest,
   type HistoryImportDetail,
   type HistoryImportPage,
@@ -322,6 +326,38 @@ export class ApiClient {
     const search = new URLSearchParams({ limit: String(limit) });
     if (cursor !== undefined) search.set("cursor", cursor);
     return this.request(`/api/v1/grants?${search}`, AccountGrantPageSchema);
+  }
+
+  getGroupManagementOperations(options?: {
+    identityId?: string;
+    accountId?: string;
+    status?: "pending" | "succeeded" | "failed" | "human_action_required";
+    cursor?: string;
+    limit?: number;
+  }): Promise<GroupManagementPage> {
+    const search = new URLSearchParams();
+    if (options?.identityId !== undefined)
+      search.set("identity_id", options.identityId);
+    if (options?.accountId !== undefined)
+      search.set("account_id", options.accountId);
+    if (options?.status !== undefined) search.set("status", options.status);
+    if (options?.cursor !== undefined) search.set("cursor", options.cursor);
+    if (options?.limit !== undefined)
+      search.set("limit", String(options.limit));
+    const suffix = search.toString().length > 0 ? `?${search}` : "";
+    return this.request(
+      `/api/v1/group-management/operations${suffix}`,
+      GroupManagementPageSchema,
+    );
+  }
+
+  getGroupManagementEvidence(
+    operationId: string,
+  ): Promise<GroupManagementEvidence[]> {
+    return this.request(
+      `/api/v1/group-management/operations/${encodeURIComponent(operationId)}/evidence`,
+      GroupManagementEvidenceSchema.array().max(100),
+    );
   }
 
   getGrantTargets(

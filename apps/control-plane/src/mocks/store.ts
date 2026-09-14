@@ -20,6 +20,8 @@ import type {
   ProviderCapability,
   SessionResponse,
   OutboundAction,
+  GroupManagementEvidence,
+  GroupManagementOperation,
 } from "@communicator/contracts";
 import {
   pilotScenario,
@@ -527,6 +529,62 @@ export class SimulatedStore {
     return clone(this.grants).toSorted((left, right) =>
       left.id.localeCompare(right.id),
     );
+  }
+
+  groupManagementOperations(): GroupManagementOperation[] {
+    return [
+      {
+        operation_id: "group_manage_simulated",
+        tenant_id: "tenant_pilot",
+        membership_id: "membership_pilot",
+        identity_id: "identity_human",
+        account_id: "account_connection_human_whatsapp",
+        connection_id: "connection_human_whatsapp",
+        provider: "whatsapp",
+        conversation_id: "conversation_group_simulated",
+        provider_group_id: "provider_group_simulated",
+        matrix_room_id: "!group-simulated:example.test",
+        action: "rename",
+        requested_name: "Pilot operations",
+        requested_member_provider_ids: [],
+        expected_revision: "1",
+        status: "succeeded",
+        result_revision: "2",
+        result_member_provider_ids: ["lid_simulated_alice"],
+        current_name: "Pilot operations",
+        current_revision: "2",
+        current_member_provider_ids: ["lid_simulated_alice"],
+        evidence: null,
+        evidence_path: "provider",
+        duplicate_risk: false,
+        human_action_required: false,
+        failure_code: null,
+        created_at: "2026-08-29T00:00:00.000Z",
+        updated_at: "2026-08-29T00:01:00.000Z",
+      },
+    ];
+  }
+
+  groupManagementEvidence(operationId: string): GroupManagementEvidence[] {
+    if (operationId !== "group_manage_simulated") return [];
+    return [
+      {
+        source: "provider",
+        evidence_id: "evidence_group_simulated",
+        observed_at: "2026-08-29T00:01:00.000Z",
+        operation_id: operationId,
+        account_id: "account_connection_human_whatsapp",
+        connection_id: "connection_human_whatsapp",
+        provider_group_id: "provider_group_simulated",
+        matrix_room_id: "!group-simulated:example.test",
+        revision: "2",
+        name: "Pilot operations",
+        member_provider_ids: ["lid_simulated_alice"],
+        status: "confirmed",
+        reason: null,
+        accepted: true,
+      },
+    ];
   }
 
   accountGrant(grantId: string): AccountGrant | null {

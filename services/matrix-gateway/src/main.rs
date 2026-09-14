@@ -26,7 +26,7 @@ use communicator_matrix_gateway::{
         restore_matrix_processor,
     },
     matrix_http::ReqwestMatrixTransport,
-    outbound::MatrixSdkTextSender,
+    outbound::{MatrixSdkGroupManager, MatrixSdkTextSender},
     provisioning::{
         GatewayRouteMetadata, ProvisioningGatewayServer, WhatsAppProvisioningClient,
         serve_private_gateway,
@@ -277,13 +277,16 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         },
     )
     .map_err(|error| SafeError::new(error.code()))?;
-    let server =
-        server
-            .with_history(history)
-            .with_outbound_sender(Arc::new(MatrixSdkTextSender::new(
-                matrix_client,
-                Duration::from_secs(config.request_timeout_secs()),
-            )));
+    let server = server
+        .with_history(history)
+        .with_outbound_sender(Arc::new(MatrixSdkTextSender::new(
+            matrix_client.clone(),
+            Duration::from_secs(config.request_timeout_secs()),
+        )))
+        .with_group_manager(Arc::new(MatrixSdkGroupManager::new(
+            matrix_client,
+            Duration::from_secs(config.request_timeout_secs()),
+        )));
     serve_private_gateway(server, provisioning.listen_addr())
         .await
         .map_err(|_| SafeError::new("provisioning_listen_failed"))

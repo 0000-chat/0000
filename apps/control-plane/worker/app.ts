@@ -159,6 +159,14 @@ import {
 } from "./routes/contacts";
 import type { ContactRouteServices } from "./contacts/service";
 import { createGroupRoute, createGroupHandler } from "./routes/groups";
+import {
+  renameGroupRoute,
+  addGroupParticipantsRoute,
+  removeGroupParticipantsRoute,
+  groupManagementOperationsRoute,
+  groupManagementOperationEvidenceRoute,
+  createGroupManagementHandlers,
+} from "./routes/group-management";
 import type { GroupRouteServices } from "./groups/service";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
@@ -440,6 +448,8 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/conversations/*", productAuthorization);
   app.use("/api/v1/groups", productAuthorization);
   app.use("/api/v1/groups/*", productAuthorization);
+  app.use("/api/v1/group-management", productAuthorization);
+  app.use("/api/v1/group-management/*", productAuthorization);
   app.use("/api/v1/commands/*", productAuthorization);
   app.use("/api/v1/commands", productAuthorization);
   app.use("/api/v1/identities/*/link-sessions", productAuthorization);
@@ -576,6 +586,20 @@ export function createApp(services: AppServices = {}) {
   app.openapi(resolveContactRoute, contactHandlers.resolve);
   app.openapi(createDirectChatRoute, contactHandlers.create);
   app.openapi(createGroupRoute, createGroupHandler(services.groupServices));
+  const groupManagementHandlers = createGroupManagementHandlers(
+    services.groupServices,
+  );
+  app.openapi(renameGroupRoute, groupManagementHandlers.rename);
+  app.openapi(addGroupParticipantsRoute, groupManagementHandlers.add);
+  app.openapi(removeGroupParticipantsRoute, groupManagementHandlers.remove);
+  app.openapi(
+    groupManagementOperationsRoute,
+    groupManagementHandlers.operations,
+  );
+  app.openapi(
+    groupManagementOperationEvidenceRoute,
+    groupManagementHandlers.evidence,
+  );
 
   app.doc("/api/v1/openapi.json", {
     openapi: "3.1.0",

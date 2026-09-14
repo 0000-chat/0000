@@ -21,6 +21,7 @@ const navigation = [
   { label: "Connections", to: "/connections" as const },
   { label: "Conversations", to: "/conversations" as const },
   { label: "Activity", to: "/activity" as const },
+  { label: "Groups", to: "/groups" as const },
   { label: "System", to: "/system" as const },
 ];
 

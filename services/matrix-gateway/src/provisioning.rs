@@ -23,7 +23,10 @@ use crate::{
     history::HistoryGatewayServer,
     ingestion::SecretString,
     model::Provider,
-    outbound::OutboundTextSender,
+    outbound::{
+        MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
+        MatrixGroupObservation, MatrixGroupObservationRequest, OutboundTextSender,
+    },
     store::{NewOutboundText, OutboundTextCompletion, OutboundTextPreparation, Store},
 };
 
@@ -43,6 +46,8 @@ const CONTACT_UNCERTAIN: &str = "contact_creation_uncertain";
 const GROUP_MISSING_STORE: &str = "group_registry_unavailable";
 const GROUP_SCOPE_MISMATCH: &str = "group_scope_mismatch";
 const GROUP_UNCERTAIN: &str = "group_creation_uncertain";
+const GROUP_MANAGEMENT_SCOPE_MISMATCH: &str = "group_management_scope_mismatch";
+const GROUP_MANAGEMENT_UNCERTAIN: &str = "group_management_uncertain";
 const OUTBOUND_TRANSACTION_CONFLICT: &str = "outbound_transaction_conflict";
 const OUTBOUND_SCOPE_MISMATCH: &str = "outbound_scope_mismatch";
 const OUTBOUND_UNCERTAIN: &str = "outbound_delivery_uncertain";
@@ -645,6 +650,62 @@ fn group_response(request: &GroupRequest, provider_group_id: &str, matrix_room_i
     })
 }
 
+fn managed_group_response(
+    request: &GroupManagementRequest,
+    observation: MatrixGroupObservation,
+    source: &str,
+) -> Result<Value, ProvisioningFailure> {
+    if observation.provider_group_id != request.provider_group_id
+        || observation.matrix_room_id != request.matrix_room_id
+        || observation.name.trim().is_empty()
+        || observation.name.len() > 100
+        || observation.revision.is_empty()
+        || observation.revision.len() > MAX_ID_BYTES
+        || observation.evidence_id.is_empty()
+        || observation.evidence_id.len() > MAX_ID_BYTES
+        || observation.member_provider_ids.len() > 128
+        || observation.member_provider_ids.iter().any(|member| {
+            member.is_empty()
+                || member.len() > MAX_ID_BYTES
+                || member.chars().any(char::is_whitespace)
+        })
+    {
+        return Err(ProvisioningFailure::ProviderError);
+    }
+    Ok(json!({
+        "id": observation.provider_group_id,
+        "provider_group_id": observation.provider_group_id,
+        "mxid": observation.matrix_room_id,
+        "matrix_room_id": observation.matrix_room_id,
+        "name": observation.name,
+        "revision": observation.revision,
+        "group_revision": observation.revision,
+        "members": observation.member_provider_ids,
+        "member_provider_ids": observation.member_provider_ids,
+        "tenant_id": request.tenant_id,
+        "identity_id": request.identity_id,
+        "account_id": request.account_id,
+        "connection_id": request.connection_id,
+        "operation_id": request.operation_id,
+        "conversation_id": request.conversation_id,
+        "evidence": {
+            "source": source,
+            "evidence_id": observation.evidence_id,
+            "observed_at": observation.observed_at,
+            "operation_id": request.operation_id,
+            "account_id": request.account_id,
+            "connection_id": request.connection_id,
+            "provider_group_id": observation.provider_group_id,
+            "matrix_room_id": observation.matrix_room_id,
+            "revision": observation.revision,
+            "name": observation.name,
+            "member_provider_ids": observation.member_provider_ids,
+            "status": "confirmed",
+            "reason": null
+        }
+    }))
+}
+
 fn contact_chat_response(request: &ContactRequest, matrix_room_id: &str, status: &str) -> Value {
     let provider_id = request.provider_id.as_deref().unwrap_or_default();
     let conversation_id = request.conversation_id.as_deref().unwrap_or_default();
@@ -693,6 +754,18 @@ fn group_failure_response(error: ProvisioningFailure) -> (u16, Vec<u8>) {
         | ProvisioningFailure::IdentityMismatch => 502,
     };
     response(status, json!({ "error": error.code() }))
+}
+
+fn matrix_group_failure_response(error: MatrixGroupFailure) -> (u16, Vec<u8>) {
+    let status = match error {
+        MatrixGroupFailure::RoomNotFound => 404,
+        MatrixGroupFailure::MalformedObservation => 502,
+        MatrixGroupFailure::MatrixRequest | MatrixGroupFailure::Uncertain => 502,
+    };
+    response(
+        status,
+        json!({ "error": GROUP_MANAGEMENT_UNCERTAIN, "detail": error.code() }),
+    )
 }
 
 fn string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
@@ -892,6 +965,80 @@ impl GroupRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GroupManagementRequest {
+    schema_version: u8,
+    tenant_id: String,
+    account_id: String,
+    connection_id: String,
+    identity_id: String,
+    provider: Provider,
+    session_generation: String,
+    route: ContactRouteRequest,
+    operation_id: String,
+    operation_created_at: String,
+    conversation_id: String,
+    provider_group_id: String,
+    matrix_room_id: String,
+    expected_revision: String,
+    action: String,
+    name: Option<String>,
+    participant_provider_ids: Vec<String>,
+}
+
+impl GroupManagementRequest {
+    fn validate(
+        &self,
+        route: &GatewayRouteMetadata,
+        allow_missing_name: bool,
+    ) -> Result<(), &'static str> {
+        let valid_action = matches!(
+            self.action.as_str(),
+            "rename" | "add_participants" | "remove_participants" | "event" | "refresh"
+        );
+        if self.schema_version != 1
+            || self.provider != Provider::Whatsapp
+            || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.account_id)
+            || !valid_resource_id(&self.connection_id)
+            || !valid_resource_id(&self.identity_id)
+            || !valid_resource_id(&self.operation_id)
+            || DateTime::parse_from_rfc3339(&self.operation_created_at).is_err()
+            || !valid_resource_id(&self.conversation_id)
+            || self.provider_group_id.is_empty()
+            || self.provider_group_id.len() > MAX_ID_BYTES
+            || self.matrix_room_id.is_empty()
+            || self.matrix_room_id.len() > MAX_ID_BYTES
+            || self.expected_revision.is_empty()
+            || self.expected_revision.len() > MAX_ID_BYTES
+            || !valid_provider_login_id(&self.route.provider_login_id)
+            || !valid_action
+            || self.participant_provider_ids.len() > 128
+            || self.participant_provider_ids.iter().any(|value| {
+                value.is_empty()
+                    || value.len() > MAX_ID_BYTES
+                    || value.chars().any(char::is_whitespace)
+            })
+            || (self.action == "rename"
+                && !allow_missing_name
+                && self
+                    .name
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty() || value.len() > 100))
+            || (self.action != "rename" && self.name.is_some())
+            || DateTime::parse_from_rfc3339(&self.session_generation).is_err()
+            || self.route.gateway_route_id != route.gateway_route_id
+            || self.route.bridge_instance_id != route.bridge_instance_id
+            || self.route.matrix_user_id != route.matrix_user_id
+            || self.route.matrix_room_namespace != route.matrix_room_namespace
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutboundTextRequest {
     schema_version: u8,
     tenant_id: String,
@@ -1001,6 +1148,7 @@ pub struct ProvisioningGatewayServer {
     history: Option<Arc<HistoryGatewayServer>>,
     outbound_store: Option<Arc<Mutex<Store>>>,
     outbound_sender: Option<Arc<dyn OutboundTextSender>>,
+    group_manager: Option<Arc<dyn MatrixGroupManager>>,
 }
 
 impl fmt::Debug for ProvisioningGatewayServer {
@@ -1026,6 +1174,7 @@ impl ProvisioningGatewayServer {
             history: None,
             outbound_store: None,
             outbound_sender: None,
+            group_manager: None,
         })
     }
 
@@ -1042,6 +1191,14 @@ impl ProvisioningGatewayServer {
     /// account or room.
     pub fn with_outbound_sender(mut self, sender: Arc<dyn OutboundTextSender>) -> Self {
         self.outbound_sender = Some(sender);
+        self
+    }
+
+    /// Attach the Matrix room event boundary used by the pinned bridge for
+    /// rename and membership operations. Group management never calls an
+    /// invented provider HTTP endpoint.
+    pub fn with_group_manager(mut self, manager: Arc<dyn MatrixGroupManager>) -> Self {
+        self.group_manager = Some(manager);
         self
     }
 
@@ -1112,6 +1269,31 @@ impl ProvisioningGatewayServer {
                 return response(400, json!({ "error": error }));
             }
             return self.group_create(parsed).await;
+        }
+        let management_source = if request.path == "/v1/groups/management/event" {
+            Some("event")
+        } else if request.path == "/v1/groups/management/refresh" {
+            Some("refresh")
+        } else if request.path == "/v1/groups/rename" {
+            Some("provider")
+        } else if request.path == "/v1/groups/participants/add" {
+            Some("provider")
+        } else if request.path == "/v1/groups/participants/remove" {
+            Some("provider")
+        } else {
+            None
+        };
+        if let Some(source) = management_source {
+            let parsed = match serde_json::from_slice::<GroupManagementRequest>(&request.body) {
+                Ok(parsed) => parsed,
+                Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            if let Err(error) =
+                parsed.validate(&self.route, source == "event" || source == "refresh")
+            {
+                return response(400, json!({ "error": error }));
+            }
+            return self.group_manage(parsed, source).await;
         }
         if request.path == "/v1/contacts/search"
             || request.path.starts_with("/v1/contacts/resolve/")
@@ -1225,6 +1407,84 @@ impl ProvisioningGatewayServer {
             200,
             group_response(&request, &provider_group_id, &matrix_room_id),
         )
+    }
+
+    async fn group_manage(&self, request: GroupManagementRequest, source: &str) -> (u16, Vec<u8>) {
+        let Some(store_handle) = self.outbound_store.as_ref() else {
+            return response(503, json!({ "error": GROUP_MISSING_STORE }));
+        };
+        let Some(group_manager) = self.group_manager.as_ref() else {
+            return response(503, json!({ "error": GROUP_MANAGEMENT_UNCERTAIN }));
+        };
+        let existing_room = {
+            let store = store_handle.lock().await;
+            match store.active_room_binding_for_outbound(
+                &request.tenant_id,
+                &request.account_id,
+                &request.connection_id,
+                &request.identity_id,
+                Provider::Whatsapp,
+                &request.conversation_id,
+            ) {
+                Ok(binding) => binding.map(|binding| binding.matrix_room_id().to_owned()),
+                Err(_) => {
+                    return response(503, json!({ "error": GROUP_MANAGEMENT_SCOPE_MISMATCH }));
+                }
+            }
+        };
+        if existing_room.as_deref() != Some(request.matrix_room_id.as_str()) {
+            return response(403, json!({ "error": GROUP_MANAGEMENT_SCOPE_MISMATCH }));
+        }
+        let observation = if source == "event" || source == "refresh" {
+            match group_manager
+                .observe_group(MatrixGroupObservationRequest {
+                    room_id: request.matrix_room_id.clone(),
+                    provider_group_id: request.provider_group_id.clone(),
+                    operation_id: request.operation_id.clone(),
+                    operation_started_at: request.operation_created_at.clone(),
+                    action: match request.action.as_str() {
+                        "rename" => MatrixGroupAction::Rename,
+                        "add_participants" => MatrixGroupAction::AddParticipants,
+                        "remove_participants" => MatrixGroupAction::RemoveParticipants,
+                        _ => return response(400, json!({ "error": INVALID_REQUEST })),
+                    },
+                    name: request.name.clone(),
+                    participant_provider_ids: request.participant_provider_ids.clone(),
+                    source_event_ids: Vec::new(),
+                })
+                .await
+            {
+                Ok(Some(observation)) => observation,
+                Ok(None) => return response(404, json!({ "error": "not_found" })),
+                Err(error) => return matrix_group_failure_response(error),
+            }
+        } else {
+            let action = match request.action.as_str() {
+                "rename" => MatrixGroupAction::Rename,
+                "add_participants" => MatrixGroupAction::AddParticipants,
+                "remove_participants" => MatrixGroupAction::RemoveParticipants,
+                _ => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            match group_manager
+                .apply_group_change(MatrixGroupChange {
+                    room_id: request.matrix_room_id.clone(),
+                    provider_group_id: request.provider_group_id.clone(),
+                    operation_id: request.operation_id.clone(),
+                    operation_started_at: request.operation_created_at.clone(),
+                    action,
+                    name: request.name.clone(),
+                    participant_provider_ids: request.participant_provider_ids.clone(),
+                })
+                .await
+            {
+                Ok(observation) => observation,
+                Err(error) => return matrix_group_failure_response(error),
+            }
+        };
+        match managed_group_response(&request, observation, source) {
+            Ok(value) => response(200, value),
+            Err(error) => group_failure_response(error),
+        }
     }
 
     async fn contact_resolve(&self, request: ContactRequest, identifier: &str) -> (u16, Vec<u8>) {
@@ -1848,7 +2108,11 @@ mod tests {
             AttachmentObservedPayload, CanonicalEvent, CanonicalEventSource, CanonicalPayload,
         },
         normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
-        outbound::{MatrixSendResult, OutboundTextSender},
+        outbound::{
+            MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
+            MatrixGroupObservation, MatrixGroupObservationRequest, MatrixSendResult,
+            OutboundTextSender,
+        },
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
         store::Store,
@@ -2414,6 +2678,195 @@ mod tests {
 
     struct RecordingOutboundSender {
         rooms: Arc<StdMutex<Vec<String>>>,
+    }
+
+    struct RecordingGroupManager {
+        changes: Arc<StdMutex<Vec<MatrixGroupChange>>>,
+        observation: MatrixGroupObservation,
+    }
+
+    #[async_trait]
+    impl MatrixGroupManager for RecordingGroupManager {
+        async fn apply_group_change(
+            &self,
+            change: MatrixGroupChange,
+        ) -> Result<MatrixGroupObservation, MatrixGroupFailure> {
+            self.changes.lock().expect("group change lock").push(change);
+            Ok(self.observation.clone())
+        }
+
+        async fn observe_group(
+            &self,
+            _request: MatrixGroupObservationRequest,
+        ) -> Result<Option<MatrixGroupObservation>, MatrixGroupFailure> {
+            Ok(Some(self.observation.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn group_management_uses_matrix_events_and_requires_authoritative_snapshot() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid binding timestamp");
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x68; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    "binding_68686868686868686868686868686868",
+                    "!group-management:example.test",
+                    "tenant_group_management",
+                    "identity_group_management",
+                    "connection_group_management",
+                    "account_group_management",
+                    Provider::Whatsapp,
+                    "gateway_route_whatsapp",
+                    "conversation_group_management",
+                    MATRIX_USER,
+                    "2026-09-14T00:00:00.000Z",
+                    created_at,
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::new(SharedHistoryTransport {
+                calls: AtomicUsize::new(0),
+                event_count: 0,
+            }),
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let changes = Arc::new(StdMutex::new(Vec::new()));
+        let manager = Arc::new(RecordingGroupManager {
+            changes: Arc::clone(&changes),
+            observation: MatrixGroupObservation {
+                provider_group_id: "120363000000000000@g.us".to_owned(),
+                matrix_room_id: "!group-management:example.test".to_owned(),
+                name: "Renamed operations".to_owned(),
+                revision: "1700000001000".to_owned(),
+                member_provider_ids: vec!["15551234567".to_owned(), "lid-42".to_owned()],
+                evidence_id: "$bridge-group-name:example.test".to_owned(),
+                observed_at: "2026-09-14T00:00:01Z".to_owned(),
+            },
+        });
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history)
+                .with_group_manager(Arc::clone(&manager) as Arc<dyn MatrixGroupManager>);
+        let request = HttpRequest {
+            path: "/v1/groups/rename".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("request-group-management".to_owned()),
+            idempotency_key: Some("group-management-idempotency".to_owned()),
+            body: serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant_id": "tenant_group_management",
+                "account_id": "account_group_management",
+                "connection_id": "connection_group_management",
+                "identity_id": "identity_group_management",
+                "provider": "whatsapp",
+                "session_generation": "2026-09-14T00:00:00.000Z",
+                "route": {
+                    "gateway_route_id": "gateway_route_whatsapp",
+                    "bridge_instance_id": "whatsapp-primary",
+                    "matrix_user_id": MATRIX_USER,
+                    "matrix_room_namespace": "communicator.0000.gold",
+                    "provider_login_id": "login-group"
+                },
+                "operation_id": "group_management_one",
+                "operation_created_at": "2026-09-14T00:00:00.000Z",
+                "conversation_id": "conversation_group_management",
+                "provider_group_id": "120363000000000000@g.us",
+                "matrix_room_id": "!group-management:example.test",
+                "expected_revision": "0",
+                "action": "rename",
+                "name": "Renamed operations",
+                "participant_provider_ids": []
+            }))
+            .expect("request JSON"),
+        };
+        let (status, bytes) = server.handle_request(request).await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).expect("management response JSON");
+        assert_eq!(body["evidence"]["source"], "provider");
+        assert_eq!(
+            body["evidence"]["evidence_id"],
+            "$bridge-group-name:example.test"
+        );
+        assert_eq!(
+            body["member_provider_ids"],
+            json!(["15551234567", "lid-42"])
+        );
+        let changes = changes.lock().expect("group change lock");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].action, MatrixGroupAction::Rename);
+        assert_eq!(changes[0].room_id, "!group-management:example.test");
+        assert_eq!(changes[0].name.as_deref(), Some("Renamed operations"));
+        drop(changes);
+        assert!(
+            bridge
+                .received_requests()
+                .await
+                .expect("bridge requests")
+                .is_empty()
+        );
+
+        let parsed_request: GroupManagementRequest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "tenant_id": "tenant_group_management",
+            "account_id": "account_group_management",
+            "connection_id": "connection_group_management",
+            "identity_id": "identity_group_management",
+            "provider": "whatsapp",
+            "session_generation": "2026-09-14T00:00:00.000Z",
+            "route": {
+                "gateway_route_id": "gateway_route_whatsapp",
+                "bridge_instance_id": "whatsapp-primary",
+                "matrix_user_id": MATRIX_USER,
+                "matrix_room_namespace": "communicator.0000.gold",
+                "provider_login_id": "login-group"
+            },
+            "operation_id": "group_management_one",
+            "operation_created_at": "2026-09-14T00:00:00.000Z",
+            "conversation_id": "conversation_group_management",
+            "provider_group_id": "120363000000000000@g.us",
+            "matrix_room_id": "!group-management:example.test",
+            "expected_revision": "0",
+            "action": "rename",
+            "name": "Renamed operations",
+            "participant_provider_ids": []
+        }))
+        .expect("management request");
+        assert!(
+            managed_group_response(
+                &parsed_request,
+                MatrixGroupObservation {
+                    member_provider_ids: vec!["malformed member".to_owned()],
+                    ..manager.observation.clone()
+                },
+                "provider",
+            )
+            .is_err()
+        );
     }
 
     #[async_trait]

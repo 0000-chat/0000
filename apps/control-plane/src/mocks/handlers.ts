@@ -551,6 +551,40 @@ export const handlers = [
     );
   }),
 
+  http.get("*/api/v1/group-management/operations", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    if (
+      !hasOnlyQueryKeys(search, [
+        "identity_id",
+        "account_id",
+        "status",
+        "cursor",
+        "limit",
+      ])
+    )
+      return errorResponse(400, "invalid_request");
+    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+    if (cursor === null || limit === null)
+      return errorResponse(400, "invalid_request");
+    return HttpResponse.json(
+      pageByCursor(
+        simulatedStore.groupManagementOperations(),
+        cursor,
+        limit,
+        (item) => item.operation_id,
+      ),
+    );
+  }),
+
+  http.get(
+    "*/api/v1/group-management/operations/:operationId/evidence",
+    ({ params }) =>
+      HttpResponse.json(
+        simulatedStore.groupManagementEvidence(String(params.operationId)),
+      ),
+  ),
+
   http.get("*/api/v1/commands/:commandId/evidence", () =>
     HttpResponse.json([]),
   ),
