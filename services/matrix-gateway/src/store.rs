@@ -643,8 +643,6 @@ struct StoredOutboundTextRow {
     response_nonce: Option<Vec<u8>>,
     response_key_version: Option<i64>,
     response_sha256: Option<Vec<u8>>,
-    created_at: String,
-    updated_at: String,
 }
 
 struct StoredCryptoResponseFields {
@@ -857,7 +855,7 @@ impl Store {
                         session_generation, projection_generation,
                         body_cipher, body_nonce, body_key_version, state,
                         response_cipher, response_nonce, response_key_version,
-                        response_sha256, created_at, updated_at
+                        response_sha256
                  FROM outbound_transactions
                  WHERE tenant_id = ?1 AND transaction_id = ?2
                  LIMIT 1",
@@ -5413,8 +5411,6 @@ fn read_stored_outbound_row(row: &Row<'_>) -> rusqlite::Result<StoredOutboundTex
         response_nonce: row.get(19)?,
         response_key_version: row.get(20)?,
         response_sha256: row.get(21)?,
-        created_at: row.get(22)?,
-        updated_at: row.get(23)?,
     })
 }
 

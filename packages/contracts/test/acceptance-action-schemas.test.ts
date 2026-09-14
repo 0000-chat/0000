@@ -14,12 +14,16 @@ describe("acceptance action request schemas", () => {
     expect(rename.methods).toEqual(["PATCH"]);
     expect(participantMutation.methods).toEqual(["POST", "DELETE"]);
     expect(GroupRenameRequestSchema.safeParse(rename.valid).success).toBe(true);
-    expect(GroupRenameRequestSchema.safeParse(rename.invalid).success).toBe(false);
+    expect(GroupRenameRequestSchema.safeParse(rename.invalid).success).toBe(
+      false,
+    );
     expect(
-      GroupParticipantsRequestSchema.safeParse(participantMutation.valid).success,
+      GroupParticipantsRequestSchema.safeParse(participantMutation.valid)
+        .success,
     ).toBe(true);
     expect(
-      GroupParticipantsRequestSchema.safeParse(participantMutation.invalid).success,
+      GroupParticipantsRequestSchema.safeParse(participantMutation.invalid)
+        .success,
     ).toBe(false);
   });
 
@@ -28,9 +32,15 @@ describe("acceptance action request schemas", () => {
     const update = actionRequestVectors.grant_update;
     expect(create.methods).toEqual(["POST"]);
     expect(update.methods).toEqual(["PATCH"]);
-    expect(AccountGrantMutationSchema.safeParse(create.valid).success).toBe(true);
-    expect(AccountGrantMutationSchema.safeParse(create.invalid).success).toBe(false);
+    expect(AccountGrantMutationSchema.safeParse(create.valid).success).toBe(
+      true,
+    );
+    expect(AccountGrantMutationSchema.safeParse(create.invalid).success).toBe(
+      false,
+    );
     expect(AccountGrantUpdateSchema.safeParse(update.valid).success).toBe(true);
-    expect(AccountGrantUpdateSchema.safeParse(update.invalid).success).toBe(false);
+    expect(AccountGrantUpdateSchema.safeParse(update.invalid).success).toBe(
+      false,
+    );
   });
 });

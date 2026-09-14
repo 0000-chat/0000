@@ -211,6 +211,7 @@ fn opens_brand_new_database_with_exact_v1_schema_and_pragmas() {
             "backfill_jobs",
             "gateway_state",
             "matrix_crypto_outbox",
+            "outbound_transactions",
             "outbox_batches",
             "room_bindings",
             "room_ephemeral_state",
@@ -224,7 +225,11 @@ fn opens_brand_new_database_with_exact_v1_schema_and_pragmas() {
     );
     assert_eq!(
         schema_objects(&path, "index"),
-        vec!["one_active_room", "one_unresolved_crypto_request"]
+        vec![
+            "one_active_room",
+            "one_unresolved_crypto_request",
+            "outbound_transaction_scope",
+        ]
     );
 
     let connection = Connection::open(&path).expect("open sqlite database for metadata check");
