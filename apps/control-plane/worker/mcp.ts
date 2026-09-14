@@ -16,6 +16,8 @@ import {
   GroupCreateRequestSchema,
   GroupParticipantsRequestSchema,
   GroupRenameRequestSchema,
+  ReadReceiptRequestSchema,
+  type ReadReceiptRequest,
   type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
@@ -81,6 +83,13 @@ import {
   type GroupManagementRouteServices,
 } from "./groups/management-service";
 import { GroupManagementRepositoryError } from "./groups/management-repository";
+import {
+  getReadReceipt,
+  listReadReceipts,
+  requestReadReceipt,
+  type ReceiptServices,
+} from "./receipts/service";
+import { ReceiptRepositoryError } from "./receipts/repository";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -127,6 +136,19 @@ const searchMessagesInput = {
   from: z.string().max(64).optional(),
   to: z.string().max(64).optional(),
   direction: MessageSearchDirectionSchema.optional(),
+  cursor: optionalCursor,
+  limit: optionalLimit,
+};
+const readReceiptInput = {
+  identity_id: boundedId,
+  account_id: boundedId,
+  conversation_id: boundedId,
+  message_id: boundedId,
+  idempotency_key: z.string().trim().min(1).max(200),
+};
+const readReceiptOperationInput = { operation_id: boundedId };
+const listReadReceiptsInput = {
+  account_id: boundedId.optional(),
   cursor: optionalCursor,
   limit: optionalLimit,
 };
@@ -284,6 +306,11 @@ const contextForContacts = (
   ...(context.delegated === undefined ? {} : { delegated: context.delegated }),
 });
 
+const contextForReceipts = (context: ReadHandlerContext) => ({
+  env: context.env,
+  authorization: context.authorization,
+});
+
 const webhookActorFor = (context: ReadHandlerContext): WebhookActor => ({
   tenantId: context.authorization.tenant.id,
   principalId: context.authorization.principal.id,
@@ -395,6 +422,23 @@ const errorResult = (error: unknown) => {
       ],
     };
   }
+  if (error instanceof ReceiptRepositoryError) {
+    const code =
+      error.code === "receipt_invalid" || error.code === "receipt_conflict"
+        ? "invalid_request"
+        : error.code === "receipt_not_found"
+          ? "not_found"
+          : "service_unavailable";
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ error: { code, message: error.message } }),
+        },
+      ],
+    };
+  }
   const mapped = readErrorResponse(error);
   return {
     isError: true,
@@ -473,6 +517,7 @@ const registerTools = (
   outboundServices: OutboundAcceptanceServices,
   contactServices: ContactRouteServices,
   groupServices: GroupRouteServices,
+  receiptServices: ReceiptServices,
 ): void => {
   registerRemovalMcpTools(server, {
     env: context.env,
@@ -624,6 +669,51 @@ const registerTools = (
         };
         return searchMessages(context, value);
       }),
+  );
+
+  server.registerTool(
+    "mark_read",
+    {
+      description:
+        "Explicitly request one account-bound read receipt; stored reads never mark a provider chat read",
+      inputSchema: readReceiptInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        requestReadReceipt(
+          contextForReceipts(context),
+          ReadReceiptRequestSchema.parse({ schema_version: 1, ...input }),
+          receiptServices,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "get_read_receipt",
+    {
+      description: "Inspect one explicit read receipt operation",
+      inputSchema: readReceiptOperationInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        getReadReceipt(contextForReceipts(context), input.operation_id),
+      ),
+  );
+
+  server.registerTool(
+    "list_read_receipts",
+    {
+      description: "Inspect administrator-visible explicit read receipt operations",
+      inputSchema: listReadReceiptsInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        listReadReceipts(contextForReceipts(context), {
+          ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        }),
+      ),
   );
 
   server.registerTool(
@@ -1046,6 +1136,7 @@ export async function handleMcpRequest(
   outboundServices: OutboundAcceptanceServices = {},
   contactServices: ContactRouteServices = {},
   groupServices: GroupRouteServices = {},
+  receiptServices: ReceiptServices = {},
 ): Promise<Response> {
   if (!validMcpRequestHeaders(context.req.raw)) {
     return new Response(
@@ -1065,6 +1156,7 @@ export async function handleMcpRequest(
     outboundServices,
     contactServices,
     groupServices,
+    receiptServices,
   );
   const requestUrl = new URL(context.req.url);
   const transport = new WebStandardStreamableHTTPServerTransport({

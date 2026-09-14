@@ -168,6 +168,13 @@ import {
   createGroupManagementHandlers,
 } from "./routes/group-management";
 import type { GroupRouteServices } from "./groups/service";
+import {
+  readReceiptRoute,
+  readReceiptOperationRoute,
+  readReceiptOperationsRoute,
+  createReceiptHandlers,
+} from "./routes/receipts";
+import type { ReceiptServices } from "./receipts/service";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -214,6 +221,7 @@ export type AppServices = {
   attachmentNow?: AttachmentRouteServices["now"];
   contactServices?: ContactRouteServices;
   groupServices?: GroupRouteServices;
+  receiptServices?: ReceiptServices;
 };
 
 export function createApp(services: AppServices = {}) {
@@ -462,6 +470,8 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/removal-expiries", productAuthorization);
   app.use("/api/v1/history-imports/*", productAuthorization);
   app.use("/api/v1/attachments/*", productAuthorization);
+  app.use("/api/v1/receipts", productAuthorization);
+  app.use("/api/v1/receipts/*", productAuthorization);
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -476,6 +486,7 @@ export function createApp(services: AppServices = {}) {
       outboundAcceptanceServices,
       services.contactServices,
       services.groupServices,
+      services.receiptServices,
     ),
   );
   app.get("/mcp", handleMcpGet);
@@ -585,6 +596,10 @@ export function createApp(services: AppServices = {}) {
   app.openapi(contactsRoute, contactHandlers.contacts);
   app.openapi(resolveContactRoute, contactHandlers.resolve);
   app.openapi(createDirectChatRoute, contactHandlers.create);
+  const receiptHandlers = createReceiptHandlers(services.receiptServices);
+  app.openapi(readReceiptRoute, receiptHandlers.create);
+  app.openapi(readReceiptOperationRoute, receiptHandlers.get);
+  app.openapi(readReceiptOperationsRoute, receiptHandlers.list);
   app.openapi(createGroupRoute, createGroupHandler(services.groupServices));
   const groupManagementHandlers = createGroupManagementHandlers(
     services.groupServices,
