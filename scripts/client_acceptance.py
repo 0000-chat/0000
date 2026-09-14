@@ -40,6 +40,127 @@ PLACEHOLDER = re.compile(
 JWT_SHAPE = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$")
 CONTENT_FIELD = re.compile(r"^(?:body|text|content|payload|bytes)$|(?:^|_)(?:body|text|payload|bytes)$", re.IGNORECASE)
 TEMPLATE = re.compile(r"\$\{([^}]+)\}")
+SCALAR_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+COMMUNICATOR_ID = re.compile(r"^[a-z]+_[a-z0-9_]+$")
+HEX_DIGEST = re.compile(r"^[0-9a-fA-F]{32,128}$")
+ISO_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+MIME_TYPE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$", re.IGNORECASE)
+
+
+EVIDENCE_FIELD_KINDS: dict[str, str] = {
+    "resource": "url",
+    "authorization_server": "url",
+    "issuer": "url",
+    "authorization_endpoint": "url",
+    "token_endpoint": "url",
+    "pkce_s256": "bool",
+    "stale_work_rejected": "bool",
+    "second_request_reused": "bool",
+    "chat_paused": "bool",
+    "age_preserved": "bool",
+    "grant_count": "count",
+    "history_message_count": "count",
+    "attempt_count": "count",
+    "cancelled_pending_count": "count",
+    "content_generation": "count",
+    "deletion_epoch": "count",
+    "saved_at": "timestamp",
+    "retry_deadline": "timestamp",
+    "sha256": "digest",
+    "member_ids_digest": "digest",
+    "mime_type": "mime",
+    "protocol_version": "version",
+    "server_version": "version",
+    "client_version": "version",
+    "provider_version": "version",
+    "destination_version": "version",
+    "old_destination_version": "version",
+    "new_destination_version": "version",
+    "revision": "version",
+    "group_revision": "version",
+    "retained_revision": "version",
+    "evidence_class": "evidence_class",
+}
+EVIDENCE_FIELD_KINDS.update(
+    {
+        name: "id"
+        for name in (
+            "account_id",
+            "chat_id",
+            "message_id",
+            "identity_id",
+            "link_session_id",
+            "provider_account_id",
+            "grant_id",
+            "connection_id",
+            "previous_connection_id",
+            "new_connection_id",
+            "history_message_id",
+            "attachment_id",
+            "download_grant",
+            "command_id",
+            "dispatch_id",
+            "provider_message_id",
+            "requested_account_id",
+            "resolved_account_id",
+            "contact_id",
+            "provider_contact_id",
+            "provider_chat_id",
+            "group_operation_id",
+            "provider_group_id",
+            "subscription_id",
+            "delivery_id",
+            "source_event_id",
+            "receiver_id",
+            "removal_event_id",
+            "manual_retry_actor",
+            "receipt_id",
+            "removal_id",
+            "restore_id",
+            "retained_message_id",
+            "installation_id",
+            "member_id",
+            "idempotency_key",
+        )
+    }
+)
+EVIDENCE_FIELD_KINDS.update(
+    {
+        name: "token"
+        for name in (
+            "status",
+            "disconnect_status",
+            "history_range_status",
+            "saved_status",
+            "matrix_status",
+            "bridge_status",
+            "provider_status",
+            "error_code",
+            "resolution_status",
+            "delivery_status",
+            "content_status",
+            "requested_status",
+            "observed_status",
+            "result_class",
+            "active_read_status",
+            "attachment_status",
+            "resource_metadata",
+            "support_status",
+            "dispatch_status",
+            "ownership_scope",
+            "actor_binding",
+            "duplicate_status",
+            "uncertainty_status",
+            "reconnect_status",
+            "confirmation_status",
+            "surface",
+        )
+    }
+)
+EVIDENCE_FIELD_KINDS["surface"] = "label"
+EVIDENCE_FIELD_KINDS["server_name"] = "label"
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -71,6 +192,7 @@ class Requirement:
     rest_methods: tuple[str, ...] = ()
     path_fragments: tuple[str, ...] = ()
     mcp_tools: tuple[str, ...] = ()
+    observations: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +226,7 @@ def _requirement(
     rest_methods: tuple[str, ...] = (),
     path_fragments: tuple[str, ...] = (),
     mcp_tools: tuple[str, ...] = (),
+    observations: tuple[tuple[str, tuple[str, ...]], ...] = (),
 ) -> Requirement:
     actors = (actor,) if actor is not None else ("agent", "admin", "none")
     return Requirement(
@@ -119,6 +242,7 @@ def _requirement(
         rest_methods,
         path_fragments,
         mcp_tools,
+        observations,
     )
 
 
@@ -202,6 +326,10 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200, 201),
                 bindings=("identity_ids", "account_ids", "provider_account_ids", "grant_ids"),
+                observations=(
+                    ("grant_result", ("identity_id", "account_id", "grant_id")),
+                    ("provider_account", ("identity_id", "provider_account_id")),
+                ),
             ),
             _requirement(
                 "same_identity_relink",
@@ -220,6 +348,15 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200, 201),
                 bindings=("identity_ids", "account_ids", "grant_ids", "chat_ids", "connection_ids"),
+                observations=(
+                    ("relink_result", ("identity_id", "account_id", "connection_id")),
+                    (
+                        "relink_connections",
+                        ("identity_id", "previous_connection_id", "new_connection_id"),
+                    ),
+                    ("relink_grant", ("identity_id", "account_id", "grant_id")),
+                    ("relink_chat", ("identity_id", "account_id", "chat_id")),
+                ),
             ),
             _requirement(
                 "disconnect_preserves_history",
@@ -237,6 +374,16 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200, 204),
                 bindings=("identity_ids", "account_ids", "chat_ids", "connection_ids"),
+                observations=(
+                    (
+                        "disconnect_result",
+                        ("identity_id", "account_id", "connection_id", "disconnect_status"),
+                    ),
+                    (
+                        "history_after_disconnect",
+                        ("identity_id", "account_id", "chat_id", "history_message_id"),
+                    ),
+                ),
             ),
             _requirement(
                 "different_identity_account",
@@ -253,6 +400,11 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200, 201),
                 expected=(("grant_count", 0), ("history_message_count", 0)),
+                observations=(
+                    ("account_result", ("identity_id", "account_id", "provider_account_id")),
+                    ("grant_count", ("identity_id", "account_id", "grant_count")),
+                    ("history_count", ("identity_id", "account_id", "history_message_count")),
+                ),
             ),
         ),
         (
@@ -729,6 +881,23 @@ REQUIREMENT_BY_KEY = {
     for requirement in scenario.requirements
 }
 
+
+def _observation_fields(requirement: Requirement, observation: str) -> tuple[str, ...]:
+    """Return the typed fields one response role may contribute to a case."""
+
+    if observation == "response":
+        return requirement.evidence
+    for name, fields in requirement.observations:
+        if name == observation:
+            return fields
+    return ()
+
+
+def _declared_observations(requirement: Requirement) -> dict[str, tuple[str, ...]]:
+    observations = {"response": requirement.evidence}
+    observations.update(requirement.observations)
+    return observations
+
 # A proof label is meaningful only when the request reaches the corresponding
 # entrypoint.  These small contracts keep a successful but unrelated GET from
 # satisfying a send, group, restore, or negative case.  Providers may expose
@@ -736,11 +905,11 @@ REQUIREMENT_BY_KEY = {
 REQUEST_CONTRACTS: dict[tuple[str, str], dict[str, tuple[str, ...]]] = {
     ("oauth_connection", "protected_resource"): {"methods": ("GET",), "paths": ("oauth-protected-resource",)},
     ("oauth_connection", "authorization_server"): {"methods": ("GET",), "paths": ("oauth-authorization-server",)},
-    ("linking_identity_lifecycle", "unlinked_start"): {"methods": ("POST",), "paths": ("link-session", "link_sessions")},
-    ("linking_identity_lifecycle", "identity_grant"): {"methods": ("POST", "PATCH"), "paths": ("link", "grant")},
-    ("linking_identity_lifecycle", "same_identity_relink"): {"methods": ("POST", "PATCH"), "paths": ("relink", "link")},
-    ("linking_identity_lifecycle", "disconnect_preserves_history"): {"methods": ("POST", "DELETE"), "paths": ("disconnect", "link")},
-    ("linking_identity_lifecycle", "different_identity_account"): {"methods": ("GET",), "paths": ("identity", "account")},
+    ("linking_identity_lifecycle", "unlinked_start"): {"methods": ("POST",), "paths": ("identities", "link-sessions")},
+    ("linking_identity_lifecycle", "identity_grant"): {"methods": ("POST", "PATCH"), "paths": ("grants",)},
+    ("linking_identity_lifecycle", "same_identity_relink"): {"methods": ("GET", "POST", "PATCH"), "paths": ("connections", "grants", "conversations", "link-sessions")},
+    ("linking_identity_lifecycle", "disconnect_preserves_history"): {"methods": ("GET", "DELETE"), "paths": ("link-sessions", "conversations", "connections")},
+    ("linking_identity_lifecycle", "different_identity_account"): {"methods": ("GET",), "paths": ("identities", "accounts", "grants", "conversations")},
     ("history_context_attachment", "stored_history"): {"methods": ("GET",), "paths": ("conversation", "message", "history", "search")},
     ("history_context_attachment", "attachment_read"): {"methods": ("GET",), "paths": ("attachment",)},
     ("text_send_and_route", "saved_before_dispatch"): {"methods": ("POST",), "paths": ("message", "conversation", "send")},
@@ -937,26 +1106,56 @@ def resolve_templates(value: Any, context: dict[str, Any]) -> Any:
 
 
 def _safe_evidence_value(name: str, value: Any) -> Any:
-    """Keep only bounded scalar identifiers, statuses, URLs, and digests."""
+    """Validate a named evidence field against its declared scalar type."""
 
+    if name not in EVIDENCE_FIELD_KINDS:
+        raise EvidenceError(f"evidence field {name!r} is not allowlisted")
     if value is None:
         return None
     if CONTENT_FIELD.search(name) or _is_sensitive_key(name):
         raise EvidenceError(f"evidence field {name!r} may contain content or a credential")
-    if isinstance(value, bool):
+    kind = EVIDENCE_FIELD_KINDS[name]
+    if kind == "bool":
+        if not isinstance(value, bool):
+            raise EvidenceError(f"evidence field {name!r} must be a boolean")
         return value
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, float):
-        if value != value or value in {float("inf"), float("-inf")}:
-            raise EvidenceError(f"evidence field {name!r} is not a finite scalar")
+    if kind == "count":
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise EvidenceError(f"evidence field {name!r} must be a non-negative integer")
         return value
     if not isinstance(value, str):
-        raise EvidenceError(f"evidence field {name!r} must be a scalar")
-    if len(value) > 2048:
-        raise EvidenceError(f"evidence field {name!r} is too large")
+        raise EvidenceError(f"evidence field {name!r} must be a typed scalar")
+    if len(value) > 2048 or "\n" in value or "\r" in value:
+        raise EvidenceError(f"evidence field {name!r} is too large or contains a line break")
     if value.lower().startswith("bearer ") or JWT_SHAPE.fullmatch(value):
         raise EvidenceError(f"evidence field {name!r} looks like a credential")
+    if kind == "url":
+        if not is_absolute_url(value) or urllib.parse.urlsplit(value).username or urllib.parse.urlsplit(value).password:
+            raise EvidenceError(f"evidence field {name!r} must be an absolute URL without credentials")
+    elif kind == "id":
+        if not COMMUNICATOR_ID.fullmatch(value):
+            raise EvidenceError(f"evidence field {name!r} must be a Communicator ID")
+    elif kind == "digest":
+        if not HEX_DIGEST.fullmatch(value):
+            raise EvidenceError(f"evidence field {name!r} must be a hexadecimal digest")
+    elif kind == "timestamp":
+        if not ISO_TIMESTAMP.fullmatch(value):
+            raise EvidenceError(f"evidence field {name!r} must be an ISO timestamp")
+    elif kind == "mime":
+        if not MIME_TYPE.fullmatch(value):
+            raise EvidenceError(f"evidence field {name!r} must be a MIME type")
+    elif kind == "evidence_class":
+        if value not in RUN_MODES:
+            raise EvidenceError(f"evidence field {name!r} must name an evidence class")
+    elif kind == "version":
+        if not SCALAR_TOKEN.fullmatch(value):
+            raise EvidenceError(f"evidence field {name!r} must be a bounded version token")
+    elif kind == "token":
+        if not SCALAR_TOKEN.fullmatch(value):
+            raise EvidenceError(f"evidence field {name!r} must be a bounded token")
+    elif kind == "label":
+        if not value.strip() or len(value) > 128 or any(ord(char) < 32 for char in value):
+            raise EvidenceError(f"evidence field {name!r} must be a bounded label")
     return value
 
 
@@ -1135,6 +1334,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(
                 f"operations[{index}] proof {role}/{case} is not declared for {scenario}"
             )
+        observation = proof.get("observation", "response")
+        if not isinstance(observation, str) or not observation:
+            raise ConfigError(f"operations[{index}].proof.observation must be a non-empty string")
+        observation_fields = _observation_fields(requirement, observation)
+        if not observation_fields:
+            declared = ", ".join(sorted(_declared_observations(requirement)))
+            raise ConfigError(
+                f"operations[{index}] proof observation {observation!r} is not declared; use {declared}"
+            )
         transport = operation.get("transport")
         if transport not in {"rest", "mcp"}:
             raise ConfigError(f"operations[{index}].transport must be rest or mcp")
@@ -1241,23 +1449,28 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(
                 f"operations[{index}] may not extract credential-like fields"
             )
-        if any(name not in requirement.evidence for name in extract):
-            unknown = sorted(set(extract) - set(requirement.evidence))
+        if any(name not in EVIDENCE_FIELD_KINDS for name in extract):
+            unknown = sorted(str(name) for name in set(extract) - set(EVIDENCE_FIELD_KINDS))
             raise ConfigError(
-                f"operations[{index}] extracts undeclared evidence fields: {', '.join(unknown)}"
+                f"operations[{index}] extracts non-typed evidence fields: {', '.join(unknown)}"
             )
-        missing_contract = [name for name in requirement.evidence if name not in extract]
-        if missing_contract:
+        if any(name not in observation_fields for name in extract):
+            unknown = sorted(set(extract) - set(observation_fields))
             raise ConfigError(
-                f"operations[{index}] must declare contract evidence: {', '.join(missing_contract)}"
+                f"operations[{index}] extracts fields outside observation {observation!r}: {', '.join(unknown)}"
             )
         required = evidence.get("required", [])
         if (
             not isinstance(required, list)
+            or not required
+            or any(not isinstance(name, str) for name in required)
+            or len(set(required)) != len(required)
             or any(name not in extract for name in required)
-            or any(name not in required for name in requirement.evidence)
+            or any(name not in observation_fields for name in required)
         ):
-            raise ConfigError(f"operations[{index}].evidence.required must name extracted fields")
+            raise ConfigError(
+                f"operations[{index}].evidence.required must name at least one field from observation {observation!r}"
+            )
         assertions = operation.get("assert", [])
         if not isinstance(assertions, list):
             raise ConfigError(f"operations[{index}].assert must be an array")
@@ -1700,9 +1913,10 @@ def classify_response(
         for index, pointer in enumerate(expect.get("unsupported_evidence", [])):
             value = json_pointer(_response_body_for_extraction(response), pointer)
             try:
-                unsupported_values[f"unsupported_{index}"] = _safe_evidence_value(
-                    f"unsupported_{index}", value
-                )
+                terminal = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
+                typed_name = terminal if terminal in EVIDENCE_FIELD_KINDS else "support_status"
+                _safe_evidence_value(typed_name, value)
+                unsupported_values[f"unsupported_{index}"] = value
             except EvidenceError:
                 return "unverified", "unsupported response lacks scalar capability evidence", {}
         if any(value is None for value in unsupported_values.values()):
@@ -1741,13 +1955,15 @@ def classify_response(
             extracted[name] = _safe_evidence_value(name, value)
         except EvidenceError as error:
             return "unverified", str(error), extracted
-    missing = [name for name in (*evidence.get("required", []), *requirement.evidence) if extracted.get(name) is None]
+    missing = [name for name in evidence.get("required", []) if extracted.get(name) is None]
     missing = list(dict.fromkeys(missing))
     if missing:
         return "unverified", f"required evidence fields are absent: {', '.join(missing)}", extracted
 
     expected_errors = []
     for field_name, expected in requirement.expected:
+        if field_name not in extracted:
+            continue
         resolved = resolve_templates(expected, context)
         if extracted.get(field_name) != resolved:
             expected_errors.append(
@@ -1786,8 +2002,9 @@ def aggregate_status(records: list[dict[str, Any]]) -> tuple[str, str | None]:
 def evaluate_scenario(
     scenario: Scenario,
     records: list[dict[str, Any]],
+    context: dict[str, Any] | None = None,
 ) -> tuple[str, str | None, list[str], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Evaluate each declared case and its cross-case identity relations."""
+    """Evaluate cases from the union of their passing observations."""
 
     selected: dict[str, dict[str, Any]] = {}
     coverage: list[dict[str, Any]] = []
@@ -1800,12 +2017,50 @@ def evaluate_scenario(
             and record.get("proof", {}).get("case") == requirement.case
         ]
         passing = [record for record in candidates if record.get("status") == "pass"]
-        if passing:
-            selected[requirement.identifier] = passing[0]
-            operation_ids.append(passing[0]["id"])
+        aggregate: dict[str, Any] = {}
+        conflicts: set[str] = set()
+        for record in passing:
+            for name, value in record.get("extracted", {}).items():
+                if value is None:
+                    continue
+                if name in aggregate and aggregate[name] != value:
+                    conflicts.add(name)
+                else:
+                    aggregate[name] = value
+        missing = [name for name in requirement.evidence if name not in aggregate]
+        expected_errors: list[str] = []
+        for field_name, expected in requirement.expected:
+            if field_name not in aggregate:
+                continue
+            resolved = resolve_templates(expected, context or {})
+            if aggregate[field_name] != resolved:
+                expected_errors.append(
+                    f"{field_name} expected {resolved!r}, got {aggregate[field_name]!r}"
+                )
+        if conflicts:
+            case_status, case_reason = "implementation_defect", (
+                f"passing observations disagree on: {', '.join(sorted(conflicts))}"
+            )
+        elif expected_errors:
+            case_status, case_reason = "implementation_defect", "; ".join(expected_errors)
+        elif not missing and passing:
+            selected[requirement.identifier] = {
+                "id": requirement.identifier,
+                "extracted": aggregate,
+                "operation_ids": [record["id"] for record in passing],
+            }
+            operation_ids.extend(record["id"] for record in passing)
             case_status, case_reason = "pass", None
         else:
-            case_status, case_reason = aggregate_status(candidates)
+            if not candidates:
+                case_status, case_reason = "unverified", "no operation was configured for this scenario"
+            elif missing:
+                case_status, case_reason = (
+                    "unverified",
+                    f"passing observations lack evidence fields: {', '.join(missing)}",
+                )
+            else:
+                case_status, case_reason = aggregate_status(candidates)
         coverage.append(
             {
                 "requirement": requirement.identifier,
@@ -1813,7 +2068,8 @@ def evaluate_scenario(
                 "case": requirement.case,
                 "status": case_status,
                 "reason": case_reason,
-                "operation_ids": [record["id"] for record in candidates],
+                "operation_ids": [record["id"] for record in passing] or [record["id"] for record in candidates],
+                "observed_fields": sorted(aggregate),
             }
         )
 
@@ -2137,7 +2393,9 @@ class AcceptanceRunner:
         scenarios: list[dict[str, Any]] = []
         for scenario in SCENARIOS:
             records = [record for record in self.records if record["scenario"] == scenario.identifier]
-            status, reason, operation_ids, coverage, relations = evaluate_scenario(scenario, records)
+            status, reason, operation_ids, coverage, relations = evaluate_scenario(
+                scenario, records, self._context()
+            )
             scenarios.append(
                 {
                     "id": scenario.identifier,
@@ -2382,7 +2640,9 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         _validate_bundle_bindings(record["bindings"], f"operations[{index}].bindings")
         if record["bindings"] != run["bindings"]:
             raise EvidenceError(f"operations[{index}].bindings do not match the run binding snapshot")
-        proof = _require_object_keys(record["proof"], {"role", "case"}, set(), f"operations[{index}].proof")
+        proof = _require_object_keys(
+            record["proof"], {"role", "case"}, {"observation"}, f"operations[{index}].proof"
+        )
         requirement = REQUIREMENT_BY_KEY.get((record["scenario"], proof["case"]))
         if requirement is None or proof["role"] != requirement.role:
             raise EvidenceError(f"operations[{index}] proof is not a declared requirement")
@@ -2393,10 +2653,14 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         if record["reason"] is not None and not isinstance(record["reason"], str):
             raise EvidenceError(f"operations[{index}].reason must be a string or null")
         _validate_bundle_response(record["response"], f"operations[{index}].response")
-        if set(record["extracted"]) - set(requirement.evidence):
-            raise EvidenceError(f"operations[{index}] contains undeclared extracted evidence")
-        if record["status"] == "pass" and set(requirement.evidence) - set(record["extracted"]):
-            raise EvidenceError(f"operations[{index}] claims pass without contract evidence")
+        observation = proof.get("observation", "response")
+        observation_fields = _observation_fields(requirement, observation)
+        if not observation_fields:
+            raise EvidenceError(f"operations[{index}] uses an undeclared proof observation")
+        if set(record["extracted"]) - set(observation_fields):
+            raise EvidenceError(f"operations[{index}] contains evidence outside its proof observation")
+        if record["status"] == "pass" and not record["extracted"]:
+            raise EvidenceError(f"operations[{index}] claims pass without observed evidence")
         request_summary = record["request"]
         contract_request = (
             {"method": request_summary.get("method"), "path": request_summary.get("path")}
@@ -2442,10 +2706,11 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             requirement.identifier for requirement in scenario.requirements
         }:
             raise EvidenceError(f"scenarios[{index}] coverage does not name every requirement")
+        coverage_values: dict[str, dict[str, Any]] = {}
         for case in coverage:
             coverage_record = _require_object_keys(
                 case,
-                {"requirement", "role", "case", "status", "reason", "operation_ids"},
+                {"requirement", "role", "case", "status", "reason", "operation_ids", "observed_fields"},
                 set(),
                 f"scenarios[{index}].coverage",
             )
@@ -2454,7 +2719,12 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             )
             if coverage_record["role"] != requirement.role or coverage_record["case"] != requirement.case:
                 raise EvidenceError(f"scenarios[{index}] coverage contract mismatch")
-            if coverage_record["status"] not in EVIDENCE_STATUSES or not isinstance(coverage_record["operation_ids"], list):
+            if (
+                coverage_record["status"] not in EVIDENCE_STATUSES
+                or not isinstance(coverage_record["operation_ids"], list)
+                or not isinstance(coverage_record["observed_fields"], list)
+                or any(not isinstance(name, str) for name in coverage_record["observed_fields"])
+            ):
                 raise EvidenceError(f"scenarios[{index}] coverage status is invalid")
             matching_records = [records_by_id.get(operation_id) for operation_id in coverage_record["operation_ids"]]
             if any(record is None for record in matching_records):
@@ -2466,10 +2736,39 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 for record in matching_records
             ):
                 raise EvidenceError(f"scenarios[{index}] coverage references the wrong requirement")
+            passing_records = [record for record in matching_records if record["status"] == "pass"]
+            observed_values: dict[str, Any] = {}
+            conflicts: set[str] = set()
+            for record in passing_records:
+                for name, value in record["extracted"].items():
+                    if value is None:
+                        continue
+                    if name in observed_values and observed_values[name] != value:
+                        conflicts.add(name)
+                    else:
+                        observed_values[name] = value
+            if coverage_record["observed_fields"] != sorted(observed_values):
+                raise EvidenceError(f"scenarios[{index}] coverage observed_fields do not match passing operations")
             if coverage_record["status"] == "pass" and (
                 not matching_records or any(record["status"] != "pass" for record in matching_records)
             ):
                 raise EvidenceError(f"scenarios[{index}] coverage claims pass without passing evidence")
+            if coverage_record["status"] == "pass":
+                missing = set(requirement.evidence) - set(observed_values)
+                if missing:
+                    raise EvidenceError(
+                        f"scenarios[{index}] coverage claims pass without fields: {', '.join(sorted(missing))}"
+                    )
+                if conflicts:
+                    raise EvidenceError(
+                        f"scenarios[{index}] coverage has conflicting fields: {', '.join(sorted(conflicts))}"
+                    )
+            elif conflicts:
+                raise EvidenceError(
+                    f"scenarios[{index}] coverage has conflicting passing fields: {', '.join(sorted(conflicts))}"
+                )
+            coverage_values[coverage_record["requirement"]] = observed_values
+        coverage_by_requirement = {case["requirement"]: case for case in coverage}
         relations = scenario_record["relations"]
         if not isinstance(relations, list) or len(relations) != len(scenario.relations):
             raise EvidenceError(f"scenarios[{index}] relation coverage is incomplete")
@@ -2489,6 +2788,19 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 raise EvidenceError(f"scenarios[{index}] relation contract mismatch")
             if relation_data["status"] not in EVIDENCE_STATUSES:
                 raise EvidenceError(f"scenarios[{index}] relation status is invalid")
+            left_coverage = coverage_by_requirement[relation.left]
+            right_coverage = coverage_by_requirement[relation.right]
+            left_values = coverage_values[relation.left]
+            right_values = coverage_values[relation.right]
+            if relation_data["status"] == "pass":
+                if left_coverage["status"] != "pass" or right_coverage["status"] != "pass":
+                    raise EvidenceError(f"scenarios[{index}] relation passes without passing cases")
+                if any(field not in left_values or field not in right_values for field in relation.fields):
+                    raise EvidenceError(f"scenarios[{index}] relation passes without relation fields")
+                if relation.kind == "equal" and any(left_values[field] != right_values[field] for field in relation.fields):
+                    raise EvidenceError(f"scenarios[{index}] equal relation does not hold")
+                if relation.kind == "distinct" and all(left_values[field] == right_values[field] for field in relation.fields):
+                    raise EvidenceError(f"scenarios[{index}] distinct relation does not hold")
         if scenario_record["status"] == "pass":
             if any(case["status"] != "pass" for case in coverage) or any(
                 relation["status"] != "pass" for relation in relations

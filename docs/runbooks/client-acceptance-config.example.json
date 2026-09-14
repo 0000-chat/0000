@@ -43,7 +43,8 @@
       "transport": "rest",
       "proof": {
         "role": "oauth_metadata",
-        "case": "protected_resource"
+        "case": "protected_resource",
+        "observation": "response"
       },
       "request": {
         "method": "GET",
@@ -66,7 +67,8 @@
       "transport": "mcp",
       "proof": {
         "role": "mcp_session",
-        "case": "scoped_read"
+        "case": "scoped_read",
+        "observation": "response"
       },
       "request": {
         "tool": "list_identities",

@@ -146,7 +146,12 @@
         "status": { "$ref": "#/$defs/status" },
         "reason": { "type": ["string", "null"] },
         "response": { "$ref": "#/$defs/response" },
-        "extracted": { "type": "object" }
+        "extracted": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "integer", "number", "boolean", "null"]
+          }
+        }
       }
     },
     "scenario": {
@@ -221,7 +226,8 @@
       "required": ["role", "case"],
       "properties": {
         "role": { "type": "string", "minLength": 1 },
-        "case": { "type": "string", "minLength": 1 }
+        "case": { "type": "string", "minLength": 1 },
+        "observation": { "type": "string", "minLength": 1 }
       }
     },
     "observed_binding": {
@@ -243,7 +249,8 @@
         "case",
         "status",
         "reason",
-        "operation_ids"
+        "operation_ids",
+        "observed_fields"
       ],
       "properties": {
         "requirement": { "type": "string", "minLength": 1 },
@@ -251,7 +258,8 @@
         "case": { "type": "string", "minLength": 1 },
         "status": { "$ref": "#/$defs/status" },
         "reason": { "type": ["string", "null"] },
-        "operation_ids": { "type": "array", "items": { "type": "string" } }
+        "operation_ids": { "type": "array", "items": { "type": "string" } },
+        "observed_fields": { "type": "array", "items": { "type": "string" } }
       }
     },
     "relation": {

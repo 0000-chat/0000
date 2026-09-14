@@ -83,8 +83,10 @@ and contains the full #35 and #36 acceptance scope.
 ## Declare operations
 
 Each operation names a scenario requirement through `proof.role` and
-`proof.case`, actor, transport, request, accepted HTTP statuses, and evidence
-to extract from the actual response. The case contract also checks the REST
+`proof.case`. Set `proof.observation` when one case needs more than one
+response role, such as `disconnect_result` and `history_after_disconnect`.
+The operation then names its actor, transport, request, accepted HTTP
+statuses, and typed evidence fields. The case contract also checks the REST
 method and stable route words or the MCP tool. A REST operation uses a
 relative path. An MCP operation uses a declared tool or the `initialize`
 method. Template values use `${target...}`, `${binding...}`, `${vars...}`, and
@@ -101,23 +103,26 @@ The existing Communicator entrypoints used by the plan include:
 | Groups | `POST /api/v1/groups`, `PATCH /api/v1/groups/{conversation_id}`, `POST/DELETE /api/v1/groups/{conversation_id}/participants` | `create_group`, `rename_group`, `add_group_participants`, `remove_group_participants` |
 | Webhooks | `/api/v1/webhook-subscriptions` and `/api/v1/webhook-deliveries/{id}` | `create_webhook_subscription`, `update_webhook_subscription`, `cutover_webhook_subscription`, `retry_webhook_delivery` |
 | Receipts and removals | `POST /api/v1/conversations/{id}/receipts/read`, `/api/v1/receipts`, `/api/v1/removals` | `mark_read`, `get_read_receipt`, `record_removal`, `get_removal_status` |
-| Linking | Administrator-only `/api/v1/identities/{id}/link-sessions` and its action/status routes | Agent MCP has no linking authority |
+| Linking | Administrator-only `/api/v1/identities/{id}/link-sessions`, `/api/v1/link-sessions/{id}`, grant, connection, and stored-read routes | Agent MCP has no linking authority |
 
 Use the target's OpenAPI document and current MCP tool schemas to fill request
 bodies. Do not copy provider credentials, access tokens, message bodies, or
 unbounded upstream URLs into the configuration. For sensitive request values,
 the evidence contains only a body hash.
 
-For a successful operation, list every identifier or scalar status that the
-declared case contract requires under `evidence.extract` and repeat it under
-`evidence.required`. Examples include `account_id`, `chat_id`, `grant_id`,
-`installation_id`, `command_id`, `message_id`, `provider_message_id`,
-`subscription_id`, `destination_version`, `source_event_id`, `delivery_id`,
-`receipt_id`, and `removal_id`. Objects, arrays, credentials, message bodies,
+For a successful operation, list every typed field that its declared
+observation can provide under `evidence.extract` and repeat those fields under
+`evidence.required`. A semantic case may collect evidence from several
+passing operations. The runner records the union in `coverage.observed_fields`
+and checks the complete case contract only after it has combined those
+observations. For example, a link-session response can prove identity,
+account, connection, and lifecycle status while a later stored-message read
+proves the chat and history message ID for
+`disconnect_preserves_history`. Objects, arrays, credentials, message bodies,
 and unbounded content are rejected. A missing required field makes the
-operation `unverified`; one arbitrary successful GET cannot satisfy another
-case. Later operations may use an earlier passing scalar ID with
-`${observed.operation-id.field}`.
+operation or combined case `unverified`; one arbitrary successful GET cannot
+satisfy another case. Later operations may use an earlier passing scalar ID
+with `${observed.operation-id.field}`.
 
 For a capability the provider or client cannot support, set the expected
 status, `expect.unsupported_statuses`, `expect.unsupported_evidence` pointers,
