@@ -33,6 +33,8 @@ export type RetentionBackendCopy = {
    * credential-bearing object as if it were a message copy.
    */
   content_classes?: readonly ControlledCopyContentClass[];
+  /** Exact core-dump row/media mapping supplied by a real inventory backend. */
+  restore_target?: Record<string, unknown>;
 };
 
 export type RetentionInventoryResult = {
@@ -141,7 +143,17 @@ const normalizeInventory = (
       deletion_method: adapter.deletion_method,
       required: adapter.required,
     });
-    return item;
+    if (
+      copy.restore_target !== undefined &&
+      (copy.restore_target === null ||
+        typeof copy.restore_target !== "object" ||
+        Array.isArray(copy.restore_target))
+    ) {
+      throw new Error("controlled copy inventory restore target is invalid");
+    }
+    return copy.restore_target === undefined
+      ? item
+      : { ...item, restore_target: copy.restore_target };
   });
   return {
     complete: result.complete === true,

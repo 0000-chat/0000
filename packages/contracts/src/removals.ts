@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 import { ControlledCopyCompletionSchema } from "./controlled-copies";
+import { RestoreReadinessSchema } from "./restore";
 
 /**
  * Removal records are intentionally provider-neutral.  A resource id may be
@@ -180,6 +181,8 @@ export const RemovalStatusResponseSchema = z
       .array(ControlledCopyCompletionSchema)
       .max(10_000)
       .default([]),
+    /** Restore ordering and current deletion-epoch readiness for administrators. */
+    restore: RestoreReadinessSchema.optional(),
   })
   .strict();
 export type RemovalStatusResponse = z.infer<typeof RemovalStatusResponseSchema>;

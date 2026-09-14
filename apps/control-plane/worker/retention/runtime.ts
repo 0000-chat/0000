@@ -217,6 +217,13 @@ const inventoryResponse = (value: unknown): RetentionInventoryResult => {
         (item): item is string => typeof item === "string",
       ) as NonNullable<RetentionBackendCopy["content_classes"]>;
     }
+    if (
+      copy.restore_target !== null &&
+      typeof copy.restore_target === "object" &&
+      !Array.isArray(copy.restore_target)
+    ) {
+      normalized.restore_target = recordValue(copy.restore_target);
+    }
     return normalized;
   });
   if (typeof body.evidence_source !== "string") {

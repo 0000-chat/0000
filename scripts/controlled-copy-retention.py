@@ -240,6 +240,9 @@ def normalized_copy(entry: Mapping[str, Any]) -> dict[str, Any]:
         "path",
         "room_id",
         "event_id",
+        "event_type",
+        "media_paths",
+        "media_paths_complete",
         "snapshot_id",
         "exclusive_resource_id",
         "queue_ref",
@@ -278,6 +281,58 @@ def entries_for(
             matches.append(normalized_copy(raw_entry))
     complete = raw_store.get("enumeration_complete") is True
     return matches, complete
+
+
+def restore_target_for_copy(
+    copy: Mapping[str, Any], database: str, contract: str
+) -> dict[str, Any] | None:
+    """Convert one real provider inventory entry into an exact core target."""
+    resource_id = copy.get("resource_id")
+    content_generation = copy.get("content_generation")
+    if not isinstance(resource_id, str) or not resource_id.strip():
+        return None
+    if not isinstance(content_generation, str) or not content_generation.strip():
+        return None
+    target: dict[str, Any] = {
+        "resource_id": resource_id,
+        "content_generation": content_generation,
+        "database": database,
+        "contract": contract,
+    }
+    if contract == "synapse-event-json-v1":
+        room_id = copy.get("room_id")
+        event_id = copy.get("event_id")
+        event_type = copy.get("event_type", "m.room.message")
+        if (
+            not isinstance(room_id, str)
+            or not room_id.strip()
+            or not isinstance(event_id, str)
+            or not event_id.strip()
+            or not isinstance(event_type, str)
+            or event_type not in CORE_EVENT_TYPES
+        ):
+            return None
+        target.update({"room_id": room_id, "event_id": event_id, "event_type": event_type})
+    elif contract == "mautrix-bridge-message-v1":
+        for key in ("bridge_id", "message_id", "part_id"):
+            value = copy.get(key)
+            if not isinstance(value, str) or not value.strip():
+                return None
+            target[key] = value
+    else:
+        return None
+    media_paths = copy.get("media_paths")
+    if not isinstance(media_paths, list) or copy.get("media_paths_complete") is not True:
+        return None
+    try:
+        target["media_paths"] = [
+            safe_relative_path(value, "restore target media path")
+            for value in media_paths
+        ]
+    except RetentionError:
+        return None
+    target["media_paths_complete"] = True
+    return target
 
 
 def file_root(store: str) -> Path | None:
@@ -526,13 +581,20 @@ def inventory_synapse_from_server(scope: Mapping[str, Any]) -> dict[str, Any]:
         ):
             invalid_mapping = True
             continue
+        restore_target = restore_target_for_copy(
+            copy, "synapse", "synapse-event-json-v1"
+        )
         state = synapse_event_state(event_id, room_id, event_type)
         if state is None:
             state = "present" if synapse_event_exists(
                 base_url, access_token, room_id, event_id
             ) else "missing"
         if state in {"present", "redacted", "intact_censored"}:
-            copies.append(copy)
+            copies.append(
+                copy
+                if restore_target is None
+                else {**copy, "restore_target": restore_target}
+            )
     complete = manifest_complete and not invalid_mapping
     return {
         "complete": complete,
@@ -806,6 +868,9 @@ def inventory_bridge_from_database(scope: Mapping[str, Any]) -> dict[str, Any]:
     entries = bridge_manifest_entries(scope)
     copies: list[dict[str, Any]] = []
     for copy in entries:
+        restore_target = restore_target_for_copy(
+            copy, "bridge_database", "mautrix-bridge-message-v1"
+        )
         count_text = run_bridge_psql(
             database_url,
             binary,
@@ -822,7 +887,11 @@ def inventory_bridge_from_database(scope: Mapping[str, Any]) -> dict[str, Any]:
             raise RetentionError("controlled-copy bridge inventory count is invalid") from error
         if count == 1:
             copy["content_classes"] = ["bridge_mapping"]
-            copies.append(copy)
+            copies.append(
+                copy
+                if restore_target is None
+                else {**copy, "restore_target": restore_target}
+            )
         elif count > 1:
             raise RetentionError("controlled-copy bridge mapping is not unique")
     complete = bool(copies) and len(copies) == len(entries)

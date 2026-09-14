@@ -1,5 +1,8 @@
 import { createRoute } from "@hono/zod-openapi";
-import { ApiErrorResponseSchema } from "@communicator/contracts";
+import {
+  ApiErrorResponseSchema,
+  RestoreAuthorityExportSchema,
+} from "@communicator/contracts";
 import {
   RecordRemovalInputSchema,
   RemovalAuthoritySchema,
@@ -17,6 +20,7 @@ import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
 import { removalStatusForTenant } from "../removals/service";
 import { scheduleRemovalExpiry } from "../removals/ledger";
 import { createConfiguredControlledCopyAdapters } from "../retention";
+import { createRestoreAuthorityExport } from "../restore/authority";
 
 type RemovalRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -42,6 +46,21 @@ export const removalStatusRoute = createRoute({
     200: {
       description: "Removal authority and incomplete active-removal work",
       content: { "application/json": { schema: RemovalStatusResponseSchema } },
+    },
+    ...removalErrors,
+  },
+});
+
+export const restoreAuthorityRoute = createRoute({
+  method: "get",
+  path: "/api/v1/removals/restore-authority",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "Current removal authority and restore evidence",
+      content: {
+        "application/json": { schema: RestoreAuthorityExportSchema },
+      },
     },
     ...removalErrors,
   },
@@ -127,6 +146,27 @@ export const removalStatusHandler: Handler<RemovalRouteEnv> = async (
       await removalStatusForTenant(
         context.env.CONTROL_DB,
         context.get("authorization").tenant.id,
+      ),
+      200,
+    );
+  } catch (error) {
+    return unavailable(context, error);
+  }
+};
+
+export const restoreAuthorityHandler: Handler<RemovalRouteEnv> = async (
+  context,
+) => {
+  if (!isAdministrator(context)) return forbidden(context);
+  try {
+    return context.json(
+      await createRestoreAuthorityExport(
+        context.env.CONTROL_DB,
+        context.get("authorization").tenant.id,
+        new Date(),
+        createConfiguredControlledCopyAdapters(
+          context.env as unknown as Record<string, unknown>,
+        ),
       ),
       200,
     );
