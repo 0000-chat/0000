@@ -6,7 +6,6 @@ import {
   type OutboundDispatch,
   type OutboundDispatchPayload,
 } from "@communicator/contracts";
-import { hasAccountOperationGrant } from "../control-directory/grants";
 import type {
   OutboundAcceptanceContext,
   OutboundAdapterEvidence,
@@ -188,9 +187,20 @@ export class HttpWhatsAppTextAdapter {
       dispatch.conversation_id !== payload.conversation_id ||
       dispatch.transaction_id !== payload.transaction_id ||
       dispatch.request_digest !== payload.request_digest ||
+      (dispatch.body_digest !== undefined &&
+        dispatch.body_digest !== payload.body_digest) ||
       dispatch.projection_generation !== payload.projection_generation
     ) {
       return failure("provider_protocol_error", "dispatch_payload_mismatch");
+    }
+    if (payload.authority === undefined || payload.body_digest === undefined) {
+      return failure("provider_protocol_error", "dispatch_authority_missing");
+    }
+    if (
+      dispatch.authority !== undefined &&
+      JSON.stringify(dispatch.authority) !== JSON.stringify(payload.authority)
+    ) {
+      return failure("provider_protocol_error", "dispatch_authority_mismatch");
     }
     if (payload.provider !== "whatsapp") {
       return failure("account_mismatch", "selected_connection_is_not_whatsapp");
@@ -217,10 +227,6 @@ export class HttpWhatsAppTextAdapter {
     }
     if (connection.has_provider_identity !== 1) {
       return failure("session_expired", "provider_identity_missing");
-    }
-    const authorized = await this.readSendGrant(payload);
-    if (!authorized) {
-      return failure("authorization_revoked", "message.send_grant_revoked");
     }
     const currentConnection = await this.readConnection(payload);
     if (currentConnection === null) {
@@ -257,13 +263,20 @@ export class HttpWhatsAppTextAdapter {
           tenant_id: payload.tenant_id,
           account_id: payload.account_id,
           connection_id: payload.connection_id,
+          actor_identity_id: payload.identity_id,
           identity_id: payload.resource_identity_id,
+          membership_id: payload.authority.membership_id,
+          reservation_id: payload.authority.reservation_id,
+          capability: payload.authority.capability,
           provider: payload.provider,
           conversation_id: payload.conversation_id,
+          command_id: payload.command_id,
+          dispatch_id: payload.dispatch_id,
           message_id: payload.message_id,
           event_id: payload.event_id,
           transaction_id: payload.transaction_id,
           request_digest: payload.request_digest,
+          body_digest: payload.body_digest,
           projection_generation: payload.projection_generation,
           session_generation: connection.session_generation,
           route: {
@@ -305,6 +318,9 @@ export class HttpWhatsAppTextAdapter {
           evidence_id: `uncertain_${payload.transaction_id}`,
         };
       }
+      if (response.status === 403 && reason === "authorization_revoked") {
+        return failure("authorization_revoked", reason);
+      }
       if (response.status === 401 || response.status === 403) {
         return failure("session_expired", reason);
       }
@@ -343,6 +359,9 @@ export class HttpWhatsAppTextAdapter {
       };
     }
     if (result.outcome === "rejected") {
+      if (result.reason === "authorization_revoked") {
+        return failure("authorization_revoked", result.reason);
+      }
       return failure("provider_rejected", result.reason ?? "provider_rejected");
     }
     if (result.outcome === "rate_limited") {
@@ -416,24 +435,6 @@ export class HttpWhatsAppTextAdapter {
       .first<unknown>();
     const parsed = connectionRowSchema.safeParse(row);
     return parsed.success ? parsed.data : null;
-  }
-
-  private async readSendGrant(
-    payload: OutboundDispatchPayload,
-  ): Promise<boolean> {
-    const database = this.context.env.CONTROL_DB;
-    if (database === undefined || typeof database.withSession !== "function") {
-      return false;
-    }
-    return hasAccountOperationGrant(
-      database.withSession("first-primary"),
-      payload.tenant_id,
-      this.context.authorization.membership.id,
-      payload.identity_id,
-      payload.account_id,
-      payload.conversation_id,
-      "message.send",
-    );
   }
 }
 

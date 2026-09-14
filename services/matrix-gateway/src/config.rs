@@ -90,6 +90,7 @@ pub struct GatewayConfig {
 pub struct ProvisioningConfig {
     listen_addr: SocketAddr,
     bridge_url: String,
+    authority_base_url: String,
     bridge_shared_secret_file: PathBuf,
     gateway_shared_secret_file: PathBuf,
     matrix_user_id: String,
@@ -154,6 +155,7 @@ struct RawGatewayConfig {
 struct RawProvisioningConfig {
     listen_addr: String,
     bridge_url: String,
+    authority_base_url: String,
     bridge_shared_secret_file: PathBuf,
     gateway_shared_secret_file: PathBuf,
     matrix_user_id: String,
@@ -360,6 +362,7 @@ impl ProvisioningConfig {
         let config = Self {
             listen_addr,
             bridge_url: raw.bridge_url,
+            authority_base_url: raw.authority_base_url,
             bridge_shared_secret_file: raw.bridge_shared_secret_file,
             gateway_shared_secret_file: raw.gateway_shared_secret_file,
             matrix_user_id: raw.matrix_user_id,
@@ -376,6 +379,7 @@ impl ProvisioningConfig {
             return Err(ConfigError::invalid());
         }
         validate_https_root_endpoint(&self.bridge_url)?;
+        validate_https_root_endpoint(&self.authority_base_url)?;
         validate_path(&self.bridge_shared_secret_file)?;
         validate_path(&self.gateway_shared_secret_file)?;
         validate_matrix_user_id(&self.matrix_user_id)?;
@@ -393,6 +397,11 @@ impl ProvisioningConfig {
     /// Return the pinned bridge HTTPS root URL.
     pub fn bridge_url(&self) -> &str {
         &self.bridge_url
+    }
+
+    /// Return the HTTPS root URL for the private Worker authority endpoint.
+    pub fn authority_base_url(&self) -> &str {
+        &self.authority_base_url
     }
 
     /// Return the protected bridge shared-secret path.

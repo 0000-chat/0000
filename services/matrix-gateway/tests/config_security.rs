@@ -60,6 +60,20 @@ fn valid_config() -> serde_json::Value {
     })
 }
 
+fn valid_provisioning_config() -> serde_json::Value {
+    serde_json::json!({
+        "listen_addr": "127.0.0.1:8448",
+        "bridge_url": "https://bridge.example.org",
+        "authority_base_url": "https://authority.example.org",
+        "bridge_shared_secret_file": "/run/secrets/bridge-shared-secret",
+        "gateway_shared_secret_file": "/run/secrets/gateway-shared-secret",
+        "matrix_user_id": "@gateway:example.org",
+        "gateway_route_id": "gateway-route-whatsapp",
+        "bridge_instance_id": "whatsapp-primary",
+        "matrix_room_namespace": "communicator.0000.gold"
+    })
+}
+
 #[test]
 fn valid_config_deserializes_and_limits_are_fixed() {
     let config = parse_config(valid_config()).expect("valid config");
@@ -112,6 +126,29 @@ fn valid_config_deserializes_and_limits_are_fixed() {
     assert_eq!(MAX_KEY_RECOVERY_AGE_SECS, 10 * 60);
     assert_eq!(INGESTION_PATH, "/internal/v1/ingestion/batches");
     assert!(PRODUCER_VERSION.starts_with("matrix-gateway/"));
+}
+
+#[test]
+fn provisioning_authority_is_a_private_https_root_endpoint() {
+    let mut value = valid_config();
+    value["provisioning"] = valid_provisioning_config();
+    let config = parse_config(value.clone()).expect("valid provisioning config");
+    let provisioning = config.provisioning().expect("provisioning config");
+    assert_eq!(provisioning.listen_addr().port(), 8448);
+    assert_eq!(
+        provisioning.authority_base_url(),
+        "https://authority.example.org"
+    );
+
+    for authority_base_url in [
+        "http://authority.example.org",
+        "https://authority.example.org/private",
+        "https://authority.example.org?token=canary",
+    ] {
+        let mut invalid = value.clone();
+        invalid["provisioning"]["authority_base_url"] = serde_json::json!(authority_base_url);
+        assert_safe_config_error(parse_config(invalid).expect_err("authority URL rejected"));
+    }
 }
 
 #[test]

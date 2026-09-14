@@ -48,6 +48,17 @@ const payload = OutboundDispatchPayloadSchema.parse({
   projection_generation: 1,
   dispatch_lease_id: "lease_adapter_test",
   dispatch_lease_expires_at: "2026-09-14T01:00:30.000Z",
+  body_digest: "b".repeat(64),
+  authority: {
+    reservation_id: "reservation_adapter_test",
+    membership_id: "membership_human",
+    identity_id: "identity_human",
+    capability: {
+      kind: "account_grant",
+      grant_id: "grant_adapter_send",
+      authorization_epoch: 1,
+    },
+  },
   created_at: "2026-09-14T00:00:00.000Z",
 });
 
@@ -67,6 +78,8 @@ const dispatch = OutboundDispatchSchema.parse({
   status: "dispatching",
   transaction_id: payload.transaction_id,
   request_digest: payload.request_digest,
+  body_digest: payload.body_digest,
+  authority: payload.authority,
   dispatch_lease_id: payload.dispatch_lease_id,
   dispatch_lease_expires_at: payload.dispatch_lease_expires_at,
   projection_generation: payload.projection_generation,
@@ -181,6 +194,11 @@ describe("HttpWhatsAppTextAdapter", () => {
       connection_id: "connection_human_whatsapp",
       transaction_id: "transaction_adapter_test",
       body: payload.body,
+      body_digest: payload.body_digest,
+      reservation_id: payload.authority?.reservation_id,
+      membership_id: payload.authority?.membership_id,
+      actor_identity_id: payload.authority?.identity_id,
+      capability: payload.authority?.capability,
     });
   });
 
@@ -256,7 +274,7 @@ describe("HttpWhatsAppTextAdapter", () => {
     expect(result).toMatchObject({ type: "failure", failure_code: code });
   });
 
-  it("blocks a revoked send grant before provider I/O", async () => {
+  it("passes a revoked capability to the private gateway claim boundary", async () => {
     await env.CONTROL_DB.prepare(
       "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
     )
@@ -266,7 +284,13 @@ describe("HttpWhatsAppTextAdapter", () => {
         "grant_adapter_send",
       )
       .run();
-    const fetcher = vi.fn(async () => acceptedResponse());
+    const fetcher = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ reason: "authorization_revoked" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+    );
     const adapter = new HttpWhatsAppTextAdapter(context(), fetcher);
 
     const result = await adapter.dispatch(dispatch, payload);
@@ -274,7 +298,7 @@ describe("HttpWhatsAppTextAdapter", () => {
       type: "failure",
       failure_code: "authorization_revoked",
     });
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("blocks missing send capability and disconnected sessions without failover", async () => {

@@ -99,6 +99,7 @@ export const GroupCreationOperationSchema = z
   .object({
     operation_id: CommunicatorIdSchema,
     tenant_id: CommunicatorIdSchema,
+    membership_id: CommunicatorIdSchema.optional(),
     identity_id: CommunicatorIdSchema,
     account_id: CommunicatorIdSchema,
     connection_id: CommunicatorIdSchema,
@@ -254,6 +255,10 @@ export const GroupManagementOperationSchema = z
       .array(z.string().trim().min(1).max(512))
       .max(128),
     expected_revision: z.string().trim().min(1).max(128),
+    request_hash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
     status: GroupManagementStatusSchema,
     result_revision: z.string().trim().min(1).max(128).nullable(),
     result_member_provider_ids: z
