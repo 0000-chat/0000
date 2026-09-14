@@ -25,7 +25,6 @@ import {
   acquireRestoreActivationLease,
   releaseRestoreActivationLease,
   renewRestoreActivationLease,
-  type RestoreActivationLease,
 } from "./lease";
 
 type RestoreActivationDatabase = D1Database | D1DatabaseSession;
