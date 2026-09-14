@@ -33,6 +33,7 @@ import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
 
 
@@ -77,6 +78,17 @@ CORE_DATABASE_DUMP_PATHS = {
     "telegram_bridge": "telegram.pgdump",
 }
 CORE_EVENT_TYPES = {"m.room.message", "m.room.encrypted"}
+# A normal core backup is a physical aggregate.  It is allowed to cover an
+# exact logical removal only when this contract is present in, and
+# authenticated from, the selected snapshot.  The values are intentionally
+# enums rather than wildcard lineage values.
+AGGREGATE_COVERAGE = {
+    "kind": "aggregate",
+    "resource_scope": "host",
+    "tenant_scope": "all",
+    "account_scope": "all",
+}
+AGGREGATE_RESOURCE_TYPES = {"message", "tenant", "account"}
 # Before the layout sidecar was introduced, backup-core.sh always emitted this
 # fixed runtime tree.  The media store is the only subtree whose regular-file
 # members are intentionally variable; every other path is part of the pinned
@@ -250,6 +262,9 @@ def normalized_copy(entry: Mapping[str, Any]) -> dict[str, Any]:
         "media_paths",
         "media_paths_complete",
         "snapshot_id",
+        "physical_resource_id",
+        "physical_content_generation",
+        "coverage",
         "exclusive_resource_id",
         "queue_ref",
         "queue_id",
@@ -264,6 +279,11 @@ def normalized_copy(entry: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(classes, list) or not all(isinstance(item, str) for item in classes):
             raise RetentionError("controlled-copy content classes are invalid")
         result["content_classes"] = classes
+    if "coverage" in entry:
+        coverage = entry["coverage"]
+        if not isinstance(coverage, dict):
+            raise RetentionError("controlled-copy coverage is invalid")
+        result["coverage"] = dict(coverage)
     return result
 
 
@@ -1154,6 +1174,169 @@ def restic_result_snapshot_id(output: str) -> str:
     return next(iter(snapshot_ids))
 
 
+def aggregate_coverage_for_scope(
+    coverage: Any, scope: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Return the exact logical scope covered by a verified aggregate.
+
+    A host-wide core snapshot can be used as evidence for a removal only when
+    the snapshot's own generated metadata carries the explicit aggregate
+    contract.  We never copy a wildcard or substitute the requested lineage
+    for missing provider metadata.
+    """
+    if coverage != AGGREGATE_COVERAGE:
+        return None
+    resource_type = scope.get("resource_type")
+    if resource_type not in AGGREGATE_RESOURCE_TYPES:
+        return None
+    tenant_id = scope.get("tenant_id")
+    resource_id = scope.get("resource_id")
+    content_generation = scope.get("content_generation")
+    if any(
+        not isinstance(value, str) or not value.strip() or value == "*"
+        for value in (tenant_id, resource_id, content_generation)
+    ):
+        return None
+    return {
+        "tenant_id": tenant_id.strip(),
+        "resource_type": resource_type,
+        "resource_id": resource_id.strip(),
+        "content_generation": content_generation.strip(),
+        "coverage": dict(coverage),
+    }
+
+
+def restic_snapshot_layout_coverage(
+    binary: str,
+    repository: str,
+    password_file: str,
+    snapshot_id: str,
+) -> dict[str, Any]:
+    """Read aggregate coverage from the authenticated selected snapshot.
+
+    The sidecar is only an index of provider ids.  The layout inside the
+    encrypted snapshot is the evidence that the producer emitted a complete
+    core tree with the aggregate coverage contract.  Requiring one exact
+    layout path also prevents an unrelated sidecar file from authorizing a
+    restore.
+    """
+    environment = restic_environment(repository, password_file)
+    try:
+        listing = subprocess.run(
+            [binary, "ls", "--json", snapshot_id],
+            env=environment,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RetentionError("controlled-copy restic snapshot listing is unavailable") from error
+    if listing.returncode != 0:
+        raise RetentionError("controlled-copy restic snapshot listing failed")
+
+    layout_paths: list[str] = []
+    for raw_line in listing.stdout.splitlines():
+        try:
+            value = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetentionError("controlled-copy restic snapshot listing is not JSON") from error
+        if not isinstance(value, dict):
+            raise RetentionError("controlled-copy restic snapshot listing entry is invalid")
+        if value.get("message_type") != "node" and value.get("struct_type") != "node":
+            continue
+        path = value.get("path")
+        node_type = value.get("type")
+        if not isinstance(path, str) or not path.strip() or not isinstance(node_type, str):
+            raise RetentionError("controlled-copy restic snapshot node is invalid")
+        candidate = PurePosixPath(path)
+        if not candidate.is_absolute() or ".." in candidate.parts:
+            raise RetentionError("controlled-copy restic snapshot path is invalid")
+        if node_type == "file" and candidate.as_posix().endswith(
+            "/retention/controlled-copy-layout.json"
+        ):
+            layout_paths.append(candidate.as_posix())
+    if len(layout_paths) != 1:
+        raise RetentionError(
+            "controlled-copy restic snapshot does not expose one exact core layout"
+        )
+
+    try:
+        dumped = subprocess.run(
+            [binary, "dump", snapshot_id, layout_paths[0]],
+            env=environment,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RetentionError("controlled-copy restic layout retrieval is unavailable") from error
+    if dumped.returncode != 0:
+        raise RetentionError("controlled-copy restic layout retrieval failed")
+    try:
+        layout = json.loads(dumped.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RetentionError("controlled-copy restic layout is not JSON") from error
+    if not isinstance(layout, dict):
+        raise RetentionError("controlled-copy restic layout is invalid")
+    if layout.get("version") != 1 or layout.get("format") != CORE_BACKUP_FORMAT:
+        raise RetentionError("controlled-copy restic layout format is unsupported")
+    databases = layout.get("databases")
+    expected_databases = [
+        {"name": name, "path": CORE_DATABASE_DUMP_PATHS[name], "contract": contract}
+        for name, contract in CORE_DATABASE_CONTRACTS.items()
+    ]
+    if databases != expected_databases:
+        raise RetentionError("controlled-copy restic layout database coverage is invalid")
+    files = layout.get("files")
+    if not isinstance(files, list) or any(
+        not isinstance(path, str) for path in files
+    ):
+        raise RetentionError("controlled-copy restic layout file coverage is invalid")
+    if not set(CORE_DATABASE_DUMP_PATHS.values()).issubset(files):
+        raise RetentionError("controlled-copy restic layout omits a database dump")
+    coverage = layout.get("coverage")
+    if coverage is None:
+        # Version-one core layouts predating the explicit field already
+        # carried the complete four-database contract.  Keep those original
+        # backups usable while deriving the same aggregate scope from the
+        # authenticated layout bytes rather than from the requested lineage.
+        coverage = AGGREGATE_COVERAGE
+    if coverage != AGGREGATE_COVERAGE:
+        raise RetentionError("controlled-copy restic aggregate coverage is unverified")
+    return dict(coverage)
+
+
+def aggregate_copy_for_scope(
+    entry: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a physical aggregate reference to one exact requested lineage."""
+    physical_resource_id = required_string(
+        entry.get("resource_id"), "aggregate physical resource id"
+    )
+    physical_generation = required_string(
+        entry.get("content_generation"), "aggregate physical content generation"
+    )
+    snapshot_id = required_string(entry.get("snapshot_id"), "aggregate snapshot id")
+    if physical_resource_id != "communicator-core" or physical_generation != snapshot_id:
+        raise RetentionError("controlled-copy aggregate physical lineage is invalid")
+    logical = aggregate_coverage_for_scope(coverage, scope)
+    if logical is None:
+        raise RetentionError("controlled-copy aggregate does not cover the requested scope")
+    result = normalized_copy(entry)
+    result.update(
+        {
+            "physical_resource_id": physical_resource_id,
+            "physical_content_generation": physical_generation,
+            "resource_id": logical["resource_id"],
+            "content_generation": logical["content_generation"],
+            "coverage": dict(coverage),
+        }
+    )
+    return result
+
+
 def restic_snapshot_inventory(
     scope: Mapping[str, Any],
     store: str = "restic_snapshot",
@@ -1164,7 +1347,32 @@ def restic_snapshot_inventory(
 ) -> dict[str, Any]:
     configuration = restic_configuration()
     if configuration is None:
-        return inventory_from_manifest("restic_snapshot", scope)
+        if store == "restic_snapshot":
+            document = parse_json_file(manifest_path())
+            manifest_store = document.get("stores", {}).get(store, {})
+            raw_entries = (
+                manifest_store.get("copies", [])
+                if isinstance(manifest_store, dict)
+                else []
+            )
+            if any(
+                isinstance(entry, dict)
+                and entry.get("resource_id") == "communicator-core"
+                for entry in raw_entries
+            ):
+                # Do this check before exact-scope matching: an aggregate row
+                # is deliberately not a logical lineage match and must not be
+                # turned into an empty complete result while Restic is absent.
+                return {
+                    "complete": False,
+                    "copies": [],
+                    "evidence_source": "restic_manifest_without_provider",
+                    "detail": (
+                        "An aggregate Restic snapshot requires provider inventory "
+                        "and authenticated snapshot coverage"
+                    ),
+                }
+        return inventory_from_manifest(store, scope)
     repository, password_file, binary = configuration
     try:
         result = subprocess.run(
@@ -1199,7 +1407,6 @@ def restic_snapshot_inventory(
             snapshot_ids.add(snapshot_id.strip())
 
     document = parse_json_file(manifest_path())
-    entries, _ = entries_for(document, store, scope)
     manifest_store = document.get("stores", {}).get(store, {})
     if not isinstance(manifest_store, dict):
         raise RetentionError(f"controlled-copy {store} manifest is invalid")
@@ -1217,22 +1424,96 @@ def restic_snapshot_inventory(
     # historical completeness bit.  Equality proves that every controlled
     # tagged snapshot has a sidecar entry and that no stale entry is hidden.
     complete = snapshot_ids == manifest_ids
+    copies: list[dict[str, Any]] = []
+    seen_references: set[str] = set()
+    aggregate_used = False
+    coverage_errors: list[str] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise RetentionError("controlled-copy restic copy is invalid")
+        snapshot_id = raw_entry.get("snapshot_id")
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            coverage_errors.append("manifest copy does not publish an exact snapshot id")
+            continue
+        snapshot_id = snapshot_id.strip()
+        if snapshot_id not in snapshot_ids:
+            continue
+        # Preserve the existing exact-lineage behavior for exclusive
+        # message-only snapshots and reject wildcard entries before deciding
+        # whether an aggregate contract applies.
+        resource_id = raw_entry.get("resource_id")
+        generation = raw_entry.get("content_generation")
+        if not isinstance(resource_id, str) or not resource_id.strip() or resource_id == "*":
+            raise RetentionError("controlled-copy resource_id must be an exact lineage value")
+        if not isinstance(generation, str) or not generation.strip() or generation == "*":
+            raise RetentionError(
+                "controlled-copy content_generation must be an exact lineage value"
+            )
+        if resource_id == "communicator-core" and store == "restic_snapshot":
+            aggregate_used = True
+        elif resource_id == scope.get("resource_id") and generation == scope.get(
+            "content_generation"
+        ):
+            copy = normalized_copy(raw_entry)
+            reference = required_string(copy.get("reference"), "copy reference")
+            if reference not in seen_references:
+                copies.append(copy)
+                seen_references.add(reference)
+            continue
+
+        if resource_id != "communicator-core" or store != "restic_snapshot":
+            continue
+        if generation != snapshot_id:
+            coverage_errors.append(
+                f"{snapshot_id}: aggregate physical generation does not match provider id"
+            )
+            continue
+        raw_coverage = raw_entry.get("coverage")
+        if raw_coverage != AGGREGATE_COVERAGE:
+            coverage_errors.append(
+                f"{snapshot_id}: aggregate coverage contract is missing or invalid"
+            )
+            continue
+        try:
+            coverage = restic_snapshot_layout_coverage(
+                binary,
+                repository,
+                password_file,
+                snapshot_id,
+            )
+            copy = aggregate_copy_for_scope(raw_entry, scope, coverage)
+        except RetentionError as error:
+            coverage_errors.append(f"{snapshot_id}: {error}")
+            continue
+        reference = required_string(copy.get("reference"), "copy reference")
+        if reference not in seen_references:
+            copies.append(copy)
+            seen_references.add(reference)
+
+    if coverage_errors:
+        complete = False
+    if snapshot_ids != manifest_ids:
+        detail = (
+            "Restic provider inventory and the controlled-copy manifest do not "
+            "cover the same tagged snapshots"
+        )
+    elif coverage_errors:
+        detail = "; ".join(coverage_errors)[:4_096]
+    else:
+        detail = None
     return {
         "complete": complete,
-        "copies": [
-            copy
-            for copy in entries
-            if isinstance(copy.get("snapshot_id"), str)
-            and copy["snapshot_id"] in snapshot_ids
-        ],
+        "copies": copies,
         "evidence_source": (
-            "restic_snapshots_manifest_reconciliation"
-            if store == "restic_snapshot"
-            else f"restic_snapshots_{store}_manifest_reconciliation"
+            "restic_snapshots_manifest_aggregate_coverage"
+            if aggregate_used
+            else (
+                "restic_snapshots_manifest_reconciliation"
+                if store == "restic_snapshot"
+                else f"restic_snapshots_{store}_manifest_reconciliation"
+            )
         ),
-        "detail": None
-        if complete
-        else "Restic provider inventory and the controlled-copy manifest do not cover the same tagged snapshots",
+        "detail": detail,
     }
 
 
@@ -2863,6 +3144,33 @@ def process_request(operation: str, payload: Mapping[str, Any]) -> dict[str, Any
     )
     copy = next((entry for entry in entries if entry["reference"] == reference), None)
     if copy is None:
+        if store == "restic_snapshot":
+            raw_store = document.get("stores", {}).get(store, {})
+            raw_copies = raw_store.get("copies", []) if isinstance(raw_store, dict) else []
+            aggregate = next(
+                (
+                    raw_entry
+                    for raw_entry in raw_copies
+                    if isinstance(raw_entry, dict)
+                    and raw_entry.get("reference") == reference
+                    and raw_entry.get("resource_id") == "communicator-core"
+                ),
+                None,
+            )
+            if aggregate is not None:
+                # Inventory projects a verified aggregate onto the logical
+                # removal scope, but cleanup must retain the physical
+                # reference and refuse to report a mixed snapshot missing.
+                return {
+                    "status": "lifecycle_pending",
+                    "content_present": True,
+                    "evidence_source": "restic_aggregate_snapshot",
+                    "object_reference": reference,
+                    "detail": (
+                        "The aggregate communicator-core snapshot is shared; "
+                        "an exclusive message-only replacement is required"
+                    ),
+                }
         return {
             "status": "missing",
             "content_present": False,

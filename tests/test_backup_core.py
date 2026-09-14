@@ -91,6 +91,10 @@ class BackupCoreTests(unittest.TestCase):
         self.assertIn('"content_classes": ["message", "session_credential", "account_key"]', source)
         self.assertIn('"resource_id": "communicator-core"', source)
         self.assertIn('"content_generation": "${backup_id}"', source)
+        self.assertIn('"kind": "aggregate"', source)
+        self.assertIn('"resource_scope": "host"', source)
+        self.assertIn('"tenant_scope": "all"', source)
+        self.assertIn('"account_scope": "all"', source)
         self.assertLess(
             source.index('controlled-copy-manifest.json'),
             source.index('restic backup --json --tag communicator-core "$staging"'),
@@ -119,6 +123,15 @@ class BackupCoreTests(unittest.TestCase):
             layout = json.loads(layout_path.read_text(encoding="utf-8"))
             self.assertEqual(1, layout["version"])
             self.assertEqual("communicator-core-pgdump-v1", layout["format"])
+            self.assertEqual(
+                {
+                    "kind": "aggregate",
+                    "resource_scope": "host",
+                    "tenant_scope": "all",
+                    "account_scope": "all",
+                },
+                layout["coverage"],
+            )
             self.assertEqual(
                 ["synapse", "whatsapp_bridge", "messenger_bridge", "telegram_bridge"],
                 [database["name"] for database in layout["databases"]],
@@ -219,6 +232,15 @@ class BackupCoreTests(unittest.TestCase):
             )
             self.assertEqual("communicator-core", new_copy["resource_id"])
             self.assertEqual("new-snapshot", new_copy["content_generation"])
+            self.assertEqual(
+                {
+                    "kind": "aggregate",
+                    "resource_scope": "host",
+                    "tenant_scope": "all",
+                    "account_scope": "all",
+                },
+                new_copy["coverage"],
+            )
             self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
 
             subprocess.run(

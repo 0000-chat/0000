@@ -18,6 +18,12 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError("controlled-copy-retention module could not load")
 RETENTION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RETENTION)
+GATE_PATH = ROOT / "scripts" / "restore-core-gate.py"
+GATE_SPEC = importlib.util.spec_from_file_location("restore_core_gate_inventory", GATE_PATH)
+if GATE_SPEC is None or GATE_SPEC.loader is None:
+    raise RuntimeError("restore-core-gate module could not load")
+GATE = importlib.util.module_from_spec(GATE_SPEC)
+GATE_SPEC.loader.exec_module(GATE)
 
 
 PG_BIN = Path("/usr/lib/postgresql/18/bin")
@@ -354,6 +360,345 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                 "restic_snapshots_manifest_reconciliation",
                 inventory["evidence_source"],
             )
+
+    def test_generated_core_backup_aggregate_inventory_binds_exact_scope(self):
+        """Normal backup metadata must bind an aggregate to one logical removal."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "staging"
+            fixture.mkdir()
+            with RETENTION.IsolatedPostgres(root / "postgres") as postgres:
+                for database, dump in (
+                    ("synapse", "synapse.pgdump"),
+                    ("whatsapp_bridge", "whatsapp.pgdump"),
+                    ("messenger_bridge", "messenger.pgdump"),
+                    ("telegram_bridge", "telegram.pgdump"),
+                ):
+                    postgres.create_database(database)
+                    postgres.execute(
+                        database,
+                        """
+                        CREATE TABLE fixture_messages (
+                          tenant_id TEXT NOT NULL,
+                          account_id TEXT NOT NULL,
+                          resource_id TEXT NOT NULL,
+                          content_generation TEXT NOT NULL
+                        );
+                        INSERT INTO fixture_messages VALUES
+                          ('tenant_fixture', 'account_fixture',
+                           'message_removed', 'generation_removed');
+                        """,
+                    )
+                    postgres.dump(database, fixture / dump)
+
+            for relative in ("synapse-data/config.yaml", "secrets/account.key"):
+                path = fixture / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "scripts/write-controlled-copy-layout.py"),
+                    str(fixture),
+                ],
+                check=True,
+            )
+            layout = json.loads(
+                (fixture / "retention/controlled-copy-layout.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("communicator-core-pgdump-v1", layout["format"])
+            self.assertEqual("aggregate", layout["coverage"]["kind"])
+
+            snapshot_id = "b" * 64
+            backup_result = root / "restic-result.jsonl"
+            backup_result.write_text(
+                json.dumps(
+                    {
+                        "message_type": "summary",
+                        "snapshot_id": snapshot_id,
+                        "time": "2026-09-14T00:00:00Z",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manifest = root / "runtime/retention/controlled-copy-manifest.json"
+            manifest.parent.mkdir(parents=True)
+            subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "scripts/merge-controlled-copy-manifest.py"),
+                    str(backup_result),
+                    str(manifest),
+                    "2026-09-14T00:00:00Z",
+                ],
+                check=True,
+            )
+
+            fake_restic = root / "restic"
+            fake_restic.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                f"source = Path({str(fixture)!r})\n"
+                f"snapshot = {snapshot_id!r}\n"
+                "root = '/fixture-root'\n"
+                "args = sys.argv[1:]\n"
+                "if args[:2] == ['snapshots', '--json']:\n"
+                "    print(json.dumps([{'id': snapshot, 'tags': ['communicator-core']}]))\n"
+                "elif args[:2] == ['ls', '--json'] and args[2] == snapshot:\n"
+                "    print(json.dumps({'message_type': 'snapshot', 'struct_type': 'snapshot', 'id': snapshot, 'paths': [root]}))\n"
+                "    for item in sorted(source.rglob('*')):\n"
+                "        relative = item.relative_to(source).as_posix()\n"
+                "        print(json.dumps({'message_type': 'node', 'struct_type': 'node', 'type': 'dir' if item.is_dir() else 'file', 'path': root + '/' + relative}))\n"
+                "elif args[0] == 'dump' and args[1] == snapshot:\n"
+                "    path = args[2]\n"
+                "    prefix = root + '/'\n"
+                "    if not path.startswith(prefix): raise SystemExit(1)\n"
+                "    sys.stdout.buffer.write((source / path[len(prefix):]).read_bytes())\n"
+                "else:\n"
+                "    raise SystemExit(2)\n",
+                encoding="utf-8",
+            )
+            fake_restic.chmod(0o700)
+            password = root / "password"
+            password.write_text("fixture-password\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "COMMUNICATOR_RETENTION_MANIFEST": str(manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_BIN": str(fake_restic),
+                    "RESTIC_REPOSITORY": "fixture-repository",
+                    "RESTIC_PASSWORD_FILE": str(password),
+                },
+                clear=False,
+            ):
+                inventory = RETENTION.process_request(
+                    "inventory",
+                    {
+                        "protocol": RETENTION.PROTOCOL,
+                        "store": "restic_snapshot",
+                        "scope": {
+                            "tenant_id": "tenant_fixture",
+                            "removal_id": "removal_fixture",
+                            "resource_type": "message",
+                            "resource_id": "message_removed",
+                            "content_generation": "generation_removed",
+                            "deletion_epoch": 1,
+                            "now": "2026-09-14T00:00:00Z",
+                        },
+                    },
+                )
+
+            self.assertTrue(inventory["complete"], inventory)
+            self.assertEqual(
+                "restic_snapshots_manifest_aggregate_coverage",
+                inventory["evidence_source"],
+            )
+            self.assertEqual(1, len(inventory["copies"]))
+            copy = inventory["copies"][0]
+            self.assertEqual("message_removed", copy["resource_id"])
+            self.assertEqual("generation_removed", copy["content_generation"])
+            self.assertEqual(f"restic:{snapshot_id}", copy["reference"])
+            self.assertEqual("communicator-core", copy["physical_resource_id"])
+            self.assertEqual(snapshot_id, copy["physical_content_generation"])
+            self.assertEqual(snapshot_id, copy["snapshot_id"])
+
+            # Bind the generated provider inventory into the same authority
+            # shape consumed by the restore gate.  The other stores are
+            # concrete fixture references; the Restic row is the only one
+            # sourced from this normal backup path.
+            gate_stores = []
+            gate_inventory_stores = []
+            for store in GATE.ALL_STORES:
+                if store == "restic_snapshot":
+                    gate_copy = {
+                        key: copy[key]
+                        for key in (
+                            "reference",
+                            "copy_created_at",
+                            "resource_id",
+                            "content_generation",
+                        )
+                    }
+                    evidence_source = inventory["evidence_source"]
+                else:
+                    gate_copy = {
+                        "reference": f"fixture:{store}",
+                        "copy_created_at": "2026-09-14T00:00:00Z",
+                        "resource_id": "tenant_fixture",
+                        "content_generation": "ledger_fixture",
+                    }
+                    evidence_source = f"fixture_{store}"
+                gate_inventory_stores.append(
+                    {
+                        "store": store,
+                        "complete": True,
+                        "evidence_source": evidence_source,
+                        "detail": None,
+                        "references": [gate_copy["reference"]],
+                        "copies": [gate_copy],
+                    }
+                )
+                gate_stores.append(
+                    {
+                        "store": store,
+                        "generation": "generation_fixture",
+                        "status": "preserved" if store in GATE.AUXILIARY_STORES else "complete",
+                        "content_present": store in GATE.AUXILIARY_STORES,
+                        "evidence_source": evidence_source,
+                        "detail": None,
+                        "references": [gate_copy["reference"]],
+                        "copies": [gate_copy],
+                    }
+                )
+            gate_authority = {
+                "version": 1,
+                "tenant_id": "tenant_fixture",
+                "deletion_epoch": 0,
+                "authorities": [],
+                "inventory": [
+                    {
+                        "authority_id": "tenant_fixture",
+                        "targets": [],
+                        "stores": gate_inventory_stores,
+                    }
+                ],
+                "stores": gate_stores,
+                "archive": {
+                    "status": "complete",
+                    "generation": "archive_fixture",
+                    "evidence_source": "fixture_archive",
+                },
+            }
+            gate_authority["ledger_head"] = GATE._sha256_json(
+                {
+                    "tenant_id": gate_authority["tenant_id"],
+                    "deletion_epoch": gate_authority["deletion_epoch"],
+                    "authorities": [],
+                    "inventory": gate_authority["inventory"],
+                }
+            )
+            normalized_authority = GATE._validate_authority_document(
+                gate_authority, "tenant_fixture"
+            )
+            GATE.verify_restic_snapshot_reference(normalized_authority, snapshot_id)
+            self.assertEqual(
+                f"restic:{snapshot_id}",
+                normalized_authority["stores"]["restic_snapshot"]["references"][0],
+            )
+            self.assertEqual(
+                "message_removed",
+                normalized_authority["stores"]["restic_snapshot"]["copies"][0][
+                    "resource_id"
+                ],
+            )
+
+            # Original v1 layouts predate the explicit coverage field.  Their
+            # authenticated full core database contract still proves the same
+            # host-wide aggregate without borrowing the requested lineage.
+            legacy_layout = dict(layout)
+            legacy_layout.pop("coverage")
+            (fixture / "retention/controlled-copy-layout.json").write_text(
+                json.dumps(legacy_layout), encoding="utf-8"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "COMMUNICATOR_RETENTION_MANIFEST": str(manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_BIN": str(fake_restic),
+                    "RESTIC_REPOSITORY": "fixture-repository",
+                    "RESTIC_PASSWORD_FILE": str(password),
+                },
+                clear=False,
+            ):
+                legacy_inventory = RETENTION.process_request(
+                    "inventory",
+                    {
+                        "protocol": RETENTION.PROTOCOL,
+                        "store": "restic_snapshot",
+                        "scope": {
+                            "tenant_id": "tenant_fixture",
+                            "removal_id": "removal_fixture",
+                            "resource_type": "message",
+                            "resource_id": "message_removed",
+                            "content_generation": "generation_removed",
+                            "deletion_epoch": 1,
+                            "now": "2026-09-14T00:00:00Z",
+                        },
+                    },
+                )
+            self.assertTrue(legacy_inventory["complete"], legacy_inventory)
+            self.assertEqual(
+                RETENTION.AGGREGATE_COVERAGE,
+                legacy_inventory["copies"][0]["coverage"],
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "COMMUNICATOR_RETENTION_MANIFEST": str(manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_BIN": str(fake_restic),
+                    "RESTIC_REPOSITORY": "fixture-repository",
+                    "RESTIC_PASSWORD_FILE": str(password),
+                },
+                clear=False,
+            ):
+                cleanup = RETENTION.process_request(
+                    "cleanup",
+                    {
+                        "protocol": RETENTION.PROTOCOL,
+                        "store": "restic_snapshot",
+                        "resource_id": "message_removed",
+                        "content_generation": "generation_removed",
+                        "reference": f"restic:{snapshot_id}",
+                    },
+                )
+            self.assertEqual("lifecycle_pending", cleanup["status"])
+            self.assertTrue(cleanup["content_present"])
+            self.assertIn("shared", cleanup["detail"])
+
+            unverified_restic = root / "restic-unverified"
+            unverified_restic.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps([{'id': '"
+                + snapshot_id
+                + "', 'tags': ['communicator-core']}]))\n",
+                encoding="utf-8",
+            )
+            unverified_restic.chmod(0o700)
+            with patch.dict(
+                os.environ,
+                {
+                    "COMMUNICATOR_RETENTION_MANIFEST": str(manifest),
+                    "COMMUNICATOR_RETENTION_RESTIC_BIN": str(unverified_restic),
+                    "RESTIC_REPOSITORY": "fixture-repository",
+                    "RESTIC_PASSWORD_FILE": str(password),
+                },
+                clear=False,
+            ):
+                incomplete = RETENTION.process_request(
+                    "inventory",
+                    {
+                        "protocol": RETENTION.PROTOCOL,
+                        "store": "restic_snapshot",
+                        "scope": {
+                            "tenant_id": "tenant_fixture",
+                            "removal_id": "removal_fixture",
+                            "resource_type": "message",
+                            "resource_id": "message_removed",
+                            "content_generation": "generation_removed",
+                            "deletion_epoch": 1,
+                            "now": "2026-09-14T00:00:00Z",
+                        },
+                    },
+                )
+            self.assertFalse(incomplete["complete"])
+            self.assertEqual([], incomplete["copies"])
+            self.assertIn("snapshot listing", incomplete["detail"])
 
     def test_synapse_exact_event_redaction_is_recorded_without_false_byte_deletion(self):
         seen: dict[str, str] = {}

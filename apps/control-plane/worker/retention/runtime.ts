@@ -220,6 +220,26 @@ const inventoryResponse = (value: unknown): RetentionInventoryResult => {
       ) as NonNullable<RetentionBackendCopy["content_classes"]>;
     }
     if (
+      copy.coverage !== null &&
+      typeof copy.coverage === "object" &&
+      !Array.isArray(copy.coverage)
+    ) {
+      const coverage = recordValue(copy.coverage);
+      if (
+        coverage.kind === "aggregate" &&
+        coverage.resource_scope === "host" &&
+        coverage.tenant_scope === "all" &&
+        coverage.account_scope === "all"
+      ) {
+        normalized.coverage = {
+          kind: "aggregate",
+          resource_scope: "host",
+          tenant_scope: "all",
+          account_scope: "all",
+        };
+      }
+    }
+    if (
       copy.restore_target !== null &&
       typeof copy.restore_target === "object" &&
       !Array.isArray(copy.restore_target)

@@ -33,6 +33,13 @@ export type RetentionBackendCopy = {
    * credential-bearing object as if it were a message copy.
    */
   content_classes?: readonly ControlledCopyContentClass[];
+  /** Authenticated coverage contract for a physical aggregate copy. */
+  coverage?: {
+    kind: "aggregate";
+    resource_scope: "host";
+    tenant_scope: "all";
+    account_scope: "all";
+  };
   /** Exact core-dump row/media mapping supplied by a real inventory backend. */
   restore_target?: Record<string, unknown>;
 };
@@ -104,8 +111,20 @@ const normalizeInventory = (
     const contentClasses = copy.content_classes ?? [
       copy.content_class ?? adapter.default_content_class,
     ];
+    const aggregateCoverage = copy.coverage;
+    const aggregateMixedResticCopy =
+      adapter.store === "restic_snapshot" &&
+      contentClasses.length > 1 &&
+      contentClasses.length === 3 &&
+      ["message", "session_credential", "account_key"].every((contentClass) =>
+        contentClasses.includes(contentClass as ControlledCopyContentClass),
+      ) &&
+      aggregateCoverage?.kind === "aggregate" &&
+      aggregateCoverage.resource_scope === "host" &&
+      aggregateCoverage.tenant_scope === "all" &&
+      aggregateCoverage.account_scope === "all";
     if (
-      contentClasses.length !== 1 ||
+      (!aggregateMixedResticCopy && contentClasses.length !== 1) ||
       contentClasses.some(
         (contentClass) =>
           !ControlledCopyContentClassSchema.safeParse(contentClass).success,
@@ -115,7 +134,9 @@ const normalizeInventory = (
         "controlled copy inventory must isolate content classes per reference",
       );
     }
-    const contentClass = contentClasses[0];
+    const contentClass = aggregateMixedResticCopy
+      ? "message"
+      : contentClasses[0];
     if (contentClass === undefined) {
       throw new Error("controlled copy inventory content class missing");
     }

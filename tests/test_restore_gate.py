@@ -508,6 +508,42 @@ class RestoreGateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual("authority_ready", json.loads(report.read_text())["state"])
 
+    def test_gate_accepts_projected_aggregate_reference_with_exact_logical_lineage(self):
+        authority = _authority(epoch=0)
+        projected = authority["stores"]
+        restic_store = next(
+            store for store in projected if store["store"] == "restic_snapshot"
+        )
+        logical_copy = {
+            **restic_store["copies"][0],
+            "reference": f"restic:{RESTIC_SNAPSHOT_ID}",
+            "resource_id": "tenant_restore_gate",
+            "content_generation": "ledger_0",
+        }
+        restic_store["copies"] = [logical_copy]
+        restic_store["references"] = [logical_copy["reference"]]
+        for inventory in authority["inventory"]:
+            inventory_store = next(
+                store
+                for store in inventory["stores"]
+                if store["store"] == "restic_snapshot"
+            )
+            inventory_store["copies"] = [logical_copy]
+            inventory_store["references"] = [logical_copy["reference"]]
+        authority["ledger_head"] = _head(authority)
+        normalized = GATE._validate_authority_document(
+            authority, authority["tenant_id"]
+        )
+        GATE.verify_restic_snapshot_reference(normalized, RESTIC_SNAPSHOT_ID)
+        self.assertEqual(
+            "restic:" + RESTIC_SNAPSHOT_ID,
+            normalized["stores"]["restic_snapshot"]["references"][0],
+        )
+        self.assertEqual(
+            "tenant_restore_gate",
+            normalized["stores"]["restic_snapshot"]["copies"][0]["resource_id"],
+        )
+
     def test_authenticated_current_endpoint_rechecks_head_before_ready(self):
         authority = _authority(epoch=0)
         _set_store_reference(

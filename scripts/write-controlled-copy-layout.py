@@ -25,6 +25,18 @@ DATABASES = (
 )
 LAYOUT_RELATIVE = Path("retention/controlled-copy-layout.json")
 
+# The core backup is one authenticated host-wide database/media tree.  This is
+# deliberately an explicit coverage contract rather than a wildcard lineage:
+# the restore inventory may project the physical aggregate copy onto one exact
+# removal scope only after it authenticates this metadata from the selected
+# snapshot.
+AGGREGATE_COVERAGE = {
+    "kind": "aggregate",
+    "resource_scope": "host",
+    "tenant_scope": "all",
+    "account_scope": "all",
+}
+
 
 def write_layout(root: Path) -> None:
     if not root.is_dir():
@@ -43,6 +55,7 @@ def write_layout(root: Path) -> None:
     document = {
         "version": 1,
         "format": "communicator-core-pgdump-v1",
+        "coverage": AGGREGATE_COVERAGE,
         "databases": [
             {"name": name, "path": relative, "contract": contract}
             for name, relative, contract in DATABASES

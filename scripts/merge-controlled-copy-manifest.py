@@ -120,6 +120,17 @@ def merge_snapshot(
                     "resource_id": "communicator-core",
                     "content_generation": snapshot_id,
                     "copy_created_at": created_at,
+                    # The physical snapshot is an aggregate copy.  Its
+                    # logical coverage is proved later from the authenticated
+                    # layout inside the selected snapshot; this sidecar only
+                    # records the producer's contract alongside the exact
+                    # provider id.
+                    "coverage": {
+                        "kind": "aggregate",
+                        "resource_scope": "host",
+                        "tenant_scope": "all",
+                        "account_scope": "all",
+                    },
                     "content_classes": [
                         "message",
                         "session_credential",

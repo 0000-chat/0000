@@ -77,12 +77,24 @@ cat > "$staging/retention/controlled-copy-manifest.json" <<EOF
   "stores": {
     "restic_snapshot": {
       "enumeration_complete": true,
+      "coverage": {
+        "kind": "aggregate",
+        "resource_scope": "host",
+        "tenant_scope": "all",
+        "account_scope": "all"
+      },
       "copies": [
         {
           "reference": "restic:${backup_id}",
           "resource_id": "communicator-core",
           "content_generation": "${backup_id}",
           "copy_created_at": "${backup_created_at}",
+          "coverage": {
+            "kind": "aggregate",
+            "resource_scope": "host",
+            "tenant_scope": "all",
+            "account_scope": "all"
+          },
           "content_classes": ["message", "session_credential", "account_key"]
         }
       ]
