@@ -640,20 +640,19 @@ export async function markLifecycleProviderPending(
   tenantId: string,
   operationId: string,
   occurredAt: string,
-): Promise<LifecycleOperationRow> {
-  await db
+): Promise<{ operation: LifecycleOperationRow; claimed: boolean }> {
+  const result = await db
     .prepare(
       `UPDATE connection_lifecycle_operations
-          SET status = CASE WHEN status = 'pending' THEN 'provider_pending' ELSE status END,
-              updated_at = ?
+          SET status = 'provider_pending', updated_at = ?
         WHERE tenant_id = ? AND operation_id = ?
-          AND status IN ('pending', 'provider_pending')`,
+          AND status = 'pending'`,
     )
     .bind(occurredAt, tenantId, operationId)
     .run();
   const operation = await getLifecycleOperation(db, tenantId, operationId);
   if (!operation) throw new LifecycleRepositoryError("connection_not_found");
-  return operation;
+  return { operation, claimed: result.meta.changes === 1 };
 }
 
 export async function markLifecycleReconciliation(

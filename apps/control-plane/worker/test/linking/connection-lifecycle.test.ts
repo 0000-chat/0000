@@ -635,6 +635,55 @@ describe("administrator connection relink and disconnect", () => {
     );
   });
 
+  it("allows only one provider call for concurrent same-key disconnects", async () => {
+    let releaseLogout!: () => void;
+    let startedLogout!: () => void;
+    const logoutEntered = new Promise<void>((resolve) => {
+      startedLogout = resolve;
+    });
+    const logoutRelease = new Promise<void>((resolve) => {
+      releaseLogout = resolve;
+    });
+    let logoutCalls = 0;
+    const gateway: ConnectionGateway = {
+      async start() {
+        throw new Error("not used");
+      },
+      async poll() {
+        throw new Error("not used");
+      },
+      async cancel() {},
+      async disconnect() {
+        logoutCalls += 1;
+        startedLogout();
+        await logoutRelease;
+        return { status: "disconnected", provider_login_id: "login-one" };
+      },
+    };
+    const app = appFor(gateway);
+    const path = "/api/v1/connections/connection_human_whatsapp/disconnect";
+    const init = {
+      method: "POST",
+      headers: { "Idempotency-Key": "disconnect-same-key-001" },
+      body: "{}",
+    };
+
+    const firstPromise = request(app, path, init);
+    const secondPromise = request(app, path, init);
+    await logoutEntered;
+    releaseLogout();
+
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(logoutCalls).toBe(1);
+    const statuses = [
+      ((await first.json()) as { status: string }).status,
+      ((await second.json()) as { status: string }).status,
+    ].sort();
+    expect(statuses).toEqual(["provider_pending", "succeeded"]);
+  });
+
   it("keeps a replacement uncreated when the old relink fence is lost", async () => {
     const gateway: ConnectionGateway = {
       async start() {

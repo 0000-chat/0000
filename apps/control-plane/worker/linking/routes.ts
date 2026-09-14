@@ -746,16 +746,18 @@ export const createRelinkSessionHandler =
         return context.json(publicSession(created.state), 200);
       }
       try {
-        const started = await startProvider(
-          context.env,
-          services,
-          created.state,
-        );
-        await markLifecycleProviderPending(
+        const claim = await markLifecycleProviderPending(
           context.env.CONTROL_DB,
           authorization.tenant.id,
           begun.operation.operation_id,
           clock().toISOString(),
+        );
+        if (!claim.claimed)
+          return context.json(publicSession(created.state), 200);
+        const started = await startProvider(
+          context.env,
+          services,
+          created.state,
         );
         return context.json(publicSession(started.state, started.qr), 201);
       } catch (error) {
@@ -846,12 +848,14 @@ export const createConnectionDisconnectHandler =
       });
       if (begun.operation.status !== "pending")
         return context.json(publicLifecycleOperation(begun.operation), 200);
-      await markLifecycleProviderPending(
+      const claim = await markLifecycleProviderPending(
         context.env.CONTROL_DB,
         authorization.tenant.id,
         operationId,
         new Date().toISOString(),
       );
+      if (!claim.claimed)
+        return context.json(publicLifecycleOperation(claim.operation), 200);
       try {
         const gateway = services.createConnectionGateway
           ? services.createConnectionGateway(context.env)
