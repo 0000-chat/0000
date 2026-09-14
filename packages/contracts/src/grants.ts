@@ -37,6 +37,7 @@ export const AccountGrantOperationScopeSchema = z.enum([
   "conversation.read",
   "conversation.create",
   "group.create",
+  "group.manage",
   "message.send",
   "webhook.manage",
 ]);

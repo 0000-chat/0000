@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ActivityRouteImport } from './routes/activity'
 import { Route as ConnectionsRouteImport } from './routes/connections'
+import { Route as GroupsRouteImport } from './routes/groups'
 import { Route as SystemRouteImport } from './routes/system'
 import { Route as ConversationsIndexRouteImport } from './routes/conversations.index'
 import { Route as ConversationsConversationIdRouteImport } from './routes/conversations.$conversationId'
@@ -29,6 +30,11 @@ const ActivityRoute = ActivityRouteImport.update({
 const ConnectionsRoute = ConnectionsRouteImport.update({
   id: '/connections',
   path: '/connections',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GroupsRoute = GroupsRouteImport.update({
+  id: '/groups',
+  path: '/groups',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SystemRoute = SystemRouteImport.update({
@@ -52,6 +58,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
   '/connections': typeof ConnectionsRoute
+  '/groups': typeof GroupsRoute
   '/system': typeof SystemRoute
   '/conversations/$conversationId': typeof ConversationsConversationIdRoute
   '/conversations/': typeof ConversationsIndexRoute
@@ -60,6 +67,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
   '/connections': typeof ConnectionsRoute
+  '/groups': typeof GroupsRoute
   '/system': typeof SystemRoute
   '/conversations/$conversationId': typeof ConversationsConversationIdRoute
   '/conversations': typeof ConversationsIndexRoute
@@ -69,6 +77,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
   '/connections': typeof ConnectionsRoute
+  '/groups': typeof GroupsRoute
   '/system': typeof SystemRoute
   '/conversations/$conversationId': typeof ConversationsConversationIdRoute
   '/conversations/': typeof ConversationsIndexRoute
@@ -79,6 +88,7 @@ export interface FileRouteTypes {
     | '/'
     | '/activity'
     | '/connections'
+    | '/groups'
     | '/system'
     | '/conversations/$conversationId'
     | '/conversations/'
@@ -87,6 +97,7 @@ export interface FileRouteTypes {
     | '/'
     | '/activity'
     | '/connections'
+    | '/groups'
     | '/system'
     | '/conversations/$conversationId'
     | '/conversations'
@@ -95,6 +106,7 @@ export interface FileRouteTypes {
     | '/'
     | '/activity'
     | '/connections'
+    | '/groups'
     | '/system'
     | '/conversations/$conversationId'
     | '/conversations/'
@@ -104,6 +116,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ActivityRoute: typeof ActivityRoute
   ConnectionsRoute: typeof ConnectionsRoute
+  GroupsRoute: typeof GroupsRoute
   SystemRoute: typeof SystemRoute
   ConversationsConversationIdRoute: typeof ConversationsConversationIdRoute
   ConversationsIndexRoute: typeof ConversationsIndexRoute
@@ -130,6 +143,13 @@ declare module '@tanstack/react-router' {
       path: '/connections'
       fullPath: '/connections'
       preLoaderRoute: typeof ConnectionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/groups': {
+      id: '/groups'
+      path: '/groups'
+      fullPath: '/groups'
+      preLoaderRoute: typeof GroupsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/system': {
@@ -160,6 +180,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ActivityRoute: ActivityRoute,
   ConnectionsRoute: ConnectionsRoute,
+  GroupsRoute: GroupsRoute,
   SystemRoute: SystemRoute,
   ConversationsConversationIdRoute: ConversationsConversationIdRoute,
   ConversationsIndexRoute: ConversationsIndexRoute,

@@ -14,6 +14,8 @@ import {
   ContactResolveRequestSchema,
   CreateDirectChatRequestSchema,
   GroupCreateRequestSchema,
+  GroupParticipantsRequestSchema,
+  GroupRenameRequestSchema,
   type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
@@ -70,6 +72,15 @@ import {
 import { registerRemovalMcpTools } from "./removals/mcp";
 import { GroupRepositoryError } from "./groups/repository";
 import { createGroup, type GroupRouteServices } from "./groups/service";
+import {
+  addGroupParticipants,
+  listManagedGroupOperations,
+  listManagementEvidence,
+  removeGroupParticipants,
+  renameGroup,
+  type GroupManagementRouteServices,
+} from "./groups/management-service";
+import { GroupManagementRepositoryError } from "./groups/management-repository";
 
 type McpContext = Context<{
   Bindings: Cloudflare.Env;
@@ -223,6 +234,41 @@ const createGroupInput = {
     .max(128),
   idempotency_key: z.string().trim().min(1).max(200),
 };
+const groupManagementTargetInput = {
+  identity_id: boundedId,
+  account_id: boundedId,
+  conversation_id: boundedId,
+  expected_revision: z.string().trim().min(1).max(128),
+  idempotency_key: z.string().trim().min(1).max(200),
+};
+const renameGroupInput = {
+  ...groupManagementTargetInput,
+  name: z.string().trim().min(1).max(100),
+};
+const groupParticipantsInput = {
+  ...groupManagementTargetInput,
+  participants: z
+    .array(
+      z
+        .object({
+          contact_id: boundedId,
+          candidate_revision: z.string().regex(/^[0-9a-f]{64}$/u),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(128),
+};
+const groupManagementOperationsInput = {
+  identity_id: optionalId,
+  account_id: optionalId,
+  status: z
+    .enum(["pending", "succeeded", "failed", "human_action_required"])
+    .optional(),
+  cursor: optionalCursor,
+  limit: optionalLimit,
+};
+const groupManagementEvidenceInput = { operation_id: boundedId };
 
 const contextForRead = (context: McpContext): ReadHandlerContext => ({
   env: context.env,
@@ -319,6 +365,24 @@ const errorResult = (error: unknown) => {
       error.code === "group_invalid" || error.code === "group_conflict"
         ? "invalid_request"
         : error.code === "group_not_found"
+          ? "not_found"
+          : "service_unavailable";
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ error: { code, message: error.message } }),
+        },
+      ],
+    };
+  }
+  if (error instanceof GroupManagementRepositoryError) {
+    const code =
+      error.code === "management_invalid" ||
+      error.code === "management_conflict"
+        ? "invalid_request"
+        : error.code === "management_not_found"
           ? "not_found"
           : "service_unavailable";
     return {
@@ -625,6 +689,94 @@ const registerTools = (
           groupServices,
         ),
       ),
+  );
+
+  const managementContext = contextForContacts(context);
+  const managementServices = groupServices as GroupManagementRouteServices;
+  server.registerTool(
+    "rename_group",
+    {
+      description:
+        "Rename an account-bound provider group at an expected current revision",
+      inputSchema: renameGroupInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        renameGroup(
+          managementContext,
+          GroupRenameRequestSchema.parse(input),
+          managementServices,
+        ),
+      ),
+  );
+  server.registerTool(
+    "add_group_participants",
+    {
+      description:
+        "Add resolved account contacts to a provider group at an expected revision",
+      inputSchema: groupParticipantsInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        addGroupParticipants(
+          managementContext,
+          GroupParticipantsRequestSchema.parse(input),
+          managementServices,
+        ),
+      ),
+  );
+  server.registerTool(
+    "remove_group_participants",
+    {
+      description:
+        "Remove resolved account contacts from a provider group at an expected revision",
+      inputSchema: groupParticipantsInput,
+    },
+    (input) =>
+      withReadErrors(() =>
+        removeGroupParticipants(
+          managementContext,
+          GroupParticipantsRequestSchema.parse(input),
+          managementServices,
+        ),
+      ),
+  );
+  server.registerTool(
+    "list_group_management_operations",
+    {
+      description: "Inspect administrator-visible group management operations",
+      inputSchema: groupManagementOperationsInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        if (!isAdministratorSession(context.authorization))
+          throw new ReadError("forbidden");
+        return listManagedGroupOperations(managementContext, {
+          ...(input.identity_id === undefined
+            ? {}
+            : { identityId: input.identity_id }),
+          ...(input.account_id === undefined
+            ? {}
+            : { accountId: input.account_id }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        });
+      }),
+  );
+  server.registerTool(
+    "get_group_management_evidence",
+    {
+      description:
+        "Inspect provider, event, and refresh evidence for an operation",
+      inputSchema: groupManagementEvidenceInput,
+    },
+    (input) =>
+      withReadErrors(async () => {
+        if (!isAdministratorSession(context.authorization))
+          throw new ReadError("forbidden");
+        return listManagementEvidence(managementContext, input.operation_id);
+      }),
   );
 
   server.registerTool(

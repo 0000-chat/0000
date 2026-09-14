@@ -10,6 +10,9 @@ export const queryKeys = {
   historyImport: (importId: string, identityId: string) =>
     ["history-import", importId, identityId] as const,
   accountGrants: ["account-grants"] as const,
+  groupManagementOperations: ["group-management-operations"] as const,
+  groupManagementEvidence: (operationId: string) =>
+    ["group-management-evidence", operationId] as const,
   grantTargets: ["grant-targets"] as const,
   grantChats: (identityId: string, accountId: string) =>
     ["grant-chats", identityId, accountId] as const,

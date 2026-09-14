@@ -13,6 +13,7 @@ export const OperationScopeSchema = z.enum([
   "conversation.read",
   "conversation.create",
   "group.create",
+  "group.manage",
   "message.send",
   "message.mutate",
   "receipt.send",

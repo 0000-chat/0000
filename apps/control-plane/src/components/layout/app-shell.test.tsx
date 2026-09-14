@@ -11,6 +11,7 @@ describe("AppShell", () => {
       "Connections",
       "Conversations",
       "Activity",
+      "Groups",
       "System",
     ]) {
       expect(await screen.findByRole("link", { name })).toBeVisible();

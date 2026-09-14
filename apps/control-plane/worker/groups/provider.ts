@@ -1,6 +1,8 @@
 import {
+  GroupManagementEvidenceSchema,
   GroupEvidenceSchema,
   type GroupEvidence,
+  type GroupManagementEvidence,
   type GroupEvidenceSource,
 } from "@communicator/contracts";
 import { z } from "zod";
@@ -13,12 +15,31 @@ export type GroupProviderInput = {
   idempotency_key: string;
 };
 
+export type GroupManagementProviderInput = GroupProviderInput & {
+  provider_group_id: string;
+  matrix_room_id: string;
+  expected_revision: string;
+  action: "rename" | "add_participants" | "remove_participants";
+  operation_created_at: string;
+  requested_name: string | null;
+  requested_member_provider_ids: readonly string[];
+};
+
 export type ProviderGroup = {
   provider_group_id: string;
   matrix_room_id: string;
   name: string;
   participant_provider_ids: string[];
   evidence: GroupEvidence;
+};
+
+export type ManagedProviderGroup = {
+  provider_group_id: string;
+  matrix_room_id: string;
+  name: string;
+  revision: string;
+  member_provider_ids: string[];
+  evidence: GroupManagementEvidence;
 };
 
 export interface GroupProvider {
@@ -39,6 +60,24 @@ export interface GroupProvider {
     name: string,
     participantProviderIds: readonly string[],
   ): Promise<ProviderGroup | null>;
+  renameGroup?: (
+    input: GroupManagementProviderInput,
+    name: string,
+  ) => Promise<ManagedProviderGroup>;
+  addGroupParticipants?: (
+    input: GroupManagementProviderInput,
+    participantProviderIds: readonly string[],
+  ) => Promise<ManagedProviderGroup>;
+  removeGroupParticipants?: (
+    input: GroupManagementProviderInput,
+    participantProviderIds: readonly string[],
+  ) => Promise<ManagedProviderGroup>;
+  observeManagedGroup?: (
+    input: GroupManagementProviderInput,
+  ) => Promise<ManagedProviderGroup | null>;
+  refreshManagedGroup?: (
+    input: GroupManagementProviderInput,
+  ) => Promise<ManagedProviderGroup | null>;
 }
 
 export class GroupProviderError extends Error {
@@ -78,6 +117,13 @@ const groupPayloadSchema = z
       .array(z.string().trim().min(1).max(512))
       .max(128)
       .optional(),
+    revision: z.string().trim().min(1).max(128).optional(),
+    group_revision: z.string().trim().min(1).max(128).optional(),
+    member_provider_ids: z
+      .array(z.string().trim().min(1).max(512))
+      .max(128)
+      .optional(),
+    members: z.array(z.string().trim().min(1).max(512)).max(128).optional(),
     evidence: z.unknown().optional(),
   })
   .passthrough();
@@ -94,6 +140,13 @@ const gatewayEvidenceSchema = z
       .array(z.string().trim().min(1).max(512))
       .max(128)
       .optional(),
+    member_provider_ids: z
+      .array(z.string().trim().min(1).max(512))
+      .max(128)
+      .optional(),
+    revision: z.string().trim().min(1).max(128).optional(),
+    group_revision: z.string().trim().min(1).max(128).optional(),
+    name: z.string().trim().min(1).max(100).optional(),
     status: z.enum(["confirmed", "uncertain"]).optional(),
     reason: z.string().trim().min(1).max(200).nullable().optional(),
   })
@@ -164,6 +217,70 @@ const mapGroup = (
   };
 };
 
+const mapManagedGroup = (
+  value: unknown,
+  input: GroupManagementProviderInput,
+  fallbackSource: GroupEvidenceSource,
+): ManagedProviderGroup => {
+  const parsed = groupPayloadSchema.safeParse(value);
+  if (!parsed.success) throw new GroupProviderError("rejected");
+  const providerGroupId = parsed.data.provider_group_id ?? parsed.data.id;
+  const matrixRoomId = parsed.data.matrix_room_id ?? parsed.data.mxid;
+  const memberProviderIds =
+    parsed.data.member_provider_ids ??
+    parsed.data.members ??
+    parsed.data.participant_provider_ids ??
+    parsed.data.participants;
+  const revision = parsed.data.revision ?? parsed.data.group_revision;
+  if (
+    providerGroupId === undefined ||
+    matrixRoomId === undefined ||
+    memberProviderIds === undefined ||
+    revision === undefined
+  ) {
+    throw new GroupProviderError("uncertain");
+  }
+  const gatewayEvidence = gatewayEvidenceSchema.safeParse(parsed.data.evidence);
+  if (
+    !gatewayEvidence.success ||
+    gatewayEvidence.data.source === undefined ||
+    gatewayEvidence.data.evidence_id === undefined ||
+    gatewayEvidence.data.observed_at === undefined ||
+    gatewayEvidence.data.operation_id === undefined ||
+    gatewayEvidence.data.account_id === undefined ||
+    gatewayEvidence.data.connection_id === undefined ||
+    gatewayEvidence.data.status === undefined
+  ) {
+    throw new GroupProviderError("uncertain");
+  }
+  const evidence = GroupManagementEvidenceSchema.safeParse({
+    source: mapSource(gatewayEvidence.data.source, fallbackSource),
+    evidence_id: gatewayEvidence.data.evidence_id,
+    observed_at: gatewayEvidence.data.observed_at,
+    operation_id: gatewayEvidence.data.operation_id,
+    account_id: gatewayEvidence.data.account_id,
+    connection_id: gatewayEvidence.data.connection_id,
+    provider_group_id: providerGroupId,
+    matrix_room_id: matrixRoomId,
+    revision: gatewayEvidence.data.revision ?? revision,
+    name: gatewayEvidence.data.name ?? parsed.data.name,
+    member_provider_ids:
+      gatewayEvidence.data.member_provider_ids ?? memberProviderIds,
+    status: gatewayEvidence.data.status,
+    reason: gatewayEvidence.data.reason ?? null,
+    accepted: true,
+  });
+  if (!evidence.success) throw new GroupProviderError("rejected");
+  return {
+    provider_group_id: providerGroupId,
+    matrix_room_id: matrixRoomId,
+    name: parsed.data.name,
+    revision,
+    member_provider_ids: memberProviderIds,
+    evidence: evidence.data,
+  };
+};
+
 /** Worker adapter for the private, account-bound group gateway routes. */
 export class HttpGroupProvider implements GroupProvider {
   private readonly baseUrl: string;
@@ -226,9 +343,91 @@ export class HttpGroupProvider implements GroupProvider {
     }
   }
 
+  async renameGroup(
+    input: GroupManagementProviderInput,
+    name: string,
+  ): Promise<ManagedProviderGroup> {
+    const value = await this.request("/v1/groups/rename", input, {
+      provider_group_id: input.provider_group_id,
+      matrix_room_id: input.matrix_room_id,
+      expected_revision: input.expected_revision,
+      action: input.action,
+      name,
+    });
+    return mapManagedGroup(value, input, "provider");
+  }
+
+  async addGroupParticipants(
+    input: GroupManagementProviderInput,
+    participantProviderIds: readonly string[],
+  ): Promise<ManagedProviderGroup> {
+    const value = await this.request("/v1/groups/participants/add", input, {
+      provider_group_id: input.provider_group_id,
+      matrix_room_id: input.matrix_room_id,
+      expected_revision: input.expected_revision,
+      action: input.action,
+      participant_provider_ids: [...participantProviderIds],
+    });
+    return mapManagedGroup(value, input, "provider");
+  }
+
+  async removeGroupParticipants(
+    input: GroupManagementProviderInput,
+    participantProviderIds: readonly string[],
+  ): Promise<ManagedProviderGroup> {
+    const value = await this.request("/v1/groups/participants/remove", input, {
+      provider_group_id: input.provider_group_id,
+      matrix_room_id: input.matrix_room_id,
+      expected_revision: input.expected_revision,
+      action: input.action,
+      participant_provider_ids: [...participantProviderIds],
+    });
+    return mapManagedGroup(value, input, "provider");
+  }
+
+  async observeManagedGroup(
+    input: GroupManagementProviderInput,
+  ): Promise<ManagedProviderGroup | null> {
+    try {
+      const value = await this.request("/v1/groups/management/event", input, {
+        provider_group_id: input.provider_group_id,
+        matrix_room_id: input.matrix_room_id,
+        expected_revision: input.expected_revision,
+        action: input.action,
+        name: input.requested_name,
+        participant_provider_ids: [...input.requested_member_provider_ids],
+      });
+      return mapManagedGroup(value, input, "event");
+    } catch (error) {
+      if (error instanceof GroupProviderError && error.code === "not_found")
+        return null;
+      throw error;
+    }
+  }
+
+  async refreshManagedGroup(
+    input: GroupManagementProviderInput,
+  ): Promise<ManagedProviderGroup | null> {
+    try {
+      const value = await this.request("/v1/groups/management/refresh", input, {
+        provider_group_id: input.provider_group_id,
+        matrix_room_id: input.matrix_room_id,
+        expected_revision: input.expected_revision,
+        action: input.action,
+        name: input.requested_name,
+        participant_provider_ids: [...input.requested_member_provider_ids],
+      });
+      return mapManagedGroup(value, input, "refresh");
+    } catch (error) {
+      if (error instanceof GroupProviderError && error.code === "not_found")
+        return null;
+      throw error;
+    }
+  }
+
   private async request(
     path: string,
-    input: GroupProviderInput,
+    input: GroupProviderInput | GroupManagementProviderInput,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     if (this.baseUrl.length === 0 || this.sharedSecret.length < 16)
@@ -260,6 +459,10 @@ export class HttpGroupProvider implements GroupProvider {
             provider_login_id: input.route.provider_login_id,
           },
           operation_id: input.operation_id,
+          operation_created_at:
+            "operation_created_at" in input
+              ? input.operation_created_at
+              : undefined,
           conversation_id: input.conversation_id,
           ...body,
         }),
