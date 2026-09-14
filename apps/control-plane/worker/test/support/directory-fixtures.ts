@@ -406,6 +406,11 @@ export async function clearDirectory(db: D1Database): Promise<void> {
   }
 
   await db.batch([
+    // Acceptance reservations and provider claims retain exact directory
+    // bindings in production. Test fixtures clear these children first so
+    // the directory rows can be rebuilt without weakening those constraints.
+    db.prepare("DELETE FROM outbound_dispatch_claims"),
+    db.prepare("DELETE FROM outbound_acceptance_intents"),
     db.prepare("DELETE FROM group_management_evidence"),
     db.prepare("DELETE FROM group_management_operations"),
     db.prepare("DELETE FROM group_management_groups"),

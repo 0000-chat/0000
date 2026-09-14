@@ -323,6 +323,19 @@ const acceptanceSelect = (
     )
     .bind(tenantId, reservationId);
 
+const acceptanceByIdempotencySelect = (
+  database: AuthorityDatabase,
+  tenantId: string,
+  idempotencyKey: string,
+) =>
+  database
+    .prepare(
+      `SELECT ${ACCEPTANCE_COLUMNS}
+       FROM outbound_acceptance_intents
+       WHERE tenant_id = ? AND idempotency_key = ?`,
+    )
+    .bind(tenantId, idempotencyKey);
+
 const claimSelect = (
   database: AuthorityDatabase,
   tenantId: string,
@@ -382,8 +395,6 @@ export async function reserveOutboundAcceptance(
          ON c.tenant_id = m.tenant_id
         AND c.id = ca.connection_id
         AND c.id = ?
-        AND c.identity_id = i.id
-        AND c.status IN ('connected', 'syncing', 'ready')
        WHERE m.tenant_id = ?
          AND m.id = ?
          AND t.status = 'active'
@@ -437,6 +448,7 @@ export async function reserveOutboundAcceptance(
              AND m.role IN ('owner', 'admin')
              AND p.principal_type IN ('human', 'operator')
              AND i.identity_kind = 'human'
+             AND c.identity_id = i.id
            )
          )
        ON CONFLICT DO NOTHING`,
@@ -761,7 +773,6 @@ export async function claimOutboundDispatch(
          ON c.tenant_id = a.tenant_id
         AND c.id = ca.connection_id
         AND c.id = a.connection_id
-        AND c.identity_id = a.identity_id
         AND c.status IN ('connected', 'syncing', 'ready')
        WHERE a.tenant_id = ?
          AND a.id = ?
@@ -832,6 +843,7 @@ export async function claimOutboundDispatch(
              AND m.role IN ('owner', 'admin')
              AND p.principal_type IN ('human', 'operator')
              AND i.identity_kind = 'human'
+             AND c.identity_id = a.identity_id
            )
          )
        ON CONFLICT DO NOTHING`,
@@ -1005,6 +1017,20 @@ export async function readOutboundAcceptanceReservation(
     database,
     tenantId,
     reservationId,
+  ).first<AcceptanceRow>();
+  return row === null ? null : acceptanceFromRow(row);
+}
+
+/** Read an existing reservation before rechecking live authority on replay. */
+export async function readOutboundAcceptanceReservationByKey(
+  database: AuthorityDatabase,
+  tenantId: string,
+  idempotencyKey: string,
+): Promise<OutboundAcceptanceReservation | null> {
+  const row = await acceptanceByIdempotencySelect(
+    database,
+    tenantId,
+    idempotencyKey,
   ).first<AcceptanceRow>();
   return row === null ? null : acceptanceFromRow(row);
 }

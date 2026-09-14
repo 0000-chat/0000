@@ -15,10 +15,18 @@ import {
 } from "@communicator/contracts";
 import { getTenantProjection } from "../projection/routing";
 import { hasAccountOperationGrant } from "../control-directory/grants";
+import { canonicalJsonStringify } from "../archive/canonical-json";
+import { sha256Hex } from "../archive/codec";
 import { mapReadError, ReadError } from "../read/errors";
 import { isAdministratorSession } from "../read/authorization";
 import { readAuthorizedMessageRemoval } from "../removals/service";
 import { defaultWhatsAppTextAdapter } from "./whatsapp-adapter";
+import {
+  finalizeOutboundAcceptance,
+  readOutboundAcceptanceReservationByKey,
+  reserveOutboundAcceptance,
+} from "./authority";
+import type { OutboundCapability } from "./authority-types";
 
 export type OutboundAcceptanceContext = {
   env: Cloudflare.Env;
@@ -28,6 +36,8 @@ export type OutboundAcceptanceContext = {
 export type OutboundAcceptanceServices = {
   /** Runtime clock used to anchor the immutable acceptance timestamp. */
   now?: () => Date;
+  /** Controlled test seam immediately before the acceptance reservation LP. */
+  beforeAcceptanceReservation?: () => void | Promise<void>;
   /** Controlled test seam before the DO transaction is entered. */
   beforeCommit?: () => void | Promise<void>;
   /** Controlled test seam after the DO transaction commits. */
@@ -106,6 +116,128 @@ const requireSendIdentity = (
   }
 };
 
+type AcceptanceCapabilityRow = {
+  grant_id: string;
+  authorization_epoch: number;
+};
+
+type AuthorityEpochRow = {
+  authority_epoch: number;
+};
+
+const readAcceptanceCapability = async (
+  database: D1DatabaseSession,
+  context: OutboundAcceptanceContext,
+  identityId: string,
+  accountId: string,
+  connectionId: string,
+  conversationId: string,
+): Promise<OutboundCapability | null> => {
+  if (isAdministratorSession(context.authorization)) {
+    const authority = await database
+      .prepare(
+        "SELECT authority_epoch FROM memberships WHERE tenant_id = ? AND id = ? LIMIT 1",
+      )
+      .bind(
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+      )
+      .first<AuthorityEpochRow>();
+    return authority === null
+      ? null
+      : {
+          kind: "owner_admin",
+          authority_id: context.authorization.membership.id,
+          authority_epoch: authority.authority_epoch,
+        };
+  }
+
+  const delegated = await database
+    .prepare(
+      `SELECT g.id AS grant_id, g.authorization_epoch
+       FROM account_grants AS g
+       JOIN identity_grants AS ig
+         ON ig.tenant_id = g.tenant_id
+        AND ig.membership_id = g.membership_id
+        AND ig.identity_id = g.identity_id
+        AND ig.operation_scope = 'message.send'
+       JOIN connection_accounts AS ca
+         ON ca.account_id = g.account_id
+        AND ca.status = 'active'
+       JOIN connections AS c
+         ON c.tenant_id = g.tenant_id
+        AND c.id = ca.connection_id
+        AND c.id = ?
+       WHERE g.tenant_id = ?
+         AND g.membership_id = ?
+         AND g.identity_id = ?
+         AND g.account_id = ?
+         AND g.operation_scope = 'message.send'
+         AND g.status = 'active'
+         AND (
+           g.chat_scope = 'all_chats'
+           OR EXISTS (
+             SELECT 1
+             FROM account_grant_chats AS gc
+             WHERE gc.tenant_id = g.tenant_id
+               AND gc.grant_id = g.id
+               AND gc.account_id = g.account_id
+               AND gc.chat_id = ?
+           )
+         )
+       ORDER BY g.id
+       LIMIT 1`,
+    )
+    .bind(
+      connectionId,
+      context.authorization.tenant.id,
+      context.authorization.membership.id,
+      identityId,
+      accountId,
+      conversationId,
+    )
+    .first<AcceptanceCapabilityRow>();
+  return delegated === null
+    ? null
+    : {
+        kind: "account_grant",
+        grant_id: delegated.grant_id,
+        authorization_epoch: delegated.authorization_epoch,
+      };
+};
+
+const outboundAcceptanceDigests = async (input: {
+  actorPrincipalId: string;
+  actorIdentityId: string;
+  conversationId: string;
+  accountId: string;
+  body: string;
+  deliveryMode: string;
+  idempotencyKey: string;
+}): Promise<{ bodyDigest: string; requestDigest: string }> => {
+  const bodyDigest = await sha256Hex(
+    new TextEncoder().encode(
+      canonicalJsonStringify({
+        actor_principal_id: input.actorPrincipalId,
+        actor_identity_id: input.actorIdentityId,
+        conversation_id: input.conversationId,
+        account_id: input.accountId,
+        body: input.body,
+        delivery_mode: input.deliveryMode,
+      }),
+    ),
+  );
+  const requestDigest = await sha256Hex(
+    new TextEncoder().encode(
+      canonicalJsonStringify({
+        body_digest: bodyDigest,
+        idempotency_key: input.idempotencyKey,
+      }),
+    ),
+  );
+  return { bodyDigest, requestDigest };
+};
+
 /**
  * Resolve the chat's immutable account owner, check the distinct account/chat
  * send grant, and commit the outbound ledger through the tenant DO.
@@ -140,26 +272,11 @@ export async function acceptTextReply(
   if (database === undefined || typeof database.withSession !== "function") {
     throw new ReadError("service_unavailable");
   }
-  let granted: boolean;
-  try {
-    granted = await hasAccountOperationGrant(
-      database.withSession("first-primary"),
-      context.authorization.tenant.id,
-      context.authorization.membership.id,
-      parsed.identity_id,
-      owner.account_id,
-      parsed.conversation_id,
-      "message.send",
-    );
-  } catch (error) {
-    throw mapReadError(error);
-  }
-  if (!granted) throw new ReadError("forbidden");
+  const dbSession = database.withSession("first-primary");
 
   let connectionAvailable = false;
   try {
-    const connection = await database
-      .withSession("first-primary")
+    const connection = await dbSession
       .prepare(
         "SELECT status FROM connections WHERE tenant_id = ? AND id = ? LIMIT 1",
       )
@@ -182,6 +299,96 @@ export async function acceptTextReply(
     ? null
     : new Date(Date.parse(acceptedAt) + FOUR_HOURS_MS).toISOString();
 
+  const { bodyDigest, requestDigest } = await outboundAcceptanceDigests({
+    actorPrincipalId: context.authorization.principal.id,
+    actorIdentityId: parsed.identity_id,
+    conversationId: parsed.conversation_id,
+    accountId: owner.account_id,
+    body: parsed.body,
+    deliveryMode: parsed.delivery_mode,
+    idempotencyKey,
+  });
+
+  let capability: OutboundCapability;
+  let reservation: Awaited<ReturnType<typeof reserveOutboundAcceptance>>;
+  let existingReservation: Awaited<
+    ReturnType<typeof readOutboundAcceptanceReservationByKey>
+  >;
+  try {
+    existingReservation = await readOutboundAcceptanceReservationByKey(
+      dbSession,
+      context.authorization.tenant.id,
+      idempotencyKey,
+    );
+  } catch (error) {
+    throw mapReadError(error);
+  }
+  if (existingReservation !== null) {
+    if (
+      existingReservation.membership_id !==
+        context.authorization.membership.id ||
+      existingReservation.identity_id !== parsed.identity_id ||
+      existingReservation.account_id !== owner.account_id ||
+      existingReservation.conversation_id !== parsed.conversation_id ||
+      existingReservation.connection_id !== owner.connection_id ||
+      existingReservation.request_digest !== requestDigest ||
+      existingReservation.body_digest !== bodyDigest
+    ) {
+      throw new ReadError("invalid_request");
+    }
+    capability = existingReservation.capability;
+    reservation = {
+      status: "reserved",
+      replayed: true,
+      reservation: existingReservation,
+    };
+  } else {
+    try {
+      const liveCapability = await readAcceptanceCapability(
+        dbSession,
+        context,
+        parsed.identity_id,
+        owner.account_id,
+        owner.connection_id,
+        parsed.conversation_id,
+      );
+      if (liveCapability === null) throw new ReadError("forbidden");
+      capability = liveCapability;
+    } catch (error) {
+      if (error instanceof ReadError) throw error;
+      throw mapReadError(error);
+    }
+
+    if (services.beforeAcceptanceReservation !== undefined) {
+      await services.beforeAcceptanceReservation();
+    }
+
+    try {
+      reservation = await reserveOutboundAcceptance(dbSession, {
+        tenant_id: context.authorization.tenant.id,
+        membership_id: context.authorization.membership.id,
+        identity_id: parsed.identity_id,
+        account_id: owner.account_id,
+        conversation_id: parsed.conversation_id,
+        connection_id: owner.connection_id,
+        idempotency_key: idempotencyKey,
+        request_digest: requestDigest,
+        body_digest: bodyDigest,
+        capability,
+        now: acceptedAt,
+      });
+    } catch (error) {
+      throw mapReadError(error);
+    }
+    if (reservation.status === "denied") {
+      throw new ReadError(
+        reservation.reason === "authorization_revoked"
+          ? "forbidden"
+          : "invalid_request",
+      );
+    }
+  }
+
   if (services.beforeCommit !== undefined) {
     await services.beforeCommit();
   }
@@ -202,6 +409,38 @@ export async function acceptTextReply(
       confirmation_due_at: confirmationDueAt,
     }),
   );
+
+  let finalized: Awaited<ReturnType<typeof finalizeOutboundAcceptance>>;
+  try {
+    finalized = await finalizeOutboundAcceptance(dbSession, {
+      tenant_id: context.authorization.tenant.id,
+      membership_id: context.authorization.membership.id,
+      identity_id: parsed.identity_id,
+      account_id: owner.account_id,
+      conversation_id: parsed.conversation_id,
+      connection_id: owner.connection_id,
+      grant_id: reservation.reservation.grant_id,
+      capability: reservation.reservation.capability,
+      reservation_id: reservation.reservation.id,
+      idempotency_key: idempotencyKey,
+      request_digest: requestDigest,
+      body_digest: bodyDigest,
+      command_id: accepted.command.id,
+      message_id: accepted.message.id,
+      dispatch_id: accepted.dispatch.id,
+      transaction_id: accepted.dispatch.transaction_id,
+      now: acceptedAt,
+    });
+  } catch (error) {
+    throw mapReadError(error);
+  }
+  if (finalized.status === "denied") {
+    throw new ReadError(
+      finalized.reason === "tuple_mismatch"
+        ? "invalid_request"
+        : "service_unavailable",
+    );
+  }
 
   // The DO transaction is the source of truth. A wakeup is advisory and may
   // fail after commit; the pending dispatch row remains recoverable by T07+.
