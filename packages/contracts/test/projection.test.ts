@@ -526,6 +526,7 @@ describe("projection authorization and bindings", () => {
     expect(ProjectionErrorCodeSchema.options).toEqual([
       "projection_invalid",
       "projection_forbidden",
+      "projection_chat_paused",
       "projection_tenant_mismatch",
       "projection_conflict",
       "projection_rebuilding",

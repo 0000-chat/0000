@@ -68,6 +68,13 @@ struct TypingSnapshot {
     observed_at: DateTime<Utc>,
 }
 
+type ProjectedObservations = (
+    Vec<RoutedEvent>,
+    u64,
+    Vec<TypingCandidate>,
+    Vec<AttachmentDescriptor>,
+);
+
 /// A source of UTC time used by the coordinator.
 pub trait Clock: Send + Sync {
     /// Return the current UTC time at millisecond precision.
@@ -803,15 +810,7 @@ where
         processed: &ProcessedSync,
         inbox: &crate::store_types::RawSyncInbox,
         observed_at: DateTime<Utc>,
-    ) -> Result<
-        (
-            Vec<RoutedEvent>,
-            u64,
-            Vec<TypingCandidate>,
-            Vec<AttachmentDescriptor>,
-        ),
-        SafeError,
-    > {
+    ) -> Result<ProjectedObservations, SafeError> {
         let raw = serde_json::from_slice::<Value>(inbox.response().as_bytes())
             .map_err(|_| SafeError::new(MATRIX_MALFORMED_EVENT))?;
         if !raw.is_object() {

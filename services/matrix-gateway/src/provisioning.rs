@@ -1582,11 +1582,10 @@ impl ProvisioningGatewayServer {
             Some("event")
         } else if request.path == "/v1/groups/refresh" {
             Some("refresh")
-        } else if request.path == "/v1/groups/rename" {
-            Some("provider")
-        } else if request.path == "/v1/groups/participants/add" {
-            Some("provider")
-        } else if request.path == "/v1/groups/participants/remove" {
+        } else if matches!(
+            request.path.as_str(),
+            "/v1/groups/rename" | "/v1/groups/participants/add" | "/v1/groups/participants/remove"
+        ) {
             Some("provider")
         } else {
             None
@@ -3879,9 +3878,10 @@ mod tests {
             body["member_provider_ids"],
             json!(["15551234567", "lid-42"])
         );
-        let changes = changes.lock().expect("group change lock");
-        assert!(changes.is_empty(), "event recovery observes Matrix state");
-        drop(changes);
+        {
+            let changes = changes.lock().expect("group change lock");
+            assert!(changes.is_empty(), "event recovery observes Matrix state");
+        }
         assert!(
             bridge
                 .received_requests()
