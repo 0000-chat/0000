@@ -17,7 +17,6 @@ import {
   GroupParticipantsRequestSchema,
   GroupRenameRequestSchema,
   ReadReceiptRequestSchema,
-  type ReadReceiptRequest,
   type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
@@ -703,13 +702,16 @@ const registerTools = (
   server.registerTool(
     "list_read_receipts",
     {
-      description: "Inspect administrator-visible explicit read receipt operations",
+      description:
+        "Inspect administrator-visible explicit read receipt operations",
       inputSchema: listReadReceiptsInput,
     },
     (input) =>
       withReadErrors(() =>
         listReadReceipts(contextForReceipts(context), {
-          ...(input.account_id === undefined ? {} : { account_id: input.account_id }),
+          ...(input.account_id === undefined
+            ? {}
+            : { account_id: input.account_id }),
           ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
           ...(input.limit === undefined ? {} : { limit: input.limit }),
         }),

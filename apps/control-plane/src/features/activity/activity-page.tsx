@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { apiClient, isDefinitiveRequestRejection } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { CommandTimeline } from "./command-timeline";
+import { ReceiptOperations } from "./receipt-operations";
 import type {
   ConfirmationDecision,
   OutboundAction,
@@ -35,6 +36,11 @@ export function ActivityPage() {
     queryKey: queryKeys.commandEvidence(evidenceCommandId ?? "none"),
     queryFn: () => apiClient.getCommandEvidence(evidenceCommandId ?? ""),
     enabled: isAdministrator && evidenceCommandId !== null,
+  });
+  const receiptOperationsQuery = useQuery({
+    queryKey: queryKeys.readReceiptOperations,
+    queryFn: () => apiClient.getReadReceiptOperations({ limit: 50 }),
+    enabled: isAdministrator,
   });
   const decisionMutation = useMutation({
     mutationFn: ({
@@ -168,6 +174,27 @@ export function ActivityPage() {
               duplicateRiskAcknowledged: decision === "resend",
             })
           }
+        />
+      )}
+      {isAdministrator && receiptOperationsQuery.isLoading && (
+        <p role="status">Loading read receipts…</p>
+      )}
+      {isAdministrator && receiptOperationsQuery.isError && (
+        <div role="alert" className="space-y-2 text-sm text-destructive">
+          <p>Unable to load read receipt operations.</p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void receiptOperationsQuery.refetch()}
+          >
+            Retry read receipts
+          </Button>
+        </div>
+      )}
+      {isAdministrator && !receiptOperationsQuery.isError && (
+        <ReceiptOperations
+          operations={receiptOperationsQuery.data?.items ?? []}
         />
       )}
     </section>

@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
 
-export const ReceiptStageSchema = z.enum(["unknown", "accepted", "observed", "confirmed"]);
+export const ReceiptStageSchema = z.enum([
+  "unknown",
+  "accepted",
+  "observed",
+  "confirmed",
+]);
 export type ReceiptStage = z.infer<typeof ReceiptStageSchema>;
 
 export const ReceiptOperationStatusSchema = z.enum([
@@ -11,9 +16,15 @@ export const ReceiptOperationStatusSchema = z.enum([
   "unknown",
   "rejected",
 ]);
-export type ReceiptOperationStatus = z.infer<typeof ReceiptOperationStatusSchema>;
+export type ReceiptOperationStatus = z.infer<
+  typeof ReceiptOperationStatusSchema
+>;
 
-export const ReceiptEvidenceSourceSchema = z.enum(["matrix", "bridge", "provider"]);
+export const ReceiptEvidenceSourceSchema = z.enum([
+  "matrix",
+  "bridge",
+  "provider",
+]);
 export type ReceiptEvidenceSource = z.infer<typeof ReceiptEvidenceSourceSchema>;
 
 export const ReceiptEvidenceStatusSchema = z.enum([
@@ -100,7 +111,9 @@ export const ReadReceiptOperationPageSchema = z
     next_cursor: z.string().max(2_048).nullable(),
   })
   .strict();
-export type ReadReceiptOperationPage = z.infer<typeof ReadReceiptOperationPageSchema>;
+export type ReadReceiptOperationPage = z.infer<
+  typeof ReadReceiptOperationPageSchema
+>;
 
 export const ResolveReceiptTargetInputSchema = z
   .object({
@@ -112,7 +125,9 @@ export const ResolveReceiptTargetInputSchema = z
     message_id: CommunicatorIdSchema,
   })
   .strict();
-export type ResolveReceiptTargetInput = z.infer<typeof ResolveReceiptTargetInputSchema>;
+export type ResolveReceiptTargetInput = z.infer<
+  typeof ResolveReceiptTargetInputSchema
+>;
 
 export const ReceiptTargetSchema = z
   .object({

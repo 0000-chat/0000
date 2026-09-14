@@ -58,7 +58,6 @@ const OUTBOUND_STALE_SESSION: &str = "outbound_stale_session";
 const RECEIPT_MISSING_SENDER: &str = "receipt_sender_unavailable";
 const RECEIPT_SCOPE_MISMATCH: &str = "receipt_scope_mismatch";
 const RECEIPT_STALE_SESSION: &str = "receipt_stale_session";
-const RECEIPT_UNCERTAIN: &str = "receipt_uncertain";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningFailure {
@@ -2279,8 +2278,8 @@ mod tests {
         normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
         outbound::{
             MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
-            MatrixGroupObservation, MatrixGroupObservationRequest, MatrixSendResult,
-            OutboundTextSender,
+            MatrixGroupObservation, MatrixGroupObservationRequest, MatrixReadReceiptResult,
+            MatrixReadReceiptSender, MatrixSendResult, OutboundTextSender,
         },
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
@@ -2849,6 +2848,27 @@ mod tests {
         rooms: Arc<StdMutex<Vec<String>>>,
     }
 
+    struct RecordingReadReceiptSender {
+        calls: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl MatrixReadReceiptSender for RecordingReadReceiptSender {
+        async fn send_read_receipt(
+            &self,
+            room_id: &str,
+            event_id: &str,
+        ) -> Result<MatrixReadReceiptResult, MatrixReadReceiptFailure> {
+            self.calls
+                .lock()
+                .expect("receipt calls lock")
+                .push((room_id.to_owned(), event_id.to_owned()));
+            Ok(MatrixReadReceiptResult {
+                event_id: OwnedEventId::try_from(event_id.to_owned()).expect("fixture event id"),
+            })
+        }
+    }
+
     struct RecordingGroupManager {
         changes: Arc<StdMutex<Vec<MatrixGroupChange>>>,
         observation: MatrixGroupObservation,
@@ -2870,6 +2890,113 @@ mod tests {
         ) -> Result<Option<MatrixGroupObservation>, MatrixGroupFailure> {
             Ok(Some(self.observation.clone()))
         }
+    }
+
+    #[tokio::test]
+    async fn read_receipt_routes_one_bound_room_and_reports_matrix_only_evidence() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid binding timestamp");
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x69; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    "binding_69696969696969696969696969696969",
+                    "!receipt:example.test",
+                    "tenant_receipt",
+                    "identity_receipt",
+                    "connection_receipt",
+                    "account_receipt",
+                    Provider::Whatsapp,
+                    "gateway_route_whatsapp",
+                    "conversation_receipt",
+                    MATRIX_USER,
+                    "2026-09-14T00:00:00.000Z",
+                    created_at,
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::new(SharedHistoryTransport {
+                calls: AtomicUsize::new(0),
+                event_count: 0,
+            }),
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history)
+                .with_read_receipt_sender(Arc::new(RecordingReadReceiptSender {
+                    calls: Arc::clone(&calls),
+                }));
+        let request = HttpRequest {
+            path: "/v1/receipts/read".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("request-receipt".to_owned()),
+            idempotency_key: Some("receipt-idempotency".to_owned()),
+            body: serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant_id": "tenant_receipt",
+                "identity_id": "identity_receipt",
+                "account_id": "account_receipt",
+                "connection_id": "connection_receipt",
+                "provider": "whatsapp",
+                "session_generation": "2026-09-14T00:00:00.000Z",
+                "route": {
+                    "gateway_route_id": "gateway_route_whatsapp",
+                    "bridge_instance_id": "whatsapp-primary",
+                    "matrix_user_id": MATRIX_USER,
+                    "matrix_room_namespace": "communicator.0000.gold",
+                    "provider_login_id": "login-receipt"
+                },
+                "operation_id": "receipt_operation",
+                "operation_created_at": "2026-09-14T00:00:00.000Z",
+                "conversation_id": "conversation_receipt",
+                "message_id": "message_receipt",
+                "matrix_room_id": "!receipt:example.test",
+                "matrix_event_id": "$receipt:example.test",
+                "receipt_position": "$receipt:example.test"
+            }))
+            .expect("request JSON"),
+        };
+
+        let (status, bytes) = server.handle_request(request).await;
+        assert_eq!(status, 200);
+        let response: Value = serde_json::from_slice(&bytes).expect("receipt response JSON");
+        assert_eq!(response["status"], "accepted");
+        assert_eq!(response["matrix_stage"], "accepted");
+        assert_eq!(response["bridge_stage"], "unknown");
+        assert_eq!(response["provider_stage"], "unknown");
+        assert_eq!(response["evidence"][0]["source"], "matrix");
+        assert_eq!(
+            calls.lock().expect("receipt calls lock").as_slice(),
+            [(
+                "!receipt:example.test".to_owned(),
+                "$receipt:example.test".to_owned()
+            )]
+        );
     }
 
     #[tokio::test]

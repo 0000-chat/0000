@@ -10,7 +10,7 @@ import {
 import type { Context, Handler } from "hono";
 import type { AuthorizationVariables } from "../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../auth/ingestion-middleware";
-import { mapReadError, ReadError, readErrorResponse } from "../read/errors";
+import { mapReadError, readErrorResponse } from "../read/errors";
 import {
   getReadReceipt,
   listReadReceipts,
@@ -84,7 +84,9 @@ export const readReceiptOperationsRoute = createRoute({
   responses: {
     200: {
       description: "Administrator read receipt operations",
-      content: { "application/json": { schema: ReadReceiptOperationPageSchema } },
+      content: {
+        "application/json": { schema: ReadReceiptOperationPageSchema },
+      },
     },
     ...receiptErrors,
   },
@@ -122,7 +124,12 @@ export const createReceiptHandlers = (services: ReceiptServices = {}) => ({
   }) satisfies Handler<
     ReceiptRouteEnv,
     string,
-    { out: { param: { conversation_id: string }; json: z.infer<typeof receiptBody> } }
+    {
+      out: {
+        param: { conversation_id: string };
+        json: z.infer<typeof receiptBody>;
+      };
+    }
   >,
   get: (async (context) => {
     try {
@@ -144,7 +151,9 @@ export const createReceiptHandlers = (services: ReceiptServices = {}) => ({
       const query = context.req.valid("query");
       return context.json(
         await listReadReceipts(routeContext(context), {
-          ...(query.account_id === undefined ? {} : { account_id: query.account_id }),
+          ...(query.account_id === undefined
+            ? {}
+            : { account_id: query.account_id }),
           ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
           ...(query.limit === undefined ? {} : { limit: query.limit }),
         }),

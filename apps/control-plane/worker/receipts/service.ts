@@ -1,18 +1,14 @@
 import {
-  ReadReceiptOperationSchema,
   ReadReceiptRequestSchema,
   ReadReceiptResultSchema,
   ReceiptTargetSchema,
   type ReadReceiptOperation,
   type ReadReceiptRequest,
   type ReadReceiptResult,
-  type ReceiptEvidence,
 } from "@communicator/contracts";
 import type { SessionResponse } from "@communicator/contracts";
 import { getTenantProjection } from "../projection/routing";
-import {
-  hasAccountOperationGrant,
-} from "../control-directory/grants";
+import { hasAccountOperationGrant } from "../control-directory/grants";
 import { isAdministratorSession } from "../read/authorization";
 import { mapReadError, ReadError } from "../read/errors";
 import {
@@ -141,8 +137,7 @@ const routeFor = (row: ReceiptRouteRow): ReceiptRoute => {
     throw new ReadError("service_unavailable");
   if (row.has_provider_identity !== 1 || row.provider_login_id === null)
     throw new ReadError("service_unavailable");
-  if (row.has_receipt_capability !== 1)
-    throw new ReadError("invalid_request");
+  if (row.has_receipt_capability !== 1) throw new ReadError("invalid_request");
   return {
     tenant_id: row.tenant_id,
     identity_id: row.identity_id,
@@ -180,7 +175,8 @@ const mapRepositoryError = (error: unknown): ReadError => {
   if (error instanceof ReceiptRepositoryError) {
     if (error.code === "receipt_invalid" || error.code === "receipt_conflict")
       return new ReadError("invalid_request", error);
-    if (error.code === "receipt_not_found") return new ReadError("not_found", error);
+    if (error.code === "receipt_not_found")
+      return new ReadError("not_found", error);
     return new ReadError("service_unavailable", error);
   }
   return mapReadError(error);
@@ -256,15 +252,21 @@ const operationIdentity = (
 
 const rejectOperation = async (
   database: D1Database,
-  identity: ReceiptOperationIdentity & { operationId: string; requestedAt: string },
+  identity: ReceiptOperationIdentity & {
+    operationId: string;
+    requestedAt: string;
+  },
   code: NonNullable<ReadReceiptOperation["failure_code"]>,
   reason: string,
   now: string,
 ): Promise<ReadReceiptOperation> => {
-  const created = await createOrReadReceiptOperation(database.withSession("first-primary"), {
-    ...identity,
-    requestedAt: identity.requestedAt || now,
-  });
+  const created = await createOrReadReceiptOperation(
+    database.withSession("first-primary"),
+    {
+      ...identity,
+      requestedAt: identity.requestedAt || now,
+    },
+  );
   if (!created.inserted && created.operation.status !== "requested")
     return created.operation;
   return updateReceiptOperation(
@@ -321,10 +323,20 @@ export async function requestReadReceipt(
   const hash = await requestHash(request);
   const operationId = operationIdFor(hash);
   const now = nowFor(services);
-  const identity = operationIdentity(context, request, target, hash, operationId);
+  const identity = operationIdentity(
+    context,
+    request,
+    target,
+    hash,
+    operationId,
+  );
   identity.requestedAt = now;
 
-  if (target.deleted_at !== null || target.matrix_room_id === null || target.matrix_event_id === null) {
+  if (
+    target.deleted_at !== null ||
+    target.matrix_room_id === null ||
+    target.matrix_event_id === null
+  ) {
     const rejected = await rejectOperation(
       database,
       identity,
@@ -335,7 +347,11 @@ export async function requestReadReceipt(
     return resultFor(rejected, false);
   }
 
-  const routeRow = await readRoute(context, request.identity_id, request.account_id);
+  const routeRow = await readRoute(
+    context,
+    request.identity_id,
+    request.account_id,
+  );
   if (routeRow === null) throw new ReadError("not_found");
   try {
     routeFor(routeRow);
@@ -433,7 +449,11 @@ export async function requestReadReceipt(
 
   let finalRoute: ReceiptRoute;
   try {
-    const latestRoute = await readRoute(context, request.identity_id, request.account_id);
+    const latestRoute = await readRoute(
+      context,
+      request.identity_id,
+      request.account_id,
+    );
     if (latestRoute === null) throw new ReadError("not_found");
     finalRoute = routeFor(latestRoute);
   } catch (error) {
@@ -473,8 +493,10 @@ export async function requestReadReceipt(
   try {
     adapterResult = await (services.dispatchReceipt
       ? services.dispatchReceipt(payload)
-      : (services.createProvider?.(context) ??
-          defaultWhatsAppReceiptProvider(context.env)).dispatch(payload));
+      : (
+          services.createProvider?.(context) ??
+          defaultWhatsAppReceiptProvider(context.env)
+        ).dispatch(payload));
   } catch (error) {
     adapterResult = adapterFailure(error);
   }
@@ -536,7 +558,9 @@ export async function listReadReceipts(
       {
         ...(input.limit === undefined ? {} : { limit: input.limit }),
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-        ...(input.account_id === undefined ? {} : { accountId: input.account_id }),
+        ...(input.account_id === undefined
+          ? {}
+          : { accountId: input.account_id }),
       },
     );
   } catch (error) {

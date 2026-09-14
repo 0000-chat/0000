@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
-import type { Command } from "@communicator/contracts";
+import type { Command, ReadReceiptOperation } from "@communicator/contracts";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/mocks/server";
 
@@ -255,5 +255,53 @@ describe("administrator activity", () => {
       screen.getByText("Provider operation: wa-operation-1"),
     ).toBeVisible();
     expect(screen.getByText("Provider message: wa-message-1")).toBeVisible();
+  });
+
+  it("keeps Matrix acceptance, bridge observation, and provider uncertainty distinct", async () => {
+    const operation: ReadReceiptOperation = {
+      schema_version: 1,
+      operation_id: "receipt_operation_ui",
+      tenant_id: "tenant_pilot",
+      identity_id: "identity_human",
+      account_id: "account_human_whatsapp",
+      connection_id: "connection_human_whatsapp",
+      conversation_id: "conversation_review_chat",
+      message_id: "message_offline_review",
+      matrix_room_id: "!room:example.test",
+      matrix_event_id: "$event:example.test",
+      status: "observed",
+      matrix_stage: "accepted",
+      bridge_stage: "observed",
+      provider_stage: "unknown",
+      failure_code: "provider_timeout",
+      failure_reason: "Provider evidence is unavailable",
+      idempotency_key: "receipt-ui-idempotency",
+      requested_at: "2026-09-10T00:00:00.000Z",
+      updated_at: "2026-09-10T00:00:01.000Z",
+      evidence: [],
+    };
+    server.use(
+      http.get("*/api/v1/commands", () => HttpResponse.json([])),
+      http.get("*/api/v1/receipts", () =>
+        HttpResponse.json({ items: [operation], next_cursor: null }),
+      ),
+    );
+
+    renderApp("/activity");
+
+    const card = await screen.findByText(
+      `Operation ${operation.operation_id} · conversation ${operation.conversation_id}`,
+    );
+    expect(card).toBeVisible();
+    expect(screen.getByText("Read receipts")).toBeVisible();
+    expect(screen.getByText("Matrix stage")).toBeVisible();
+    expect(screen.getByText("Bridge stage")).toBeVisible();
+    expect(screen.getByText("Provider stage")).toBeVisible();
+    expect(
+      screen.getByText(/provider_timeout · Provider evidence is unavailable/),
+    ).toBeVisible();
+    expect(screen.getByText("accepted")).toBeVisible();
+    expect(screen.getAllByText("observed").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Unknown")).toBeVisible();
   });
 });

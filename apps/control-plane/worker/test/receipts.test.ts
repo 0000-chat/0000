@@ -10,6 +10,7 @@ import { createApp } from "../app";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   ReceiptProviderError,
+  type ReceiptAdapterResult,
   type ReceiptDispatchPayload,
 } from "../receipts/provider";
 import {
@@ -80,15 +81,9 @@ const requestEnvironment = (projection: ReceiptProjection) => {
 
 const createTestApp = (
   projection: ReceiptProjection,
-  dispatchReceipt?: (payload: ReceiptDispatchPayload) => Promise<{
-    status: "accepted" | "observed" | "unknown" | "rejected";
-    matrix_stage: "unknown" | "accepted";
-    bridge_stage: "unknown" | "observed";
-    provider_stage: "unknown" | "confirmed";
-    evidence: [];
-    failure_code?: "provider_timeout";
-    failure_reason?: string;
-  }>,
+  dispatchReceipt?: (
+    payload: ReceiptDispatchPayload,
+  ) => Promise<ReceiptAdapterResult>,
   beforeFinalAuthorization?: () => void | Promise<void>,
 ) =>
   createApp({
@@ -143,31 +138,27 @@ const requestBody = (
 
 async function insertReceiptAuthority() {
   await env.CONTROL_DB.batch([
-    env.CONTROL_DB
-      .prepare(
-        "INSERT INTO connection_provider_identities (tenant_id, provider, identity_key, provider_login_id, connection_id, link_session_id, created_at) VALUES (?, 'whatsapp', ?, ?, ?, ?, ?)",
-      )
-      .bind(
-        tenantId,
-        "a".repeat(64),
-        "login-receipt",
-        "connection_human_whatsapp",
-        "link-receipt",
-        timestamp,
-      ),
-    env.CONTROL_DB
-      .prepare(
-        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'receipt.send', 'all_chats', 'active', ?, ?)",
-      )
-      .bind(
-        "grant_receipt_send",
-        tenantId,
-        "membership_human",
-        identityId,
-        accountId,
-        timestamp,
-        timestamp,
-      ),
+    env.CONTROL_DB.prepare(
+      "INSERT INTO connection_provider_identities (tenant_id, provider, identity_key, provider_login_id, connection_id, link_session_id, created_at) VALUES (?, 'whatsapp', ?, ?, ?, ?, ?)",
+    ).bind(
+      tenantId,
+      "a".repeat(64),
+      "login-receipt",
+      "connection_human_whatsapp",
+      "link-receipt",
+      timestamp,
+    ),
+    env.CONTROL_DB.prepare(
+      "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'receipt.send', 'all_chats', 'active', ?, ?)",
+    ).bind(
+      "grant_receipt_send",
+      tenantId,
+      "membership_human",
+      identityId,
+      accountId,
+      timestamp,
+      timestamp,
+    ),
   ]);
 }
 
@@ -226,10 +217,9 @@ describe("explicit read receipt API", () => {
     expect(result.evidence).toHaveLength(2);
     expect(dispatchReceipt).toHaveBeenCalledTimes(1);
 
-    const stored = await env.CONTROL_DB
-      .prepare(
-        "SELECT status, matrix_stage, bridge_stage, provider_stage FROM receipt_operations WHERE operation_id = ?",
-      )
+    const stored = await env.CONTROL_DB.prepare(
+      "SELECT status, matrix_stage, bridge_stage, provider_stage FROM receipt_operations WHERE operation_id = ?",
+    )
       .bind(result.operation_id)
       .first();
     expect(stored).toEqual({
@@ -273,18 +263,13 @@ describe("explicit read receipt API", () => {
   it("does not dispatch when the final receipt grant is revoked", async () => {
     const dispatchReceipt = vi.fn();
     const projection = projectionFor();
-    const app = createTestApp(
-      projection,
-      dispatchReceipt,
-      async () => {
-        await env.CONTROL_DB
-          .prepare(
-            "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
-          )
-          .bind(timestamp, timestamp, "grant_receipt_send")
-          .run();
-      },
-    );
+    const app = createTestApp(projection, dispatchReceipt, async () => {
+      await env.CONTROL_DB.prepare(
+        "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+      )
+        .bind(timestamp, timestamp, "grant_receipt_send")
+        .run();
+    });
     const response = await request(
       app,
       projection,
@@ -326,66 +311,59 @@ describe("explicit read receipt API", () => {
 
   it("rejects an unsupported account provider with durable capability evidence", async () => {
     await env.CONTROL_DB.batch([
-      env.CONTROL_DB
-        .prepare(
-          "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, 'telegram', ?, 'ready', ?, ?)",
-        )
-        .bind(
-          "connection_human_telegram",
-          tenantId,
-          identityId,
-          "Human Telegram",
-          timestamp,
-          timestamp,
-        ),
-      env.CONTROL_DB
-        .prepare(
-          "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(
-          "connection_human_telegram",
-          "gateway_route_human",
-          "bridge-telegram",
-          "route-user-human-telegram",
-          "route-room-human-telegram",
-          timestamp,
-          timestamp,
-        ),
-      env.CONTROL_DB
-        .prepare(
-          "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
-        )
-        .bind("account_human_telegram", "connection_human_telegram", timestamp, timestamp),
-      env.CONTROL_DB
-        .prepare(
-          "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, 'receipt.read', ?)",
-        )
-        .bind(tenantId, "connection_human_telegram", timestamp),
-      env.CONTROL_DB
-        .prepare(
-          "INSERT INTO connection_provider_identities (tenant_id, provider, identity_key, provider_login_id, connection_id, link_session_id, created_at) VALUES (?, 'telegram', ?, ?, ?, ?, ?)",
-        )
-        .bind(
-          tenantId,
-          "b".repeat(64),
-          "login-telegram",
-          "connection_human_telegram",
-          "link-telegram",
-          timestamp,
-        ),
-      env.CONTROL_DB
-        .prepare(
-          "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'receipt.send', 'all_chats', 'active', ?, ?)",
-        )
-        .bind(
-          "grant_receipt_telegram",
-          tenantId,
-          "membership_human",
-          identityId,
-          "account_human_telegram",
-          timestamp,
-          timestamp,
-        ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, 'telegram', ?, 'ready', ?, ?)",
+      ).bind(
+        "connection_human_telegram",
+        tenantId,
+        identityId,
+        "Human Telegram",
+        timestamp,
+        timestamp,
+      ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(
+        "connection_human_telegram",
+        "gateway_route_human",
+        "bridge-telegram",
+        "route-user-human-telegram",
+        "route-room-human-telegram",
+        timestamp,
+        timestamp,
+      ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      ).bind(
+        "account_human_telegram",
+        "connection_human_telegram",
+        timestamp,
+        timestamp,
+      ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, 'receipt.read', ?)",
+      ).bind(tenantId, "connection_human_telegram", timestamp),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO connection_provider_identities (tenant_id, provider, identity_key, provider_login_id, connection_id, link_session_id, created_at) VALUES (?, 'telegram', ?, ?, ?, ?, ?)",
+      ).bind(
+        tenantId,
+        "b".repeat(64),
+        "login-telegram",
+        "connection_human_telegram",
+        "link-telegram",
+        timestamp,
+      ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'receipt.send', 'all_chats', 'active', ?, ?)",
+      ).bind(
+        "grant_receipt_telegram",
+        tenantId,
+        "membership_human",
+        identityId,
+        "account_human_telegram",
+        timestamp,
+        timestamp,
+      ),
     ]);
     const dispatchReceipt = vi.fn();
     const unsupportedAccount = "account_human_telegram";
@@ -478,9 +456,9 @@ describe("explicit read receipt API", () => {
     expect(response.status).toBe(400);
     expect(body.error.code).toBe("invalid_request");
     expect(dispatchReceipt).not.toHaveBeenCalled();
-    const operationCount = await env.CONTROL_DB
-      .prepare("SELECT COUNT(*) AS count FROM receipt_operations")
-      .first<{ count: number }>();
+    const operationCount = await env.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM receipt_operations",
+    ).first<{ count: number }>();
     expect(operationCount?.count).toBe(0);
   });
 });

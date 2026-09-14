@@ -29,6 +29,10 @@ import {
   MessagePageResultSchema,
   OutboundDecisionResultSchema,
   OutboundEvidenceRecordSchema,
+  ReadReceiptOperationPageSchema,
+  ReadReceiptOperationSchema,
+  ReadReceiptRequestSchema,
+  ReadReceiptResultSchema,
   RealtimeTicketRequestSchema,
   RealtimeTicketResponseSchema,
   SessionResponseSchema,
@@ -63,6 +67,10 @@ import {
   type RealtimeTicketResponse,
   type SessionResponse,
   type ProviderCapability,
+  type ReadReceiptOperation,
+  type ReadReceiptOperationPage,
+  type ReadReceiptRequest,
+  type ReadReceiptResult,
 } from "@communicator/contracts";
 
 const ResetResponseSchema = z
@@ -525,6 +533,53 @@ export class ApiClient {
     return this.request(
       `/api/v1/commands/${encodeURIComponent(commandId)}/evidence`,
       OutboundEvidenceRecordSchema.array().max(100),
+    );
+  }
+
+  requestReadReceipt(
+    conversationId: string,
+    input: ReadReceiptRequest,
+  ): Promise<ReadReceiptResult> {
+    const { conversation_id: inputConversationId, ...body } =
+      ReadReceiptRequestSchema.parse(input);
+    if (inputConversationId !== conversationId)
+      throw new ApiError(400, "Receipt conversation does not match the route");
+    return this.request(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/receipts/read`,
+      ReadReceiptResultSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": input.idempotency_key,
+        },
+        body: JSON.stringify(body),
+      },
+    );
+  }
+
+  getReadReceipt(operationId: string): Promise<ReadReceiptOperation> {
+    return this.request(
+      `/api/v1/receipts/${encodeURIComponent(operationId)}`,
+      ReadReceiptOperationSchema,
+    );
+  }
+
+  getReadReceiptOperations(options?: {
+    accountId?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<ReadReceiptOperationPage> {
+    const search = new URLSearchParams();
+    if (options?.accountId !== undefined)
+      search.set("account_id", options.accountId);
+    if (options?.cursor !== undefined) search.set("cursor", options.cursor);
+    if (options?.limit !== undefined)
+      search.set("limit", String(options.limit));
+    const suffix = search.toString().length > 0 ? `?${search}` : "";
+    return this.request(
+      `/api/v1/receipts${suffix}`,
+      ReadReceiptOperationPageSchema,
     );
   }
 

@@ -49,11 +49,7 @@ export type ReceiptAdapterResult = {
 
 export class ReceiptProviderError extends Error {
   constructor(
-    readonly code:
-      | "unavailable"
-      | "timeout"
-      | "rejected"
-      | "protocol",
+    readonly code: "unavailable" | "timeout" | "rejected" | "protocol",
     cause?: unknown,
   ) {
     super(code);
@@ -152,7 +148,10 @@ export class HttpWhatsAppReceiptProvider implements ReceiptProvider {
       throw new ReceiptProviderError("protocol", error);
     }
     const parsed = responseSchema.safeParse(value);
-    if (!parsed.success) throw new ReceiptProviderError("protocol", parsed.error);
+    if (!parsed.success)
+      throw new ReceiptProviderError("protocol", parsed.error);
+    if (parsed.data.operation_id !== input.operation_id)
+      throw new ReceiptProviderError("protocol");
     if (!response.ok && parsed.data.status !== "unknown")
       throw new ReceiptProviderError("rejected");
     return parsed.data;

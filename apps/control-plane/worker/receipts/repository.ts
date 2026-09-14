@@ -96,8 +96,7 @@ const parseEvidence = (value: string): ReceiptEvidence[] => {
 };
 
 const mapOperation = (row: ReceiptOperationRow): ReadReceiptOperation => {
-  const publicStatus =
-    row.status === "dispatching" ? "requested" : row.status;
+  const publicStatus = row.status === "dispatching" ? "requested" : row.status;
   return ReadReceiptOperationSchema.parse({
     schema_version: 1,
     operation_id: row.operation_id,
@@ -161,7 +160,7 @@ export async function createOrReadReceiptOperation(
           bridge_stage, provider_stage, failure_code, failure_reason,
           evidence_json, requested_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 'unknown',
-          'unknown', 'unknown', NULL, NULL, '[]', ?, ?)`
+          'unknown', 'unknown', NULL, NULL, '[]', ?, ?)`,
       )
       .bind(
         input.operationId,
@@ -295,7 +294,9 @@ export async function listReceiptOperations(
       throw new ReceiptRepositoryError("receipt_invalid");
     const created = input.cursor.slice(0, separator);
     const operationId = input.cursor.slice(separator + 1);
-    conditions.push("(updated_at < ? OR (updated_at = ? AND operation_id < ?))");
+    conditions.push(
+      "(updated_at < ? OR (updated_at = ? AND operation_id < ?))",
+    );
     bindings.push(created, created, operationId);
   }
   bindings.push(limit + 1);
