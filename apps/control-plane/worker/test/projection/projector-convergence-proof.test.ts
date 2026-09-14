@@ -633,6 +633,11 @@ describe("tenant projection full-domain convergence proof", () => {
         name: "attachment_expiry",
         applied_at: "2026-09-14T00:45:00.000Z",
       },
+      {
+        version: 7,
+        name: "private_dispatch_authority",
+        applied_at: "2026-09-14T01:00:00.000Z",
+      },
     ]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);

@@ -585,7 +585,7 @@ describe("TenantProjectionDO resumable rebuilds", () => {
     }
     await expect(
       rows(stub, "SELECT COUNT(*) AS count FROM _sql_schema_migrations"),
-    ).resolves.toEqual([{ count: 6 }]);
+    ).resolves.toEqual([{ count: 7 }]);
     await expect(
       rows(
         stub,

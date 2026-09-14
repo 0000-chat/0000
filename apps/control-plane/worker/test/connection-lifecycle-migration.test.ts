@@ -53,6 +53,7 @@ async function resetSchema() {
     "archive_purge_locks",
     "archive_purge_objects",
     "archive_purge_operations",
+    "restore_activation_leases",
     "removal_expiry_schedule",
     "removal_authority",
     "attachment_download_grants",

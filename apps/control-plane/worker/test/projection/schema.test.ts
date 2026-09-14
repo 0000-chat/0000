@@ -27,6 +27,8 @@ const uncertaintyReconciliationMigrationName = "uncertainty_reconciliation";
 const uncertaintyReconciliationMigrationAppliedAt = "2026-09-14T00:30:00.000Z";
 const attachmentExpiryMigrationName = "attachment_expiry";
 const attachmentExpiryMigrationAppliedAt = "2026-09-14T00:45:00.000Z";
+const privateDispatchAuthorityMigrationName = "private_dispatch_authority";
+const privateDispatchAuthorityMigrationAppliedAt = "2026-09-14T01:00:00.000Z";
 const applicationTableNames = [
   "projection_meta",
   "connection_bindings",
@@ -370,6 +372,12 @@ const expectedColumns: Record<
     ["confirmation_decided_at", "TEXT", 0, 0, null],
     ["created_at", "TEXT", 1, 0, null],
     ["updated_at", "TEXT", 1, 0, null],
+    ["authority_reservation_id", "TEXT", 0, 0, null],
+    ["authority_membership_id", "TEXT", 0, 0, null],
+    ["authority_identity_id", "TEXT", 0, 0, null],
+    ["authority_capability_kind", "TEXT", 0, 0, null],
+    ["authority_capability_id", "TEXT", 0, 0, null],
+    ["authority_capability_epoch", "INTEGER", 0, 0, null],
   ],
   outbound_evidence: [
     ["id", "TEXT", 1, 1, null],
@@ -619,6 +627,7 @@ const expectedIndexes = [
   "idx_outbound_dispatches_actor_created",
   "idx_outbound_command_decisions_tenant_decided",
   "idx_outbound_dispatches_transaction",
+  "idx_outbound_dispatches_authority_reservation",
   "idx_outbound_evidence_command_observed",
   "idx_outbound_actions_command_at",
   "idx_event_tombstones_conversation_owner",
@@ -689,6 +698,8 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_outbound_command_decisions_tenant_decided ON outbound_command_decisions(tenant_id, decided_at, command_id)",
   idx_outbound_dispatches_transaction:
     "CREATE INDEX idx_outbound_dispatches_transaction ON outbound_dispatches(tenant_id, transaction_id, request_digest)",
+  idx_outbound_dispatches_authority_reservation:
+    "CREATE INDEX idx_outbound_dispatches_authority_reservation ON outbound_dispatches(tenant_id, authority_reservation_id)",
   idx_outbound_evidence_command_observed:
     "CREATE INDEX idx_outbound_evidence_command_observed ON outbound_evidence(tenant_id, command_id, observed_at, id)",
   idx_outbound_actions_command_at:
@@ -804,7 +815,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(38);
+    expect(indexNames).toHaveLength(39);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -867,6 +878,11 @@ describe("tenant projection SQLite schema", () => {
         version: 6,
         name: attachmentExpiryMigrationName,
         applied_at: attachmentExpiryMigrationAppliedAt,
+      },
+      {
+        version: 7,
+        name: privateDispatchAuthorityMigrationName,
+        applied_at: privateDispatchAuthorityMigrationAppliedAt,
       },
     ]);
     expect(
@@ -1604,7 +1620,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 6,
+      schema_generation: 7,
       state: "ready",
       generation: 1,
       rebuild_id: null,
