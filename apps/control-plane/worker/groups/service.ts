@@ -8,7 +8,7 @@ import {
   type GroupParticipant,
   type SessionResponse,
 } from "@communicator/contracts";
-import { hasAccountOperationGrantForAccount } from "../control-directory/grants";
+import { isAdministratorSession } from "../read/authorization";
 import { ReadError } from "../read/errors";
 import {
   getContactCandidate,
@@ -31,6 +31,11 @@ import {
   type GroupCreationOperationInput,
 } from "./repository";
 import { GroupRepositoryError } from "./repository";
+import {
+  readPrivateAuthorityReservation,
+  reservePrivateAuthority,
+} from "../outbound/private-authority";
+import type { OutboundCapability } from "../outbound/authority-types";
 
 export type GroupRouteServices = {
   createProvider?: (context: ContactServiceContext) => GroupProvider;
@@ -130,6 +135,96 @@ const checkCapability = async (
     .bind(tenantId, accountId)
     .first<{ available: number }>();
   if (capability === null) throw new ReadError("service_unavailable");
+};
+
+const readGroupCapability = async (
+  context: ContactServiceContext,
+  route: GroupRoute,
+  identityId: string,
+  accountId: string,
+  conversationId: string,
+  operationScope: "group.create" | "group.manage",
+): Promise<OutboundCapability | null> => {
+  const db = databaseFor(context).withSession("first-primary");
+  if (isAdministratorSession(context.authorization)) {
+    const row = await db
+      .prepare(
+        `SELECT m.authority_epoch
+           FROM memberships AS m
+           JOIN tenants AS t ON t.id = m.tenant_id
+           JOIN principals AS p ON p.id = m.principal_id
+           JOIN identities AS i
+             ON i.tenant_id = m.tenant_id AND i.id = ?
+           JOIN connections AS c
+             ON c.tenant_id = m.tenant_id AND c.id = ?
+            AND c.identity_id = i.id
+           JOIN connection_accounts AS ca
+             ON ca.connection_id = c.id AND ca.account_id = ?
+            AND ca.status = 'active'
+          WHERE m.tenant_id = ? AND m.id = ?
+            AND t.status = 'active'
+            AND m.status = 'active' AND m.role IN ('owner', 'admin')
+            AND p.status = 'active' AND p.revoked_at IS NULL
+            AND p.principal_type IN ('human', 'operator')
+            AND i.status = 'active' AND i.identity_kind = 'human'
+          LIMIT 1`,
+      )
+      .bind(
+        identityId,
+        route.connection_id,
+        accountId,
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+      )
+      .first<{ authority_epoch: number }>();
+    return row === null
+      ? null
+      : {
+          kind: "owner_admin",
+          authority_id: context.authorization.membership.id,
+          authority_epoch: row.authority_epoch,
+        };
+  }
+  const row = await db
+    .prepare(
+      `SELECT g.id AS grant_id, g.authorization_epoch
+         FROM account_grants AS g
+         JOIN identity_grants AS ig
+           ON ig.tenant_id = g.tenant_id
+          AND ig.membership_id = g.membership_id
+          AND ig.identity_id = g.identity_id
+          AND ig.operation_scope = ?
+         JOIN connection_accounts AS ca
+           ON ca.account_id = g.account_id AND ca.status = 'active'
+         JOIN connections AS c
+           ON c.tenant_id = g.tenant_id AND c.id = ca.connection_id AND c.id = ?
+        WHERE g.tenant_id = ? AND g.membership_id = ? AND g.identity_id = ?
+          AND g.account_id = ? AND g.operation_scope = ? AND g.status = 'active'
+          AND (g.chat_scope = 'all_chats' OR EXISTS (
+            SELECT 1 FROM account_grant_chats AS gc
+             WHERE gc.tenant_id = g.tenant_id AND gc.grant_id = g.id
+               AND gc.account_id = g.account_id AND gc.chat_id = ?
+          ))
+        ORDER BY g.id LIMIT 1`,
+    )
+    .bind(
+      operationScope,
+      route.connection_id,
+      context.authorization.tenant.id,
+      context.authorization.membership.id,
+      identityId,
+      accountId,
+      operationScope,
+      conversationId,
+    )
+    .first<{ grant_id: string; authorization_epoch: number }>();
+  return row === null
+    ? null
+    : {
+        kind: "account_grant",
+        grant_id: row.grant_id,
+        authorization_epoch: row.authorization_epoch,
+      };
 };
 
 const participantSnapshot = async (
@@ -336,10 +431,41 @@ const providerInput = (
   idempotency_key: idempotencyKey,
 });
 
+const recoveryProviderInput = async (
+  context: ContactServiceContext,
+  operation: GroupCreationOperation,
+  route: GroupRoute,
+  idempotencyKey: string,
+): Promise<GroupProviderInput | null> => {
+  const reservation = await readPrivateAuthorityReservation(
+    databaseFor(context).withSession("first-primary"),
+    "group.create",
+    operation.tenant_id,
+    operation.operation_id,
+  );
+  if (reservation === null) return null;
+  return {
+    ...providerInput(
+      route,
+      operation.operation_id,
+      operation.conversation_id,
+      idempotencyKey,
+    ),
+    membership_id: reservation.membership_id,
+    actor_identity_id: reservation.identity_id,
+    reservation_id: reservation.id,
+    capability: reservation.capability,
+    request_hash: reservation.request_hash,
+    operation_scope: "group.create",
+  };
+};
+
 const providerErrorCode = (error: unknown): string =>
-  error instanceof GroupProviderError
-    ? `provider_${error.code}`
-    : "provider_unavailable";
+  error instanceof GroupProviderError && error.code === "authorization_revoked"
+    ? "authorization_revoked"
+    : error instanceof GroupProviderError
+      ? `provider_${error.code}`
+      : "provider_unavailable";
 
 const isReconciliationError = (error: unknown): boolean =>
   error instanceof GroupProviderError &&
@@ -444,15 +570,6 @@ export async function createGroup(
     context.authorization.tenant.id,
     parsed.account_id,
   );
-  const granted = await hasAccountOperationGrantForAccount(
-    database.withSession("first-primary"),
-    context.authorization.tenant.id,
-    context.authorization.membership.id,
-    parsed.identity_id,
-    parsed.account_id,
-    "group.create",
-  );
-  if (!granted) throw new ReadError("forbidden");
   const snapshot = await participantSnapshot(context, route, parsed);
   const canonicalParticipants = [...snapshot.participants].sort((a, b) =>
     a.contact_id.localeCompare(b.contact_id),
@@ -477,6 +594,15 @@ export async function createGroup(
       ].join("\u001f"),
     )
   ).slice(0, 36)}`;
+  const capability = await readGroupCapability(
+    context,
+    route,
+    parsed.identity_id,
+    parsed.account_id,
+    conversationId,
+    "group.create",
+  );
+  if (capability === null) throw new ReadError("forbidden");
   const operationId = `group_create_${crypto.randomUUID().replaceAll("-", "")}`;
   const operationInput: GroupCreationOperationInput = {
     operationId,
@@ -504,18 +630,28 @@ export async function createGroup(
       operation.failure_code === "group_creation_persistence_uncertain"
     ) {
       const provider = providerFor(context, services);
+      const input = await recoveryProviderInput(
+        context,
+        operation,
+        route,
+        parsed.idempotency_key,
+      );
+      if (input === null)
+        return operationResult(
+          await completeUnresolved(
+            context,
+            operation,
+            "group_creation_authority_reservation_missing",
+            services,
+          ),
+        );
       return operationResult(
         await reconcileAfterCreate(
           context,
           operation,
           route,
           provider,
-          providerInput(
-            route,
-            operation.operation_id,
-            operation.conversation_id,
-            parsed.idempotency_key,
-          ),
+          input,
           services,
         ),
       );
@@ -525,31 +661,75 @@ export async function createGroup(
     if (!Number.isFinite(age) || age <= GROUP_DISPATCH_LEASE_MS)
       return operationResult(operation);
     const provider = providerFor(context, services);
+    const input = await recoveryProviderInput(
+      context,
+      operation,
+      route,
+      parsed.idempotency_key,
+    );
+    if (input === null)
+      return operationResult(
+        await completeUnresolved(
+          context,
+          operation,
+          "group_creation_authority_reservation_missing",
+          services,
+        ),
+      );
     return operationResult(
       await reconcileAfterCreate(
         context,
         operation,
         route,
         provider,
-        providerInput(
-          route,
-          operation.operation_id,
-          operation.conversation_id,
-          parsed.idempotency_key,
-        ),
+        input,
         services,
       ),
     );
   }
   if (operation.status !== "pending") return operationResult(operation);
 
-  const provider = providerFor(context, services);
-  const inputForProvider = providerInput(
-    route,
-    operation.operation_id,
-    operation.conversation_id,
-    parsed.idempotency_key,
+  const reservation = await reservePrivateAuthority(
+    database.withSession("first-primary"),
+    {
+      tenant_id: operation.tenant_id,
+      membership_id:
+        operation.membership_id ?? context.authorization.membership.id,
+      identity_id: operation.identity_id,
+      account_id: operation.account_id,
+      conversation_id: operation.conversation_id,
+      connection_id: operation.connection_id,
+      operation_scope: "group.create",
+      operation_id: operation.operation_id,
+      request_hash: operationInput.requestHash,
+      capability,
+      now: nowFor(services),
+    },
   );
+  if (reservation.status === "denied") {
+    throw new ReadError(
+      reservation.reason === "authorization_revoked"
+        ? "forbidden"
+        : "service_unavailable",
+    );
+  }
+
+  const provider = providerFor(context, services);
+  const inputForProvider: GroupProviderInput = {
+    ...providerInput(
+      route,
+      operation.operation_id,
+      operation.conversation_id,
+      parsed.idempotency_key,
+    ),
+    membership_id:
+      operation.membership_id ?? context.authorization.membership.id,
+    actor_identity_id: operation.identity_id,
+    reservation_id: reservation.reservation.id,
+    capability: reservation.reservation.capability,
+    request_hash: operationInput.requestHash,
+    operation_scope: "group.create",
+  };
   let created: ProviderGroup;
   try {
     created = await provider.createGroup(
@@ -558,6 +738,21 @@ export async function createGroup(
       operation.participants.map((participant) => participant.provider_id),
     );
   } catch (error) {
+    if (
+      error instanceof GroupProviderError &&
+      error.code === "authorization_revoked"
+    ) {
+      return operationResult(
+        await finishGroupCreationOperation(database, operation, {
+          membershipId: context.authorization.membership.id,
+          status: "failed",
+          duplicateRisk: false,
+          humanActionRequired: false,
+          failureCode: "authorization_revoked",
+          now: nowFor(services),
+        }),
+      );
+    }
     if (!isReconciliationError(error)) {
       return operationResult(
         await finishGroupCreationOperation(database, operation, {

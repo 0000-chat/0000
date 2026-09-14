@@ -12,6 +12,10 @@ import {
   runWebhookRetryTick,
   type WebhookProjection,
 } from "../webhooks/delivery";
+import {
+  retryWebhookDelivery,
+  type WebhookActor,
+} from "../control-directory/webhooks";
 import { recordRemoval } from "../removals/ledger";
 import { recordRemovalWithSuppression } from "../removals/service";
 import {
@@ -106,6 +110,39 @@ const message = (body = "incoming body"): WebhookMessage => ({
   deleted_at: null,
   attachments: [],
 });
+
+const messageWithAttachment = (
+  attachmentId = "attachment_incoming_1",
+): WebhookMessage => ({
+  ...message(),
+  attachments: [
+    {
+      attachment_id: attachmentId,
+      message_id: "message_incoming_1",
+      identity_id: "identity_human",
+      account_id: "account_human",
+      connection_id: "connection_human_whatsapp",
+      conversation_id: "conversation_one",
+      platform: "whatsapp",
+      file_name: "photo.jpg",
+      mime_type: "image/jpeg",
+      size_bytes: 42,
+      sha256: "a".repeat(64),
+      revision: "event_incoming_1",
+      expires_at: null,
+    },
+  ],
+});
+
+const humanWebhookActor: WebhookActor = {
+  tenantId: "tenant_pilot",
+  principalId: "principal_human",
+  principalType: "human",
+  membershipId: "membership_human",
+  role: "owner",
+  identityIds: ["identity_human"],
+  delegated: false,
+};
 
 const insertSubscription = async (
   value: WebhookSubscription,
@@ -999,6 +1036,84 @@ describe("durable incoming webhook delivery", () => {
     });
   });
 
+  it("does not prepare an attachment grant when attachment removal wins before delivery", async () => {
+    await insertSubscription(
+      subscription({ id: "webhook_attachment_removal_before_claim" }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_attachment_removal_before_claim")],
+      now: () => fixedNow,
+    });
+    const grantsBeforeDelivery = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM attachment_download_grants WHERE tenant_id = ?",
+    )
+      .bind("tenant_pilot")
+      .first<{ count: number }>();
+
+    let enterClaimBarrier!: () => void;
+    let releaseClaimBarrier!: () => void;
+    const claimBarrierEntered = new Promise<void>((resolve) => {
+      enterClaimBarrier = resolve;
+    });
+    const claimBarrierRelease = new Promise<void>((resolve) => {
+      releaseClaimBarrier = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => messageWithAttachment()),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        beforeClaim: async () => {
+          enterClaimBarrier();
+          await claimBarrierRelease;
+        },
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await claimBarrierEntered;
+    await recordRemovalWithSuppression(
+      workerEnv.CONTROL_DB.withSession("first-primary"),
+      {
+        tenant_id: "tenant_pilot",
+        resource_type: "attachment",
+        resource_id: "attachment_incoming_1",
+        content_generation: "attachment_incoming_1",
+        account_id: "account_human",
+        conversation_id: "conversation_one",
+        source_event_id: "event_attachment_removal_before_claim",
+        source_object_key: null,
+        reason: "requested",
+        removed_at: fixedNow.toISOString(),
+      },
+      fixedNow,
+    );
+    releaseClaimBarrier();
+    await delivery;
+
+    expect(fetchCount).toBe(0);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "source_removed",
+      provider_request_started_at: null,
+    });
+    await expect(
+      workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM attachment_download_grants WHERE tenant_id = ?",
+      )
+        .bind("tenant_pilot")
+        .first<{ count: number }>(),
+    ).resolves.toEqual(grantsBeforeDelivery);
+  });
+
   it("keeps missing credentials retryable without starting a provider request", async () => {
     await insertSubscription(
       subscription({
@@ -1118,6 +1233,115 @@ describe("durable incoming webhook delivery", () => {
       }),
     ).resolves.toEqual({ scanned: 0, attempted: 0 });
     expect(fetchCount).toBe(1);
+  });
+
+  it("fences an attachment-removed uncertain delivery when manually retried", async () => {
+    await insertSubscription(
+      subscription({ id: "webhook_attachment_removal_retry" }),
+    );
+    const [id] = await fanOutIncomingWebhookDeliveries({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      events: [incomingEvent("event_attachment_removal_retry")],
+      now: () => fixedNow,
+    });
+
+    let enterFetch!: () => void;
+    let releaseFetch!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => {
+      enterFetch = resolve;
+    });
+    const fetchRelease = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let fetchCount = 0;
+    const delivery = deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => messageWithAttachment()),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => fixedNow,
+        fetch: async () => {
+          fetchCount += 1;
+          enterFetch();
+          await fetchRelease;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    await fetchEntered;
+    await recordRemovalWithSuppression(
+      workerEnv.CONTROL_DB.withSession("first-primary"),
+      {
+        tenant_id: "tenant_pilot",
+        resource_type: "attachment",
+        resource_id: "attachment_incoming_1",
+        content_generation: "attachment_incoming_1",
+        account_id: "account_human",
+        conversation_id: "conversation_one",
+        source_event_id: "event_attachment_removal_retry",
+        source_object_key: null,
+        reason: "requested",
+        removed_at: fixedNow.toISOString(),
+      },
+      fixedNow,
+    );
+    releaseFetch();
+    await delivery;
+
+    expect(fetchCount).toBe(1);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "uncertain",
+      error_code: "delivery_uncertain",
+      uncertainty_reason: "source_removed_in_flight",
+      provider_request_started_at: fixedNow.toISOString(),
+    });
+    const grantsBeforeRetry = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM attachment_download_grants WHERE tenant_id = ?",
+    )
+      .bind("tenant_pilot")
+      .first<{ count: number }>();
+
+    const retryAt = new Date(fixedNow.getTime() + 1_000).toISOString();
+    await expect(
+      retryWebhookDelivery(
+        workerEnv.CONTROL_DB,
+        humanWebhookActor,
+        id ?? "",
+        "webhook-attachment-removal-retry",
+        retryAt,
+      ),
+    ).resolves.toMatchObject({ status: "pending" });
+
+    await deliverIncomingWebhookBatch({
+      database: workerEnv.CONTROL_DB,
+      tenantId: "tenant_pilot",
+      projection: projectionFor(() => messageWithAttachment()),
+      deliveryIds: [id ?? ""],
+      services: {
+        now: () => new Date(retryAt),
+        fetch: async () => {
+          fetchCount += 1;
+          return new Response(null, { status: 202 });
+        },
+      },
+    });
+
+    expect(fetchCount).toBe(1);
+    expect(await deliveryRow(id ?? "")).toMatchObject({
+      status: "cancelled",
+      cancellation_reason: "source_removed",
+      provider_request_started_at: null,
+    });
+    await expect(
+      workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM attachment_download_grants WHERE tenant_id = ?",
+      )
+        .bind("tenant_pilot")
+        .first<{ count: number }>(),
+    ).resolves.toEqual(grantsBeforeRetry);
   });
 
   it("fences the terminal write when removal wins after the response check", async () => {

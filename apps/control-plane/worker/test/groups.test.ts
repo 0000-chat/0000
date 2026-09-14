@@ -441,6 +441,11 @@ describe("group creation account and evidence boundaries", () => {
     };
     const app = createTestApp(state);
     await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'member', updated_at = ? WHERE id = 'membership_human'",
+    )
+      .bind(observedAt)
+      .run();
+    await env.CONTROL_DB.prepare(
       "DELETE FROM account_grants WHERE id = 'grant_group_create'",
     ).run();
     const denied = await request(app, "/api/v1/groups", {

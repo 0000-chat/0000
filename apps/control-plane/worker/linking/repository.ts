@@ -21,6 +21,11 @@ export type CommitLinkedAccountInput = {
   };
   identityHashSecret: string;
   occurredAt: string;
+  sourceConnectionFence?: {
+    connectionId: string;
+    operationId: string;
+    sessionGeneration: string;
+  };
 };
 
 export type CommitLinkedAccountResult = {
@@ -185,6 +190,27 @@ export async function commitLinkedAccount(
     if (!administrator)
       throw new LinkingRepositoryError("authorization_required");
 
+    if (input.sourceConnectionFence) {
+      const source = await db
+        .prepare(
+          `SELECT 1 AS valid
+             FROM connections
+            WHERE tenant_id = ? AND id = ?
+              AND lifecycle_operation_id = ?
+              AND updated_at = ?
+              AND status NOT IN ('revoked', 'unlinked')
+            LIMIT 1`,
+        )
+        .bind(
+          input.tenantId,
+          input.sourceConnectionFence.connectionId,
+          input.sourceConnectionFence.operationId,
+          input.sourceConnectionFence.sessionGeneration,
+        )
+        .first<{ valid: number }>();
+      if (!source) throw new LinkingRepositoryError("link_conflict");
+    }
+
     const existingSession = await getExistingSessionCommit(db, input);
     if (existingSession) return existingSession;
 
@@ -258,7 +284,43 @@ export async function commitLinkedAccount(
         ),
       db
         .prepare(
-          "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at, last_synced_at, attention_code, sort_position) VALUES (?, ?, ?, ?, ?, 'connected', ?, ?, NULL, NULL, 0)",
+          input.sourceConnectionFence
+            ? `INSERT INTO connections
+                 (id, tenant_id, identity_id, provider, display_label, status,
+                  created_at, updated_at, last_synced_at, attention_code,
+                  sort_position, lifecycle_operation_id)
+               SELECT ?, ?, ?, ?, ?, 'connected', ?, ?, NULL, NULL, 0, NULL
+                WHERE EXISTS (
+                  SELECT 1 FROM connections AS source
+                   WHERE source.tenant_id = ? AND source.id = ?
+                     AND source.lifecycle_operation_id = ?
+                     AND source.updated_at = ?
+                     AND source.status NOT IN ('revoked', 'unlinked')
+                )
+                AND EXISTS (
+                  SELECT 1
+                    FROM principals AS auth_p
+                    JOIN memberships AS auth_m
+                      ON auth_m.tenant_id = ?
+                     AND auth_m.id = ?
+                     AND auth_m.principal_id = auth_p.id
+                    JOIN identities AS auth_i
+                      ON auth_i.tenant_id = auth_m.tenant_id
+                     AND auth_i.id = ?
+                    JOIN identity_grants AS auth_g
+                      ON auth_g.tenant_id = auth_m.tenant_id
+                     AND auth_g.membership_id = auth_m.id
+                     AND auth_g.identity_id = auth_i.id
+                     AND auth_g.operation_scope = 'connection.manage'
+                   WHERE auth_p.id = ?
+                     AND auth_p.principal_type IN ('human', 'operator')
+                     AND auth_p.status = 'active'
+                     AND auth_m.status = 'active'
+                     AND auth_m.role IN ('owner', 'admin')
+                     AND auth_i.identity_kind = 'human'
+                     AND auth_i.status = 'active'
+                )`
+            : "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at, last_synced_at, attention_code, sort_position) VALUES (?, ?, ?, ?, ?, 'connected', ?, ?, NULL, NULL, 0)",
         )
         .bind(
           connectionId,
@@ -268,6 +330,18 @@ export async function commitLinkedAccount(
           displayLabel,
           input.occurredAt,
           input.occurredAt,
+          ...(input.sourceConnectionFence
+            ? [
+                input.tenantId,
+                input.sourceConnectionFence.connectionId,
+                input.sourceConnectionFence.operationId,
+                input.sourceConnectionFence.sessionGeneration,
+                input.tenantId,
+                input.membershipId,
+                input.targetIdentityId,
+                input.actorPrincipalId,
+              ]
+            : []),
         ),
       db
         .prepare(

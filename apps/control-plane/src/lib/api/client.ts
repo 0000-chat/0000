@@ -3,6 +3,9 @@ import {
   ApiErrorResponseSchema,
   ChannelSummarySchema,
   CommandSchema,
+  ConnectionDisconnectRequestSchema,
+  ConnectionLifecycleOperationSchema,
+  ConnectionRelinkStartSchema,
   ConnectionSchema,
   AccountGrantMutationSchema,
   AccountGrantPageSchema,
@@ -53,6 +56,9 @@ import {
   type PermissionRequest,
   type ChannelSummary,
   type Connection,
+  type ConnectionDisconnectRequest,
+  type ConnectionLifecycleOperation,
+  type ConnectionRelinkStart,
   type ConversationPageResult,
   type ConversationSummary,
   type Identity,
@@ -195,6 +201,44 @@ export class ApiClient {
           "Idempotency-Key": idempotencyKey,
         },
         body: JSON.stringify(LinkSessionStartSchema.parse(input)),
+      },
+    );
+  }
+
+  startRelinkSession(
+    connectionId: string,
+    input: ConnectionRelinkStart,
+    idempotencyKey: string,
+  ): Promise<LinkSession> {
+    return this.request(
+      `/api/v1/connections/${encodeURIComponent(connectionId)}/relink-sessions`,
+      LinkSessionSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(ConnectionRelinkStartSchema.parse(input)),
+      },
+    );
+  }
+
+  disconnectConnection(
+    connectionId: string,
+    idempotencyKey: string,
+    input: ConnectionDisconnectRequest = {},
+  ): Promise<ConnectionLifecycleOperation> {
+    return this.request(
+      `/api/v1/connections/${encodeURIComponent(connectionId)}/disconnect`,
+      ConnectionLifecycleOperationSchema,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(ConnectionDisconnectRequestSchema.parse(input)),
       },
     );
   }

@@ -18,7 +18,10 @@ import { sha256Hex } from "../archive/codec";
 import { issueAttachmentGrant } from "../attachments/grants";
 import { hasAccountOperationGrant } from "../control-directory/grants";
 import { getWebhookSubscription } from "../control-directory/webhooks";
-import { readAuthorizedMessageRemoval } from "../removals/service";
+import {
+  readAuthorizedMessageRemoval,
+  readAuthorizedResourceRemoval,
+} from "../removals/service";
 import { readTenantDeletionEpoch } from "../removals/ledger";
 import {
   isEligibleWebhookSource,
@@ -1435,13 +1438,11 @@ const currentSubscription = async (
   }
 };
 
-const hydrateCurrentPayload = async (
-  database: D1Database,
+const currentMessageFor = async (
   projection: WebhookProjection,
   delivery: DeliveryLease,
   subscription: WebhookSubscription,
-  now: Date,
-): Promise<{ payload: WebhookDeliveryPayload; revision: string } | null> => {
+): Promise<WebhookMessage | null> => {
   if (
     delivery.source_message_id === null ||
     delivery.source_identity_id === null ||
@@ -1474,21 +1475,27 @@ const hydrateCurrentPayload = async (
   ) {
     return null;
   }
-  const payload = await payloadFor(
-    database,
-    subscription,
-    delivery.id,
-    delivery.source_event_id,
-    message,
-    now,
-    delivery.event_type === WEBHOOK_MESSAGE_EDITED
-      ? WEBHOOK_MESSAGE_EDITED
-      : WEBHOOK_MESSAGE_CREATED,
-    delivery.event_type === WEBHOOK_MESSAGE_EDITED
-      ? (delivery.source_revision ?? undefined)
-      : undefined,
-  );
-  return { payload, revision: message.revision };
+  return message;
+};
+
+const attachmentIdsForMessage = (
+  message: WebhookMessage | null,
+): readonly string[] =>
+  message?.attachments.map((attachment) => attachment.attachment_id) ?? [];
+
+const attachmentIdsForPayload = (
+  payloadJson: string | null,
+): readonly string[] => {
+  if (payloadJson === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    const payload = WebhookDeliveryPayloadSchema.safeParse(parsed);
+    return payload.success && "attachments" in payload.data
+      ? payload.data.attachments.map((attachment) => attachment.attachment_id)
+      : [];
+  } catch {
+    return [];
+  }
 };
 
 const removalForDelivery = async (
@@ -1500,7 +1507,9 @@ const removalForDelivery = async (
     | "source_message_id"
     | "source_account_id"
     | "source_conversation_id"
+    | "payload_json"
   >,
+  currentAttachmentIds: readonly string[] = [],
 ) => {
   if (
     delivery.source_message_id === null ||
@@ -1516,6 +1525,23 @@ const removalForDelivery = async (
     conversationId: delivery.source_conversation_id,
   });
   if (messageRemoval !== null) return messageRemoval;
+
+  const attachmentIds = [
+    ...new Set([
+      ...currentAttachmentIds,
+      ...attachmentIdsForPayload(delivery.payload_json),
+    ]),
+  ];
+  for (const attachmentId of attachmentIds) {
+    const attachmentRemoval = await readAuthorizedResourceRemoval(database, {
+      tenantId: delivery.tenant_id,
+      resourceType: "attachment",
+      resourceId: attachmentId,
+      accountId: delivery.source_account_id,
+      conversationId: delivery.source_conversation_id,
+    });
+    if (attachmentRemoval !== null) return attachmentRemoval;
+  }
 
   // Attachment authorities do not replace the message lineage. Match the
   // removed attachment against the already delivered metadata and return the
@@ -1727,6 +1753,9 @@ const deliverOne = async (
   let removalEpoch = lease.removal_epoch;
   let providerRequestStarted = false;
   let payloadJson: string | null = null;
+  let currentMessage: WebhookMessage | null = null;
+  const sourceAttachmentIds = (): readonly string[] =>
+    attachmentIdsForMessage(currentMessage);
   const authorizationMatches = async (
     subscription: WebhookSubscription | null,
     credentialRef: string | null | undefined,
@@ -1775,12 +1804,14 @@ const deliverOne = async (
     );
   };
 
-  const removalFence = async (): Promise<{
+  const removalFence = async (
+    attachmentIds: readonly string[] = sourceAttachmentIds(),
+  ): Promise<{
     changed: boolean;
     authority: Awaited<ReturnType<typeof removalForDelivery>>;
   }> => {
     const currentEpoch = await readTenantDeletionEpoch(database, tenantId);
-    const authority = await removalForDelivery(database, lease);
+    const authority = await removalForDelivery(database, lease, attachmentIds);
     const changed = currentEpoch !== removalEpoch;
     removalEpoch = currentEpoch;
     return { changed, authority };
@@ -1985,16 +2016,13 @@ const deliverOne = async (
       return;
     }
     let activeFinalSubscription = finalSubscription;
-    let hydrated: Awaited<ReturnType<typeof hydrateCurrentPayload>> = null;
     if (!isWebhookRemovalDelivery(lease.event_type)) {
-      hydrated = await hydrateCurrentPayload(
-        database,
+      currentMessage = await currentMessageFor(
         projection,
         lease,
         activeFinalSubscription,
-        now,
       );
-      if (hydrated === null) {
+      if (currentMessage === null) {
         await cancelDelivery(
           database,
           tenantId,
@@ -2040,14 +2068,12 @@ const deliverOne = async (
       }
       activeFinalSubscription = refreshedSubscription;
       if (!isWebhookRemovalDelivery(lease.event_type)) {
-        hydrated = await hydrateCurrentPayload(
-          database,
+        currentMessage = await currentMessageFor(
           projection,
           lease,
           activeFinalSubscription,
-          now,
         );
-        if (hydrated === null) {
+        if (currentMessage === null) {
           await cancelDelivery(
             database,
             tenantId,
@@ -2103,8 +2129,23 @@ const deliverOne = async (
           finalRemoval.authority,
         ),
       );
-    } else if (hydrated !== null) {
-      payloadJson = JSON.stringify(hydrated.payload);
+    } else if (currentMessage !== null) {
+      payloadJson = JSON.stringify(
+        await payloadFor(
+          database,
+          activeFinalSubscription,
+          lease.id,
+          lease.source_event_id,
+          currentMessage,
+          now,
+          lease.event_type === WEBHOOK_MESSAGE_EDITED
+            ? WEBHOOK_MESSAGE_EDITED
+            : WEBHOOK_MESSAGE_CREATED,
+          lease.event_type === WEBHOOK_MESSAGE_EDITED
+            ? (lease.source_revision ?? undefined)
+            : undefined,
+        ),
+      );
     } else {
       await cancelDelivery(
         database,

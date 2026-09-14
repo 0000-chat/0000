@@ -648,6 +648,26 @@ const attachmentExpiryMigration: ProjectionMigration = Object.freeze({
   ],
 });
 
+/**
+ * Persist the D1 authority reservation on each accepted dispatch. Legacy
+ * rows remain readable, but the adapter must fail closed when these nullable
+ * columns are absent because no provider claim can safely be made for them.
+ */
+const privateDispatchAuthorityMigration: ProjectionMigration = Object.freeze({
+  version: 7,
+  name: "private_dispatch_authority",
+  appliedAt: "2026-09-14T01:00:00.000Z",
+  statements: [
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_reservation_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_membership_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_identity_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_capability_kind TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_capability_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_capability_epoch INTEGER",
+    "CREATE INDEX idx_outbound_dispatches_authority_reservation ON outbound_dispatches(tenant_id, authority_reservation_id)",
+  ],
+});
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
   Object.freeze([
@@ -657,6 +677,7 @@ export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
     offlineOutboundConfirmationMigration,
     uncertaintyReconciliationMigration,
     attachmentExpiryMigration,
+    privateDispatchAuthorityMigration,
   ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */

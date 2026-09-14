@@ -26,6 +26,7 @@ type LinkViewState =
 
 type LinkViewProps = {
   identityId: string;
+  connectionId?: string;
   identityDisplayName: string;
   actorDisplayName: string;
   open: boolean;
@@ -165,6 +166,7 @@ function sessionIdForState(state: LinkViewState) {
 
 export function WhatsAppLinkSheet({
   identityId,
+  connectionId,
   identityDisplayName,
   actorDisplayName,
   open,
@@ -207,15 +209,25 @@ export function WhatsAppLinkSheet({
     linkedSessionRef.current = null;
     setState({ kind: "starting" });
     try {
-      const session = await apiClient.startLinkSession(
-        identityId,
-        {
-          provider: "whatsapp",
-          method: "qr",
-          confirmed_identity_id: identityId,
-        },
-        newIdempotencyKey(),
-      );
+      const session = connectionId
+        ? await apiClient.startRelinkSession(
+            connectionId,
+            {
+              provider: "whatsapp",
+              method: "qr",
+              confirmed_identity_id: identityId,
+            },
+            newIdempotencyKey(),
+          )
+        : await apiClient.startLinkSession(
+            identityId,
+            {
+              provider: "whatsapp",
+              method: "qr",
+              confirmed_identity_id: identityId,
+            },
+            newIdempotencyKey(),
+          );
       if (!isCurrent(generation)) {
         await cancelSession(session.id);
         return;
@@ -230,7 +242,7 @@ export function WhatsAppLinkSheet({
         });
       }
     }
-  }, [cancelSession, identityId, isCurrent]);
+  }, [cancelSession, connectionId, identityId, isCurrent]);
 
   const cancelCurrent = useCallback(() => {
     generationRef.current += 1;
@@ -383,6 +395,9 @@ export function WhatsAppLinkSheet({
           <SheetDescription>
             Scan the QR code from WhatsApp Linked devices. The challenge stays
             in this administrator session and is cleared when the attempt ends.
+            {connectionId
+              ? " The existing account and grants are retained only when the verified provider identity matches."
+              : null}
           </SheetDescription>
         </SheetHeader>
 

@@ -1,6 +1,9 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import {
   ApiErrorResponseSchema,
+  ConnectionDisconnectRequestSchema,
+  ConnectionLifecycleOperationSchema,
+  ConnectionRelinkStartSchema,
   CommunicatorIdSchema,
   LinkSessionActionRequestSchema,
   LinkSessionSchema,
@@ -8,6 +11,7 @@ import {
   type LinkSession,
   type LinkSessionActionRequest,
   type LinkSessionStart,
+  type ConnectionRelinkStart,
 } from "@communicator/contracts";
 import type { Context, Handler } from "hono";
 import type { AuthorizationVariables } from "../auth/middleware";
@@ -25,6 +29,16 @@ import {
   type LinkSessionState,
 } from "./session";
 import { LinkingRepositoryError } from "./repository";
+import {
+  beginConnectionDisconnect,
+  beginConnectionRelink,
+  completeConnectionDisconnect,
+  getLifecycleConnection,
+  getLifecycleOperation,
+  LifecycleRepositoryError,
+  markLifecycleProviderPending,
+  markLifecycleReconciliation,
+} from "./lifecycle-repository";
 
 type LinkingRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -141,6 +155,99 @@ export const linkSessionCancelRoute = createRoute({
   },
 });
 
+export const connectionRelinkSessionStartRoute = createRoute({
+  method: "post",
+  path: "/api/v1/connections/{connection_id}/relink-sessions",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ connection_id: boundedId }).strict(),
+    headers: z
+      .object({ "idempotency-key": z.string().trim().min(8).max(200) })
+      .passthrough(),
+    body: {
+      content: { "application/json": { schema: ConnectionRelinkStartSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Existing relink session",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
+    201: {
+      description: "Started relink session",
+      content: { "application/json": { schema: LinkSessionSchema } },
+    },
+    400: { description: "Invalid relink request", content: errorContent },
+    403: {
+      description: "Administrator permission required",
+      content: errorContent,
+    },
+    404: { description: "Connection not found", content: errorContent },
+    409: { description: "Relink conflict", content: errorContent },
+    503: { description: "Link provider unavailable", content: errorContent },
+  },
+});
+
+export const connectionDisconnectRoute = createRoute({
+  method: "post",
+  path: "/api/v1/connections/{connection_id}/disconnect",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ connection_id: boundedId }).strict(),
+    headers: z
+      .object({ "idempotency-key": z.string().trim().min(8).max(200) })
+      .passthrough(),
+    body: {
+      content: {
+        "application/json": { schema: ConnectionDisconnectRequestSchema },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Disconnect operation",
+      content: {
+        "application/json": { schema: ConnectionLifecycleOperationSchema },
+      },
+    },
+    400: { description: "Invalid disconnect request", content: errorContent },
+    403: {
+      description: "Administrator permission required",
+      content: errorContent,
+    },
+    404: { description: "Connection not found", content: errorContent },
+    409: { description: "Disconnect conflict", content: errorContent },
+    503: {
+      description: "Disconnect reconciliation required",
+      content: errorContent,
+    },
+  },
+});
+
+export const connectionLifecycleOperationRoute = createRoute({
+  method: "get",
+  path: "/api/v1/connections/{connection_id}/lifecycle-operations/{operation_id}",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z
+      .object({ connection_id: boundedId, operation_id: boundedId })
+      .strict(),
+  },
+  responses: {
+    200: {
+      description: "Connection lifecycle operation",
+      content: {
+        "application/json": { schema: ConnectionLifecycleOperationSchema },
+      },
+    },
+    403: {
+      description: "Administrator permission required",
+      content: errorContent,
+    },
+    404: { description: "Operation not found", content: errorContent },
+  },
+});
+
 class LinkingRouteError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409 | 503,
@@ -208,6 +315,34 @@ const errorResponse = (
         },
       }),
       error.code === "invalid_link" ? 400 : 503,
+    );
+  }
+  if (error instanceof LifecycleRepositoryError) {
+    const status =
+      error.code === "authorization_required"
+        ? 403
+        : error.code === "connection_not_found"
+          ? 404
+          : error.code === "stale_generation" ||
+              error.code === "operation_conflict" ||
+              error.code === "provider_identity_mismatch"
+            ? 409
+            : 503;
+    return context.json(
+      ApiErrorResponseSchema.parse({
+        error: {
+          code:
+            status === 403
+              ? "forbidden"
+              : status === 404
+                ? "not_found"
+                : status === 409
+                  ? "invalid_request"
+                  : "service_unavailable",
+          message: error.message,
+        },
+      }),
+      status,
     );
   }
   return context.json(
@@ -320,6 +455,12 @@ const gatewayOwnerFor = (state: LinkSessionState): GatewayOwner => ({
   target_identity_id: state.target_identity_id,
   provider: state.provider,
   generation: state.generation,
+  ...(state.connection_id && state.lifecycle_operation_id
+    ? { connection_id: state.connection_id }
+    : {}),
+  ...(state.provider_login_id
+    ? { provider_login_id: state.provider_login_id }
+    : {}),
 });
 
 const publicSession = (
@@ -482,6 +623,8 @@ export const createLinkSessionHandler =
         action_expires_at: null,
         gateway_ref: null,
         connection_id: null,
+        lifecycle_operation_id: null,
+        provider_login_id: null,
         account_id: null,
         provider_label: null,
         error_code: null,
@@ -501,6 +644,307 @@ export const createLinkSessionHandler =
       return errorResponse(context, error);
     }
   };
+
+/**
+ * Start a generation-bound relink for one established connection. The
+ * lifecycle row is written before this function calls the private gateway;
+ * the existing LinkSessionDO then supplies the cancellation/late-callback
+ * fence used by initial linking as well.
+ */
+export const createRelinkSessionHandler =
+  (services: LinkingServices = {}): LinkingHandler =>
+  async (context) => {
+    try {
+      const { connection_id: connectionId } = context.req.valid("param") as {
+        connection_id: string;
+      };
+      const body = context.req.valid("json") as ConnectionRelinkStart;
+      const idempotencyKey = context.req.header("Idempotency-Key");
+      if (!idempotencyKey)
+        throw new LinkingRouteError(
+          400,
+          "invalid_request",
+          "Idempotency-Key is required",
+        );
+      if (body.provider !== "whatsapp")
+        throw new LinkingRouteError(
+          400,
+          "invalid_request",
+          "This provider is not enabled for QR relinking",
+        );
+      requireLinkAdministrator(context, body.confirmed_identity_id);
+      const authorization = context.get("authorization");
+      const clock = services.now ?? (() => new Date());
+      const sessionId = `relink_${(
+        await sha256Hex(
+          `${authorization.tenant.id}\0${connectionId}\0${body.provider}\0${idempotencyKey}`,
+        )
+      ).slice(0, 48)}`;
+      const begun = await beginConnectionRelink({
+        db: context.env.CONTROL_DB,
+        operation_id: `lifecycle_${sessionId}`,
+        session_id: sessionId,
+        tenant_id: authorization.tenant.id,
+        actor_principal_id: authorization.principal.id,
+        membership_id: authorization.membership.id,
+        identity_id: body.confirmed_identity_id,
+        connection_id: connectionId,
+        provider: body.provider,
+        idempotency_key: idempotencyKey,
+        occurred_at: clock().toISOString(),
+        ...(body.expected_session_generation === undefined
+          ? {}
+          : { expected_session_generation: body.expected_session_generation }),
+      });
+      const createdAt = clock();
+      const initial: LinkSessionState = {
+        id: sessionId,
+        tenant_id: authorization.tenant.id,
+        actor_principal_id: authorization.principal.id,
+        membership_id: authorization.membership.id,
+        target_identity_id: body.confirmed_identity_id,
+        provider: body.provider,
+        generation: 1,
+        status:
+          begun.operation.status === "reconciliation_required" ||
+          begun.operation.status === "failed"
+            ? "reconciliation_required"
+            : begun.operation.status === "succeeded"
+              ? "connected"
+              : "created",
+        action: "none",
+        expires_at: new Date(
+          createdAt.getTime() + LINK_SESSION_TTL_MS,
+        ).toISOString(),
+        action_expires_at: null,
+        gateway_ref: null,
+        connection_id: begun.connection.connection_id,
+        lifecycle_operation_id: begun.operation.operation_id,
+        provider_login_id: begun.connection.provider_login_id,
+        account_id: begun.connection.account_id,
+        provider_label: null,
+        error_code:
+          begun.operation.status === "reconciliation_required" ||
+          begun.operation.status === "failed"
+            ? "reconciliation_required"
+            : null,
+        request_key_digest: await sha256Hex(idempotencyKey),
+        created_at: createdAt.toISOString(),
+        updated_at: createdAt.toISOString(),
+      };
+      const created = await command(context.env, sessionId, {
+        command: "create",
+        state: initial,
+      });
+      if (!created.created)
+        return context.json(publicSession(created.state), 200);
+      if (
+        begun.operation.status === "succeeded" ||
+        begun.operation.status === "reconciliation_required" ||
+        begun.operation.status === "failed"
+      ) {
+        return context.json(publicSession(created.state), 200);
+      }
+      try {
+        const claim = await markLifecycleProviderPending(
+          context.env.CONTROL_DB,
+          authorization.tenant.id,
+          begun.operation.operation_id,
+          clock().toISOString(),
+        );
+        if (!claim.claimed)
+          return context.json(publicSession(created.state), 200);
+        const started = await startProvider(
+          context.env,
+          services,
+          created.state,
+        );
+        return context.json(publicSession(started.state, started.qr), 201);
+      } catch (error) {
+        try {
+          await markLifecycleReconciliation(
+            context.env.CONTROL_DB,
+            authorization.tenant.id,
+            begun.operation.operation_id,
+            error instanceof ConnectionGatewayError &&
+              error.code === "provider_unavailable"
+              ? "provider_unavailable"
+              : "provider_error",
+            clock().toISOString(),
+          );
+        } catch {
+          // The operation row remains durable even if the status write is unavailable.
+        }
+        throw error;
+      }
+    } catch (error) {
+      return errorResponse(context, error);
+    }
+  };
+
+const publicLifecycleOperation = (
+  operation: Awaited<ReturnType<typeof getLifecycleOperation>>,
+) => {
+  if (!operation) throw new LifecycleRepositoryError("connection_not_found");
+  return ConnectionLifecycleOperationSchema.parse({
+    operation_id: operation.operation_id,
+    kind: operation.kind,
+    connection_id: operation.connection_id,
+    provider: operation.provider,
+    status: operation.status,
+    session_generation: operation.session_generation,
+    replacement_connection_id: operation.replacement_connection_id,
+    error_code: operation.error_code,
+    created_at: operation.created_at,
+    updated_at: operation.updated_at,
+  });
+};
+
+export const createConnectionDisconnectHandler =
+  (services: LinkingServices = {}): LinkingHandler =>
+  async (context) => {
+    try {
+      const { connection_id: connectionId } = context.req.valid("param") as {
+        connection_id: string;
+      };
+      const body = context.req.valid("json") as {
+        expected_session_generation?: string;
+      };
+      const idempotencyKey = context.req.header("Idempotency-Key");
+      if (!idempotencyKey)
+        throw new LinkingRouteError(
+          400,
+          "invalid_request",
+          "Idempotency-Key is required",
+        );
+      const authorization = context.get("authorization");
+      const connection = await getLifecycleConnection(
+        context.env.CONTROL_DB,
+        authorization.tenant.id,
+        connectionId,
+      );
+      if (!connection)
+        throw new LifecycleRepositoryError("connection_not_found");
+      requireLinkAdministrator(context, connection.identity_id);
+      const clock = new Date();
+      const operationId = `lifecycle_disconnect_${(
+        await sha256Hex(
+          `${authorization.tenant.id}\0${connectionId}\0${idempotencyKey}`,
+        )
+      ).slice(0, 48)}`;
+      const begun = await beginConnectionDisconnect({
+        db: context.env.CONTROL_DB,
+        operation_id: operationId,
+        tenant_id: authorization.tenant.id,
+        actor_principal_id: authorization.principal.id,
+        membership_id: authorization.membership.id,
+        identity_id: connection.identity_id,
+        connection_id: connectionId,
+        idempotency_key: idempotencyKey,
+        occurred_at: clock.toISOString(),
+        ...(body.expected_session_generation === undefined
+          ? {}
+          : { expected_session_generation: body.expected_session_generation }),
+      });
+      if (begun.operation.status !== "pending")
+        return context.json(publicLifecycleOperation(begun.operation), 200);
+      const claim = await markLifecycleProviderPending(
+        context.env.CONTROL_DB,
+        authorization.tenant.id,
+        operationId,
+        new Date().toISOString(),
+      );
+      if (!claim.claimed)
+        return context.json(publicLifecycleOperation(claim.operation), 200);
+      try {
+        const gateway = services.createConnectionGateway
+          ? services.createConnectionGateway(context.env)
+          : gatewayFromEnv(context.env);
+        if (!gateway?.disconnect) {
+          return context.json(
+            publicLifecycleOperation(
+              await markLifecycleReconciliation(
+                context.env.CONTROL_DB,
+                authorization.tenant.id,
+                operationId,
+                "provider_unavailable",
+                new Date().toISOString(),
+              ),
+            ),
+            200,
+          );
+        }
+        const result = await gateway.disconnect({
+          session_id: operationId,
+          tenant_id: authorization.tenant.id,
+          actor_principal_id: authorization.principal.id,
+          membership_id: authorization.membership.id,
+          target_identity_id: connection.identity_id,
+          provider: connection.provider,
+          generation: 1,
+          connection_id: connection.connection_id,
+          provider_login_id: connection.provider_login_id,
+        });
+        const completed = await completeConnectionDisconnect({
+          db: context.env.CONTROL_DB,
+          operation_id: operationId,
+          actor: {
+            tenant_id: authorization.tenant.id,
+            actor_principal_id: authorization.principal.id,
+            membership_id: authorization.membership.id,
+            identity_id: connection.identity_id,
+          },
+          provider_login_id: result.provider_login_id,
+          occurred_at: new Date().toISOString(),
+        });
+        return context.json(publicLifecycleOperation(completed), 200);
+      } catch (error) {
+        const reconciled = await markLifecycleReconciliation(
+          context.env.CONTROL_DB,
+          authorization.tenant.id,
+          operationId,
+          error instanceof ConnectionGatewayError &&
+            error.code === "provider_unavailable"
+            ? "provider_unavailable"
+            : "provider_error",
+          new Date().toISOString(),
+        );
+        return context.json(publicLifecycleOperation(reconciled), 200);
+      }
+    } catch (error) {
+      return errorResponse(context, error);
+    }
+  };
+
+export const getConnectionLifecycleOperationHandler: LinkingHandler = async (
+  context,
+) => {
+  try {
+    const { connection_id: connectionId, operation_id: operationId } =
+      context.req.valid("param") as {
+        connection_id: string;
+        operation_id: string;
+      };
+    const authorization = context.get("authorization");
+    const connection = await getLifecycleConnection(
+      context.env.CONTROL_DB,
+      authorization.tenant.id,
+      connectionId,
+    );
+    if (!connection) throw new LifecycleRepositoryError("connection_not_found");
+    requireLinkAdministrator(context, connection.identity_id);
+    const operation = await getLifecycleOperation(
+      context.env.CONTROL_DB,
+      authorization.tenant.id,
+      operationId,
+    );
+    if (!operation || operation.connection_id !== connectionId)
+      throw new LifecycleRepositoryError("connection_not_found");
+    return context.json(publicLifecycleOperation(operation), 200);
+  } catch (error) {
+    return errorResponse(context, error);
+  }
+};
 
 const authorizedState = async (
   context: Context<LinkingRouteEnv>,

@@ -4,6 +4,37 @@ import { ProviderSchema } from "./connection";
 import { IdentityKindSchema } from "./identity";
 import { MembershipRoleSchema, PrincipalTypeSchema } from "./authorization";
 
+/** Capability metadata carried only on private provider-bound messages. */
+export const OutboundCapabilitySchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("account_grant"),
+      grant_id: CommunicatorIdSchema,
+      authorization_epoch: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("owner_admin"),
+      authority_id: CommunicatorIdSchema,
+      authority_epoch: z.number().int().positive(),
+    })
+    .strict(),
+]);
+export type OutboundCapability = z.infer<typeof OutboundCapabilitySchema>;
+
+export const OutboundAuthorityMetadataSchema = z
+  .object({
+    reservation_id: CommunicatorIdSchema,
+    membership_id: CommunicatorIdSchema,
+    identity_id: CommunicatorIdSchema,
+    capability: OutboundCapabilitySchema,
+  })
+  .strict();
+export type OutboundAuthorityMetadata = z.infer<
+  typeof OutboundAuthorityMetadataSchema
+>;
+
 export const MAX_GRANT_PAGE_SIZE = 100;
 export const MAX_GRANT_CHAT_IDS = 10_000;
 

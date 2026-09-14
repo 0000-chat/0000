@@ -384,6 +384,11 @@ describe("group management operation boundaries", () => {
     };
     const app = createTestApp(state);
     await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'member', updated_at = ? WHERE id = 'membership_human'",
+    )
+      .bind(timestamp)
+      .run();
+    await env.CONTROL_DB.prepare(
       "UPDATE account_grants SET status = 'revoked', revoked_at = ? WHERE id = 'grant_group_manage'",
     )
       .bind(timestamp)
@@ -410,6 +415,42 @@ describe("group management operation boundaries", () => {
     );
     expect(missingIdentityScope.status).toBe(403);
     expect(state.providerCalls).toHaveLength(0);
+  });
+
+  it("allows an owner/admin provider mutation without manufacturing a group grant", async () => {
+    await env.CONTROL_DB.prepare(
+      "DELETE FROM account_grants WHERE tenant_id = ? AND membership_id = 'membership_human' AND identity_id = ? AND account_id = ? AND operation_scope = 'group.manage'",
+    )
+      .bind(tenantId, identityId, accountId)
+      .run();
+    const state: ManagementState = {
+      mode: "provider",
+      providerCalls: [],
+      observeCalls: [],
+      refreshCalls: [],
+    };
+    const response = await request(
+      createTestApp(state),
+      `/api/v1/groups/${conversationId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(renameBody("rename-owner-admin")),
+      },
+    );
+    const result = (await response.json()) as Record<string, any>;
+    expect(response.status, JSON.stringify(result)).toBe(200);
+    expect(result).toMatchObject({
+      status: "succeeded",
+      current_name: "Renamed Team",
+      evidence_path: "provider",
+    });
+    expect(state.providerCalls).toHaveLength(1);
+    const grants = await env.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM account_grants WHERE tenant_id = ? AND membership_id = 'membership_human' AND account_id = ? AND operation_scope = 'group.manage'",
+    )
+      .bind(tenantId, accountId)
+      .first<{ count: number }>();
+    expect(grants?.count).toBe(0);
   });
 
   it("reconciles timeout through event and bounded refresh evidence", async () => {
@@ -549,6 +590,11 @@ describe("group management operation boundaries", () => {
           .run();
       },
     };
+    await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'member', updated_at = ? WHERE id = 'membership_human'",
+    )
+      .bind(timestamp)
+      .run();
     const response = await request(
       createTestApp(state),
       `/api/v1/groups/${conversationId}`,
@@ -714,6 +760,15 @@ describe("group management gateway envelope", () => {
       operation_id: "group_manage_envelope",
       conversation_id: conversationId,
       idempotency_key: "group_manage_envelope",
+      membership_id: "membership_human",
+      actor_identity_id: identityId,
+      reservation_id: "group_manage_reservation",
+      capability: {
+        kind: "account_grant",
+        grant_id: "grant_group_manage",
+        authorization_epoch: 2,
+      },
+      request_hash: "d".repeat(64),
       provider_group_id: providerGroupId,
       matrix_room_id: matrixRoomId,
       expected_revision: "1",
@@ -764,6 +819,15 @@ describe("group management gateway envelope", () => {
       name: "Renamed Team",
       operation_created_at: timestamp,
       expected_revision: "1",
+      membership_id: "membership_human",
+      actor_identity_id: identityId,
+      reservation_id: "group_manage_reservation",
+      capability: {
+        kind: "account_grant",
+        grant_id: "grant_group_manage",
+        authorization_epoch: 2,
+      },
+      request_hash: "d".repeat(64),
     });
     expect(sent).not.toHaveProperty("requested_name");
     expect(sent).not.toHaveProperty("requested_member_provider_ids");

@@ -8,6 +8,10 @@ import {
   readOutboundAcceptanceReservation,
   reserveOutboundAcceptance,
 } from "../../outbound/authority";
+import {
+  claimPrivateAuthority,
+  reservePrivateAuthority,
+} from "../../outbound/private-authority";
 import type {
   ClaimOutboundDispatchInput,
   FinalizeOutboundAcceptanceInput,
@@ -16,6 +20,11 @@ import type {
   OutboundCapability,
   OutboundTuple,
   ReserveOutboundAcceptanceInput,
+} from "../../outbound/authority-types";
+import type {
+  PrivateAuthorityClaimInput,
+  PrivateAuthorityReservationInput,
+  PrivateAuthorityScope,
 } from "../../outbound/authority-types";
 
 const env = runtimeEnv as typeof runtimeEnv & {
@@ -283,6 +292,221 @@ const requireReservation = (
   if (result.status !== "reserved") throw new Error(result.reason);
   return result.reservation;
 };
+
+type PrivateOperationFixture = {
+  scope: PrivateAuthorityScope;
+  operation_id: string;
+  request_hash: string;
+  tuple: OutboundTuple;
+  capability: OutboundCapability;
+};
+
+const privateTuple = (fixture: Fixture, owner: boolean): OutboundTuple =>
+  owner
+    ? {
+        tenant_id: fixture.tenant_id,
+        membership_id: fixture.owner_membership_id,
+        identity_id: fixture.owner_identity_id,
+        account_id: fixture.owner_account_id,
+        conversation_id: fixture.owner_conversation_id,
+        connection_id: fixture.owner_connection_id,
+      }
+    : fixtureTuple(fixture);
+
+async function seedPrivateOperation(
+  fixture: Fixture,
+  scope: PrivateAuthorityScope,
+  tuple: OutboundTuple = fixtureTuple(fixture),
+  capability?: OutboundCapability,
+): Promise<PrivateOperationFixture> {
+  const suffix = crypto.randomUUID().replaceAll("-", "");
+  const operationId = `operation_${scope.replaceAll(".", "_")}_${suffix}`;
+  const requestHash =
+    `${scope === "receipt.send" ? "d" : scope === "group.create" ? "e" : "f"}`.repeat(
+      64,
+    );
+  let effectiveCapability = capability;
+  const statements: D1PreparedStatement[] = [];
+  if (effectiveCapability === undefined) {
+    const grantId = `grant_${scope.replaceAll(".", "_")}_${suffix}`;
+    statements.push(
+      env.CONTROL_DB.prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        tuple.tenant_id,
+        tuple.membership_id,
+        tuple.identity_id,
+        scope,
+        timestamp,
+      ),
+      env.CONTROL_DB.prepare(
+        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, 'all_chats', 'active', ?, ?, NULL)",
+      ).bind(
+        grantId,
+        tuple.tenant_id,
+        tuple.membership_id,
+        tuple.identity_id,
+        tuple.account_id,
+        scope,
+        timestamp,
+        timestamp,
+      ),
+    );
+    effectiveCapability = {
+      kind: "account_grant",
+      grant_id: grantId,
+      authorization_epoch: 1,
+    };
+  }
+
+  if (scope === "receipt.send") {
+    statements.push(
+      env.CONTROL_DB.prepare(
+        `INSERT INTO receipt_operations (
+             operation_id, tenant_id, membership_id, identity_id, account_id,
+             connection_id, conversation_id, message_id, matrix_room_id,
+             matrix_event_id, request_hash, idempotency_key, status,
+             matrix_stage, bridge_stage, provider_stage, failure_code,
+             failure_reason, evidence_json, requested_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 'requested',
+                     'unknown', 'unknown', 'unknown', NULL, NULL, '[]', ?, ?)`,
+      ).bind(
+        operationId,
+        tuple.tenant_id,
+        tuple.membership_id,
+        tuple.identity_id,
+        tuple.account_id,
+        tuple.connection_id,
+        tuple.conversation_id,
+        `message_${suffix}`,
+        requestHash,
+        `receipt_key_${suffix}`,
+        timestamp,
+        timestamp,
+      ),
+    );
+  } else if (scope === "group.create") {
+    statements.push(
+      env.CONTROL_DB.prepare(
+        `INSERT INTO group_creation_operations (
+             operation_id, tenant_id, membership_id, identity_id, account_id,
+             connection_id, provider, conversation_id, idempotency_key,
+             request_hash, name, participant_contacts_json,
+             participant_provider_ids_json, status, provider_group_id,
+             matrix_room_id, evidence_json, evidence_path, duplicate_risk,
+             human_action_required, failure_code, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'whatsapp', ?, ?, ?, 'Test group',
+                     '[]', '[]', 'pending', NULL, NULL, NULL, NULL, 0, 0,
+                     NULL, ?, ?)`,
+      ).bind(
+        operationId,
+        tuple.tenant_id,
+        tuple.membership_id,
+        tuple.identity_id,
+        tuple.account_id,
+        tuple.connection_id,
+        tuple.conversation_id,
+        `group_create_key_${suffix}`,
+        requestHash,
+        timestamp,
+        timestamp,
+      ),
+    );
+  } else {
+    statements.push(
+      env.CONTROL_DB.prepare(
+        `INSERT INTO group_management_groups (
+             tenant_id, identity_id, account_id, connection_id, provider,
+             conversation_id, provider_group_id, matrix_room_id, name,
+             current_revision, current_member_provider_ids_json,
+             current_evidence_json, active_operation_id,
+             active_claim_expires_at, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'whatsapp', ?, ?, ?, 'Test group', 'r1',
+                     '[]', NULL, NULL, NULL, ?, ?)`,
+      ).bind(
+        tuple.tenant_id,
+        tuple.identity_id,
+        tuple.account_id,
+        tuple.connection_id,
+        tuple.conversation_id,
+        `provider_group_${suffix}`,
+        `matrix_room_${suffix}`,
+        timestamp,
+        timestamp,
+      ),
+      env.CONTROL_DB.prepare(
+        `INSERT INTO group_management_operations (
+             operation_id, tenant_id, membership_id, identity_id, account_id,
+             connection_id, provider, conversation_id, provider_group_id,
+             matrix_room_id, action, requested_name,
+             requested_member_provider_ids_json, expected_revision,
+             request_hash, idempotency_key, status, result_revision,
+             result_member_provider_ids_json, evidence_json, evidence_path,
+             duplicate_risk, human_action_required, failure_code, created_at,
+             updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'whatsapp', ?, ?, ?, 'rename', 'New name',
+                     '[]', 'r1', ?, ?, 'pending', NULL, NULL, NULL, NULL, 0,
+                     0, NULL, ?, ?)`,
+      ).bind(
+        operationId,
+        tuple.tenant_id,
+        tuple.membership_id,
+        tuple.identity_id,
+        tuple.account_id,
+        tuple.connection_id,
+        tuple.conversation_id,
+        `provider_group_${suffix}`,
+        `matrix_room_${suffix}`,
+        requestHash,
+        `group_manage_key_${suffix}`,
+        timestamp,
+        timestamp,
+      ),
+    );
+  }
+  await env.CONTROL_DB.batch(statements);
+  return {
+    scope,
+    operation_id: operationId,
+    request_hash: requestHash,
+    tuple,
+    capability: effectiveCapability,
+  };
+}
+
+const privateReserveInput = (
+  operation: PrivateOperationFixture,
+  overrides: Partial<PrivateAuthorityReservationInput> = {},
+): PrivateAuthorityReservationInput => ({
+  ...operation.tuple,
+  operation_scope: operation.scope,
+  operation_id: operation.operation_id,
+  request_hash: operation.request_hash,
+  capability: operation.capability,
+  reservation_id: `reservation_${operation.operation_id}`,
+  now: timestamp,
+  ...overrides,
+});
+
+const privateClaimInput = (
+  operation: PrivateOperationFixture,
+  reservationId: string,
+  overrides: Partial<PrivateAuthorityClaimInput> = {},
+): PrivateAuthorityClaimInput => ({
+  ...operation.tuple,
+  grant_id:
+    operation.capability.kind === "account_grant"
+      ? operation.capability.grant_id
+      : null,
+  operation_scope: operation.scope,
+  operation_id: operation.operation_id,
+  request_hash: operation.request_hash,
+  capability: operation.capability,
+  reservation_id: reservationId,
+  now: later,
+  expires_at: "2026-09-14T00:01:00.000Z",
+  ...overrides,
+});
 
 describe("outbound authority migration", () => {
   it("preserves populated pre-fence grants and retains epochs across regrant", async () => {
@@ -722,5 +946,250 @@ describe("outbound authority migration", () => {
         ? fixture.grant_capability.authorization_epoch
         : 0,
     );
+  });
+});
+
+describe("private provider authority", () => {
+  it("uses the exact operation tuple and allows only the first claim", async () => {
+    const fixture = await seedFixture();
+    const operation = await seedPrivateOperation(fixture, "receipt.send");
+    const reservation = await reservePrivateAuthority(
+      env.CONTROL_DB,
+      privateReserveInput(operation),
+    );
+    expect(reservation.status).toBe("reserved");
+    if (reservation.status !== "reserved") throw new Error("not reserved");
+
+    const mismatchedDigest = await claimPrivateAuthority(
+      env.CONTROL_DB,
+      privateClaimInput(operation, reservation.reservation.id, {
+        request_hash: "0".repeat(64),
+      }),
+    );
+    expect(mismatchedDigest).toEqual({
+      status: "denied",
+      reason: "tuple_mismatch",
+    });
+    const first = await claimPrivateAuthority(
+      env.CONTROL_DB,
+      privateClaimInput(operation, reservation.reservation.id),
+    );
+    expect(first.status).toBe("claimed");
+    expect(first).toMatchObject({ provider_allowed: true });
+    const duplicate = await claimPrivateAuthority(
+      env.CONTROL_DB,
+      privateClaimInput(operation, reservation.reservation.id, {
+        claim_id: "claim_replay_private",
+      }),
+    );
+    expect(duplicate).toMatchObject({
+      status: "replayed",
+      replayed: true,
+      provider_allowed: false,
+    });
+  });
+
+  it("rejects a revoke before claim and cannot revive the old epoch on regrant", async () => {
+    const fixture = await seedFixture();
+    const operation = await seedPrivateOperation(fixture, "group.create");
+    const reservation = await reservePrivateAuthority(
+      env.CONTROL_DB,
+      privateReserveInput(operation),
+    );
+    expect(reservation.status).toBe("reserved");
+    if (reservation.status !== "reserved") throw new Error("not reserved");
+    await env.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+    )
+      .bind(
+        later,
+        later,
+        fixture.tenant_id,
+        operation.capability.kind === "account_grant"
+          ? operation.capability.grant_id
+          : "",
+      )
+      .run();
+    const denied = await claimPrivateAuthority(
+      env.CONTROL_DB,
+      privateClaimInput(operation, reservation.reservation.id),
+    );
+    expect(denied).toEqual({
+      status: "denied",
+      reason: "authorization_revoked",
+    });
+
+    await env.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'active', revoked_at = NULL, updated_at = ? WHERE tenant_id = ? AND id = ?",
+    )
+      .bind(
+        "2026-09-14T00:00:02.000Z",
+        fixture.tenant_id,
+        operation.capability.kind === "account_grant"
+          ? operation.capability.grant_id
+          : "",
+      )
+      .run();
+    const stillDenied = await claimPrivateAuthority(
+      env.CONTROL_DB,
+      privateClaimInput(operation, reservation.reservation.id),
+    );
+    expect(stillDenied).toEqual({
+      status: "denied",
+      reason: "authorization_revoked",
+    });
+    const current = await env.CONTROL_DB.prepare(
+      "SELECT authorization_epoch FROM account_grants WHERE tenant_id = ? AND id = ?",
+    )
+      .bind(
+        fixture.tenant_id,
+        operation.capability.kind === "account_grant"
+          ? operation.capability.grant_id
+          : "",
+      )
+      .first<{ authorization_epoch: number }>();
+    expect(current?.authorization_epoch).toBeGreaterThan(1);
+  });
+
+  it("denies a revoked capability before writing a private intent", async () => {
+    const fixture = await seedFixture();
+    const operation = await seedPrivateOperation(fixture, "receipt.send");
+    await env.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+    )
+      .bind(
+        later,
+        later,
+        fixture.tenant_id,
+        operation.capability.kind === "account_grant"
+          ? operation.capability.grant_id
+          : "",
+      )
+      .run();
+    const denied = await reservePrivateAuthority(
+      env.CONTROL_DB,
+      privateReserveInput(operation),
+    );
+    expect(denied).toEqual({
+      status: "denied",
+      reason: "authorization_revoked",
+    });
+    const intent = await env.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM receipt_authority_intents WHERE tenant_id = ? AND operation_id = ?",
+    )
+      .bind(fixture.tenant_id, operation.operation_id)
+      .first<{ count: number }>();
+    expect(intent?.count).toBe(0);
+  });
+
+  it("supports receipt, group creation, and group management operation scopes", async () => {
+    const fixture = await seedFixture();
+    for (const scope of [
+      "receipt.send",
+      "group.create",
+      "group.manage",
+    ] as const) {
+      const operation = await seedPrivateOperation(fixture, scope);
+      const reservation = await reservePrivateAuthority(
+        env.CONTROL_DB,
+        privateReserveInput(operation),
+      );
+      expect(reservation.status).toBe("reserved");
+      if (reservation.status !== "reserved") continue;
+      const claim = await claimPrivateAuthority(
+        env.CONTROL_DB,
+        privateClaimInput(operation, reservation.reservation.id),
+      );
+      expect(claim).toMatchObject({
+        status: "claimed",
+        provider_allowed: true,
+      });
+    }
+  });
+
+  it("keeps unavailable connections acceptable at reservation but denies the provider claim", async () => {
+    for (const scope of [
+      "receipt.send",
+      "group.create",
+      "group.manage",
+    ] as const) {
+      const fixture = await seedFixture();
+      const operation = await seedPrivateOperation(fixture, scope);
+      const reservation = await reservePrivateAuthority(
+        env.CONTROL_DB,
+        privateReserveInput(operation),
+      );
+      expect(reservation.status).toBe("reserved");
+      if (reservation.status !== "reserved")
+        throw new Error("private reservation was denied");
+      await env.CONTROL_DB.prepare(
+        "UPDATE connections SET status = 'disconnected', updated_at = ? WHERE tenant_id = ? AND id = ?",
+      )
+        .bind(later, fixture.tenant_id, fixture.connection_id)
+        .run();
+      await expect(
+        claimPrivateAuthority(
+          env.CONTROL_DB,
+          privateClaimInput(operation, reservation.reservation.id),
+        ),
+      ).resolves.toEqual({
+        status: "denied",
+        reason: "authorization_revoked",
+      });
+    }
+  });
+
+  it("allows owner/admin authority without an account-grant row and fences demotion", async () => {
+    const fixture = await seedFixture();
+    const owner = await seedPrivateOperation(
+      fixture,
+      "group.manage",
+      privateTuple(fixture, true),
+      fixture.owner_capability,
+    );
+    const reservation = await reservePrivateAuthority(
+      env.CONTROL_DB,
+      privateReserveInput(owner),
+    );
+    expect(reservation.status).toBe("reserved");
+    if (reservation.status !== "reserved") throw new Error("not reserved");
+    const claim = await claimPrivateAuthority(
+      env.CONTROL_DB,
+      privateClaimInput(owner, reservation.reservation.id),
+    );
+    expect(claim).toMatchObject({
+      status: "claimed",
+      provider_allowed: true,
+    });
+    const grants = await env.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM account_grants WHERE tenant_id = ? AND membership_id = ? AND operation_scope = 'group.manage'",
+    )
+      .bind(fixture.tenant_id, fixture.owner_membership_id)
+      .first<{ count: number }>();
+    expect(grants?.count).toBe(0);
+
+    await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'member', updated_at = ? WHERE tenant_id = ? AND id = ?",
+    )
+      .bind(later, fixture.tenant_id, fixture.owner_membership_id)
+      .run();
+    const afterDemotion = await seedPrivateOperation(
+      fixture,
+      "group.manage",
+      {
+        ...privateTuple(fixture, true),
+        conversation_id: `owner_retry_${crypto.randomUUID().replaceAll("-", "")}`,
+      },
+      fixture.owner_capability,
+    );
+    await expect(
+      reservePrivateAuthority(
+        env.CONTROL_DB,
+        privateReserveInput(afterDemotion),
+      ),
+    ).resolves.toEqual({
+      status: "denied",
+      reason: "authorization_revoked",
+    });
   });
 });

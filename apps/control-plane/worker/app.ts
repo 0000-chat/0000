@@ -127,9 +127,15 @@ import { resolveAuthorization } from "./control-directory/authorization";
 import { handleMcpGet, handleMcpRequest } from "./mcp";
 import {
   createCancelLinkSessionHandler,
+  createConnectionDisconnectHandler,
   createLinkSessionActionHandler,
   createLinkSessionHandler,
+  createRelinkSessionHandler,
+  getConnectionLifecycleOperationHandler,
   getLinkSessionHandler,
+  connectionDisconnectRoute,
+  connectionLifecycleOperationRoute,
+  connectionRelinkSessionStartRoute,
   linkSessionActionRoute,
   linkSessionCancelRoute,
   linkSessionGetRoute,
@@ -175,6 +181,7 @@ import {
   createReceiptHandlers,
 } from "./routes/receipts";
 import type { ReceiptServices } from "./receipts/service";
+import { dispatchClaimHandler } from "./outbound/dispatch-claim-route";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -444,6 +451,7 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/identities", productAuthorization);
   app.use("/api/v1/identities/*", productAuthorization);
   app.use("/api/v1/connections", productAuthorization);
+  app.use("/api/v1/connections/*", productAuthorization);
   app.use("/api/v1/accounts", productAuthorization);
   app.use("/api/v1/accounts/*", productAuthorization);
   app.use("/api/v1/grant-targets", productAuthorization);
@@ -544,6 +552,18 @@ export function createApp(services: AppServices = {}) {
   if (services.linkingNow !== undefined)
     linkingServices.now = services.linkingNow;
   app.openapi(linkSessionStartRoute, createLinkSessionHandler(linkingServices));
+  app.openapi(
+    connectionRelinkSessionStartRoute,
+    createRelinkSessionHandler(linkingServices),
+  );
+  app.openapi(
+    connectionDisconnectRoute,
+    createConnectionDisconnectHandler(linkingServices),
+  );
+  app.openapi(
+    connectionLifecycleOperationRoute,
+    getConnectionLifecycleOperationHandler,
+  );
   app.openapi(linkSessionGetRoute, getLinkSessionHandler);
   app.openapi(
     linkSessionActionRoute,
@@ -631,6 +651,7 @@ export function createApp(services: AppServices = {}) {
     "/internal/v1/ingestion/batches",
     createIngestionBatchHandler(services),
   );
+  app.post("/internal/v1/outbound/dispatch-claims", dispatchClaimHandler);
 
   return app;
 }

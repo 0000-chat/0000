@@ -238,6 +238,20 @@ const outboundAcceptanceDigests = async (input: {
   return { bodyDigest, requestDigest };
 };
 
+const outboundResendRequestDigest = async (
+  dispatch: OutboundDispatch,
+  idempotencyKey: string,
+): Promise<string> =>
+  sha256Hex(
+    new TextEncoder().encode(
+      canonicalJsonStringify({
+        original_command_id: dispatch.command_id,
+        original_request_digest: dispatch.request_digest,
+        idempotency_key: idempotencyKey,
+      }),
+    ),
+  );
+
 /**
  * Resolve the chat's immutable account owner, check the distinct account/chat
  * send grant, and commit the outbound ledger through the tenant DO.
@@ -407,6 +421,12 @@ export async function acceptTextReply(
       accepted_at: acceptedAt,
       initial_dispatch_status: initialDispatchStatus,
       confirmation_due_at: confirmationDueAt,
+      authority: {
+        reservation_id: reservation.reservation.id,
+        membership_id: reservation.reservation.membership_id,
+        identity_id: reservation.reservation.identity_id,
+        capability: reservation.reservation.capability,
+      },
     }),
   );
 
@@ -849,6 +869,78 @@ export async function decideOutboundCommand(
   const actorIdentity =
     identity?.identity_id ?? context.authorization.identities[0]?.identity_id;
   if (actorIdentity === undefined) throw new ReadError("forbidden");
+  type CommittedReservation = Extract<
+    Awaited<ReturnType<typeof reserveOutboundAcceptance>>,
+    { status: "reserved" }
+  >;
+  let resendReservation: CommittedReservation | undefined;
+  let resendReservationKey: string | undefined;
+  if (decision === "resend") {
+    const database = context.env.CONTROL_DB;
+    if (database === undefined || typeof database.withSession !== "function")
+      throw new ReadError("service_unavailable");
+    const resendRequestDigest = await outboundResendRequestDigest(
+      current.dispatch,
+      idempotencyKey,
+    );
+    resendReservationKey = `resend_${resendRequestDigest.slice(0, 48)}`;
+    const reservationKey = resendReservationKey;
+    const dbSession = database.withSession("first-primary");
+    const bodyDigest = current.dispatch.body_digest;
+    if (bodyDigest === undefined) throw new ReadError("service_unavailable");
+    let existing = await readOutboundAcceptanceReservationByKey(
+      dbSession,
+      context.authorization.tenant.id,
+      reservationKey,
+    );
+    if (existing !== null) {
+      if (
+        existing.identity_id !== actorIdentity ||
+        existing.account_id !== current.dispatch.account_id ||
+        existing.conversation_id !== current.dispatch.conversation_id ||
+        existing.connection_id !== current.dispatch.connection_id ||
+        existing.request_digest !== resendRequestDigest ||
+        existing.body_digest !== bodyDigest
+      ) {
+        throw new ReadError("invalid_request");
+      }
+      resendReservation = {
+        status: "reserved",
+        replayed: true,
+        reservation: existing,
+      };
+    } else {
+      const capability = await readAcceptanceCapability(
+        dbSession,
+        context,
+        actorIdentity,
+        current.dispatch.account_id,
+        current.dispatch.connection_id,
+        current.dispatch.conversation_id,
+      );
+      if (capability === null) throw new ReadError("forbidden");
+      const reserved = await reserveOutboundAcceptance(dbSession, {
+        tenant_id: context.authorization.tenant.id,
+        membership_id: context.authorization.membership.id,
+        identity_id: actorIdentity,
+        account_id: current.dispatch.account_id,
+        conversation_id: current.dispatch.conversation_id,
+        connection_id: current.dispatch.connection_id,
+        idempotency_key: reservationKey,
+        request_digest: resendRequestDigest,
+        body_digest: bodyDigest,
+        capability,
+        now: acceptanceNow(services),
+      });
+      if (reserved.status === "denied")
+        throw new ReadError(
+          reserved.reason === "authorization_revoked"
+            ? "forbidden"
+            : "invalid_request",
+        );
+      resendReservation = reserved;
+    }
+  }
   const projection = getTenantProjection(
     context.env,
     context.authorization.tenant.id,
@@ -865,8 +957,52 @@ export async function decideOutboundCommand(
         actor_identity_id: actorIdentity,
         decided_at: acceptanceNow(services),
         duplicate_risk_acknowledged: duplicateRiskAcknowledged,
+        ...(resendReservation === undefined
+          ? {}
+          : {
+              resend_authority: {
+                reservation_id: resendReservation.reservation.id,
+                membership_id: resendReservation.reservation.membership_id,
+                identity_id: resendReservation.reservation.identity_id,
+                capability: resendReservation.reservation.capability,
+              },
+            }),
       }),
     );
+    const finalizedKey = resendReservationKey;
+    const finalizedBodyDigest = result.dispatch.body_digest;
+    if (
+      decision === "resend" &&
+      resendReservation !== undefined &&
+      resendReservation.reservation.status === "reserved" &&
+      finalizedKey !== undefined &&
+      finalizedBodyDigest !== undefined
+    ) {
+      const finalized = await finalizeOutboundAcceptance(
+        context.env.CONTROL_DB!.withSession("first-primary"),
+        {
+          tenant_id: context.authorization.tenant.id,
+          membership_id: resendReservation.reservation.membership_id,
+          identity_id: resendReservation.reservation.identity_id,
+          account_id: result.dispatch.account_id,
+          conversation_id: result.dispatch.conversation_id,
+          connection_id: result.dispatch.connection_id,
+          grant_id: resendReservation.reservation.grant_id,
+          capability: resendReservation.reservation.capability,
+          reservation_id: resendReservation.reservation.id,
+          idempotency_key: finalizedKey,
+          request_digest: result.dispatch.request_digest,
+          body_digest: finalizedBodyDigest,
+          command_id: result.dispatch.command_id,
+          message_id: result.dispatch.message_id,
+          dispatch_id: result.dispatch.id,
+          transaction_id: result.dispatch.transaction_id,
+          now: acceptanceNow(services),
+        },
+      );
+      if (finalized.status === "denied")
+        throw new ReadError("service_unavailable");
+    }
     const adapter = configuredOutboundAdapter(context, services);
     if (
       decision === "confirm" &&

@@ -21,6 +21,10 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    authority::{
+        AuthorityClaimOutcome, AuthorityClaimRequest, MessageAuthorityClaim,
+        OperationAuthorityClaim, OutboundAuthority, OutboundCapability, PrivateAuthorityOperation,
+    },
     history::HistoryGatewayServer,
     ingestion::SecretString,
     model::Provider,
@@ -58,6 +62,8 @@ const OUTBOUND_STALE_SESSION: &str = "outbound_stale_session";
 const RECEIPT_MISSING_SENDER: &str = "receipt_sender_unavailable";
 const RECEIPT_SCOPE_MISMATCH: &str = "receipt_scope_mismatch";
 const RECEIPT_STALE_SESSION: &str = "receipt_stale_session";
+const AUTHORITY_DENIED: &str = "authorization_revoked";
+const AUTHORITY_UNCERTAIN: &str = "authority_claim_uncertain";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningFailure {
@@ -400,6 +406,16 @@ impl WhatsAppProvisioningClient {
     /// Start a QR login.  The adapter first checks the pinned connector's
     /// advertised flows, then starts the exact `start/qr` process.
     pub async fn start_qr(&self) -> Result<ProvisioningStart, ProvisioningFailure> {
+        self.start_qr_for_login(None).await
+    }
+
+    /// Start a QR login selected for one existing provider login. The
+    /// `login_id` query parameter is the pinned bridge's relink selector; it
+    /// is never accepted from an unverified browser value.
+    pub async fn start_qr_for_login(
+        &self,
+        provider_login_id: Option<&str>,
+    ) -> Result<ProvisioningStart, ProvisioningFailure> {
         let flows = self
             .request(
                 Method::GET,
@@ -410,11 +426,18 @@ impl WhatsAppProvisioningClient {
         if !advertises_qr(&flows) {
             return Err(ProvisioningFailure::ProviderError);
         }
+        let mut query = vec![("user_id", self.matrix_user_id.as_str())];
+        if let Some(login_id) = provider_login_id {
+            if !valid_provider_login_id(login_id) || login_id.eq_ignore_ascii_case("all") {
+                return Err(ProvisioningFailure::InvalidRequest);
+            }
+            query.push(("login_id", login_id));
+        }
         let response = self
             .request(
                 Method::POST,
                 &format!("{PROVISIONING_ROOT}/login/start/qr"),
-                &[("user_id", self.matrix_user_id.as_str())],
+                &query,
             )
             .await?;
         let process_id = required_id(&response, &["login_id", "process_id"])?;
@@ -431,6 +454,35 @@ impl WhatsAppProvisioningClient {
             },
         );
         Ok(ProvisioningStart { gateway_ref, qr })
+    }
+
+    /// Log out exactly one provider login. The bridge's special `all` value
+    /// is deliberately rejected so a connection cannot revoke another
+    /// account's session.
+    pub async fn logout(&self, provider_login_id: &str) -> Result<(), ProvisioningFailure> {
+        if !valid_provider_login_id(provider_login_id)
+            || provider_login_id.eq_ignore_ascii_case("all")
+        {
+            return Err(ProvisioningFailure::InvalidRequest);
+        }
+        let (status, value) = self
+            .request_raw(
+                Method::POST,
+                &format!(
+                    "{PROVISIONING_ROOT}/logout/{}",
+                    encode_path(provider_login_id)
+                ),
+                &[("user_id", self.matrix_user_id.as_str())],
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        if !value.is_object() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        Ok(())
     }
 
     /// Poll/rotate a QR with the exact `display_and_wait` step route.
@@ -859,6 +911,8 @@ struct GatewayRequest {
     provider: String,
     generation: u64,
     gateway_ref: Option<String>,
+    connection_id: Option<String>,
+    provider_login_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -902,6 +956,11 @@ struct ContactRequest {
 struct ReadReceiptRequest {
     schema_version: u8,
     tenant_id: String,
+    membership_id: String,
+    actor_identity_id: String,
+    reservation_id: String,
+    capability: OutboundCapability,
+    request_hash: String,
     identity_id: String,
     account_id: String,
     connection_id: String,
@@ -922,6 +981,11 @@ impl ReadReceiptRequest {
         if self.schema_version != 1
             || self.provider != Provider::Whatsapp
             || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.membership_id)
+            || !valid_resource_id(&self.actor_identity_id)
+            || !valid_resource_id(&self.reservation_id)
+            || !valid_authority_capability(&self.capability)
+            || !valid_digest(&self.request_hash)
             || !valid_resource_id(&self.identity_id)
             || !valid_resource_id(&self.account_id)
             || !valid_resource_id(&self.connection_id)
@@ -972,6 +1036,11 @@ impl ContactRequest {
 struct GroupRequest {
     schema_version: u8,
     tenant_id: String,
+    membership_id: String,
+    actor_identity_id: String,
+    reservation_id: String,
+    capability: OutboundCapability,
+    request_hash: String,
     account_id: String,
     connection_id: String,
     identity_id: String,
@@ -989,6 +1058,11 @@ impl GroupRequest {
         if self.schema_version != 1
             || self.provider != Provider::Whatsapp
             || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.membership_id)
+            || !valid_resource_id(&self.actor_identity_id)
+            || !valid_resource_id(&self.reservation_id)
+            || !valid_authority_capability(&self.capability)
+            || !valid_digest(&self.request_hash)
             || !valid_resource_id(&self.account_id)
             || !valid_resource_id(&self.connection_id)
             || !valid_resource_id(&self.identity_id)
@@ -1021,6 +1095,11 @@ impl GroupRequest {
 struct GroupManagementRequest {
     schema_version: u8,
     tenant_id: String,
+    membership_id: String,
+    actor_identity_id: String,
+    reservation_id: String,
+    capability: OutboundCapability,
+    request_hash: String,
     account_id: String,
     connection_id: String,
     identity_id: String,
@@ -1051,6 +1130,11 @@ impl GroupManagementRequest {
         if self.schema_version != 1
             || self.provider != Provider::Whatsapp
             || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.membership_id)
+            || !valid_resource_id(&self.actor_identity_id)
+            || !valid_resource_id(&self.reservation_id)
+            || !valid_authority_capability(&self.capability)
+            || !valid_digest(&self.request_hash)
             || !valid_resource_id(&self.account_id)
             || !valid_resource_id(&self.connection_id)
             || !valid_resource_id(&self.identity_id)
@@ -1095,15 +1179,22 @@ impl GroupManagementRequest {
 struct OutboundTextRequest {
     schema_version: u8,
     tenant_id: String,
+    membership_id: String,
+    actor_identity_id: String,
+    reservation_id: String,
+    capability: OutboundCapability,
     account_id: String,
     connection_id: String,
     identity_id: String,
     provider: Provider,
     conversation_id: String,
+    command_id: String,
+    dispatch_id: String,
     message_id: String,
     event_id: String,
     transaction_id: String,
     request_digest: String,
+    body_digest: String,
     projection_generation: u64,
     session_generation: String,
     route: OutboundRouteRequest,
@@ -1115,14 +1206,21 @@ impl OutboundTextRequest {
         if self.schema_version != 1
             || self.provider != Provider::Whatsapp
             || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.membership_id)
+            || !valid_resource_id(&self.actor_identity_id)
+            || !valid_resource_id(&self.reservation_id)
+            || !valid_authority_capability(&self.capability)
             || !valid_resource_id(&self.account_id)
             || !valid_resource_id(&self.connection_id)
             || !valid_resource_id(&self.identity_id)
             || !valid_resource_id(&self.conversation_id)
+            || !valid_resource_id(&self.command_id)
+            || !valid_resource_id(&self.dispatch_id)
             || !valid_resource_id(&self.message_id)
             || !valid_resource_id(&self.event_id)
             || !valid_resource_id(&self.transaction_id)
             || !valid_digest(&self.request_digest)
+            || !valid_digest(&self.body_digest)
             || self.projection_generation == 0
             || self.body.is_empty()
             || self.body.len() > 20_000
@@ -1161,6 +1259,19 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn valid_authority_capability(value: &OutboundCapability) -> bool {
+    match value {
+        OutboundCapability::AccountGrant {
+            grant_id,
+            authorization_epoch,
+        } => valid_resource_id(grant_id) && *authorization_epoch > 0,
+        OutboundCapability::OwnerAdmin {
+            authority_id,
+            authority_epoch,
+        } => valid_resource_id(authority_id) && *authority_epoch > 0,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct GatewayOwner {
     session_id: String,
@@ -1170,6 +1281,8 @@ struct GatewayOwner {
     target_identity_id: String,
     provider: String,
     generation: u64,
+    connection_id: Option<String>,
+    provider_login_id: Option<String>,
 }
 
 impl From<&GatewayRequest> for GatewayOwner {
@@ -1182,6 +1295,8 @@ impl From<&GatewayRequest> for GatewayOwner {
             target_identity_id: request.target_identity_id.clone(),
             provider: request.provider.clone(),
             generation: request.generation,
+            connection_id: request.connection_id.clone(),
+            provider_login_id: request.provider_login_id.clone(),
         }
     }
 }
@@ -1211,6 +1326,7 @@ pub struct ProvisioningGatewayServer {
     outbound_sender: Option<Arc<dyn OutboundTextSender>>,
     read_receipt_sender: Option<Arc<dyn MatrixReadReceiptSender>>,
     group_manager: Option<Arc<dyn MatrixGroupManager>>,
+    outbound_authority: Option<Arc<dyn OutboundAuthority>>,
 }
 
 impl fmt::Debug for ProvisioningGatewayServer {
@@ -1238,6 +1354,7 @@ impl ProvisioningGatewayServer {
             outbound_sender: None,
             read_receipt_sender: None,
             group_manager: None,
+            outbound_authority: None,
         })
     }
 
@@ -1270,6 +1387,24 @@ impl ProvisioningGatewayServer {
     pub fn with_group_manager(mut self, manager: Arc<dyn MatrixGroupManager>) -> Self {
         self.group_manager = Some(manager);
         self
+    }
+
+    /// Attach the private Worker authority client. Every provider-facing
+    /// operation fails closed when this boundary is absent or uncertain.
+    pub fn with_outbound_authority(mut self, authority: Arc<dyn OutboundAuthority>) -> Self {
+        self.outbound_authority = Some(authority);
+        self
+    }
+
+    async fn claim_provider(&self, request: AuthorityClaimRequest) -> Result<(), &'static str> {
+        let Some(authority) = self.outbound_authority.as_ref() else {
+            return Err(AUTHORITY_UNCERTAIN);
+        };
+        match authority.claim(request).await {
+            Ok(AuthorityClaimOutcome::Allowed { .. }) => Ok(()),
+            Ok(AuthorityClaimOutcome::Denied { .. }) => Err(AUTHORITY_DENIED),
+            Err(_) => Err(AUTHORITY_UNCERTAIN),
+        }
     }
 
     /// Serve the private gateway on a caller-supplied listener.  The caller
@@ -1407,9 +1542,19 @@ impl ProvisioningGatewayServer {
         }
         let owner = GatewayOwner::from(&parsed);
         match request.path.as_str() {
-            "/v1/link-sessions/start" => self.start(owner).await,
+            "/v1/link-sessions/start" => self.start(parsed, owner).await,
             "/v1/link-sessions/poll" => self.poll(parsed, owner).await,
             "/v1/link-sessions/cancel" => self.cancel(parsed, owner).await,
+            "/v1/connections/disconnect" => {
+                if parsed.connection_id.as_deref().is_none_or(|value| {
+                    !valid_resource_id(value)
+                }) || parsed.provider_login_id.as_deref().is_none_or(|value| {
+                    !valid_provider_login_id(value) || value.eq_ignore_ascii_case("all")
+                }) {
+                    return response(400, json!({ "error": INVALID_REQUEST }));
+                }
+                self.disconnect(parsed, owner).await
+            }
             _ => response(404, json!({ "error": "not_found" })),
         }
     }
@@ -1435,6 +1580,28 @@ impl ProvisioningGatewayServer {
         let Some(store_handle) = self.outbound_store.as_ref() else {
             return response(503, json!({ "error": GROUP_MISSING_STORE }));
         };
+        if let Err(reason) = self
+            .claim_provider(AuthorityClaimRequest::Operation(OperationAuthorityClaim {
+                operation: PrivateAuthorityOperation::GroupCreate,
+                tenant_id: request.tenant_id.clone(),
+                membership_id: request.membership_id.clone(),
+                actor_identity_id: request.actor_identity_id.clone(),
+                account_id: request.account_id.clone(),
+                conversation_id: request.conversation_id.clone(),
+                connection_id: request.connection_id.clone(),
+                reservation_id: request.reservation_id.clone(),
+                operation_id: request.operation_id.clone(),
+                request_hash: request.request_hash.clone(),
+                capability: request.capability.clone(),
+            }))
+            .await
+        {
+            return if reason == AUTHORITY_DENIED {
+                response(403, json!({ "error": AUTHORITY_DENIED }))
+            } else {
+                response(502, json!({ "error": GROUP_UNCERTAIN }))
+            };
+        }
         let provider_value = match self
             .client
             .create_group(
@@ -1545,6 +1712,28 @@ impl ProvisioningGatewayServer {
                 "remove_participants" => MatrixGroupAction::RemoveParticipants,
                 _ => return response(400, json!({ "error": INVALID_REQUEST })),
             };
+            if let Err(reason) = self
+                .claim_provider(AuthorityClaimRequest::Operation(OperationAuthorityClaim {
+                    operation: PrivateAuthorityOperation::GroupManage,
+                    tenant_id: request.tenant_id.clone(),
+                    membership_id: request.membership_id.clone(),
+                    actor_identity_id: request.actor_identity_id.clone(),
+                    account_id: request.account_id.clone(),
+                    conversation_id: request.conversation_id.clone(),
+                    connection_id: request.connection_id.clone(),
+                    reservation_id: request.reservation_id.clone(),
+                    operation_id: request.operation_id.clone(),
+                    request_hash: request.request_hash.clone(),
+                    capability: request.capability.clone(),
+                }))
+                .await
+            {
+                return if reason == AUTHORITY_DENIED {
+                    response(403, json!({ "error": AUTHORITY_DENIED }))
+                } else {
+                    response(502, json!({ "error": GROUP_MANAGEMENT_UNCERTAIN }))
+                };
+            }
             match group_manager
                 .apply_group_change(MatrixGroupChange {
                     room_id: request.matrix_room_id.clone(),
@@ -1701,8 +1890,12 @@ impl ProvisioningGatewayServer {
         )
     }
 
-    async fn start(&self, owner: GatewayOwner) -> (u16, Vec<u8>) {
-        match self.client.start_qr().await {
+    async fn start(&self, request: GatewayRequest, owner: GatewayOwner) -> (u16, Vec<u8>) {
+        match self
+            .client
+            .start_qr_for_login(request.provider_login_id.as_deref())
+            .await
+        {
             Ok(start) => {
                 self.sessions.lock().await.insert(
                     start.gateway_ref.clone(),
@@ -1721,6 +1914,27 @@ impl ProvisioningGatewayServer {
                     }),
                 )
             }
+            Err(error) => response(502, json!({ "error": error.code() })),
+        }
+    }
+
+    async fn disconnect(&self, request: GatewayRequest, owner: GatewayOwner) -> (u16, Vec<u8>) {
+        let Some(provider_login_id) = request.provider_login_id.as_deref() else {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        };
+        if provider_login_id.eq_ignore_ascii_case("all") {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        }
+        match self.client.logout(provider_login_id).await {
+            Ok(()) => response(
+                200,
+                json!({
+                    "status": "disconnected",
+                    "provider_login_id": provider_login_id,
+                    "connection_id": request.connection_id,
+                    "generation": owner.generation,
+                }),
+            ),
             Err(error) => response(502, json!({ "error": error.code() })),
         }
     }
@@ -1826,6 +2040,79 @@ impl ProvisioningGatewayServer {
             OutboundTextPreparation::Created => {}
         }
         drop(store);
+
+        let authority_result = self
+            .claim_provider(AuthorityClaimRequest::Message(MessageAuthorityClaim {
+                tenant_id: request.tenant_id.clone(),
+                membership_id: request.membership_id.clone(),
+                actor_identity_id: request.actor_identity_id.clone(),
+                account_id: request.account_id.clone(),
+                conversation_id: request.conversation_id.clone(),
+                connection_id: request.connection_id.clone(),
+                reservation_id: request.reservation_id.clone(),
+                command_id: request.command_id.clone(),
+                dispatch_id: request.dispatch_id.clone(),
+                transaction_id: request.transaction_id.clone(),
+                request_digest: request.request_digest.clone(),
+                body_digest: request.body_digest.clone(),
+                capability: request.capability.clone(),
+            }))
+            .await;
+        if let Err(reason) = authority_result {
+            let (outcome, state, matrix_stage, evidence, failure_reason) =
+                if reason == AUTHORITY_DENIED {
+                    ("rejected", "rejected", "unknown", None, Some(reason))
+                } else {
+                    (
+                        "uncertain",
+                        "uncertain",
+                        "unknown",
+                        Some(json!({
+                            "source": "refresh",
+                            "status": "uncertain",
+                            "evidence_id": format!("uncertain_{}", request.transaction_id),
+                            "observed_at": Utc::now().to_rfc3339(),
+                            "reason": AUTHORITY_UNCERTAIN
+                        })),
+                        Some(OUTBOUND_UNCERTAIN),
+                    )
+                };
+            let observed_at = Utc::now().to_rfc3339();
+            let body = outbound_result_json(
+                &request,
+                outcome,
+                &observed_at,
+                failure_reason,
+                evidence.clone(),
+            );
+            let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+            let matrix_evidence = evidence
+                .as_ref()
+                .and_then(|value| serde_json::to_vec(value).ok());
+            let mut store = store_handle.lock().await;
+            if store
+                .complete_outbound_text(
+                    &request.tenant_id,
+                    &request.transaction_id,
+                    &request.request_digest,
+                    OutboundTextCompletion {
+                        state: state.to_owned(),
+                        matrix_stage: matrix_stage.to_owned(),
+                        bridge_stage: "unknown".to_owned(),
+                        provider_stage: "unknown".to_owned(),
+                        response: body_bytes.clone(),
+                        matrix_evidence,
+                        bridge_evidence: None,
+                        provider_evidence: None,
+                        updated_at: Utc::now(),
+                    },
+                )
+                .is_err()
+            {
+                return response(503, json!({ "error": OUTBOUND_UNCERTAIN }));
+            }
+            return (200, body_bytes);
+        }
 
         let send_result = sender
             .send_encrypted_text(&matrix_room_id, &request.transaction_id, &request.body)
@@ -1967,6 +2254,53 @@ impl ProvisioningGatewayServer {
         };
         if binding_generation.as_deref() != Some(request.session_generation.as_str()) {
             return response(409, json!({ "error": RECEIPT_STALE_SESSION }));
+        }
+
+        if let Err(reason) = self
+            .claim_provider(AuthorityClaimRequest::Operation(OperationAuthorityClaim {
+                operation: PrivateAuthorityOperation::ReceiptSend,
+                tenant_id: request.tenant_id.clone(),
+                membership_id: request.membership_id.clone(),
+                actor_identity_id: request.actor_identity_id.clone(),
+                account_id: request.account_id.clone(),
+                conversation_id: request.conversation_id.clone(),
+                connection_id: request.connection_id.clone(),
+                reservation_id: request.reservation_id.clone(),
+                operation_id: request.operation_id.clone(),
+                request_hash: request.request_hash.clone(),
+                capability: request.capability.clone(),
+            }))
+            .await
+        {
+            return if reason == AUTHORITY_DENIED {
+                response(
+                    200,
+                    json!({
+                        "status": "rejected",
+                        "operation_id": request.operation_id,
+                        "matrix_stage": "unknown",
+                        "bridge_stage": "unknown",
+                        "provider_stage": "unknown",
+                        "failure_code": AUTHORITY_DENIED,
+                        "failure_reason": "Outbound authority was revoked before the Matrix receipt",
+                        "evidence": []
+                    }),
+                )
+            } else {
+                response(
+                    200,
+                    json!({
+                        "status": "unknown",
+                        "operation_id": request.operation_id,
+                        "matrix_stage": "unknown",
+                        "bridge_stage": "unknown",
+                        "provider_stage": "unknown",
+                        "failure_code": "provider_timeout",
+                        "failure_reason": "Outbound authority claim outcome is unknown",
+                        "evidence": []
+                    }),
+                )
+            };
         }
 
         let result = sender
@@ -2249,7 +2583,7 @@ mod tests {
         os::unix::fs::PermissionsExt,
         sync::{
             Arc, Mutex as StdMutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU8, AtomicUsize, Ordering},
         },
     };
 
@@ -2304,6 +2638,63 @@ mod tests {
         }
     }
 
+    struct AllowingAuthority;
+
+    #[async_trait]
+    impl OutboundAuthority for AllowingAuthority {
+        async fn claim(
+            &self,
+            _request: AuthorityClaimRequest,
+        ) -> Result<AuthorityClaimOutcome, crate::authority::AuthorityClaimFailure> {
+            Ok(AuthorityClaimOutcome::Allowed {
+                expires_at: "2026-09-14T00:01:00.000Z".to_owned(),
+            })
+        }
+    }
+
+    fn allowing_authority() -> Arc<dyn OutboundAuthority> {
+        Arc::new(AllowingAuthority)
+    }
+
+    const AUTHORITY_ALLOW: u8 = 0;
+    const AUTHORITY_DENY: u8 = 1;
+    const AUTHORITY_UNCERTAIN: u8 = 2;
+
+    struct SwitchableAuthority {
+        mode: AtomicU8,
+    }
+
+    impl SwitchableAuthority {
+        fn new(mode: u8) -> Self {
+            Self {
+                mode: AtomicU8::new(mode),
+            }
+        }
+
+        fn set_mode(&self, mode: u8) {
+            self.mode.store(mode, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl OutboundAuthority for SwitchableAuthority {
+        async fn claim(
+            &self,
+            _request: AuthorityClaimRequest,
+        ) -> Result<AuthorityClaimOutcome, crate::authority::AuthorityClaimFailure> {
+            match self.mode.load(Ordering::SeqCst) {
+                AUTHORITY_ALLOW => Ok(AuthorityClaimOutcome::Allowed {
+                    expires_at: "2026-09-14T00:01:00.000Z".to_owned(),
+                }),
+                AUTHORITY_DENY => Ok(AuthorityClaimOutcome::Denied {
+                    reason: AUTHORITY_DENIED.to_owned(),
+                }),
+                AUTHORITY_UNCERTAIN => Err(crate::authority::AuthorityClaimFailure::Uncertain),
+                _ => Err(crate::authority::AuthorityClaimFailure::InvalidRequest),
+            }
+        }
+    }
+
     async fn mount_start_fixtures(server: &MockServer) {
         Mock::given(matchers::method("GET"))
             .and(matchers::path(format!("{PROVISIONING_ROOT}/login/flows")))
@@ -2334,6 +2725,62 @@ mod tests {
             })))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn adapter_relink_selects_one_login_and_logout_rejects_all() {
+        let bridge = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path(format!("{PROVISIONING_ROOT}/login/flows")))
+            .and(matchers::query_param("user_id", MATRIX_USER))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "flows": [{"id": "qr"}]
+            })))
+            .mount(&bridge)
+            .await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/login/start/qr"
+            )))
+            .and(matchers::query_param("user_id", MATRIX_USER))
+            .and(matchers::query_param("login_id", "login-one"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login_id": "relink-process",
+                "step_id": "fi.mau.whatsapp.login.qr",
+                "txn_id": "relink-txn",
+                "display_and_wait": {"data": "relink-qr"}
+            })))
+            .mount(&bridge)
+            .await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/logout/login-one"
+            )))
+            .and(matchers::query_param("user_id", MATRIX_USER))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&bridge)
+            .await;
+
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let started = client
+            .start_qr_for_login(Some("login-one"))
+            .await
+            .expect("selected-login QR start succeeds");
+        assert_eq!(started.qr, "relink-qr");
+        client
+            .logout("login-one")
+            .await
+            .expect("selected-login logout succeeds");
+        assert_eq!(
+            client.logout("all").await,
+            Err(ProvisioningFailure::InvalidRequest)
+        );
     }
 
     #[tokio::test]
@@ -2570,7 +3017,8 @@ mod tests {
         let server =
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
-                .with_history(history);
+                .with_history(history)
+                .with_outbound_authority(allowing_authority());
         let session_generation = "2026-09-14T00:00:00.000Z";
         let request = |path: &str, idempotency_key: &str, body: Value| HttpRequest {
             path: path.to_owned(),
@@ -2742,7 +3190,8 @@ mod tests {
         let server =
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
-                .with_history(history);
+                .with_history(history)
+                .with_outbound_authority(allowing_authority());
         let request = HttpRequest {
             path: "/v1/groups/create".to_owned(),
             authorization: Some(GATEWAY_SECRET.to_owned()),
@@ -2751,6 +3200,15 @@ mod tests {
             body: serde_json::to_vec(&json!({
                 "schema_version": 1,
                 "tenant_id": "tenant_group",
+                "membership_id": "membership_group",
+                "actor_identity_id": "identity_group_actor",
+                "reservation_id": "reservation_group_create",
+                "capability": {
+                    "kind": "account_grant",
+                    "grant_id": "grant_group_create",
+                    "authorization_epoch": 1
+                },
+                "request_hash": "a".repeat(64),
                 "account_id": "account_group",
                 "connection_id": "connection_group",
                 "identity_id": "identity_group",
@@ -2950,7 +3408,8 @@ mod tests {
                 .with_history(history)
                 .with_read_receipt_sender(Arc::new(RecordingReadReceiptSender {
                     calls: Arc::clone(&calls),
-                }));
+                }))
+                .with_outbound_authority(allowing_authority());
         let request = HttpRequest {
             path: "/v1/receipts/read".to_owned(),
             authorization: Some(GATEWAY_SECRET.to_owned()),
@@ -2959,6 +3418,15 @@ mod tests {
             body: serde_json::to_vec(&json!({
                 "schema_version": 1,
                 "tenant_id": "tenant_receipt",
+                "membership_id": "membership_receipt",
+                "actor_identity_id": "identity_receipt_actor",
+                "reservation_id": "reservation_receipt",
+                "capability": {
+                    "kind": "account_grant",
+                    "grant_id": "grant_receipt",
+                    "authorization_epoch": 1
+                },
+                "request_hash": "b".repeat(64),
                 "identity_id": "identity_receipt",
                 "account_id": "account_receipt",
                 "connection_id": "connection_receipt",
@@ -3067,7 +3535,8 @@ mod tests {
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
                 .with_history(history)
-                .with_group_manager(Arc::clone(&manager) as Arc<dyn MatrixGroupManager>);
+                .with_group_manager(Arc::clone(&manager) as Arc<dyn MatrixGroupManager>)
+                .with_outbound_authority(allowing_authority());
         let request = HttpRequest {
             path: "/v1/groups/rename".to_owned(),
             authorization: Some(GATEWAY_SECRET.to_owned()),
@@ -3076,6 +3545,15 @@ mod tests {
             body: serde_json::to_vec(&json!({
                 "schema_version": 1,
                 "tenant_id": "tenant_group_management",
+                "membership_id": "membership_group_management",
+                "actor_identity_id": "identity_group_management_actor",
+                "reservation_id": "reservation_group_management",
+                "capability": {
+                    "kind": "account_grant",
+                    "grant_id": "grant_group_management",
+                    "authorization_epoch": 1
+                },
+                "request_hash": "c".repeat(64),
                 "account_id": "account_group_management",
                 "connection_id": "connection_group_management",
                 "identity_id": "identity_group_management",
@@ -3129,6 +3607,15 @@ mod tests {
         let parsed_request: GroupManagementRequest = serde_json::from_value(json!({
             "schema_version": 1,
             "tenant_id": "tenant_group_management",
+            "membership_id": "membership_group_management",
+            "actor_identity_id": "identity_group_management_actor",
+            "reservation_id": "reservation_group_management",
+            "capability": {
+                "kind": "account_grant",
+                "grant_id": "grant_group_management",
+                "authorization_epoch": 1
+            },
+            "request_hash": "c".repeat(64),
             "account_id": "account_group_management",
             "connection_id": "connection_group_management",
             "identity_id": "identity_group_management",
@@ -3247,11 +3734,20 @@ mod tests {
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
                 .with_history(history)
-                .with_outbound_sender(Arc::clone(&sender) as Arc<dyn OutboundTextSender>);
+                .with_outbound_sender(Arc::clone(&sender) as Arc<dyn OutboundTextSender>)
+                .with_outbound_authority(allowing_authority());
 
         let request_body = serde_json::to_vec(&json!({
             "schema_version": 1,
             "tenant_id": "tenant_outbound",
+            "membership_id": "membership_outbound",
+            "actor_identity_id": "identity_outbound_actor",
+            "reservation_id": "reservation_outbound_race",
+            "capability": {
+                "kind": "account_grant",
+                "grant_id": "grant_outbound_race",
+                "authorization_epoch": 1
+            },
             "account_id": "account_outbound",
             "connection_id": "connection_outbound",
             "identity_id": "identity_outbound",
@@ -3261,6 +3757,9 @@ mod tests {
             "event_id": "event_outbound",
             "transaction_id": "txn_outbound_race",
             "request_digest": "b".repeat(64),
+            "body_digest": "c".repeat(64),
+            "command_id": "command_outbound_race",
+            "dispatch_id": "dispatch_outbound_race",
             "projection_generation": 1,
             "session_generation": generation.to_rfc3339(),
             "route": {
@@ -3423,13 +3922,15 @@ mod tests {
         )
         .expect("history gateway");
         let rooms = Arc::new(StdMutex::new(Vec::new()));
+        let authority = Arc::new(SwitchableAuthority::new(AUTHORITY_ALLOW));
         let server =
             ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
                 .expect("provisioning gateway")
                 .with_history(history)
                 .with_outbound_sender(Arc::new(RecordingOutboundSender {
                     rooms: Arc::clone(&rooms),
-                }));
+                }))
+                .with_outbound_authority(Arc::clone(&authority) as Arc<dyn OutboundAuthority>);
 
         let request = |conversation_id: &str, transaction_id: &str, digest: char| HttpRequest {
             path: "/v1/outbound/text".to_owned(),
@@ -3439,6 +3940,14 @@ mod tests {
             body: serde_json::to_vec(&json!({
                 "schema_version": 1,
                 "tenant_id": "tenant_outbound",
+                "membership_id": "membership_outbound",
+                "actor_identity_id": "identity_outbound_actor",
+                "reservation_id": format!("reservation_{transaction_id}"),
+                "capability": {
+                    "kind": "account_grant",
+                    "grant_id": "grant_outbound",
+                    "authorization_epoch": 1
+                },
                 "account_id": "account_outbound",
                 "connection_id": "connection_outbound",
                 "identity_id": "identity_outbound",
@@ -3448,6 +3957,9 @@ mod tests {
                 "event_id": format!("event_{transaction_id}"),
                 "transaction_id": transaction_id,
                 "request_digest": digest.to_string().repeat(64),
+                "body_digest": digest.to_string().repeat(64),
+                "command_id": format!("command_{transaction_id}"),
+                "dispatch_id": format!("dispatch_{transaction_id}"),
                 "projection_generation": 1,
                 "session_generation": session_generation.clone(),
                 "route": {
@@ -3460,6 +3972,29 @@ mod tests {
             }))
             .expect("request JSON"),
         };
+
+        authority.set_mode(AUTHORITY_DENY);
+        let (denied_status, denied_body) = server
+            .handle_request(request("conversation_one", "txn_chat_denied", 'b'))
+            .await;
+        assert_eq!(denied_status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&denied_body).expect("denied response JSON")["outcome"],
+            "rejected"
+        );
+        assert!(rooms.lock().expect("recording sender lock").is_empty());
+
+        authority.set_mode(AUTHORITY_UNCERTAIN);
+        let (uncertain_status, uncertain_body) = server
+            .handle_request(request("conversation_one", "txn_chat_uncertain", 'c'))
+            .await;
+        assert_eq!(uncertain_status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&uncertain_body).expect("uncertain response JSON")["outcome"],
+            "uncertain"
+        );
+        assert!(rooms.lock().expect("recording sender lock").is_empty());
+        authority.set_mode(AUTHORITY_ALLOW);
 
         let mut stale_request = request("conversation_one", "txn_chat_stale", 'c');
         let mut stale_body: Value =

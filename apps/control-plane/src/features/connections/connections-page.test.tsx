@@ -31,7 +31,12 @@ describe("ConnectionsPage", () => {
     expect(screen.getAllByText("message.send").length).toBeGreaterThan(0);
     expect(
       screen
-        .getAllByRole("button", { name: /Simulation only.*Reconnect/i })
+        .getAllByRole("button", { name: "Disconnect" })
+        .some((button) => !(button as HTMLButtonElement).disabled),
+    ).toBe(true);
+    expect(
+      screen
+        .getAllByRole("button", { name: "Unlink" })
         .every((button) => (button as HTMLButtonElement).disabled),
     ).toBe(true);
   });
