@@ -32,6 +32,24 @@ const resetSchema = async (): Promise<void> => {
     await env.CONTROL_DB.prepare(`DROP TRIGGER IF EXISTS "${row.name}"`).run();
   }
   const tables = [
+    // Keep this teardown ordered from foreign-key children to their parents.
+    // These tables are created by migrations after the schema under test, so
+    // they may still exist when this fixture is reused by another test file.
+    "controlled_copy_evidence",
+    "controlled_copy_operations",
+    "group_management_evidence",
+    "group_management_operations",
+    "group_management_groups",
+    "group_dispatch_claims",
+    "group_authority_intents",
+    "receipt_dispatch_claims",
+    "receipt_authority_intents",
+    "receipt_operation_evidence",
+    "receipt_operations",
+    "outbound_dispatch_claims",
+    "outbound_acceptance_intents",
+    "outbound_authority_heads",
+    "connection_lifecycle_operations",
     "archive_purge_locks",
     "archive_purge_objects",
     "archive_purge_operations",
