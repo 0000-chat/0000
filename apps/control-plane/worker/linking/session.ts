@@ -18,6 +18,12 @@ import {
   LinkingRepositoryError,
   type LinkingRepositoryErrorCode,
 } from "./repository";
+import {
+  completeConnectionRelink,
+  LifecycleRepositoryError,
+  markLifecycleReconciliation,
+  type LifecycleActor,
+} from "./lifecycle-repository";
 
 const STATE_KEY = "link-session";
 const PRODUCT_TTL_MS = 10 * 60_000;
@@ -39,6 +45,10 @@ export type LinkSessionState = LinkSessionOwner & {
   action_expires_at: string | null;
   gateway_ref: string | null;
   connection_id: string | null;
+  /** Set only for a session relinking an already-established connection. */
+  lifecycle_operation_id: string | null;
+  /** Raw provider login is gateway-bound and never exposed in LinkSession. */
+  provider_login_id: string | null;
   account_id: string | null;
   provider_label: string | null;
   error_code: LinkSessionErrorCode | null;
@@ -72,6 +82,8 @@ const persistedStateSchema = z
     action_expires_at: TimestampSchema.nullable(),
     gateway_ref: z.string().min(1).max(512).nullable(),
     connection_id: CommunicatorIdSchema.nullable(),
+    lifecycle_operation_id: CommunicatorIdSchema.nullable().optional(),
+    provider_login_id: z.string().trim().min(1).max(512).nullable().optional(),
     account_id: CommunicatorIdSchema.nullable(),
     provider_label: z.string().min(1).max(100).nullable(),
     error_code: LinkSessionErrorCodeSchema.nullable(),
@@ -193,8 +205,8 @@ const json = (body: unknown, status = 200): Response =>
 
 const now = (): string => new Date().toISOString();
 
-const safeState = (state: LinkSessionState): LinkSessionState =>
-  persistedStateSchema.parse({
+const safeState = (state: LinkSessionState): LinkSessionState => {
+  const parsed = persistedStateSchema.parse({
     id: state.id,
     tenant_id: state.tenant_id,
     actor_principal_id: state.actor_principal_id,
@@ -208,13 +220,21 @@ const safeState = (state: LinkSessionState): LinkSessionState =>
     action_expires_at: state.action_expires_at,
     gateway_ref: state.gateway_ref,
     connection_id: state.connection_id,
+    lifecycle_operation_id: state.lifecycle_operation_id,
+    provider_login_id: state.provider_login_id,
     account_id: state.account_id,
     provider_label: state.provider_label,
     error_code: state.error_code,
     request_key_digest: state.request_key_digest,
     created_at: state.created_at,
     updated_at: state.updated_at,
-  }) as LinkSessionState;
+  });
+  return {
+    ...parsed,
+    lifecycle_operation_id: parsed.lifecycle_operation_id ?? null,
+    provider_login_id: parsed.provider_login_id ?? null,
+  } as LinkSessionState;
+};
 
 const ownerMatches = (state: LinkSessionState, owner: LinkSessionOwner) =>
   state.tenant_id === owner.tenant_id &&
@@ -368,7 +388,11 @@ async function execute(
       }
       return { state: await expireIfNeeded(ctx, existing), created: false };
     }
-    const state = safeState(input.state);
+    const state = safeState({
+      ...input.state,
+      lifecycle_operation_id: input.state.lifecycle_operation_id ?? null,
+      provider_login_id: input.state.provider_login_id ?? null,
+    } as LinkSessionState);
     await ctx.storage.put(STATE_KEY, state);
     await ctx.storage.setAlarm(Date.parse(state.expires_at));
     return { state, created: true };
@@ -423,35 +447,98 @@ async function execute(
       .CONTROL_DB;
     if (!database) throw new SessionCommandError("invalid_session", 422);
     try {
-      const committed = await commitLinkedAccount({
-        db: database,
-        sessionId: state.id,
-        tenantId: state.tenant_id,
-        actorPrincipalId: state.actor_principal_id,
-        membershipId: state.membership_id,
-        targetIdentityId: state.target_identity_id,
-        provider: state.provider,
-        providerIdentity: input.provider_identity,
-        identityHashSecret: identityHashSecret(env),
-        occurredAt: input.occurred_at,
-      });
-      state = {
-        ...state,
-        status:
-          committed.kind === "duplicate" ? "relink_required" : "connected",
-        action: "none",
-        action_expires_at: null,
-        gateway_ref: null,
-        error_code: committed.kind === "duplicate" ? "relink_required" : null,
-        connection_id: committed.connection_id,
-        account_id: committed.account_id,
-        provider_label: committed.account?.display_label ?? null,
-        updated_at: now(),
-      };
+      let committed: Awaited<ReturnType<typeof commitLinkedAccount>>;
+      if (state.lifecycle_operation_id && state.connection_id) {
+        const relinked = await completeConnectionRelink({
+          db: database,
+          operation_id: state.lifecycle_operation_id,
+          session_id: state.id,
+          actor: {
+            tenant_id: state.tenant_id,
+            actor_principal_id: state.actor_principal_id,
+            membership_id: state.membership_id,
+            identity_id: state.target_identity_id,
+          } satisfies LifecycleActor,
+          provider_identity: input.provider_identity,
+          identity_hash_secret: identityHashSecret(env),
+          occurred_at: input.occurred_at,
+        });
+        committed = relinked.committed ?? {
+          kind: "created",
+          account: null,
+          connection_id:
+            relinked.connection?.connection_id ?? state.connection_id,
+          account_id: relinked.connection?.account_id ?? state.account_id,
+        };
+        state = {
+          ...state,
+          status: "connected",
+          action: "none",
+          action_expires_at: null,
+          gateway_ref: null,
+          error_code: null,
+          provider_login_id: input.provider_identity.user_login_id,
+          connection_id: committed.connection_id,
+          account_id: committed.account_id,
+          provider_label:
+            committed.account?.display_label ?? state.provider_label,
+          updated_at: now(),
+        };
+      } else {
+        committed = await commitLinkedAccount({
+          db: database,
+          sessionId: state.id,
+          tenantId: state.tenant_id,
+          actorPrincipalId: state.actor_principal_id,
+          membershipId: state.membership_id,
+          targetIdentityId: state.target_identity_id,
+          provider: state.provider,
+          providerIdentity: input.provider_identity,
+          identityHashSecret: identityHashSecret(env),
+          occurredAt: input.occurred_at,
+        });
+        state = {
+          ...state,
+          status:
+            committed.kind === "duplicate" ? "relink_required" : "connected",
+          action: "none",
+          action_expires_at: null,
+          gateway_ref: null,
+          error_code: committed.kind === "duplicate" ? "relink_required" : null,
+          connection_id: committed.connection_id,
+          account_id: committed.account_id,
+          provider_label: committed.account?.display_label ?? null,
+          provider_login_id: input.provider_identity.user_login_id,
+          updated_at: now(),
+        };
+      }
       await ctx.storage.put(STATE_KEY, safeState(state));
       return { state, committed, created: false };
     } catch (error) {
-      if (!(error instanceof LinkingRepositoryError)) throw error;
+      if (
+        !(error instanceof LinkingRepositoryError) &&
+        !(error instanceof LifecycleRepositoryError)
+      )
+        throw error;
+      if (state.lifecycle_operation_id) {
+        try {
+          await markLifecycleReconciliation(
+            database,
+            state.tenant_id,
+            state.lifecycle_operation_id,
+            error instanceof LifecycleRepositoryError &&
+              error.code === "stale_generation"
+              ? "stale_generation"
+              : error instanceof LifecycleRepositoryError &&
+                  error.code === "provider_identity_mismatch"
+                ? "reconciliation_required"
+                : "reconciliation_required",
+            input.occurred_at,
+          );
+        } catch {
+          // The durable session still records reconciliation_required below.
+        }
+      }
       state = {
         ...state,
         status: "reconciliation_required",
@@ -465,7 +552,14 @@ async function execute(
         updated_at: now(),
       };
       await ctx.storage.put(STATE_KEY, safeState(state));
-      return { state, commit_error: error.code, created: false };
+      return {
+        state,
+        commit_error:
+          error instanceof LinkingRepositoryError
+            ? error.code
+            : "link_unavailable",
+        created: false,
+      };
     }
   }
 

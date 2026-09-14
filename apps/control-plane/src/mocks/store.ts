@@ -482,6 +482,18 @@ export class SimulatedStore {
     return clone(source.filter((item) => item.identity_id === identityId));
   }
 
+  disconnectConnection(connectionId: string): boolean {
+    let found = false;
+    for (const connections of Object.values(this.state.connection_variants)) {
+      const connection = connections.find((item) => item.id === connectionId);
+      if (!connection) continue;
+      connection.status = "disconnected";
+      connection.attention_code = undefined;
+      found = true;
+    }
+    return found;
+  }
+
   connectedAccounts(identityId?: string): ConnectedAccount[] {
     return this.identities()
       .flatMap((identity) =>

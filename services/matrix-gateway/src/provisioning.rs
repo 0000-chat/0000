@@ -406,6 +406,16 @@ impl WhatsAppProvisioningClient {
     /// Start a QR login.  The adapter first checks the pinned connector's
     /// advertised flows, then starts the exact `start/qr` process.
     pub async fn start_qr(&self) -> Result<ProvisioningStart, ProvisioningFailure> {
+        self.start_qr_for_login(None).await
+    }
+
+    /// Start a QR login selected for one existing provider login. The
+    /// `login_id` query parameter is the pinned bridge's relink selector; it
+    /// is never accepted from an unverified browser value.
+    pub async fn start_qr_for_login(
+        &self,
+        provider_login_id: Option<&str>,
+    ) -> Result<ProvisioningStart, ProvisioningFailure> {
         let flows = self
             .request(
                 Method::GET,
@@ -416,11 +426,18 @@ impl WhatsAppProvisioningClient {
         if !advertises_qr(&flows) {
             return Err(ProvisioningFailure::ProviderError);
         }
+        let mut query = vec![("user_id", self.matrix_user_id.as_str())];
+        if let Some(login_id) = provider_login_id {
+            if !valid_provider_login_id(login_id) || login_id.eq_ignore_ascii_case("all") {
+                return Err(ProvisioningFailure::InvalidRequest);
+            }
+            query.push(("login_id", login_id));
+        }
         let response = self
             .request(
                 Method::POST,
                 &format!("{PROVISIONING_ROOT}/login/start/qr"),
-                &[("user_id", self.matrix_user_id.as_str())],
+                &query,
             )
             .await?;
         let process_id = required_id(&response, &["login_id", "process_id"])?;
@@ -437,6 +454,35 @@ impl WhatsAppProvisioningClient {
             },
         );
         Ok(ProvisioningStart { gateway_ref, qr })
+    }
+
+    /// Log out exactly one provider login. The bridge's special `all` value
+    /// is deliberately rejected so a connection cannot revoke another
+    /// account's session.
+    pub async fn logout(&self, provider_login_id: &str) -> Result<(), ProvisioningFailure> {
+        if !valid_provider_login_id(provider_login_id)
+            || provider_login_id.eq_ignore_ascii_case("all")
+        {
+            return Err(ProvisioningFailure::InvalidRequest);
+        }
+        let (status, value) = self
+            .request_raw(
+                Method::POST,
+                &format!(
+                    "{PROVISIONING_ROOT}/logout/{}",
+                    encode_path(provider_login_id)
+                ),
+                &[("user_id", self.matrix_user_id.as_str())],
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        if !value.is_object() {
+            return Err(ProvisioningFailure::ProviderError);
+        }
+        Ok(())
     }
 
     /// Poll/rotate a QR with the exact `display_and_wait` step route.
@@ -865,6 +911,8 @@ struct GatewayRequest {
     provider: String,
     generation: u64,
     gateway_ref: Option<String>,
+    connection_id: Option<String>,
+    provider_login_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1233,6 +1281,8 @@ struct GatewayOwner {
     target_identity_id: String,
     provider: String,
     generation: u64,
+    connection_id: Option<String>,
+    provider_login_id: Option<String>,
 }
 
 impl From<&GatewayRequest> for GatewayOwner {
@@ -1245,6 +1295,8 @@ impl From<&GatewayRequest> for GatewayOwner {
             target_identity_id: request.target_identity_id.clone(),
             provider: request.provider.clone(),
             generation: request.generation,
+            connection_id: request.connection_id.clone(),
+            provider_login_id: request.provider_login_id.clone(),
         }
     }
 }
@@ -1490,9 +1542,19 @@ impl ProvisioningGatewayServer {
         }
         let owner = GatewayOwner::from(&parsed);
         match request.path.as_str() {
-            "/v1/link-sessions/start" => self.start(owner).await,
+            "/v1/link-sessions/start" => self.start(parsed, owner).await,
             "/v1/link-sessions/poll" => self.poll(parsed, owner).await,
             "/v1/link-sessions/cancel" => self.cancel(parsed, owner).await,
+            "/v1/connections/disconnect" => {
+                if parsed.connection_id.as_deref().is_none_or(|value| {
+                    !valid_resource_id(value)
+                }) || parsed.provider_login_id.as_deref().is_none_or(|value| {
+                    !valid_provider_login_id(value) || value.eq_ignore_ascii_case("all")
+                }) {
+                    return response(400, json!({ "error": INVALID_REQUEST }));
+                }
+                self.disconnect(parsed, owner).await
+            }
             _ => response(404, json!({ "error": "not_found" })),
         }
     }
@@ -1828,8 +1890,12 @@ impl ProvisioningGatewayServer {
         )
     }
 
-    async fn start(&self, owner: GatewayOwner) -> (u16, Vec<u8>) {
-        match self.client.start_qr().await {
+    async fn start(&self, request: GatewayRequest, owner: GatewayOwner) -> (u16, Vec<u8>) {
+        match self
+            .client
+            .start_qr_for_login(request.provider_login_id.as_deref())
+            .await
+        {
             Ok(start) => {
                 self.sessions.lock().await.insert(
                     start.gateway_ref.clone(),
@@ -1848,6 +1914,27 @@ impl ProvisioningGatewayServer {
                     }),
                 )
             }
+            Err(error) => response(502, json!({ "error": error.code() })),
+        }
+    }
+
+    async fn disconnect(&self, request: GatewayRequest, owner: GatewayOwner) -> (u16, Vec<u8>) {
+        let Some(provider_login_id) = request.provider_login_id.as_deref() else {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        };
+        if provider_login_id.eq_ignore_ascii_case("all") {
+            return response(400, json!({ "error": INVALID_REQUEST }));
+        }
+        match self.client.logout(provider_login_id).await {
+            Ok(()) => response(
+                200,
+                json!({
+                    "status": "disconnected",
+                    "provider_login_id": provider_login_id,
+                    "connection_id": request.connection_id,
+                    "generation": owner.generation,
+                }),
+            ),
             Err(error) => response(502, json!({ "error": error.code() })),
         }
     }
@@ -2638,6 +2725,62 @@ mod tests {
             })))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn adapter_relink_selects_one_login_and_logout_rejects_all() {
+        let bridge = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path(format!("{PROVISIONING_ROOT}/login/flows")))
+            .and(matchers::query_param("user_id", MATRIX_USER))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "flows": [{"id": "qr"}]
+            })))
+            .mount(&bridge)
+            .await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/login/start/qr"
+            )))
+            .and(matchers::query_param("user_id", MATRIX_USER))
+            .and(matchers::query_param("login_id", "login-one"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login_id": "relink-process",
+                "step_id": "fi.mau.whatsapp.login.qr",
+                "txn_id": "relink-txn",
+                "display_and_wait": {"data": "relink-qr"}
+            })))
+            .mount(&bridge)
+            .await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "{PROVISIONING_ROOT}/logout/login-one"
+            )))
+            .and(matchers::query_param("user_id", MATRIX_USER))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&bridge)
+            .await;
+
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let started = client
+            .start_qr_for_login(Some("login-one"))
+            .await
+            .expect("selected-login QR start succeeds");
+        assert_eq!(started.qr, "relink-qr");
+        client
+            .logout("login-one")
+            .await
+            .expect("selected-login logout succeeds");
+        assert_eq!(
+            client.logout("all").await,
+            Err(ProvisioningFailure::InvalidRequest)
+        );
     }
 
     #[tokio::test]

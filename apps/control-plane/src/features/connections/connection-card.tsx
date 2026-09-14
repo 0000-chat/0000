@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Connection } from "@communicator/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { apiClient, ApiError } from "@/lib/api/client";
 import { WhatsAppLinkSheet } from "./whatsapp-link-sheet";
 
 function titleCase(value: string) {
@@ -28,7 +29,13 @@ export function ConnectionCard({
   onLinked: () => void;
 }) {
   const [linkOpen, setLinkOpen] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const isAttentionRequired = connection.status === "attention_required";
+  const canDisconnect =
+    canManageLinking &&
+    connection.provider === "whatsapp" &&
+    !["disconnected", "revoked", "unlinked"].includes(connection.status);
   const lastSynced = connection.last_synced_at
     ? new Date(connection.last_synced_at).toLocaleString("en-NZ", {
         dateStyle: "medium",
@@ -63,6 +70,28 @@ export function ConnectionCard({
           </p>
         </div>
       )}
+      {connection.status === "disconnected" && (
+        <div
+          role="status"
+          className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm text-slate-900"
+        >
+          <p className="font-semibold">Provider disconnected</p>
+          <p className="mt-1">
+            New provider dispatch is fenced. Relink this account to create a
+            fresh provider session.
+          </p>
+          {connection.attention_code && (
+            <p className="mt-1 text-amber-800">
+              Reconciliation required before provider logout can be confirmed.
+            </p>
+          )}
+        </div>
+      )}
+      {lifecycleError && (
+        <p role="alert" className="mt-4 text-sm text-destructive">
+          {lifecycleError}
+        </p>
+      )}
 
       <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
         <div>
@@ -93,7 +122,9 @@ export function ConnectionCard({
             variant="outline"
             onClick={() => setLinkOpen(true)}
           >
-            Link WhatsApp account
+            {connection.status === "disconnected"
+              ? "Relink WhatsApp account"
+              : "Link WhatsApp account"}
           </Button>
         ) : (
           <Button
@@ -106,21 +137,64 @@ export function ConnectionCard({
             Link WhatsApp account
           </Button>
         )}
-        {(["Reconnect", "Disconnect", "Unlink"] as const).map((label) => (
-          <Button
-            key={label}
-            type="button"
-            variant="outline"
-            disabled
-            title={`Simulation only — ${label}`}
-            aria-label={`Simulation only — ${label}`}
-          >
-            {label}
-          </Button>
-        ))}
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!canDisconnect || disconnecting}
+          title={
+            canDisconnect
+              ? "Disconnect this selected WhatsApp login"
+              : "Disconnect is available to human administrators only"
+          }
+          aria-label="Disconnect"
+          onClick={() => {
+            if (!canDisconnect || disconnecting) return;
+            if (
+              !window.confirm(
+                "Disconnect this WhatsApp login? Existing history and grants will be retained, while new provider dispatch stays blocked until relink.",
+              )
+            )
+              return;
+            setDisconnecting(true);
+            setLifecycleError(null);
+            void apiClient
+              .disconnectConnection(
+                connection.id,
+                `ui-disconnect-${crypto.randomUUID()}`,
+              )
+              .then((operation) => {
+                if (operation.status === "reconciliation_required") {
+                  setLifecycleError(
+                    "The connection is locally fenced, but provider logout needs reconciliation.",
+                  );
+                }
+                onLinked();
+              })
+              .catch((error: unknown) => {
+                setLifecycleError(
+                  error instanceof ApiError
+                    ? error.message
+                    : "The connection could not be disconnected.",
+                );
+              })
+              .finally(() => setDisconnecting(false));
+          }}
+        >
+          {disconnecting ? "Disconnecting…" : "Disconnect"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled
+          title="Unlink requires a separate retained-history workflow"
+          aria-label="Unlink"
+        >
+          Unlink
+        </Button>
       </div>
       <WhatsAppLinkSheet
         identityId={connection.identity_id}
+        connectionId={connection.id}
         identityDisplayName={identityDisplayName}
         actorDisplayName={actorDisplayName}
         open={linkOpen}

@@ -8,6 +8,10 @@ export type GatewayOwner = {
   target_identity_id: string;
   provider: Provider;
   generation: number;
+  /** Established-connection relink scope. Omitted for a new link. */
+  connection_id?: string;
+  /** The verified provider login selected for a relink or logout. */
+  provider_login_id?: string;
 };
 
 export type GatewayRoute = {
@@ -51,12 +55,23 @@ export type GatewayPollResult =
         | "provisioning_disabled";
     };
 
+export type GatewayDisconnectResult = {
+  status: "disconnected";
+  provider_login_id: string;
+};
+
 export interface ConnectionGateway {
   start(owner: GatewayOwner): Promise<GatewayStartResult>;
   poll(
     owner: GatewayOwner & { gateway_ref: string },
   ): Promise<GatewayPollResult>;
   cancel(owner: GatewayOwner & { gateway_ref: string }): Promise<void>;
+  disconnect?: (
+    owner: GatewayOwner & {
+      connection_id: string;
+      provider_login_id: string;
+    },
+  ) => Promise<GatewayDisconnectResult>;
 }
 
 export class ConnectionGatewayError extends Error {
@@ -171,6 +186,24 @@ const parsePoll = (value: unknown): GatewayPollResult => {
   throw new ConnectionGatewayError("provider_error");
 };
 
+const parseDisconnect = (value: unknown): GatewayDisconnectResult => {
+  if (typeof value !== "object" || value === null) {
+    throw new ConnectionGatewayError("provider_error");
+  }
+  const typed = value as Record<string, unknown>;
+  if (
+    typed.status !== "disconnected" ||
+    !isString(typed.provider_login_id) ||
+    typed.provider_login_id.trim().toLowerCase() === "all"
+  ) {
+    throw new ConnectionGatewayError("provider_error");
+  }
+  return {
+    status: "disconnected",
+    provider_login_id: typed.provider_login_id,
+  };
+};
+
 const validateOwner = (owner: GatewayOwner): void => {
   if (
     !isString(owner.session_id) ||
@@ -180,7 +213,11 @@ const validateOwner = (owner: GatewayOwner): void => {
     !isString(owner.target_identity_id) ||
     !ProviderSchema.safeParse(owner.provider).success ||
     !Number.isSafeInteger(owner.generation) ||
-    owner.generation < 1
+    owner.generation < 1 ||
+    (owner.connection_id !== undefined && !isString(owner.connection_id)) ||
+    (owner.provider_login_id !== undefined &&
+      (!isString(owner.provider_login_id) ||
+        owner.provider_login_id.trim().toLowerCase() === "all"))
   )
     throw new ConnectionGatewayError("provider_error");
 };
@@ -270,6 +307,34 @@ export class HttpConnectionGateway implements ConnectionGateway {
     validateOwner(owner);
     if (!isString(owner.gateway_ref)) return;
     await this.request("/v1/link-sessions/cancel", owner, () => undefined);
+  }
+
+  async disconnect(
+    owner: GatewayOwner & {
+      connection_id: string;
+      provider_login_id: string;
+    },
+  ): Promise<GatewayDisconnectResult> {
+    validateOwner(owner);
+    if (
+      !isString(owner.connection_id) ||
+      !isString(owner.provider_login_id) ||
+      owner.provider_login_id.trim().toLowerCase() === "all"
+    ) {
+      throw new ConnectionGatewayError("provider_error");
+    }
+    const result = await this.request(
+      "/v1/connections/disconnect",
+      owner,
+      parseDisconnect,
+    );
+    if (
+      result.provider_login_id.trim().toLowerCase() !==
+      owner.provider_login_id.trim().toLowerCase()
+    ) {
+      throw new ConnectionGatewayError("provider_error");
+    }
+    return result;
   }
 }
 
