@@ -34,9 +34,7 @@ export const RestoreInventoryCopySchema = z
     content_generation: z.string().trim().min(1).max(256),
   })
   .strict();
-export type RestoreInventoryCopy = z.infer<
-  typeof RestoreInventoryCopySchema
->;
+export type RestoreInventoryCopy = z.infer<typeof RestoreInventoryCopySchema>;
 
 export const RestoreStoreStatusSchema = z
   .object({

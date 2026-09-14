@@ -155,7 +155,8 @@ export const restoreActivationLeaseRoute = createRoute({
   },
   responses: {
     200: {
-      description: "Acquire the restore write fence at the current authority head",
+      description:
+        "Acquire the restore write fence at the current authority head",
       content: { "application/json": { schema: RestoreActivationLeaseSchema } },
     },
     ...removalErrors,

@@ -179,7 +179,7 @@ const seedCompleteControlledCopies = async (
          id, operation_id, tenant_id, removal_id, store, resource_id,
          content_generation, deletion_epoch, status, content_present,
          evidence_source, object_reference, detail, worker_token, observed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'deleted', 0, 'restore-activation-test', ?, NULL, 'restore-activation-worker', ?)` ,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'deleted', 0, 'restore-activation-test', ?, NULL, 'restore-activation-worker', ?)`,
     ).bind(
       `restore_activation_${authorityId}_evidence_${index}`,
       operationId,
@@ -240,19 +240,52 @@ const seedOutboundRows = async (
         `event_restore_activation_${suffix}`,
       );
       const columns = [
-        "id", "command_id", "message_id", "event_id", "tenant_id",
-        "actor_principal_id", "actor_identity_id", "resource_identity_id",
-        "account_id", "connection_id", "conversation_id", "platform",
-        "idempotency_key", "body_digest", "body", "delivery_mode", "status",
-        "transaction_id", "request_digest", "dispatch_lease_id",
-        "dispatch_lease_expires_at", "uncertainty_reason", "uncertain_at",
-        "projection_generation", "matrix_stage", "bridge_stage", "provider_stage",
-        "last_evidence_at", "chat_paused", "duplicate_risk", "resend_of_command_id",
-        "last_action", "last_action_actor_principal_id", "last_action_at",
-        "confirmation_due_at", "confirmation_decision", "confirmation_actor_principal_id",
-        "confirmation_actor_identity_id", "confirmation_decided_at", "created_at",
-        "updated_at", "authority_reservation_id", "authority_membership_id",
-        "authority_identity_id", "authority_capability_kind", "authority_capability_id",
+        "id",
+        "command_id",
+        "message_id",
+        "event_id",
+        "tenant_id",
+        "actor_principal_id",
+        "actor_identity_id",
+        "resource_identity_id",
+        "account_id",
+        "connection_id",
+        "conversation_id",
+        "platform",
+        "idempotency_key",
+        "body_digest",
+        "body",
+        "delivery_mode",
+        "status",
+        "transaction_id",
+        "request_digest",
+        "dispatch_lease_id",
+        "dispatch_lease_expires_at",
+        "uncertainty_reason",
+        "uncertain_at",
+        "projection_generation",
+        "matrix_stage",
+        "bridge_stage",
+        "provider_stage",
+        "last_evidence_at",
+        "chat_paused",
+        "duplicate_risk",
+        "resend_of_command_id",
+        "last_action",
+        "last_action_actor_principal_id",
+        "last_action_at",
+        "confirmation_due_at",
+        "confirmation_decision",
+        "confirmation_actor_principal_id",
+        "confirmation_actor_identity_id",
+        "confirmation_decided_at",
+        "created_at",
+        "updated_at",
+        "authority_reservation_id",
+        "authority_membership_id",
+        "authority_identity_id",
+        "authority_capability_kind",
+        "authority_capability_id",
         "authority_capability_epoch",
       ];
       state.storage.sql.exec(
@@ -661,17 +694,19 @@ describe("restore projection activation", () => {
         },
       }),
     ).rejects.toThrow();
-    const dispatches = await runInDurableObject(stub, async (_instance, state) =>
-      state.storage.sql
-        .exec<{
-          message_id: string;
-          status: string;
-          chat_paused: number;
-          uncertainty_reason: string | null;
-        }>(
-          "SELECT message_id, status, chat_paused, uncertainty_reason FROM outbound_dispatches ORDER BY id",
-        )
-        .toArray(),
+    const dispatches = await runInDurableObject(
+      stub,
+      async (_instance, state) =>
+        state.storage.sql
+          .exec<{
+            message_id: string;
+            status: string;
+            chat_paused: number;
+            uncertainty_reason: string | null;
+          }>(
+            "SELECT message_id, status, chat_paused, uncertainty_reason FROM outbound_dispatches ORDER BY id",
+          )
+          .toArray(),
     );
     expect(dispatches).toEqual([
       {

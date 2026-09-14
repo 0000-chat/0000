@@ -25,9 +25,7 @@ type RestoreActivationLeaseRow = {
   status: unknown;
 };
 
-const primaryDatabase = (
-  database: RestoreLeaseDatabase,
-): D1DatabaseSession => {
+const primaryDatabase = (database: RestoreLeaseDatabase): D1DatabaseSession => {
   if ("withSession" in database && typeof database.withSession === "function") {
     return database.withSession("first-primary");
   }

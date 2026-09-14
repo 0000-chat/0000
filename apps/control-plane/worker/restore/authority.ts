@@ -163,7 +163,7 @@ const statusForStore = ({
       : (inventoryDetail ??
         (targetCoverageComplete
           ? "Current controlled-copy evidence does not prove this store is safe to restore"
-        : "Exact restore targets are unavailable for one or more removal authorities")),
+          : "Exact restore targets are unavailable for one or more removal authorities")),
     references: [...references],
     copies: [...copies],
   });
@@ -226,8 +226,7 @@ const inventoryCopies = (
             ? copy.copy_created_at.toISOString()
             : new Date(copy.copy_created_at).toISOString(),
         resource_id: copy.resource_id ?? scope.resource_id,
-        content_generation:
-          copy.content_generation ?? scope.content_generation,
+        content_generation: copy.content_generation ?? scope.content_generation,
       }),
     )
     .sort((left, right) =>
@@ -387,7 +386,12 @@ export const createRestoreAuthorityExport = async (
   const authorityInventories = await Promise.all(
     authorities.map(async (authority) => ({
       authority,
-      inventory: await inventoryForAuthority(adapters, authority, now, authority),
+      inventory: await inventoryForAuthority(
+        adapters,
+        authority,
+        now,
+        authority,
+      ),
     })),
   );
   const ledgerInventory =

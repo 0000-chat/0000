@@ -195,15 +195,12 @@ export const restoreProjectionFromArchive = async (
   if (authorityExport.deletion_epoch !== initialAuthority.deletion_epoch) {
     throw new Error("restore authority changed before projection rebuild");
   }
-  const activationLease = await acquireRestoreActivationLease(
-    database,
-    {
-      tenantId,
-      leaseId: randomIdentifier("restore_activation"),
-      expectedDeletionEpoch: initialAuthority.deletion_epoch,
-      expectedLedgerHead: authorityExport.ledger_head,
-    },
-  );
+  const activationLease = await acquireRestoreActivationLease(database, {
+    tenantId,
+    leaseId: randomIdentifier("restore_activation"),
+    expectedDeletionEpoch: initialAuthority.deletion_epoch,
+    expectedLedgerHead: authorityExport.ledger_head,
+  });
   const rebuildAuthorization = projectionAuthorization(
     tenantId,
     principalId,
