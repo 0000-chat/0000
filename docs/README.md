@@ -1,5 +1,5 @@
 # Communicator documentation
 
-Future channel and adapter design belongs here after communication boundaries
-and runtime decisions are reviewed.
-
+This directory contains the imported application runbooks, design records,
+implementation plans, and migration handoff for the communication adapters and
+delivery-channel runtime.

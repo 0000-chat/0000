@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tenant_id": "tenant_relink",
+  "account_id": "account_relink",
+  "connection_id": "connection_relink",
+  "identity_id": "identity_relink",
+  "provider": "whatsapp",
+  "old_session_generation": "2026-09-14T00:00:00.000Z",
+  "new_session_generation": "2026-09-14T00:00:01.000Z",
+  "route": {
+    "gateway_route_id": "gateway_route_whatsapp",
+    "bridge_instance_id": "whatsapp-primary",
+    "matrix_user_id": "@communicator:communicator.0000.gold",
+    "matrix_room_namespace": "communicator.0000.gold",
+    "provider_login_id": "login-relink"
+  }
+}

@@ -1,19 +1,22 @@
 # 0000-communicator
 
-This independent repository is the scaffold for communication adapters and
-delivery channels. It is coordinated by `0000-full`, not embedded application
-source.
+This independent repository contains the communication adapter application and
+its delivery-channel boundary. It is coordinated by `0000-full`, not embedded
+application source.
 
-The current delivery contains metadata, documentation, a local check, a
-pre-commit hook, and CI only. It contains no application source, package
-manifest, generated dependency tree, database, API, deployment configuration,
-secret, or license.
+The application history was migrated from the previous local Communicator
+checkout. Treat `docs/migration/2026-09-12-communicator-migration.md` as the
+handoff for preserved refs, dirty work, excluded local state, and pending
+validation. Keep credentials, runtime databases, generated dependencies, and
+other local state outside tracked files.
 
 Standalone public components do not require hosted platform authentication.
 Cloudflare is the public ingress and normal runtime class. Run
-`./scripts/check`; it validates metadata, formats supported files with Biome,
-and lints supported JavaScript and TypeScript files with pinned tools. Direct
-commits on `main` are blocked after bootstrap.
+`./scripts/check`; it validates the imported application metadata and required
+repository files, then runs the pinned Biome/Oxlint tools. The imported
+application currently has a recorded pre-existing tooling baseline, so a
+check failure in those tools must be reconciled through reviewed cleanup.
+Direct commits on `main` are blocked after bootstrap.
 
 ## Agent skills
 
@@ -28,3 +31,16 @@ The default five-role triage vocabulary is used. See `docs/agents/triage-labels.
 ### Domain docs
 
 This repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
+
+### Wayfinding
+
+When choosing the next product slice, defining a pilot boundary, or deciding
+the outbound route, read `/home/ubuntu/0000-full/skills/ecosystem/wayfinder/SKILL.md`
+first and then follow the [WhatsApp pilot with reusable provider boundaries](https://github.com/0000-chat/0000-communicator/issues/1).
+
+The pilot direction is settled: WhatsApp comes first, with provider boundaries
+that support adding other providers shortly thereafter. Preserve and reconcile
+the imported history recorded in `docs/migration/2026-09-12-communicator-migration.md`.
+The map Notes allow execution because the user requested continuation. Execute
+at most one nonresearch ticket per session. Use the map and named child tickets
+for current acceptance, dependencies, and ticket order.

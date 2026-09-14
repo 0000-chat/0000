@@ -1,0 +1,473 @@
+const fixtureTimestamp = "2026-08-29T00:00:00.000Z";
+
+export async function seedDirectory(db: D1Database): Promise<void> {
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "pilot",
+        "Pilot",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "principal_human",
+        "https://issuer.example/",
+        "human-subject",
+        "human",
+        "Human",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "principal_agent",
+        "https://issuer.example/",
+        "agent-subject",
+        "agent",
+        "Agent",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "principal_operator",
+        "https://issuer.example/",
+        "operator-subject",
+        "operator",
+        "Operator",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "membership_human",
+        "tenant_pilot",
+        "principal_human",
+        "owner",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "membership_agent",
+        "tenant_pilot",
+        "principal_agent",
+        "member",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "membership_operator",
+        "tenant_pilot",
+        "principal_operator",
+        "admin",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "identity_human",
+        "tenant_pilot",
+        "human",
+        "Human",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "identity_agent",
+        "tenant_pilot",
+        "agent",
+        "Agent",
+        "active",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "conversation.read",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "message.send",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "receipt.send",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "connection.read",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "connection.manage",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_agent",
+        "identity_agent",
+        "conversation.read",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_agent",
+        "identity_agent",
+        "message.send",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_agent",
+        "identity_agent",
+        "connection.read",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "membership_operator",
+        "identity_human",
+        "connection.read",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "connection_human_whatsapp",
+        "tenant_pilot",
+        "identity_human",
+        "whatsapp",
+        "Human WhatsApp",
+        "ready",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "connection_agent_whatsapp",
+        "tenant_pilot",
+        "identity_agent",
+        "whatsapp",
+        "Agent WhatsApp",
+        "ready",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "connection_human_whatsapp",
+        "gateway_route_human",
+        "bridge-human",
+        "route-user-human",
+        "route-room-human",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        "connection_agent_whatsapp",
+        "gateway_route_agent",
+        "bridge-agent",
+        "route-user-agent",
+        "route-room-agent",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "connection_human_whatsapp",
+        "message.send",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "connection_human_whatsapp",
+        "receipt.read",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "connection_human_whatsapp",
+        "typing.send",
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .bind(
+        "tenant_pilot",
+        "connection_agent_whatsapp",
+        "message.send",
+        fixtureTimestamp,
+      ),
+  ]);
+}
+
+/** Seed the account registry and durable grants used by stored-read fixtures. */
+export async function seedAccountAccess(db: D1Database): Promise<void> {
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "gateway_route_human",
+        "principal_operator",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "gateway_route_agent",
+        "principal_operator",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "account_human",
+        "connection_human_whatsapp",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      )
+      .bind(
+        "account_agent",
+        "connection_agent_whatsapp",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
+      )
+      .bind(
+        "grant_fixture_human",
+        "tenant_pilot",
+        "membership_human",
+        "identity_human",
+        "account_human",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+    db
+      .prepare(
+        "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
+      )
+      .bind(
+        "grant_fixture_agent",
+        "tenant_pilot",
+        "membership_agent",
+        "identity_agent",
+        "account_agent",
+        fixtureTimestamp,
+        fixtureTimestamp,
+      ),
+  ]);
+}
+
+export async function clearDirectory(db: D1Database): Promise<void> {
+  // Ingestion history is intentionally append-only in production. Tests need
+  // an isolated database between cases, so temporarily remove only the
+  // ingestion triggers, clear fixture rows in FK order, and restore the exact
+  // trigger definitions from sqlite_schema before returning.
+  const triggerRows = await db
+    .prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'ingestion_%' ORDER BY name",
+    )
+    .all<{ name: string; sql: string }>();
+  for (const trigger of triggerRows.results) {
+    if (!/^[A-Za-z0-9_]+$/.test(trigger.name))
+      throw new Error("unexpected trigger name");
+    await db.prepare(`DROP TRIGGER IF EXISTS "${trigger.name}"`).run();
+  }
+
+  await db.batch([
+    // Acceptance reservations and provider claims retain exact directory
+    // bindings in production. Test fixtures clear these children first so
+    // the directory rows can be rebuilt without weakening those constraints.
+    db.prepare("DELETE FROM connection_lifecycle_operations"),
+    db.prepare("DELETE FROM group_dispatch_claims"),
+    db.prepare("DELETE FROM receipt_dispatch_claims"),
+    db.prepare("DELETE FROM contact_dispatch_claims"),
+    db.prepare("DELETE FROM group_authority_intents"),
+    db.prepare("DELETE FROM receipt_authority_intents"),
+    db.prepare("DELETE FROM contact_authority_intents"),
+    db.prepare("DELETE FROM outbound_dispatch_claims"),
+    db.prepare("DELETE FROM outbound_acceptance_intents"),
+    db.prepare("DELETE FROM receipt_operation_evidence"),
+    db.prepare("DELETE FROM receipt_operations"),
+    db.prepare("DELETE FROM group_management_evidence"),
+    db.prepare("DELETE FROM group_management_operations"),
+    db.prepare("DELETE FROM group_management_groups"),
+    db.prepare("DELETE FROM group_creation_webhook_evaluations"),
+    db.prepare("DELETE FROM group_creation_access_grants"),
+    db.prepare("DELETE FROM group_creation_operations"),
+    db.prepare("DELETE FROM direct_chat_creation_operations"),
+    db.prepare("DELETE FROM contact_resolution_candidates"),
+    db.prepare("DELETE FROM webhook_deliveries"),
+    db.prepare("DELETE FROM archive_purge_locks"),
+    db.prepare("DELETE FROM archive_purge_objects"),
+    db.prepare("DELETE FROM archive_purge_operations"),
+    db.prepare("DELETE FROM removal_expiry_schedule"),
+    db.prepare("DELETE FROM removal_authority"),
+    db.prepare("DELETE FROM webhook_subscription_chat_rules"),
+    db.prepare("DELETE FROM webhook_subscription_account_rules"),
+    db.prepare("DELETE FROM webhook_subscriptions"),
+    db.prepare("DELETE FROM history_import_events"),
+    db.prepare("DELETE FROM history_import_ranges"),
+    db.prepare("DELETE FROM history_imports"),
+    db.prepare("DELETE FROM provider_capability_records"),
+    db.prepare("DELETE FROM oauth_authorization_codes"),
+    db.prepare("DELETE FROM oauth_upstream_login_transactions"),
+    db.prepare("DELETE FROM oauth_authorization_transactions"),
+    db.prepare("DELETE FROM oauth_client_installations"),
+    db.prepare("DELETE FROM oauth_clients"),
+    db.prepare("DELETE FROM audit_events"),
+    db.prepare("DELETE FROM control_event_outbox"),
+    db.prepare("DELETE FROM directory_mutations"),
+    db.prepare("DELETE FROM permission_requests"),
+    db.prepare("DELETE FROM account_grant_chats"),
+    db.prepare("DELETE FROM account_grants"),
+    db.prepare("DELETE FROM break_glass_grants"),
+    db.prepare("DELETE FROM revoked_tokens"),
+    db.prepare("DELETE FROM connection_accounts"),
+    db.prepare("DELETE FROM connection_provider_identities"),
+    db.prepare("DELETE FROM connection_capabilities"),
+    db.prepare("DELETE FROM connection_routes"),
+    db.prepare("DELETE FROM connections"),
+    db.prepare("DELETE FROM identity_grants"),
+    db.prepare("DELETE FROM identities"),
+    db.prepare("DELETE FROM memberships"),
+    db.prepare("DELETE FROM gateway_routes"),
+    db.prepare("DELETE FROM principals"),
+    db.prepare("DELETE FROM tenants"),
+  ]);
+
+  for (const trigger of triggerRows.results) {
+    await db.prepare(trigger.sql).run();
+  }
+}

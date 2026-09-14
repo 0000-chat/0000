@@ -1,0 +1,3393 @@
+import { applyD1Migrations, env, runInDurableObject } from "cloudflare:test";
+import type { D1Migration } from "@cloudflare/vitest-plugin";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  AccountGrantSchema,
+  ApiErrorResponseSchema,
+  CommandSchema,
+  ConnectedAccountPageSchema,
+  ConnectionSchema,
+  ConversationPageResultSchema,
+  OutboundDecisionResultSchema,
+  OutboundEvidenceRecordSchema,
+  SessionResponseSchema,
+} from "@communicator/contracts";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createApp, type AppServices } from "../app";
+import {
+  reconcileTrustedOutboundEvidence,
+  type OutboundAcceptanceServices,
+} from "../outbound/acceptance";
+import { recordRemovalWithSuppression } from "../removals/service";
+import type { VerifiedSubject } from "../auth/oidc";
+import {
+  auth,
+  bindingFor,
+  event,
+  initialize,
+  rows,
+} from "./projection/projector-test-support";
+import { clearDirectory, seedDirectory } from "./support/directory-fixtures";
+
+const workerEnv = env as typeof env & { CONTROL_DB: D1Database };
+const migrationEnv = env as typeof env & {
+  CONTROL_DB: D1Database;
+  TEST_MIGRATIONS: D1Migration[];
+};
+const tenantId = "tenant_pilot";
+
+const createTestApp = (services: AppServices = {}) =>
+  createApp({
+    ...services,
+    createTokenVerifier: () => ({
+      verify: async (token: string): Promise<VerifiedSubject> => {
+        if (token === "human-token")
+          return {
+            issuer: "https://issuer.example/",
+            subject: "human-subject",
+          };
+        if (token === "agent-token")
+          return {
+            issuer: "https://issuer.example/",
+            subject: "agent-subject",
+            token_id: "agent-token-id",
+          };
+        if (token === "service-token")
+          return {
+            issuer: "https://issuer.example/",
+            subject: "service-subject",
+            token_id: "service-token-id",
+          };
+        throw new Error("invalid local test token");
+      },
+    }),
+  });
+
+const requestForApp = async (
+  app: ReturnType<typeof createApp>,
+  path: string,
+  token = "human-token",
+  init: RequestInit = {},
+) =>
+  app.request(
+    `http://example.test${path}`,
+    {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...init.headers,
+      },
+    },
+    workerEnv,
+  );
+
+const request = async (
+  path: string,
+  token = "human-token",
+  init: RequestInit = {},
+) => requestForApp(createTestApp(), path, token, init);
+
+const trustedReconcile = async (
+  app: ReturnType<typeof createApp>,
+  commandId: string,
+  evidence: Parameters<typeof reconcileTrustedOutboundEvidence>[3],
+) => {
+  const session = await requestForApp(app, "/api/v1/session", "human-token");
+  const authorization = SessionResponseSchema.parse(await session.json());
+  return reconcileTrustedOutboundEvidence(
+    { env: workerEnv, authorization },
+    commandId,
+    { now: () => new Date("2050-01-01T00:00:00.000Z") },
+    evidence,
+  );
+};
+
+const connectMcpClient = async (
+  app: ReturnType<typeof createApp>,
+  token: string,
+) => {
+  const client = new Client({
+    name: "durable-acceptance-test-client",
+    version: "1.0.0",
+  });
+  const transport = new StreamableHTTPClientTransport(
+    new URL("http://example.test/mcp"),
+    {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Origin: "http://example.test",
+        },
+      },
+      fetch: async (input, init) => {
+        const url = input instanceof URL ? input.href : input.toString();
+        return app.request(url, init, workerEnv);
+      },
+    },
+  );
+  await client.connect(
+    transport as unknown as Parameters<Client["connect"]>[0],
+  );
+  return { client, transport };
+};
+
+const grantBody = (overrides: Record<string, unknown> = {}) => ({
+  membership_id: "membership_human",
+  identity_id: "identity_human",
+  account_id: "account_human",
+  operation_scope: "conversation.read",
+  chat_scope: "selected_chats",
+  chat_ids: ["conversation_human_one"],
+  idempotency_key: `grant-test-${crypto.randomUUID()}`,
+  ...overrides,
+});
+
+async function insertAccounts() {
+  await workerEnv.CONTROL_DB.batch([
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "gateway_route_human",
+      "principal_operator",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "gateway_route_agent",
+      "principal_operator",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "gateway_route_agent_secondary",
+      "principal_operator",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, 'telegram', ?, 'ready', ?, ?)",
+    ).bind(
+      "connection_agent_secondary",
+      tenantId,
+      "identity_agent",
+      "Agent Telegram",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      "connection_agent_secondary",
+      "gateway_route_agent_secondary",
+      "bridge-agent-secondary",
+      "route-user-agent-secondary",
+      "route-room-agent-secondary",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "account_human",
+      "connection_human_whatsapp",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "account_agent",
+      "connection_agent_whatsapp",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "account_agent_secondary",
+      "connection_agent_secondary",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+  ]);
+}
+
+async function projectReadFixtures() {
+  await applyD1Migrations(
+    migrationEnv.CONTROL_DB,
+    migrationEnv.TEST_MIGRATIONS,
+  );
+  const stub = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+  await initialize(tenantId);
+  await runInDurableObject(stub, async (_instance, state) => {
+    state.storage.sql.exec("UPDATE projection_meta SET state = 'ready'");
+  });
+  await stub.applyBatch({
+    schema_version: 1,
+    tenant_id: tenantId,
+    authorization: auth(["projection.write"], ["identity_human"], tenantId),
+    mode: "live",
+    rebuild_id: null,
+    connections: [
+      bindingFor(
+        "account_human",
+        "connection_human_whatsapp",
+        "identity_human",
+      ),
+    ],
+    events: [
+      event(
+        "event_grant_human_one",
+        {
+          title: "Granted conversation",
+          archived: false,
+          muted: false,
+        },
+        "conversation.updated",
+        {
+          tenant_id: tenantId,
+          identity_id: "identity_human",
+          account_id: "account_human",
+          conversation_id: "conversation_human_one",
+        },
+      ),
+      event(
+        "event_grant_human_two",
+        {
+          title: "Another conversation",
+          archived: false,
+          muted: false,
+        },
+        "conversation.updated",
+        {
+          tenant_id: tenantId,
+          identity_id: "identity_human",
+          account_id: "account_human",
+          conversation_id: "conversation_human_two",
+          occurred_at: "2026-09-07T02:00:00.000Z",
+          observed_at: "2026-09-07T02:00:01.000Z",
+        },
+      ),
+    ],
+    checkpoint: null,
+  });
+}
+
+beforeAll(projectReadFixtures);
+beforeEach(async () => {
+  const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+  await runInDurableObject(projection, (_instance, state) => {
+    state.storage.transactionSync(() => {
+      state.storage.sql.exec("DELETE FROM outbound_actions");
+      state.storage.sql.exec("DELETE FROM outbound_evidence");
+      state.storage.sql.exec("DELETE FROM outbound_command_decisions");
+      state.storage.sql.exec("DELETE FROM outbound_dispatches");
+      state.storage.sql.exec(
+        "DELETE FROM commands WHERE operation = 'message.send'",
+      );
+      state.storage.sql.exec(
+        "DELETE FROM messages WHERE direction = 'outbound'",
+      );
+    });
+  });
+  await projectReadFixtures();
+  await clearDirectory(workerEnv.CONTROL_DB);
+  await seedDirectory(workerEnv.CONTROL_DB);
+  await workerEnv.CONTROL_DB.batch([
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'service', ?, 'active', ?, ?)",
+    ).bind(
+      "principal_service",
+      "https://issuer.example/",
+      "service-subject",
+      "Service",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    workerEnv.CONTROL_DB.prepare(
+      "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'owner', 'active', ?, ?)",
+    ).bind(
+      "membership_service",
+      tenantId,
+      "principal_service",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+  ]);
+  await insertAccounts();
+});
+
+describe("account-scoped grant API", () => {
+  it("fails closed for an ungranted linked account, then applies selected/all scope and revocation", async () => {
+    const beforeGrant = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_human",
+    );
+    expect(beforeGrant.status).toBe(404);
+    const realtime = await request("/api/v1/realtime/tickets", "agent-token", {
+      method: "POST",
+      body: JSON.stringify({
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: "identity_agent", families: ["projection"] },
+        ],
+      }),
+    });
+    expect(realtime.status).toBe(404);
+
+    const create = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(grantBody()),
+    });
+    expect(create.status).toBe(201);
+    const grant = AccountGrantSchema.parse(await create.json());
+
+    const selected = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_human",
+    );
+    expect(selected.status).toBe(200);
+    expect(
+      ConversationPageResultSchema.parse(await selected.json()).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual(["conversation_human_one"]);
+
+    const update = await request(`/api/v1/grants/${grant.id}`, "human-token", {
+      method: "PATCH",
+      body: JSON.stringify({
+        operation_scope: "conversation.read",
+        chat_scope: "all_chats",
+        chat_ids: [],
+        idempotency_key: `grant-update-${crypto.randomUUID()}`,
+      }),
+    });
+    expect(update.status).toBe(200);
+    await workerEnv.TENANT_PROJECTION.getByName(tenantId).applyBatch({
+      schema_version: 1,
+      tenant_id: tenantId,
+      authorization: auth(["projection.write"], ["identity_human"], tenantId),
+      mode: "live",
+      rebuild_id: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      events: [
+        event(
+          "event_grant_human_future",
+          {
+            title: "Future conversation",
+            archived: false,
+            muted: false,
+          },
+          "conversation.updated",
+          {
+            tenant_id: tenantId,
+            identity_id: "identity_human",
+            account_id: "account_human",
+            conversation_id: "conversation_human_future",
+            occurred_at: "2026-09-07T03:00:00.000Z",
+            observed_at: "2026-09-07T03:00:01.000Z",
+          },
+        ),
+      ],
+      checkpoint: null,
+    });
+    const allChats = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_human",
+    );
+    expect(
+      ConversationPageResultSchema.parse(await allChats.json()).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([
+      "conversation_human_future",
+      "conversation_human_two",
+      "conversation_human_one",
+    ]);
+
+    const revoke = await request(`/api/v1/grants/${grant.id}`, "human-token", {
+      method: "DELETE",
+      headers: { "Idempotency-Key": `grant-revoke-${crypto.randomUUID()}` },
+    });
+    expect(revoke.status).toBe(200);
+    const afterRevoke = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_human",
+    );
+    expect(afterRevoke.status).toBe(404);
+    const audit = await workerEnv.CONTROL_DB.prepare(
+      "SELECT action, target_id FROM audit_events WHERE target_type = 'account_grant' ORDER BY occurred_at, id",
+    ).all<{ action: string; target_id: string }>();
+    expect(audit.results.map((row) => row.action)).toEqual([
+      "authorization.account_grant.created",
+      "authorization.account_grant.updated",
+      "authorization.account_grant.revoked",
+    ]);
+    expect(new Set(audit.results.map((row) => row.target_id))).toEqual(
+      new Set([grant.id]),
+    );
+  });
+
+  it("accepts and replays a text reply through the official MCP tool", async () => {
+    const create = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          idempotency_key: `mcp-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(create.status).toBe(201);
+
+    const app = createTestApp();
+    const { client, transport } = await connectMcpClient(app, "agent-token");
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toContain("send_text_reply");
+
+      const idempotencyKey = `mcp-send-${crypto.randomUUID()}`;
+      const input = {
+        identity_id: "identity_agent",
+        conversation_id: "conversation_human_one",
+        body: "Saved through MCP",
+        delivery_mode: "direct",
+        idempotency_key: idempotencyKey,
+      } as const;
+      const first = await client.callTool({
+        name: "send_text_reply",
+        arguments: input,
+      });
+      expect(first.isError).not.toBe(true);
+      const firstValue = first.structuredContent as {
+        command: {
+          id: string;
+          status: string;
+          message_id?: string;
+          event_id?: string;
+          dispatch_id?: string;
+        };
+        message: { id: string };
+        dispatch: { id: string; status: string; idempotency_key: string };
+        replayed: boolean;
+      };
+      expect(firstValue.replayed).toBe(false);
+      expect(firstValue.command.status).toBe("accepted");
+      expect(firstValue.command.message_id).toBe(firstValue.message.id);
+      expect(firstValue.command.dispatch_id).toBe(firstValue.dispatch.id);
+      expect(firstValue.dispatch.status).toBe("pending");
+      expect(firstValue.dispatch.idempotency_key).toBe(idempotencyKey);
+
+      const replay = await client.callTool({
+        name: "send_text_reply",
+        arguments: input,
+      });
+      expect(replay.isError).not.toBe(true);
+      const replayValue = replay.structuredContent as typeof firstValue;
+      expect(replayValue.replayed).toBe(true);
+      expect(replayValue.command.id).toBe(firstValue.command.id);
+      expect(replayValue.message.id).toBe(firstValue.message.id);
+      expect(replayValue.dispatch.id).toBe(firstValue.dispatch.id);
+
+      const apiReplay = await requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Saved through MCP",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+      expect(apiReplay.status).toBe(202);
+      const apiCommand = (await apiReplay.json()) as { id: string };
+      expect(apiCommand.id).toBe(firstValue.command.id);
+
+      const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+      expect(
+        await rows(
+          projection,
+          "SELECT id FROM outbound_dispatches WHERE idempotency_key = ?",
+          idempotencyKey,
+        ),
+      ).toHaveLength(1);
+      expect(
+        await rows(
+          projection,
+          "SELECT id FROM commands WHERE id = ?",
+          firstValue.command.id,
+        ),
+      ).toHaveLength(1);
+      expect(
+        await rows(
+          projection,
+          "SELECT id FROM messages WHERE id = ?",
+          firstValue.message.id,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  });
+
+  it("keeps API acceptance atomic across controlled crash boundaries", async () => {
+    const create = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          idempotency_key: `crash-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(create.status).toBe(201);
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    type TableCounts = {
+      dispatches: number;
+      commands: number;
+      messages: number;
+    };
+    const tableCounts = async (): Promise<TableCounts> =>
+      (
+        await rows<TableCounts>(
+          projection,
+          "SELECT (SELECT COUNT(*) FROM outbound_dispatches) AS dispatches, (SELECT COUNT(*) FROM commands) AS commands, (SELECT COUNT(*) FROM messages) AS messages",
+        )
+      )[0]!;
+    const plusAcceptance = (counts: TableCounts): TableCounts => ({
+      dispatches: counts.dispatches + 1,
+      commands: counts.commands + 1,
+      messages: counts.messages + 1,
+    });
+    const rowsFor = (idempotencyKey: string) =>
+      rows<{
+        id: string;
+        command_id: string;
+        message_id: string;
+        status: string;
+      }>(
+        projection,
+        "SELECT id, command_id, message_id, status FROM outbound_dispatches WHERE idempotency_key = ?",
+        idempotencyKey,
+      );
+    const send = (app: ReturnType<typeof createApp>, idempotencyKey: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Crash boundary reply",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const crashCases = [
+      {
+        name: "before-commit",
+        persistedAfterFailure: false,
+        services: {
+          beforeCommit: () => {
+            throw new Error("controlled before-commit crash");
+          },
+        },
+      },
+      {
+        name: "after-commit",
+        persistedAfterFailure: true,
+        services: {
+          afterCommit: () => {
+            throw new Error("controlled after-commit crash");
+          },
+        },
+      },
+      {
+        name: "before-wakeup",
+        persistedAfterFailure: true,
+        services: {
+          beforeWakeup: () => {
+            throw new Error("controlled before-wakeup crash");
+          },
+        },
+      },
+    ] as const;
+
+    for (const crashCase of crashCases) {
+      const idempotencyKey = `crash-${crashCase.name}-${crypto.randomUUID()}`;
+      const beforeFailure = await tableCounts();
+      const failed = await send(
+        createTestApp({ outboundAcceptance: crashCase.services }),
+        idempotencyKey,
+      );
+      expect(failed.status).toBe(503);
+      const afterFailure = await rowsFor(idempotencyKey);
+      expect(afterFailure).toHaveLength(
+        crashCase.persistedAfterFailure ? 1 : 0,
+      );
+      expect(await tableCounts()).toEqual(
+        crashCase.persistedAfterFailure
+          ? plusAcceptance(beforeFailure)
+          : beforeFailure,
+      );
+
+      const retry = await send(createTestApp(), idempotencyKey);
+      expect(retry.status).toBe(202);
+      const retryCommand = (await retry.json()) as { id: string };
+      const afterRetry = await rowsFor(idempotencyKey);
+      expect(afterRetry).toHaveLength(1);
+      expect(retryCommand.id).toBe(afterRetry[0]!.command_id);
+      expect(afterRetry[0]!.status).toBe("pending");
+      expect(await tableCounts()).toEqual(plusAcceptance(beforeFailure));
+      if (afterFailure[0] !== undefined) {
+        expect(afterRetry[0]).toMatchObject({
+          id: afterFailure[0].id,
+          command_id: afterFailure[0].command_id,
+          message_id: afterFailure[0].message_id,
+        });
+      }
+
+      const replay = await send(createTestApp(), idempotencyKey);
+      expect(replay.status).toBe(202);
+      expect(((await replay.json()) as { id: string }).id).toBe(
+        retryCommand.id,
+      );
+      expect(await rowsFor(idempotencyKey)).toHaveLength(1);
+    }
+
+    let wakeCalls = 0;
+    const wakeFailureKey = `wake-failure-${crypto.randomUUID()}`;
+    const beforeWakeFailure = await tableCounts();
+    const wakeFailure = await send(
+      createTestApp({
+        outboundAcceptance: {
+          wakeDispatch: async () => {
+            wakeCalls += 1;
+            throw new Error("controlled adapter wakeup failure");
+          },
+        },
+      }),
+      wakeFailureKey,
+    );
+    expect(wakeFailure.status).toBe(202);
+    expect(wakeCalls).toBe(1);
+    const wakeCommand = (await wakeFailure.json()) as { id: string };
+    const wakeRows = await rowsFor(wakeFailureKey);
+    expect(wakeRows).toHaveLength(1);
+    expect(wakeRows[0]!.command_id).toBe(wakeCommand.id);
+    expect(wakeRows[0]!.status).toBe("pending");
+    expect(await tableCounts()).toEqual(plusAcceptance(beforeWakeFailure));
+  });
+
+  it("rejects invalid text acceptance without partial rows and accepts a disconnected account", async () => {
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    type TableCounts = {
+      dispatches: number;
+      commands: number;
+      messages: number;
+    };
+    const tableCounts = async (): Promise<TableCounts> =>
+      (
+        await rows<TableCounts>(
+          projection,
+          "SELECT (SELECT COUNT(*) FROM outbound_dispatches) AS dispatches, (SELECT COUNT(*) FROM commands) AS commands, (SELECT COUNT(*) FROM messages) AS messages",
+        )
+      )[0]!;
+    const plusAcceptance = (counts: TableCounts): TableCounts => ({
+      dispatches: counts.dispatches + 1,
+      commands: counts.commands + 1,
+      messages: counts.messages + 1,
+    });
+    const send = (input: {
+      key: string;
+      token?: string;
+      identityId?: string;
+      conversationId?: string;
+      accountId?: string;
+      body?: string;
+      extra?: Record<string, unknown>;
+    }) => {
+      const payload = Object.assign(
+        {
+          identity_id: input.identityId ?? "identity_agent",
+          body: input.body ?? "Stable outbound body",
+          delivery_mode: "direct",
+          ...(input.accountId === undefined
+            ? {}
+            : { account_id: input.accountId }),
+        },
+        input.extra,
+      );
+      return requestForApp(
+        createTestApp(),
+        `/api/v1/conversations/${input.conversationId ?? "conversation_human_one"}/messages`,
+        input.token ?? "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": input.key },
+          body: JSON.stringify(payload),
+        },
+      );
+    };
+    const rejectWithoutRows = async (
+      response: Response,
+      status: number,
+      code: string,
+      before: TableCounts,
+    ) => {
+      expect(response.status).toBe(status);
+      expect(
+        ApiErrorResponseSchema.parse(await response.json()).error.code,
+      ).toBe(code);
+      expect(await tableCounts()).toEqual(before);
+    };
+    const createSendGrant = async (
+      identityId: string,
+      membershipId: string,
+    ) => {
+      const response = await request("/api/v1/grants", "human-token", {
+        method: "POST",
+        body: JSON.stringify(
+          grantBody({
+            membership_id: membershipId,
+            identity_id: identityId,
+            operation_scope: "message.send",
+            chat_scope: "all_chats",
+            chat_ids: [],
+            idempotency_key: `rejection-send-grant-${identityId}-${crypto.randomUUID()}`,
+          }),
+        ),
+      });
+      expect(response.status).toBe(201);
+      return AccountGrantSchema.parse(await response.json());
+    };
+
+    let before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: `ungranted-${crypto.randomUUID()}` }),
+      403,
+      "forbidden",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `unknown-account-${crypto.randomUUID()}`,
+        accountId: "account_unknown",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `ungranted-account-${crypto.randomUUID()}`,
+        accountId: "account_agent",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    const agentGrant = await createSendGrant(
+      "identity_agent",
+      "membership_agent",
+    );
+    const acceptedKey = `rejection-valid-${crypto.randomUUID()}`;
+    before = await tableCounts();
+    const accepted = await send({ key: acceptedKey });
+    expect(accepted.status).toBe(202);
+    const acceptedCommand = (await accepted.json()) as { id: string };
+    expect(acceptedCommand.id).toBeTruthy();
+    expect(await tableCounts()).toEqual(plusAcceptance(before));
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: acceptedKey, body: "Changed payload" }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: acceptedKey,
+        conversationId: "conversation_human_two",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: acceptedKey, accountId: "account_agent" }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    await createSendGrant("identity_human", "membership_human");
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: acceptedKey,
+        token: "human-token",
+        identityId: "identity_human",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    const revoke = await request(
+      `/api/v1/grants/${agentGrant.id}`,
+      "human-token",
+      {
+        method: "DELETE",
+        headers: {
+          "Idempotency-Key": `rejection-revoke-${crypto.randomUUID()}`,
+        },
+      },
+    );
+    expect(revoke.status).toBe(200);
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({ key: `revoked-${crypto.randomUUID()}` }),
+      403,
+      "forbidden",
+      before,
+    );
+
+    await createSendGrant("identity_agent", "membership_agent");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const disconnectedKey = `disconnected-${crypto.randomUUID()}`;
+    before = await tableCounts();
+    const disconnected = await send({ key: disconnectedKey });
+    expect(disconnected.status).toBe(202);
+    const disconnectedCommand = (await disconnected.json()) as { id: string };
+    expect(disconnectedCommand.id).toBeTruthy();
+    expect(await tableCounts()).toEqual(plusAcceptance(before));
+    expect(
+      await rows<{ status: string }>(
+        projection,
+        "SELECT status FROM outbound_dispatches WHERE idempotency_key = ?",
+        disconnectedKey,
+      ),
+    ).toEqual([{ status: "waiting_for_connection" }]);
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `empty-body-${crypto.randomUUID()}`,
+        body: "",
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+
+    before = await tableCounts();
+    await rejectWithoutRows(
+      await send({
+        key: `attachments-${crypto.randomUUID()}`,
+        extra: { attachments: [{ name: "blocked.txt" }] },
+      }),
+      400,
+      "invalid_request",
+      before,
+    );
+  });
+
+  it("denies an agent grant, cross-account reads, and cross-tenant account binding", async () => {
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'admin' WHERE id = ?",
+    )
+      .bind("membership_agent")
+      .run();
+    const agentGrant = await request("/api/v1/grants", "agent-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          account_id: "account_agent",
+          idempotency_key: `agent-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(agentGrant.status).toBe(403);
+    expect(
+      ApiErrorResponseSchema.parse(await agentGrant.json()).error.code,
+    ).toBe("forbidden");
+
+    const serviceGrant = await request("/api/v1/grants", "service-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          idempotency_key: `service-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(serviceGrant.status).toBe(403);
+
+    const crossAccount = await request(
+      "/api/v1/accounts/account_agent/conversations?identity_id=identity_human",
+    );
+    expect(crossAccount.status).toBe(404);
+
+    await workerEnv.CONTROL_DB.batch([
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)",
+      ).bind(
+        "tenant_other",
+        "other",
+        "Other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'human', ?, 'active', ?, ?)",
+      ).bind(
+        "principal_other",
+        "https://issuer.example/",
+        "other-subject",
+        "Other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'owner', 'active', ?, ?)",
+      ).bind(
+        "membership_other",
+        "tenant_other",
+        "principal_other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, 'human', ?, 'active', ?, ?)",
+      ).bind(
+        "identity_other",
+        "tenant_other",
+        "Other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, 'whatsapp', ?, 'ready', ?, ?)",
+      ).bind(
+        "connection_other",
+        "tenant_other",
+        "identity_other",
+        "Other WhatsApp",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(
+        "connection_other",
+        "gateway_route_other",
+        "bridge-other",
+        "route-user-other",
+        "route-room-other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      ).bind(
+        "gateway_route_other",
+        "principal_other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+      ).bind(
+        "account_other",
+        "connection_other",
+        "2026-09-07T00:00:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+    ]);
+    const crossTenant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          account_id: "account_other",
+          idempotency_key: `cross-tenant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(crossTenant.status).toBe(409);
+  });
+
+  it("filters delegated account and connection enumeration by active grants", async () => {
+    const before = await request(
+      "/api/v1/accounts?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(before.status).toBe(200);
+    expect(await before.json()).toEqual({ items: [], next_cursor: null });
+
+    const beforeConnections = await request(
+      "/api/v1/connections?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(beforeConnections.status).toBe(200);
+    expect(await beforeConnections.json()).toEqual([]);
+
+    const create = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          account_id: "account_agent",
+          idempotency_key: `agent-account-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(create.status).toBe(201);
+
+    const after = await request(
+      "/api/v1/accounts?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(after.status).toBe(200);
+    expect(
+      ConnectedAccountPageSchema.parse(await after.json()).items.map(
+        (account) => account.account_id,
+      ),
+    ).toEqual(["account_agent"]);
+
+    const afterConnections = await request(
+      "/api/v1/connections?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(afterConnections.status).toBe(200);
+    expect(
+      ConnectionSchema.array()
+        .parse(await afterConnections.json())
+        .map((connection) => connection.id),
+    ).toEqual(["connection_agent_whatsapp"]);
+  });
+
+  it("paginates more than one hundred delegated account grants without an account-list cap", async () => {
+    const rows: D1PreparedStatement[] = [];
+    for (let index = 0; index < 105; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      const connectionId = `connection_agent_bulk_${suffix}`;
+      const accountId = `account_agent_bulk_${suffix}`;
+      rows.push(
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, 'identity_agent', 'telegram', ?, 'ready', ?, ?)",
+        ).bind(
+          connectionId,
+          tenantId,
+          `Agent bulk ${suffix}`,
+          "2026-09-07T00:00:00.000Z",
+          "2026-09-07T00:00:00.000Z",
+        ),
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, 'gateway_route_agent', ?, ?, ?, ?, ?)",
+        ).bind(
+          connectionId,
+          `bridge-agent-bulk-${suffix}`,
+          `route-user-agent-bulk-${suffix}`,
+          `route-room-agent-bulk-${suffix}`,
+          "2026-09-07T00:00:00.000Z",
+          "2026-09-07T00:00:00.000Z",
+        ),
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+        ).bind(
+          accountId,
+          connectionId,
+          "2026-09-07T00:00:00.000Z",
+          "2026-09-07T00:00:00.000Z",
+        ),
+        workerEnv.CONTROL_DB.prepare(
+          "INSERT INTO account_grants (id, tenant_id, membership_id, identity_id, account_id, operation_scope, chat_scope, status, created_at, updated_at) VALUES (?, ?, 'membership_agent', 'identity_agent', ?, 'conversation.read', 'all_chats', 'active', ?, ?)",
+        ).bind(
+          `grant_agent_bulk_${suffix}`,
+          tenantId,
+          accountId,
+          "2026-09-07T00:00:00.000Z",
+          "2026-09-07T00:00:00.000Z",
+        ),
+      );
+    }
+    await workerEnv.CONTROL_DB.batch(rows);
+
+    const accountIds: string[] = [];
+    const pageSizes: number[] = [];
+    let cursor: string | undefined;
+    do {
+      const query = new URLSearchParams({
+        identity_id: "identity_agent",
+        limit: "50",
+      });
+      if (cursor !== undefined) query.set("cursor", cursor);
+      const response = await request(
+        `/api/v1/accounts?${query}`,
+        "agent-token",
+      );
+      expect(response.status).toBe(200);
+      const page = ConnectedAccountPageSchema.parse(await response.json());
+      pageSizes.push(page.items.length);
+      accountIds.push(...page.items.map((account) => account.account_id));
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor !== undefined);
+
+    expect(pageSizes).toEqual([50, 50, 5]);
+    expect(new Set(accountIds).size).toBe(105);
+    expect(accountIds).toContain("account_agent_bulk_104");
+  });
+
+  it("denies retained projection rows when the last account is retired or the account table is empty", async () => {
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connection_accounts SET status = 'retired', retired_at = ? WHERE account_id = ?",
+    )
+      .bind("2026-09-07T04:00:00.000Z", "account_human")
+      .run();
+    const retired = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_human",
+    );
+    expect(retired.status).toBe(404);
+
+    await clearDirectory(workerEnv.CONTROL_DB);
+    await seedDirectory(workerEnv.CONTROL_DB);
+    const unknownLegacy = await request(
+      "/api/v1/accounts/account_human/conversations?identity_id=identity_human",
+    );
+    expect(unknownLegacy.status).toBe(404);
+  });
+
+  it("lets an agent inspect its own grants and request access without elevating itself", async () => {
+    const implicitOwnGrants = await request("/api/v1/grants", "agent-token");
+    expect(implicitOwnGrants.status).toBe(200);
+    expect(await implicitOwnGrants.json()).toEqual({
+      items: [],
+      next_cursor: null,
+    });
+    const ownGrants = await request(
+      "/api/v1/grants?identity_id=identity_agent",
+      "agent-token",
+    );
+    expect(ownGrants.status).toBe(200);
+    expect(await ownGrants.json()).toEqual({ items: [], next_cursor: null });
+
+    const requestAccess = await request(
+      "/api/v1/permission-requests",
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          account_id: "account_agent",
+          operation_scope: "conversation.read",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          reason: "Need access to the assigned account",
+          idempotency_key: `permission-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(requestAccess.status).toBe(201);
+
+    const selfGrant = await request("/api/v1/grants", "agent-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          account_id: "account_agent",
+          idempotency_key: `self-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(selfGrant.status).toBe(403);
+
+    const otherIdentityRequest = await request(
+      "/api/v1/permission-requests",
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          identity_id: "identity_human",
+          account_id: "account_human",
+          operation_scope: "conversation.read",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          reason: "Attempt to request for another identity",
+          idempotency_key: `permission-other-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(otherIdentityRequest.status).toBe(403);
+  });
+
+  it("accepts an account-scoped text reply once, separates keys, and survives rebuild", async () => {
+    const conversationPath =
+      "/api/v1/conversations/conversation_human_one/messages";
+    const firstKey = `reply-first-${crypto.randomUUID()}`;
+    const secondKey = `reply-second-${crypto.randomUUID()}`;
+    const before = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(before.status).toBe(403);
+    expect(
+      await rows(
+        workerEnv.TENANT_PROJECTION.getByName(tenantId),
+        "SELECT id FROM outbound_dispatches WHERE idempotency_key = ?",
+        firstKey,
+      ),
+    ).toEqual([]);
+
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          account_id: "account_human",
+          operation_scope: "message.send",
+          idempotency_key: `send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const firstResponse = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(firstResponse.status).toBe(202);
+    const first = (await firstResponse.json()) as {
+      id: string;
+      status: string;
+      account_id?: string;
+      message_id?: string;
+      event_id?: string;
+      dispatch_id?: string;
+    };
+    expect(first).toMatchObject({
+      status: "accepted",
+      account_id: "account_human",
+    });
+    expect(first.message_id).toEqual(expect.any(String));
+    expect(first.event_id).toEqual(expect.any(String));
+    expect(first.dispatch_id).toEqual(expect.any(String));
+
+    const replayResponse = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(replayResponse.status).toBe(202);
+    const replay = (await replayResponse.json()) as { id: string };
+    expect(replay.id).toBe(first.id);
+
+    const secondResponse = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": secondKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(secondResponse.status).toBe(202);
+    const second = (await secondResponse.json()) as {
+      id: string;
+      message_id?: string;
+    };
+    expect(second.id).not.toBe(first.id);
+    expect(second.message_id).not.toBe(first.message_id);
+
+    const conflict = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: { "Idempotency-Key": firstKey },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "changed durable hello",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(conflict.status).toBe(400);
+    expect(ApiErrorResponseSchema.parse(await conflict.json()).error.code).toBe(
+      "invalid_request",
+    );
+
+    const dispatchRows = await rows<{
+      id: string;
+      message_id: string;
+      command_id: string;
+    }>(
+      workerEnv.TENANT_PROJECTION.getByName(tenantId),
+      "SELECT id, message_id, command_id FROM outbound_dispatches WHERE idempotency_key IN (?, ?) ORDER BY idempotency_key",
+      firstKey,
+      secondKey,
+    );
+    expect(dispatchRows).toHaveLength(2);
+    expect(
+      await rows(
+        workerEnv.TENANT_PROJECTION.getByName(tenantId),
+        "SELECT id FROM messages WHERE id IN (?, ?)",
+        dispatchRows[0]!.message_id,
+        dispatchRows[1]!.message_id,
+      ),
+    ).toHaveLength(2);
+    expect(
+      await rows(
+        workerEnv.TENANT_PROJECTION.getByName(tenantId),
+        "SELECT id FROM commands WHERE id IN (?, ?)",
+        dispatchRows[0]!.command_id,
+        dispatchRows[1]!.command_id,
+      ),
+    ).toHaveLength(2);
+
+    const revoke = await request(
+      `/api/v1/grants/${((await grantResponse.clone().json()) as { id: string }).id}`,
+      "human-token",
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": `revoke-send-${crypto.randomUUID()}` },
+      },
+    );
+    expect(revoke.status).toBe(200);
+    const afterRevoke = await request(conversationPath, "agent-token", {
+      method: "POST",
+      headers: {
+        "Idempotency-Key": `reply-after-revoke-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({
+        identity_id: "identity_agent",
+        body: "must be denied",
+        delivery_mode: "direct",
+      }),
+    });
+    expect(afterRevoke.status).toBe(403);
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const deletionEvent = event(
+      "event_outbound_deleted",
+      { message_id: first.message_id!, reason_code: "redacted" },
+      "message.deleted",
+      {
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-13T02:00:00.000Z",
+        observed_at: "2026-09-13T02:00:01.000Z",
+      },
+    );
+    await projection.applyBatch({
+      schema_version: 1,
+      tenant_id: tenantId,
+      authorization: auth(["projection.write"], ["identity_human"], tenantId),
+      mode: "live",
+      rebuild_id: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      events: [deletionEvent],
+      checkpoint: null,
+    });
+    expect(
+      await rows<{ body: string; deleted_at: string | null }>(
+        projection,
+        "SELECT body, deleted_at FROM messages WHERE id = ?",
+        first.message_id!,
+      ),
+    ).toEqual([{ body: "", deleted_at: expect.any(String) }]);
+
+    const currentMeta = await rows<{ generation: number }>(
+      projection,
+      "SELECT generation FROM projection_meta WHERE singleton = 1",
+    );
+    const rebuildId = `rebuild_outbound_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rebuildAuthorization = auth(
+      ["projection.rebuild"],
+      ["identity_human"],
+      tenantId,
+    );
+    await projection.beginRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      expected_generation: currentMeta[0]!.generation,
+      started_at: "2026-09-13T02:00:00.000Z",
+      authorization: rebuildAuthorization,
+    });
+    const replayEvent = event(
+      `event_rebuild_outbound_${crypto.randomUUID().replaceAll("-", "")}`,
+      { title: "Granted conversation", archived: false, muted: false },
+      "conversation.updated",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-13T02:00:00.000Z",
+        observed_at: "2026-09-13T02:00:01.000Z",
+      },
+    );
+    const replayDeletionEvent = event(
+      "event_rebuild_outbound_deleted",
+      { message_id: first.message_id!, reason_code: "redacted" },
+      "message.deleted",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-13T02:00:02.000Z",
+        observed_at: "2026-09-13T02:00:03.000Z",
+      },
+    );
+    await projection.applyReplayPage({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      source_cursor: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      page: {
+        schema_version: 1,
+        replay_mode: "projection_only",
+        tenant_id: tenantId,
+        manifests: [
+          {
+            schema_version: 1,
+            tenant_id: tenantId,
+            batch_id: "batch_outbound_rebuild",
+            data_key: `events/${tenantId}/2026/09/13/02/batch_outbound_rebuild.jsonl.gz`,
+            compression: "gzip",
+            content_type: "application/x-ndjson",
+            event_count: 2,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            canonical_sha256: "0".repeat(64),
+            data_etag: "etag-outbound-rebuild",
+            first_event_id: replayEvent.event_id,
+            last_event_id: replayDeletionEvent.event_id,
+            first_observed_at: replayEvent.observed_at,
+            last_observed_at: replayDeletionEvent.observed_at,
+            archived_at: "2026-09-13T02:00:02.000Z",
+            producer: {
+              service: "communicator-control-plane",
+              version: "outbound-test/1",
+            },
+            source_checkpoint: null,
+          },
+        ],
+        events: [replayEvent, replayDeletionEvent],
+        next_cursor: null,
+      },
+      authorization: rebuildAuthorization,
+    });
+    const completeInput = {
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      terminal_cursor: null,
+      completed_at: "2026-09-13T02:00:03.000Z",
+      authorization: rebuildAuthorization,
+    } as const;
+    await projection.completeRebuild(completeInput);
+
+    expect(
+      await rows(
+        projection,
+        "SELECT id FROM outbound_dispatches WHERE idempotency_key IN (?, ?)",
+        firstKey,
+        secondKey,
+      ),
+    ).toHaveLength(2);
+    expect(
+      await rows<{ body: string; deleted_at: string | null }>(
+        projection,
+        "SELECT body, deleted_at FROM messages WHERE id = ?",
+        first.message_id!,
+      ),
+    ).toEqual([{ body: "", deleted_at: expect.any(String) }]);
+    expect(
+      await rows(
+        projection,
+        "SELECT id FROM messages WHERE id IN (?, ?)",
+        dispatchRows[0]!.message_id,
+        dispatchRows[1]!.message_id,
+      ),
+    ).toHaveLength(2);
+    expect(
+      await rows(
+        projection,
+        "SELECT id FROM commands WHERE id IN (?, ?)",
+        dispatchRows[0]!.command_id,
+        dispatchRows[1]!.command_id,
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("anchors offline waiting to the saved clock, reconnects without aging it, and cancels durably", async () => {
+    const grant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `offline-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grant.status).toBe(201);
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2026-09-14T00:00:00.000Z");
+    const app = createTestApp({ outboundAcceptance: { now: () => now } });
+    const send = async (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Offline waiting reply",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const waitingKey = `offline-waiting-${crypto.randomUUID()}`;
+    const waiting = await send(waitingKey);
+    expect(waiting.status).toBe(202);
+    const waitingCommand = (await waiting.json()) as {
+      id: string;
+      status: string;
+      created_at: string;
+      confirmation_due_at?: string;
+    };
+    expect(waitingCommand.status).toBe("waiting_for_connection");
+    expect(waitingCommand.created_at).toBe(now.toISOString());
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const waitingDispatch = await rows<{
+      status: string;
+      created_at: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT status, created_at, confirmation_due_at FROM outbound_dispatches WHERE idempotency_key = ?",
+      waitingKey,
+    );
+    expect(waitingDispatch).toEqual([
+      {
+        status: "waiting_for_connection",
+        created_at: now.toISOString(),
+        confirmation_due_at: "2026-09-14T04:00:00.000Z",
+      },
+    ]);
+
+    now = new Date("2026-09-14T03:59:59.999Z");
+    const beforeDue = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(beforeDue.status).toBe(200);
+    expect(
+      ((await beforeDue.json()) as { dispatch: { status: string } }).dispatch
+        .status,
+    ).toBe("waiting_for_connection");
+    const tooEarly = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/confirm`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `offline-confirm-early-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(tooEarly.status).toBe(400);
+
+    now = new Date("2026-09-14T04:00:00.000Z");
+    const atDue = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(atDue.status).toBe(200);
+    expect(
+      ((await atDue.json()) as { dispatch: { status: string } }).dispatch
+        .status,
+    ).toBe("confirmation_required");
+    const cancelKey = `offline-cancel-${crypto.randomUUID()}`;
+    const cancelled = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: cancelKey }),
+      },
+    );
+    expect(cancelled.status).toBe(200);
+    const cancelledValue = (await cancelled.json()) as {
+      replayed: boolean;
+      command: { id: string; status: string; confirmation_decision?: string };
+      dispatch: {
+        status: string;
+        confirmation_decision?: string;
+        confirmation_actor_principal_id?: string;
+        confirmation_decided_at?: string;
+      };
+    };
+    expect(cancelledValue.replayed).toBe(false);
+    expect(cancelledValue.command.status).toBe("cancelled");
+    expect(cancelledValue.command.confirmation_decision).toBe("cancel");
+    expect(cancelledValue.dispatch.status).toBe("cancelled");
+    expect(cancelledValue.dispatch.confirmation_decision).toBe("cancel");
+    expect(cancelledValue.dispatch.confirmation_actor_principal_id).toBe(
+      "principal_human",
+    );
+    expect(cancelledValue.dispatch.confirmation_decided_at).toBe(
+      now.toISOString(),
+    );
+
+    const replayCancel = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: cancelKey }),
+      },
+    );
+    expect(replayCancel.status).toBe(200);
+    expect(
+      ((await replayCancel.json()) as { replayed: boolean }).replayed,
+    ).toBe(true);
+    const conflictingCancel = await requestForApp(
+      app,
+      `/api/v1/commands/${waitingCommand.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `offline-cancel-conflict-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(conflictingCancel.status).toBe(400);
+
+    now = new Date("2026-09-14T01:00:00.000Z");
+    const reconnectKey = `offline-reconnect-${crypto.randomUUID()}`;
+    const reconnect = await send(reconnectKey);
+    expect(reconnect.status).toBe(202);
+    const reconnectCommand = (await reconnect.json()) as {
+      id: string;
+      status: string;
+      created_at: string;
+    };
+    expect(reconnectCommand.status).toBe("waiting_for_connection");
+    expect(reconnectCommand.created_at).toBe(now.toISOString());
+
+    now = new Date("2026-09-14T02:00:00.000Z");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'ready' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const reconnected = await requestForApp(
+      app,
+      `/api/v1/commands/${reconnectCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(reconnected.status).toBe(200);
+    expect(
+      ((await reconnected.json()) as { dispatch: { status: string } }).dispatch
+        .status,
+    ).toBe("pending");
+    const reconnectDispatch = await rows<{
+      status: string;
+      created_at: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT status, created_at, confirmation_due_at FROM outbound_dispatches WHERE idempotency_key = ?",
+      reconnectKey,
+    );
+    expect(reconnectDispatch[0]?.status).toBe("pending");
+    expect(reconnectDispatch[0]?.created_at).toBe("2026-09-14T01:00:00.000Z");
+    expect(reconnectDispatch[0]?.confirmation_due_at).toBe(
+      "2026-09-14T05:00:00.000Z",
+    );
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    now = new Date("2026-09-14T05:00:00.000Z");
+    const droppedAfterReconnect = await requestForApp(
+      app,
+      `/api/v1/commands/${reconnectCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(droppedAfterReconnect.status).toBe(200);
+    expect(
+      ((await droppedAfterReconnect.json()) as { dispatch: { status: string } })
+        .dispatch.status,
+    ).toBe("confirmation_required");
+    const droppedDispatch = await rows<{
+      status: string;
+      created_at: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT status, created_at, confirmation_due_at FROM outbound_dispatches WHERE idempotency_key = ?",
+      reconnectKey,
+    );
+    expect(droppedDispatch).toEqual([
+      {
+        status: "confirmation_required",
+        created_at: "2026-09-14T01:00:00.000Z",
+        confirmation_due_at: "2026-09-14T05:00:00.000Z",
+      },
+    ]);
+
+    const currentMeta = await rows<{ generation: number }>(
+      projection,
+      "SELECT generation FROM projection_meta WHERE singleton = 1",
+    );
+    const rebuildId = `rebuild_offline_decision_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rebuildAuthorization = auth(
+      ["projection.rebuild"],
+      ["identity_human"],
+      tenantId,
+    );
+    await projection.beginRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      expected_generation: currentMeta[0]!.generation,
+      started_at: "2026-09-14T05:00:01.000Z",
+      authorization: rebuildAuthorization,
+    });
+    const replayEvent = event(
+      `event_offline_rebuild_${crypto.randomUUID().replaceAll("-", "")}`,
+      { title: "Granted conversation", archived: false, muted: false },
+      "conversation.updated",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2026-09-14T05:00:01.000Z",
+        observed_at: "2026-09-14T05:00:01.000Z",
+      },
+    );
+    await projection.applyReplayPage({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      source_cursor: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      page: {
+        schema_version: 1,
+        replay_mode: "projection_only",
+        tenant_id: tenantId,
+        manifests: [
+          {
+            schema_version: 1,
+            tenant_id: tenantId,
+            batch_id: "batch_offline_rebuild",
+            data_key: `events/${tenantId}/2026/09/14/05/batch_offline_rebuild.jsonl.gz`,
+            compression: "gzip",
+            content_type: "application/x-ndjson",
+            event_count: 1,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            canonical_sha256: "0".repeat(64),
+            data_etag: "etag-offline-rebuild",
+            first_event_id: replayEvent.event_id,
+            last_event_id: replayEvent.event_id,
+            first_observed_at: replayEvent.observed_at,
+            last_observed_at: replayEvent.observed_at,
+            archived_at: "2026-09-14T05:00:01.000Z",
+            producer: {
+              service: "communicator-control-plane",
+              version: "offline-rebuild-test/1",
+            },
+            source_checkpoint: null,
+          },
+        ],
+        events: [replayEvent],
+        next_cursor: null,
+      },
+      authorization: rebuildAuthorization,
+    });
+    await projection.completeRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      terminal_cursor: null,
+      completed_at: "2026-09-14T05:00:02.000Z",
+      authorization: rebuildAuthorization,
+    });
+
+    expect(
+      await rows<{
+        decision: string;
+        actor_principal_id: string;
+        actor_identity_id: string;
+        decided_at: string;
+      }>(
+        projection,
+        "SELECT decision, actor_principal_id, actor_identity_id, decided_at FROM outbound_command_decisions WHERE command_id = ?",
+        waitingCommand.id,
+      ),
+    ).toEqual([
+      {
+        decision: "cancel",
+        actor_principal_id: "principal_human",
+        actor_identity_id: "identity_human",
+        decided_at: "2026-09-14T04:00:00.000Z",
+      },
+    ]);
+    expect(
+      await rows<{ status: string; confirmation_decision: string | null }>(
+        projection,
+        "SELECT status, confirmation_decision FROM outbound_dispatches WHERE idempotency_key = ?",
+        waitingKey,
+      ),
+    ).toEqual([{ status: "cancelled", confirmation_decision: "cancel" }]);
+    expect(
+      await rows<{ status: string; confirmation_decision: string | null }>(
+        projection,
+        "SELECT status, confirmation_decision FROM outbound_dispatches WHERE idempotency_key = ?",
+        reconnectKey,
+      ),
+    ).toEqual([
+      { status: "confirmation_required", confirmation_decision: null },
+    ]);
+    expect(
+      await rows<{ count: number }>(
+        projection,
+        "SELECT COUNT(*) AS count FROM outbound_dispatches WHERE idempotency_key = ?",
+        waitingKey,
+      ),
+    ).toEqual([{ count: 1 }]);
+    const rebuiltAdminCommands = await requestForApp(
+      app,
+      "/api/v1/commands",
+      "human-token",
+      { method: "GET" },
+    );
+    expect(rebuiltAdminCommands.status).toBe(200);
+    const rebuiltCommands = (await rebuiltAdminCommands.json()) as Array<{
+      id: string;
+      status: string;
+      confirmation_decision?: string;
+      confirmation_actor_principal_id?: string;
+      confirmation_decided_at?: string;
+    }>;
+    expect(
+      rebuiltCommands.find((command) => command.id === waitingCommand.id),
+    ).toMatchObject({
+      status: "cancelled",
+      confirmation_decision: "cancel",
+      confirmation_actor_principal_id: "principal_human",
+      confirmation_decided_at: "2026-09-14T04:00:00.000Z",
+    });
+    expect(
+      rebuiltCommands.find((command) => command.id === reconnectCommand.id),
+    ).toMatchObject({ status: "confirmation_required" });
+  });
+
+  it("promotes a waiting command from the durable alarm and keeps stale confirmation human-only", async () => {
+    const grant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: "alarm-send-grant-" + crypto.randomUUID(),
+        }),
+      ),
+    });
+    expect(grant.status).toBe(201);
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2030-01-01T00:00:00.000Z");
+    const app = createTestApp({ outboundAcceptance: { now: () => now } });
+    const response = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_one/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "alarm-wait-" + crypto.randomUUID() },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "Alarm waiting reply",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(response.status).toBe(202);
+    const command = (await response.json()) as { id: string };
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const due = Date.parse("2030-01-01T04:00:00.000Z");
+    const scheduledAlarm = await runInDurableObject(
+      projection,
+      async (_instance, state) => state.storage.getAlarm(),
+    );
+    expect(scheduledAlarm).not.toBeNull();
+    expect(scheduledAlarm).toBeLessThanOrEqual(due);
+
+    now = new Date("2030-01-01T04:00:00.000Z");
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(due);
+    try {
+      await runInDurableObject(projection, async (instance) => {
+        await instance.alarm();
+      });
+      await runInDurableObject(projection, async (instance) => {
+        await instance.alarm();
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    const status = await requestForApp(
+      app,
+      "/api/v1/commands/" + command.id,
+      "agent-token",
+      { method: "GET" },
+    );
+    expect(status.status).toBe(200);
+    expect(
+      ((await status.json()) as { dispatch: { status: string } }).dispatch
+        .status,
+    ).toBe("confirmation_required");
+    const adminCommands = await requestForApp(
+      app,
+      "/api/v1/commands",
+      "human-token",
+      { method: "GET" },
+    );
+    expect(adminCommands.status).toBe(200);
+    expect(
+      (
+        (await adminCommands.json()) as Array<{ id: string; status: string }>
+      ).find((candidate) => candidate.id === command.id)?.status,
+    ).toBe("confirmation_required");
+    const agentCommands = await requestForApp(
+      app,
+      "/api/v1/commands",
+      "agent-token",
+      { method: "GET" },
+    );
+    expect(agentCommands.status).toBe(403);
+
+    const agentConfirm = await requestForApp(
+      app,
+      "/api/v1/commands/" + command.id + "/confirm",
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: "alarm-agent-confirm-" + crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(agentConfirm.status).toBe(403);
+
+    const humanConfirm = await requestForApp(
+      app,
+      "/api/v1/commands/" + command.id + "/confirm",
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: "alarm-human-confirm-" + crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(humanConfirm.status).toBe(200);
+    expect(
+      (
+        (await humanConfirm.json()) as {
+          dispatch: { status: string; confirmation_decision?: string };
+        }
+      ).dispatch,
+    ).toMatchObject({
+      status: "waiting_for_connection",
+      confirmation_decision: "confirm",
+    });
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'ready' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    now = new Date("2030-01-01T04:01:00.000Z");
+    const reconnect = await requestForApp(
+      app,
+      "/api/v1/commands/" + command.id + "/reconcile",
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(reconnect.status).toBe(200);
+    expect(
+      ((await reconnect.json()) as { dispatch: { status: string } }).dispatch
+        .status,
+    ).toBe("pending");
+  });
+
+  it("keeps a later waiting deadline scheduled when an earlier pending deadline has elapsed", async () => {
+    const grant = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: "alarm-two-row-grant-" + crypto.randomUUID(),
+        }),
+      ),
+    });
+    expect(grant.status).toBe(201);
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2040-01-01T00:00:00.000Z");
+    const app = createTestApp({ outboundAcceptance: { now: () => now } });
+    const send = (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Alarm deadline row",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const firstKey = "alarm-two-row-first-" + crypto.randomUUID();
+    const first = await send(firstKey);
+    expect(first.status).toBe(202);
+    const firstCommand = (await first.json()) as { id: string };
+
+    now = new Date("2040-01-01T01:00:00.000Z");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'ready' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const firstReconcile = await requestForApp(
+      app,
+      `/api/v1/commands/${firstCommand.id}/reconcile`,
+      "agent-token",
+      { method: "POST" },
+    );
+    expect(firstReconcile.status).toBe(200);
+    expect(
+      ((await firstReconcile.json()) as { dispatch: { status: string } })
+        .dispatch.status,
+    ).toBe("pending");
+
+    now = new Date("2040-01-01T02:00:00.000Z");
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+    const second = await send("alarm-two-row-second-" + crypto.randomUUID());
+    expect(second.status).toBe(202);
+    const secondCommand = (await second.json()) as { id: string };
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    await runInDurableObject(projection, async (_instance, state) => {
+      // Keep the first row pending on an independently ready connection while
+      // the second row remains waiting on the disconnected pilot connection.
+      state.storage.sql.exec(
+        "UPDATE outbound_dispatches SET connection_id = ? WHERE command_id = ?",
+        "connection_agent_secondary",
+        firstCommand.id,
+      );
+    });
+
+    now = new Date("2040-01-01T05:00:00.000Z");
+    const dateNow = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.parse("2040-01-01T05:00:00.000Z"));
+    try {
+      await runInDurableObject(projection, async (instance) => {
+        await instance.alarm();
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    const rowsAfterAlarm = await rows<{
+      command_id: string;
+      status: string;
+      confirmation_due_at: string | null;
+    }>(
+      projection,
+      "SELECT command_id, status, confirmation_due_at FROM outbound_dispatches WHERE command_id IN (?, ?) ORDER BY confirmation_due_at ASC",
+      firstCommand.id,
+      secondCommand.id,
+    );
+    expect(rowsAfterAlarm).toEqual([
+      {
+        command_id: firstCommand.id,
+        status: "pending",
+        confirmation_due_at: "2040-01-01T04:00:00.000Z",
+      },
+      {
+        command_id: secondCommand.id,
+        status: "waiting_for_connection",
+        confirmation_due_at: "2040-01-01T06:00:00.000Z",
+      },
+    ]);
+    expect(
+      await runInDurableObject(projection, (_instance, state) =>
+        state.storage.getAlarm(),
+      ),
+    ).toBe(Date.parse("2040-01-01T06:00:00.000Z"));
+  });
+
+  it("allows a granted agent to cancel before dispatch, then blocks cancellation after grant revocation", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: "cancel-send-grant-" + crypto.randomUUID(),
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+    const grant = AccountGrantSchema.parse(await grantResponse.json());
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2031-01-01T00:00:00.000Z");
+    const app = createTestApp({ outboundAcceptance: { now: () => now } });
+    const send = (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Cancelable waiting reply",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send("cancel-before-" + crypto.randomUUID());
+    expect(first.status).toBe(202);
+    const firstCommand = (await first.json()) as { id: string };
+    const { client, transport } = await connectMcpClient(app, "agent-token");
+    try {
+      const tools = await client.listTools();
+      const toolNames = tools.tools.map((tool) => tool.name);
+      expect(toolNames).toContain("get_text_reply_status");
+      expect(toolNames).toContain("cancel_text_reply");
+      expect(toolNames).not.toContain("confirm_text_reply");
+      const inspected = await client.callTool({
+        name: "get_text_reply_status",
+        arguments: { command_id: firstCommand.id },
+      });
+      expect(inspected.isError).not.toBe(true);
+      expect(
+        (
+          inspected.structuredContent as {
+            dispatch: { status: string };
+          }
+        ).dispatch.status,
+      ).toBe("waiting_for_connection");
+      const firstCancel = await client.callTool({
+        name: "cancel_text_reply",
+        arguments: {
+          command_id: firstCommand.id,
+          idempotency_key: "agent-cancel-" + crypto.randomUUID(),
+        },
+      });
+      expect(firstCancel.isError).not.toBe(true);
+      expect(
+        (
+          firstCancel.structuredContent as {
+            command: { status: string };
+          }
+        ).command.status,
+      ).toBe("cancelled");
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+
+    now = new Date("2031-01-01T00:01:00.000Z");
+    const second = await send("cancel-after-revoke-" + crypto.randomUUID());
+    expect(second.status).toBe(202);
+    const secondCommand = (await second.json()) as { id: string };
+    const revoke = await request("/api/v1/grants/" + grant.id, "human-token", {
+      method: "DELETE",
+      headers: { "Idempotency-Key": "revoke-cancel-" + crypto.randomUUID() },
+    });
+    expect(revoke.status).toBe(200);
+    const deniedCancel = await requestForApp(
+      app,
+      "/api/v1/commands/" + secondCommand.id + "/cancel",
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: "agent-cancel-revoked-" + crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(deniedCancel.status).toBe(403);
+  });
+
+  it("records one uncertain transaction when the controlled adapter times out after acceptance", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-send-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const transactionIds: string[] = [];
+    let adapterObservedDurableClaim = false;
+    const outboundAcceptance: OutboundAcceptanceServices = {
+      now: () => new Date("2050-01-01T00:00:00.000Z"),
+      dispatchOutbound: async (dispatch) => {
+        expect(dispatch.status).toBe("dispatching");
+        expect(dispatch.dispatch_lease_id).toEqual(expect.any(String));
+        transactionIds.push(dispatch.transaction_id);
+        adapterObservedDurableClaim = true;
+        return {
+          type: "uncertain",
+          reason: "timeout_after_provider_acceptance",
+        };
+      },
+    };
+    const app = createTestApp({ outboundAcceptance });
+    const idempotencyKey = `uncertain-send-${crypto.randomUUID()}`;
+    const send = () =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "The adapter accepted this before timing out",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send();
+    expect(first.status).toBe(202);
+    const firstCommand = CommandSchema.parse(await first.json());
+    expect(adapterObservedDurableClaim).toBe(true);
+    expect(firstCommand.status).toBe("delivery_uncertain");
+    expect(firstCommand.transaction_id).toEqual(expect.any(String));
+    expect(firstCommand.request_digest).toMatch(/^[0-9a-f]{64}$/);
+
+    const replay = await send();
+    expect(replay.status).toBe(202);
+    const replayCommand = CommandSchema.parse(await replay.json());
+    expect(replayCommand).toMatchObject({
+      id: firstCommand.id,
+      status: "delivery_uncertain",
+      transaction_id: firstCommand.transaction_id,
+    });
+    expect(transactionIds).toEqual([firstCommand.transaction_id]);
+
+    const cleanup = await requestForApp(
+      app,
+      `/api/v1/commands/${firstCommand.id}/continue`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `uncertain-cleanup-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(cleanup.status).toBe(200);
+  });
+
+  it("rejects caller evidence while preserving trusted adapter reconciliation", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `evidence-boundary-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    let dispatchCount = 0;
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => {
+          dispatchCount += 1;
+          if (dispatchCount === 1) {
+            return {
+              type: "evidence" as const,
+              source: "provider" as const,
+              status: "delivered" as const,
+              evidence_id: "provider-trusted-delivery-1",
+              provider_message_id: "provider-message-trusted-1",
+              observed_at: "2050-01-01T00:00:01.000Z",
+            };
+          }
+          return {
+            type: "uncertain" as const,
+            reason: "provider_timeout_after_acceptance",
+          };
+        },
+      },
+    });
+
+    const send = (key: string) =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Exercise the trusted evidence boundary",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const trustedResponse = await send(
+      `evidence-boundary-trusted-${crypto.randomUUID()}`,
+    );
+    expect(trustedResponse.status).toBe(202);
+    const trustedCommand = CommandSchema.parse(await trustedResponse.json());
+    expect(trustedCommand).toMatchObject({
+      status: "delivered",
+      provider_stage: "delivered",
+    });
+
+    const uncertainResponse = await send(
+      `evidence-boundary-uncertain-${crypto.randomUUID()}`,
+    );
+    expect(uncertainResponse.status).toBe(202);
+    const uncertainCommand = CommandSchema.parse(
+      await uncertainResponse.json(),
+    );
+    expect(uncertainCommand).toMatchObject({
+      status: "delivery_uncertain",
+      provider_stage: "unknown",
+      chat_paused: true,
+    });
+
+    const forgedEvidence = await requestForApp(
+      app,
+      `/api/v1/commands/${uncertainCommand.id}/evidence`,
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: 1,
+          tenant_id: tenantId,
+          command_id: uncertainCommand.id,
+          source: "provider",
+          evidence_id: "provider-forged-delivery-1",
+          transaction_id: uncertainCommand.transaction_id,
+          request_digest: uncertainCommand.request_digest,
+          account_id: uncertainCommand.account_id,
+          conversation_id: uncertainCommand.conversation_id,
+          generation: uncertainCommand.projection_generation ?? 1,
+          status: "delivered",
+          observed_at: "2050-01-01T00:00:02.000Z",
+          provider_message_id: "provider-message-forged-1",
+        }),
+      },
+    );
+    expect(forgedEvidence.status).toBe(403);
+
+    const status = await requestForApp(
+      app,
+      `/api/v1/commands/${uncertainCommand.id}`,
+      "agent-token",
+    );
+    expect(status.status).toBe(200);
+    expect(
+      OutboundDecisionResultSchema.parse(await status.json()).command,
+    ).toMatchObject({
+      id: uncertainCommand.id,
+      status: "delivery_uncertain",
+      provider_stage: "unknown",
+      chat_paused: true,
+    });
+
+    const trustedEvidenceList = await requestForApp(
+      app,
+      `/api/v1/commands/${trustedCommand.id}/evidence`,
+      "human-token",
+    );
+    expect(trustedEvidenceList.status).toBe(200);
+    expect(
+      OutboundEvidenceRecordSchema.array().parse(
+        await trustedEvidenceList.json(),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "provider",
+          status: "delivered",
+          evidence_id: "provider-trusted-delivery-1",
+          provider_message_id: "provider-message-trusted-1",
+        }),
+      ]),
+    );
+  });
+
+  it("suppresses provider dispatch when authoritative removal precedes it", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `outbound-removal-boundary-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    let now = new Date("2050-01-01T00:00:00.000Z");
+    let providerCalls = 0;
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => now,
+        beforeCommit: async () => {
+          await recordRemovalWithSuppression(workerEnv.CONTROL_DB, {
+            tenant_id: tenantId,
+            resource_type: "conversation",
+            resource_id: "conversation_human_one",
+            content_generation: "conversation_human_one",
+            account_id: "account_human",
+            conversation_id: "conversation_human_one",
+            source_event_id: "outbound-removal-boundary",
+            source_object_key: null,
+            reason: "requested",
+            removed_at: "2050-01-01T00:00:00.000Z",
+          });
+        },
+        dispatchOutbound: async () => {
+          providerCalls += 1;
+          return {
+            type: "evidence" as const,
+            source: "provider" as const,
+            status: "delivered" as const,
+            evidence_id: "should-not-reach-provider",
+            observed_at: "2050-01-01T00:00:01.000Z",
+          };
+        },
+      },
+    });
+
+    try {
+      const response = await requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": `removed-${crypto.randomUUID()}` },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "This body must not reach a provider",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+      expect(response.status).toBe(202);
+      const command = CommandSchema.parse(await response.json());
+      expect(providerCalls).toBe(0);
+      expect(command).toMatchObject({
+        status: "failed",
+        failure_code: "deleted_message",
+      });
+
+      const status = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}`,
+        "human-token",
+      );
+      expect(status.status).toBe(200);
+      expect(
+        OutboundDecisionResultSchema.parse(await status.json()),
+      ).toMatchObject({
+        command: {
+          id: command.id,
+          status: "cancelled",
+          failure_code: "deleted_message",
+        },
+        dispatch: { status: "cancelled" },
+      });
+    } finally {
+      await workerEnv.CONTROL_DB.prepare(
+        "DELETE FROM removal_authority WHERE source_event_id = ?",
+      )
+        .bind("outbound-removal-boundary")
+        .run();
+    }
+  });
+
+  it("suppresses a queued message after authoritative message removal", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `queued-removal-boundary-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET status = 'disconnected' WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .run();
+
+    let now = new Date("2050-01-01T00:00:00.000Z");
+    let providerCalls = 0;
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => now,
+        dispatchOutbound: async () => {
+          providerCalls += 1;
+          return {
+            type: "evidence" as const,
+            source: "provider" as const,
+            status: "delivered" as const,
+            evidence_id: "should-not-reach-queued-provider",
+            observed_at: "2050-01-01T00:00:01.000Z",
+          };
+        },
+      },
+    });
+
+    const queued = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_one/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": `queued-${crypto.randomUUID()}` },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "Queue this body before its message is removed",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(queued.status).toBe(202);
+    const command = CommandSchema.parse(await queued.json());
+    expect(command).toMatchObject({ status: "waiting_for_connection" });
+    expect(command.message_id).toEqual(expect.any(String));
+
+    try {
+      await recordRemovalWithSuppression(workerEnv.CONTROL_DB, {
+        tenant_id: tenantId,
+        resource_type: "message",
+        resource_id: command.message_id!,
+        content_generation: command.message_id!,
+        account_id: command.account_id!,
+        conversation_id: command.conversation_id,
+        source_event_id: "queued-message-removal-boundary",
+        source_object_key: null,
+        reason: "requested",
+        removed_at: "2050-01-01T00:00:00.000Z",
+      });
+
+      now = new Date("2050-05-01T00:00:00.000Z");
+      const due = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}/reconcile`,
+        "agent-token",
+        { method: "POST" },
+      );
+      expect(due.status).toBe(200);
+      expect(
+        OutboundDecisionResultSchema.parse(await due.json()).dispatch,
+      ).toMatchObject({ status: "confirmation_required" });
+
+      await workerEnv.CONTROL_DB.prepare(
+        "UPDATE connections SET status = 'ready' WHERE id = ?",
+      )
+        .bind("connection_human_whatsapp")
+        .run();
+      const reconnected = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}/reconcile`,
+        "agent-token",
+        { method: "POST" },
+      );
+      expect(reconnected.status).toBe(200);
+      expect(
+        OutboundDecisionResultSchema.parse(await reconnected.json()).dispatch,
+      ).toMatchObject({ status: "confirmation_required" });
+
+      const confirmed = await requestForApp(
+        app,
+        `/api/v1/commands/${command.id}/confirm`,
+        "human-token",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            idempotency_key: `queued-removal-confirm-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      expect(confirmed.status).toBe(200);
+      expect(providerCalls).toBe(0);
+      expect(
+        OutboundDecisionResultSchema.parse(await confirmed.json()),
+      ).toMatchObject({
+        command: {
+          id: command.id,
+          status: "failed",
+          failure_code: "deleted_message",
+        },
+        dispatch: { status: "cancelled" },
+      });
+    } finally {
+      await workerEnv.CONTROL_DB.prepare(
+        "DELETE FROM removal_authority WHERE source_event_id = ?",
+      )
+        .bind("queued-message-removal-boundary")
+        .run();
+    }
+
+    const unrelated = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_two/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": `queued-unrelated-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "An unrelated chat remains deliverable",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(unrelated.status).toBe(202);
+    expect(CommandSchema.parse(await unrelated.json())).toMatchObject({
+      status: "delivered",
+    });
+    expect(providerCalls).toBe(1);
+  });
+
+  it("correlates evidence and records a deliberate resend without unpausing another chat", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-action-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => ({
+          type: "uncertain" as const,
+          reason: "timeout_after_provider_acceptance",
+        }),
+      },
+    });
+    const send = (conversationId: string, key: string) =>
+      requestForApp(
+        app,
+        `/api/v1/conversations/${conversationId}/messages`,
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": key },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Correlate this uncertain message",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send(
+      "conversation_human_one",
+      `uncertain-action-${crypto.randomUUID()}`,
+    );
+    expect(first.status).toBe(202);
+    const command = CommandSchema.parse(await first.json());
+    expect(command.status).toBe("delivery_uncertain");
+    const generation = command.projection_generation ?? 1;
+    const evidence = {
+      schema_version: 1 as const,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "matrix" as const,
+      evidence_id: "matrix-echo-uncertain-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation,
+      status: "confirmed" as const,
+      observed_at: "2050-01-01T00:00:01.000Z",
+      remote_echo_id: "matrix-remote-uncertain-1",
+    };
+    const paused = await send(
+      "conversation_human_one",
+      `uncertain-paused-${crypto.randomUUID()}`,
+    );
+    expect(paused.status).toBe(409);
+    expect((await paused.json()) as unknown).toMatchObject({
+      error: { code: "chat_paused" },
+    });
+
+    const resendKey = `uncertain-resend-${crypto.randomUUID()}`;
+    const resend = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/resend`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: resendKey,
+          duplicate_risk_acknowledged: true,
+        }),
+      },
+    );
+    expect(resend.status).toBe(200);
+    const resendResult = OutboundDecisionResultSchema.parse(
+      await resend.json(),
+    );
+    expect(resendResult.action).toBe("resend");
+    expect(resendResult.duplicate_risk).toBe(true);
+    expect(resendResult.command.id).not.toBe(command.id);
+    expect(resendResult.command.resend_of_command_id).toBe(command.id);
+
+    const matrixResult = await trustedReconcile(app, command.id, evidence);
+    expect(matrixResult.command).toMatchObject({
+      id: command.id,
+      status: "matrix_confirmed",
+      matrix_stage: "confirmed",
+      provider_stage: "unknown",
+      chat_paused: false,
+    });
+    expect(matrixResult.dispatch.status).toBe("dispatched");
+
+    const duplicate = await trustedReconcile(app, command.id, evidence);
+    expect(duplicate.command.id).toBe(command.id);
+
+    const resumedChat = await send(
+      "conversation_human_one",
+      `uncertain-resumed-${crypto.randomUUID()}`,
+    );
+    expect(resumedChat.status).toBe(202);
+    const resumedCommand = CommandSchema.parse(await resumedChat.json());
+
+    const unrelated = await send(
+      "conversation_human_two",
+      `uncertain-unrelated-${crypto.randomUUID()}`,
+    );
+    expect(unrelated.status).toBe(202);
+    const unrelatedCommand = CommandSchema.parse(await unrelated.json());
+
+    const resendReplay = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/resend`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: resendKey,
+          duplicate_risk_acknowledged: true,
+        }),
+      },
+    );
+    expect(resendReplay.status).toBe(200);
+    const resendReplayResult = OutboundDecisionResultSchema.parse(
+      await resendReplay.json(),
+    );
+    expect(resendReplayResult.command.id).toBe(resendResult.command.id);
+
+    for (const commandToContinue of [resumedCommand, unrelatedCommand]) {
+      const cleanup = await requestForApp(
+        app,
+        `/api/v1/commands/${commandToContinue.id}/continue`,
+        "human-token",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            idempotency_key: `cleanup-continue-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      expect(cleanup.status).toBe(200);
+    }
+  });
+
+  it("preserves an explicit continue when late provider evidence arrives", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-continue-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+    const grant = AccountGrantSchema.parse(await grantResponse.json());
+
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => ({
+          type: "uncertain" as const,
+          reason: "provider_timeout_after_acceptance",
+        }),
+      },
+    });
+    const send = () =>
+      requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": `continue-${crypto.randomUUID()}` },
+          body: JSON.stringify({
+            identity_id: "identity_agent",
+            body: "Continue while the original remains recorded",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+
+    const first = await send();
+    expect(first.status).toBe(202);
+    const command = CommandSchema.parse(await first.json());
+    expect(command.status).toBe("delivery_uncertain");
+    const generation = command.projection_generation ?? 1;
+    const continuation = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/continue`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `continue-action-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(continuation.status).toBe(200);
+    const continued = OutboundDecisionResultSchema.parse(
+      await continuation.json(),
+    );
+    expect(continued).toMatchObject({
+      action: "continue",
+      command: {
+        id: command.id,
+        status: "delivery_uncertain",
+        chat_paused: false,
+        last_action: "continue",
+      },
+      dispatch: { status: "delivery_uncertain", chat_paused: false },
+    });
+
+    const nextMessage = await send();
+    expect(nextMessage.status).toBe(202);
+
+    const lateResult = await trustedReconcile(app, command.id, {
+      schema_version: 1,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "provider",
+      evidence_id: "provider-late-accepted-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation,
+      status: "accepted",
+      observed_at: "2050-01-01T00:00:02.000Z",
+      reason: "provider accepted before response was lost",
+    });
+    expect(lateResult).toMatchObject({
+      command: {
+        id: command.id,
+        status: "delivery_uncertain",
+        chat_paused: false,
+        provider_stage: "accepted",
+        last_action: "continue",
+      },
+      dispatch: { status: "delivery_uncertain", chat_paused: false },
+    });
+
+    const outOfOrderResult = await trustedReconcile(app, command.id, {
+      schema_version: 1,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "provider",
+      evidence_id: "provider-out-of-order-uncertain-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation,
+      status: "uncertain",
+      observed_at: "2050-01-01T00:00:01.000Z",
+      reason: "late uncertain callback",
+    });
+    expect(outOfOrderResult).toMatchObject({
+      command: {
+        id: command.id,
+        status: "delivery_uncertain",
+        provider_stage: "accepted",
+        chat_paused: false,
+        last_action: "continue",
+      },
+      dispatch: {
+        status: "delivery_uncertain",
+        provider_stage: "accepted",
+        chat_paused: false,
+      },
+    });
+
+    const revoke = await request(`/api/v1/grants/${grant.id}`, "human-token", {
+      method: "DELETE",
+      headers: { "Idempotency-Key": `revoke-uncertain-${crypto.randomUUID()}` },
+    });
+    expect(revoke.status).toBe(200);
+    const revokedAgentCancel = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/cancel`,
+      "agent-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `revoked-uncertain-cancel-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(revokedAgentCancel.status).toBe(403);
+  });
+
+  it("keeps uncertainty evidence and human action audit through projection rebuild", async () => {
+    const grantResponse = await request("/api/v1/grants", "human-token", {
+      method: "POST",
+      body: JSON.stringify(
+        grantBody({
+          membership_id: "membership_agent",
+          identity_id: "identity_agent",
+          operation_scope: "message.send",
+          chat_scope: "all_chats",
+          chat_ids: [],
+          idempotency_key: `uncertain-rebuild-grant-${crypto.randomUUID()}`,
+        }),
+      ),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const app = createTestApp({
+      outboundAcceptance: {
+        now: () => new Date("2050-01-01T00:00:00.000Z"),
+        dispatchOutbound: async () => ({
+          type: "uncertain" as const,
+          reason: "provider_timeout_before_rebuild",
+        }),
+      },
+    });
+    const response = await requestForApp(
+      app,
+      "/api/v1/conversations/conversation_human_one/messages",
+      "agent-token",
+      {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": `rebuild-uncertain-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({
+          identity_id: "identity_agent",
+          body: "Keep this uncertain command across rebuild",
+          delivery_mode: "direct",
+        }),
+      },
+    );
+    expect(response.status).toBe(202);
+    const command = CommandSchema.parse(await response.json());
+
+    const continuation = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/continue`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `rebuild-continue-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(continuation.status).toBe(200);
+
+    await trustedReconcile(app, command.id, {
+      schema_version: 1,
+      tenant_id: tenantId,
+      command_id: command.id,
+      source: "provider",
+      evidence_id: "provider-rebuild-accepted-1",
+      transaction_id: command.transaction_id!,
+      request_digest: command.request_digest!,
+      account_id: command.account_id!,
+      conversation_id: command.conversation_id,
+      generation: command.projection_generation ?? 1,
+      status: "accepted",
+      observed_at: "2050-01-01T00:00:01.000Z",
+      reason: "provider accepted before rebuild",
+    });
+
+    const evidenceList = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "human-token",
+    );
+    expect(evidenceList.status).toBe(200);
+    expect(
+      OutboundEvidenceRecordSchema.array().parse(await evidenceList.json()),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "provider",
+          status: "accepted",
+          evidence_id: "provider-rebuild-accepted-1",
+        }),
+      ]),
+    );
+
+    const delegatedEvidenceList = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/evidence`,
+      "agent-token",
+    );
+    expect(delegatedEvidenceList.status).toBe(403);
+
+    const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+    const currentMeta = await rows<{ generation: number }>(
+      projection,
+      "SELECT generation FROM projection_meta WHERE singleton = 1",
+    );
+    const rebuildId = `rebuild_uncertain_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rebuildAuthorization = auth(
+      ["projection.rebuild"],
+      ["identity_human"],
+      tenantId,
+    );
+    await projection.beginRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      expected_generation: currentMeta[0]!.generation,
+      started_at: "2050-01-01T00:01:00.000Z",
+      authorization: rebuildAuthorization,
+    });
+
+    const replayEvent = event(
+      `event_rebuild_uncertain_${crypto.randomUUID().replaceAll("-", "")}`,
+      {
+        title: "Rebuilt uncertain conversation",
+        archived: false,
+        muted: false,
+      },
+      "conversation.updated",
+      {
+        event_source: "replay",
+        tenant_id: tenantId,
+        identity_id: "identity_human",
+        account_id: "account_human",
+        conversation_id: "conversation_human_one",
+        occurred_at: "2050-01-01T00:01:01.000Z",
+        observed_at: "2050-01-01T00:01:02.000Z",
+      },
+    );
+    await projection.applyReplayPage({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      source_cursor: null,
+      connections: [
+        bindingFor(
+          "account_human",
+          "connection_human_whatsapp",
+          "identity_human",
+        ),
+      ],
+      page: {
+        schema_version: 1,
+        replay_mode: "projection_only",
+        tenant_id: tenantId,
+        manifests: [
+          {
+            schema_version: 1,
+            tenant_id: tenantId,
+            batch_id: "batch_rebuild_uncertain",
+            data_key: `events/${tenantId}/2050/01/01/00/batch_rebuild_uncertain.jsonl.gz`,
+            compression: "gzip",
+            content_type: "application/x-ndjson",
+            event_count: 1,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            canonical_sha256: "0".repeat(64),
+            data_etag: "etag-rebuild-uncertain",
+            first_event_id: replayEvent.event_id,
+            last_event_id: replayEvent.event_id,
+            first_observed_at: replayEvent.observed_at,
+            last_observed_at: replayEvent.observed_at,
+            archived_at: "2050-01-01T00:01:02.000Z",
+            producer: {
+              service: "communicator-control-plane",
+              version: "uncertainty-rebuild-test/1",
+            },
+            source_checkpoint: null,
+          },
+        ],
+        events: [replayEvent],
+        next_cursor: null,
+      },
+      authorization: rebuildAuthorization,
+    });
+    await projection.completeRebuild({
+      schema_version: 1,
+      tenant_id: tenantId,
+      rebuild_id: rebuildId,
+      terminal_cursor: null,
+      completed_at: "2050-01-01T00:01:03.000Z",
+      authorization: rebuildAuthorization,
+    });
+
+    expect(
+      await rows<{
+        status: string;
+        chat_paused: number;
+        last_action: string | null;
+        last_action_actor_principal_id: string | null;
+      }>(
+        projection,
+        "SELECT status, chat_paused, last_action, last_action_actor_principal_id FROM outbound_dispatches WHERE command_id = ?",
+        command.id,
+      ),
+    ).toEqual([
+      {
+        status: "delivery_uncertain",
+        chat_paused: 0,
+        last_action: "continue",
+        last_action_actor_principal_id: "principal_human",
+      },
+    ]);
+    expect(
+      await rows<{ status: string }>(
+        projection,
+        "SELECT status FROM commands WHERE id = ?",
+        command.id,
+      ),
+    ).toEqual([{ status: "delivery_uncertain" }]);
+    expect(
+      await rows<{ count: number }>(
+        projection,
+        "SELECT COUNT(*) AS count FROM outbound_evidence WHERE command_id = ?",
+        command.id,
+      ),
+    ).toEqual([{ count: 2 }]);
+    expect(
+      await rows<{ action: string; actor_principal_id: string }>(
+        projection,
+        "SELECT action, actor_principal_id FROM outbound_actions WHERE original_command_id = ?",
+        command.id,
+      ),
+    ).toEqual([{ action: "continue", actor_principal_id: "principal_human" }]);
+
+    const cleanup = await requestForApp(
+      app,
+      `/api/v1/commands/${command.id}/cancel`,
+      "human-token",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: `rebuild-cancel-${crypto.randomUUID()}`,
+        }),
+      },
+    );
+    expect(cleanup.status).toBe(200);
+  });
+});

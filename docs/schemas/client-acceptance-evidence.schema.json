@@ -1,0 +1,414 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://0000.chat/schemas/communicator-client-acceptance-evidence-v1.json",
+  "title": "Communicator client acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "preflight",
+    "operations",
+    "scenarios",
+    "controls"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": { "$ref": "#/$defs/run" },
+    "preflight": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/preflight" }
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operation" }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 13,
+      "items": { "$ref": "#/$defs/scenario" }
+    },
+    "controls": { "$ref": "#/$defs/controls" }
+  },
+  "$defs": {
+    "status": {
+      "enum": ["pass", "unsupported", "unverified", "implementation_defect"]
+    },
+    "evidence_class": {
+      "enum": ["live_client", "controlled"]
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surface", "name", "version", "transport"],
+      "properties": {
+        "surface": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "transport": { "enum": ["rest", "mcp", "both"] }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "adapter_version", "proof_source"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "proof_source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "tenant_id",
+        "installation_id",
+        "grant_ids",
+        "account_ids",
+        "chat_ids",
+        "connection_ids",
+        "provider_account_ids",
+        "identity_ids"
+      ],
+      "properties": {
+        "resource": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "installation_id": { "type": "string" },
+        "grant_ids": { "type": "array", "items": { "type": "string" } },
+        "account_ids": { "type": "array", "items": { "type": "string" } },
+        "chat_ids": { "type": "array", "items": { "type": "string" } },
+        "connection_ids": { "type": "array", "items": { "type": "string" } },
+        "provider_account_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "identity_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "response": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "http_status": { "type": ["integer", "null"] },
+        "body_sha256": { "type": ["string", "null"] },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "error": { "type": "string" },
+        "jsonrpc_error": { "type": "object" },
+        "jsonrpc_version": { "type": ["string", "null"] },
+        "jsonrpc_id": { "type": ["string", "integer", "null"] },
+        "jsonrpc_request_id": { "type": ["string", "integer", "null"] },
+        "jsonrpc_has_result": { "type": "boolean" }
+      }
+    },
+    "request": {
+      "oneOf": [
+        { "$ref": "#/$defs/rest_request" },
+        { "$ref": "#/$defs/mcp_request" }
+      ]
+    },
+    "rest_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "method",
+        "path",
+        "query",
+        "headers",
+        "body_present",
+        "body_type",
+        "body_keys",
+        "body_sha256"
+      ],
+      "properties": {
+        "transport": { "const": "rest" },
+        "method": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^/" },
+        "query": { "type": "object" },
+        "headers": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[Ii][Dd][Ee][Mm][Pp][Oo][Tt][Ee][Nn][Cc][Yy]-[Kk][Ee][Yy]$"
+          },
+          "additionalProperties": { "type": "string" }
+        },
+        "body_present": { "type": "boolean" },
+        "body_type": { "type": "string", "minLength": 1 },
+        "body_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "body_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "mcp_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transport", "method", "tool", "arguments_sha256"],
+      "properties": {
+        "transport": { "const": "mcp" },
+        "method": { "type": "string", "minLength": 1 },
+        "tool": { "type": ["string", "null"] },
+        "arguments_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "evidence_class", "response"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"] },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" },
+        "response": { "$ref": "#/$defs/response" }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scenario",
+        "ticket",
+        "actor",
+        "transport",
+        "evidence_class",
+        "bindings",
+        "proof",
+        "request",
+        "evidence",
+        "status",
+        "reason",
+        "response",
+        "extracted"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "scenario": { "type": "string", "minLength": 1 },
+        "ticket": { "type": "array", "items": { "type": "string" } },
+        "actor": { "enum": ["agent", "admin", "none"] },
+        "transport": { "enum": ["rest", "mcp"] },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "proof": { "$ref": "#/$defs/proof" },
+        "request": { "$ref": "#/$defs/request" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "response": { "$ref": "#/$defs/response" },
+        "extracted": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "integer", "number", "boolean", "null"]
+          }
+        }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "tickets",
+        "title",
+        "status",
+        "reason",
+        "operation_ids",
+        "coverage",
+        "relations",
+        "evidence_class"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "tickets": { "type": "array", "items": { "type": "string" } },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "operation_ids": { "type": "array", "items": { "type": "string" } },
+        "coverage": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/coverage" }
+        },
+        "relations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relation" }
+        },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "started_at",
+        "finished_at",
+        "status",
+        "mode",
+        "environment",
+        "client",
+        "provider",
+        "resource",
+        "bindings",
+        "observed_bindings"
+      ],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "started_at": { "type": "string", "minLength": 1 },
+        "finished_at": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["complete", "incomplete"] },
+        "mode": { "$ref": "#/$defs/evidence_class" },
+        "environment": { "type": "string", "minLength": 1 },
+        "source_commit": { "type": ["string", "null"] },
+        "client": { "$ref": "#/$defs/client" },
+        "provider": { "$ref": "#/$defs/provider" },
+        "resource": { "type": "string", "minLength": 1 },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "observed_bindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/observed_binding" }
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "case"],
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "case": { "type": "string", "minLength": 1 },
+        "observation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "extract_spec": {
+      "oneOf": [
+        { "type": "string", "pattern": "^/" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pointer", "transform"],
+          "properties": {
+            "pointer": { "type": "string", "pattern": "^/" },
+            "transform": { "const": "count" }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extract", "required"],
+      "properties": {
+        "extract": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/extract_spec" }
+        },
+        "required": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "observed_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "name", "value"],
+      "properties": {
+        "operation": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": ["string", "integer", "number", "boolean"] }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement",
+        "role",
+        "case",
+        "status",
+        "reason",
+        "operation_ids",
+        "observed_fields",
+        "observations"
+      ],
+      "properties": {
+        "requirement": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "case": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "operation_ids": { "type": "array", "items": { "type": "string" } },
+        "observed_fields": { "type": "array", "items": { "type": "string" } },
+        "observations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/observation_coverage" }
+        }
+      }
+    },
+    "observation_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status",
+        "reason",
+        "operation_ids",
+        "observed_fields"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "operation_ids": { "type": "array", "items": { "type": "string" } },
+        "observed_fields": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "left", "right", "fields", "status", "reason"],
+      "properties": {
+        "kind": { "enum": ["equal", "distinct"] },
+        "left": { "type": "string", "minLength": 1 },
+        "right": { "type": "string", "minLength": 1 },
+        "fields": { "type": "array", "items": { "type": "string" } },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentials_redacted",
+        "raw_message_bodies_stored",
+        "provider_delivery_claimed_from_http_success",
+        "fixture_evidence_is_client_proof",
+        "live_actions_requested_by_harness"
+      ],
+      "properties": {
+        "credentials_redacted": { "const": true },
+        "raw_message_bodies_stored": { "const": false },
+        "provider_delivery_claimed_from_http_success": { "const": false },
+        "fixture_evidence_is_client_proof": { "const": false },
+        "live_actions_requested_by_harness": { "type": "boolean" }
+      }
+    }
+  }
+}
