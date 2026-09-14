@@ -126,6 +126,7 @@
         "transport",
         "evidence_class",
         "bindings",
+        "proof",
         "request",
         "status",
         "reason",
@@ -140,6 +141,7 @@
         "transport": { "enum": ["rest", "mcp"] },
         "evidence_class": { "$ref": "#/$defs/evidence_class" },
         "bindings": { "$ref": "#/$defs/bindings" },
+        "proof": { "$ref": "#/$defs/proof" },
         "request": { "type": "object" },
         "status": { "$ref": "#/$defs/status" },
         "reason": { "type": ["string", "null"] },
@@ -157,6 +159,8 @@
         "status",
         "reason",
         "operation_ids",
+        "coverage",
+        "relations",
         "evidence_class"
       ],
       "properties": {
@@ -166,6 +170,14 @@
         "status": { "$ref": "#/$defs/status" },
         "reason": { "type": ["string", "null"] },
         "operation_ids": { "type": "array", "items": { "type": "string" } },
+        "coverage": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/coverage" }
+        },
+        "relations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relation" }
+        },
         "evidence_class": { "$ref": "#/$defs/evidence_class" }
       }
     },
@@ -197,7 +209,62 @@
         "provider": { "$ref": "#/$defs/provider" },
         "resource": { "type": "string", "minLength": 1 },
         "bindings": { "$ref": "#/$defs/bindings" },
-        "observed_bindings": { "type": "array", "items": { "type": "object" } }
+        "observed_bindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/observed_binding" }
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "case"],
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "case": { "type": "string", "minLength": 1 }
+      }
+    },
+    "observed_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "name", "value"],
+      "properties": {
+        "operation": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": ["string", "integer", "number", "boolean"] }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement",
+        "role",
+        "case",
+        "status",
+        "reason",
+        "operation_ids"
+      ],
+      "properties": {
+        "requirement": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "case": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "operation_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "left", "right", "fields", "status", "reason"],
+      "properties": {
+        "kind": { "enum": ["equal", "distinct"] },
+        "left": { "type": "string", "minLength": 1 },
+        "right": { "type": "string", "minLength": 1 },
+        "fields": { "type": "array", "items": { "type": "string" } },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] }
       }
     },
     "controls": {

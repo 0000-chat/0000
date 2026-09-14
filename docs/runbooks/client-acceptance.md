@@ -9,9 +9,11 @@ versions, and the configured OAuth resource and account bindings.
 The runner does not create credentials, deploy a Worker, link an account, or
 invent a pass. A run with missing credentials, missing operations, missing
 provider evidence, or an unreachable target records `unverified`. A target
-response that declares a capability unavailable records `unsupported`. An
-unexpected response records `implementation_defect`. Only observed responses
-with all required evidence fields can produce `pass`.
+response records `unsupported` only when the operation declares an explicit
+capability outcome, status, and scalar capability evidence. An unexpected
+response records `implementation_defect`. Only observed responses with every
+required case, typed scalar evidence, request contract, and cross-case binding
+relation can produce `pass`.
 
 The implementation is in
 [`scripts/client_acceptance.py`](../../scripts/client_acceptance.py). The
@@ -80,11 +82,14 @@ and contains the full #35 and #36 acceptance scope.
 
 ## Declare operations
 
-Each operation names a scenario, actor, transport, request, accepted HTTP
-statuses, and evidence to extract from the actual response. A REST operation
-uses a relative path. An MCP operation uses a tool name or `tools/list`.
-Template values use `${target...}`, `${binding...}`, and `${vars...}`. The
-runner hashes request bodies and stores only selected response fields.
+Each operation names a scenario requirement through `proof.role` and
+`proof.case`, actor, transport, request, accepted HTTP statuses, and evidence
+to extract from the actual response. The case contract also checks the REST
+method and stable route words or the MCP tool. A REST operation uses a
+relative path. An MCP operation uses a declared tool or the `initialize`
+method. Template values use `${target...}`, `${binding...}`, `${vars...}`, and
+validated IDs from earlier passing operations as `${observed...}`. The runner
+hashes request bodies and stores only bounded scalar response fields.
 
 The existing Communicator entrypoints used by the plan include:
 
@@ -103,18 +108,23 @@ bodies. Do not copy provider credentials, access tokens, message bodies, or
 unbounded upstream URLs into the configuration. For sensitive request values,
 the evidence contains only a body hash.
 
-For a successful operation, list every identifier that the acceptance claim
-depends on under `evidence.extract` and repeat it under `evidence.required`.
-Examples include `account_id`, `chat_id`, `grant_id`, `installation_id`,
-`command_id`, `message_id`, `provider_message_id`, `subscription_id`,
-`destination_version`, `source_event_id`, `delivery_id`, `receipt_id`, and
-`removal_id`. A missing required field makes the operation `unverified`.
+For a successful operation, list every identifier or scalar status that the
+declared case contract requires under `evidence.extract` and repeat it under
+`evidence.required`. Examples include `account_id`, `chat_id`, `grant_id`,
+`installation_id`, `command_id`, `message_id`, `provider_message_id`,
+`subscription_id`, `destination_version`, `source_event_id`, `delivery_id`,
+`receipt_id`, and `removal_id`. Objects, arrays, credentials, message bodies,
+and unbounded content are rejected. A missing required field makes the
+operation `unverified`; one arbitrary successful GET cannot satisfy another
+case. Later operations may use an earlier passing scalar ID with
+`${observed.operation-id.field}`.
 
 For a capability the provider or client cannot support, set the expected
-status to the response that documents the limitation and set
-`expect.outcome` to `unsupported`. Use `unverified` when the target could not
-be tested or the available response does not prove the behavior. The harness
-does not allow a configuration to label an unexpected response as a pass.
+status, `expect.unsupported_statuses`, `expect.unsupported_evidence` pointers,
+and `expect.outcome` to `unsupported`. A bare 404, 405, or 501 remains an
+unexpected response. Use `unverified` when the target could not be tested or
+the available response does not prove the behavior. The harness does not allow
+a configuration to label an unexpected response as a pass.
 
 ## Cover the ticket scenarios
 
@@ -124,7 +134,7 @@ mobile, and Bot surface, then review the bundles together.
 
 | Scenario ID | Ticket | Required proof |
 | --- | --- | --- |
-| `oauth_connection` | #35, #36 | Protected-resource metadata, authorization-server metadata, and a real MCP initialize or tool call with the configured resource and installation. |
+| `oauth_connection` | #35, #36 | Protected-resource metadata, authorization-server metadata, PKCE S256, and a real MCP initialize plus scoped tool call with the configured resource and installation. |
 | `linking_identity_lifecycle` | #35 | Start unlinked, administrator identity verification and grant, same-identity relink with stable IDs, explicit disconnect preserving history, and a different identity with a new account and no inherited grant. |
 | `history_context_attachment` | #35 | Stored history/context and an authenticated attachment read, with account and chat binding and no provider credential in the response. |
 | `text_send_and_route` | #35, #36 | Durable saved text, account-owned route, Matrix/bridge/provider stages, and provider evidence. A saved or HTTP-accepted command alone does not prove WhatsApp delivery. |
@@ -172,10 +182,12 @@ Reviewers should confirm that:
    account bindings are exact and consistent.
 3. A provider delivery claim has provider evidence. HTTP status, saved state,
    Matrix state, and bridge state remain separate observations.
-4. Unsupported, unverified, and implementation-defect results retain their
+4. Scenario `coverage` lists every named case and `relations` prove stable or
+   distinct IDs across the cases; operation count alone is not acceptance.
+5. Unsupported, unverified, and implementation-defect results retain their
    reason and response hash. They are escalated without widening the product
    promise.
-5. The bundle has no access token, secret, raw message body, provider
+6. The bundle has no access token, secret, raw message body, provider
    credential, or unbounded upstream URL.
 
 Do not publish the bundle or mark #35 or #36 complete from a runbook or a

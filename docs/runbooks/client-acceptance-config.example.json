@@ -41,14 +41,21 @@
       "scenario": "oauth_connection",
       "actor": "none",
       "transport": "rest",
+      "proof": {
+        "role": "oauth_metadata",
+        "case": "protected_resource"
+      },
       "request": {
         "method": "GET",
         "path": "/.well-known/oauth-protected-resource"
       },
       "expect": { "statuses": [200] },
       "evidence": {
-        "extract": { "resource": "/resource" },
-        "required": ["resource"]
+        "extract": {
+          "resource": "/resource",
+          "authorization_server": "/authorization_servers/0"
+        },
+        "required": ["resource", "authorization_server"]
       },
       "assert": [{ "path": "/resource", "equals": "${target.resource}" }]
     },
@@ -57,14 +64,22 @@
       "scenario": "oauth_connection",
       "actor": "agent",
       "transport": "mcp",
+      "proof": {
+        "role": "mcp_session",
+        "case": "scoped_read"
+      },
       "request": {
         "tool": "list_identities",
         "arguments": {}
       },
       "expect": { "statuses": [200] },
       "evidence": {
-        "extract": { "result": "/result/structuredContent" },
-        "required": ["result"]
+        "extract": {
+          "account_id": "/result/structuredContent/account_id",
+          "chat_id": "/result/structuredContent/chat_id",
+          "message_id": "/result/structuredContent/message_id"
+        },
+        "required": ["account_id", "chat_id", "message_id"]
       }
     }
   ]
