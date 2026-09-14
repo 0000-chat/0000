@@ -89,8 +89,8 @@ class BackupCoreTests(unittest.TestCase):
 
         self.assertIn('controlled-copy-manifest.json', source)
         self.assertIn('"content_classes": ["message", "session_credential", "account_key"]', source)
-        self.assertIn('"resource_id": "*"', source)
-        self.assertIn('"content_generation": "*"', source)
+        self.assertIn('"resource_id": "communicator-core"', source)
+        self.assertIn('"content_generation": "${backup_id}"', source)
         self.assertLess(
             source.index('controlled-copy-manifest.json'),
             source.index('restic backup --json --tag communicator-core "$staging"'),
@@ -212,6 +212,13 @@ class BackupCoreTests(unittest.TestCase):
                 [copy["snapshot_id"] for copy in restic["copies"]],
                 ["old-snapshot", "new-snapshot"],
             )
+            new_copy = next(
+                copy
+                for copy in restic["copies"]
+                if copy["snapshot_id"] == "new-snapshot"
+            )
+            self.assertEqual("communicator-core", new_copy["resource_id"])
+            self.assertEqual("new-snapshot", new_copy["content_generation"])
             self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
 
             subprocess.run(

@@ -12,6 +12,9 @@ class RestoreCoreTests(unittest.TestCase):
     def test_waits_for_postgres_health_before_restoring_dump(self):
         source = SCRIPT.read_text()
 
+        self.assertIn("restic_bin=${COMMUNICATOR_RESTORE_RESTIC_BIN:-restic}", source)
+        self.assertIn('export RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-$restore_tmpdir/restic-cache}"', source)
+        self.assertIn('[[ "$restic_snapshot_id" =~ ^[0-9a-f]{64}$ ]]', source)
         self.assertIn("wait_for_healthy() {", source)
         wait_start = source.index("wait_for_healthy() {")
         restore_start = source.index("pg_restore", wait_start)

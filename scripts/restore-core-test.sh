@@ -7,6 +7,7 @@ restore_root="$runtime_dir/restore-tests/$(timeout --foreground 30s date -u +%Y%
 project=communicator-restore-test
 gate_script="$repo_dir/scripts/restore-core-gate.py"
 restore_tmpdir=${COMMUNICATOR_RESTORE_TMPDIR:-"$repo_dir/node_modules/.cache/restore-tests"}
+restic_bin=${COMMUNICATOR_RESTORE_RESTIC_BIN:-restic}
 
 run_bounded() {
   local duration=$1
@@ -32,6 +33,7 @@ fi
 
 run_bounded 30s install -d -m 0700 "$restore_root" "$restore_tmpdir"
 export TMPDIR="$restore_tmpdir"
+export RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-$restore_tmpdir/restic-cache}"
 run_bounded 30s install -d -m 0700 "$restore_root/restore-evidence"
 run_bounded 300s python3 "$gate_script" \
   --authority-url "$COMMUNICATOR_RESTORE_AUTHORITY_URL" \
@@ -40,13 +42,13 @@ run_bounded 300s python3 "$gate_script" \
   --report "$restore_root/restore-evidence/authority-preflight.json" \
   --authority-only
 
-run_bounded 60s restic snapshots --json --latest 1 --tag communicator-core \
+run_bounded 60s "$restic_bin" snapshots --json --latest 1 --tag communicator-core \
   > "$restore_root/restore-evidence/restic-snapshot.json"
 restic_snapshot_id=$(run_bounded 30s python3 -c \
   'import json, sys; document=json.load(open(sys.argv[1], encoding="utf-8")); rows=document if isinstance(document, list) else document.get("snapshots", []); ids={row.get("id") for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("id")}; assert len(ids) == 1, "restic snapshot selection was not exact"; print(next(iter(ids)))' \
   "$restore_root/restore-evidence/restic-snapshot.json")
-[[ "$restic_snapshot_id" =~ ^[A-Za-z0-9]+$ ]]
-run_bounded 300s restic restore "$restic_snapshot_id" --target "$restore_root/restic"
+[[ "$restic_snapshot_id" =~ ^[0-9a-f]{64}$ ]]
+run_bounded 300s "$restic_bin" restore "$restic_snapshot_id" --target "$restore_root/restic"
 
 payload=$(run_bounded 30s find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n' -quit)
 [[ -n "$payload" ]]

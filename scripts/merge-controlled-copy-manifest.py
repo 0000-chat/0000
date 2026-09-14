@@ -114,8 +114,11 @@ def merge_snapshot(
                 {
                     "reference": reference,
                     "snapshot_id": snapshot_id,
-                    "resource_id": "*",
-                    "content_generation": "*",
+                    # The mixed snapshot is one exact aggregate copy.  It is
+                    # never treated as a message lineage by retention, but
+                    # its provider generation must still be concrete.
+                    "resource_id": "communicator-core",
+                    "content_generation": snapshot_id,
                     "copy_created_at": created_at,
                     "content_classes": [
                         "message",

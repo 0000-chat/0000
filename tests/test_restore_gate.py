@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -28,6 +29,7 @@ def _load(path: Path, name: str):
 GATE = _load(GATE_PATH, "restore_core_gate")
 RETENTION = _load(RETENTION_PATH, "restore_core_retention")
 PG_BIN = Path("/usr/lib/postgresql/18/bin")
+RESTIC_SNAPSHOT_ID = "a" * 64
 
 
 def _authority(
@@ -147,6 +149,73 @@ def _head(authority: dict) -> str:
     )
 
 
+def _fake_restic_environment(
+    root: Path,
+    source: Path,
+    snapshot_id: str = RESTIC_SNAPSHOT_ID,
+) -> dict[str, str]:
+    password = root / "restic-password"
+    password.write_text("fixture-password\n", encoding="utf-8")
+    binary = root / "restic"
+    binary.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+source = Path(os.environ["FAKE_RESTIC_SOURCE"])
+snapshot_id = os.environ["FAKE_RESTIC_ID"]
+source_root = "/fixture-root"
+args = sys.argv[1:]
+if not args:
+    raise SystemExit(2)
+if args[0] == "ls":
+    if args[-1] != snapshot_id:
+        raise SystemExit(1)
+    print(json.dumps({
+        "message_type": "snapshot",
+        "struct_type": "snapshot",
+        "id": snapshot_id,
+        "paths": [source_root],
+    }))
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source).as_posix()
+        print(json.dumps({
+            "message_type": "node",
+            "struct_type": "node",
+            "type": "dir" if path.is_dir() else "file",
+            "path": source_root + "/" + relative,
+        }))
+    raise SystemExit(0)
+if args[0] == "dump":
+    if len(args) != 3 or args[1] != snapshot_id:
+        raise SystemExit(1)
+    prefix = source_root + "/"
+    if not args[2].startswith(prefix):
+        raise SystemExit(1)
+    target = source / args[2][len(prefix):]
+    if not target.is_file():
+        raise SystemExit(1)
+    sys.stdout.buffer.write(target.read_bytes())
+    raise SystemExit(0)
+if args[0] == "snapshots":
+    print(json.dumps([{"id": snapshot_id, "tags": ["communicator-core"]}]))
+    raise SystemExit(0)
+raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    return {
+        "COMMUNICATOR_RESTORE_RESTIC_BIN": str(binary),
+        "RESTIC_REPOSITORY": "fixture-repository",
+        "RESTIC_PASSWORD_FILE": str(password),
+        "FAKE_RESTIC_SOURCE": str(source),
+        "FAKE_RESTIC_ID": snapshot_id,
+    }
+
+
 class RestoreGateTests(unittest.TestCase):
     def test_payload_paths_reject_nested_parent_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -241,6 +310,20 @@ class RestoreGateTests(unittest.TestCase):
             before, GATE._authority_fingerprint(progressed_normalized)
         )
 
+    def test_authority_rejects_wildcard_lineage(self):
+        record = {
+            "id": "removal_restore_gate_wildcard",
+            "tenant_id": "tenant_restore_gate",
+            "resource_type": "message",
+            "resource_id": "*",
+            "content_generation": "generation_wildcard",
+            "deletion_epoch": 1,
+            "removed_at": "2026-09-14T00:00:00Z",
+        }
+        authority = _authority(authorities=[record], epoch=1)
+        with self.assertRaisesRegex(Exception, "exact resource lineage"):
+            GATE._validate_authority_document(authority, authority["tenant_id"])
+
     def test_restored_snapshot_id_must_match_authority_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -282,7 +365,11 @@ class RestoreGateTests(unittest.TestCase):
                 encoding="utf-8",
             )
             authority = _authority(epoch=0)
-            _set_store_reference(authority, "restic_snapshot", "restic:expected-snapshot")
+            _set_store_reference(
+                authority,
+                "restic_snapshot",
+                f"restic:{RESTIC_SNAPSHOT_ID}",
+            )
             authority_path = root / "authority.json"
             authority_path.write_text(json.dumps(authority), encoding="utf-8")
             report = root / "report.json"
@@ -297,7 +384,7 @@ class RestoreGateTests(unittest.TestCase):
                     "--payload",
                     str(payload),
                     "--restic-snapshot-id",
-                    "wrong-snapshot",
+                    "b" * 64,
                     "--report",
                     str(report),
                 ],
@@ -308,6 +395,89 @@ class RestoreGateTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("outside the current authority generation", result.stderr)
+            self.assertEqual("blocked", json.loads(report.read_text())["state"])
+
+    def test_restic_snapshot_bytes_must_match_the_selected_restored_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload"
+            (payload / "retention").mkdir(parents=True)
+            for filename in (
+                "synapse.pgdump",
+                "whatsapp.pgdump",
+                "messenger.pgdump",
+                "telegram.pgdump",
+            ):
+                (payload / filename).write_bytes(b"restored-bytes")
+            (payload / "retention/controlled-copy-layout.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "format": "communicator-core-pgdump-v1",
+                        "databases": [
+                            {
+                                "name": database,
+                                "path": filename,
+                                "contract": contract,
+                            }
+                            for database, filename, contract in (
+                                ("synapse", "synapse.pgdump", "synapse-event-json-v1"),
+                                ("whatsapp_bridge", "whatsapp.pgdump", "mautrix-bridge-message-v1"),
+                                ("messenger_bridge", "messenger.pgdump", "mautrix-bridge-message-v1"),
+                                ("telegram_bridge", "telegram.pgdump", "mautrix-bridge-message-v1"),
+                            )
+                        ],
+                        "files": [
+                            "synapse.pgdump",
+                            "whatsapp.pgdump",
+                            "messenger.pgdump",
+                            "telegram.pgdump",
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot_source = root / "authenticated-snapshot"
+            shutil.copytree(payload, snapshot_source)
+            (snapshot_source / "synapse.pgdump").write_bytes(b"different-bytes")
+            authority = _authority(epoch=0)
+            _set_store_reference(
+                authority,
+                "restic_snapshot",
+                f"restic:{RESTIC_SNAPSHOT_ID}",
+            )
+            authority_path = root / "authority.json"
+            authority_path.write_text(json.dumps(authority), encoding="utf-8")
+            report = root / "report.json"
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(GATE_PATH),
+                    "--authority",
+                    str(authority_path),
+                    "--tenant",
+                    authority["tenant_id"],
+                    "--payload",
+                    str(payload),
+                    "--restic-snapshot-id",
+                    RESTIC_SNAPSHOT_ID,
+                    "--report",
+                    str(report),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    **os.environ,
+                    **_fake_restic_environment(root, snapshot_source),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "restored payload bytes do not match authenticated restic snapshot",
+                result.stderr,
+            )
             self.assertEqual("blocked", json.loads(report.read_text())["state"])
 
     def test_inventory_bound_authority_head_is_accepted(self):
@@ -340,6 +510,11 @@ class RestoreGateTests(unittest.TestCase):
 
     def test_authenticated_current_endpoint_rechecks_head_before_ready(self):
         authority = _authority(epoch=0)
+        _set_store_reference(
+            authority,
+            "restic_snapshot",
+            f"restic:{RESTIC_SNAPSHOT_ID}",
+        )
         authority["issued_at"] = datetime.now(timezone.utc).isoformat().replace(
             "+00:00", "Z"
         )
@@ -413,6 +588,11 @@ class RestoreGateTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
+                snapshot_source = root / "authenticated-snapshot"
+                shutil.copytree(payload, snapshot_source)
+                fake_restic_environment = _fake_restic_environment(
+                    root, snapshot_source
+                )
                 report = root / "report.json"
                 result = subprocess.run(
                     [
@@ -427,7 +607,7 @@ class RestoreGateTests(unittest.TestCase):
                         "--payload",
                         str(payload),
                         "--restic-snapshot-id",
-                        "fixture-snapshot",
+                        RESTIC_SNAPSHOT_ID,
                         "--report",
                         str(report),
                     ],
@@ -435,7 +615,11 @@ class RestoreGateTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     timeout=30,
-                    env={**os.environ, "COMMUNICATOR_RESTORE_ALLOW_HTTP": "1"},
+                    env={
+                        **os.environ,
+                        "COMMUNICATOR_RESTORE_ALLOW_HTTP": "1",
+                        **fake_restic_environment,
+                    },
                 )
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertIn("changed during sanitation", result.stderr)
@@ -831,6 +1015,11 @@ class RestoreGateTests(unittest.TestCase):
                     text=True,
                     timeout=30,
                 )
+                snapshot_source = root / "authenticated-snapshot"
+                shutil.copytree(payload, snapshot_source)
+                fake_restic_environment = _fake_restic_environment(
+                    root, snapshot_source
+                )
 
                 removed = {
                     "id": "removal_restore_gate",
@@ -866,8 +1055,14 @@ class RestoreGateTests(unittest.TestCase):
                     ],
                 }
                 authority_path = root / "authority.json"
+                authority_document = _authority(authorities=[removed])
+                _set_store_reference(
+                    authority_document,
+                    "restic_snapshot",
+                    f"restic:{RESTIC_SNAPSHOT_ID}",
+                )
                 authority_path.write_text(
-                    json.dumps(_authority(authorities=[removed])), encoding="utf-8"
+                    json.dumps(authority_document), encoding="utf-8"
                 )
                 report = root / "restore-report.json"
                 result = subprocess.run(
@@ -881,7 +1076,7 @@ class RestoreGateTests(unittest.TestCase):
                         "--payload",
                         str(payload),
                         "--restic-snapshot-id",
-                        "fixture-snapshot",
+                        RESTIC_SNAPSHOT_ID,
                         "--report",
                         str(report),
                     ],
@@ -889,7 +1084,7 @@ class RestoreGateTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     timeout=900,
-                    env=os.environ.copy(),
+                    env={**os.environ, **fake_restic_environment},
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual("ready", json.loads(report.read_text())["state"])

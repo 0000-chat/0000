@@ -80,8 +80,8 @@ cat > "$staging/retention/controlled-copy-manifest.json" <<EOF
       "copies": [
         {
           "reference": "restic:${backup_id}",
-          "resource_id": "*",
-          "content_generation": "*",
+          "resource_id": "communicator-core",
+          "content_generation": "${backup_id}",
           "copy_created_at": "${backup_created_at}",
           "content_classes": ["message", "session_credential", "account_key"]
         }

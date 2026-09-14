@@ -17,16 +17,18 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 
@@ -87,6 +89,13 @@ def _required_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RestoreGateError(f"restore {name} is required")
     return value.strip()
+
+
+def _exact_lineage_string(value: Any, name: str) -> str:
+    result = _required_string(value, name)
+    if "*" in result:
+        raise RestoreGateError(f"restore {name} must be exact resource lineage")
+    return result
 
 
 def _safe_relative(value: Any, name: str) -> str:
@@ -181,9 +190,9 @@ def _failpoint(stage: str, *, before: bool = False) -> None:
 
 def _authority_key(authority: Mapping[str, Any]) -> tuple[str, str, str]:
     return (
-        _required_string(authority.get("resource_type"), "authority resource type"),
-        _required_string(authority.get("resource_id"), "authority resource id"),
-        _required_string(
+        _exact_lineage_string(authority.get("resource_type"), "authority resource type"),
+        _exact_lineage_string(authority.get("resource_id"), "authority resource id"),
+        _exact_lineage_string(
             authority.get("content_generation"), "authority content generation"
         ),
     )
@@ -308,10 +317,10 @@ def _validate_authority_document(
                 copy_created_at = _parse_timestamp(
                     raw_copy.get("copy_created_at"), "inventory copy_created_at"
                 )
-                copy_resource_id = _required_string(
+                copy_resource_id = _exact_lineage_string(
                     raw_copy.get("resource_id"), "inventory copy resource id"
                 )
-                copy_generation = _required_string(
+                copy_generation = _exact_lineage_string(
                     raw_copy.get("content_generation"),
                     "inventory copy content generation",
                 )
@@ -399,10 +408,10 @@ def _validate_authority_document(
                     "copy_created_at": _parse_timestamp(
                         raw_copy.get("copy_created_at"), f"{store} copy_created_at"
                     ),
-                    "resource_id": _required_string(
+                    "resource_id": _exact_lineage_string(
                         raw_copy.get("resource_id"), f"{store} copy resource id"
                     ),
-                    "content_generation": _required_string(
+                    "content_generation": _exact_lineage_string(
                         raw_copy.get("content_generation"),
                         f"{store} copy content generation",
                     ),
@@ -571,8 +580,188 @@ def verify_restic_snapshot_reference(
     if not expected:
         raise RestoreGateError("restore restic snapshot inventory reference is missing")
     actual = _required_string(snapshot_id, "restic snapshot id")
+    if len(actual) != 64 or any(character not in "0123456789abcdef" for character in actual):
+        raise RestoreGateError("restore restic snapshot id must be the full authenticated id")
     if f"restic:{actual}" not in expected:
         raise RestoreGateError("restic snapshot is outside the current authority generation")
+
+
+def _restic_configuration() -> tuple[str, str, str]:
+    repository = _required_string(
+        os.environ.get("RESTIC_REPOSITORY"), "restic repository"
+    )
+    password_file = _required_string(
+        os.environ.get("RESTIC_PASSWORD_FILE"), "restic password file"
+    )
+    binary = _required_string(
+        os.environ.get("COMMUNICATOR_RESTORE_RESTIC_BIN", "restic"),
+        "restic binary",
+    )
+    if not Path(password_file).is_file():
+        raise RestoreGateError("restore restic password file is unavailable")
+    return repository, password_file, binary
+
+
+def _restic_environment(repository: str, password_file: str) -> dict[str, str]:
+    return {
+        **os.environ,
+        "RESTIC_REPOSITORY": repository,
+        "RESTIC_PASSWORD_FILE": password_file,
+    }
+
+
+def _restic_command_error(result: subprocess.CompletedProcess[bytes], action: str) -> RestoreGateError:
+    detail = result.stderr.decode("utf-8", errors="replace").strip()
+    if detail:
+        return RestoreGateError(f"restore restic {action} failed: {detail[:240]}")
+    return RestoreGateError(f"restore restic {action} failed")
+
+
+def _snapshot_relative_path(
+    path: str, snapshot_roots: Iterable[str]
+) -> str | None:
+    candidate = PurePosixPath(path)
+    if not candidate.is_absolute():
+        raise RestoreGateError("restore restic snapshot path is not absolute")
+    normalized = candidate.as_posix().rstrip("/")
+    if not normalized:
+        return None
+    for raw_root in snapshot_roots:
+        root = PurePosixPath(raw_root)
+        if not root.is_absolute():
+            raise RestoreGateError("restore restic snapshot root is not absolute")
+        root_text = root.as_posix().rstrip("/")
+        if normalized == root_text:
+            return ""
+        if normalized.startswith(root_text + "/"):
+            relative = normalized[len(root_text) + 1 :]
+            if relative and ".." not in PurePosixPath(relative).parts:
+                return relative
+        if root_text.startswith(normalized + "/"):
+            # Restic lists the ancestors of an absolute backup path as
+            # directory nodes.  They are metadata outside the selected
+            # payload root and have no corresponding restored file.
+            return None
+    raise RestoreGateError("restore restic snapshot contains an unbound payload path")
+
+
+def verify_restic_snapshot_payload(
+    payload: Path, snapshot_id: str, *, timeout_seconds: float = 300
+) -> dict[str, Any]:
+    """Authenticate every restored payload file against the selected snapshot.
+
+    ``restic restore`` writes the local tree, but a path or local sidecar alone
+    does not prove which encrypted snapshot supplied those bytes.  The gate
+    lists the exact selected snapshot and dumps every regular file through the
+    authenticated repository, then compares hashes and complete file coverage
+    before any sanitization mutates the payload.
+    """
+    repository, password_file, binary = _restic_configuration()
+    environment = _restic_environment(repository, password_file)
+    listing = tempfile.TemporaryFile()
+    try:
+        try:
+            result = subprocess.run(
+                [binary, "ls", "--json", snapshot_id],
+                env=environment,
+                stdout=listing,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RestoreGateError("restore restic snapshot listing failed") from error
+        if result.returncode != 0:
+            raise _restic_command_error(result, "snapshot listing")
+        listing.seek(0)
+        roots: list[str] = []
+        snapshot_files: dict[str, str] = {}
+        for raw_line in listing:
+            try:
+                value = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RestoreGateError("restore restic snapshot listing is invalid") from error
+            if not isinstance(value, dict):
+                raise RestoreGateError("restore restic snapshot listing entry is invalid")
+            if value.get("message_type") == "snapshot" or value.get("struct_type") == "snapshot":
+                raw_paths = value.get("paths")
+                if not isinstance(raw_paths, list) or not raw_paths:
+                    raise RestoreGateError("restore restic snapshot roots are missing")
+                roots.extend(
+                    _required_string(path, "restic snapshot root")
+                    for path in raw_paths
+                )
+                continue
+            if value.get("message_type") != "node" and value.get("struct_type") != "node":
+                continue
+            node_path = _required_string(value.get("path"), "restic snapshot node path")
+            node_type = _required_string(value.get("type"), "restic snapshot node type")
+            relative = _snapshot_relative_path(node_path, roots)
+            if relative is None:
+                if node_type == "dir":
+                    continue
+                raise RestoreGateError(
+                    "restore restic snapshot contains an unbound payload path"
+                )
+            if node_type == "dir":
+                continue
+            if node_type != "file":
+                raise RestoreGateError("restore restic snapshot contains unsupported node type")
+            if relative in snapshot_files:
+                raise RestoreGateError("restore restic snapshot contains duplicate file paths")
+            snapshot_files[relative] = node_path
+    finally:
+        listing.close()
+
+    if not roots:
+        raise RestoreGateError("restore restic snapshot roots are missing")
+    local_files = _exact_payload_files(payload)
+    if set(snapshot_files) != local_files:
+        raise RestoreGateError(
+            "restored payload file coverage does not match authenticated restic snapshot"
+        )
+
+    hashes: dict[str, dict[str, Any]] = {}
+    for relative, snapshot_path in sorted(snapshot_files.items()):
+        local_path = _payload_path(payload, relative, "restored payload file")
+        expected_hash = hashlib.sha256()
+        size = 0
+        with tempfile.TemporaryFile() as dumped:
+            try:
+                result = subprocess.run(
+                    [binary, "dump", snapshot_id, snapshot_path],
+                    env=environment,
+                    stdout=dumped,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise RestoreGateError(
+                    "restore restic snapshot file retrieval failed"
+                ) from error
+            if result.returncode != 0:
+                raise _restic_command_error(result, "snapshot file retrieval")
+            dumped.seek(0)
+            while chunk := dumped.read(1024 * 1024):
+                expected_hash.update(chunk)
+                size += len(chunk)
+        actual_hash = hashlib.sha256()
+        actual_size = 0
+        with local_path.open("rb") as local_file:
+            while chunk := local_file.read(1024 * 1024):
+                actual_hash.update(chunk)
+                actual_size += len(chunk)
+        if size != actual_size or expected_hash.hexdigest() != actual_hash.hexdigest():
+            raise RestoreGateError(
+                "restored payload bytes do not match authenticated restic snapshot"
+            )
+        hashes[relative] = {"sha256": actual_hash.hexdigest(), "size": actual_size}
+    return {
+        "snapshot_id": snapshot_id,
+        "files": hashes,
+        "payload_digest": _sha256_json(hashes),
+    }
 
 
 def fetch_authority(
@@ -799,10 +988,10 @@ def _targets_for(authorities: Iterable[Mapping[str, Any]]) -> list[dict[str, Any
             if not isinstance(raw, dict):
                 raise RestoreGateError("restore authority target is invalid")
             target = dict(raw)
-            authority_resource = _required_string(
+            authority_resource = _exact_lineage_string(
                 authority.get("resource_id"), "authority resource id"
             )
-            authority_generation = _required_string(
+            authority_generation = _exact_lineage_string(
                 authority.get("content_generation"), "authority content generation"
             )
             if "resource_id" in target and target.get("resource_id") != authority_resource:
@@ -816,10 +1005,10 @@ def _targets_for(authorities: Iterable[Mapping[str, Any]]) -> list[dict[str, Any
                 raise RestoreGateError(
                     "restore target must publish exact resource lineage"
                 )
-            target["resource_id"] = _required_string(
+            target["resource_id"] = _exact_lineage_string(
                 target.get("resource_id"), "target resource id"
             )
-            target["content_generation"] = _required_string(
+            target["content_generation"] = _exact_lineage_string(
                 target.get("content_generation"), "target content generation"
             )
             target["authority_id"] = _required_string(authority.get("id"), "authority id")
@@ -931,6 +1120,7 @@ def run_payload_gate(
     payload: Path,
     authority: dict[str, Any],
     report: Path,
+    restic_snapshot_id: str,
     refresh_authority: Any = None,
 ) -> dict[str, Any]:
     stages: list[dict[str, Any]] = []
@@ -950,6 +1140,15 @@ def run_payload_gate(
     layout = validate_payload(payload)
     stage("payload_validated", {"files": len(layout["files"]), "format": "communicator-core-pgdump-v1"})
     stage("store_evidence_validated", {"stores": list(ALL_STORES)})
+    restic_proof = verify_restic_snapshot_payload(payload, restic_snapshot_id)
+    stage(
+        "restic_payload_proof",
+        {
+            "snapshot_id": restic_proof["snapshot_id"],
+            "files": len(restic_proof["files"]),
+            "payload_digest": restic_proof["payload_digest"],
+        },
+    )
     work_parent = Path(
         tempfile.mkdtemp(prefix="communicator-restore-gate-", dir=os.environ.get("TMPDIR") or None)
     )
@@ -1126,6 +1325,7 @@ def main(argv: list[str]) -> int:
             args.payload,
             authority,
             args.report,
+            args.restic_snapshot_id,
             refresh_authority=authority_loader if args.authority_url is not None else None,
         )
         return 0
