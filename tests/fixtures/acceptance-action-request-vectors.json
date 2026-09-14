@@ -1,0 +1,99 @@
+{
+  "group_rename": {
+    "methods": ["PATCH"],
+    "path": "/api/v1/groups/conversation_one",
+    "valid": {
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "conversation_id": "conversation_one",
+      "expected_revision": "revision_one",
+      "idempotency_key": "group-rename-001",
+      "name": "Renamed group"
+    },
+    "invalid": {
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "conversation_id": "conversation_one",
+      "expected_revision": "revision_one",
+      "idempotency_key": "group-rename-001",
+      "name": "Renamed group",
+      "participants": [
+        {
+          "contact_id": "contact_one",
+          "candidate_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  },
+  "group_participants": {
+    "methods": ["POST", "DELETE"],
+    "path": "/api/v1/groups/conversation_one/participants",
+    "valid": {
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "conversation_id": "conversation_one",
+      "expected_revision": "revision_one",
+      "idempotency_key": "group-participants-001",
+      "participants": [
+        {
+          "contact_id": "contact_one",
+          "candidate_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    "invalid": {
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "conversation_id": "conversation_one",
+      "expected_revision": "revision_one",
+      "idempotency_key": "group-participants-001",
+      "participants": [
+        {
+          "contact_id": "contact_one",
+          "candidate_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "name": "Unexpected on participant route"
+    }
+  },
+  "grant_create": {
+    "methods": ["POST"],
+    "path": "/api/v1/grants",
+    "valid": {
+      "membership_id": "membership_one",
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "operation_scope": "conversation.read",
+      "chat_scope": "all_chats",
+      "chat_ids": [],
+      "idempotency_key": "grant-create-001"
+    },
+    "invalid": {
+      "membership_id": "membership_one",
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "operation_scope": "conversation.read",
+      "chat_scope": "all_chats",
+      "chat_ids": [],
+      "idempotency_key": "grant-create-001",
+      "grant_id": "grant_one"
+    }
+  },
+  "grant_update": {
+    "methods": ["PATCH"],
+    "path": "/api/v1/grants/grant_one",
+    "valid": {
+      "operation_scope": "conversation.read",
+      "chat_scope": "all_chats",
+      "chat_ids": [],
+      "idempotency_key": "grant-update-001"
+    },
+    "invalid": {
+      "operation_scope": "conversation.read",
+      "chat_scope": "all_chats",
+      "chat_ids": [],
+      "idempotency_key": "grant-update-001",
+      "membership_id": "membership_one"
+    }
+  }
+}

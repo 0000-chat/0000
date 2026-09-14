@@ -21,6 +21,12 @@ sys.modules[SPEC.name] = client_acceptance
 SPEC.loader.exec_module(client_acceptance)
 
 
+ACTION_REQUEST_VECTORS_PATH = ROOT / "tests" / "fixtures" / "acceptance-action-request-vectors.json"
+ACTION_REQUEST_VECTORS: dict[str, Any] = json.loads(
+    ACTION_REQUEST_VECTORS_PATH.read_text(encoding="utf-8")
+)
+
+
 REST_PATHS: dict[tuple[str, str], tuple[str, str]] = {
     ("oauth_connection", "protected_resource"): ("GET", "/.well-known/oauth-protected-resource"),
     ("oauth_connection", "authorization_server"): ("GET", "/.well-known/oauth-authorization-server"),
@@ -1002,98 +1008,60 @@ class ClientAcceptanceTest(unittest.TestCase):
         client_acceptance.validate_config(config_with_operations(operations))
 
     def test_group_management_request_contract_matches_worker_action_schemas(self) -> None:
-        common = {
-            "identity_id": "identity_one",
-            "account_id": "account_one",
-            "conversation_id": "chat_one",
-            "expected_revision": "revision_one",
-            "idempotency_key": "group-action-001",
-        }
-        rename = {**common, "name": "Renamed group"}
-        participants = {
-            **common,
-            "participants": [
-                {
-                    "contact_id": "contact_one",
-                    "candidate_revision": "a" * 64,
-                }
-            ],
-        }
-        for method, path, body in (
-            ("PATCH", "/api/v1/groups/chat_one", rename),
-            ("POST", "/api/v1/groups/chat_one/participants", participants),
-            ("DELETE", "/api/v1/groups/chat_one/participants", participants),
+        for vector in (
+            ACTION_REQUEST_VECTORS["group_rename"],
+            ACTION_REQUEST_VECTORS["group_participants"],
         ):
-            operation = operation_for_requirement(
-                "direct_chat_and_group",
-                "group_management",
-                method=method,
-                path=path,
-                body=body,
-            )
-            client_acceptance.validate_config(config_with_operations([operation]))
-
-        for method, path, body in (
-            ("PATCH", "/api/v1/groups/chat_one", {**rename, "participants": participants["participants"]}),
-            ("POST", "/api/v1/groups/chat_one/participants", {**participants, "name": "invalid"}),
-            ("DELETE", "/api/v1/groups/chat_one/participants", {**participants, "name": "invalid"}),
-        ):
-            operation = operation_for_requirement(
-                "direct_chat_and_group",
-                "group_management",
-                method=method,
-                path=path,
-                body=body,
-            )
-            with self.assertRaises(client_acceptance.ConfigError):
+            for method in vector["methods"]:
+                operation = operation_for_requirement(
+                    "direct_chat_and_group",
+                    "group_management",
+                    method=method,
+                    path=vector["path"],
+                    body=vector["valid"],
+                )
                 client_acceptance.validate_config(config_with_operations([operation]))
+
+                invalid_operation = operation_for_requirement(
+                    "direct_chat_and_group",
+                    "group_management",
+                    method=method,
+                    path=vector["path"],
+                    body=vector["invalid"],
+                )
+                with self.assertRaises(client_acceptance.ConfigError):
+                    client_acceptance.validate_config(
+                        config_with_operations([invalid_operation])
+                    )
 
     def test_grant_request_contract_matches_worker_create_and_update_schemas(self) -> None:
-        create_body = {
-            "membership_id": "membership_one",
-            "identity_id": "identity_one",
-            "account_id": "account_one",
-            "operation_scope": "conversation.read",
-            "chat_scope": "all_chats",
-            "chat_ids": [],
-            "idempotency_key": "grant-create-001",
-        }
-        update_body = {
-            "operation_scope": "conversation.read",
-            "chat_scope": "all_chats",
-            "chat_ids": [],
-            "idempotency_key": "grant-update-001",
-        }
-        for method, path, body in (
-            ("POST", "/api/v1/grants", create_body),
-            ("PATCH", "/api/v1/grants/grant_one", update_body),
+        for vector in (
+            ACTION_REQUEST_VECTORS["grant_create"],
+            ACTION_REQUEST_VECTORS["grant_update"],
         ):
-            operation = operation_for_requirement(
-                "linking_identity_lifecycle",
-                "identity_grant",
-                observation="grant_result",
-                method=method,
-                path=path,
-                body=body,
-            )
-            client_acceptance.validate_config(config_with_operations([operation]))
-
-        invalid_update = {**update_body, "membership_id": "membership_one"}
-        invalid_create = {**create_body, "grant_id": "grant_one"}
-        for method, path, body in (
-            ("PATCH", "/api/v1/grants/grant_one", invalid_update),
-            ("POST", "/api/v1/grants", invalid_create),
-        ):
-            operation = operation_for_requirement(
-                "linking_identity_lifecycle",
-                "identity_grant",
-                observation="grant_result",
-                method=method,
-                path=path,
-                body=body,
-            )
-            with self.assertRaises(client_acceptance.ConfigError):
+            for method in vector["methods"]:
+                operation = operation_for_requirement(
+                    "linking_identity_lifecycle",
+                    "identity_grant",
+                    observation="grant_result",
+                    method=method,
+                    path=vector["path"],
+                    body=vector["valid"],
+                )
                 client_acceptance.validate_config(config_with_operations([operation]))
+
+                invalid_operation = operation_for_requirement(
+                    "linking_identity_lifecycle",
+                    "identity_grant",
+                    observation="grant_result",
+                    method=method,
+                    path=vector["path"],
+                    body=vector["invalid"],
+                )
+                with self.assertRaises(client_acceptance.ConfigError):
+                    client_acceptance.validate_config(
+                        config_with_operations([invalid_operation])
+                    )
 
     def test_every_advertised_mcp_tool_has_bound_schema_and_rejects_pointer_aliases(self) -> None:
         for (scenario, requirement_identifier), tools in client_acceptance.MCP_CONTRACTS.items():
