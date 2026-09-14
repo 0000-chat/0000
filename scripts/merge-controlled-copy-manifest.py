@@ -114,9 +114,23 @@ def merge_snapshot(
                 {
                     "reference": reference,
                     "snapshot_id": snapshot_id,
-                    "resource_id": "*",
-                    "content_generation": "*",
+                    # The mixed snapshot is one exact aggregate copy.  It is
+                    # never treated as a message lineage by retention, but
+                    # its provider generation must still be concrete.
+                    "resource_id": "communicator-core",
+                    "content_generation": snapshot_id,
                     "copy_created_at": created_at,
+                    # The physical snapshot is an aggregate copy.  Its
+                    # logical coverage is proved later from the authenticated
+                    # layout inside the selected snapshot; this sidecar only
+                    # records the producer's contract alongside the exact
+                    # provider id.
+                    "coverage": {
+                        "kind": "aggregate",
+                        "resource_scope": "host",
+                        "tenant_scope": "all",
+                        "account_scope": "all",
+                    },
                     "content_classes": [
                         "message",
                         "session_credential",

@@ -9,6 +9,7 @@ import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
 import { removalStatusForTenant } from "./service";
 import { scheduleRemovalExpiry } from "./ledger";
 import { createConfiguredControlledCopyAdapters } from "../retention";
+import { createRestoreAuthorityExport } from "../restore/authority";
 
 /** The authenticated context passed from the shared MCP transport. */
 export type RemovalMcpContext = {
@@ -107,6 +108,26 @@ export const registerRemovalMcpTools = (
         return removalStatusForTenant(
           databaseFor(context),
           context.authorization.tenant.id,
+        );
+      }),
+  );
+
+  server.registerTool(
+    "get_restore_authority",
+    {
+      description:
+        "Export the current authenticated removal ledger and restore evidence",
+    },
+    () =>
+      withRemovalErrors(async () => {
+        requireAdministrator(context);
+        return createRestoreAuthorityExport(
+          databaseFor(context),
+          context.authorization.tenant.id,
+          new Date(),
+          createConfiguredControlledCopyAdapters(
+            context.env as unknown as Record<string, unknown>,
+          ),
         );
       }),
   );

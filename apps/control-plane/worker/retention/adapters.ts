@@ -33,6 +33,15 @@ export type RetentionBackendCopy = {
    * credential-bearing object as if it were a message copy.
    */
   content_classes?: readonly ControlledCopyContentClass[];
+  /** Authenticated coverage contract for a physical aggregate copy. */
+  coverage?: {
+    kind: "aggregate";
+    resource_scope: "host";
+    tenant_scope: "all";
+    account_scope: "all";
+  };
+  /** Exact core-dump row/media mapping supplied by a real inventory backend. */
+  restore_target?: Record<string, unknown>;
 };
 
 export type RetentionInventoryResult = {
@@ -86,7 +95,6 @@ const normalizeInventory = (
     ControlledCopyAdapter,
     "store" | "owner" | "default_content_class" | "deletion_method" | "required"
   >,
-  scope: RetentionInventoryScope,
 ): RetentionInventoryResult => {
   if (
     typeof result.evidence_source !== "string" ||
@@ -103,8 +111,20 @@ const normalizeInventory = (
     const contentClasses = copy.content_classes ?? [
       copy.content_class ?? adapter.default_content_class,
     ];
+    const aggregateCoverage = copy.coverage;
+    const aggregateMixedResticCopy =
+      adapter.store === "restic_snapshot" &&
+      contentClasses.length > 1 &&
+      contentClasses.length === 3 &&
+      ["message", "session_credential", "account_key"].every((contentClass) =>
+        contentClasses.includes(contentClass as ControlledCopyContentClass),
+      ) &&
+      aggregateCoverage?.kind === "aggregate" &&
+      aggregateCoverage.resource_scope === "host" &&
+      aggregateCoverage.tenant_scope === "all" &&
+      aggregateCoverage.account_scope === "all";
     if (
-      contentClasses.length !== 1 ||
+      (!aggregateMixedResticCopy && contentClasses.length !== 1) ||
       contentClasses.some(
         (contentClass) =>
           !ControlledCopyContentClassSchema.safeParse(contentClass).success,
@@ -114,7 +134,9 @@ const normalizeInventory = (
         "controlled copy inventory must isolate content classes per reference",
       );
     }
-    const contentClass = contentClasses[0];
+    const contentClass = aggregateMixedResticCopy
+      ? "message"
+      : contentClasses[0];
     if (contentClass === undefined) {
       throw new Error("controlled copy inventory content class missing");
     }
@@ -130,18 +152,40 @@ const normalizeInventory = (
       throw new Error("controlled copy inventory reference is duplicated");
     }
     references.add(copy.reference);
+    if (
+      typeof copy.resource_id !== "string" ||
+      copy.resource_id.trim() === "" ||
+      copy.resource_id === "*" ||
+      typeof copy.content_generation !== "string" ||
+      copy.content_generation.trim() === "" ||
+      copy.content_generation === "*"
+    ) {
+      throw new Error(
+        "controlled copy inventory copy must publish exact resource lineage",
+      );
+    }
     const item = ControlledCopyInventoryItemSchema.parse({
       store: adapter.store,
       owner: adapter.owner,
       content_class: contentClass,
-      resource_id: copy.resource_id ?? scope.resource_id,
-      content_generation: copy.content_generation ?? scope.content_generation,
+      resource_id: copy.resource_id,
+      content_generation: copy.content_generation,
       reference: copy.reference,
       copy_created_at: normalizeTimestamp(copy.copy_created_at),
       deletion_method: adapter.deletion_method,
       required: adapter.required,
     });
-    return item;
+    if (
+      copy.restore_target !== undefined &&
+      (copy.restore_target === null ||
+        typeof copy.restore_target !== "object" ||
+        Array.isArray(copy.restore_target))
+    ) {
+      throw new Error("controlled copy inventory restore target is invalid");
+    }
+    return copy.restore_target === undefined
+      ? item
+      : { ...item, restore_target: copy.restore_target };
   });
   return {
     complete: result.complete === true,
@@ -210,7 +254,7 @@ export const createStoreAdapter = ({
     deletion_method: deletionMethod,
     required,
     inventory: async (scope) =>
-      normalizeInventory(await backend.inventory(scope), adapter, scope),
+      normalizeInventory(await backend.inventory(scope), adapter),
     cleanup: async (operation, now) => {
       if (
         required &&

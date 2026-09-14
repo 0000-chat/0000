@@ -17,6 +17,7 @@ import {
 } from "./ledger";
 import { listArchivePurgeOperations } from "../archive/purge";
 import { cancelWebhookDeliveriesForRemoval } from "../webhooks/delivery";
+import { restoreReadinessForTenant } from "../restore/gate";
 
 /**
  * Resource identity is the immutable content lineage. A message edit changes
@@ -186,6 +187,15 @@ export const removalStatusForTenant = async (
       }),
     );
   }
+  const restore = await restoreReadinessForTenant({
+    database,
+    tenantId,
+    canonicalArchiveFor: async (authority) => {
+      const archive = archiveByRemoval.get(authority.id);
+      if (archive === undefined) return "missing";
+      return archive.status === "complete" ? "complete" : "incomplete";
+    },
+  });
   return RemovalStatusResponseSchema.parse({
     tenant_id: tenantId,
     authorities,
@@ -204,6 +214,7 @@ export const removalStatusForTenant = async (
       completed_at: operation.completed_at,
     })),
     controlled_copy: controlledCopy,
+    restore,
   });
 };
 
