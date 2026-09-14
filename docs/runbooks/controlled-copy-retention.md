@@ -21,16 +21,20 @@ Configure the actual homeserver separately as
 `COMMUNICATOR_RETENTION_SYNAPSE_HOMESERVER_URL` and provide its access token in
 `COMMUNICATOR_RETENTION_SYNAPSE_ACCESS_TOKEN`; the Worker-facing
 `COMMUNICATOR_RETENTION_SYNAPSE_URL` remains the controlled-copy service URL.
-With those host credentials, inventory checks the exact event through
-`/_matrix/client/v3/rooms/<room_id>/event/<event_id>`; a 404 proves that mapped
-event is absent, while other failures remain incomplete. Cleanup uses Synapse's
-supported Matrix redaction endpoint to redact that event. It records
-`quarantined` with `content_present: true`: Synapse's
-supported purge-history endpoint is room/event-prefix based and retains its
-cutoff event, so it cannot prove physical removal of one event without risking
-unrelated room history. This is useful suppression evidence, but it cannot
-complete the controlled-copy gate. An exact room/event mapping is required;
-the communicator removal record does not invent one.
+With those host credentials, cleanup uses Synapse's supported Matrix redaction
+endpoint to redact that exact event. The pinned `v1.159.0` homeserver template
+sets `redaction_retention_period: 7d`. Configure the host-side database
+connection separately with `COMMUNICATOR_RETENTION_SYNAPSE_DATABASE_URL` and,
+for tests or a root-owned wrapper, `COMMUNICATOR_RETENTION_SYNAPSE_PSQL_BIN`.
+The adapter inspects Synapse's `redactions.have_censored` state joined to the
+stored `event_json`; it records `expired` only after the censor job has replaced
+the unredacted event body. Synapse checks this job every five minutes, so the
+seven-day period plus the Worker's 24-hour cleanup margin stays below the
+30-day ceiling. If the database boundary is absent, the adapter records only
+`quarantined` or `unknown` evidence and cannot complete the controlled-copy
+gate. The public event endpoint is not used as physical-deletion evidence.
+Synapse WAL and restic backups are separate controlled stores and must also
+complete their own evidence.
 
 For the pinned `v26.08` Mautrix bridge-v2 images, bridge inventory entries must
 carry `bridge_id`, `message_id`, and `part_id`. Configure the bridge database
@@ -54,26 +58,42 @@ is only a test/private API base override. The generic command hook remains an
 explicit provider escape hatch for other configured stores, but it cannot turn
 an unscoped mapping into completion.
 
-Restic is handled directly only for an exclusive message-only snapshot. The
-cleanup invokes `restic forget <snapshot> --prune` after checking the manifest
-class and `exclusive_resource_id`. The existing [`backup-core.sh`](../../scripts/backup-core.sh)
+Restic is handled directly for an exclusive message-only snapshot. The cleanup
+invokes `restic forget <snapshot> --prune` after checking the manifest class and
+`exclusive_resource_id`. The existing [`backup-core.sh`](../../scripts/backup-core.sh)
 records its mixed database/media/session/key snapshot explicitly and merges a
 sidecar entry using the exact `snapshot_id` from that backup's JSON summary;
-historical entries and other store inventories are retained, while the sidecar
-does not claim complete historical enumeration. The service returns
-`lifecycle_pending` and preserves that mixed snapshot. This keeps session
-credentials and account keys outside message deletion and prevents a whole
-mixed snapshot from being treated as a per-message copy.
+historical entries and other store inventories are retained.
+When restic credentials are configured, inventory calls `restic snapshots
+--json` and reconciles every controlled tag with the sidecar before returning a
+complete result. A missing or extra tagged snapshot leaves the inventory
+incomplete even when a matching manifest entry happens to exist.
+
+An operator can migrate a legacy mixed snapshot by setting
+`COMMUNICATOR_RETENTION_RESTIC_MIGRATION_MANIFEST` to a root-only JSON manifest
+that exhaustively maps every restored regular file to one exact message
+lineage, `session_credential`, or `account_key`. The host adapter restores the
+snapshot into a temporary directory, rejects omissions, symlinks, wildcard
+message lineages, and mixed file classes, then creates one replacement
+message-only snapshot per retained lineage and separate protected snapshots
+for session credentials and account keys. It forgets the old snapshot only
+after every replacement returns an exact snapshot id, and atomically records
+the new references. The removed lineage is deliberately absent from the
+replacement set. A current `backup-core.sh` pgdump or media tree whose file
+contents mix several classes cannot be mapped safely at this boundary; it
+remains `lifecycle_pending` and visible as an administrator alert until an
+exhaustive, class-separated fixture or operational mapping exists. That
+fail-closed state is the explicit legacy limitation and never becomes a false
+completion claim.
 
 The Worker always persists unavailable or unsupported stores as incomplete
 operations. Configure all required private endpoints before relying on a
 completion status; credentials and session-key adapters use `preserved` and
 are reported separately from the six required message-copy stores.
 
-The remaining shared registration seam is intentionally small: the HTTP
-removal handler and the removal MCP tool must pass
+The HTTP removal handler and removal MCP tool pass
 `retentionAdapters: createConfiguredControlledCopyAdapters(context.env as
 Record<string, unknown>)` into `recordRemovalWithArchivePurge`. The scheduled
-Worker entry point already constructs and passes the same adapters. Status
-reads use the durable controlled-copy rows and therefore do not need a second
-provider call.
+Worker entry point constructs and passes the same adapters before running the
+expiry and retention sweep. Status reads use the durable controlled-copy rows
+and therefore do not need a second provider call.

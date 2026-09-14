@@ -324,11 +324,18 @@ describe("removal administrator API and MCP boundaries", () => {
       body: JSON.stringify(recordInput()),
     });
     expect(record.status).toBe(201);
-    expect(await record.json()).toMatchObject({
+    const recordedAuthority = (await record.json()) as { id: string };
+    expect(recordedAuthority).toMatchObject({
       tenant_id: tenantId,
       resource_id: "message_mcp_admin",
       status: "active",
     });
+    const controlledCopyCount = await workerEnv.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM controlled_copy_operations WHERE tenant_id = ? AND removal_id = ?",
+    )
+      .bind(tenantId, recordedAuthority.id)
+      .first<{ count: number }>();
+    expect(controlledCopyCount?.count).toBe(8);
 
     const status = await apiRequest(adminSession, "/api/v1/removals");
     expect(status.status).toBe(200);
@@ -336,6 +343,12 @@ describe("removal administrator API and MCP boundaries", () => {
       tenant_id: tenantId,
       active_suppression: "enforced",
       physical_purge: "not_implemented",
+      controlled_copy: expect.arrayContaining([
+        expect.objectContaining({
+          removal_id: recordedAuthority.id,
+          status: "incomplete",
+        }),
+      ]),
       incomplete: [
         expect.objectContaining({ resource_id: "message_mcp_admin" }),
       ],

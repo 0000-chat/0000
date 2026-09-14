@@ -30,6 +30,12 @@ signing_key_path: /data/communicator.0000.gold.signing.key
 registration_shared_secret: "${REGISTRATION_SHARED_SECRET}"
 report_stats: false
 
+# Redacted event bodies are censored from event_json after seven days.  The
+# controlled-copy worker observes redactions.have_censored before it records
+# the Synapse copy as physically expired.  Keep this below the 30-day ceiling
+# so the five-minute Synapse censor sweep has a bounded operational margin.
+redaction_retention_period: 7d
+
 app_service_config_files:
   - /data/whatsapp-registration.yaml
   - /data/messenger-registration.yaml

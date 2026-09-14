@@ -16,6 +16,7 @@ import { isAdministratorSession } from "../read/authorization";
 import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
 import { removalStatusForTenant } from "../removals/service";
 import { scheduleRemovalExpiry } from "../removals/ledger";
+import { createConfiguredControlledCopyAdapters } from "../retention";
 
 type RemovalRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -148,6 +149,9 @@ export const recordRemovalHandler: Handler<
       {
         database: context.env.CONTROL_DB,
         bucket: context.env.EVENT_ARCHIVE,
+        retentionAdapters: createConfiguredControlledCopyAdapters(
+          context.env as unknown as Record<string, unknown>,
+        ),
       },
       input,
     );
