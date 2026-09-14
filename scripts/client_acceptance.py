@@ -212,6 +212,17 @@ class Scenario:
     relations: tuple[Relation, ...] = ()
 
 
+@dataclass(frozen=True)
+class RestRequestContract:
+    """Request requirements for one configured REST action."""
+
+    required_headers: tuple[str, ...] = ()
+    body_required: bool = False
+    body_keys: frozenset[str] | None = None
+    required_body_keys: frozenset[str] = frozenset()
+    idempotency_key_min_length: int = 1
+
+
 def _requirement(
     identifier: str,
     role: str,
@@ -950,6 +961,235 @@ REST_ROUTE_CONTRACTS: dict[tuple[str, str, str], tuple[RouteContract, ...]] = {
     ("surface_outcome_record", "surface_metadata", "response"): (("GET", r"/api/v1/session"),),
 }
 
+# Request contracts mirror the current Worker route declarations.  The
+# response route contract alone is insufficient for a mutation: a successful
+# response from a request that omitted an idempotency key or JSON body is not
+# proof that the configured client can perform the action.  Body values are
+# intentionally not copied into evidence; validation records only their
+# presence and top-level keys.
+REST_REQUEST_CONTRACTS: dict[tuple[str, str, str], RestRequestContract] = {
+    ("linking_identity_lifecycle", "unlinked_start", "response"): RestRequestContract(
+        required_headers=("idempotency-key",),
+        body_required=True,
+        body_keys=frozenset({"provider", "method", "confirmed_identity_id"}),
+        required_body_keys=frozenset({"provider", "method", "confirmed_identity_id"}),
+        idempotency_key_min_length=8,
+    ),
+    ("linking_identity_lifecycle", "identity_grant", "grant_result"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "membership_id",
+                "identity_id",
+                "account_id",
+                "operation_scope",
+                "chat_scope",
+                "chat_ids",
+                "idempotency_key",
+            }
+        ),
+        required_body_keys=frozenset(
+            {
+                "membership_id",
+                "identity_id",
+                "account_id",
+                "operation_scope",
+                "chat_scope",
+                "chat_ids",
+                "idempotency_key",
+            }
+        ),
+    ),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): RestRequestContract(
+        required_headers=("idempotency-key",),
+        body_required=True,
+        body_keys=frozenset(
+            {"provider", "method", "confirmed_identity_id", "expected_session_generation"}
+        ),
+        required_body_keys=frozenset({"provider", "method", "confirmed_identity_id"}),
+        idempotency_key_min_length=8,
+    ),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "membership_id",
+                "identity_id",
+                "account_id",
+                "operation_scope",
+                "chat_scope",
+                "chat_ids",
+                "idempotency_key",
+            }
+        ),
+        required_body_keys=frozenset(
+            {
+                "membership_id",
+                "identity_id",
+                "account_id",
+                "operation_scope",
+                "chat_scope",
+                "chat_ids",
+                "idempotency_key",
+            }
+        ),
+    ),
+    # The Worker requires this header even though the JSON action body is
+    # currently empty (or carries only the optional generation guard).
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "disconnect_result"): RestRequestContract(
+        required_headers=("idempotency-key",),
+        body_required=True,
+        body_keys=frozenset({"expected_session_generation"}),
+        idempotency_key_min_length=8,
+    ),
+    ("text_send_and_route", "saved_before_dispatch", "response"): RestRequestContract(
+        required_headers=("idempotency-key",),
+        body_required=True,
+        body_keys=frozenset({"identity_id", "account_id", "body", "delivery_mode"}),
+        required_body_keys=frozenset({"identity_id", "body", "delivery_mode"}),
+    ),
+    ("text_send_and_route", "account_failover_rejected", "response"): RestRequestContract(
+        required_headers=("idempotency-key",),
+        body_required=True,
+        body_keys=frozenset({"identity_id", "account_id", "body", "delivery_mode"}),
+        required_body_keys=frozenset({"identity_id", "body", "delivery_mode"}),
+    ),
+    ("direct_chat_and_group", "contact_resolution", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset({"identity_id", "account_id", "phone"}),
+        required_body_keys=frozenset({"identity_id", "account_id", "phone"}),
+    ),
+    ("direct_chat_and_group", "direct_chat_creation", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {"identity_id", "account_id", "contact_id", "candidate_revision", "idempotency_key"}
+        ),
+        required_body_keys=frozenset(
+            {"identity_id", "account_id", "contact_id", "candidate_revision", "idempotency_key"}
+        ),
+    ),
+    ("direct_chat_and_group", "group_creation", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset({"identity_id", "account_id", "name", "participants", "idempotency_key"}),
+        required_body_keys=frozenset(
+            {"identity_id", "account_id", "name", "participants", "idempotency_key"}
+        ),
+    ),
+    ("direct_chat_and_group", "group_management", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "identity_id",
+                "account_id",
+                "conversation_id",
+                "expected_revision",
+                "idempotency_key",
+                "name",
+                "participants",
+            }
+        ),
+        required_body_keys=frozenset(
+            {"identity_id", "account_id", "conversation_id", "expected_revision", "idempotency_key"}
+        ),
+    ),
+    ("webhook_subscriptions", "subscription_one_initial", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "owner_installation_id",
+                "logical_agent_id",
+                "destination",
+                "event_filter",
+                "global_enabled",
+                "account_rules",
+                "chat_rules",
+                "idempotency_key",
+            }
+        ),
+        required_body_keys=frozenset({"destination", "idempotency_key"}),
+    ),
+    ("webhook_subscriptions", "subscription_two_initial", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "owner_installation_id",
+                "logical_agent_id",
+                "destination",
+                "event_filter",
+                "global_enabled",
+                "account_rules",
+                "chat_rules",
+                "idempotency_key",
+            }
+        ),
+        required_body_keys=frozenset({"destination", "idempotency_key"}),
+    ),
+    ("webhook_subscriptions", "revision_removal", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset({"idempotency_key"}),
+        required_body_keys=frozenset({"idempotency_key"}),
+    ),
+    ("webhook_subscriptions", "retry", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset({"idempotency_key"}),
+        required_body_keys=frozenset({"idempotency_key"}),
+    ),
+    ("webhook_subscriptions", "cutover", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset({"destination", "idempotency_key"}),
+        required_body_keys=frozenset({"destination", "idempotency_key"}),
+    ),
+    ("receipt_and_restore", "explicit_receipt", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {"schema_version", "identity_id", "account_id", "message_id", "idempotency_key"}
+        ),
+        required_body_keys=frozenset(
+            {"schema_version", "identity_id", "account_id", "message_id", "idempotency_key"}
+        ),
+    ),
+    ("receipt_and_restore", "active_removal", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "tenant_id",
+                "resource_type",
+                "resource_id",
+                "content_generation",
+                "account_id",
+                "conversation_id",
+                "source_event_id",
+                "source_object_key",
+                "reason",
+                "removed_at",
+            }
+        ),
+        required_body_keys=frozenset(
+            {"tenant_id", "resource_type", "resource_id", "content_generation", "reason"}
+        ),
+    ),
+    ("receipt_and_restore", "restore_anti_resurrection", "response"): RestRequestContract(
+        body_required=True,
+        body_keys=frozenset(
+            {
+                "tenant_id",
+                "resource_type",
+                "resource_id",
+                "content_generation",
+                "account_id",
+                "conversation_id",
+                "source_event_id",
+                "source_object_key",
+                "reason",
+                "removed_at",
+            }
+        ),
+        required_body_keys=frozenset(
+            {"tenant_id", "resource_type", "resource_id", "content_generation", "reason"}
+        ),
+    ),
+}
+
 REST_CANONICAL_POINTERS: dict[tuple[str, str, str], dict[str, Any]] = {
     ("linking_identity_lifecycle", "identity_grant", "grant_result"): {
         "identity_id": "/identity_id", "account_id": "/account_id", "grant_id": "/id"
@@ -984,6 +1224,11 @@ REST_CANONICAL_POINTERS: dict[tuple[str, str, str], dict[str, Any]] = {
 }
 
 MCP_CANONICAL_POINTERS: dict[tuple[str, str, str, str], dict[str, Any]] = {
+    ("oauth_connection", "mcp_initialize", "response", "initialize"): {
+        "protocol_version": "/result/protocolVersion",
+        "server_name": "/result/serverInfo/name",
+        "server_version": "/result/serverInfo/version",
+    },
     ("oauth_connection", "mcp_scoped_read", "response", "list_messages"): {
         "account_id": "/result/structuredContent/items/0/account_id",
         "chat_id": "/result/structuredContent/items/0/conversation_id",
@@ -995,35 +1240,6 @@ MCP_CANONICAL_POINTERS: dict[tuple[str, str, str, str], dict[str, Any]] = {
 REQUEST_CONTRACTS = REST_ROUTE_CONTRACTS
 MCP_CONTRACTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("oauth_connection", "mcp_scoped_read"): ("list_messages",),
-    ("history_context_attachment", "stored_history"): ("list_conversations", "list_messages", "search_messages"),
-    ("history_context_attachment", "attachment_read"): ("get_attachment", "read_attachment", "download_attachment"),
-    ("text_send_and_route", "saved_before_dispatch"): ("send_text_reply", "send_message"),
-    ("text_send_and_route", "provider_delivery"): ("get_delivery_status", "get_command_status", "send_text_reply"),
-    ("text_send_and_route", "account_failover_rejected"): ("send_text_reply", "send_message"),
-    ("direct_chat_and_group", "contact_resolution"): ("resolve_contact", "resolve_recipient"),
-    ("direct_chat_and_group", "direct_chat_creation"): ("create_direct_chat", "create_chat"),
-    ("direct_chat_and_group", "group_creation"): ("create_group",),
-    ("direct_chat_and_group", "group_management"): ("rename_group", "add_group_participants", "remove_group_participants"),
-    ("webhook_subscriptions", "subscription_one_initial"): ("create_webhook_subscription",),
-    ("webhook_subscriptions", "subscription_two_initial"): ("create_webhook_subscription",),
-    ("webhook_subscriptions", "revision_removal"): ("update_webhook_subscription", "remove_webhook_subscription"),
-    ("webhook_subscriptions", "retry"): ("retry_webhook_delivery",),
-    ("webhook_subscriptions", "cutover"): ("cutover_webhook_subscription",),
-    ("receipt_and_restore", "explicit_receipt"): ("mark_read", "get_read_receipt", "list_read_receipts"),
-    ("receipt_and_restore", "active_removal"): ("record_removal", "get_removal_status"),
-    ("receipt_and_restore", "restore_anti_resurrection"): ("restore_message", "get_removal_status"),
-    ("authorization_negative_matrix", "wrong_resource"): ("list_identities",),
-    ("authorization_negative_matrix", "expired_installation"): ("list_identities",),
-    ("authorization_negative_matrix", "revoked_installation"): ("list_identities",),
-    ("authorization_negative_matrix", "missing_grant"): ("list_messages",),
-    ("authorization_negative_matrix", "account_mismatch"): ("list_messages",),
-    ("grok_surface_read", "surface_scoped_read"): ("list_identities", "list_conversations", "list_messages", "search_messages"),
-    ("grok_surface_send", "surface_text_send"): ("send_text_reply", "send_message"),
-    ("grok_bot_identity", "bot_member_binding"): ("get_bot_identity", "get_connection", "get_member_binding", "whoami"),
-    ("grok_failure_matrix", "duplicate_request"): ("send_text_reply", "send_message"),
-    ("grok_failure_matrix", "timeout_uncertainty"): ("send_text_reply", "send_message"),
-    ("grok_failure_matrix", "reconnect"): ("reconnect", "get_connection"),
-    ("grok_failure_matrix", "provider_rejection"): ("send_text_reply", "send_message"),
 }
 
 
@@ -1249,6 +1465,69 @@ def _route_contracts_for(
     )
 
 
+def _rest_request_contract(
+    scenario: str, requirement: Requirement, observation: str
+) -> RestRequestContract | None:
+    return REST_REQUEST_CONTRACTS.get(
+        (scenario, requirement.identifier, observation),
+        REST_REQUEST_CONTRACTS.get((scenario, requirement.identifier, "response")),
+    )
+
+
+def _request_headers(request: dict[str, Any]) -> dict[str, str]:
+    value = request.get("headers", {})
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key).lower(): item
+        for key, item in value.items()
+        if isinstance(key, str) and isinstance(item, str)
+    }
+
+
+def _safe_transport_headers(
+    value: dict[str, str] | None, *, min_idempotency_length: int = 1
+) -> dict[str, str]:
+    """Allow only the bounded action header surface used by Worker routes."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("request headers must be an object")
+    safe: dict[str, str] = {}
+    for name, header_value in value.items():
+        if not isinstance(name, str) or not isinstance(header_value, str) or not header_value.strip():
+            raise ConfigError("request headers must map names to non-empty strings")
+        if name.lower() != "idempotency-key":
+            raise ConfigError("request headers only permit Idempotency-Key")
+        if len(header_value.strip()) < min_idempotency_length:
+            raise ConfigError(
+                "Idempotency-Key must be at least "
+                f"{min_idempotency_length} characters"
+            )
+        safe["Idempotency-Key"] = header_value
+    return safe
+
+
+def _request_body_shape(request: dict[str, Any]) -> tuple[bool, set[str] | None, str]:
+    if "body" in request:
+        body = request.get("body")
+        if body is None:
+            return False, None, "null"
+        if isinstance(body, dict):
+            return True, set(body), "object"
+        return True, None, type(body).__name__
+    if "body_present" in request:
+        present = request.get("body_present") is True
+        keys = request.get("body_keys")
+        return (
+            present,
+            set(keys) if isinstance(keys, list) and all(isinstance(key, str) for key in keys) else None,
+            str(request.get("body_type", "unknown")),
+        )
+    return False, None, "missing"
+
+
 def _route_path_for_matching(path: str) -> str:
     parsed = urllib.parse.urlsplit(path)
     path_only = parsed.path or path.split("?", 1)[0]
@@ -1277,6 +1556,36 @@ def _request_contract_errors(
             path = str(request.get("path", "")).lower()
             if not any(fragment.lower() == path for fragment in requirement.path_fragments):
                 errors.append(f"route is not the declared {requirement.case} entrypoint")
+        action_contract = _rest_request_contract(scenario, requirement, observation)
+        if action_contract is not None:
+            headers = _request_headers(request)
+            for header in action_contract.required_headers:
+                value = headers.get(header.lower())
+                if not value:
+                    errors.append(f"{requirement.case} request requires the {header} header")
+                elif header.lower() == "idempotency-key" and len(value.strip()) < action_contract.idempotency_key_min_length:
+                    errors.append(
+                        f"{requirement.case} request {header} must be at least "
+                        f"{action_contract.idempotency_key_min_length} characters"
+                    )
+            present, body_keys, body_type = _request_body_shape(request)
+            if action_contract.body_required and not present:
+                errors.append(f"{requirement.case} request requires a JSON body")
+            if action_contract.body_required and present and body_type != "object":
+                errors.append(f"{requirement.case} request body must be a JSON object")
+            if action_contract.body_keys is not None and present and body_keys is not None:
+                unknown = sorted(body_keys - action_contract.body_keys)
+                if unknown:
+                    errors.append(
+                        f"{requirement.case} request body has unsupported fields: {', '.join(unknown)}"
+                    )
+                missing = sorted(action_contract.required_body_keys - body_keys)
+                if missing:
+                    errors.append(
+                        f"{requirement.case} request body is missing fields: {', '.join(missing)}"
+                    )
+        elif _request_body_shape(request)[0]:
+            errors.append(f"{requirement.case} entrypoint does not declare a JSON body")
     else:
         if requirement.case == "initialize":
             if request.get("method") != "initialize":
@@ -1298,7 +1607,7 @@ def _canonical_evidence_pointers(
 ) -> dict[str, Any] | None:
     if transport == "rest":
         return REST_CANONICAL_POINTERS.get((scenario, requirement.identifier, observation))
-    tool = request.get("tool")
+    tool = request.get("tool") or request.get("method")
     if not isinstance(tool, str):
         return None
     return MCP_CANONICAL_POINTERS.get((scenario, requirement.identifier, observation, tool))
@@ -1314,6 +1623,10 @@ def _evidence_contract_errors(
 ) -> list[str]:
     expected = _canonical_evidence_pointers(requirement, scenario, observation, request, transport)
     if expected is None:
+        if transport == "mcp" or requirement.identifier == "provider_delivery":
+            return [
+                f"no canonical evidence mapping exists for {transport} {requirement.case}"
+            ]
         return []
     errors: list[str] = []
     for name, pointer in extract.items():
@@ -1498,6 +1811,19 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             path = _require_string(request.get("path"), f"operations[{index}].request.path")
             if not path.startswith("/") or is_absolute_url(path):
                 raise ConfigError(f"operations[{index}].request.path must be relative")
+            headers = request.get("headers", {})
+            if not isinstance(headers, dict):
+                raise ConfigError(f"operations[{index}].request.headers must be an object")
+            for header_name, header_value in headers.items():
+                if not isinstance(header_name, str) or not isinstance(header_value, str) or not header_value.strip():
+                    raise ConfigError(
+                        f"operations[{index}].request.headers must map names to non-empty strings"
+                    )
+                normalized_header = header_name.lower()
+                if normalized_header != "idempotency-key":
+                    raise ConfigError(
+                        f"operations[{index}].request.headers only permits Idempotency-Key"
+                    )
         else:
             if not isinstance(request.get("tool"), str) and request.get("method") not in {
                 "initialize",
@@ -1621,7 +1947,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         evidence_contract_errors = _evidence_contract_errors(
             requirement, scenario, observation, request, transport, extract
         )
-        if evidence_contract_errors:
+        if evidence_contract_errors and not (
+            expected_outcome == "unverified"
+            and all(error.startswith("no canonical evidence mapping exists") for error in evidence_contract_errors)
+        ):
             raise ConfigError(
                 f"operations[{index}].evidence is outside the declared response schema: "
                 + "; ".join(evidence_contract_errors)
@@ -1699,6 +2028,7 @@ class Transport(Protocol):
         query: dict[str, Any],
         body: Any,
         token: str | None,
+        headers: dict[str, str] | None = None,
     ) -> HttpResponse:
         ...
 
@@ -1762,21 +2092,24 @@ class NetworkTransport:
         query: dict[str, Any],
         body: Any,
         token: str | None,
+        headers: dict[str, str] | None = None,
     ) -> HttpResponse:
         base = self.target["base_url"].rstrip("/")
         query_string = urllib.parse.urlencode(query, doseq=True)
         url = f"{base}{path}" + (f"?{query_string}" if query_string else "")
-        headers = {
+        safe_headers = _safe_transport_headers(headers)
+        request_headers = {
             "Accept": "application/json",
             "Origin": origin_for(self.target["base_url"]),
+            **safe_headers,
         }
         payload = None
         if body is not None:
             payload = canonical_bytes(body)
-            headers["Content-Type"] = "application/json"
+            request_headers["Content-Type"] = "application/json"
         if token:
-            headers["Authorization"] = f"Bearer {token}"
-        return self._request(url, method.upper(), payload, headers)
+            request_headers["Authorization"] = f"Bearer {token}"
+        return self._request(url, method.upper(), payload, request_headers)
 
     def absolute_get(self, url: str) -> HttpResponse:
         return self._request(url, "GET", None, {"Accept": "application/json"})
@@ -2123,7 +2456,10 @@ def classify_response(
         operation["transport"],
         evidence.get("extract", {}),
     )
-    if evidence_contract_errors:
+    if evidence_contract_errors and not (
+        expected_outcome == "unverified"
+        and all(error.startswith("no canonical evidence mapping exists") for error in evidence_contract_errors)
+    ):
         return "unverified", "; ".join(evidence_contract_errors), {}
     extracted: dict[str, Any] = {}
     for name, pointer in evidence.get("extract", {}).items():
@@ -2512,11 +2848,20 @@ class AcceptanceRunner:
             path = request["path"]
             query = request.get("query", {})
             body = request.get("body")
+            request_headers = request.get("headers", {})
             request_summary.update(
                 {
                     "method": method,
                     "path": path,
                     "query": redact(query),
+                    "headers": redact(request_headers),
+                    "body_present": body is not None,
+                    "body_type": (
+                        "object"
+                        if isinstance(body, dict)
+                        else type(body).__name__ if body is not None else "null"
+                    ),
+                    "body_keys": sorted(body) if isinstance(body, dict) else [],
                     "body_sha256": sha256_json(body) if body is not None else None,
                 }
             )
@@ -2582,6 +2927,7 @@ class AcceptanceRunner:
                 request.get("query", {}),
                 request.get("body"),
                 token,
+                request.get("headers", {}),
             )
         else:
             response = self.transport.mcp(request, token, self.target["client"])
@@ -2772,6 +3118,88 @@ def _validate_bundle_response(value: Any, label: str) -> None:
         raise EvidenceError(f"{label}.jsonrpc_has_result must be a boolean")
 
 
+def _validate_bundle_request(value: Any, label: str, transport: str) -> None:
+    if transport == "rest":
+        request = _require_object_keys(
+            value,
+            {
+                "transport",
+                "method",
+                "path",
+                "query",
+                "headers",
+                "body_present",
+                "body_type",
+                "body_keys",
+                "body_sha256",
+            },
+            set(),
+            label,
+        )
+        if request["transport"] != "rest":
+            raise EvidenceError(f"{label}.transport does not match the operation")
+        if not isinstance(request["method"], str) or not request["method"]:
+            raise EvidenceError(f"{label}.method must be a non-empty string")
+        if (
+            not isinstance(request["path"], str)
+            or not request["path"].startswith("/")
+            or is_absolute_url(request["path"])
+        ):
+            raise EvidenceError(f"{label}.path must be a relative path")
+        if not isinstance(request["query"], dict):
+            raise EvidenceError(f"{label}.query must be an object")
+        try:
+            _safe_transport_headers(request["headers"])
+        except ConfigError as error:
+            raise EvidenceError(f"{label}.headers: {error}") from error
+        if not isinstance(request["body_present"], bool):
+            raise EvidenceError(f"{label}.body_present must be a boolean")
+        if not isinstance(request["body_type"], str) or not request["body_type"]:
+            raise EvidenceError(f"{label}.body_type must be a non-empty string")
+        if not isinstance(request["body_keys"], list) or any(
+            not isinstance(key, str) for key in request["body_keys"]
+        ):
+            raise EvidenceError(f"{label}.body_keys must be an array of strings")
+        if request["body_keys"] != sorted(set(request["body_keys"])):
+            raise EvidenceError(f"{label}.body_keys must be sorted and unique")
+        digest = request["body_sha256"]
+        if digest is not None and (
+            not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise EvidenceError(f"{label}.body_sha256 must be a SHA-256 digest or null")
+        if request["body_present"]:
+            if request["body_type"] == "null" or digest is None:
+                raise EvidenceError(f"{label} does not prove the declared JSON body")
+        elif request["body_type"] != "null" or request["body_keys"] or digest is not None:
+            raise EvidenceError(f"{label} contains body metadata for an absent body")
+        return
+
+    request = _require_object_keys(
+        value,
+        {"transport", "method", "tool", "arguments_sha256"},
+        set(),
+        label,
+    )
+    if request["transport"] != "mcp":
+        raise EvidenceError(f"{label}.transport does not match the operation")
+    if not isinstance(request["method"], str) or not request["method"]:
+        raise EvidenceError(f"{label}.method must be a non-empty string")
+    if request["tool"] is not None and not isinstance(request["tool"], str):
+        raise EvidenceError(f"{label}.tool must be a string or null")
+    if request["tool"] is None and request["method"] not in {
+        "initialize",
+        "tools/list",
+        "resources/list",
+    }:
+        raise EvidenceError(f"{label} has no tool for its MCP method")
+    if request["tool"] is not None and request["method"] != "tools/call":
+        raise EvidenceError(f"{label}.method must be tools/call for a named tool")
+    if not isinstance(request["arguments_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", request["arguments_sha256"]
+    ):
+        raise EvidenceError(f"{label}.arguments_sha256 must be a SHA-256 digest")
+
+
 def _validate_passing_response(
     response: Any,
     label: str,
@@ -2801,6 +3229,11 @@ def _validate_passing_response(
             raise EvidenceError(f"{label} does not prove JSON-RPC 2.0")
         if response.get("jsonrpc_id") is None or response.get("jsonrpc_has_result") is not True:
             raise EvidenceError(f"{label} does not prove a matching JSON-RPC result")
+        if (
+            response.get("jsonrpc_request_id") is not None
+            and response.get("jsonrpc_id") != response.get("jsonrpc_request_id")
+        ):
+            raise EvidenceError(f"{label} JSON-RPC id does not match the request")
 
 
 def validate_bundle(bundle: dict[str, Any]) -> None:
@@ -2935,6 +3368,9 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             raise EvidenceError(f"operations[{index}] proof transport or actor is invalid")
         if not isinstance(record["request"], dict) or not isinstance(record["evidence"], dict) or not isinstance(record["extracted"], dict):
             raise EvidenceError(f"operations[{index}] request or extracted is invalid")
+        _validate_bundle_request(
+            record["request"], f"operations[{index}].request", record["transport"]
+        )
         if record["reason"] is not None and not isinstance(record["reason"], str):
             raise EvidenceError(f"operations[{index}].reason must be a string or null")
         _validate_bundle_response(record["response"], f"operations[{index}].response")
@@ -2970,7 +3406,14 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             raise EvidenceError(f"operations[{index}].evidence.required is invalid")
         request_summary = record["request"]
         contract_request = (
-            {"method": request_summary.get("method"), "path": request_summary.get("path")}
+            {
+                "method": request_summary.get("method"),
+                "path": request_summary.get("path"),
+                "headers": request_summary.get("headers", {}),
+                "body_present": request_summary.get("body_present", False),
+                "body_type": request_summary.get("body_type", "unknown"),
+                "body_keys": request_summary.get("body_keys", []),
+            }
             if record["transport"] == "rest"
             else {"method": request_summary.get("method"), "tool": request_summary.get("tool")}
         )

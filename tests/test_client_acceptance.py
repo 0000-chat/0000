@@ -193,8 +193,16 @@ class FakeTransport:
             body["capability"] = {"status": "unavailable"}
         return body
 
-    def rest(self, method: str, path: str, query: dict[str, Any], body: Any, token: str | None) -> client_acceptance.HttpResponse:
-        del token
+    def rest(
+        self,
+        method: str,
+        path: str,
+        query: dict[str, Any],
+        body: Any,
+        token: str | None,
+        headers: dict[str, str] | None = None,
+    ) -> client_acceptance.HttpResponse:
+        del token, headers
         self.rest_calls.append((method, path))
         acceptance_case = query.get("acceptance_case")
         body_path = path
@@ -207,7 +215,7 @@ class FakeTransport:
         response_body = self._body(body_path)
         status = self.rest_statuses.get(path, 200)
         case = path.rstrip("/").split("/")[-1]
-        if (isinstance(body, dict) and body.get("acceptance_case") == "account_failover_rejected") or acceptance_case in {"wrong_resource", "expired_installation", "revoked_installation"}:
+        if acceptance_case == "account_failover_rejected" or acceptance_case in {"wrong_resource", "expired_installation", "revoked_installation"}:
             status = 401
         if acceptance_case in {"missing_grant", "account_mismatch"}:
             status = 403
@@ -324,6 +332,8 @@ def operation_for_requirement(
     method: str | None = None,
     tool: str | None = None,
     evidence: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
     statuses: list[int] | None = None,
     expect: dict[str, Any] | None = None,
     actor: str | None = None,
@@ -339,8 +349,6 @@ def operation_for_requirement(
             REST_PATHS[(scenario, requirement_identifier)],
         )
         request: dict[str, Any] = {"method": method or default_method, "path": path or default_path}
-        if req.case == "account_failover_rejected":
-            request["body"] = {"acceptance_case": req.case}
         if req.case in {
             "different_identity_account",
             "subscription_two_initial",
@@ -352,10 +360,71 @@ def operation_for_requirement(
             "revoked_installation",
             "missing_grant",
             "account_mismatch",
+            "account_failover_rejected",
         }:
             request["query"] = {"acceptance_case": req.case}
         if selected_observation == "history_after_disconnect":
             request["query"] = {"acceptance_case": req.case}
+        request_contract = client_acceptance._rest_request_contract(
+            scenario, req, selected_observation
+        )
+        if headers is not None:
+            request["headers"] = headers
+        elif request_contract is not None and request_contract.required_headers:
+            request["headers"] = {
+                header: f"acceptance-{req.case}-001"
+                for header in request_contract.required_headers
+            }
+        if body is not None:
+            request["body"] = body
+        elif request_contract is not None and request_contract.body_required:
+            values: dict[str, Any] = {
+                "provider": "whatsapp",
+                "method": "qr",
+                "confirmed_identity_id": "identity_one",
+                "expected_session_generation": "2026-09-14T00:00:00Z",
+                "membership_id": "membership_one",
+                "identity_id": "identity_one",
+                "account_id": "account_one",
+                "operation_scope": "conversation.read",
+                "chat_scope": "all_chats",
+                "chat_ids": [],
+                "idempotency_key": f"acceptance-{req.case}-001",
+                "body": "controlled acceptance body",
+                "delivery_mode": "direct",
+                "phone": "+10000000000",
+                "contact_id": "contact_one",
+                "candidate_revision": "a" * 64,
+                "name": "Controlled group",
+                "participants": [
+                    {"contact_id": "contact_one", "candidate_revision": "a" * 64}
+                ],
+                "destination": {"url": "https://receiver.test/webhook"},
+                "event_filter": {"event_types": ["message.created"]},
+                "global_enabled": True,
+                "account_rules": [],
+                "chat_rules": [],
+                "owner_installation_id": "installation_one",
+                "logical_agent_id": None,
+                "tenant_id": "tenant_one",
+                "schema_version": 1,
+                "conversation_id": "chat_one",
+                "expected_revision": "revision_one",
+                "message_id": "message_one",
+                "resource_type": "message",
+                "resource_id": "message_one",
+                "content_generation": "2",
+                "reason": "requested",
+                "removed_at": "2026-09-14T00:00:00Z",
+            }
+            if request_contract.body_keys is None:
+                request["body"] = {}
+            else:
+                request["body"] = {
+                    key: values[key]
+                    for key in request_contract.body_keys
+                    if key in values
+                }
         pointers = dict(
             client_acceptance.REST_CANONICAL_POINTERS.get(
                 (scenario, requirement_identifier, selected_observation),
@@ -371,12 +440,21 @@ def operation_for_requirement(
                 "server_version": "/result/serverInfo/version",
             }
         else:
-            allowed = client_acceptance.MCP_CONTRACTS[(scenario, requirement_identifier)]
+            allowed = client_acceptance.MCP_CONTRACTS.get((scenario, requirement_identifier), ())
+            if not allowed:
+                raise client_acceptance.ConfigError(
+                    f"no canonical MCP contract is published for {scenario}/{requirement_identifier}"
+                )
             chosen_tool = tool or allowed[0]
             request = {"tool": chosen_tool, "arguments": {"acceptance_case": req.case}}
             if chosen_tool == "list_messages":
                 request["arguments"].update(
-                    {"identity_id": "identity_one", "conversation_id": "chat_one", "account_id": "account_one", "limit": 1}
+                    {
+                        "identity_id": "identity_one",
+                        "conversation_id": "chat_one",
+                        "account_id": "account_one",
+                        "limit": 1,
+                    }
                 )
             pointers = dict(
                 client_acceptance.MCP_CANONICAL_POINTERS.get(
@@ -401,12 +479,28 @@ def operation_for_requirement(
 
 
 def all_scenario_operations() -> list[dict[str, Any]]:
-    return [
-        operation_for_requirement(scenario.identifier, req.identifier, observation=observation)
-        for scenario in client_acceptance.SCENARIOS
-        for req in scenario.requirements
-        for observation in client_acceptance._declared_observations(req)
-    ]
+    operations: list[dict[str, Any]] = []
+    for scenario in client_acceptance.SCENARIOS:
+        for req in scenario.requirements:
+            if req.transports == ("mcp",) and req.identifier != "mcp_initialize":
+                if not client_acceptance.MCP_CONTRACTS.get((scenario.identifier, req.identifier)):
+                    continue
+            for observation in client_acceptance._declared_observations(req):
+                operation_expect = None
+                if req.identifier == "provider_delivery":
+                    operation_expect = {
+                        "outcome": "unverified",
+                        "reason": "provider delivery requires an external evidence artifact",
+                    }
+                operations.append(
+                    operation_for_requirement(
+                        scenario.identifier,
+                        req.identifier,
+                        observation=observation,
+                        expect=operation_expect,
+                    )
+                )
+    return operations
 
 
 class ClientAcceptanceTest(unittest.TestCase):
@@ -426,16 +520,16 @@ class ClientAcceptanceTest(unittest.TestCase):
         else:
             os.environ["TEST_ACCEPTANCE_ADMIN_TOKEN"] = self.previous_admin_token
 
-    def test_complete_controlled_run_requires_every_semantic_case(self) -> None:
+    def test_controlled_run_requires_every_semantic_case(self) -> None:
         config = config_with_operations(all_scenario_operations())
         transport = FakeTransport()
         bundle = client_acceptance.AcceptanceRunner(config, transport=transport, now="2026-09-14T00:00:00Z").run()
-        self.assertEqual(bundle["run"]["status"], "complete")
+        self.assertEqual(bundle["run"]["status"], "incomplete")
         self.assertTrue(transport.rest_calls)
         self.assertIn("initialize", transport.mcp_calls)
         self.assertIn("list_messages", transport.mcp_calls)
         self.assertEqual(len(bundle["scenarios"]), len(client_acceptance.SCENARIOS))
-        self.assertTrue(all(item["status"] == "pass" for item in bundle["scenarios"]))
+        self.assertTrue(any(item["status"] == "unverified" for item in bundle["scenarios"]))
         self.assertFalse("controlled-token-value" in json.dumps(bundle))
         client_acceptance.validate_bundle(bundle)
 
@@ -500,7 +594,7 @@ class ClientAcceptanceTest(unittest.TestCase):
     def test_mcp_jsonrpc_error_at_http_200_is_not_a_pass(self) -> None:
         transport = FakeTransport()
         transport.mcp_error = True
-        operation = operation_for_requirement("grok_surface_send", "surface_text_send")
+        operation = operation_for_requirement("oauth_connection", "mcp_scoped_read")
         bundle = client_acceptance.AcceptanceRunner(config_with_operations([operation]), transport=transport).run()
         self.assertEqual(bundle["operations"][0]["status"], "implementation_defect")
 
@@ -722,6 +816,48 @@ class ClientAcceptanceTest(unittest.TestCase):
         with self.assertRaises(client_acceptance.ConfigError):
             client_acceptance.validate_config(config_with_operations([operation]))
 
+    def test_disconnect_request_contract_requires_header_and_body(self) -> None:
+        operation = operation_for_requirement(
+            "linking_identity_lifecycle",
+            "disconnect_preserves_history",
+            observation="disconnect_result",
+        )
+        operation["request"].pop("headers")
+        operation["request"].pop("body")
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+        valid = operation_for_requirement(
+            "linking_identity_lifecycle",
+            "disconnect_preserves_history",
+            observation="disconnect_result",
+            headers={"Idempotency-Key": "disconnect-valid-001"},
+            body={},
+        )
+        client_acceptance.validate_config(config_with_operations([valid]))
+
+    def test_mutating_request_contract_requires_declared_body_fields(self) -> None:
+        operation = operation_for_requirement(
+            "linking_identity_lifecycle", "unlinked_start"
+        )
+        operation["request"]["body"].pop("confirmed_identity_id")
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_network_transport_rejects_unbounded_action_headers(self) -> None:
+        network = client_acceptance.NetworkTransport(
+            {"base_url": "http://target.test"}
+        )
+        with self.assertRaises(client_acceptance.ConfigError):
+            network.rest(
+                "GET",
+                "/api/v1/session",
+                {},
+                None,
+                None,
+                {"Authorization": "Bearer token"},
+            )
+
     def test_provider_account_id_cannot_be_extracted_from_public_response(self) -> None:
         operation = operation_for_requirement(
             "linking_identity_lifecycle",
@@ -751,6 +887,15 @@ class ClientAcceptanceTest(unittest.TestCase):
         bundle["operations"][0]["response"]["http_status"] = 500
         with self.assertRaises(client_acceptance.EvidenceError):
             client_acceptance.validate_bundle(bundle)
+        bundle = client_acceptance.AcceptanceRunner(
+            config_with_operations(
+                [operation_for_requirement("oauth_connection", "mcp_scoped_read")]
+            ),
+            transport=FakeTransport(),
+        ).run()
+        bundle["operations"][0]["response"]["jsonrpc_request_id"] = 2
+        with self.assertRaises(client_acceptance.EvidenceError):
+            client_acceptance.validate_bundle(bundle)
 
     def test_scoped_mcp_read_requires_the_real_list_messages_tool_shape(self) -> None:
         operation = operation_for_requirement(
@@ -761,7 +906,40 @@ class ClientAcceptanceTest(unittest.TestCase):
         with self.assertRaises(client_acceptance.ConfigError):
             client_acceptance.validate_config(config_with_operations([operation]))
 
-    def test_controlled_real_route_lifecycle_uses_network_transport(self) -> None:
+    def test_every_advertised_mcp_tool_has_bound_schema_and_rejects_pointer_aliases(self) -> None:
+        for (scenario, requirement_identifier), tools in client_acceptance.MCP_CONTRACTS.items():
+            req = requirement(scenario, requirement_identifier)
+            for tool in tools:
+                canonical = client_acceptance.MCP_CANONICAL_POINTERS.get(
+                    (scenario, requirement_identifier, "response", tool)
+                )
+                self.assertIsNotNone(canonical, (scenario, requirement_identifier, tool))
+                operation = operation_for_requirement(
+                    scenario, requirement_identifier, tool=tool
+                )
+                field = next(iter(canonical))
+                operation["evidence"]["extract"][field] = "/result/structuredContent/not_canonical"
+                with self.assertRaises(client_acceptance.ConfigError):
+                    client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_provider_delivery_requires_external_evidence_mapping(self) -> None:
+        operation = operation_for_requirement("text_send_and_route", "provider_delivery")
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+        operation = operation_for_requirement(
+            "text_send_and_route",
+            "provider_delivery",
+            expect={
+                "outcome": "unverified",
+                "reason": "provider delivery requires an external evidence artifact",
+            },
+        )
+        bundle = client_acceptance.AcceptanceRunner(
+            config_with_operations([operation]), transport=FakeTransport()
+        ).run()
+        self.assertEqual(bundle["operations"][0]["status"], "unverified")
+
+    def test_controlled_http_fixture_uses_network_transport(self) -> None:
         timestamp = "2026-09-14T00:00:00Z"
 
         def link_session(
@@ -799,6 +977,9 @@ class ClientAcceptanceTest(unittest.TestCase):
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib protocol hook
                 self.calls.append(("POST", self.path))
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = self.rfile.read(length) if length else b""
+                request_body = json.loads(payload.decode("utf-8")) if payload else None
                 if self.path.endswith("/link-sessions"):
                     self._json(link_session())
                     return
@@ -806,6 +987,12 @@ class ClientAcceptanceTest(unittest.TestCase):
                     self._json(link_session("connected", session_id="relink_session_one", connection_id="connection_one"))
                     return
                 if self.path.endswith("/disconnect"):
+                    if (
+                        len(self.headers.get("Idempotency-Key", "")) < 8
+                        or request_body not in ({}, {"expected_session_generation": timestamp})
+                    ):
+                        self._json({"error": {"code": "invalid_request"}}, 400)
+                        return
                     self._json(
                         {
                             "operation_id": "operation_disconnect",
@@ -910,6 +1097,26 @@ class ClientAcceptanceTest(unittest.TestCase):
         thread.start()
         try:
             port = server.server_address[1]
+            network = client_acceptance.NetworkTransport(
+                {"base_url": f"http://127.0.0.1:{port}"}, timeout=5
+            )
+            missing_action = network.rest(
+                "POST",
+                "/api/v1/connections/connection_one/disconnect",
+                {},
+                None,
+                "controlled-admin-token-value",
+            )
+            self.assertEqual(missing_action.status, 400)
+            valid_action = network.rest(
+                "POST",
+                "/api/v1/connections/connection_one/disconnect",
+                {},
+                {},
+                "controlled-admin-token-value",
+                {"Idempotency-Key": "disconnect-valid-001"},
+            )
+            self.assertEqual(valid_action.status, 200)
             config = config_with_operations(
                 [
                     operation_for_requirement("linking_identity_lifecycle", "unlinked_start"),

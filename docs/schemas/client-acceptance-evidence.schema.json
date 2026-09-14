@@ -106,6 +106,64 @@
         "jsonrpc_has_result": { "type": "boolean" }
       }
     },
+    "request": {
+      "oneOf": [
+        { "$ref": "#/$defs/rest_request" },
+        { "$ref": "#/$defs/mcp_request" }
+      ]
+    },
+    "rest_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "method",
+        "path",
+        "query",
+        "headers",
+        "body_present",
+        "body_type",
+        "body_keys",
+        "body_sha256"
+      ],
+      "properties": {
+        "transport": { "const": "rest" },
+        "method": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^/" },
+        "query": { "type": "object" },
+        "headers": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[Ii][Dd][Ee][Mm][Pp][Oo][Tt][Ee][Nn][Cc][Yy]-[Kk][Ee][Yy]$"
+          },
+          "additionalProperties": { "type": "string" }
+        },
+        "body_present": { "type": "boolean" },
+        "body_type": { "type": "string", "minLength": 1 },
+        "body_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "body_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "mcp_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transport", "method", "tool", "arguments_sha256"],
+      "properties": {
+        "transport": { "const": "mcp" },
+        "method": { "type": "string", "minLength": 1 },
+        "tool": { "type": ["string", "null"] },
+        "arguments_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
     "preflight": {
       "type": "object",
       "additionalProperties": false,
@@ -147,7 +205,7 @@
         "evidence_class": { "$ref": "#/$defs/evidence_class" },
         "bindings": { "$ref": "#/$defs/bindings" },
         "proof": { "$ref": "#/$defs/proof" },
-        "request": { "type": "object" },
+        "request": { "$ref": "#/$defs/request" },
         "evidence": { "$ref": "#/$defs/evidence" },
         "status": { "$ref": "#/$defs/status" },
         "reason": { "type": ["string", "null"] },
