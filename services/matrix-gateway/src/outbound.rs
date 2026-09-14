@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use matrix_sdk::{Client, config::RequestConfig, room::MessagesOptions};
 use ruma::{
     OwnedEventId, OwnedTransactionId, OwnedUserId, RoomId, UserId,
-    api::error::ErrorKind,
+    api::{client::receipt::create_receipt, error::ErrorKind},
+    events::receipt::ReceiptThread,
     events::room::{
         member::{MembershipState, RoomMemberEventContent},
         message::RoomMessageEventContent,
@@ -77,6 +78,107 @@ pub trait OutboundTextSender: Send + Sync {
         transaction_id: &str,
         body: &str,
     ) -> Result<MatrixSendResult, OutboundSendFailure>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatrixReadReceiptFailure {
+    RoomNotFound,
+    MatrixRejected,
+    MatrixRequest,
+}
+
+impl MatrixReadReceiptFailure {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::RoomNotFound => "matrix_room_not_found",
+            Self::MatrixRejected => "matrix_receipt_rejected",
+            Self::MatrixRequest => "matrix_receipt_request_failed",
+        }
+    }
+}
+
+impl fmt::Display for MatrixReadReceiptFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for MatrixReadReceiptFailure {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatrixReadReceiptResult {
+    pub event_id: OwnedEventId,
+}
+
+#[async_trait]
+pub trait MatrixReadReceiptSender: Send + Sync {
+    async fn send_read_receipt(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<MatrixReadReceiptResult, MatrixReadReceiptFailure>;
+}
+
+#[derive(Clone)]
+pub struct MatrixSdkReadReceiptSender {
+    client: Client,
+    request_timeout: Duration,
+}
+
+impl fmt::Debug for MatrixSdkReadReceiptSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MatrixSdkReadReceiptSender([REDACTED])")
+    }
+}
+
+impl MatrixSdkReadReceiptSender {
+    pub fn new(client: Client, request_timeout: Duration) -> Self {
+        Self {
+            client,
+            request_timeout,
+        }
+    }
+}
+
+#[async_trait]
+impl MatrixReadReceiptSender for MatrixSdkReadReceiptSender {
+    async fn send_read_receipt(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<MatrixReadReceiptResult, MatrixReadReceiptFailure> {
+        let room_id = RoomId::parse(room_id).map_err(|_| MatrixReadReceiptFailure::RoomNotFound)?;
+        let event_id = OwnedEventId::try_from(event_id.to_owned())
+            .map_err(|_| MatrixReadReceiptFailure::MatrixRejected)?;
+        let room = self
+            .client
+            .get_room(&room_id)
+            .ok_or(MatrixReadReceiptFailure::RoomNotFound)?;
+        timeout(
+            self.request_timeout,
+            room.send_single_receipt(
+                create_receipt::v3::ReceiptType::Read,
+                ReceiptThread::Unthreaded,
+                event_id.clone(),
+            ),
+        )
+        .await
+        .map_err(|_| MatrixReadReceiptFailure::MatrixRequest)?
+        .map_err(|error| classify_matrix_error(&error).into_read_receipt_failure())?;
+        Ok(MatrixReadReceiptResult { event_id })
+    }
+}
+
+impl OutboundSendFailure {
+    fn into_read_receipt_failure(self) -> MatrixReadReceiptFailure {
+        match self {
+            Self::MatrixRejected | Self::MatrixSessionExpired | Self::MatrixRateLimited => {
+                MatrixReadReceiptFailure::MatrixRejected
+            }
+            Self::RoomNotFound | Self::RoomNotEncrypted => MatrixReadReceiptFailure::RoomNotFound,
+            Self::MatrixRequest => MatrixReadReceiptFailure::MatrixRequest,
+        }
+    }
 }
 
 /// A supported Matrix event which the pinned WhatsApp bridge translates into

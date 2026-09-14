@@ -551,6 +551,24 @@ export const handlers = [
     );
   }),
 
+  http.get("*/api/v1/receipts", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    if (!hasOnlyQueryKeys(search, ["account_id", "cursor", "limit"]))
+      return errorResponse(400, "invalid_request");
+    const cursor = parseSingleQueryValue(search, "cursor", boundedCursor);
+    const limit = parseSingleQueryValue(search, "limit", boundedLimit);
+    if (cursor === null || limit === null)
+      return errorResponse(400, "invalid_request");
+    return HttpResponse.json(
+      pageByCursor(
+        simulatedStore.receiptOperations(),
+        cursor,
+        limit,
+        (item) => item.operation_id,
+      ),
+    );
+  }),
+
   http.get("*/api/v1/group-management/operations", ({ request }) => {
     const search = new URL(request.url).searchParams;
     if (

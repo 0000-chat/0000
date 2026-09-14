@@ -39,6 +39,7 @@ export const AccountGrantOperationScopeSchema = z.enum([
   "group.create",
   "group.manage",
   "message.send",
+  "receipt.send",
   "webhook.manage",
 ]);
 export type AccountGrantOperationScope = z.infer<

@@ -26,6 +26,8 @@ import {
   ListProjectionAttachmentsInputSchema,
   ListProjectionAttachmentsResultSchema,
   ResolveConversationOwnerInputSchema,
+  ReceiptTargetSchema,
+  ResolveReceiptTargetInputSchema,
   DEFAULT_PROJECTION_PAGE_SIZE,
   ListProjectionChannelStatsInputSchema,
   MAX_PROJECTION_CHANGES,
@@ -89,6 +91,8 @@ import {
   type MessagePageResult,
   type Command,
   type ResolveConversationOwnerInput,
+  type ResolveReceiptTargetInput,
+  type ReceiptTarget,
   type OutboundDispatch,
   type OutboundDecisionInput,
   type OutboundDecisionResult,
@@ -3122,6 +3126,61 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         account_id: row.account_id,
         connection_id: row.connection_id,
         platform: row.platform,
+      });
+    } catch (error) {
+      throw safeProjectionError(error, "projection_unavailable");
+    }
+  }
+
+  /** Resolve one message's immutable receipt target without exposing content. */
+  async resolveReceiptTarget(
+    input: ResolveReceiptTargetInput,
+  ): Promise<ReceiptTarget | null> {
+    try {
+      const parsed = parseProjectionInput(
+        ResolveReceiptTargetInputSchema,
+        input,
+      );
+      const meta = readProjectionMeta(this.ctx.storage);
+      if (meta === undefined) throw projectionError("projection_not_found");
+      requireStoredTenant(meta, parsed.tenant_id);
+      this.#requireReadyState(meta);
+      const row = this.ctx.storage.sql
+        .exec<{
+          id: string;
+          identity_id: string;
+          account_id: string;
+          connection_id: string;
+          conversation_id: string;
+          platform: string;
+          current_event_id: string;
+          matrix_room_id: string | null;
+          matrix_event_id: string | null;
+          occurred_at: string;
+          deleted_at: string | null;
+        }>(
+          "SELECT id, identity_id, account_id, connection_id, conversation_id, platform, current_event_id, matrix_room_id, matrix_event_id, occurred_at, deleted_at FROM messages WHERE id = ? AND identity_id = ? AND account_id = ? AND conversation_id = ? LIMIT 1",
+          parsed.message_id,
+          parsed.identity_id,
+          parsed.account_id,
+          parsed.conversation_id,
+        )
+        .toArray()[0];
+      if (row === undefined) return null;
+      return ReceiptTargetSchema.parse({
+        schema_version: 1,
+        tenant_id: parsed.tenant_id,
+        identity_id: row.identity_id,
+        account_id: row.account_id,
+        connection_id: row.connection_id,
+        conversation_id: row.conversation_id,
+        message_id: row.id,
+        platform: row.platform,
+        event_id: row.current_event_id,
+        matrix_room_id: row.matrix_room_id,
+        matrix_event_id: row.matrix_event_id,
+        occurred_at: row.occurred_at,
+        deleted_at: row.deleted_at,
       });
     } catch (error) {
       throw safeProjectionError(error, "projection_unavailable");

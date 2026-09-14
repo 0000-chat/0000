@@ -18,6 +18,7 @@ import type {
   MessagePageResult,
   OperationScope,
   ProviderCapability,
+  ReadReceiptOperation,
   SessionResponse,
   OutboundAction,
   GroupManagementEvidence,
@@ -287,6 +288,10 @@ export class SimulatedStore {
       observed_at: now,
       updated_at: now,
     }));
+  }
+
+  receiptOperations(): ReadReceiptOperation[] {
+    return [];
   }
 
   historyImportPage(accountId: string, identityId: string) {

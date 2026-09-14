@@ -27,5 +27,7 @@ export const queryKeys = {
     ["commands", identityId ?? "tenant"] as const,
   commandEvidence: (commandId: string) =>
     ["command-evidence", commandId] as const,
+  readReceiptOperations: ["read-receipt-operations"] as const,
+  readReceipt: (operationId: string) => ["read-receipt", operationId] as const,
   health: ["health"] as const,
 };

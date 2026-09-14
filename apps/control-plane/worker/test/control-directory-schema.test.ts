@@ -57,6 +57,8 @@ const applicationTables = [
   "group_management_groups",
   "group_management_operations",
   "group_management_evidence",
+  "receipt_operations",
+  "receipt_operation_evidence",
   "outbound_authority_heads",
   "outbound_acceptance_intents",
   "outbound_dispatch_claims",
@@ -121,6 +123,11 @@ async function dropControlDirectorySchema(db: D1Database) {
   }
 
   for (const table of [
+    "receipt_operation_evidence",
+    "receipt_operations",
+    "outbound_dispatch_claims",
+    "outbound_acceptance_intents",
+    "outbound_authority_heads",
     "attachment_download_grants",
     "direct_chat_creation_operations",
     "contact_resolution_candidates",

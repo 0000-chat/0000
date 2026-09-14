@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SessionResponseSchema,
   type MessagePageResult,
+  type ReadReceiptOperation,
   type SessionResponse,
 } from "@communicator/contracts";
 import {
@@ -322,5 +323,84 @@ describe("Communicator API client", () => {
         error.status === 502 &&
         !error.message.includes(privateTicket),
     );
+  });
+
+  it("routes explicit read receipts and validates administrator operation pages", async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const operation: ReadReceiptOperation = {
+      schema_version: 1,
+      operation_id: "receipt_operation_1",
+      tenant_id: "tenant_pilot",
+      identity_id: "identity_human",
+      account_id: "account_human_whatsapp",
+      connection_id: "connection_human_whatsapp",
+      conversation_id: "conversation_one",
+      message_id: "message_one",
+      matrix_room_id: "!room:example.test",
+      matrix_event_id: "$event:example.test",
+      status: "observed",
+      matrix_stage: "accepted",
+      bridge_stage: "observed",
+      provider_stage: "unknown",
+      failure_code: null,
+      failure_reason: null,
+      idempotency_key: "receipt-idempotency-1",
+      requested_at: "2026-09-10T00:00:00.000Z",
+      updated_at: "2026-09-10T00:00:01.000Z",
+      evidence: [],
+    };
+    const client = new ApiClient(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, init });
+      const body = url.includes("/receipts/read")
+        ? { ...operation, replayed: false }
+        : { items: [operation], next_cursor: null };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, "https://communicator.test");
+
+    await expect(
+      client.requestReadReceipt("conversation_one", {
+        schema_version: 1,
+        identity_id: "identity_human",
+        account_id: "account_human_whatsapp",
+        conversation_id: "conversation_one",
+        message_id: "message_one",
+        idempotency_key: "receipt-idempotency-1",
+      }),
+    ).resolves.toMatchObject({ operation_id: operation.operation_id });
+    await expect(
+      client.getReadReceiptOperations({
+        accountId: "account/human",
+        cursor: "cursor /?",
+        limit: 2,
+      }),
+    ).resolves.toEqual({ items: [operation], next_cursor: null });
+
+    expect(calls).toEqual([
+      {
+        url: "https://communicator.test/api/v1/conversations/conversation_one/receipts/read",
+        init: {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "receipt-idempotency-1",
+          },
+          body: JSON.stringify({
+            schema_version: 1,
+            identity_id: "identity_human",
+            account_id: "account_human_whatsapp",
+            message_id: "message_one",
+            idempotency_key: "receipt-idempotency-1",
+          }),
+        },
+      },
+      {
+        url: "https://communicator.test/api/v1/receipts?account_id=account%2Fhuman&cursor=cursor+%2F%3F&limit=2",
+        init: undefined,
+      },
+    ]);
   });
 });

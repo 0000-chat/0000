@@ -411,6 +411,8 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     // the directory rows can be rebuilt without weakening those constraints.
     db.prepare("DELETE FROM outbound_dispatch_claims"),
     db.prepare("DELETE FROM outbound_acceptance_intents"),
+    db.prepare("DELETE FROM receipt_operation_evidence"),
+    db.prepare("DELETE FROM receipt_operations"),
     db.prepare("DELETE FROM group_management_evidence"),
     db.prepare("DELETE FROM group_management_operations"),
     db.prepare("DELETE FROM group_management_groups"),

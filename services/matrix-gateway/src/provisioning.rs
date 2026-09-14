@@ -9,6 +9,7 @@ use std::{collections::HashMap, fmt, net::SocketAddr, sync::Arc, time::Duration}
 
 use chrono::{DateTime, TimeZone, Utc};
 use reqwest::{Client, Method, StatusCode, Url, redirect::Policy};
+use ruma::OwnedEventId;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -25,7 +26,8 @@ use crate::{
     model::Provider,
     outbound::{
         MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
-        MatrixGroupObservation, MatrixGroupObservationRequest, OutboundTextSender,
+        MatrixGroupObservation, MatrixGroupObservationRequest, MatrixReadReceiptFailure,
+        MatrixReadReceiptSender, OutboundTextSender,
     },
     store::{NewOutboundText, OutboundTextCompletion, OutboundTextPreparation, Store},
 };
@@ -53,6 +55,9 @@ const OUTBOUND_SCOPE_MISMATCH: &str = "outbound_scope_mismatch";
 const OUTBOUND_UNCERTAIN: &str = "outbound_delivery_uncertain";
 const OUTBOUND_MISSING_SENDER: &str = "outbound_sender_unavailable";
 const OUTBOUND_STALE_SESSION: &str = "outbound_stale_session";
+const RECEIPT_MISSING_SENDER: &str = "receipt_sender_unavailable";
+const RECEIPT_SCOPE_MISMATCH: &str = "receipt_scope_mismatch";
+const RECEIPT_STALE_SESSION: &str = "receipt_stale_session";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisioningFailure {
@@ -892,6 +897,54 @@ struct ContactRequest {
     conversation_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadReceiptRequest {
+    schema_version: u8,
+    tenant_id: String,
+    identity_id: String,
+    account_id: String,
+    connection_id: String,
+    provider: Provider,
+    session_generation: String,
+    route: ContactRouteRequest,
+    operation_id: String,
+    operation_created_at: String,
+    conversation_id: String,
+    message_id: String,
+    matrix_room_id: String,
+    matrix_event_id: String,
+    receipt_position: String,
+}
+
+impl ReadReceiptRequest {
+    fn validate(&self, route: &GatewayRouteMetadata) -> Result<(), &'static str> {
+        if self.schema_version != 1
+            || self.provider != Provider::Whatsapp
+            || !valid_resource_id(&self.tenant_id)
+            || !valid_resource_id(&self.identity_id)
+            || !valid_resource_id(&self.account_id)
+            || !valid_resource_id(&self.connection_id)
+            || !valid_resource_id(&self.operation_id)
+            || !valid_resource_id(&self.conversation_id)
+            || !valid_resource_id(&self.message_id)
+            || DateTime::parse_from_rfc3339(&self.operation_created_at).is_err()
+            || DateTime::parse_from_rfc3339(&self.session_generation).is_err()
+            || !valid_matrix_room_id(&self.matrix_room_id)
+            || !valid_event_id(&self.matrix_event_id)
+            || self.receipt_position != self.matrix_event_id
+            || !valid_provider_login_id(&self.route.provider_login_id)
+            || self.route.gateway_route_id != route.gateway_route_id
+            || self.route.bridge_instance_id != route.bridge_instance_id
+            || self.route.matrix_user_id != route.matrix_user_id
+            || self.route.matrix_room_namespace != route.matrix_room_namespace
+        {
+            return Err(INVALID_REQUEST);
+        }
+        Ok(())
+    }
+}
+
 impl ContactRequest {
     fn validate(&self, route: &GatewayRouteMetadata) -> Result<(), &'static str> {
         if self.schema_version != 1
@@ -1089,6 +1142,14 @@ fn valid_resource_id(value: &str) -> bool {
     crate::model::valid_resource_id(value)
 }
 
+fn valid_matrix_room_id(value: &str) -> bool {
+    crate::model::valid_matrix_room_id(value)
+}
+
+fn valid_event_id(value: &str) -> bool {
+    value.len() <= MAX_ID_BYTES && OwnedEventId::try_from(value.to_owned()).is_ok()
+}
+
 fn valid_provider_login_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_ID_BYTES && !value.chars().any(char::is_whitespace)
 }
@@ -1148,6 +1209,7 @@ pub struct ProvisioningGatewayServer {
     history: Option<Arc<HistoryGatewayServer>>,
     outbound_store: Option<Arc<Mutex<Store>>>,
     outbound_sender: Option<Arc<dyn OutboundTextSender>>,
+    read_receipt_sender: Option<Arc<dyn MatrixReadReceiptSender>>,
     group_manager: Option<Arc<dyn MatrixGroupManager>>,
 }
 
@@ -1174,6 +1236,7 @@ impl ProvisioningGatewayServer {
             history: None,
             outbound_store: None,
             outbound_sender: None,
+            read_receipt_sender: None,
             group_manager: None,
         })
     }
@@ -1191,6 +1254,13 @@ impl ProvisioningGatewayServer {
     /// account or room.
     pub fn with_outbound_sender(mut self, sender: Arc<dyn OutboundTextSender>) -> Self {
         self.outbound_sender = Some(sender);
+        self
+    }
+
+    /// Attach the Matrix read-receipt sender. A successful response proves
+    /// Matrix acceptance only; the bridge/provider stages remain unknown.
+    pub fn with_read_receipt_sender(mut self, sender: Arc<dyn MatrixReadReceiptSender>) -> Self {
+        self.read_receipt_sender = Some(sender);
         self
     }
 
@@ -1259,6 +1329,16 @@ impl ProvisioningGatewayServer {
                 return response(status, json!({ "error": error }));
             }
             return self.outbound_text(parsed, idempotency_key).await;
+        }
+        if request.path == "/v1/receipts/read" {
+            let parsed = match serde_json::from_slice::<ReadReceiptRequest>(&request.body) {
+                Ok(parsed) => parsed,
+                Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+            };
+            if let Err(error) = parsed.validate(&self.route) {
+                return response(400, json!({ "error": error }));
+            }
+            return self.read_receipt(parsed).await;
         }
         if request.path == "/v1/groups/create" {
             let parsed = match serde_json::from_slice::<GroupRequest>(&request.body) {
@@ -1852,6 +1932,94 @@ impl ProvisioningGatewayServer {
         (status, body_bytes)
     }
 
+    async fn read_receipt(&self, request: ReadReceiptRequest) -> (u16, Vec<u8>) {
+        let Some(store_handle) = self.outbound_store.as_ref() else {
+            return response(503, json!({ "error": RECEIPT_MISSING_SENDER }));
+        };
+        let Some(sender) = self.read_receipt_sender.as_ref() else {
+            return response(503, json!({ "error": RECEIPT_MISSING_SENDER }));
+        };
+
+        let (matrix_room_id, binding_generation) = {
+            let store = store_handle.lock().await;
+            let binding = match store.active_room_binding_for_outbound(
+                &request.tenant_id,
+                &request.account_id,
+                &request.connection_id,
+                &request.identity_id,
+                Provider::Whatsapp,
+                &request.conversation_id,
+            ) {
+                Ok(Some(binding)) => binding,
+                Ok(None) => return response(403, json!({ "error": RECEIPT_SCOPE_MISMATCH })),
+                Err(_) => return response(503, json!({ "error": RECEIPT_SCOPE_MISMATCH })),
+            };
+            if binding.gateway_route_id() != self.route.gateway_route_id
+                || binding.owner_matrix_user_id() != self.route.matrix_user_id
+                || binding.matrix_room_id() != request.matrix_room_id
+            {
+                return response(403, json!({ "error": RECEIPT_SCOPE_MISMATCH }));
+            }
+            (
+                binding.matrix_room_id().to_owned(),
+                binding.session_generation().map(str::to_owned),
+            )
+        };
+        if binding_generation.as_deref() != Some(request.session_generation.as_str()) {
+            return response(409, json!({ "error": RECEIPT_STALE_SESSION }));
+        }
+
+        let result = sender
+            .send_read_receipt(&matrix_room_id, &request.matrix_event_id)
+            .await;
+        let observed_at = Utc::now().to_rfc3339();
+        match result {
+            Ok(result) => response(
+                200,
+                json!({
+                    "status": "accepted",
+                    "operation_id": request.operation_id,
+                    "matrix_stage": "accepted",
+                    "bridge_stage": "unknown",
+                    "provider_stage": "unknown",
+                    "evidence": [{
+                        "source": "matrix",
+                        "status": "accepted",
+                        "evidence_id": result.event_id.as_str(),
+                        "observed_at": observed_at
+                    }]
+                }),
+            ),
+            Err(MatrixReadReceiptFailure::RoomNotFound)
+            | Err(MatrixReadReceiptFailure::MatrixRejected) => response(
+                200,
+                json!({
+                    "status": "rejected",
+                    "operation_id": request.operation_id,
+                    "matrix_stage": "unknown",
+                    "bridge_stage": "unknown",
+                    "provider_stage": "unknown",
+                    "failure_code": "matrix_rejected",
+                    "failure_reason": "Matrix rejected the read receipt",
+                    "evidence": []
+                }),
+            ),
+            Err(MatrixReadReceiptFailure::MatrixRequest) => response(
+                200,
+                json!({
+                    "status": "unknown",
+                    "operation_id": request.operation_id,
+                    "matrix_stage": "unknown",
+                    "bridge_stage": "unknown",
+                    "provider_stage": "unknown",
+                    "failure_code": "provider_timeout",
+                    "failure_reason": "Matrix receipt request outcome is unknown",
+                    "evidence": []
+                }),
+            ),
+        }
+    }
+
     async fn poll(&self, request: GatewayRequest, owner: GatewayOwner) -> (u16, Vec<u8>) {
         let Some(gateway_ref) = request.gateway_ref.as_deref() else {
             return response(400, json!({ "error": INVALID_REQUEST }));
@@ -2110,8 +2278,8 @@ mod tests {
         normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
         outbound::{
             MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
-            MatrixGroupObservation, MatrixGroupObservationRequest, MatrixSendResult,
-            OutboundTextSender,
+            MatrixGroupObservation, MatrixGroupObservationRequest, MatrixReadReceiptResult,
+            MatrixReadReceiptSender, MatrixSendResult, OutboundTextSender,
         },
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
@@ -2680,6 +2848,27 @@ mod tests {
         rooms: Arc<StdMutex<Vec<String>>>,
     }
 
+    struct RecordingReadReceiptSender {
+        calls: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl MatrixReadReceiptSender for RecordingReadReceiptSender {
+        async fn send_read_receipt(
+            &self,
+            room_id: &str,
+            event_id: &str,
+        ) -> Result<MatrixReadReceiptResult, MatrixReadReceiptFailure> {
+            self.calls
+                .lock()
+                .expect("receipt calls lock")
+                .push((room_id.to_owned(), event_id.to_owned()));
+            Ok(MatrixReadReceiptResult {
+                event_id: OwnedEventId::try_from(event_id.to_owned()).expect("fixture event id"),
+            })
+        }
+    }
+
     struct RecordingGroupManager {
         changes: Arc<StdMutex<Vec<MatrixGroupChange>>>,
         observation: MatrixGroupObservation,
@@ -2701,6 +2890,113 @@ mod tests {
         ) -> Result<Option<MatrixGroupObservation>, MatrixGroupFailure> {
             Ok(Some(self.observation.clone()))
         }
+    }
+
+    #[tokio::test]
+    async fn read_receipt_routes_one_bound_room_and_reports_matrix_only_evidence() {
+        let bridge = MockServer::start().await;
+        let client = WhatsAppProvisioningClient::new_for_test(
+            client_url(&bridge),
+            SecretString::new(BRIDGE_SECRET),
+            MATRIX_USER,
+            Duration::from_secs(2),
+        )
+        .expect("test bridge URL is valid");
+        let directory = tempdir().expect("state directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("restrict state parent");
+        let database = directory.path().join("gateway.sqlite3");
+        let created_at = Utc
+            .timestamp_millis_opt(1_700_000_000_000)
+            .single()
+            .expect("valid binding timestamp");
+        let mut store = Store::open(
+            &database,
+            Keyring::new([0x69; 32], 1).expect("test keyring"),
+        )
+        .expect("open state store");
+        store
+            .append_room_binding(
+                NewRoomBinding::new_with_session_generation(
+                    "binding_69696969696969696969696969696969",
+                    "!receipt:example.test",
+                    "tenant_receipt",
+                    "identity_receipt",
+                    "connection_receipt",
+                    "account_receipt",
+                    Provider::Whatsapp,
+                    "gateway_route_whatsapp",
+                    "conversation_receipt",
+                    MATRIX_USER,
+                    "2026-09-14T00:00:00.000Z",
+                    created_at,
+                )
+                .expect("room binding"),
+            )
+            .expect("append room binding");
+        let history = HistoryGatewayServer::new(
+            store,
+            Arc::new(SharedHistoryTransport {
+                calls: AtomicUsize::new(0),
+                event_count: 0,
+            }),
+            GATEWAY_SECRET,
+        )
+        .expect("history gateway");
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let server =
+            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
+                .expect("provisioning gateway")
+                .with_history(history)
+                .with_read_receipt_sender(Arc::new(RecordingReadReceiptSender {
+                    calls: Arc::clone(&calls),
+                }));
+        let request = HttpRequest {
+            path: "/v1/receipts/read".to_owned(),
+            authorization: Some(GATEWAY_SECRET.to_owned()),
+            request_id: Some("request-receipt".to_owned()),
+            idempotency_key: Some("receipt-idempotency".to_owned()),
+            body: serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant_id": "tenant_receipt",
+                "identity_id": "identity_receipt",
+                "account_id": "account_receipt",
+                "connection_id": "connection_receipt",
+                "provider": "whatsapp",
+                "session_generation": "2026-09-14T00:00:00.000Z",
+                "route": {
+                    "gateway_route_id": "gateway_route_whatsapp",
+                    "bridge_instance_id": "whatsapp-primary",
+                    "matrix_user_id": MATRIX_USER,
+                    "matrix_room_namespace": "communicator.0000.gold",
+                    "provider_login_id": "login-receipt"
+                },
+                "operation_id": "receipt_operation",
+                "operation_created_at": "2026-09-14T00:00:00.000Z",
+                "conversation_id": "conversation_receipt",
+                "message_id": "message_receipt",
+                "matrix_room_id": "!receipt:example.test",
+                "matrix_event_id": "$receipt:example.test",
+                "receipt_position": "$receipt:example.test"
+            }))
+            .expect("request JSON"),
+        };
+
+        let (status, bytes) = server.handle_request(request).await;
+        assert_eq!(status, 200);
+        let response: Value = serde_json::from_slice(&bytes).expect("receipt response JSON");
+        assert_eq!(response["status"], "accepted");
+        assert_eq!(response["matrix_stage"], "accepted");
+        assert_eq!(response["bridge_stage"], "unknown");
+        assert_eq!(response["provider_stage"], "unknown");
+        assert_eq!(response["evidence"][0]["source"], "matrix");
+        assert_eq!(
+            calls.lock().expect("receipt calls lock").as_slice(),
+            [(
+                "!receipt:example.test".to_owned(),
+                "$receipt:example.test".to_owned()
+            )]
+        );
     }
 
     #[tokio::test]
