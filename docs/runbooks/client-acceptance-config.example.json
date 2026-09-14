@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "run_id": "controlled-example",
+  "mode": "controlled",
+  "environment": "local",
+  "source_commit": "eb0c18b",
+  "preflight": { "enabled": false },
+  "target": {
+    "base_url": "http://127.0.0.1:8787",
+    "mcp_url": "http://127.0.0.1:8787/mcp",
+    "resource": "http://127.0.0.1:8787/mcp",
+    "client": {
+      "surface": "controlled-client",
+      "name": "Controlled acceptance client",
+      "version": "controlled-1",
+      "transport": "both"
+    },
+    "provider": {
+      "name": "whatsapp",
+      "version": "controlled-provider-1",
+      "adapter_version": "controlled-adapter-1",
+      "proof_source": "controlled provider adapter"
+    },
+    "bindings": {
+      "tenant_id": "tenant_example",
+      "installation_id": "installation_example",
+      "grant_ids": ["grant_example"],
+      "account_ids": ["account_example"],
+      "chat_ids": ["chat_example"],
+      "connection_ids": ["connection_example"],
+      "provider_account_ids": ["provider_account_example"],
+      "identity_ids": ["identity_example"]
+    }
+  },
+  "oauth": {
+    "access_token_env": "COMMUNICATOR_ACCEPTANCE_ACCESS_TOKEN"
+  },
+  "operations": [
+    {
+      "id": "protected-resource-metadata",
+      "scenario": "oauth_connection",
+      "actor": "none",
+      "transport": "rest",
+      "request": {
+        "method": "GET",
+        "path": "/.well-known/oauth-protected-resource"
+      },
+      "expect": { "statuses": [200] },
+      "evidence": {
+        "extract": { "resource": "/resource" },
+        "required": ["resource"]
+      },
+      "assert": [{ "path": "/resource", "equals": "${target.resource}" }]
+    },
+    {
+      "id": "mcp-list-identities",
+      "scenario": "oauth_connection",
+      "actor": "agent",
+      "transport": "mcp",
+      "request": {
+        "tool": "list_identities",
+        "arguments": {}
+      },
+      "expect": { "statuses": [200] },
+      "evidence": {
+        "extract": { "result": "/result/structuredContent" },
+        "required": ["result"]
+      }
+    }
+  ]
+}

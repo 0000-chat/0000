@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://0000.chat/schemas/communicator-client-acceptance-evidence-v1.json",
+  "title": "Communicator client acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "preflight",
+    "operations",
+    "scenarios",
+    "controls"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": { "$ref": "#/$defs/run" },
+    "preflight": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/preflight" }
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operation" }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 13,
+      "items": { "$ref": "#/$defs/scenario" }
+    },
+    "controls": { "$ref": "#/$defs/controls" }
+  },
+  "$defs": {
+    "status": {
+      "enum": ["pass", "unsupported", "unverified", "implementation_defect"]
+    },
+    "evidence_class": {
+      "enum": ["live_client", "controlled"]
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surface", "name", "version", "transport"],
+      "properties": {
+        "surface": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "transport": { "enum": ["rest", "mcp", "both"] }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "adapter_version", "proof_source"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "proof_source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "tenant_id",
+        "installation_id",
+        "grant_ids",
+        "account_ids",
+        "chat_ids",
+        "connection_ids",
+        "provider_account_ids",
+        "identity_ids"
+      ],
+      "properties": {
+        "resource": { "type": "string", "minLength": 1 },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "installation_id": { "type": "string" },
+        "grant_ids": { "type": "array", "items": { "type": "string" } },
+        "account_ids": { "type": "array", "items": { "type": "string" } },
+        "chat_ids": { "type": "array", "items": { "type": "string" } },
+        "connection_ids": { "type": "array", "items": { "type": "string" } },
+        "provider_account_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "identity_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "response": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "http_status": { "type": ["integer", "null"] },
+        "body_sha256": { "type": ["string", "null"] },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "error": { "type": "string" },
+        "jsonrpc_error": { "type": "object" }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "evidence_class", "response"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"] },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" },
+        "response": { "$ref": "#/$defs/response" }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scenario",
+        "ticket",
+        "actor",
+        "transport",
+        "evidence_class",
+        "bindings",
+        "request",
+        "status",
+        "reason",
+        "response",
+        "extracted"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "scenario": { "type": "string", "minLength": 1 },
+        "ticket": { "type": "array", "items": { "type": "string" } },
+        "actor": { "enum": ["agent", "admin", "none"] },
+        "transport": { "enum": ["rest", "mcp"] },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "request": { "type": "object" },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "response": { "$ref": "#/$defs/response" },
+        "extracted": { "type": "object" }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "tickets",
+        "title",
+        "status",
+        "reason",
+        "operation_ids",
+        "evidence_class"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "tickets": { "type": "array", "items": { "type": "string" } },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": ["string", "null"] },
+        "operation_ids": { "type": "array", "items": { "type": "string" } },
+        "evidence_class": { "$ref": "#/$defs/evidence_class" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "started_at",
+        "finished_at",
+        "status",
+        "mode",
+        "environment",
+        "client",
+        "provider",
+        "resource",
+        "bindings",
+        "observed_bindings"
+      ],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "started_at": { "type": "string", "minLength": 1 },
+        "finished_at": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["complete", "incomplete"] },
+        "mode": { "$ref": "#/$defs/evidence_class" },
+        "environment": { "type": "string", "minLength": 1 },
+        "source_commit": { "type": ["string", "null"] },
+        "client": { "$ref": "#/$defs/client" },
+        "provider": { "$ref": "#/$defs/provider" },
+        "resource": { "type": "string", "minLength": 1 },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "observed_bindings": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentials_redacted",
+        "raw_message_bodies_stored",
+        "provider_delivery_claimed_from_http_success",
+        "fixture_evidence_is_client_proof",
+        "live_actions_requested_by_harness"
+      ],
+      "properties": {
+        "credentials_redacted": { "const": true },
+        "raw_message_bodies_stored": { "const": false },
+        "provider_delivery_claimed_from_http_success": { "const": false },
+        "fixture_evidence_is_client_proof": { "const": false },
+        "live_actions_requested_by_harness": { "type": "boolean" }
+      }
+    }
+  }
+}
