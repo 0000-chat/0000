@@ -21,6 +21,34 @@ SPEC.loader.exec_module(RETENTION)
 
 
 PG_BIN = Path("/usr/lib/postgresql/18/bin")
+LEGACY_ORIGINAL_CORE_FILES = (
+    "synapse.pgdump",
+    "whatsapp.pgdump",
+    "messenger.pgdump",
+    "telegram.pgdump",
+    "synapse-data/homeserver.yaml",
+    "synapse-data/log.config",
+    "synapse-data/communicator.0000.gold.signing.key",
+    "synapse-data/whatsapp-registration.yaml",
+    "synapse-data/messenger-registration.yaml",
+    "whatsapp-data/config.yaml",
+    "whatsapp-data/registration.yaml",
+    "messenger-data/config.yaml",
+    "messenger-data/registration.yaml",
+    "telegram-data/config.yaml",
+    "telegram-data/registration.yaml",
+    "telegram-data/synapse-registration.yaml",
+    "telegram-secrets/telegram-db.password",
+    "telegram-secrets/telegram-db.env",
+    "telegram-secrets/telegram-api-id",
+    "telegram-secrets/telegram-api-hash",
+    "secrets/postgres.env",
+    "secrets/synapse_registration_shared_secret",
+    "secrets/whatsapp-db.password",
+    "secrets/whatsapp-db.env",
+    "secrets/messenger-db.password",
+    "secrets/messenger-db.env",
+)
 
 
 def _free_port() -> int:
@@ -56,7 +84,7 @@ def _pg_client(socket_dir: Path, port: int, database: str, sql: str) -> str:
 
 
 def _write_legacy_core_tree(root: Path, dump_bytes: bytes = b"fixture-dump") -> None:
-    for relative in RETENTION.LEGACY_CORE_REQUIRED_FILES:
+    for relative in LEGACY_ORIGINAL_CORE_FILES:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(dump_bytes)
@@ -1392,11 +1420,10 @@ class ControlledCopyRetentionTests(unittest.TestCase):
             root = Path(directory)
             fixture = root / "snapshot-root"
             _write_legacy_core_tree(fixture)
-            (fixture / "retention/controlled-copy-manifest.json").write_text(
-                json.dumps({"version": 1, "stores": {}}), encoding="utf-8"
-            )
             (fixture / "synapse-data/media_store/target.bin").write_bytes(b"remove")
             (fixture / "synapse-data/media_store/retained.bin").write_bytes(b"keep")
+            self.assertFalse((fixture / "retention/controlled-copy-manifest.json").exists())
+            self.assertFalse((fixture / "retention/controlled-copy-layout.json").exists())
             (fixture / "secrets/synapse_registration_shared_secret").write_text(
                 "session-secret", encoding="utf-8"
             )
@@ -1603,9 +1630,8 @@ class ControlledCopyRetentionTests(unittest.TestCase):
             root = Path(directory)
             fixture = root / "snapshot-root"
             _write_legacy_core_tree(fixture)
-            (fixture / "retention/controlled-copy-manifest.json").write_text(
-                json.dumps({"version": 1, "stores": {}}), encoding="utf-8"
-            )
+            self.assertFalse((fixture / "retention/controlled-copy-manifest.json").exists())
+            self.assertFalse((fixture / "retention/controlled-copy-layout.json").exists())
             migration_manifest = root / "migration.json"
             migration_manifest.write_text(
                 json.dumps(

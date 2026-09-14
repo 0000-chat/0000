@@ -110,9 +110,9 @@ LEGACY_CORE_REQUIRED_FILES = frozenset(
         "secrets/whatsapp-db.env",
         "secrets/messenger-db.password",
         "secrets/messenger-db.env",
-        "retention/controlled-copy-manifest.json",
     }
 )
+LEGACY_CORE_OPTIONAL_FILES = frozenset({"retention/controlled-copy-manifest.json"})
 LEGACY_CORE_MEDIA_PREFIX = "synapse-data/media_store/"
 
 
@@ -1680,9 +1680,11 @@ def legacy_core_layout_from_tree(
 
     This recognizes only the exact tree emitted by the original script.  The
     four database dumps and runtime/credential files are fixed; media files
-    may vary only below Synapse's media store.  The caller still compares the
-    resulting list with the entire restore target so a sibling outside the
-    declared prefix cannot be silently preserved.
+    may vary only below Synapse's media store.  An intermediate backup may
+    also contain the descriptive controlled-copy manifest, but it is not
+    required by the original format.  The caller still compares the resulting
+    list with the entire restore target so a sibling outside the declared
+    prefix cannot be silently preserved.
     """
     actual = exact_files_under(restored_content)
     missing = LEGACY_CORE_REQUIRED_FILES - actual
@@ -1690,7 +1692,7 @@ def legacy_core_layout_from_tree(
         raise RetentionError("legacy communicator core backup is missing required files")
     unexpected = {
         path
-        for path in actual - LEGACY_CORE_REQUIRED_FILES
+        for path in actual - LEGACY_CORE_REQUIRED_FILES - LEGACY_CORE_OPTIONAL_FILES
         if not path.startswith(LEGACY_CORE_MEDIA_PREFIX)
     }
     if unexpected:
@@ -1698,7 +1700,7 @@ def legacy_core_layout_from_tree(
 
     required_directories = {
         str(Path(path).parent).replace("\\", "/")
-        for path in LEGACY_CORE_REQUIRED_FILES
+        for path in LEGACY_CORE_REQUIRED_FILES | (actual & LEGACY_CORE_OPTIONAL_FILES)
         if "/" in path
     }
     for current, directories, _files in os.walk(restored_content, followlinks=False):
