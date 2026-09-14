@@ -193,20 +193,22 @@ const inventoryResponse = (value: unknown): RetentionInventoryResult => {
     const copy = recordValue(value);
     if (
       typeof copy.reference !== "string" ||
-      typeof copy.copy_created_at !== "string"
+      typeof copy.copy_created_at !== "string" ||
+      typeof copy.resource_id !== "string" ||
+      copy.resource_id.trim() === "" ||
+      copy.resource_id === "*" ||
+      typeof copy.content_generation !== "string" ||
+      copy.content_generation.trim() === "" ||
+      copy.content_generation === "*"
     ) {
       throw new Error("controlled-copy backend inventory copy is invalid");
     }
     const normalized: RetentionBackendCopy = {
       reference: copy.reference,
       copy_created_at: copy.copy_created_at,
+      resource_id: copy.resource_id,
+      content_generation: copy.content_generation,
     };
-    if (typeof copy.resource_id === "string") {
-      normalized.resource_id = copy.resource_id;
-    }
-    if (typeof copy.content_generation === "string") {
-      normalized.content_generation = copy.content_generation;
-    }
     if (typeof copy.content_class === "string") {
       normalized.content_class = copy.content_class as NonNullable<
         RetentionBackendCopy["content_class"]
@@ -216,6 +218,33 @@ const inventoryResponse = (value: unknown): RetentionInventoryResult => {
       normalized.content_classes = copy.content_classes.filter(
         (item): item is string => typeof item === "string",
       ) as NonNullable<RetentionBackendCopy["content_classes"]>;
+    }
+    if (
+      copy.coverage !== null &&
+      typeof copy.coverage === "object" &&
+      !Array.isArray(copy.coverage)
+    ) {
+      const coverage = recordValue(copy.coverage);
+      if (
+        coverage.kind === "aggregate" &&
+        coverage.resource_scope === "host" &&
+        coverage.tenant_scope === "all" &&
+        coverage.account_scope === "all"
+      ) {
+        normalized.coverage = {
+          kind: "aggregate",
+          resource_scope: "host",
+          tenant_scope: "all",
+          account_scope: "all",
+        };
+      }
+    }
+    if (
+      copy.restore_target !== null &&
+      typeof copy.restore_target === "object" &&
+      !Array.isArray(copy.restore_target)
+    ) {
+      normalized.restore_target = recordValue(copy.restore_target);
     }
     return normalized;
   });

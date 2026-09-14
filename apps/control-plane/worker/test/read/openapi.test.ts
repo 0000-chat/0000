@@ -53,6 +53,10 @@ describe("published live read OpenAPI document", () => {
         "/api/v1/identities/{identity_id}/conversations/{conversation_id}",
         "/api/v1/conversations/{conversation_id}/messages",
         "/api/v1/realtime/tickets",
+        "/api/v1/removals/restore-authority",
+        "/api/v1/removals/restore-projection",
+        "/api/v1/removals/restore-activation-lease",
+        "/api/v1/removals/restore-activation-lease/release",
       ]),
     );
     expect(document.components?.securitySchemes?.bearerAuth).toMatchObject({

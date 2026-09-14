@@ -4,9 +4,12 @@ import {
   type CanonicalJsonObject,
   type RemovalAuthority,
   RemovalAuthoritySchema,
+  RestoreReplayEvidenceSchema,
+  type RestoreReplayEvidence,
 } from "@communicator/contracts";
 import { archiveError } from "./errors";
 import { readCommittedArchiveBatch, readReplayPage } from "./reader";
+import { loadRestoreAuthority } from "../restore/gate";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -65,6 +68,17 @@ const isRemovalMarker = (event: CanonicalEventEnvelope): boolean =>
   event.event_type === "message.deleted" ||
   event.event_type === "replay.tombstone";
 
+const removalReferenceKeys = [
+  "resource_id",
+  "message_id",
+  "source_message_id",
+  "command_id",
+  "dispatch_id",
+  "delivery_id",
+  "webhook_id",
+  "attachment_id",
+] as const;
+
 /**
  * Match the immutable resource lineage, independently of a message edit
  * revision.  The authority's generation is checked when an event carries one;
@@ -93,6 +107,11 @@ export const eventMatchesRemoval = (
   }
 
   const resourceId = authority.resource_id;
+  if (
+    removalReferenceKeys.some((key) => payloadValue(event, key) === resourceId)
+  ) {
+    return true;
+  }
   const payloadResourceId = payloadValue(event, "resource_id");
   if (payloadResourceId === resourceId) return true;
 
@@ -291,5 +310,63 @@ export const readSanitizedReplayPage = async (
     manifests: page.manifests,
     events: sanitized.events,
     next_cursor: page.next_cursor,
+  };
+};
+
+/**
+ * Read one projection replay page only after the current removal ledger has
+ * been loaded from primary D1. Every authority is applied to the decoded
+ * page, so an old archive cannot reintroduce a message, attachment reference,
+ * command, or delivery pointer that crossed a deletion epoch. The evidence
+ * returned beside the page is consumed by the restore orchestrator before it
+ * exposes a projection or starts a provider service.
+ */
+export const readRestoreReplayPage = async (
+  bucket: R2Bucket,
+  database: D1Database | D1DatabaseSession,
+  tenantId: string,
+  options?: { cursor?: string; pageSize?: number },
+): Promise<{
+  manifests: Awaited<ReturnType<typeof readReplayPage>>["manifests"];
+  events: CanonicalEventEnvelope[];
+  next_cursor: string | null;
+  evidence: RestoreReplayEvidence;
+}> => {
+  const authority = await loadRestoreAuthority(database, tenantId);
+  const page = await readReplayPage(bucket, tenantId, options);
+  // A removal may be recorded while the R2 page is being listed and decoded.
+  // Re-read the primary ledger after the page fetch and refuse to expose even
+  // a sanitized page if the authority changed during that window.
+  const currentAuthority = await loadRestoreAuthority(database, tenantId);
+  if (
+    currentAuthority.deletion_epoch !== authority.deletion_epoch ||
+    JSON.stringify(currentAuthority.authorities) !==
+      JSON.stringify(authority.authorities)
+  ) {
+    throw archiveError("archive_conflict");
+  }
+  let events = page.events;
+  const removedEventIds: string[] = [];
+  const changedEventIds: string[] = [];
+  for (const removal of authority.authorities) {
+    const sanitized = sanitizeArchiveEvents(events, removal);
+    events = sanitized.events;
+    removedEventIds.push(...sanitized.removed_event_ids);
+    changedEventIds.push(...sanitized.changed_event_ids);
+  }
+  const evidence = RestoreReplayEvidenceSchema.parse({
+    tenant_id: tenantId,
+    deletion_epoch: authority.deletion_epoch,
+    authority_ids: [...authority.authority_ids],
+    removed_event_ids: [...new Set(removedEventIds)],
+    changed_event_ids: [...new Set(changedEventIds)],
+    rejected_event_ids: [...new Set(removedEventIds)],
+    tombstones_reapplied: [...authority.authority_ids],
+  });
+  return {
+    manifests: page.manifests,
+    events,
+    next_cursor: page.next_cursor,
+    evidence,
   };
 };

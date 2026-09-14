@@ -183,6 +183,9 @@ import {
 } from "../removals/service";
 import { listRemovalAuthorities } from "../removals/ledger";
 import type { RecordRemovalInput } from "../../../../packages/contracts/src/removals";
+import { loadRestoreAuthority } from "../restore/gate";
+import { renewRestoreActivationLeaseForCompletion } from "../restore/lease";
+import { fenceRestoredOutboundWork } from "../restore/outbound";
 
 type ProjectionMetaRow = {
   singleton: number;
@@ -2834,6 +2837,34 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         throw projectionError("projection_rebuild_mismatch");
       }
 
+      const database = this.env.CONTROL_DB;
+      if (
+        database === undefined ||
+        typeof database.withSession !== "function"
+      ) {
+        throw projectionError("projection_unavailable");
+      }
+      const leaseProof = parsed.restore_activation_lease;
+      if (
+        leaseProof !== undefined &&
+        !(await renewRestoreActivationLeaseForCompletion(database, {
+          tenantId: parsed.tenant_id,
+          leaseId: leaseProof.lease_id,
+          leaseToken: leaseProof.lease_token,
+          expectedDeletionEpoch: leaseProof.deletion_epoch,
+          expectedLedgerHead: leaseProof.ledger_head,
+        }))
+      ) {
+        throw projectionError("projection_rebuild_mismatch");
+      }
+      // Read the non-rebuildable removal ledger immediately before publishing
+      // this restored generation. The transaction below applies its fence
+      // before the projection can become ready.
+      const restoreAuthority = await loadRestoreAuthority(
+        database,
+        parsed.tenant_id,
+      );
+
       this.ctx.storage.transactionSync(() => {
         const current = readProjectionMeta(this.ctx.storage);
         if (current === undefined)
@@ -2868,6 +2899,11 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         }
 
         restoreOutboundProjectionRows(this.ctx.storage, parsed.tenant_id);
+        fenceRestoredOutboundWork(
+          this.ctx.storage.sql,
+          restoreAuthority.authorities,
+          parsed.completed_at,
+        );
 
         this.ctx.storage.sql.exec(
           "INSERT INTO completed_rebuilds (rebuild_id, generation, completed_at) VALUES (?, ?, ?)",

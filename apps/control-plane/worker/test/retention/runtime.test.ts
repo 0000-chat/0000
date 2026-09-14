@@ -72,6 +72,10 @@ const serviceFetcher = (
     const body = JSON.parse(String(init?.body)) as {
       store: string;
       operation: string;
+      scope?: {
+        resource_id?: string;
+        content_generation?: string;
+      };
     };
     if (body.operation === "inventory") {
       return new Response(
@@ -81,6 +85,8 @@ const serviceFetcher = (
             {
               reference: `${body.store}:one`,
               copy_created_at: "2026-09-12T00:00:00.000Z",
+              resource_id: body.scope?.resource_id,
+              content_generation: body.scope?.content_generation,
               content_class:
                 body.store === "session_credentials"
                   ? "session_credential"

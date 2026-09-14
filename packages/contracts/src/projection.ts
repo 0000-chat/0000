@@ -754,12 +754,24 @@ export const BeginRebuildInputSchema = strictObject({
 
 export type BeginRebuildInput = z.infer<typeof BeginRebuildInputSchema>;
 
+export const RestoreActivationLeaseProofSchema = strictObject({
+  lease_id: CanonicalResourceIdSchema,
+  lease_token: z.string().trim().min(32).max(256),
+  deletion_epoch: NonnegativeSafeIntegerSchema,
+  ledger_head: z.string().trim().min(1).max(256),
+});
+
+export type RestoreActivationLeaseProof = z.infer<
+  typeof RestoreActivationLeaseProofSchema
+>;
+
 export const CompleteRebuildInputSchema = strictObject({
   schema_version: z.literal(1),
   tenant_id: CanonicalResourceIdSchema,
   rebuild_id: CanonicalResourceIdSchema,
   terminal_cursor: z.null(),
   completed_at: TimestampSchema,
+  restore_activation_lease: RestoreActivationLeaseProofSchema.optional(),
   authorization: ProjectionAuthorizationContextSchema,
 });
 

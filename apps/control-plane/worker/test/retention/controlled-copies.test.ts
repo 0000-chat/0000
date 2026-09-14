@@ -84,6 +84,8 @@ const fixtureBackend = ({
           {
             reference,
             copy_created_at: copyCreatedAt,
+            resource_id: lineage.resource_id,
+            content_generation: lineage.content_generation,
           },
         ],
         evidence_source: "controlled_fixture_inventory",
@@ -461,6 +463,8 @@ describe("controlled-copy retention", () => {
             copy_created_at: new Date(
               fixedNow.getTime() - 2 * 24 * 60 * 60 * 1_000,
             ),
+            resource_id: lineage.resource_id,
+            content_generation: lineage.content_generation,
             content_classes: ["message", "account_key"],
           },
         ],
@@ -503,6 +507,82 @@ describe("controlled-copy retention", () => {
     expect(result.incomplete_stores).toContain("restic_snapshot");
   });
 
+  it("keeps a verified aggregate restic reference actionable without deleting it", async () => {
+    const fixture = fixtureBackend({ reference: "restic:aggregate_snapshot" });
+    const aggregate = createResticSnapshotAdapter({
+      ...fixture.backend,
+      inventory: async () => ({
+        complete: true,
+        copies: [
+          {
+            reference: "restic:aggregate_snapshot",
+            copy_created_at: new Date(
+              fixedNow.getTime() - 2 * 24 * 60 * 60 * 1_000,
+            ),
+            resource_id: lineage.resource_id,
+            content_generation: lineage.content_generation,
+            content_classes: ["message", "session_credential", "account_key"],
+            coverage: {
+              kind: "aggregate",
+              resource_scope: "host",
+              tenant_scope: "all",
+              account_scope: "all",
+            },
+          },
+        ],
+        evidence_source: "restic_aggregate_inventory",
+      }),
+    });
+    const inventory = await aggregate.inventory({
+      tenant_id: lineage.tenant_id,
+      removal_id: lineage.removal_id,
+      resource_type: lineage.resource_type,
+      resource_id: lineage.resource_id,
+      content_generation: lineage.content_generation,
+      deletion_epoch: lineage.deletion_epoch,
+      now: fixedNow,
+    });
+    expect(inventory.copies).toMatchObject([
+      {
+        content_class: "message",
+        resource_id: lineage.resource_id,
+        content_generation: lineage.content_generation,
+      },
+    ]);
+  });
+
+  it("does not infer missing copy lineage from the requested removal", async () => {
+    const fixture = fixtureBackend({ reference: "synapse:missing-lineage" });
+    const missingLineage = createSynapseAdapter({
+      ...fixture.backend,
+      inventory: async () => ({
+        complete: true,
+        copies: [
+          {
+            reference: "synapse:missing-lineage",
+            copy_created_at: fixedNow,
+          },
+        ],
+        evidence_source: "synapse_missing_lineage_inventory",
+      }),
+    });
+    const { adapters } = requiredAdapters();
+    const plan = await createControlledCopyRetentionPlan({
+      database: workerEnv.CONTROL_DB,
+      lineage,
+      adapters: [
+        ...adapters.filter((adapter) => adapter.store !== "synapse"),
+        missingLineage,
+      ],
+      now: fixedNow,
+    });
+    expect(plan.inventory_errors).toContainEqual({
+      store: "synapse",
+      error:
+        "controlled copy inventory copy must publish exact resource lineage",
+    });
+  });
+
   it("keeps an incomplete inventory gap visible after known copies are cleaned", async () => {
     const fixture = fixtureBackend({ reference: "media:attachment_one" });
     const mediaAdapter = createMediaStoreAdapter({
@@ -515,6 +595,8 @@ describe("controlled-copy retention", () => {
             copy_created_at: new Date(
               fixedNow.getTime() - 2 * 24 * 60 * 60 * 1_000,
             ),
+            resource_id: lineage.resource_id,
+            content_generation: lineage.content_generation,
           },
         ],
         evidence_source: "media_partial_inventory",

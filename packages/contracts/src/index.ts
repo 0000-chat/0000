@@ -22,3 +22,4 @@ export * from "./groups";
 export * from "./removals";
 export * from "./receipts";
 export * from "./controlled-copies";
+export * from "./restore";
