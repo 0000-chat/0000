@@ -12,6 +12,7 @@ import {
 } from "@communicator/contracts";
 import { z } from "zod";
 import type { ManagedProviderGroup } from "./provider";
+import type { OutboundCapability } from "../outbound/authority-types";
 
 export type GroupManagementRepositoryErrorCode =
   | "management_invalid"
@@ -120,6 +121,8 @@ export type GroupManagementCompletion = {
   evidencePath?: GroupManagementEvidenceSource;
   duplicateRisk: boolean;
   humanActionRequired: boolean;
+  /** The current private authority family used for the provider call. */
+  authorityKind?: OutboundCapability["kind"];
   failureCode?: string;
   now: string;
 };
@@ -198,6 +201,7 @@ const mapOperation = (
       z.array(z.string().trim().min(1).max(512)).max(128),
     ),
     expected_revision: row.expected_revision,
+    request_hash: row.request_hash,
     status: row.status,
     result_revision: row.result_revision,
     result_member_provider_ids:
@@ -592,91 +596,143 @@ export async function finishGroupManagementOperation(
       ) {
         throw new GroupManagementRepositoryError("management_invalid");
       }
-      statements.push(
-        db
-          .prepare(
-            `UPDATE group_management_groups
-                SET name = ?, current_revision = ?,
-                    current_member_provider_ids_json = ?, current_evidence_json = ?,
-                    active_operation_id = NULL, active_claim_expires_at = NULL,
-                    updated_at = ?
-              WHERE tenant_id = ? AND conversation_id = ?
-                AND current_revision = ? AND active_operation_id = ?
-                AND EXISTS (
-                  SELECT 1
-                    FROM account_grants AS ag
-                    JOIN connections AS c
-                      ON c.tenant_id = ag.tenant_id
-                    JOIN connection_accounts AS ca
-                      ON ca.connection_id = c.id
-                     AND ca.account_id = ag.account_id
-                     AND ca.status = 'active'
-                   WHERE ag.tenant_id = ?
-                     AND ag.membership_id = ?
-                     AND ag.identity_id = ?
-                     AND ag.account_id = ?
-                     AND ag.operation_scope = 'group.manage'
-                     AND ag.status = 'active'
-                     AND (
-                       ag.chat_scope = 'all_chats'
-                       OR EXISTS (
-                         SELECT 1
-                           FROM account_grant_chats AS gc
-                          WHERE gc.tenant_id = ag.tenant_id
-                            AND gc.grant_id = ag.id
-                            AND gc.chat_id = ?
-                       )
-                     )
-                )
-                AND EXISTS (
-                  SELECT 1
-                    FROM account_grants AS ag
-                    JOIN connections AS c
-                      ON c.tenant_id = ag.tenant_id
-                    JOIN connection_accounts AS ca
-                      ON ca.connection_id = c.id
-                     AND ca.account_id = ag.account_id
-                     AND ca.status = 'active'
-                   WHERE ag.tenant_id = ?
-                     AND ag.membership_id = ?
-                     AND ag.identity_id = ?
-                     AND ag.account_id = ?
-                     AND ag.operation_scope = 'conversation.read'
-                     AND ag.status = 'active'
-                     AND (
-                       ag.chat_scope = 'all_chats'
-                       OR EXISTS (
-                         SELECT 1
-                           FROM account_grant_chats AS gc
-                          WHERE gc.tenant_id = ag.tenant_id
-                            AND gc.grant_id = ag.id
-                            AND gc.chat_id = ?
-                       )
-                     )
-                )`,
-          )
-          .bind(
-            completion.evidence.name,
-            completion.resultRevision,
-            JSON.stringify(completion.resultMemberProviderIds),
-            JSON.stringify(completion.evidence),
-            completion.now,
-            operation.tenant_id,
-            operation.conversation_id,
-            operation.expected_revision,
-            operation.operation_id,
-            operation.tenant_id,
-            operation.membership_id,
-            operation.identity_id,
-            operation.account_id,
-            operation.conversation_id,
-            operation.tenant_id,
-            operation.membership_id,
-            operation.identity_id,
-            operation.account_id,
-            operation.conversation_id,
-          ),
-      );
+      const completionUpdate =
+        completion.authorityKind === "owner_admin"
+          ? db
+              .prepare(
+                `UPDATE group_management_groups
+                    SET name = ?, current_revision = ?,
+                        current_member_provider_ids_json = ?, current_evidence_json = ?,
+                        active_operation_id = NULL, active_claim_expires_at = NULL,
+                        updated_at = ?
+                  WHERE tenant_id = ? AND conversation_id = ?
+                    AND current_revision = ? AND active_operation_id = ?
+                    AND EXISTS (
+                      SELECT 1
+                        FROM memberships AS m
+                        JOIN tenants AS t ON t.id = m.tenant_id
+                        JOIN principals AS p ON p.id = m.principal_id
+                        JOIN identities AS i ON i.tenant_id = m.tenant_id
+                        JOIN connections AS c ON c.tenant_id = m.tenant_id
+                        JOIN connection_accounts AS ca
+                          ON ca.connection_id = c.id
+                         AND ca.status = 'active'
+                       WHERE m.tenant_id = ?
+                         AND m.id = ?
+                         AND m.status = 'active'
+                         AND m.role IN ('owner', 'admin')
+                         AND t.status = 'active'
+                         AND p.status = 'active'
+                         AND p.revoked_at IS NULL
+                         AND p.principal_type IN ('human', 'operator')
+                         AND i.id = ?
+                         AND i.status = 'active'
+                         AND i.identity_kind = 'human'
+                         AND c.id = ?
+                         AND c.identity_id = i.id
+                         AND ca.account_id = ?
+                    )`,
+              )
+              .bind(
+                completion.evidence.name,
+                completion.resultRevision,
+                JSON.stringify(completion.resultMemberProviderIds),
+                JSON.stringify(completion.evidence),
+                completion.now,
+                operation.tenant_id,
+                operation.conversation_id,
+                operation.expected_revision,
+                operation.operation_id,
+                operation.tenant_id,
+                operation.membership_id,
+                operation.identity_id,
+                operation.connection_id,
+                operation.account_id,
+              )
+          : db
+              .prepare(
+                `UPDATE group_management_groups
+                    SET name = ?, current_revision = ?,
+                        current_member_provider_ids_json = ?, current_evidence_json = ?,
+                        active_operation_id = NULL, active_claim_expires_at = NULL,
+                        updated_at = ?
+                  WHERE tenant_id = ? AND conversation_id = ?
+                    AND current_revision = ? AND active_operation_id = ?
+                    AND EXISTS (
+                      SELECT 1
+                        FROM account_grants AS ag
+                        JOIN connections AS c
+                          ON c.tenant_id = ag.tenant_id
+                        JOIN connection_accounts AS ca
+                          ON ca.connection_id = c.id
+                         AND ca.account_id = ag.account_id
+                         AND ca.status = 'active'
+                       WHERE ag.tenant_id = ?
+                         AND ag.membership_id = ?
+                         AND ag.identity_id = ?
+                         AND ag.account_id = ?
+                         AND ag.operation_scope = 'group.manage'
+                         AND ag.status = 'active'
+                         AND (
+                           ag.chat_scope = 'all_chats'
+                           OR EXISTS (
+                             SELECT 1
+                               FROM account_grant_chats AS gc
+                              WHERE gc.tenant_id = ag.tenant_id
+                                AND gc.grant_id = ag.id
+                                AND gc.chat_id = ?
+                           )
+                         )
+                    )
+                    AND EXISTS (
+                      SELECT 1
+                        FROM account_grants AS ag
+                        JOIN connections AS c
+                          ON c.tenant_id = ag.tenant_id
+                        JOIN connection_accounts AS ca
+                          ON ca.connection_id = c.id
+                         AND ca.account_id = ag.account_id
+                         AND ca.status = 'active'
+                       WHERE ag.tenant_id = ?
+                         AND ag.membership_id = ?
+                         AND ag.identity_id = ?
+                         AND ag.account_id = ?
+                         AND ag.operation_scope = 'conversation.read'
+                         AND ag.status = 'active'
+                         AND (
+                           ag.chat_scope = 'all_chats'
+                           OR EXISTS (
+                             SELECT 1
+                               FROM account_grant_chats AS gc
+                              WHERE gc.tenant_id = ag.tenant_id
+                                AND gc.grant_id = ag.id
+                                AND gc.chat_id = ?
+                           )
+                         )
+                    )`,
+              )
+              .bind(
+                completion.evidence.name,
+                completion.resultRevision,
+                JSON.stringify(completion.resultMemberProviderIds),
+                JSON.stringify(completion.evidence),
+                completion.now,
+                operation.tenant_id,
+                operation.conversation_id,
+                operation.expected_revision,
+                operation.operation_id,
+                operation.tenant_id,
+                operation.membership_id,
+                operation.identity_id,
+                operation.account_id,
+                operation.conversation_id,
+                operation.tenant_id,
+                operation.membership_id,
+                operation.identity_id,
+                operation.account_id,
+                operation.conversation_id,
+              );
+      statements.push(completionUpdate);
       statements.push(
         db
           .prepare(

@@ -16,6 +16,7 @@
   "provisioning": {
     "listen_addr": "127.0.0.1:8787",
     "bridge_url": "https://whatsapp.internal.example.invalid",
+    "authority_base_url": "https://control-plane.internal.example.invalid",
     "bridge_shared_secret_file": "/etc/communicator/matrix-gateway/secrets/whatsapp-provisioning",
     "gateway_shared_secret_file": "/etc/communicator/matrix-gateway/secrets/linking-gateway",
     "matrix_user_id": "@communicator:synapse",

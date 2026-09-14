@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ProviderSchema } from "./connection";
 import { MessageSchema } from "./conversation";
 import { CommunicatorIdSchema, TimestampSchema } from "./ids";
+import { OutboundAuthorityMetadataSchema } from "./grants";
 
 export const DeliveryModeSchema = z.enum(["direct", "paced"]);
 
@@ -69,6 +70,11 @@ export const CommandSchema = z
       .string()
       .regex(/^[0-9a-f]{64}$/)
       .optional(),
+    body_digest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    authority: OutboundAuthorityMetadataSchema.optional(),
     dispatch_lease_id: CommunicatorIdSchema.optional(),
     dispatch_lease_expires_at: TimestampSchema.optional(),
     projection_generation: z.number().int().positive().optional(),
@@ -124,6 +130,11 @@ export const OutboundDispatchSchema = z
     status: OutboundDispatchStatusSchema,
     transaction_id: CommunicatorIdSchema,
     request_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    body_digest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    authority: OutboundAuthorityMetadataSchema.optional(),
     dispatch_lease_id: CommunicatorIdSchema.nullable().optional(),
     dispatch_lease_expires_at: TimestampSchema.nullable().optional(),
     uncertainty_reason: z.string().max(200).nullable().optional(),
@@ -174,6 +185,11 @@ export const OutboundDispatchPayloadSchema = z
     projection_generation: z.number().int().positive(),
     dispatch_lease_id: CommunicatorIdSchema,
     dispatch_lease_expires_at: TimestampSchema,
+    body_digest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    authority: OutboundAuthorityMetadataSchema.optional(),
     created_at: TimestampSchema,
   })
   .strict();
@@ -246,6 +262,7 @@ export const AcceptTextReplyInputSchema = z
       .enum(["pending", "waiting_for_connection"])
       .optional(),
     confirmation_due_at: TimestampSchema.nullable().optional(),
+    authority: OutboundAuthorityMetadataSchema.optional(),
   })
   .strict();
 
@@ -281,6 +298,7 @@ export const OutboundDecisionInputSchema = z
     decided_at: TimestampSchema,
     connection_available: z.boolean().optional(),
     duplicate_risk_acknowledged: z.boolean().optional(),
+    resend_authority: OutboundAuthorityMetadataSchema.optional(),
   })
   .strict();
 
