@@ -24,9 +24,7 @@ const isGatewayServiceBinding = (
   "fetch" in value &&
   typeof value.fetch === "function";
 
-export const gatewayFetchFromEnv = (
-  env: GatewayTransportEnv,
-): GatewayFetch => {
+export const gatewayFetchFromEnv = (env: GatewayTransportEnv): GatewayFetch => {
   const binding = env.CONNECTION_GATEWAY_VPC;
   if (binding === undefined)
     throw new GatewayTransportConfigError("missing_binding");

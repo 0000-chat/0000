@@ -157,13 +157,14 @@ describe("provider factories use the private gateway binding", () => {
       );
     });
 
-    await expect(gatewayFromEnv(environment(binding)).start(gatewayOwner))
-      .resolves.toEqual({
-        gateway_ref: "gateway_factory_ref",
-        action: "scan_qr",
-        qr: "qr-factory",
-        action_expires_at: null,
-      });
+    await expect(
+      gatewayFromEnv(environment(binding)).start(gatewayOwner),
+    ).resolves.toEqual({
+      gateway_ref: "gateway_factory_ref",
+      action: "scan_qr",
+      qr: "qr-factory",
+      action_expires_at: null,
+    });
     expect(binding.calls).toBe(1);
   });
 
@@ -237,9 +238,7 @@ describe("provider factories use the private gateway binding", () => {
 
   it("routes the contact factory through the binding", async () => {
     const binding = bindingFor(async (request, init) => {
-      expect(request).toBe(
-        `${gatewayUrl}/v1/contacts/resolve/%2B15550000001`,
-      );
+      expect(request).toBe(`${gatewayUrl}/v1/contacts/resolve/%2B15550000001`);
       expect(init?.headers).toMatchObject({
         authorization: `Bearer ${gatewayToken}`,
         "content-type": "application/json",

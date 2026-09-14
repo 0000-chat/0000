@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  LinkSessionDO,
-  type LinkSessionState,
-} from "../../linking/session";
+import { LinkSessionDO, type LinkSessionState } from "../../linking/session";
 
 const stateFor = (
   status: "awaiting_user" | "expired",
@@ -44,8 +41,9 @@ const runAlarm = async (initial: LinkSessionState) => {
     storage,
     blockConcurrencyWhile: async <T>(callback: () => Promise<T>) => callback(),
   } as unknown as DurableObjectState;
-  const gatewayFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-    new Response("", { status: 200 }),
+  const gatewayFetch = vi.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response("", { status: 200 }),
   );
   const runtimeEnv = {
     CONNECTION_GATEWAY_URL: "https://gateway.example",

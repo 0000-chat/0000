@@ -363,7 +363,9 @@ const unavailableContactOperation = async (): Promise<never> => {
   throw new ContactProviderError("unavailable");
 };
 
-export const defaultContactProvider = (env: Cloudflare.Env): ContactProvider => {
+export const defaultContactProvider = (
+  env: Cloudflare.Env,
+): ContactProvider => {
   try {
     return new HttpContactProvider(env, gatewayFetchFromEnv(env));
   } catch (error) {

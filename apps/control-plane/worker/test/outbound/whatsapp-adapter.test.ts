@@ -163,16 +163,19 @@ describe("HttpWhatsAppTextAdapter", () => {
   it.each([
     ["missing", undefined],
     ["malformed", { fetch: "not-a-function" }],
-  ] as const)("does not construct a default adapter with %s binding", (_label, binding) => {
-    const globalFetch = vi.fn();
-    vi.stubGlobal("fetch", globalFetch);
-    try {
-      expect(defaultWhatsAppTextAdapter(context(binding))).toBeUndefined();
-      expect(globalFetch).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
+  ] as const)(
+    "does not construct a default adapter with %s binding",
+    (_label, binding) => {
+      const globalFetch = vi.fn();
+      vi.stubGlobal("fetch", globalFetch);
+      try {
+        expect(defaultWhatsAppTextAdapter(context(binding))).toBeUndefined();
+        expect(globalFetch).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("routes the default factory through the private binding", async () => {
     const fetcher = vi.fn(

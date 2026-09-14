@@ -456,7 +456,8 @@ export const defaultWhatsAppTextAdapter = (
   ) {
     return undefined;
   }
-  if (fetcher !== undefined) return new HttpWhatsAppTextAdapter(context, fetcher);
+  if (fetcher !== undefined)
+    return new HttpWhatsAppTextAdapter(context, fetcher);
   try {
     return new HttpWhatsAppTextAdapter(
       context,
