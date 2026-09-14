@@ -61,7 +61,7 @@
       "assert": [{ "path": "/resource", "equals": "${target.resource}" }]
     },
     {
-      "id": "mcp-list-identities",
+      "id": "mcp-list-messages",
       "scenario": "oauth_connection",
       "actor": "agent",
       "transport": "mcp",
@@ -71,15 +71,20 @@
         "observation": "response"
       },
       "request": {
-        "tool": "list_identities",
-        "arguments": {}
+        "tool": "list_messages",
+        "arguments": {
+          "identity_id": "${binding.identity_ids[0]}",
+          "conversation_id": "${binding.chat_ids[0]}",
+          "account_id": "${binding.account_ids[0]}",
+          "limit": 1
+        }
       },
       "expect": { "statuses": [200] },
       "evidence": {
         "extract": {
-          "account_id": "/result/structuredContent/account_id",
-          "chat_id": "/result/structuredContent/chat_id",
-          "message_id": "/result/structuredContent/message_id"
+          "account_id": "/result/structuredContent/items/0/account_id",
+          "chat_id": "/result/structuredContent/items/0/conversation_id",
+          "message_id": "/result/structuredContent/items/0/id"
         },
         "required": ["account_id", "chat_id", "message_id"]
       }

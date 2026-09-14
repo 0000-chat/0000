@@ -37,9 +37,10 @@ Fill every target field from the actual run:
 - `target.resource` is the exact OAuth resource. It must match the protected
   resource metadata returned by the target.
 - `target.bindings` records tenant, installation, grant, connected account,
-  chat, connection, provider-account, and identity IDs. Empty arrays are
-  valid only before the corresponding administrator step. A passing operation
-  must extract the IDs it claims to prove.
+  chat, connection, and identity IDs. Provider-account identity is external
+  provider evidence and stays separate from public Communicator responses.
+  Empty arrays are valid only before the corresponding administrator step. A
+  passing operation must extract the IDs it claims to prove.
 - `oauth.access_token_env` or `oauth.access_token_file` points to a protected
   access token source. The token never belongs in the JSON configuration.
   Administrator-only operations may use a separate
@@ -86,10 +87,10 @@ Each operation names a scenario requirement through `proof.role` and
 `proof.case`. Set `proof.observation` when one case needs more than one
 response role, such as `disconnect_result` and `history_after_disconnect`.
 The operation then names its actor, transport, request, accepted HTTP
-statuses, and typed evidence fields. The case contract also checks the REST
-method and stable route words or the MCP tool. A REST operation uses a
-relative path. An MCP operation uses a declared tool or the `initialize`
-method. Template values use `${target...}`, `${binding...}`, `${vars...}`, and
+statuses, and typed evidence fields. The case contract checks the exact REST
+route and method or the exact MCP tool and response pointers. A REST operation
+uses a relative path. An MCP operation uses a declared tool or the
+`initialize` method. Template values use `${target...}`, `${binding...}`, `${vars...}`, and
 validated IDs from earlier passing operations as `${observed...}`. The runner
 hashes request bodies and stores only bounded scalar response fields.
 
@@ -103,7 +104,7 @@ The existing Communicator entrypoints used by the plan include:
 | Groups | `POST /api/v1/groups`, `PATCH /api/v1/groups/{conversation_id}`, `POST/DELETE /api/v1/groups/{conversation_id}/participants` | `create_group`, `rename_group`, `add_group_participants`, `remove_group_participants` |
 | Webhooks | `/api/v1/webhook-subscriptions` and `/api/v1/webhook-deliveries/{id}` | `create_webhook_subscription`, `update_webhook_subscription`, `cutover_webhook_subscription`, `retry_webhook_delivery` |
 | Receipts and removals | `POST /api/v1/conversations/{id}/receipts/read`, `/api/v1/receipts`, `/api/v1/removals` | `mark_read`, `get_read_receipt`, `record_removal`, `get_removal_status` |
-| Linking | Administrator-only `/api/v1/identities/{id}/link-sessions`, `/api/v1/link-sessions/{id}`, grant, connection, and stored-read routes | Agent MCP has no linking authority |
+| Linking | Administrator-only `/api/v1/identities/{id}/link-sessions`, `/api/v1/connections/{id}/relink-sessions`, `/api/v1/connections/{id}/disconnect`, grant, and stored-read routes | Agent MCP has no linking authority |
 
 Use the target's OpenAPI document and current MCP tool schemas to fill request
 bodies. Do not copy provider credentials, access tokens, message bodies, or
@@ -114,10 +115,10 @@ For a successful operation, list every typed field that its declared
 observation can provide under `evidence.extract` and repeat those fields under
 `evidence.required`. A semantic case may collect evidence from several
 passing operations. The runner records the union in `coverage.observed_fields`
-and checks the complete case contract only after it has combined those
-observations. For example, a link-session response can prove identity,
-account, connection, and lifecycle status while a later stored-message read
-proves the chat and history message ID for
+and checks every named observation before it combines those observations. For
+example, the exact disconnect operation response proves its operation ID,
+connection ID, and status while a later stored-message read proves the
+identity, account, chat, connection, and history message ID for
 `disconnect_preserves_history`. Objects, arrays, credentials, message bodies,
 and unbounded content are rejected. A missing required field makes the
 operation or combined case `unverified`; one arbitrary successful GET cannot
@@ -183,8 +184,9 @@ Reviewers should confirm that:
 1. `run.mode` and every operation's `evidence_class` match the proof being
    claimed. Controlled or fixture results do not establish a client pass.
 2. Client surface, client version, provider version, adapter version, OAuth
-   resource, installation, grant, account, chat, connection, and provider
-   account bindings are exact and consistent.
+   resource, installation, grant, account, chat, connection, and identity
+   bindings are exact and consistent. Provider-account bindings come from a
+   separate provider proof source.
 3. A provider delivery claim has provider evidence. HTTP status, saved state,
    Matrix state, and bridge state remain separate observations.
 4. Scenario `coverage` lists every named case and `relations` prove stable or

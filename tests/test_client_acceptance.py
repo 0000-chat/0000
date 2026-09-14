@@ -26,32 +26,44 @@ REST_PATHS: dict[tuple[str, str], tuple[str, str]] = {
     ("oauth_connection", "authorization_server"): ("GET", "/.well-known/oauth-authorization-server"),
     ("linking_identity_lifecycle", "unlinked_start"): ("POST", "/api/v1/identities/identity_one/link-sessions"),
     ("linking_identity_lifecycle", "identity_grant"): ("POST", "/api/v1/grants"),
-    ("linking_identity_lifecycle", "same_identity_relink"): ("POST", "/api/v1/link-sessions/link_session_one/actions"),
-    ("linking_identity_lifecycle", "disconnect_preserves_history"): ("DELETE", "/api/v1/link-sessions/link_session_one"),
-    ("linking_identity_lifecycle", "different_identity_account"): ("GET", "/api/v1/accounts?identity_id=different_identity_account"),
+    ("linking_identity_lifecycle", "same_identity_relink"): ("POST", "/api/v1/connections/connection_one/relink-sessions"),
+    ("linking_identity_lifecycle", "disconnect_preserves_history"): ("POST", "/api/v1/connections/connection_one/disconnect"),
+    ("linking_identity_lifecycle", "different_identity_account"): ("GET", "/api/v1/accounts"),
     ("history_context_attachment", "stored_history"): ("GET", "/api/v1/conversations/stored_history/messages"),
     ("history_context_attachment", "attachment_read"): ("GET", "/api/v1/attachments/authenticated_attachment"),
-    ("text_send_and_route", "saved_before_dispatch"): ("POST", "/api/v1/conversations/send/saved_before_dispatch"),
+    ("text_send_and_route", "saved_before_dispatch"): ("POST", "/api/v1/conversations/chat_one/messages"),
     ("text_send_and_route", "provider_delivery"): ("GET", "/api/v1/commands/provider_delivery"),
-    ("text_send_and_route", "account_failover_rejected"): ("POST", "/api/v1/conversations/send/account_failover_rejected"),
-    ("direct_chat_and_group", "contact_resolution"): ("POST", "/api/v1/contacts/resolve/contact_resolution"),
-    ("direct_chat_and_group", "direct_chat_creation"): ("POST", "/api/v1/conversations/direct_chat_creation"),
-    ("direct_chat_and_group", "group_creation"): ("POST", "/api/v1/groups/group_creation"),
+    ("text_send_and_route", "account_failover_rejected"): ("POST", "/api/v1/conversations/chat_one/messages"),
+    ("direct_chat_and_group", "contact_resolution"): ("POST", "/api/v1/contacts/resolve"),
+    ("direct_chat_and_group", "direct_chat_creation"): ("POST", "/api/v1/conversations"),
+    ("direct_chat_and_group", "group_creation"): ("POST", "/api/v1/groups"),
     ("direct_chat_and_group", "group_management"): ("PATCH", "/api/v1/groups/group_management"),
-    ("webhook_subscriptions", "subscription_one_initial"): ("POST", "/api/v1/webhooks/subscription_one_initial"),
-    ("webhook_subscriptions", "subscription_two_initial"): ("POST", "/api/v1/webhooks/subscription_two_initial"),
-    ("webhook_subscriptions", "revision_removal"): ("DELETE", "/api/v1/webhooks/revision_removal"),
-    ("webhook_subscriptions", "retry"): ("POST", "/api/v1/webhooks/retry"),
-    ("webhook_subscriptions", "cutover"): ("PATCH", "/api/v1/webhooks/cutover"),
-    ("receipt_and_restore", "explicit_receipt"): ("POST", "/api/v1/receipts/explicit_receipt"),
-    ("receipt_and_restore", "active_removal"): ("POST", "/api/v1/removals/active_removal"),
-    ("receipt_and_restore", "restore_anti_resurrection"): ("POST", "/api/v1/removals/restore/restore_anti_resurrection"),
-    ("authorization_negative_matrix", "wrong_resource"): ("GET", "/api/v1/resource/wrong_resource"),
-    ("authorization_negative_matrix", "expired_installation"): ("GET", "/api/v1/installation/expired_installation"),
-    ("authorization_negative_matrix", "revoked_installation"): ("GET", "/api/v1/installation/revoked_installation"),
-    ("authorization_negative_matrix", "missing_grant"): ("GET", "/api/v1/grant/missing_grant"),
-    ("authorization_negative_matrix", "account_mismatch"): ("GET", "/api/v1/account/account_mismatch"),
-    ("surface_outcome_record", "surface_metadata"): ("GET", "/api/v1/surface/metadata"),
+    ("webhook_subscriptions", "subscription_one_initial"): ("POST", "/api/v1/webhook-subscriptions"),
+    ("webhook_subscriptions", "subscription_two_initial"): ("POST", "/api/v1/webhook-subscriptions"),
+    ("webhook_subscriptions", "revision_removal"): ("DELETE", "/api/v1/webhook-subscriptions/subscription_one"),
+    ("webhook_subscriptions", "retry"): ("POST", "/api/v1/webhook-deliveries/delivery_one/retry"),
+    ("webhook_subscriptions", "cutover"): ("POST", "/api/v1/webhook-subscriptions/subscription_one/cutover"),
+    ("receipt_and_restore", "explicit_receipt"): ("POST", "/api/v1/conversations/chat_one/receipts/read"),
+    ("receipt_and_restore", "active_removal"): ("POST", "/api/v1/removals"),
+    ("receipt_and_restore", "restore_anti_resurrection"): ("POST", "/api/v1/removals"),
+    ("authorization_negative_matrix", "wrong_resource"): ("GET", "/api/v1/identities"),
+    ("authorization_negative_matrix", "expired_installation"): ("GET", "/api/v1/identities"),
+    ("authorization_negative_matrix", "revoked_installation"): ("GET", "/api/v1/identities"),
+    ("authorization_negative_matrix", "missing_grant"): ("GET", "/api/v1/conversations/chat_one/messages"),
+    ("authorization_negative_matrix", "account_mismatch"): ("GET", "/api/v1/conversations/chat_one/messages"),
+    ("surface_outcome_record", "surface_metadata"): ("GET", "/api/v1/session"),
+}
+
+REST_OBSERVATION_PATHS: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): ("POST", "/api/v1/connections/connection_one/relink-sessions"),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_operation"): ("GET", "/api/v1/connections/connection_one/lifecycle-operations/lifecycle_relink_session_one"),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): ("POST", "/api/v1/grants"),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_chat"): ("GET", "/api/v1/identities/identity_one/conversations/chat_one"),
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "disconnect_result"): ("POST", "/api/v1/connections/connection_one/disconnect"),
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "history_after_disconnect"): ("GET", "/api/v1/conversations/chat_one/messages"),
+    ("linking_identity_lifecycle", "different_identity_account", "account_result"): ("GET", "/api/v1/accounts"),
+    ("linking_identity_lifecycle", "different_identity_account", "grant_count"): ("GET", "/api/v1/grants"),
+    ("linking_identity_lifecycle", "different_identity_account", "history_count"): ("GET", "/api/v1/identities/identity_two/conversations"),
 }
 
 
@@ -96,7 +108,10 @@ class FakeTransport:
             "status": "linked",
             "connection_id": "connection_one",
             "previous_connection_id": "connection_one",
-            "new_connection_id": "connection_one",
+            "new_connection_id": "connection_new",
+            "operation_id": "operation_disconnect",
+            "disconnect_operation_id": "operation_disconnect",
+            "replacement_connection_id": "connection_new",
             "history_message_id": "message_one",
             "disconnect_status": "disconnected",
             "revision": "revision_one",
@@ -179,15 +194,58 @@ class FakeTransport:
         return body
 
     def rest(self, method: str, path: str, query: dict[str, Any], body: Any, token: str | None) -> client_acceptance.HttpResponse:
-        del query, body, token
+        del token
         self.rest_calls.append((method, path))
+        acceptance_case = query.get("acceptance_case")
+        body_path = path
+        if acceptance_case == "different_identity_account":
+            body_path = "/different_identity_account"
+        elif acceptance_case == "subscription_two_initial":
+            body_path = "/subscription_two"
+        elif acceptance_case in {"revision_removal", "retry", "cutover"}:
+            body_path = f"/{acceptance_case}"
+        response_body = self._body(body_path)
         status = self.rest_statuses.get(path, 200)
         case = path.rstrip("/").split("/")[-1]
-        if case in {"account_failover_rejected", "wrong_resource", "expired_installation", "revoked_installation"}:
+        if (isinstance(body, dict) and body.get("acceptance_case") == "account_failover_rejected") or acceptance_case in {"wrong_resource", "expired_installation", "revoked_installation"}:
             status = 401
-        if case in {"missing_grant", "account_mismatch"}:
+        if acceptance_case in {"missing_grant", "account_mismatch"}:
             status = 403
-        response_body = self._body(path)
+        if acceptance_case in {"wrong_resource", "expired_installation", "revoked_installation", "missing_grant", "account_mismatch"}:
+            response_body["error_code"] = acceptance_case
+        if path == "/api/v1/grants" or path.startswith("/api/v1/grants/"):
+            response_body["id"] = response_body["grant_id"]
+        elif path.endswith("/relink-sessions"):
+            response_body["id"] = "relink_session_one"
+        elif path.endswith("/conversations/chat_one"):
+            response_body["id"] = response_body["chat_id"]
+        if path == "/api/v1/accounts":
+            response_body = {
+                "items": [
+                    {
+                        "identity_id": response_body["identity_id"],
+                        "account_id": response_body["account_id"],
+                    }
+                ],
+                "next_cursor": None,
+            }
+        elif path == "/api/v1/grants" and method == "GET":
+            response_body = {"items": [], "next_cursor": None}
+        elif path.startswith("/api/v1/identities/") and path.endswith("/conversations"):
+            response_body = {"items": [], "next_cursor": None}
+        if query.get("acceptance_case") == "disconnect_preserves_history":
+            response_body = {
+                "items": [
+                    {
+                        "id": response_body["history_message_id"],
+                        "identity_id": response_body["identity_id"],
+                        "account_id": response_body["account_id"],
+                        "conversation_id": response_body["chat_id"],
+                        "connection_id": response_body["connection_id"],
+                    }
+                ],
+                "next_cursor": None,
+            }
         raw = client_acceptance.canonical_bytes(response_body)
         return client_acceptance.HttpResponse(status, {"content-type": "application/json"}, response_body, raw)
 
@@ -206,7 +264,19 @@ class FakeTransport:
                 },
             }
         else:
-            response_body = {"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": self._body("/mcp")}}
+            body = self._body("/mcp")
+            if request.get("tool") == "list_messages":
+                body = {
+                    "items": [
+                        {
+                            "id": body["message_id"],
+                            "account_id": body["account_id"],
+                            "conversation_id": body["chat_id"],
+                        }
+                    ],
+                    "next_cursor": None,
+                }
+            response_body = {"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": body}}
         raw = client_acceptance.canonical_bytes(response_body)
         status = 400 if request.get("arguments", {}).get("acceptance_case") == "provider_rejection" else 200
         return client_acceptance.HttpResponse(status, {"content-type": "application/json"}, response_body, raw)
@@ -264,9 +334,34 @@ def operation_for_requirement(
     observation_fields = client_acceptance._observation_fields(req, selected_observation)
     transport = req.transports[0]
     if transport == "rest":
-        default_method, default_path = REST_PATHS[(scenario, requirement_identifier)]
+        default_method, default_path = REST_OBSERVATION_PATHS.get(
+            (scenario, requirement_identifier, selected_observation),
+            REST_PATHS[(scenario, requirement_identifier)],
+        )
         request: dict[str, Any] = {"method": method or default_method, "path": path or default_path}
-        pointers = {name: f"/{name}" for name in observation_fields}
+        if req.case == "account_failover_rejected":
+            request["body"] = {"acceptance_case": req.case}
+        if req.case in {
+            "different_identity_account",
+            "subscription_two_initial",
+            "revision_removal",
+            "retry",
+            "cutover",
+            "wrong_resource",
+            "expired_installation",
+            "revoked_installation",
+            "missing_grant",
+            "account_mismatch",
+        }:
+            request["query"] = {"acceptance_case": req.case}
+        if selected_observation == "history_after_disconnect":
+            request["query"] = {"acceptance_case": req.case}
+        pointers = dict(
+            client_acceptance.REST_CANONICAL_POINTERS.get(
+                (scenario, requirement_identifier, selected_observation),
+                {name: f"/{name}" for name in observation_fields},
+            )
+        )
     else:
         if req.case == "initialize":
             request = {"method": "initialize"}
@@ -277,14 +372,24 @@ def operation_for_requirement(
             }
         else:
             allowed = client_acceptance.MCP_CONTRACTS[(scenario, requirement_identifier)]
-            request = {"tool": tool or allowed[0], "arguments": {"acceptance_case": req.case}}
-            pointers = {name: f"/result/structuredContent/{name}" for name in observation_fields}
+            chosen_tool = tool or allowed[0]
+            request = {"tool": chosen_tool, "arguments": {"acceptance_case": req.case}}
+            if chosen_tool == "list_messages":
+                request["arguments"].update(
+                    {"identity_id": "identity_one", "conversation_id": "chat_one", "account_id": "account_one", "limit": 1}
+                )
+            pointers = dict(
+                client_acceptance.MCP_CANONICAL_POINTERS.get(
+                    (scenario, requirement_identifier, selected_observation, chosen_tool),
+                    {name: f"/result/structuredContent/{name}" for name in observation_fields},
+                )
+            )
     operation_evidence = evidence or {"extract": pointers, "required": list(observation_fields)}
     operation_expect = {"statuses": statuses or list(req.statuses)}
     if expect:
         operation_expect.update(expect)
     return {
-        "id": identifier or f"{scenario}-{requirement_identifier}",
+        "id": identifier or f"{scenario}-{requirement_identifier}-{selected_observation}",
         "scenario": scenario,
         "actor": actor or req.actors[0],
         "transport": transport,
@@ -297,9 +402,10 @@ def operation_for_requirement(
 
 def all_scenario_operations() -> list[dict[str, Any]]:
     return [
-        operation_for_requirement(scenario.identifier, req.identifier)
+        operation_for_requirement(scenario.identifier, req.identifier, observation=observation)
         for scenario in client_acceptance.SCENARIOS
         for req in scenario.requirements
+        for observation in client_acceptance._declared_observations(req)
     ]
 
 
@@ -327,7 +433,7 @@ class ClientAcceptanceTest(unittest.TestCase):
         self.assertEqual(bundle["run"]["status"], "complete")
         self.assertTrue(transport.rest_calls)
         self.assertIn("initialize", transport.mcp_calls)
-        self.assertIn("list_identities", transport.mcp_calls)
+        self.assertIn("list_messages", transport.mcp_calls)
         self.assertEqual(len(bundle["scenarios"]), len(client_acceptance.SCENARIOS))
         self.assertTrue(all(item["status"] == "pass" for item in bundle["scenarios"]))
         self.assertFalse("controlled-token-value" in json.dumps(bundle))
@@ -341,31 +447,29 @@ class ClientAcceptanceTest(unittest.TestCase):
 
     def test_arbitrary_successful_get_does_not_satisfy_send_contract(self) -> None:
         operation = operation_for_requirement("text_send_and_route", "saved_before_dispatch", path="/api/v1/identities/identity_one", method="GET")
-        bundle = client_acceptance.AcceptanceRunner(
-            config_with_operations([operation]),
-            transport=FakeTransport(),
-        ).run()
-        record = bundle["operations"][0]
-        self.assertEqual(record["status"], "unverified")
-        self.assertIn("entrypoint", record["reason"] or "")
-        self.assertEqual(next(item for item in bundle["scenarios"] if item["id"] == "text_send_and_route")["status"], "unverified")
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
 
     def test_required_contract_evidence_prevents_false_pass(self) -> None:
         req = requirement("text_send_and_route", "saved_before_dispatch")
         pointers = {name: f"/{name}" for name in req.evidence}
         pointers["command_id"] = "/missing"
         operation = operation_for_requirement("text_send_and_route", "saved_before_dispatch", evidence={"extract": pointers, "required": list(req.evidence)})
-        bundle = client_acceptance.AcceptanceRunner(config_with_operations([operation]), transport=FakeTransport()).run()
+        bundle = client_acceptance.AcceptanceRunner(
+            config_with_operations([operation]),
+            transport=FakeTransport(),
+        ).run()
         self.assertEqual(bundle["operations"][0]["status"], "unverified")
         self.assertIn("command_id", bundle["operations"][0]["reason"] or "")
 
     def test_passing_observed_ids_can_bind_a_later_operation(self) -> None:
         first = operation_for_requirement(
-            "linking_identity_lifecycle", "identity_grant", identifier="grant"
+            "linking_identity_lifecycle", "identity_grant", identifier="grant", observation="grant_result"
         )
         second = operation_for_requirement(
             "linking_identity_lifecycle",
             "same_identity_relink",
+            observation="relink_grant",
             path="/api/v1/grants/${observed.grant.account_id}",
         )
         transport = FakeTransport()
@@ -433,9 +537,14 @@ class ClientAcceptanceTest(unittest.TestCase):
                     "id": payload["id"],
                     "result": {
                         "structuredContent": {
-                            "account_id": "account_one",
-                            "chat_id": "chat_one",
-                            "message_id": "message_one",
+                            "items": [
+                                {
+                                    "account_id": "account_one",
+                                    "conversation_id": "chat_one",
+                                    "id": "message_one",
+                                }
+                            ],
+                            "next_cursor": None,
                         }
                     },
                 }
@@ -525,17 +634,17 @@ class ClientAcceptanceTest(unittest.TestCase):
                 observation="relink_result",
             ),
             operation_for_requirement(
-                "linking_identity_lifecycle",
-                "same_identity_relink",
-                identifier="relink-connections",
-                observation="relink_connections",
-                method="GET",
-                path="/api/v1/connections",
-            ),
-            operation_for_requirement(
-                "linking_identity_lifecycle",
-                "same_identity_relink",
-                identifier="relink-grant",
+            "linking_identity_lifecycle",
+            "same_identity_relink",
+            identifier="relink-operation",
+            observation="relink_operation",
+            method="GET",
+            path="/api/v1/connections/connection_one/lifecycle-operations/lifecycle_relink_session_one",
+        ),
+        operation_for_requirement(
+            "linking_identity_lifecycle",
+            "same_identity_relink",
+            identifier="relink-grant",
                 observation="relink_grant",
                 method="POST",
                 path="/api/v1/grants",
@@ -561,12 +670,108 @@ class ClientAcceptanceTest(unittest.TestCase):
         )
         self.assertEqual(len(coverage["operation_ids"]), 4)
 
+    def test_named_lifecycle_observation_cannot_be_replaced_by_a_generic_pass(self) -> None:
+        operations = [
+            operation_for_requirement(
+                "linking_identity_lifecycle",
+                "same_identity_relink",
+                identifier="relink-result",
+                observation="relink_result",
+            ),
+            operation_for_requirement(
+                "linking_identity_lifecycle",
+                "same_identity_relink",
+                identifier="relink-grant",
+                observation="relink_grant",
+                method="POST",
+                path="/api/v1/grants",
+            ),
+            operation_for_requirement(
+                "linking_identity_lifecycle",
+                "same_identity_relink",
+                identifier="relink-chat",
+                observation="relink_chat",
+                method="GET",
+                path="/api/v1/identities/identity_one/conversations/chat_one",
+            ),
+        ]
+        bundle = client_acceptance.AcceptanceRunner(
+            config_with_operations(operations), transport=FakeTransport()
+        ).run()
+        coverage = next(
+            item
+            for item in next(
+                scenario for scenario in bundle["scenarios"] if scenario["id"] == "linking_identity_lifecycle"
+            )["coverage"]
+            if item["requirement"] == "same_identity_relink"
+        )
+        self.assertEqual(coverage["status"], "unverified")
+        self.assertEqual(
+            next(item for item in coverage["observations"] if item["name"] == "relink_operation")["status"],
+            "unverified",
+        )
+
+    def test_disconnect_cancellation_route_is_not_disconnect_evidence(self) -> None:
+        operation = operation_for_requirement(
+            "linking_identity_lifecycle",
+            "disconnect_preserves_history",
+            observation="disconnect_result",
+            method="DELETE",
+            path="/api/v1/link-sessions/link_session_one",
+        )
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_provider_account_id_cannot_be_extracted_from_public_response(self) -> None:
+        operation = operation_for_requirement(
+            "linking_identity_lifecycle",
+            "identity_grant",
+            observation="grant_result",
+            evidence={
+                "extract": {
+                    "provider_account_id": "/provider_account_id",
+                },
+                "required": ["provider_account_id"],
+            },
+        )
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_passing_bundle_requires_nonnull_response_provenance(self) -> None:
+        operation = operation_for_requirement("oauth_connection", "protected_resource")
+        bundle = client_acceptance.AcceptanceRunner(
+            config_with_operations([operation]), transport=FakeTransport()
+        ).run()
+        bundle["operations"][0]["response"] = None
+        with self.assertRaises(client_acceptance.EvidenceError):
+            client_acceptance.validate_bundle(bundle)
+        bundle = client_acceptance.AcceptanceRunner(
+            config_with_operations([operation]), transport=FakeTransport()
+        ).run()
+        bundle["operations"][0]["response"]["http_status"] = 500
+        with self.assertRaises(client_acceptance.EvidenceError):
+            client_acceptance.validate_bundle(bundle)
+
+    def test_scoped_mcp_read_requires_the_real_list_messages_tool_shape(self) -> None:
+        operation = operation_for_requirement(
+            "oauth_connection",
+            "mcp_scoped_read",
+            tool="list_identities",
+        )
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+
     def test_controlled_real_route_lifecycle_uses_network_transport(self) -> None:
         timestamp = "2026-09-14T00:00:00Z"
 
-        def link_session(status: str = "awaiting_user") -> dict[str, Any]:
+        def link_session(
+            status: str = "awaiting_user",
+            *,
+            session_id: str = "link_session_one",
+            connection_id: str = "connection_new",
+        ) -> dict[str, Any]:
             return {
-                "id": "link_session_one",
+                "id": session_id,
                 "identity_id": "identity_one",
                 "provider": "whatsapp",
                 "generation": 1,
@@ -575,7 +780,7 @@ class ClientAcceptanceTest(unittest.TestCase):
                 "expires_at": timestamp,
                 "action_expires_at": None,
                 "qr": None,
-                "connection_id": "connection_new",
+                "connection_id": connection_id,
                 "account_id": "account_one",
                 "provider_label": "Controlled WhatsApp",
                 "error_code": None,
@@ -596,6 +801,25 @@ class ClientAcceptanceTest(unittest.TestCase):
                 self.calls.append(("POST", self.path))
                 if self.path.endswith("/link-sessions"):
                     self._json(link_session())
+                    return
+                if self.path.endswith("/relink-sessions"):
+                    self._json(link_session("connected", session_id="relink_session_one", connection_id="connection_one"))
+                    return
+                if self.path.endswith("/disconnect"):
+                    self._json(
+                        {
+                            "operation_id": "operation_disconnect",
+                            "kind": "disconnect",
+                            "connection_id": "connection_one",
+                            "provider": "whatsapp",
+                            "status": "succeeded",
+                            "session_generation": timestamp,
+                            "replacement_connection_id": None,
+                            "error_code": None,
+                            "created_at": timestamp,
+                            "updated_at": timestamp,
+                        }
+                    )
                     return
                 self._json(
                     {
@@ -621,30 +845,20 @@ class ClientAcceptanceTest(unittest.TestCase):
 
             def do_GET(self) -> None:  # noqa: N802 - stdlib protocol hook
                 self.calls.append(("GET", self.path))
-                if self.path == "/api/v1/connections":
+                if "/lifecycle-operations/" in self.path:
                     self._json(
-                        [
-                            {
-                                "id": "connection_old",
-                                "tenant_id": "tenant_one",
-                                "identity_id": "identity_one",
-                                "provider": "whatsapp",
-                                "display_label": "Old connection",
-                                "status": "disconnected",
-                                "capabilities": [],
-                                "last_synced_at": None,
-                            },
-                            {
-                                "id": "connection_new",
-                                "tenant_id": "tenant_one",
-                                "identity_id": "identity_one",
-                                "provider": "whatsapp",
-                                "display_label": "New connection",
-                                "status": "ready",
-                                "capabilities": [],
-                                "last_synced_at": timestamp,
-                            },
-                        ]
+                        {
+                            "operation_id": "lifecycle_relink_session_one",
+                            "kind": "relink",
+                            "connection_id": "connection_one",
+                            "provider": "whatsapp",
+                            "status": "succeeded",
+                            "session_generation": timestamp,
+                            "replacement_connection_id": "connection_new",
+                            "error_code": None,
+                            "created_at": timestamp,
+                            "updated_at": timestamp,
+                        }
                     )
                     return
                 if self.path.endswith("/conversations/chat_one"):
@@ -670,7 +884,7 @@ class ClientAcceptanceTest(unittest.TestCase):
                                 "tenant_id": "tenant_one",
                                 "identity_id": "identity_one",
                                 "account_id": "account_one",
-                                "connection_id": "connection_new",
+                                "connection_id": "connection_one",
                                 "conversation_id": "chat_one",
                                 "direction": "inbound",
                                 "sender_label": "Controlled sender",
@@ -684,10 +898,6 @@ class ClientAcceptanceTest(unittest.TestCase):
                         "next_cursor": None,
                     }
                 )
-
-            def do_DELETE(self) -> None:  # noqa: N802 - stdlib protocol hook
-                self.calls.append(("DELETE", self.path))
-                self._json(link_session("cancelled"))
 
             def log_message(self, format: str, *args: Any) -> None:
                 del format, args
@@ -715,10 +925,10 @@ class ClientAcceptanceTest(unittest.TestCase):
                     operation_for_requirement(
                         "linking_identity_lifecycle",
                         "same_identity_relink",
-                        identifier="real-relink-connections",
-                        observation="relink_connections",
+                        identifier="real-relink-operation",
+                        observation="relink_operation",
                         method="GET",
-                        path="/api/v1/connections",
+                        path="/api/v1/connections/connection_one/lifecycle-operations/lifecycle_relink_session_one",
                     ),
                     operation_for_requirement(
                         "linking_identity_lifecycle",
@@ -754,21 +964,6 @@ class ClientAcceptanceTest(unittest.TestCase):
             )
             evidence_overrides = {
                 "linking_identity_lifecycle-unlinked_start": {"link_session_id": "/id"},
-                "linking_identity_lifecycle-identity_grant": {"grant_id": "/id"},
-                "real-relink-connections": {
-                    "identity_id": "/1/identity_id",
-                    "previous_connection_id": "/0/id",
-                    "new_connection_id": "/1/id",
-                },
-                "real-relink-grant": {"grant_id": "/id"},
-                "real-relink-chat": {"chat_id": "/id"},
-                "real-disconnect": {"disconnect_status": "/status"},
-                "real-history-after-disconnect": {
-                    "identity_id": "/items/0/identity_id",
-                    "account_id": "/items/0/account_id",
-                    "chat_id": "/items/0/conversation_id",
-                    "history_message_id": "/items/0/id",
-                },
             }
             for operation in config["operations"]:
                 operation["evidence"]["extract"].update(evidence_overrides.get(operation["id"], {}))
@@ -783,7 +978,12 @@ class ClientAcceptanceTest(unittest.TestCase):
             self.assertEqual(statuses["same_identity_relink"], "pass")
             self.assertEqual(statuses["disconnect_preserves_history"], "pass")
             self.assertIn(("POST", "/api/v1/identities/identity_one/link-sessions"), Handler.calls)
-            self.assertIn(("GET", "/api/v1/conversations/chat_one/messages"), Handler.calls)
+            self.assertIn(("POST", "/api/v1/connections/connection_one/relink-sessions"), Handler.calls)
+            self.assertIn(("POST", "/api/v1/connections/connection_one/disconnect"), Handler.calls)
+            self.assertIn(
+                ("GET", "/api/v1/conversations/chat_one/messages?acceptance_case=disconnect_preserves_history"),
+                Handler.calls,
+            )
             self.assertEqual(bundle["controls"]["fixture_evidence_is_client_proof"], False)
         finally:
             server.shutdown()

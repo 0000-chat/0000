@@ -92,9 +92,9 @@ EVIDENCE_FIELD_KINDS.update(
             "message_id",
             "identity_id",
             "link_session_id",
-            "provider_account_id",
             "grant_id",
             "connection_id",
+            "disconnect_operation_id",
             "previous_connection_id",
             "new_connection_id",
             "history_message_id",
@@ -321,14 +321,13 @@ SCENARIOS: tuple[Scenario, ...] = (
                 "identity_grant",
                 "linking_lifecycle",
                 "identity_grant",
-                ("identity_id", "account_id", "provider_account_id", "grant_id"),
+                ("identity_id", "account_id", "grant_id"),
                 transports=("rest",),
                 actor="admin",
                 statuses=(200, 201),
-                bindings=("identity_ids", "account_ids", "provider_account_ids", "grant_ids"),
+                bindings=("identity_ids", "account_ids", "grant_ids"),
                 observations=(
                     ("grant_result", ("identity_id", "account_id", "grant_id")),
-                    ("provider_account", ("identity_id", "provider_account_id")),
                 ),
             ),
             _requirement(
@@ -341,6 +340,7 @@ SCENARIOS: tuple[Scenario, ...] = (
                     "chat_id",
                     "grant_id",
                     "connection_id",
+                    "link_session_id",
                     "previous_connection_id",
                     "new_connection_id",
                 ),
@@ -349,11 +349,11 @@ SCENARIOS: tuple[Scenario, ...] = (
                 statuses=(200, 201),
                 bindings=("identity_ids", "account_ids", "grant_ids", "chat_ids", "connection_ids"),
                 observations=(
-                    ("relink_result", ("identity_id", "account_id", "connection_id")),
                     (
-                        "relink_connections",
-                        ("identity_id", "previous_connection_id", "new_connection_id"),
+                        "relink_result",
+                        ("identity_id", "account_id", "connection_id", "link_session_id"),
                     ),
+                    ("relink_operation", ("previous_connection_id", "new_connection_id")),
                     ("relink_grant", ("identity_id", "account_id", "grant_id")),
                     ("relink_chat", ("identity_id", "account_id", "chat_id")),
                 ),
@@ -377,11 +377,17 @@ SCENARIOS: tuple[Scenario, ...] = (
                 observations=(
                     (
                         "disconnect_result",
-                        ("identity_id", "account_id", "connection_id", "disconnect_status"),
+                        ("connection_id", "disconnect_operation_id", "disconnect_status"),
                     ),
                     (
                         "history_after_disconnect",
-                        ("identity_id", "account_id", "chat_id", "history_message_id"),
+                        (
+                            "identity_id",
+                            "account_id",
+                            "chat_id",
+                            "connection_id",
+                            "history_message_id",
+                        ),
                     ),
                 ),
             ),
@@ -392,7 +398,6 @@ SCENARIOS: tuple[Scenario, ...] = (
                 (
                     "identity_id",
                     "account_id",
-                    "provider_account_id",
                     "grant_count",
                     "history_message_count",
                 ),
@@ -401,16 +406,16 @@ SCENARIOS: tuple[Scenario, ...] = (
                 statuses=(200, 201),
                 expected=(("grant_count", 0), ("history_message_count", 0)),
                 observations=(
-                    ("account_result", ("identity_id", "account_id", "provider_account_id")),
-                    ("grant_count", ("identity_id", "account_id", "grant_count")),
-                    ("history_count", ("identity_id", "account_id", "history_message_count")),
+                    ("account_result", ("identity_id", "account_id")),
+                    ("grant_count", ("grant_count",)),
+                    ("history_count", ("history_message_count",)),
                 ),
             ),
         ),
         (
             _relation("equal", "identity_grant", "same_identity_relink", "identity_id", "account_id", "grant_id"),
             _relation("equal", "identity_grant", "disconnect_preserves_history", "identity_id", "account_id"),
-            _relation("distinct", "identity_grant", "different_identity_account", "identity_id", "account_id", "provider_account_id"),
+            _relation("distinct", "identity_grant", "different_identity_account", "identity_id", "account_id"),
         ),
     ),
     Scenario(
@@ -885,57 +890,111 @@ REQUIREMENT_BY_KEY = {
 def _observation_fields(requirement: Requirement, observation: str) -> tuple[str, ...]:
     """Return the typed fields one response role may contribute to a case."""
 
-    if observation == "response":
-        return requirement.evidence
     for name, fields in requirement.observations:
         if name == observation:
             return fields
+    if observation == "response" and not requirement.observations:
+        return requirement.evidence
     return ()
 
 
 def _declared_observations(requirement: Requirement) -> dict[str, tuple[str, ...]]:
-    observations = {"response": requirement.evidence}
-    observations.update(requirement.observations)
-    return observations
+    if requirement.observations:
+        return dict(requirement.observations)
+    return {"response": requirement.evidence}
 
-# A proof label is meaningful only when the request reaches the corresponding
-# entrypoint.  These small contracts keep a successful but unrelated GET from
-# satisfying a send, group, restore, or negative case.  Providers may expose
-# different concrete IDs, so contracts use method/tool and stable route words.
-REQUEST_CONTRACTS: dict[tuple[str, str], dict[str, tuple[str, ...]]] = {
-    ("oauth_connection", "protected_resource"): {"methods": ("GET",), "paths": ("oauth-protected-resource",)},
-    ("oauth_connection", "authorization_server"): {"methods": ("GET",), "paths": ("oauth-authorization-server",)},
-    ("linking_identity_lifecycle", "unlinked_start"): {"methods": ("POST",), "paths": ("identities", "link-sessions")},
-    ("linking_identity_lifecycle", "identity_grant"): {"methods": ("POST", "PATCH"), "paths": ("grants",)},
-    ("linking_identity_lifecycle", "same_identity_relink"): {"methods": ("GET", "POST", "PATCH"), "paths": ("connections", "grants", "conversations", "link-sessions")},
-    ("linking_identity_lifecycle", "disconnect_preserves_history"): {"methods": ("GET", "DELETE"), "paths": ("link-sessions", "conversations", "connections")},
-    ("linking_identity_lifecycle", "different_identity_account"): {"methods": ("GET",), "paths": ("identities", "accounts", "grants", "conversations")},
-    ("history_context_attachment", "stored_history"): {"methods": ("GET",), "paths": ("conversation", "message", "history", "search")},
-    ("history_context_attachment", "attachment_read"): {"methods": ("GET",), "paths": ("attachment",)},
-    ("text_send_and_route", "saved_before_dispatch"): {"methods": ("POST",), "paths": ("message", "conversation", "send")},
-    ("text_send_and_route", "provider_delivery"): {"methods": ("GET", "POST"), "paths": ("command", "dispatch", "delivery")},
-    ("text_send_and_route", "account_failover_rejected"): {"methods": ("POST",), "paths": ("message", "conversation", "send")},
-    ("direct_chat_and_group", "contact_resolution"): {"methods": ("POST",), "paths": ("contact", "resolve")},
-    ("direct_chat_and_group", "direct_chat_creation"): {"methods": ("POST",), "paths": ("conversation", "chat")},
-    ("direct_chat_and_group", "group_creation"): {"methods": ("POST",), "paths": ("group",)},
-    ("direct_chat_and_group", "group_management"): {"methods": ("PATCH", "POST", "DELETE"), "paths": ("group", "participant", "member")},
-    ("webhook_subscriptions", "subscription_one_initial"): {"methods": ("POST",), "paths": ("webhook",)},
-    ("webhook_subscriptions", "subscription_two_initial"): {"methods": ("POST",), "paths": ("webhook",)},
-    ("webhook_subscriptions", "revision_removal"): {"methods": ("DELETE", "PATCH", "POST"), "paths": ("webhook", "delivery")},
-    ("webhook_subscriptions", "retry"): {"methods": ("POST",), "paths": ("webhook", "retry", "delivery")},
-    ("webhook_subscriptions", "cutover"): {"methods": ("POST", "PATCH"), "paths": ("webhook", "cutover")},
-    ("receipt_and_restore", "explicit_receipt"): {"methods": ("POST", "GET"), "paths": ("receipt",)},
-    ("receipt_and_restore", "active_removal"): {"methods": ("POST", "PATCH", "DELETE"), "paths": ("removal", "message")},
-    ("receipt_and_restore", "restore_anti_resurrection"): {"methods": ("POST", "GET"), "paths": ("restore",)},
-    ("authorization_negative_matrix", "wrong_resource"): {"methods": ("GET", "POST"), "paths": ("resource",)},
-    ("authorization_negative_matrix", "expired_installation"): {"methods": ("GET", "POST"), "paths": ("installation",)},
-    ("authorization_negative_matrix", "revoked_installation"): {"methods": ("GET", "POST"), "paths": ("installation",)},
-    ("authorization_negative_matrix", "missing_grant"): {"methods": ("GET", "POST"), "paths": ("grant",)},
-    ("authorization_negative_matrix", "account_mismatch"): {"methods": ("GET", "POST"), "paths": ("account",)},
-    ("surface_outcome_record", "surface_metadata"): {"methods": ("GET",), "paths": ("surface", "metadata", "outcome")},
+
+# A proof label is bound to one concrete application entrypoint.  Matching the
+# complete route keeps a successful but unrelated endpoint from satisfying a
+# semantic case.  IDs remain wildcards because the configured bindings supply
+# the concrete values at run time.
+RouteContract = tuple[tuple[str, ...], str]
+REST_ROUTE_CONTRACTS: dict[tuple[str, str, str], tuple[RouteContract, ...]] = {
+    ("oauth_connection", "protected_resource", "response"): (("GET", r"/\.well-known/oauth-protected-resource"),),
+    ("oauth_connection", "authorization_server", "response"): (("GET", r"/\.well-known/oauth-authorization-server"),),
+    ("linking_identity_lifecycle", "unlinked_start", "response"): (("POST", r"/api/v1/identities/[^/]+/link-sessions"),),
+    ("linking_identity_lifecycle", "identity_grant", "grant_result"): (("POST", r"/api/v1/grants(?:/[^/]+)?"), ("PATCH", r"/api/v1/grants/[^/]+")),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): (("POST", r"/api/v1/connections/[^/]+/relink-sessions"),),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_operation"): (("GET", r"/api/v1/connections/[^/]+/lifecycle-operations/[^/]+"),),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): (("POST", r"/api/v1/grants(?:/[^/]+)?"), ("PATCH", r"/api/v1/grants/[^/]+")),
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_chat"): (("GET", r"/api/v1/identities/[^/]+/conversations/[^/]+"),),
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "disconnect_result"): (("POST", r"/api/v1/connections/[^/]+/disconnect"),),
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "history_after_disconnect"): (("GET", r"/api/v1/conversations/[^/]+/messages"),),
+    ("linking_identity_lifecycle", "different_identity_account", "account_result"): (("GET", r"/api/v1/accounts"),),
+    ("linking_identity_lifecycle", "different_identity_account", "grant_count"): (("GET", r"/api/v1/grants"),),
+    ("linking_identity_lifecycle", "different_identity_account", "history_count"): (("GET", r"/api/v1/identities/[^/]+/conversations"),),
+    ("history_context_attachment", "stored_history", "response"): (("GET", r"/api/v1/conversations/[^/]+/messages"),),
+    ("history_context_attachment", "attachment_read", "response"): (("GET", r"/api/v1/attachments/[^/]+(?:/download)?"),),
+    ("text_send_and_route", "saved_before_dispatch", "response"): (("POST", r"/api/v1/conversations/[^/]+/messages"),),
+    ("text_send_and_route", "provider_delivery", "response"): (("GET", r"/api/v1/commands/[^/]+"), ("GET", r"/api/v1/commands/[^/]+/evidence")),
+    ("text_send_and_route", "account_failover_rejected", "response"): (("POST", r"/api/v1/conversations/[^/]+/messages"),),
+    ("direct_chat_and_group", "contact_resolution", "response"): (("POST", r"/api/v1/contacts/resolve"),),
+    ("direct_chat_and_group", "direct_chat_creation", "response"): (("POST", r"/api/v1/conversations"),),
+    ("direct_chat_and_group", "group_creation", "response"): (("POST", r"/api/v1/groups"),),
+    ("direct_chat_and_group", "group_management", "response"): (("PATCH", r"/api/v1/groups/[^/]+"), ("POST", r"/api/v1/groups/[^/]+/participants"), ("DELETE", r"/api/v1/groups/[^/]+/participants")),
+    ("webhook_subscriptions", "subscription_one_initial", "response"): (("POST", r"/api/v1/webhook-subscriptions"),),
+    ("webhook_subscriptions", "subscription_two_initial", "response"): (("POST", r"/api/v1/webhook-subscriptions"),),
+    ("webhook_subscriptions", "revision_removal", "response"): (("DELETE", r"/api/v1/webhook-subscriptions/[^/]+"), ("POST", r"/api/v1/webhook-deliveries/[^/]+/retry")),
+    ("webhook_subscriptions", "retry", "response"): (("POST", r"/api/v1/webhook-deliveries/[^/]+/retry"),),
+    ("webhook_subscriptions", "cutover", "response"): (("POST", r"/api/v1/webhook-subscriptions/[^/]+/cutover"),),
+    ("receipt_and_restore", "explicit_receipt", "response"): (("POST", r"/api/v1/conversations/[^/]+/receipts/read"), ("GET", r"/api/v1/receipts/[^/]+")),
+    ("receipt_and_restore", "active_removal", "response"): (("POST", r"/api/v1/removals"),),
+    ("receipt_and_restore", "restore_anti_resurrection", "response"): (("POST", r"/api/v1/removals"),),
+    # Negative cases are intentionally tied to real read/metadata routes; the
+    # expected error status and capability evidence still come from the target.
+    ("authorization_negative_matrix", "wrong_resource", "response"): (("GET", r"/api/v1/identities"),),
+    ("authorization_negative_matrix", "expired_installation", "response"): (("GET", r"/api/v1/identities"),),
+    ("authorization_negative_matrix", "revoked_installation", "response"): (("GET", r"/api/v1/identities"),),
+    ("authorization_negative_matrix", "missing_grant", "response"): (("GET", r"/api/v1/conversations/[^/]+/messages"),),
+    ("authorization_negative_matrix", "account_mismatch", "response"): (("GET", r"/api/v1/conversations/[^/]+/messages"),),
+    ("surface_outcome_record", "surface_metadata", "response"): (("GET", r"/api/v1/session"),),
 }
+
+REST_CANONICAL_POINTERS: dict[tuple[str, str, str], dict[str, Any]] = {
+    ("linking_identity_lifecycle", "identity_grant", "grant_result"): {
+        "identity_id": "/identity_id", "account_id": "/account_id", "grant_id": "/id"
+    },
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): {
+        "identity_id": "/identity_id", "account_id": "/account_id", "connection_id": "/connection_id", "link_session_id": "/id"
+    },
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_operation"): {
+        "previous_connection_id": "/connection_id", "new_connection_id": "/replacement_connection_id"
+    },
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): {
+        "identity_id": "/identity_id", "account_id": "/account_id", "grant_id": "/id"
+    },
+    ("linking_identity_lifecycle", "same_identity_relink", "relink_chat"): {
+        "identity_id": "/identity_id", "account_id": "/account_id", "chat_id": "/id"
+    },
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "disconnect_result"): {
+        "connection_id": "/connection_id", "disconnect_operation_id": "/operation_id", "disconnect_status": "/status"
+    },
+    ("linking_identity_lifecycle", "disconnect_preserves_history", "history_after_disconnect"): {
+        "identity_id": "/items/0/identity_id", "account_id": "/items/0/account_id", "chat_id": "/items/0/conversation_id", "connection_id": "/items/0/connection_id", "history_message_id": "/items/0/id"
+    },
+    ("linking_identity_lifecycle", "different_identity_account", "account_result"): {
+        "identity_id": "/items/0/identity_id", "account_id": "/items/0/account_id"
+    },
+    ("linking_identity_lifecycle", "different_identity_account", "grant_count"): {
+        "grant_count": {"pointer": "/items", "transform": "count"}
+    },
+    ("linking_identity_lifecycle", "different_identity_account", "history_count"): {
+        "history_message_count": {"pointer": "/items", "transform": "count"}
+    },
+}
+
+MCP_CANONICAL_POINTERS: dict[tuple[str, str, str, str], dict[str, Any]] = {
+    ("oauth_connection", "mcp_scoped_read", "response", "list_messages"): {
+        "account_id": "/result/structuredContent/items/0/account_id",
+        "chat_id": "/result/structuredContent/items/0/conversation_id",
+        "message_id": "/result/structuredContent/items/0/id",
+    },
+}
+
+# Compatibility name retained for callers that inspect the contract catalog.
+REQUEST_CONTRACTS = REST_ROUTE_CONTRACTS
 MCP_CONTRACTS: dict[tuple[str, str], tuple[str, ...]] = {
-    ("oauth_connection", "mcp_scoped_read"): ("list_identities", "list_conversations", "list_messages", "search_messages"),
+    ("oauth_connection", "mcp_scoped_read"): ("list_messages",),
     ("history_context_attachment", "stored_history"): ("list_conversations", "list_messages", "search_messages"),
     ("history_context_attachment", "attachment_read"): ("get_attachment", "read_attachment", "download_attachment"),
     ("text_send_and_route", "saved_before_dispatch"): ("send_text_reply", "send_message"),
@@ -944,13 +1003,13 @@ MCP_CONTRACTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("direct_chat_and_group", "contact_resolution"): ("resolve_contact", "resolve_recipient"),
     ("direct_chat_and_group", "direct_chat_creation"): ("create_direct_chat", "create_chat"),
     ("direct_chat_and_group", "group_creation"): ("create_group",),
-    ("direct_chat_and_group", "group_management"): ("rename_group", "add_group_participants", "remove_group_participants", "update_group"),
+    ("direct_chat_and_group", "group_management"): ("rename_group", "add_group_participants", "remove_group_participants"),
     ("webhook_subscriptions", "subscription_one_initial"): ("create_webhook_subscription",),
     ("webhook_subscriptions", "subscription_two_initial"): ("create_webhook_subscription",),
     ("webhook_subscriptions", "revision_removal"): ("update_webhook_subscription", "remove_webhook_subscription"),
     ("webhook_subscriptions", "retry"): ("retry_webhook_delivery",),
     ("webhook_subscriptions", "cutover"): ("cutover_webhook_subscription",),
-    ("receipt_and_restore", "explicit_receipt"): ("mark_read", "get_read_receipt", "record_receipt"),
+    ("receipt_and_restore", "explicit_receipt"): ("mark_read", "get_read_receipt", "list_read_receipts"),
     ("receipt_and_restore", "active_removal"): ("record_removal", "get_removal_status"),
     ("receipt_and_restore", "restore_anti_resurrection"): ("restore_message", "get_removal_status"),
     ("authorization_negative_matrix", "wrong_resource"): ("list_identities",),
@@ -1159,23 +1218,65 @@ def _safe_evidence_value(name: str, value: Any) -> Any:
     return value
 
 
+def _validate_extract_spec(spec: Any, label: str) -> None:
+    if isinstance(spec, str):
+        if not spec.startswith("/"):
+            raise ConfigError(f"{label} must be a JSON pointer")
+        return
+    if not isinstance(spec, dict) or set(spec) != {"pointer", "transform"}:
+        raise ConfigError(f"{label} must be a JSON pointer or a declared transform")
+    if not isinstance(spec["pointer"], str) or not spec["pointer"].startswith("/"):
+        raise ConfigError(f"{label}.pointer must be a JSON pointer")
+    if spec["transform"] != "count":
+        raise ConfigError(f"{label}.transform is unsupported")
+
+
+def _extract_evidence_value(body: Any, spec: Any) -> Any:
+    if isinstance(spec, str):
+        return json_pointer(body, spec)
+    if isinstance(spec, dict) and spec.get("transform") == "count":
+        value = json_pointer(body, spec["pointer"])
+        return len(value) if isinstance(value, list) else None
+    return None
+
+
+def _route_contracts_for(
+    scenario: str, requirement: Requirement, observation: str
+) -> tuple[RouteContract, ...]:
+    return REST_ROUTE_CONTRACTS.get(
+        (scenario, requirement.identifier, observation),
+        REST_ROUTE_CONTRACTS.get((scenario, requirement.identifier, "response"), ()),
+    )
+
+
+def _route_path_for_matching(path: str) -> str:
+    parsed = urllib.parse.urlsplit(path)
+    path_only = parsed.path or path.split("?", 1)[0]
+    return TEMPLATE.sub("placeholder", path_only)
+
+
 def _request_contract_errors(
     requirement: Requirement,
     scenario: str,
     request: dict[str, Any],
     transport: str,
+    observation: str = "response",
 ) -> list[str]:
     errors: list[str] = []
-    contract = REQUEST_CONTRACTS.get((scenario, requirement.identifier), {})
     if transport == "rest":
         method = str(request.get("method", "")).upper()
-        methods = requirement.rest_methods or contract.get("methods", ())
-        paths = requirement.path_fragments or contract.get("paths", ())
-        if methods and method not in methods:
+        contracts = _route_contracts_for(scenario, requirement, observation)
+        if requirement.rest_methods and method not in requirement.rest_methods:
             errors.append(f"HTTP method {method or '<missing>'} is not a {requirement.case} entrypoint")
-        path = str(request.get("path", ""))
-        if paths and not any(fragment in path.lower() for fragment in paths):
-            errors.append(f"path does not name a {requirement.case} entrypoint")
+        if contracts and not any(
+            method in methods and re.fullmatch(pattern, _route_path_for_matching(str(request.get("path", ""))))
+            for methods, pattern in contracts
+        ):
+            errors.append(f"route is not the declared {requirement.case} entrypoint")
+        elif not contracts and requirement.path_fragments:
+            path = str(request.get("path", "")).lower()
+            if not any(fragment.lower() == path for fragment in requirement.path_fragments):
+                errors.append(f"route is not the declared {requirement.case} entrypoint")
     else:
         if requirement.case == "initialize":
             if request.get("method") != "initialize":
@@ -1183,8 +1284,44 @@ def _request_contract_errors(
         else:
             tools = requirement.mcp_tools or MCP_CONTRACTS.get((scenario, requirement.identifier), ())
             tool = request.get("tool")
-            if tools and tool not in tools:
+            if not tools or tool not in tools:
                 errors.append(f"MCP tool {tool!r} is not a {requirement.case} entrypoint")
+    return errors
+
+
+def _canonical_evidence_pointers(
+    requirement: Requirement,
+    scenario: str,
+    observation: str,
+    request: dict[str, Any],
+    transport: str,
+) -> dict[str, Any] | None:
+    if transport == "rest":
+        return REST_CANONICAL_POINTERS.get((scenario, requirement.identifier, observation))
+    tool = request.get("tool")
+    if not isinstance(tool, str):
+        return None
+    return MCP_CANONICAL_POINTERS.get((scenario, requirement.identifier, observation, tool))
+
+
+def _evidence_contract_errors(
+    requirement: Requirement,
+    scenario: str,
+    observation: str,
+    request: dict[str, Any],
+    transport: str,
+    extract: dict[str, Any],
+) -> list[str]:
+    expected = _canonical_evidence_pointers(requirement, scenario, observation, request, transport)
+    if expected is None:
+        return []
+    errors: list[str] = []
+    for name, pointer in extract.items():
+        if name in expected and pointer != expected[name]:
+            errors.append(f"evidence pointer for {name} is not the canonical {requirement.case} response field")
+    unknown = sorted(set(extract) - set(expected))
+    if unknown:
+        errors.append(f"evidence fields are not present in the {requirement.case} response schema: {', '.join(unknown)}")
     return errors
 
 
@@ -1439,8 +1576,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(evidence, dict):
             raise ConfigError(f"operations[{index}].evidence must be an object")
         extract = evidence.get("extract", {})
-        if not isinstance(extract, dict) or any(not isinstance(pointer, str) for pointer in extract.values()):
+        if not isinstance(extract, dict):
             raise ConfigError(f"operations[{index}].evidence.extract must map names to JSON pointers")
+        for name, pointer in extract.items():
+            _validate_extract_spec(pointer, f"operations[{index}].evidence.extract.{name}")
         if any(CONTENT_FIELD.search(str(name)) for name in extract):
             raise ConfigError(
                 f"operations[{index}] may extract identifiers and hashes, not message content"
@@ -1470,6 +1609,22 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ConfigError(
                 f"operations[{index}].evidence.required must name at least one field from observation {observation!r}"
+            )
+        contract_errors = _request_contract_errors(
+            requirement, scenario, request, transport, observation
+        )
+        if contract_errors:
+            raise ConfigError(
+                f"operations[{index}] request is outside the declared {case} contract: "
+                + "; ".join(contract_errors)
+            )
+        evidence_contract_errors = _evidence_contract_errors(
+            requirement, scenario, observation, request, transport, extract
+        )
+        if evidence_contract_errors:
+            raise ConfigError(
+                f"operations[{index}].evidence is outside the declared response schema: "
+                + "; ".join(evidence_contract_errors)
             )
         assertions = operation.get("assert", [])
         if not isinstance(assertions, list):
@@ -1792,7 +1947,7 @@ class McpSession:
 def response_summary(response: HttpResponse) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "http_status": response.status,
-        "body_sha256": sha256_bytes(response.raw) if response.raw else None,
+        "body_sha256": sha256_bytes(response.raw),
         "headers": {
             key: value
             for key, value in response.headers.items()
@@ -1803,6 +1958,16 @@ def response_summary(response: HttpResponse) -> dict[str, Any]:
         summary["error"] = response.error
     if isinstance(response.body, dict) and isinstance(response.body.get("error"), dict):
         summary["jsonrpc_error"] = redact(response.body["error"])
+    payload = _jsonrpc_payload(response)
+    if payload is not None and "jsonrpc" in payload:
+        summary.update(
+            {
+                "jsonrpc_version": payload.get("jsonrpc"),
+                "jsonrpc_id": payload.get("id"),
+                "jsonrpc_request_id": response.details.get("jsonrpc_request_id"),
+                "jsonrpc_has_result": "result" in payload,
+            }
+        )
     return summary
 
 
@@ -1928,12 +2093,14 @@ def classify_response(
         return "implementation_defect", f"unexpected HTTP status {response.status}", {}
 
     requirement = _operation_requirement(operation)
+    observation = operation.get("proof", {}).get("observation", "response")
     if request is not None:
         contract_errors = _request_contract_errors(
             requirement,
             operation["scenario"],
             request,
             operation["transport"],
+            observation,
         )
         if contract_errors:
             return "unverified", "; ".join(contract_errors), {}
@@ -1948,9 +2115,19 @@ def classify_response(
             return "implementation_defect", mcp_error, {}
 
     evidence = operation.get("evidence", {})
+    evidence_contract_errors = _evidence_contract_errors(
+        requirement,
+        operation["scenario"],
+        observation,
+        request or operation.get("request", {}),
+        operation["transport"],
+        evidence.get("extract", {}),
+    )
+    if evidence_contract_errors:
+        return "unverified", "; ".join(evidence_contract_errors), {}
     extracted: dict[str, Any] = {}
     for name, pointer in evidence.get("extract", {}).items():
-        value = json_pointer(_response_body_for_extraction(response), pointer)
+        value = _extract_evidence_value(_response_body_for_extraction(response), pointer)
         try:
             extracted[name] = _safe_evidence_value(name, value)
         except EvidenceError as error:
@@ -2004,7 +2181,7 @@ def evaluate_scenario(
     records: list[dict[str, Any]],
     context: dict[str, Any] | None = None,
 ) -> tuple[str, str | None, list[str], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Evaluate cases from the union of their passing observations."""
+    """Evaluate every named observation, then combine only passing evidence."""
 
     selected: dict[str, dict[str, Any]] = {}
     coverage: list[dict[str, Any]] = []
@@ -2016,10 +2193,57 @@ def evaluate_scenario(
             if record.get("proof", {}).get("role") == requirement.role
             and record.get("proof", {}).get("case") == requirement.case
         ]
-        passing = [record for record in candidates if record.get("status") == "pass"]
+        observation_results: list[dict[str, Any]] = []
+        passing_records: list[dict[str, Any]] = []
+        for observation, fields in _declared_observations(requirement).items():
+            observation_candidates = [
+                record
+                for record in candidates
+                if record.get("proof", {}).get("observation", "response") == observation
+            ]
+            passing = [record for record in observation_candidates if record.get("status") == "pass"]
+            observed: dict[str, Any] = {}
+            conflicts: set[str] = set()
+            for record in passing:
+                for name, value in record.get("extracted", {}).items():
+                    if value is None:
+                        continue
+                    if name in observed and observed[name] != value:
+                        conflicts.add(name)
+                    else:
+                        observed[name] = value
+            missing = [name for name in fields if name not in observed]
+            if conflicts:
+                obs_status, obs_reason = "implementation_defect", (
+                    f"passing {observation} observations disagree on: {', '.join(sorted(conflicts))}"
+                )
+            elif not observation_candidates:
+                obs_status, obs_reason = "unverified", f"no operation was configured for observation {observation}"
+            elif missing:
+                obs_status, obs_reason = (
+                    "unverified",
+                    f"{observation} lacks evidence fields: {', '.join(missing)}",
+                )
+            elif passing:
+                obs_status, obs_reason = "pass", None
+            else:
+                obs_status, obs_reason = aggregate_status(observation_candidates)
+            observation_results.append(
+                {
+                    "name": observation,
+                    "status": obs_status,
+                    "reason": obs_reason,
+                    "operation_ids": [record["id"] for record in passing]
+                    or [record["id"] for record in observation_candidates],
+                    "observed_fields": sorted(observed),
+                }
+            )
+            if obs_status == "pass":
+                passing_records.extend(passing)
+
         aggregate: dict[str, Any] = {}
         conflicts: set[str] = set()
-        for record in passing:
+        for record in passing_records:
             for name, value in record.get("extracted", {}).items():
                 if value is None:
                     continue
@@ -2027,7 +2251,6 @@ def evaluate_scenario(
                     conflicts.add(name)
                 else:
                     aggregate[name] = value
-        missing = [name for name in requirement.evidence if name not in aggregate]
         expected_errors: list[str] = []
         for field_name, expected in requirement.expected:
             if field_name not in aggregate:
@@ -2037,30 +2260,31 @@ def evaluate_scenario(
                 expected_errors.append(
                     f"{field_name} expected {resolved!r}, got {aggregate[field_name]!r}"
                 )
+        observation_statuses = [item["status"] for item in observation_results]
         if conflicts:
             case_status, case_reason = "implementation_defect", (
                 f"passing observations disagree on: {', '.join(sorted(conflicts))}"
             )
         elif expected_errors:
             case_status, case_reason = "implementation_defect", "; ".join(expected_errors)
-        elif not missing and passing:
+        elif all(status == "pass" for status in observation_statuses):
             selected[requirement.identifier] = {
                 "id": requirement.identifier,
                 "extracted": aggregate,
-                "operation_ids": [record["id"] for record in passing],
+                "operation_ids": [record["id"] for record in passing_records],
             }
-            operation_ids.extend(record["id"] for record in passing)
+            operation_ids.extend(record["id"] for record in passing_records)
             case_status, case_reason = "pass", None
+        elif "implementation_defect" in observation_statuses:
+            case_status, case_reason = "implementation_defect", "a named observation failed"
+        elif "unverified" in observation_statuses:
+            case_status, case_reason = "unverified", "one or more named observations lack proof"
         else:
-            if not candidates:
-                case_status, case_reason = "unverified", "no operation was configured for this scenario"
-            elif missing:
-                case_status, case_reason = (
-                    "unverified",
-                    f"passing observations lack evidence fields: {', '.join(missing)}",
-                )
-            else:
-                case_status, case_reason = aggregate_status(candidates)
+            case_status, case_reason = "unsupported", "one or more named observations are unsupported"
+        selected_ids = [record["id"] for record in passing_records]
+        operation_ids.extend(
+            record["id"] for record in candidates if record["id"] not in operation_ids and not selected_ids
+        )
         coverage.append(
             {
                 "requirement": requirement.identifier,
@@ -2068,8 +2292,10 @@ def evaluate_scenario(
                 "case": requirement.case,
                 "status": case_status,
                 "reason": case_reason,
-                "operation_ids": [record["id"] for record in passing] or [record["id"] for record in candidates],
+                "operation_ids": selected_ids
+                or [record["id"] for record in candidates],
                 "observed_fields": sorted(aggregate),
+                "observations": observation_results,
             }
         )
 
@@ -2202,6 +2428,9 @@ class AcceptanceRunner:
             ):
                 status = "implementation_defect"
                 reason = "protected-resource metadata has no valid authorization server"
+            elif any(urllib.parse.urlsplit(authority).scheme != "https" for authority in authorities):
+                status = "implementation_defect"
+                reason = "protected-resource metadata contains a non-HTTPS authorization server"
         if status == "pass" and path.endswith("oauth-authorization-server"):
             for field_name in ("issuer", "authorization_endpoint", "token_endpoint"):
                 value = json_pointer(response.body, f"/{field_name}")
@@ -2312,6 +2541,7 @@ class AcceptanceRunner:
             "bindings": _binding_snapshot(self.target),
             "proof": redact(operation["proof"]),
             "request": request_summary,
+            "evidence": redact(operation["evidence"]),
         }
         if self.preflight_blocked:
             base_record.update(
@@ -2503,13 +2733,26 @@ def _validate_bundle_response(value: Any, label: str) -> None:
     response = _require_object_keys(
         value,
         set(),
-        {"http_status", "body_sha256", "headers", "error", "jsonrpc_error"},
+        {
+            "http_status",
+            "body_sha256",
+            "headers",
+            "error",
+            "jsonrpc_error",
+            "jsonrpc_version",
+            "jsonrpc_id",
+            "jsonrpc_request_id",
+            "jsonrpc_has_result",
+        },
         label,
     )
     if response.get("http_status") is not None and not isinstance(response["http_status"], int):
         raise EvidenceError(f"{label}.http_status must be an integer or null")
-    if response.get("body_sha256") is not None and not isinstance(response["body_sha256"], str):
-        raise EvidenceError(f"{label}.body_sha256 must be a string or null")
+    if response.get("body_sha256") is not None and (
+        not isinstance(response["body_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", response["body_sha256"])
+    ):
+        raise EvidenceError(f"{label}.body_sha256 must be a SHA-256 digest or null")
     if "headers" in response and (
         not isinstance(response["headers"], dict)
         or any(not isinstance(key, str) or not isinstance(item, str) for key, item in response["headers"].items())
@@ -2519,6 +2762,45 @@ def _validate_bundle_response(value: Any, label: str) -> None:
         raise EvidenceError(f"{label}.error must be a string")
     if "jsonrpc_error" in response and not isinstance(response["jsonrpc_error"], dict):
         raise EvidenceError(f"{label}.jsonrpc_error must be an object")
+    if "jsonrpc_version" in response and response["jsonrpc_version"] is not None and not isinstance(response["jsonrpc_version"], str):
+        raise EvidenceError(f"{label}.jsonrpc_version must be a string or null")
+    if "jsonrpc_id" in response and response["jsonrpc_id"] is not None and not isinstance(response["jsonrpc_id"], (str, int)):
+        raise EvidenceError(f"{label}.jsonrpc_id must be a scalar or null")
+    if "jsonrpc_request_id" in response and response["jsonrpc_request_id"] is not None and not isinstance(response["jsonrpc_request_id"], (str, int)):
+        raise EvidenceError(f"{label}.jsonrpc_request_id must be a scalar or null")
+    if "jsonrpc_has_result" in response and not isinstance(response["jsonrpc_has_result"], bool):
+        raise EvidenceError(f"{label}.jsonrpc_has_result must be a boolean")
+
+
+def _validate_passing_response(
+    response: Any,
+    label: str,
+    requirement: Requirement | None = None,
+    transport: str | None = None,
+) -> None:
+    if response is None:
+        raise EvidenceError(f"{label} is required for a passing operation")
+    _validate_bundle_response(response, label)
+    if not isinstance(response, dict):
+        raise EvidenceError(f"{label} must be an object")
+    status = response.get("http_status")
+    digest = response.get("body_sha256")
+    if not isinstance(status, int):
+        raise EvidenceError(f"{label}.http_status must be an integer")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise EvidenceError(f"{label}.body_sha256 is required for passing evidence")
+    if response.get("error") is not None or response.get("jsonrpc_error") is not None:
+        raise EvidenceError(f"{label} contains a transport or JSON-RPC error")
+    if requirement is not None and requirement.statuses:
+        if status not in requirement.statuses:
+            raise EvidenceError(f"{label}.http_status is outside the declared requirement statuses")
+    elif not 200 <= status < 300:
+        raise EvidenceError(f"{label}.http_status must be a successful HTTP status")
+    if transport == "mcp":
+        if response.get("jsonrpc_version") != "2.0":
+            raise EvidenceError(f"{label} does not prove JSON-RPC 2.0")
+        if response.get("jsonrpc_id") is None or response.get("jsonrpc_has_result") is not True:
+            raise EvidenceError(f"{label} does not prove a matching JSON-RPC result")
 
 
 def validate_bundle(bundle: dict[str, Any]) -> None:
@@ -2599,6 +2881,8 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         if "reason" in record and record["reason"] is not None and not isinstance(record["reason"], str):
             raise EvidenceError(f"preflight[{index}].reason must be a string or null")
         _validate_bundle_response(record["response"], f"preflight[{index}].response")
+        if record["status"] == "pass":
+            _validate_passing_response(record["response"], f"preflight[{index}].response")
 
     records = bundle["operations"]
     if not isinstance(records, list):
@@ -2617,6 +2901,7 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 "bindings",
                 "proof",
                 "request",
+                "evidence",
                 "status",
                 "reason",
                 "response",
@@ -2648,7 +2933,7 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             raise EvidenceError(f"operations[{index}] proof is not a declared requirement")
         if record["transport"] not in requirement.transports or record["actor"] not in requirement.actors:
             raise EvidenceError(f"operations[{index}] proof transport or actor is invalid")
-        if not isinstance(record["request"], dict) or not isinstance(record["extracted"], dict):
+        if not isinstance(record["request"], dict) or not isinstance(record["evidence"], dict) or not isinstance(record["extracted"], dict):
             raise EvidenceError(f"operations[{index}] request or extracted is invalid")
         if record["reason"] is not None and not isinstance(record["reason"], str):
             raise EvidenceError(f"operations[{index}].reason must be a string or null")
@@ -2661,6 +2946,28 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             raise EvidenceError(f"operations[{index}] contains evidence outside its proof observation")
         if record["status"] == "pass" and not record["extracted"]:
             raise EvidenceError(f"operations[{index}] claims pass without observed evidence")
+        evidence = _require_object_keys(
+            record["evidence"], {"extract", "required"}, set(), f"operations[{index}].evidence"
+        )
+        extract = evidence["extract"]
+        required = evidence["required"]
+        if not isinstance(extract, dict) or not isinstance(required, list):
+            raise EvidenceError(f"operations[{index}].evidence has invalid shape")
+        for name, pointer in extract.items():
+            if not isinstance(name, str) or name not in observation_fields:
+                raise EvidenceError(f"operations[{index}].evidence.extract contains an undeclared field")
+            try:
+                _validate_extract_spec(pointer, f"operations[{index}].evidence.extract.{name}")
+            except ConfigError as error:
+                raise EvidenceError(str(error)) from error
+        if set(record["extracted"]) - set(extract):
+            raise EvidenceError(f"operations[{index}].extracted contains a field absent from evidence.extract")
+        if (
+            not required
+            or any(not isinstance(name, str) or name not in extract for name in required)
+            or len(set(required)) != len(required)
+        ):
+            raise EvidenceError(f"operations[{index}].evidence.required is invalid")
         request_summary = record["request"]
         contract_request = (
             {"method": request_summary.get("method"), "path": request_summary.get("path")}
@@ -2668,10 +2975,29 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
             else {"method": request_summary.get("method"), "tool": request_summary.get("tool")}
         )
         contract_errors = _request_contract_errors(
-            requirement, record["scenario"], contract_request, record["transport"]
+            requirement,
+            record["scenario"],
+            contract_request,
+            record["transport"],
+            observation,
         )
-        if record["status"] == "pass" and contract_errors:
+        evidence_contract_errors = _evidence_contract_errors(
+            requirement,
+            record["scenario"],
+            observation,
+            contract_request,
+            record["transport"],
+            extract,
+        )
+        if record["status"] == "pass" and (contract_errors or evidence_contract_errors):
             raise EvidenceError(f"operations[{index}] claims pass outside its request contract")
+        if record["status"] == "pass":
+            _validate_passing_response(
+                record["response"],
+                f"operations[{index}].response",
+                requirement,
+                record["transport"],
+            )
         for name, value in record["extracted"].items():
             try:
                 _safe_evidence_value(name, value)
@@ -2710,7 +3036,7 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         for case in coverage:
             coverage_record = _require_object_keys(
                 case,
-                {"requirement", "role", "case", "status", "reason", "operation_ids", "observed_fields"},
+                {"requirement", "role", "case", "status", "reason", "operation_ids", "observed_fields", "observations"},
                 set(),
                 f"scenarios[{index}].coverage",
             )
@@ -2723,6 +3049,7 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 coverage_record["status"] not in EVIDENCE_STATUSES
                 or not isinstance(coverage_record["operation_ids"], list)
                 or not isinstance(coverage_record["observed_fields"], list)
+                or not isinstance(coverage_record["observations"], list)
                 or any(not isinstance(name, str) for name in coverage_record["observed_fields"])
             ):
                 raise EvidenceError(f"scenarios[{index}] coverage status is invalid")
@@ -2749,6 +3076,53 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                         observed_values[name] = value
             if coverage_record["observed_fields"] != sorted(observed_values):
                 raise EvidenceError(f"scenarios[{index}] coverage observed_fields do not match passing operations")
+            declared_observations = _declared_observations(requirement)
+            if {item.get("name") for item in coverage_record["observations"] if isinstance(item, dict)} != set(declared_observations):
+                raise EvidenceError(f"scenarios[{index}] coverage does not name every required observation")
+            observation_values: dict[str, dict[str, Any]] = {}
+            for observation_record in coverage_record["observations"]:
+                observation_data = _require_object_keys(
+                    observation_record,
+                    {"name", "status", "reason", "operation_ids", "observed_fields"},
+                    set(),
+                    f"scenarios[{index}].coverage.observations",
+                )
+                observation = observation_data["name"]
+                fields = declared_observations.get(observation)
+                if fields is None or observation_data["status"] not in EVIDENCE_STATUSES:
+                    raise EvidenceError(f"scenarios[{index}] coverage observation is invalid")
+                observation_ids = observation_data["operation_ids"]
+                if not isinstance(observation_ids, list):
+                    raise EvidenceError(f"scenarios[{index}] coverage observation IDs are invalid")
+                observation_records = [records_by_id.get(operation_id) for operation_id in observation_ids]
+                if any(record is None for record in observation_records):
+                    raise EvidenceError(f"scenarios[{index}] coverage observation references an unknown operation")
+                if any(
+                    record["proof"].get("observation", "response") != observation
+                    for record in observation_records
+                ):
+                    raise EvidenceError(f"scenarios[{index}] coverage observation references the wrong source")
+                observation_passing = [record for record in observation_records if record["status"] == "pass"]
+                values: dict[str, Any] = {}
+                observation_conflicts: set[str] = set()
+                for record in observation_passing:
+                    for name, value in record["extracted"].items():
+                        if value is None:
+                            continue
+                        if name in values and values[name] != value:
+                            observation_conflicts.add(name)
+                        else:
+                            values[name] = value
+                if observation_data["observed_fields"] != sorted(values):
+                    raise EvidenceError(f"scenarios[{index}] observation fields do not match passing operations")
+                if observation_data["status"] == "pass":
+                    if not observation_records or any(record["status"] != "pass" for record in observation_records):
+                        raise EvidenceError(f"scenarios[{index}] observation claims pass without passing evidence")
+                    if set(fields) - set(values):
+                        raise EvidenceError(f"scenarios[{index}] observation claims pass without complete fields")
+                    if observation_conflicts:
+                        raise EvidenceError(f"scenarios[{index}] observation has conflicting fields")
+                observation_values[observation] = values
             if coverage_record["status"] == "pass" and (
                 not matching_records or any(record["status"] != "pass" for record in matching_records)
             ):
@@ -2763,6 +3137,8 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                     raise EvidenceError(
                         f"scenarios[{index}] coverage has conflicting fields: {', '.join(sorted(conflicts))}"
                     )
+                if any(item["status"] != "pass" for item in coverage_record["observations"]):
+                    raise EvidenceError(f"scenarios[{index}] coverage claims pass without complete observations")
             elif conflicts:
                 raise EvidenceError(
                     f"scenarios[{index}] coverage has conflicting passing fields: {', '.join(sorted(conflicts))}"
