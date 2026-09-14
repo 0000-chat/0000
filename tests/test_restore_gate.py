@@ -133,6 +133,20 @@ def _set_store_reference(authority: dict, store_name: str, reference: str) -> No
                 store["copies"] = [copy]
 
 
+def _head(authority: dict) -> str:
+    return GATE._sha256_json(
+        {
+            "tenant_id": authority["tenant_id"],
+            "deletion_epoch": authority["deletion_epoch"],
+            "authorities": [
+                GATE._immutable_authority(item)
+                for item in authority["authorities"]
+            ],
+            "inventory": authority["inventory"],
+        }
+    )
+
+
 class RestoreGateTests(unittest.TestCase):
     def test_payload_paths_reject_nested_parent_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,6 +172,74 @@ class RestoreGateTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(Exception, "escapes"):
                 GATE.validate_payload(root)
+
+    def test_restore_target_must_publish_exact_lineage(self):
+        authority = {
+            "id": "removal_restore_gate_lineage",
+            "tenant_id": "tenant_restore_gate",
+            "resource_type": "message",
+            "resource_id": "message_removed",
+            "content_generation": "message_removed",
+            "deletion_epoch": 1,
+            "targets": [
+                {
+                    "database": "synapse",
+                    "contract": "synapse-event-json-v1",
+                    "room_id": "!room:example.test",
+                    "event_id": "$removed:example.test",
+                    "event_type": "m.room.message",
+                    "media_paths": [],
+                    "media_paths_complete": True,
+                }
+            ],
+        }
+        with self.assertRaisesRegex(Exception, "exact resource lineage"):
+            GATE._targets_for([authority])
+
+    def test_mutable_removal_progress_does_not_change_authority_identity(self):
+        record = {
+            "id": "removal_restore_gate_progress",
+            "tenant_id": "tenant_restore_gate",
+            "resource_type": "message",
+            "resource_id": "message_progress",
+            "content_generation": "generation_progress",
+            "account_id": None,
+            "conversation_id": None,
+            "source_event_id": None,
+            "source_object_key": None,
+            "reason": "requested",
+            "removed_at": "2026-09-14T00:00:00Z",
+            "deletion_epoch": 1,
+            "status": "active",
+            "purge_status": "pending",
+            "failure_code": None,
+            "completed_at": None,
+            "created_at": "2026-09-14T00:00:00Z",
+            "updated_at": "2026-09-14T00:00:00Z",
+        }
+        authority = _authority(authorities=[record], epoch=1)
+        authority["ledger_head"] = _head(authority)
+        normalized = GATE._validate_authority_document(
+            authority, authority["tenant_id"]
+        )
+        before = GATE._authority_fingerprint(normalized)
+        progressed = json.loads(json.dumps(authority))
+        progressed["authorities"][0].update(
+            {
+                "status": "completed",
+                "purge_status": "complete",
+                "completed_at": "2026-09-14T00:02:00Z",
+                "updated_at": "2026-09-14T00:02:00Z",
+            }
+        )
+        progressed["ledger_head"] = _head(progressed)
+        progressed_normalized = GATE._validate_authority_document(
+            progressed, progressed["tenant_id"]
+        )
+        self.assertEqual(authority["ledger_head"], progressed["ledger_head"])
+        self.assertEqual(
+            before, GATE._authority_fingerprint(progressed_normalized)
+        )
 
     def test_restored_snapshot_id_must_match_authority_generation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -232,14 +314,7 @@ class RestoreGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             authority = _authority(epoch=0)
-            authority["ledger_head"] = GATE._sha256_json(
-                {
-                    "tenant_id": authority["tenant_id"],
-                    "deletion_epoch": authority["deletion_epoch"],
-                    "authorities": authority["authorities"],
-                    "inventory": authority["inventory"],
-                }
-            )
+            authority["ledger_head"] = _head(authority)
             source = root / "authority.json"
             report = root / "report.json"
             source.write_text(json.dumps(authority), encoding="utf-8")
@@ -271,23 +346,9 @@ class RestoreGateTests(unittest.TestCase):
         authority["expires_at"] = (
             datetime.now(timezone.utc) + timedelta(seconds=60)
         ).isoformat().replace("+00:00", "Z")
-        authority["ledger_head"] = GATE._sha256_json(
-            {
-                "tenant_id": authority["tenant_id"],
-                "deletion_epoch": authority["deletion_epoch"],
-                "authorities": authority["authorities"],
-                "inventory": authority["inventory"],
-            }
-        )
+        authority["ledger_head"] = _head(authority)
         changed_epoch = {**authority, "deletion_epoch": 1}
-        changed_epoch["ledger_head"] = GATE._sha256_json(
-            {
-                "tenant_id": changed_epoch["tenant_id"],
-                "deletion_epoch": changed_epoch["deletion_epoch"],
-                "authorities": changed_epoch["authorities"],
-                "inventory": changed_epoch["inventory"],
-            }
-        )
+        changed_epoch["ledger_head"] = _head(changed_epoch)
         responses = [dict(authority), changed_epoch]
         seen_authorizations = []
 
@@ -396,23 +457,9 @@ class RestoreGateTests(unittest.TestCase):
         base["expires_at"] = (
             datetime.now(timezone.utc) + timedelta(seconds=60)
         ).isoformat().replace("+00:00", "Z")
-        base["ledger_head"] = GATE._sha256_json(
-            {
-                "tenant_id": base["tenant_id"],
-                "deletion_epoch": base["deletion_epoch"],
-                "authorities": base["authorities"],
-                "inventory": base["inventory"],
-            }
-        )
+        base["ledger_head"] = _head(base)
         changed = {**base, "deletion_epoch": 1}
-        changed["ledger_head"] = GATE._sha256_json(
-            {
-                "tenant_id": changed["tenant_id"],
-                "deletion_epoch": changed["deletion_epoch"],
-                "authorities": changed["authorities"],
-                "inventory": changed["inventory"],
-            }
-        )
+        changed["ledger_head"] = _head(changed)
         normalized_base = GATE._validate_authority_document(
             base, base["tenant_id"], require_current=True
         )
@@ -639,6 +686,8 @@ class RestoreGateTests(unittest.TestCase):
                 {
                     "database": "synapse",
                     "contract": "synapse-event-json-v1",
+                    "resource_id": "message_removed",
+                    "content_generation": "message_removed",
                     "room_id": "!room:example.test",
                     "event_id": "$removed:example.test",
                     "event_type": "m.room.message",
@@ -795,6 +844,8 @@ class RestoreGateTests(unittest.TestCase):
                         {
                             "database": "synapse",
                             "contract": "synapse-event-json-v1",
+                            "resource_id": "message_removed",
+                            "content_generation": "message_removed",
                             "room_id": "!room:example.test",
                             "event_id": "$removed:example.test",
                             "event_type": "m.room.message",
@@ -804,6 +855,8 @@ class RestoreGateTests(unittest.TestCase):
                         {
                             "database": "whatsapp_bridge",
                             "contract": "mautrix-bridge-message-v1",
+                            "resource_id": "message_removed",
+                            "content_generation": "message_removed",
                             "bridge_id": "whatsapp",
                             "message_id": "remote-removed",
                             "part_id": "part-1",

@@ -153,6 +153,8 @@ describe("restore authority gate", () => {
             restore_target: {
               database: "synapse",
               contract: "synapse-event-json-v1",
+              resource_id: "message_restore33_inventory",
+              content_generation: "message_restore33_inventory",
               room_id: "!restore:example.test",
               event_id: "$restore33-inventory:example.test",
               event_type: "m.room.message",
@@ -196,6 +198,54 @@ describe("restore authority gate", () => {
       status: "incomplete",
       evidence_source: "restic_snapshot_inventory_unavailable",
     });
+  });
+
+  it("rejects inventory copies that omit their exact lineage", async () => {
+    const tenantId = tenant("missing_copy_lineage");
+    await recordRemoval(
+      workerEnv.CONTROL_DB,
+      inputFor(tenantId, "message_restore33_missing_copy_lineage"),
+      fixedNow,
+    );
+    const incompleteSynapseAdapter: ControlledCopyAdapter = {
+      store: "synapse",
+      owner: "restore-test-synapse",
+      default_content_class: "message",
+      deletion_method: "delete",
+      required: true,
+      inventory: async () => ({
+        complete: true,
+        evidence_source: "restore-test-synapse-inventory",
+        copies: [
+          {
+            reference: "synapse:missing-lineage",
+            copy_created_at: fixedNow.toISOString(),
+            restore_target: {
+              database: "synapse",
+              contract: "synapse-event-json-v1",
+              room_id: "!restore:example.test",
+              event_id: "$restore33-missing-lineage:example.test",
+              event_type: "m.room.message",
+              media_paths: [],
+              media_paths_complete: true,
+            },
+          },
+        ],
+      }),
+      cleanup: async () => ({
+        status: "deleted",
+        content_present: false,
+        evidence_source: "restore-test-synapse-cleanup",
+        object_reference: "synapse:missing-lineage",
+        detail: null,
+      }),
+    };
+
+    await expect(
+      createRestoreAuthorityExport(workerEnv.CONTROL_DB, tenantId, fixedNow, [
+        incompleteSynapseAdapter,
+      ]),
+    ).rejects.toThrow();
   });
 
   it("rejects missing or duplicate store evidence before readiness", () => {

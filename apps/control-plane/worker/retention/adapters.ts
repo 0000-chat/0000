@@ -88,7 +88,6 @@ const normalizeInventory = (
     ControlledCopyAdapter,
     "store" | "owner" | "default_content_class" | "deletion_method" | "required"
   >,
-  scope: RetentionInventoryScope,
 ): RetentionInventoryResult => {
   if (
     typeof result.evidence_source !== "string" ||
@@ -132,12 +131,24 @@ const normalizeInventory = (
       throw new Error("controlled copy inventory reference is duplicated");
     }
     references.add(copy.reference);
+    if (
+      typeof copy.resource_id !== "string" ||
+      copy.resource_id.trim() === "" ||
+      copy.resource_id === "*" ||
+      typeof copy.content_generation !== "string" ||
+      copy.content_generation.trim() === "" ||
+      copy.content_generation === "*"
+    ) {
+      throw new Error(
+        "controlled copy inventory copy must publish exact resource lineage",
+      );
+    }
     const item = ControlledCopyInventoryItemSchema.parse({
       store: adapter.store,
       owner: adapter.owner,
       content_class: contentClass,
-      resource_id: copy.resource_id ?? scope.resource_id,
-      content_generation: copy.content_generation ?? scope.content_generation,
+      resource_id: copy.resource_id,
+      content_generation: copy.content_generation,
       reference: copy.reference,
       copy_created_at: normalizeTimestamp(copy.copy_created_at),
       deletion_method: adapter.deletion_method,
@@ -222,7 +233,7 @@ export const createStoreAdapter = ({
     deletion_method: deletionMethod,
     required,
     inventory: async (scope) =>
-      normalizeInventory(await backend.inventory(scope), adapter, scope),
+      normalizeInventory(await backend.inventory(scope), adapter),
     cleanup: async (operation, now) => {
       if (
         required &&

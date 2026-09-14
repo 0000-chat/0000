@@ -220,10 +220,16 @@ def run_store_command(
 
 
 def entry_matches(entry: Mapping[str, Any], scope: Mapping[str, Any]) -> bool:
-    return all(
-        entry.get(key) == scope.get(key) or entry.get(key) == "*"
-        for key in ("resource_id", "content_generation")
-    )
+    for key in ("resource_id", "content_generation"):
+        value = entry.get(key)
+        expected = scope.get(key)
+        if not isinstance(value, str) or not value.strip() or value == "*":
+            raise RetentionError(
+                f"controlled-copy {key} must be an exact lineage value"
+            )
+        if value != expected:
+            return False
+    return True
 
 
 def normalized_copy(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -2103,7 +2109,11 @@ def verify_restic_snapshot(
 
 
 def replace_manifest_after_core_migration(
-    old_reference: str, snapshot_id: str, migrated_at: str
+    old_reference: str,
+    snapshot_id: str,
+    migrated_at: str,
+    resource_id: str,
+    content_generation: str,
 ) -> None:
     replace_manifest_after_migration(
         old_reference=old_reference,
@@ -2111,8 +2121,8 @@ def replace_manifest_after_core_migration(
             {
                 "reference": f"restic:{snapshot_id}",
                 "snapshot_id": snapshot_id,
-                "resource_id": "*",
-                "content_generation": "*",
+                "resource_id": resource_id,
+                "content_generation": content_generation,
                 "copy_created_at": migrated_at,
                 "content_classes": [
                     "message",
@@ -2239,6 +2249,11 @@ def migrate_core_restic_copy(
         required_string(copy.get("reference"), "copy reference"),
         replacement_id,
         migrated_at,
+        required_string(target_scope.get("resource_id"), "migration target resource id"),
+        required_string(
+            target_scope.get("content_generation"),
+            "migration target content generation",
+        ),
     )
     return {
         "status": "aged_out",
@@ -2409,8 +2424,8 @@ def migrate_legacy_restic_copy(
                     {
                         "reference": f"restic:{replacement_id}",
                         "snapshot_id": replacement_id,
-                        "resource_id": "*",
-                        "content_generation": "*",
+                        "resource_id": target_resource,
+                        "content_generation": target_generation,
                         "copy_created_at": migrated_at,
                         "content_class": content_class,
                         "detail": "protected replacement from an exhaustively mapped legacy snapshot",

@@ -19,7 +19,11 @@ import {
   createConfiguredControlledCopyAdapters,
   type ControlledCopyAdapter,
 } from "../retention";
-import { loadRestoreAuthority, restoreReadinessForTenant } from "./gate";
+import {
+  immutableRestoreAuthority,
+  loadRestoreAuthority,
+  restoreReadinessForTenant,
+} from "./gate";
 import { createRestoreAuthorityExport } from "./authority";
 import {
   acquireRestoreActivationLease,
@@ -84,7 +88,8 @@ const sameAuthority = (
 ): boolean =>
   left.tenant_id === right.tenant_id &&
   left.deletion_epoch === right.deletion_epoch &&
-  JSON.stringify(left.authorities) === JSON.stringify(right.authorities);
+  JSON.stringify(left.authorities.map(immutableRestoreAuthority)) ===
+    JSON.stringify(right.authorities.map(immutableRestoreAuthority));
 
 /**
  * Read the connection bindings that a tenant-wide archive replay needs.  The
@@ -172,20 +177,6 @@ export const restoreProjectionFromArchive = async (
   ]);
   const database = primaryDatabase(input.database);
   const initialAuthority = await loadRestoreAuthority(database, tenantId);
-  const readiness = await restoreReadinessForTenant({
-    database,
-    tenantId,
-    ...(input.canonicalArchiveFor === undefined
-      ? {}
-      : { canonicalArchiveFor: input.canonicalArchiveFor }),
-    ...(input.now === undefined ? {} : { now: input.now }),
-  });
-  if (readiness.state !== "ready") {
-    throw new Error("restore readiness is incomplete");
-  }
-  if (readiness.deletion_epoch !== initialAuthority.deletion_epoch) {
-    throw new Error("restore authority changed before projection rebuild");
-  }
   const authorityExport = await createRestoreAuthorityExport(
     database,
     tenantId,
@@ -193,6 +184,21 @@ export const restoreProjectionFromArchive = async (
     input.adapters ?? [],
   );
   if (authorityExport.deletion_epoch !== initialAuthority.deletion_epoch) {
+    throw new Error("restore authority changed before projection rebuild");
+  }
+  const readiness = await restoreReadinessForTenant({
+    database,
+    tenantId,
+    ...(input.canonicalArchiveFor === undefined
+      ? {}
+      : { canonicalArchiveFor: input.canonicalArchiveFor }),
+    storeEvidence: authorityExport.stores,
+    ...(input.now === undefined ? {} : { now: input.now }),
+  });
+  if (readiness.state !== "ready") {
+    throw new Error("restore readiness is incomplete");
+  }
+  if (readiness.deletion_epoch !== initialAuthority.deletion_epoch) {
     throw new Error("restore authority changed before projection rebuild");
   }
   const activationLease = await acquireRestoreActivationLease(database, {
@@ -324,12 +330,34 @@ export const restoreProjectionFromArchive = async (
         suppressionNow,
       );
     }
+    if (
+      !(await renewRestoreActivationLease(database, {
+        tenantId,
+        leaseId: activationLease.lease_id,
+        leaseToken: activationLease.lease_token,
+      }))
+    ) {
+      throw new Error("restore activation lease expired before activation");
+    }
+    const postSuppressionAuthority = await loadRestoreAuthority(
+      database,
+      tenantId,
+    );
+    if (!sameAuthority(initialAuthority, postSuppressionAuthority)) {
+      throw new Error("restore authority changed before projection activation");
+    }
     await input.projection.completeRebuild({
       schema_version: 1,
       tenant_id: tenantId,
       rebuild_id: rebuildId,
       terminal_cursor: null,
       completed_at: completedAt,
+      restore_activation_lease: {
+        lease_id: activationLease.lease_id,
+        lease_token: activationLease.lease_token,
+        deletion_epoch: activationLease.deletion_epoch,
+        ledger_head: activationLease.ledger_head,
+      },
       authorization: rebuildAuthorization,
     });
     const projection = await input.projection.getStatus({

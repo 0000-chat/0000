@@ -193,20 +193,22 @@ const inventoryResponse = (value: unknown): RetentionInventoryResult => {
     const copy = recordValue(value);
     if (
       typeof copy.reference !== "string" ||
-      typeof copy.copy_created_at !== "string"
+      typeof copy.copy_created_at !== "string" ||
+      typeof copy.resource_id !== "string" ||
+      copy.resource_id.trim() === "" ||
+      copy.resource_id === "*" ||
+      typeof copy.content_generation !== "string" ||
+      copy.content_generation.trim() === "" ||
+      copy.content_generation === "*"
     ) {
       throw new Error("controlled-copy backend inventory copy is invalid");
     }
     const normalized: RetentionBackendCopy = {
       reference: copy.reference,
       copy_created_at: copy.copy_created_at,
+      resource_id: copy.resource_id,
+      content_generation: copy.content_generation,
     };
-    if (typeof copy.resource_id === "string") {
-      normalized.resource_id = copy.resource_id;
-    }
-    if (typeof copy.content_generation === "string") {
-      normalized.content_generation = copy.content_generation;
-    }
     if (typeof copy.content_class === "string") {
       normalized.content_class = copy.content_class as NonNullable<
         RetentionBackendCopy["content_class"]

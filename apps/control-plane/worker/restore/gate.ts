@@ -26,6 +26,45 @@ export type RestoreAuthoritySnapshot = {
   authority_ids: readonly string[];
 };
 
+/**
+ * The removal ledger head binds immutable suppression identity. Mutable
+ * lifecycle fields such as purge status, failure detail, and timestamps may
+ * advance while a restore is in flight without changing which content is
+ * forbidden to expose.
+ */
+export const immutableRestoreAuthority = (
+  authority: RemovalAuthority,
+): Pick<
+  RemovalAuthority,
+  | "id"
+  | "tenant_id"
+  | "resource_type"
+  | "resource_id"
+  | "content_generation"
+  | "account_id"
+  | "conversation_id"
+  | "source_event_id"
+  | "source_object_key"
+  | "reason"
+  | "removed_at"
+  | "deletion_epoch"
+  | "created_at"
+> => ({
+  id: authority.id,
+  tenant_id: authority.tenant_id,
+  resource_type: authority.resource_type,
+  resource_id: authority.resource_id,
+  content_generation: authority.content_generation,
+  account_id: authority.account_id,
+  conversation_id: authority.conversation_id,
+  source_event_id: authority.source_event_id,
+  source_object_key: authority.source_object_key,
+  reason: authority.reason,
+  removed_at: authority.removed_at,
+  deletion_epoch: authority.deletion_epoch,
+  created_at: authority.created_at,
+});
+
 export type RestoreStoreObservation = {
   store: RestoreStoreStatus["store"];
   generation: string;
@@ -166,14 +205,30 @@ const statusForStore = (
   store: ControlledCopyStore,
   completions: Awaited<ReturnType<typeof evaluateControlledCopyCompletion>>[],
   deletionEpoch: number,
+  inventory?: RestoreStoreStatus,
 ): RestoreStoreStatus => {
-  const complete = completions.every(
-    (completion) =>
-      completion.status === "complete" &&
-      completion.completed_stores.includes(store) &&
-      !completion.incomplete_stores.includes(store) &&
-      !completion.missing_stores.includes(store),
-  );
+  if (inventory !== undefined) {
+    if (
+      inventory.status === "complete" &&
+      (inventory.references.length === 0 || inventory.copies.length === 0)
+    ) {
+      return RestoreStoreStatusSchema.parse({
+        ...inventory,
+        status: "incomplete",
+        content_present: true,
+        detail: "Current store evidence has no concrete copy reference",
+      });
+    }
+    return inventory;
+  }
+  const complete =
+    completions.every(
+      (completion) =>
+        completion.status === "complete" &&
+        completion.completed_stores.includes(store) &&
+        !completion.incomplete_stores.includes(store) &&
+        !completion.missing_stores.includes(store),
+    ) && completions.length > 0;
   const incomplete = completions.some(
     (completion) =>
       completion.incomplete_stores.includes(store) ||
@@ -203,6 +258,7 @@ export const restoreReadinessForTenant = async ({
   database,
   tenantId,
   canonicalArchiveFor,
+  storeEvidence,
   now = new Date(),
 }: {
   database: RestoreDatabase;
@@ -210,6 +266,7 @@ export const restoreReadinessForTenant = async ({
   canonicalArchiveFor?: (
     authority: RemovalAuthority,
   ) => Promise<"complete" | "incomplete" | "missing">;
+  storeEvidence?: readonly RestoreStoreStatus[];
   now?: Date;
 }): Promise<RestoreReadiness> => {
   const snapshot = await loadRestoreAuthority(database, tenantId);
@@ -230,7 +287,12 @@ export const restoreReadinessForTenant = async ({
     ),
   );
   const stores = CONTROLLED_COPY_STORES.map((store) =>
-    statusForStore(store, completions, snapshot.deletion_epoch),
+    statusForStore(
+      store,
+      completions,
+      snapshot.deletion_epoch,
+      storeEvidence?.find((evidence) => evidence.store === store),
+    ),
   );
   const blockedReasons = unique(
     completions.flatMap((completion) => completion.alerts),

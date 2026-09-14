@@ -184,6 +184,7 @@ import {
 import { listRemovalAuthorities } from "../removals/ledger";
 import type { RecordRemovalInput } from "../../../../packages/contracts/src/removals";
 import { loadRestoreAuthority } from "../restore/gate";
+import { renewRestoreActivationLeaseForCompletion } from "../restore/lease";
 import { fenceRestoredOutboundWork } from "../restore/outbound";
 
 type ProjectionMetaRow = {
@@ -2842,6 +2843,19 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         typeof database.withSession !== "function"
       ) {
         throw projectionError("projection_unavailable");
+      }
+      const leaseProof = parsed.restore_activation_lease;
+      if (
+        leaseProof !== undefined &&
+        !(await renewRestoreActivationLeaseForCompletion(database, {
+          tenantId: parsed.tenant_id,
+          leaseId: leaseProof.lease_id,
+          leaseToken: leaseProof.lease_token,
+          expectedDeletionEpoch: leaseProof.deletion_epoch,
+          expectedLedgerHead: leaseProof.ledger_head,
+        }))
+      ) {
+        throw projectionError("projection_rebuild_mismatch");
       }
       // Read the non-rebuildable removal ledger immediately before publishing
       // this restored generation. The transaction below applies its fence

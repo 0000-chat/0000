@@ -55,6 +55,23 @@ class RestoreGateError(Exception):
     """An operator-visible restore gate failure without content disclosure."""
 
 
+_IMMUTABLE_AUTHORITY_FIELDS = (
+    "id",
+    "tenant_id",
+    "resource_type",
+    "resource_id",
+    "content_generation",
+    "account_id",
+    "conversation_id",
+    "source_event_id",
+    "source_object_key",
+    "reason",
+    "removed_at",
+    "deletion_epoch",
+    "created_at",
+)
+
+
 def _load_retention_module() -> Any:
     spec = importlib.util.spec_from_file_location(
         "communicator_controlled_copy_retention", RETENTION_PATH
@@ -113,6 +130,11 @@ def _parse_timestamp(value: Any, name: str) -> str:
     return timestamp
 
 
+def _immutable_authority(authority: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep lifecycle progress out of the suppression identity/fingerprint."""
+    return {field: authority.get(field) for field in _IMMUTABLE_AUTHORITY_FIELDS}
+
+
 def _authority_fingerprint(authority: Mapping[str, Any]) -> str:
     """Return the current ledger/evidence view used at activation."""
     return _sha256_json(
@@ -120,7 +142,9 @@ def _authority_fingerprint(authority: Mapping[str, Any]) -> str:
             "tenant_id": authority["tenant_id"],
             "deletion_epoch": authority["deletion_epoch"],
             "authority_ids": [item["id"] for item in authority["authorities"]],
-            "authorities": authority["authorities"],
+            "authorities": [
+                _immutable_authority(item) for item in authority["authorities"]
+            ],
             "ledger_head": authority["ledger_head"],
             "inventory": authority.get("inventory", []),
             "stores": list(authority["stores"].values()),
@@ -453,7 +477,7 @@ def _validate_authority_document(
         {
             "tenant_id": actual_tenant,
             "deletion_epoch": raw_epoch,
-            "authorities": authorities,
+            "authorities": [_immutable_authority(item) for item in authorities],
             **({"inventory": inventory} if raw_inventory is not None else {}),
         }
     )
@@ -788,13 +812,15 @@ def _targets_for(authorities: Iterable[Mapping[str, Any]]) -> list[dict[str, Any
                 and str(target.get("content_generation")) != authority_generation
             ):
                 raise RestoreGateError("restore target generation does not match authority")
+            if "resource_id" not in target or "content_generation" not in target:
+                raise RestoreGateError(
+                    "restore target must publish exact resource lineage"
+                )
             target["resource_id"] = _required_string(
-                target.get("resource_id", authority_resource),
-                "target resource id",
+                target.get("resource_id"), "target resource id"
             )
             target["content_generation"] = _required_string(
-                target.get("content_generation", authority_generation),
-                "target content generation",
+                target.get("content_generation"), "target content generation"
             )
             target["authority_id"] = _required_string(authority.get("id"), "authority id")
             target["database"] = _required_string(target.get("database"), "target database")

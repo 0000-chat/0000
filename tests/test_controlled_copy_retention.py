@@ -214,33 +214,18 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                 {"COMMUNICATOR_RETENTION_MANIFEST": str(manifest)},
                 clear=False,
             ):
-                inventory = RETENTION.process_request(
-                    "inventory",
-                    {
-                        "protocol": RETENTION.PROTOCOL,
-                        "store": "restic_snapshot",
-                        "scope": {
-                            "resource_id": "message_one",
-                            "content_generation": "generation_one",
+                with self.assertRaises(RETENTION.RetentionError):
+                    RETENTION.process_request(
+                        "inventory",
+                        {
+                            "protocol": RETENTION.PROTOCOL,
+                            "store": "restic_snapshot",
+                            "scope": {
+                                "resource_id": "message_one",
+                                "content_generation": "generation_one",
+                            },
                         },
-                    },
-                )
-                self.assertEqual(
-                    ["message", "session_credential", "account_key"],
-                    inventory["copies"][0]["content_classes"],
-                )
-                evidence = RETENTION.process_request(
-                    "cleanup",
-                    {
-                        "protocol": RETENTION.PROTOCOL,
-                        "store": "restic_snapshot",
-                        "resource_id": "message_one",
-                        "content_generation": "generation_one",
-                        "reference": "restic:core-1",
-                    },
-                )
-            self.assertEqual("lifecycle_pending", evidence["status"])
-            self.assertTrue(evidence["content_present"])
+                    )
 
     def test_exclusive_message_restic_snapshot_uses_the_real_snapshot_id(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -661,8 +646,8 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                                     {
                                         "reference": "restic:legacy-1",
                                         "snapshot_id": "legacy-1",
-                                        "resource_id": "*",
-                                        "content_generation": "*",
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
                                         "copy_created_at": "2026-08-01T00:00:00Z",
                                         "content_classes": [
                                             "message",
@@ -818,8 +803,8 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                                     {
                                         "reference": "restic:legacy-outside",
                                         "snapshot_id": "legacy-outside",
-                                        "resource_id": "*",
-                                        "content_generation": "*",
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
                                         "copy_created_at": "2026-08-01T00:00:00Z",
                                         "content_classes": [
                                             "message",
@@ -1092,8 +1077,8 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                                     {
                                         "reference": "restic:legacy-core",
                                         "snapshot_id": "legacy-core",
-                                        "resource_id": "*",
-                                        "content_generation": "*",
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
                                         "copy_created_at": "2026-08-01T00:00:00Z",
                                         "content_classes": [
                                             "message",
@@ -1473,8 +1458,8 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                                     {
                                         "reference": "restic:legacy-v0",
                                         "snapshot_id": "legacy-v0",
-                                        "resource_id": "*",
-                                        "content_generation": "*",
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
                                         "copy_created_at": "2026-08-01T00:00:00Z",
                                         "content_classes": [
                                             "message",
@@ -1673,8 +1658,8 @@ class ControlledCopyRetentionTests(unittest.TestCase):
                                     {
                                         "reference": "restic:legacy-unexpected",
                                         "snapshot_id": "legacy-unexpected",
-                                        "resource_id": "*",
-                                        "content_generation": "*",
+                                        "resource_id": "message_one",
+                                        "content_generation": "generation_one",
                                         "copy_created_at": "2026-08-01T00:00:00Z",
                                         "content_classes": [
                                             "message",

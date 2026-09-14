@@ -14,7 +14,7 @@ import type { RemovalAuthority } from "../../../../packages/contracts/src/remova
 import { listArchivePurgeOperations } from "../archive/purge";
 import { evaluateControlledCopyCompletion } from "../retention/service";
 import type { ControlledCopyAdapter } from "../retention/adapters";
-import { loadRestoreAuthority } from "./gate";
+import { immutableRestoreAuthority, loadRestoreAuthority } from "./gate";
 
 type RestoreAuthorityDatabase = D1Database | D1DatabaseSession;
 type RestoreStore = ControlledCopyStore | ControlledCopyAuxiliaryStore;
@@ -117,24 +117,31 @@ const statusForStore = ({
     content_generation: string;
   }[];
 }): RestoreStoreStatus => {
+  const concreteInventory = references.length > 0 && copies.length > 0;
   if (completions.length === 0) {
     return RestoreStoreStatusSchema.parse({
       store,
       generation,
-      status: inventoryComplete
-        ? required
-          ? "complete"
-          : "preserved"
-        : "incomplete",
-      content_present: !required || !inventoryComplete,
+      status:
+        inventoryComplete && concreteInventory
+          ? required
+            ? "complete"
+            : "preserved"
+          : "incomplete",
+      content_present: !required || !inventoryComplete || !concreteInventory,
       evidence_source: inventorySource,
-      detail: inventoryComplete ? null : inventoryDetail,
+      detail:
+        inventoryComplete && concreteInventory
+          ? null
+          : (inventoryDetail ??
+            "Current store evidence has no concrete copy reference"),
       references: [...references],
       copies: [...copies],
     });
   }
   const complete =
     inventoryComplete &&
+    concreteInventory &&
     targetCoverageComplete &&
     completions.every((completion) =>
       required
@@ -215,7 +222,6 @@ const inventoryCopies = (
     resource_id?: string;
     content_generation?: string;
   }[],
-  scope: { resource_id: string; content_generation: string },
 ) =>
   copies
     .map((copy) =>
@@ -225,8 +231,8 @@ const inventoryCopies = (
           copy.copy_created_at instanceof Date
             ? copy.copy_created_at.toISOString()
             : new Date(copy.copy_created_at).toISOString(),
-        resource_id: copy.resource_id ?? scope.resource_id,
-        content_generation: copy.content_generation ?? scope.content_generation,
+        resource_id: copy.resource_id,
+        content_generation: copy.content_generation,
       }),
     )
     .sort((left, right) =>
@@ -282,7 +288,7 @@ const inventoryForAuthority = async (
       });
       continue;
     }
-    const copies = inventoryCopies(inventory.copies, authority);
+    const copies = inventoryCopies(inventory.copies);
     stores.set(store, {
       complete: inventory.complete,
       evidence_source: inventory.evidence_source,
@@ -302,12 +308,8 @@ const inventoryForAuthority = async (
       if (raw === undefined) continue;
       const parsed = RestoreDatabaseTargetSchema.safeParse({
         ...raw,
-        resource_id:
-          raw.resource_id ?? copy.resource_id ?? targetAuthority.resource_id,
-        content_generation:
-          raw.content_generation ??
-          copy.content_generation ??
-          targetAuthority.content_generation,
+        resource_id: raw.resource_id,
+        content_generation: raw.content_generation,
       });
       if (!parsed.success) continue;
       if (
@@ -451,14 +453,15 @@ export const createRestoreAuthorityExport = async (
     canonicalJson({
       tenant_id: tenantId,
       deletion_epoch: deletionEpoch,
-      authorities: exportAuthorities,
+      authorities: exportAuthorities.map(immutableRestoreAuthority),
       inventory: inventoryEvidence,
     }),
   );
   const current = await loadRestoreAuthority(primary, tenantId);
   if (
     current.deletion_epoch !== deletionEpoch ||
-    canonicalJson(current.authorities) !== canonicalJson(authorities)
+    canonicalJson(current.authorities.map(immutableRestoreAuthority)) !==
+      canonicalJson(authorities.map(immutableRestoreAuthority))
   ) {
     throw new Error("restore authority changed while it was being exported");
   }

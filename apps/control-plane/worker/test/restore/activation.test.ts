@@ -8,6 +8,7 @@ import { purgeRecordedRemoval } from "../../archive/lifecycle";
 import { recordRemoval } from "../../removals/ledger";
 import { cleanupArchiveTenant } from "../archive/support";
 import { restoreProjectionFromArchive } from "../../restore/activation";
+import type { ControlledCopyAdapter } from "../../retention/adapters";
 import type { TenantProjectionDO } from "../../projection/tenant-projection";
 import {
   clearDirectory,
@@ -126,6 +127,82 @@ const removalInput = (resourceId: string) => ({
   reason: "requested" as const,
   removed_at: "2026-09-14T00:00:00.000Z",
 });
+
+const restoreTestAdapters = (): ControlledCopyAdapter[] => {
+  const stores = [
+    "projection_backup",
+    "synapse",
+    "bridge_database",
+    "media_store",
+    "queue",
+    "restic_snapshot",
+    "session_credentials",
+    "account_keys",
+  ] as const;
+  return stores.map((store) => {
+    const auxiliary =
+      store === "session_credentials" || store === "account_keys";
+    return {
+      store,
+      owner: `restore-test-${store}`,
+      default_content_class: auxiliary
+        ? store === "session_credentials"
+          ? ("session_credential" as const)
+          : ("account_key" as const)
+        : ("message" as const),
+      deletion_method: auxiliary ? ("preserve" as const) : ("delete" as const),
+      required: !auxiliary,
+      inventory: async (scope) => ({
+        complete: true,
+        evidence_source: `restore-test-${store}-inventory`,
+        copies: [
+          {
+            reference: `${store}:${scope.resource_id}:${scope.content_generation}`,
+            copy_created_at: "2026-09-13T00:00:00.000Z",
+            resource_id: scope.resource_id,
+            content_generation: scope.content_generation,
+            ...(store === "synapse"
+              ? {
+                  restore_target: {
+                    database: "synapse",
+                    contract: "synapse-event-json-v1",
+                    resource_id: scope.resource_id,
+                    content_generation: scope.content_generation,
+                    room_id: "!restore:example.test",
+                    event_id: `$restore-${scope.resource_id}:example.test`,
+                    event_type: "m.room.message",
+                    media_paths: [],
+                    media_paths_complete: true,
+                  },
+                }
+              : store === "bridge_database"
+                ? {
+                    restore_target: {
+                      database: "whatsapp_bridge",
+                      contract: "mautrix-bridge-message-v1",
+                      resource_id: scope.resource_id,
+                      content_generation: scope.content_generation,
+                      bridge_id: "whatsapp",
+                      message_id: scope.resource_id,
+                      part_id: scope.content_generation,
+                      media_paths: [],
+                      media_paths_complete: true,
+                    },
+                  }
+                : {}),
+          },
+        ],
+      }),
+      cleanup: async () => ({
+        status: auxiliary ? "preserved" : "deleted",
+        content_present: auxiliary,
+        evidence_source: `restore-test-${store}-cleanup`,
+        object_reference: `${store}:restore-test`,
+        detail: null,
+      }),
+    } satisfies ControlledCopyAdapter;
+  });
+};
 
 const seedCompleteControlledCopies = async (
   authorityId: string,
@@ -365,6 +442,26 @@ afterEach(async () => {
 });
 
 describe("restore projection activation", () => {
+  it("blocks an empty ledger without nonvacuous current store evidence", async () => {
+    const stub = await resetProjection();
+
+    await expect(
+      restoreProjectionFromArchive({
+        database: workerEnv.CONTROL_DB,
+        bucket,
+        projection: stub,
+        tenantId,
+        principalId: "principal_restore_activation",
+        rebuildId: "rebuild_restore_activation_empty_evidence",
+        expectedGeneration: 1,
+        startedAt: "2026-09-14T00:01:00.000Z",
+        completedAt: "2026-09-14T00:02:00.000Z",
+        connections: [],
+        now: new Date("2026-09-14T00:02:00.000Z"),
+      }),
+    ).rejects.toThrow("restore readiness is incomplete");
+  });
+
   it("loads authority, sanitizes R2 replay, and publishes a ready projection", async () => {
     const stub = await resetProjection();
     await archiveCanonicalEventBatch({
@@ -381,6 +478,7 @@ describe("restore projection activation", () => {
       database: workerEnv.CONTROL_DB,
       bucket,
       projection: stub,
+      adapters: restoreTestAdapters(),
       tenantId,
       principalId: "principal_restore_activation",
       rebuildId: "rebuild_restore_activation",
@@ -513,6 +611,7 @@ describe("restore projection activation", () => {
       database: workerEnv.CONTROL_DB,
       bucket,
       projection: stub,
+      adapters: restoreTestAdapters(),
       tenantId,
       principalId: "principal_restore_activation",
       rebuildId: "rebuild_restore_activation_resume",
@@ -566,18 +665,13 @@ describe("restore projection activation", () => {
       workerEnv,
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({
-      tenant_id: tenantId,
-      rebuild_id: "rebuild_restore_activation_route",
-      deletion_epoch: 0,
-      page_count: 1,
-      readiness: { state: "ready" },
-      projection: { state: "ready", generation: 2, message_count: 1 },
+      error: { code: "service_unavailable" },
     });
   });
 
-  it("restores a nonempty authority through the route and fences outbound uncertainty", async () => {
+  it("restores a nonempty authority and fences outbound uncertainty", async () => {
     const stub = await resetProjection();
     await archiveCanonicalEventBatch({
       bucket,
@@ -633,26 +727,59 @@ describe("restore projection activation", () => {
       2,
     );
     await seedOutboundRows(stub);
-
-    const response = await createTestApp().request(
-      "https://example.test/api/v1/removals/restore-projection",
-      {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer human-token",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          rebuild_id: "rebuild_restore_activation_authority",
-          expected_generation: 1,
-          started_at: "2026-09-14T00:01:00.000Z",
-        }),
+    await workerEnv.CONTROL_DB.prepare(
+      `UPDATE removal_authority
+       SET status = 'active', completed_at = NULL, updated_at = ?
+       WHERE tenant_id = ?`,
+    )
+      .bind("2026-09-14T00:01:59.000Z", tenantId)
+      .run();
+    const statusMutationProjection = new Proxy(stub, {
+      get(target, property, receiver) {
+        if (property !== "completeRebuild") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (...args: Parameters<typeof stub.completeRebuild>) => {
+          await workerEnv.CONTROL_DB.prepare(
+            `UPDATE removal_authority
+             SET status = 'completed', purge_status = 'complete',
+                 completed_at = ?, updated_at = ?
+             WHERE tenant_id = ?`,
+          )
+            .bind(
+              "2026-09-14T00:02:00.000Z",
+              "2026-09-14T00:02:00.000Z",
+              tenantId,
+            )
+            .run();
+          return target.completeRebuild(...args);
+        };
       },
-      workerEnv,
-    );
+    }) as DurableObjectStub<TenantProjectionDO>;
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const result = await restoreProjectionFromArchive({
+      database: workerEnv.CONTROL_DB,
+      bucket,
+      projection: statusMutationProjection,
+      adapters: restoreTestAdapters(),
+      tenantId,
+      principalId: "principal_restore_activation",
+      rebuildId: "rebuild_restore_activation_authority",
+      expectedGeneration: 1,
+      startedAt: "2026-09-14T00:01:00.000Z",
+      completedAt: "2026-09-14T00:02:00.000Z",
+      connections: [
+        {
+          account_id: "account_human",
+          connection_id: "connection_human_whatsapp",
+          identity_id: "identity_human",
+          platform: "whatsapp",
+        },
+      ],
+      now: new Date("2026-09-14T00:02:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
       deletion_epoch: 2,
       readiness: {
         state: "ready",
@@ -730,6 +857,104 @@ describe("restore projection activation", () => {
     ]);
   });
 
+  it("hides a removal recorded immediately after completion from public reads", async () => {
+    const stub = await resetProjection();
+    const postCompletionEvent = removedEvent(
+      "message_restore_activation_postcomplete",
+    );
+    await archiveCanonicalEventBatch({
+      bucket,
+      tenantId,
+      batchId: "batch_restore_activation_postcomplete",
+      events: [restoreEvent(), postCompletionEvent],
+      archivedAt: "2026-09-14T00:00:00.000Z",
+      producerVersion: "restore-activation-test/1",
+      sourceCheckpoint: null,
+    });
+    const completionWins = new Proxy(stub, {
+      get(target, property, receiver) {
+        if (property !== "completeRebuild") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (...args: Parameters<typeof stub.completeRebuild>) => {
+          const status = await target.completeRebuild(...args);
+          await workerEnv.CONTROL_DB.prepare(
+            "UPDATE restore_activation_leases SET status = 'released', updated_at = ? WHERE tenant_id = ? AND status = 'active'",
+          )
+            .bind("2026-09-14T00:02:00.000Z", tenantId)
+            .run();
+          await expect(
+            recordRemoval(
+              workerEnv.CONTROL_DB,
+              removalInput("message_restore_activation_postcomplete"),
+              new Date("2026-09-14T00:02:00.000Z"),
+            ),
+          ).resolves.toMatchObject({
+            resource_id: "message_restore_activation_postcomplete",
+          });
+          return status;
+        };
+      },
+    }) as DurableObjectStub<TenantProjectionDO>;
+
+    await expect(
+      restoreProjectionFromArchive({
+        database: workerEnv.CONTROL_DB,
+        bucket,
+        projection: completionWins,
+        adapters: restoreTestAdapters(),
+        tenantId,
+        principalId: "principal_restore_activation",
+        rebuildId: "rebuild_restore_activation_postcomplete",
+        expectedGeneration: 1,
+        startedAt: "2026-09-14T00:01:00.000Z",
+        completedAt: "2026-09-14T00:02:00.000Z",
+        connections: [
+          {
+            account_id: "account_human",
+            connection_id: "connection_human_whatsapp",
+            identity_id: "identity_human",
+            platform: "whatsapp",
+          },
+        ],
+        now: new Date("2026-09-14T00:02:00.000Z"),
+      }),
+    ).resolves.toMatchObject({
+      projection: { state: "ready", message_count: 2 },
+    });
+
+    await expect(
+      runInDurableObject(stub, async (_instance, state) =>
+        state.storage.sql
+          .exec<{ body: string; deleted_at: string | null }>(
+            "SELECT body, deleted_at FROM messages WHERE id = ?",
+            "message_restore_activation_postcomplete",
+          )
+          .toArray(),
+      ),
+    ).resolves.toEqual([{ body: "removed during restore", deleted_at: null }]);
+
+    const response = await createTestApp().request(
+      "https://example.test/api/v1/conversations/conversation_restore_activation/messages?identity_id=identity_human&account_id=account_human",
+      {
+        headers: { Authorization: "Bearer human-token" },
+      },
+      workerEnv,
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      items: Array<{ id: string; body: string; sender_label: string }>;
+    };
+    expect(
+      payload.items.find(
+        (item) => item.id === "message_restore_activation_postcomplete",
+      ),
+    ).toMatchObject({
+      body: "",
+      sender_label: "Deleted sender",
+    });
+  });
+
   it("holds the removal writer behind the activation lease during archive replay", async () => {
     const stub = await resetProjection();
     await archiveCanonicalEventBatch({
@@ -769,6 +994,7 @@ describe("restore projection activation", () => {
         database: workerEnv.CONTROL_DB,
         bucket: racingBucket,
         projection: stub,
+        adapters: restoreTestAdapters(),
         tenantId,
         principalId: "principal_restore_activation",
         rebuildId: "rebuild_restore_activation_race",
@@ -793,5 +1019,73 @@ describe("restore projection activation", () => {
         .bind(tenantId)
         .first<{ count: number }>(),
     ).resolves.toMatchObject({ count: 0 });
+  });
+
+  it("rejects a lease status change and late removal at the completion boundary", async () => {
+    const stub = await resetProjection();
+    await archiveCanonicalEventBatch({
+      bucket,
+      tenantId,
+      batchId: "batch_restore_activation_completion_lease",
+      events: [restoreEvent()],
+      archivedAt: "2026-09-14T00:00:00.000Z",
+      producerVersion: "restore-activation-test/1",
+      sourceCheckpoint: null,
+    });
+    const completionRace = new Proxy(stub, {
+      get(target, property, receiver) {
+        if (property !== "completeRebuild") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (...args: Parameters<typeof stub.completeRebuild>) => {
+          await workerEnv.CONTROL_DB.prepare(
+            "UPDATE restore_activation_leases SET status = 'expired', updated_at = ? WHERE tenant_id = ? AND status = 'active'",
+          )
+            .bind("2026-09-14T00:02:00.000Z", tenantId)
+            .run();
+          await expect(
+            recordRemoval(
+              workerEnv.CONTROL_DB,
+              removalInput("message_restore_activation_completion_lease_new"),
+              new Date("2026-09-14T00:02:00.000Z"),
+            ),
+          ).resolves.toMatchObject({
+            resource_id: "message_restore_activation_completion_lease_new",
+          });
+          return target.completeRebuild(...args);
+        };
+      },
+    }) as DurableObjectStub<TenantProjectionDO>;
+
+    await expect(
+      restoreProjectionFromArchive({
+        database: workerEnv.CONTROL_DB,
+        bucket,
+        projection: completionRace,
+        adapters: restoreTestAdapters(),
+        tenantId,
+        principalId: "principal_restore_activation",
+        rebuildId: "rebuild_restore_activation_completion_lease",
+        expectedGeneration: 1,
+        startedAt: "2026-09-14T00:01:00.000Z",
+        completedAt: "2026-09-14T00:02:00.000Z",
+        connections: [
+          {
+            account_id: "account_human",
+            connection_id: "connection_human_whatsapp",
+            identity_id: "identity_human",
+            platform: "whatsapp",
+          },
+        ],
+        now: new Date("2026-09-14T00:02:00.000Z"),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      workerEnv.CONTROL_DB.prepare(
+        "SELECT count(*) AS count FROM removal_authority WHERE tenant_id = ?",
+      )
+        .bind(tenantId)
+        .first<{ count: number }>(),
+    ).resolves.toMatchObject({ count: 1 });
   });
 });

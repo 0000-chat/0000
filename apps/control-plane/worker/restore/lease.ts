@@ -254,6 +254,57 @@ export const renewRestoreActivationLease = async (
   return (result.meta.changes ?? 0) === 1;
 };
 
+/**
+ * Revalidate the identity and authority binding at the DO completion
+ * boundary.  The caller must renew the same active token immediately before
+ * the DO publishes a rebuilt generation; a released, expired, or replaced
+ * lease cannot authorize readiness.
+ */
+export const renewRestoreActivationLeaseForCompletion = async (
+  database: RestoreLeaseDatabase,
+  input: {
+    tenantId: string;
+    leaseId: string;
+    leaseToken: string;
+    expectedDeletionEpoch: number;
+    expectedLedgerHead: string;
+    now?: Date;
+  },
+): Promise<boolean> => {
+  const tenant = CommunicatorIdSchema.parse(input.tenantId);
+  const leaseId = CommunicatorIdSchema.parse(input.leaseId);
+  const expectedDeletionEpoch = positiveEpoch(input.expectedDeletionEpoch);
+  const expectedLedgerHead = requiredText(
+    input.expectedLedgerHead,
+    "ledger head",
+  );
+  const now = input.now ?? new Date();
+  const nowIso = timestampFor(now);
+  const expiresAtIso = timestampFor(
+    new Date(now.getTime() + RESTORE_ACTIVATION_LEASE_MAX_TTL_MS),
+  );
+  const result = await primaryDatabase(database)
+    .prepare(
+      `UPDATE restore_activation_leases
+       SET expires_at = ?, updated_at = ?
+       WHERE tenant_id = ? AND id = ? AND status = 'active'
+         AND lease_token_hash = ? AND expires_at > ?
+         AND deletion_epoch = ? AND ledger_head = ?`,
+    )
+    .bind(
+      expiresAtIso,
+      nowIso,
+      tenant,
+      leaseId,
+      await tokenHash(input.leaseToken),
+      nowIso,
+      expectedDeletionEpoch,
+      expectedLedgerHead,
+    )
+    .run();
+  return (result.meta.changes ?? 0) === 1;
+};
+
 export const releaseRestoreActivationLease = async (
   database: RestoreLeaseDatabase,
   input: {
