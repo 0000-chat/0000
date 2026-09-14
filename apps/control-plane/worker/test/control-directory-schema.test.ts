@@ -57,6 +57,9 @@ const applicationTables = [
   "group_management_groups",
   "group_management_operations",
   "group_management_evidence",
+  "outbound_authority_heads",
+  "outbound_acceptance_intents",
+  "outbound_dispatch_claims",
 ];
 
 const timestamp = "2026-08-29T00:00:00.000Z";
