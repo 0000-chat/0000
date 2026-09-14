@@ -9,6 +9,7 @@ import {
   FailOutboundDispatchInputSchema,
   ListOutboundEvidenceInputSchema,
   OutboundDispatchPayloadSchema,
+  OutboundAuthorityMetadataSchema,
   OutboundEvidenceRecordSchema,
   ApplyProjectionBatchInputSchema,
   ApplyReplayPageInputSchema,
@@ -102,6 +103,7 @@ import {
   type FailOutboundDispatchInput,
   type ListOutboundEvidenceInput,
   type OutboundDispatchPayload,
+  type OutboundAuthorityMetadata,
   type OutboundEvidenceRecord,
   type ProjectionChannelStat,
   type ProjectionChange,
@@ -420,6 +422,12 @@ type OutboundDispatchRow = {
   last_action_at: string | null;
   created_at: string;
   updated_at: string;
+  authority_reservation_id: string | null;
+  authority_membership_id: string | null;
+  authority_identity_id: string | null;
+  authority_capability_kind: "account_grant" | "owner_admin" | null;
+  authority_capability_id: string | null;
+  authority_capability_epoch: number | null;
 };
 
 type OutboundDecisionRow = {
@@ -485,7 +493,7 @@ type OutboundCommandRow = {
 };
 
 const OUTBOUND_DISPATCH_COLUMNS =
-  "id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, created_at, updated_at";
+  "id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, created_at, updated_at, authority_reservation_id, authority_membership_id, authority_identity_id, authority_capability_kind, authority_capability_id, authority_capability_epoch";
 
 type ConversationExistsRow = { id: string };
 
@@ -1464,6 +1472,46 @@ const readOutboundMessage = (
     )
     .toArray()[0];
 
+const authorityMetadataFromRow = (
+  row: OutboundDispatchRow,
+): OutboundAuthorityMetadata | undefined => {
+  if (
+    row.authority_reservation_id === null ||
+    row.authority_membership_id === null ||
+    row.authority_identity_id === null ||
+    row.authority_capability_kind === null ||
+    row.authority_capability_id === null ||
+    row.authority_capability_epoch === null
+  ) {
+    return undefined;
+  }
+  return OutboundAuthorityMetadataSchema.parse({
+    reservation_id: row.authority_reservation_id,
+    membership_id: row.authority_membership_id,
+    identity_id: row.authority_identity_id,
+    capability:
+      row.authority_capability_kind === "account_grant"
+        ? {
+            kind: "account_grant",
+            grant_id: row.authority_capability_id,
+            authorization_epoch: row.authority_capability_epoch,
+          }
+        : {
+            kind: "owner_admin",
+            authority_id: row.authority_capability_id,
+            authority_epoch: row.authority_capability_epoch,
+          },
+  });
+};
+
+const sameAuthorityMetadata = (
+  left: OutboundAuthorityMetadata | undefined,
+  right: OutboundAuthorityMetadata | undefined,
+): boolean => {
+  if (left === undefined || right === undefined) return left === right;
+  return JSON.stringify(left) === JSON.stringify(right);
+};
+
 const mapOutboundDispatch = (row: OutboundDispatchRow): OutboundDispatch =>
   OutboundDispatchSchema.parse({
     id: row.id,
@@ -1481,6 +1529,10 @@ const mapOutboundDispatch = (row: OutboundDispatchRow): OutboundDispatch =>
     status: row.status,
     transaction_id: row.transaction_id,
     request_digest: row.request_digest,
+    body_digest: row.body_digest,
+    ...(authorityMetadataFromRow(row) === undefined
+      ? {}
+      : { authority: authorityMetadataFromRow(row) }),
     dispatch_lease_id: row.dispatch_lease_id,
     dispatch_lease_expires_at: row.dispatch_lease_expires_at,
     uncertainty_reason: row.uncertainty_reason,
@@ -1543,6 +1595,10 @@ const mapOutboundCommand = (
     dispatch_id: dispatch.id,
     transaction_id: dispatch.transaction_id,
     request_digest: dispatch.request_digest,
+    body_digest: dispatch.body_digest,
+    ...(authorityMetadataFromRow(dispatch) === undefined
+      ? {}
+      : { authority: authorityMetadataFromRow(dispatch) }),
     dispatch_lease_id:
       dispatch.dispatch_lease_id === null
         ? undefined
@@ -3257,6 +3313,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       const eventId = `event_outbound_${requestDigest.slice(0, 48)}`;
       const dispatchId = `dispatch_outbound_${requestDigest.slice(0, 48)}`;
       const transactionId = `transaction_outbound_${requestDigest.slice(0, 48)}`;
+      const authority = parsed.authority;
+      if (
+        authority !== undefined &&
+        authority.identity_id !== parsed.actor_identity_id
+      ) {
+        throw projectionError("projection_conflict");
+      }
       const occurredMs = parseStoredMilliseconds(parsed.accepted_at);
       const initialDispatchStatus = parsed.initial_dispatch_status ?? "pending";
       const initialCommandStatus =
@@ -3327,7 +3390,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             current.actor_identity_id !== parsed.actor_identity_id ||
             current.conversation_id !== parsed.conversation_id ||
             current.account_id !== owner.account_id ||
-            current.delivery_mode !== parsed.delivery_mode
+            current.delivery_mode !== parsed.delivery_mode ||
+            !sameAuthorityMetadata(authority, authorityMetadataFromRow(current))
           ) {
             throw projectionError("projection_conflict");
           }
@@ -3392,7 +3456,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           eventId,
         );
         this.ctx.storage.sql.exec(
-          "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 'unknown', 'unknown', 'unknown', NULL, 0, 0, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, ?)",
+          "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at, authority_reservation_id, authority_membership_id, authority_identity_id, authority_capability_kind, authority_capability_id, authority_capability_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 'unknown', 'unknown', 'unknown', NULL, 0, 0, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
           dispatchId,
           commandId,
           messageId,
@@ -3416,6 +3480,20 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           confirmationDueAt,
           parsed.accepted_at,
           parsed.accepted_at,
+          authority?.reservation_id ?? null,
+          authority?.membership_id ?? null,
+          authority?.identity_id ?? null,
+          authority?.capability.kind ?? null,
+          authority === undefined
+            ? null
+            : authority.capability.kind === "account_grant"
+              ? authority.capability.grant_id
+              : authority.capability.authority_id,
+          authority === undefined
+            ? null
+            : authority.capability.kind === "account_grant"
+              ? authority.capability.authorization_epoch
+              : authority.capability.authority_epoch,
         );
         recomputeConversationSummaries(
           this.ctx.storage.sql,
@@ -3603,6 +3681,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       ) {
         throw projectionError("projection_conflict");
       }
+      const authority = authorityMetadataFromRow(dispatch);
+      if (authority === undefined) throw projectionError("projection_conflict");
       return structuredClone(
         OutboundDispatchPayloadSchema.parse({
           schema_version: 1,
@@ -3624,6 +3704,8 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           dispatch_lease_id: dispatch.dispatch_lease_id,
           dispatch_lease_expires_at: dispatch.dispatch_lease_expires_at,
           created_at: dispatch.created_at,
+          body_digest: dispatch.body_digest,
+          authority,
         }),
       );
     } catch (error) {
@@ -4119,6 +4201,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             if (resendRequestDigest === null) {
               throw projectionError("projection_conflict");
             }
+            const resendAuthority = parsed.resend_authority;
+            if (
+              resendAuthority === undefined ||
+              (resendAuthority.identity_id !== dispatch.actor_identity_id &&
+                (resendAuthority.capability.kind !== "owner_admin" ||
+                  resendAuthority.identity_id !== parsed.actor_identity_id)) ||
+              resendAuthority.membership_id.trim().length === 0
+            ) {
+              throw projectionError("projection_conflict");
+            }
             newCommandId = `command_outbound_${resendRequestDigest.slice(0, 48)}`;
             const newMessageId = `message_outbound_${resendRequestDigest.slice(0, 48)}`;
             const newEventId = `event_outbound_${resendRequestDigest.slice(0, 48)}`;
@@ -4163,7 +4255,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             this.ctx.storage.sql.exec(
               "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) VALUES (?, ?, ?, ?, ?, ?, 'message.send', ?, ?, NULL, ?, ?, ?, ?)",
               newCommandId,
-              dispatch.actor_identity_id,
+              parsed.actor_identity_id,
               dispatch.account_id,
               dispatch.connection_id,
               dispatch.conversation_id,
@@ -4176,14 +4268,14 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               newEventId,
             );
             this.ctx.storage.sql.exec(
-              "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 'unknown', 'unknown', 'unknown', NULL, 0, 1, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, ?)",
+              "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at, authority_reservation_id, authority_membership_id, authority_identity_id, authority_capability_kind, authority_capability_id, authority_capability_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 'unknown', 'unknown', 'unknown', NULL, 0, 1, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
               newDispatchId,
               newCommandId,
               newMessageId,
               newEventId,
               parsed.tenant_id,
               dispatch.actor_principal_id,
-              dispatch.actor_identity_id,
+              parsed.actor_identity_id,
               dispatch.resource_identity_id,
               dispatch.account_id,
               dispatch.connection_id,
@@ -4201,6 +4293,16 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               newDueAt,
               parsed.decided_at,
               parsed.decided_at,
+              resendAuthority.reservation_id,
+              resendAuthority.membership_id,
+              resendAuthority.identity_id,
+              resendAuthority.capability.kind,
+              resendAuthority.capability.kind === "account_grant"
+                ? resendAuthority.capability.grant_id
+                : resendAuthority.capability.authority_id,
+              resendAuthority.capability.kind === "account_grant"
+                ? resendAuthority.capability.authorization_epoch
+                : resendAuthority.capability.authority_epoch,
             );
             newDispatch = readOutboundDispatchByCommand(
               this.ctx.storage,

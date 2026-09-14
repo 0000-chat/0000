@@ -139,6 +139,7 @@ const mapOperation = (
   return GroupCreationOperationSchema.parse({
     operation_id: row.operation_id,
     tenant_id: row.tenant_id,
+    membership_id: row.membership_id,
     identity_id: row.identity_id,
     account_id: row.account_id,
     connection_id: row.connection_id,

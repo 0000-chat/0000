@@ -23,6 +23,15 @@ const payload: ReceiptDispatchPayload = {
     matrix_room_namespace: "communicator.0000.gold",
     provider_login_id: "login-primary",
   },
+  membership_id: "membership_human",
+  actor_identity_id: "identity_human",
+  reservation_id: "receipt_reservation_1",
+  capability: {
+    kind: "account_grant",
+    grant_id: "grant_receipt_send",
+    authorization_epoch: 2,
+  },
+  request_hash: "a".repeat(64),
   operation_id: "receipt_operation_1",
   operation_created_at: "2026-09-14T00:00:00.000Z",
   conversation_id: "conversation_receipt",
@@ -38,10 +47,20 @@ describe("WhatsApp receipt provider", () => {
       const body = JSON.parse(String(init?.body)) as {
         route: ReceiptDispatchPayload["route"];
         matrix_event_id: string;
+        membership_id: string;
+        actor_identity_id: string;
+        reservation_id: string;
+        capability: ReceiptDispatchPayload["capability"];
+        request_hash: string;
       };
       expect(body.route.account_id).toBe(payload.route.account_id);
       expect(body.route.provider_login_id).toBe("login-primary");
       expect(body.matrix_event_id).toBe(payload.matrix_event_id);
+      expect(body.membership_id).toBe(payload.membership_id);
+      expect(body.actor_identity_id).toBe(payload.actor_identity_id);
+      expect(body.reservation_id).toBe(payload.reservation_id);
+      expect(body.capability).toEqual(payload.capability);
+      expect(body.request_hash).toBe(payload.request_hash);
       return new Response(
         JSON.stringify({
           status: "accepted",

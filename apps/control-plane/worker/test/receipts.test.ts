@@ -263,6 +263,11 @@ describe("explicit read receipt API", () => {
   it("does not dispatch when the final receipt grant is revoked", async () => {
     const dispatchReceipt = vi.fn();
     const projection = projectionFor();
+    await env.CONTROL_DB.prepare(
+      "UPDATE memberships SET role = 'member', updated_at = ? WHERE id = 'membership_human'",
+    )
+      .bind(timestamp)
+      .run();
     const app = createTestApp(projection, dispatchReceipt, async () => {
       await env.CONTROL_DB.prepare(
         "UPDATE account_grants SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",

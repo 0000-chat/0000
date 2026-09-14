@@ -9,6 +9,7 @@ import {
   type GroupRenameRequest,
 } from "@communicator/contracts";
 import { hasAccountOperationGrant } from "../control-directory/grants";
+import { isAdministratorSession } from "../read/authorization";
 import { ReadError } from "../read/errors";
 import {
   getContactCandidate,
@@ -36,6 +37,11 @@ import {
   type GroupManagementOperationInput,
   type GroupManagementRepositoryError,
 } from "./management-repository";
+import {
+  readPrivateAuthorityReservation,
+  reservePrivateAuthority,
+} from "../outbound/private-authority";
+import type { OutboundCapability } from "../outbound/authority-types";
 
 export type GroupManagementRouteServices = {
   createProvider?: (context: ContactServiceContext) => GroupProvider;
@@ -133,6 +139,40 @@ const requireAuthority = async (
 ): Promise<void> => {
   const database = databaseFor(context);
   const session = database.withSession("first-primary");
+  if (isAdministratorSession(context.authorization)) {
+    const current = await session
+      .prepare(
+        `SELECT 1 AS available
+           FROM memberships AS m
+           JOIN tenants AS t ON t.id = m.tenant_id
+           JOIN principals AS p ON p.id = m.principal_id
+           JOIN identities AS i
+             ON i.tenant_id = m.tenant_id AND i.id = ?
+           JOIN connections AS c
+             ON c.tenant_id = m.tenant_id AND c.id = ?
+            AND c.identity_id = i.id
+           JOIN connection_accounts AS ca
+             ON ca.connection_id = c.id AND ca.account_id = ?
+            AND ca.status = 'active'
+          WHERE m.tenant_id = ? AND m.id = ?
+            AND t.status = 'active'
+            AND m.status = 'active' AND m.role IN ('owner', 'admin')
+            AND p.status = 'active' AND p.revoked_at IS NULL
+            AND p.principal_type IN ('human', 'operator')
+            AND i.status = 'active' AND i.identity_kind = 'human'
+          LIMIT 1`,
+      )
+      .bind(
+        route.identity_id,
+        route.connection_id,
+        route.account_id,
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+      )
+      .first<{ available: number }>();
+    if (current === null) throw new ReadError("forbidden");
+    return;
+  }
   const [manage, read] = await Promise.all([
     hasAccountOperationGrant(
       session,
@@ -154,6 +194,92 @@ const requireAuthority = async (
     ),
   ]);
   if (!manage || !read) throw new ReadError("forbidden");
+};
+
+const readManagementCapability = async (
+  context: ContactServiceContext,
+  route: GroupRoute,
+  conversationId: string,
+): Promise<OutboundCapability | null> => {
+  const db = databaseFor(context).withSession("first-primary");
+  if (isAdministratorSession(context.authorization)) {
+    const row = await db
+      .prepare(
+        `SELECT m.authority_epoch
+           FROM memberships AS m
+           JOIN tenants AS t ON t.id = m.tenant_id
+           JOIN principals AS p ON p.id = m.principal_id
+           JOIN identities AS i
+             ON i.tenant_id = m.tenant_id AND i.id = ?
+           JOIN connections AS c
+             ON c.tenant_id = m.tenant_id AND c.id = ?
+            AND c.identity_id = i.id
+           JOIN connection_accounts AS ca
+             ON ca.connection_id = c.id AND ca.account_id = ?
+            AND ca.status = 'active'
+          WHERE m.tenant_id = ? AND m.id = ?
+            AND t.status = 'active'
+            AND m.status = 'active' AND m.role IN ('owner', 'admin')
+            AND p.status = 'active' AND p.revoked_at IS NULL
+            AND p.principal_type IN ('human', 'operator')
+            AND i.status = 'active' AND i.identity_kind = 'human'
+          LIMIT 1`,
+      )
+      .bind(
+        route.identity_id,
+        route.connection_id,
+        route.account_id,
+        context.authorization.tenant.id,
+        context.authorization.membership.id,
+      )
+      .first<{ authority_epoch: number }>();
+    return row === null
+      ? null
+      : {
+          kind: "owner_admin",
+          authority_id: context.authorization.membership.id,
+          authority_epoch: row.authority_epoch,
+        };
+  }
+  const row = await db
+    .prepare(
+      `SELECT g.id AS grant_id, g.authorization_epoch
+         FROM account_grants AS g
+         JOIN identity_grants AS ig
+           ON ig.tenant_id = g.tenant_id
+          AND ig.membership_id = g.membership_id
+          AND ig.identity_id = g.identity_id
+          AND ig.operation_scope = 'group.manage'
+         JOIN connection_accounts AS ca
+           ON ca.account_id = g.account_id AND ca.status = 'active'
+         JOIN connections AS c
+           ON c.tenant_id = g.tenant_id AND c.id = ca.connection_id AND c.id = ?
+        WHERE g.tenant_id = ? AND g.membership_id = ? AND g.identity_id = ?
+          AND g.account_id = ? AND g.operation_scope = 'group.manage'
+          AND g.status = 'active'
+          AND (g.chat_scope = 'all_chats' OR EXISTS (
+            SELECT 1 FROM account_grant_chats AS gc
+             WHERE gc.tenant_id = g.tenant_id AND gc.grant_id = g.id
+               AND gc.account_id = g.account_id AND gc.chat_id = ?
+          ))
+        ORDER BY g.id LIMIT 1`,
+    )
+    .bind(
+      route.connection_id,
+      context.authorization.tenant.id,
+      context.authorization.membership.id,
+      route.identity_id,
+      route.account_id,
+      conversationId,
+    )
+    .first<{ grant_id: string; authorization_epoch: number }>();
+  return row === null
+    ? null
+    : {
+        kind: "account_grant",
+        grant_id: row.grant_id,
+        authorization_epoch: row.authorization_epoch,
+      };
 };
 
 const participantSnapshot = async (
@@ -316,9 +442,11 @@ const providerInput = (
 });
 
 const providerErrorCode = (error: unknown): string =>
-  error instanceof GroupProviderError
-    ? `provider_${error.code}`
-    : "provider_unavailable";
+  error instanceof GroupProviderError && error.code === "authorization_revoked"
+    ? "group_management_authority_revoked"
+    : error instanceof GroupProviderError
+      ? `provider_${error.code}`
+      : "provider_unavailable";
 
 const isReconciliationError = (error: unknown): boolean =>
   error instanceof GroupProviderError &&
@@ -383,6 +511,7 @@ const authorityFailure = async (
 const completeManaged = async (
   context: ContactServiceContext,
   operation: GroupManagementOperation,
+  route: GroupRoute,
   group: ManagedProviderGroup,
   source: "provider" | "event" | "refresh",
   services: GroupManagementRouteServices,
@@ -401,6 +530,30 @@ const completeManaged = async (
     if (!finalizeInvalid) return operation;
     return completeFailure(context, operation, invalidReason, services);
   }
+  // Provider evidence is only a candidate result. Recheck the same
+  // membership/identity authority immediately before committing the new
+  // group revision so a revoke or demotion that lands during provider I/O
+  // cannot become a successful durable mutation.
+  const finalAuthority = await authorityFailure(
+    context,
+    operation,
+    route,
+    services,
+  );
+  if (finalAuthority !== null) return finalAuthority;
+  const finalCapability = await readManagementCapability(
+    context,
+    route,
+    operation.conversation_id,
+  );
+  if (finalCapability === null) {
+    return completeFailure(
+      context,
+      operation,
+      "group_management_authority_revoked",
+      services,
+    );
+  }
   try {
     return await finishGroupManagementOperation(
       databaseFor(context),
@@ -413,6 +566,7 @@ const completeManaged = async (
         evidencePath: source,
         duplicateRisk: false,
         humanActionRequired: false,
+        authorityKind: finalCapability.kind,
         now: nowFor(services),
       },
     );
@@ -435,7 +589,29 @@ const reconcileManagementOperation = async (
 ): Promise<GroupManagementOperation> => {
   const authority = await authorityFailure(context, operation, route, services);
   if (authority !== null) return authority;
-  const input = providerInput(operation, route);
+  const savedReservation = await readPrivateAuthorityReservation(
+    databaseFor(context).withSession("first-primary"),
+    "group.manage",
+    operation.tenant_id,
+    operation.operation_id,
+  );
+  if (savedReservation === null) {
+    return completeFailure(
+      context,
+      operation,
+      "group_management_authority_reservation_missing",
+      services,
+    );
+  }
+  const input: GroupManagementProviderInput = {
+    ...providerInput(operation, route),
+    membership_id: savedReservation.membership_id,
+    actor_identity_id: savedReservation.identity_id,
+    reservation_id: savedReservation.id,
+    capability: savedReservation.capability,
+    request_hash: savedReservation.request_hash,
+    operation_scope: "group.manage",
+  };
   if (provider.observeManagedGroup !== undefined) {
     try {
       const observed = await provider.observeManagedGroup(input);
@@ -443,6 +619,7 @@ const reconcileManagementOperation = async (
         const result = await completeManaged(
           context,
           operation,
+          route,
           observed,
           "event",
           services,
@@ -461,6 +638,7 @@ const reconcileManagementOperation = async (
         const result = await completeManaged(
           context,
           operation,
+          route,
           refreshed,
           "refresh",
           services,
@@ -486,8 +664,25 @@ const dispatchProvider = async (
   route: GroupRoute,
   provider: GroupProvider,
   services: GroupManagementRouteServices,
+  authority?: {
+    reservation_id: string;
+    capability: OutboundCapability;
+    request_hash: string;
+  },
 ): Promise<GroupManagementOperation> => {
-  const input = providerInput(operation, route);
+  const input: GroupManagementProviderInput = {
+    ...providerInput(operation, route),
+    ...(authority === undefined
+      ? {}
+      : {
+          membership_id: operation.membership_id,
+          actor_identity_id: operation.identity_id,
+          reservation_id: authority.reservation_id,
+          capability: authority.capability,
+          request_hash: authority.request_hash,
+          operation_scope: "group.manage" as const,
+        }),
+  };
   try {
     let result: ManagedProviderGroup;
     if (operation.action === "rename") {
@@ -527,15 +722,26 @@ const dispatchProvider = async (
         operation.requested_member_provider_ids,
       );
     }
-    const authority = await authorityFailure(
+    return completeManaged(
       context,
       operation,
       route,
+      result,
+      "provider",
       services,
     );
-    if (authority !== null) return authority;
-    return completeManaged(context, operation, result, "provider", services);
   } catch (error) {
+    if (
+      error instanceof GroupProviderError &&
+      error.code === "authorization_revoked"
+    ) {
+      return completeFailure(
+        context,
+        operation,
+        "group_management_authority_revoked",
+        services,
+      );
+    }
     if (!isReconciliationError(error)) {
       return completeFailure(
         context,
@@ -586,7 +792,54 @@ const dispatchOwner = async (
       "group_revision_conflict",
       services,
     );
-  return dispatchProvider(context, operation, route, provider, services);
+  const capability = await readManagementCapability(
+    context,
+    route,
+    operation.conversation_id,
+  );
+  if (capability === null)
+    return completeFailure(
+      context,
+      operation,
+      "group_management_authority_revoked",
+      services,
+    );
+  const requestHash = operation.request_hash;
+  if (requestHash === undefined)
+    return completeFailure(
+      context,
+      operation,
+      "group_management_authority_revoked",
+      services,
+    );
+  const reservation = await reservePrivateAuthority(
+    databaseFor(context).withSession("first-primary"),
+    {
+      tenant_id: operation.tenant_id,
+      membership_id: operation.membership_id,
+      identity_id: operation.identity_id,
+      account_id: operation.account_id,
+      conversation_id: operation.conversation_id,
+      connection_id: operation.connection_id,
+      operation_scope: "group.manage",
+      operation_id: operation.operation_id,
+      request_hash: requestHash,
+      capability,
+      now,
+    },
+  );
+  if (reservation.status === "denied")
+    return completeFailure(
+      context,
+      operation,
+      "group_management_authority_revoked",
+      services,
+    );
+  return dispatchProvider(context, operation, route, provider, services, {
+    reservation_id: reservation.reservation.id,
+    capability: reservation.reservation.capability,
+    request_hash: requestHash,
+  });
 };
 
 const routeAndState = async (
