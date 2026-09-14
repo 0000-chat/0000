@@ -46,6 +46,13 @@ external provider requires a confidential client. Never put either secret in
 `wrangler.jsonc`, a checked-in env file, a client registration JSON, logs, or
 the bootstrap SQL.
 
+Provider-backed environments also require two independently managed secrets.
+Set `CONNECTION_GATEWAY_TOKEN` to the same value stored in the Matrix gateway's
+`provisioning.gateway_shared_secret_file`. Set
+`LINKING_IDENTITY_HMAC_SECRET` to a separate random value. Never reuse the
+gateway secret for the identity HMAC secret. Keep both values outside
+`wrangler.jsonc`, checked-in env files, logs, and command arguments.
+
 The external IdP registration is an operator-owned prerequisite. It must
 allow exactly the configured callback URI, issue an ID token containing
 `iss`, `sub`, `aud`, `nonce`, `iat`, and `exp`, publish the configured JWKS,
@@ -162,9 +169,17 @@ After the non-secret values pass validation, an approved operator applies the
 checked-in D1 migrations to the selected environment and sets secrets without
 printing them:
 
+Wrangler reads the `migrations` directory from `apps/control-plane/wrangler.jsonc`
+and applies every pending SQL file in numeric filename order. This includes the
+current authority and lifecycle migrations.
+
 ```sh
 pnpm --filter @communicator/control-plane exec wrangler d1 migrations apply \
   CONTROL_DB --env staging --remote
+pnpm --filter @communicator/control-plane exec wrangler secret put \
+  CONNECTION_GATEWAY_TOKEN --env staging
+pnpm --filter @communicator/control-plane exec wrangler secret put \
+  LINKING_IDENTITY_HMAC_SECRET --env staging
 pnpm --filter @communicator/control-plane exec wrangler secret put \
   COMMUNICATOR_OAUTH_SIGNING_SECRET --env staging
 pnpm --filter @communicator/control-plane exec wrangler secret put \

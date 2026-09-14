@@ -88,15 +88,11 @@ inject a fake verifier. They do not create a working live ingress credential.
 
 ## Apply the local D1 migrations
 
-The D1 schema has two checked-in migrations:
-
-- `apps/control-plane/migrations/0001_control_directory.sql` creates tenants,
-  principals, identities, connections, and control-directory tables.
-- `apps/control-plane/migrations/0002_ingestion_routing.sql` creates gateway
-  routes, immutable account mappings, and their history guards.
-
-Apply both to the local `CONTROL_DB` binding with the repository's actual
-Wrangler command:
+Wrangler reads `apps/control-plane/migrations` from the checked-in Worker
+configuration and applies every pending SQL file in numeric filename order.
+The command below applies the full directory, including the earlier
+control-directory and ingestion migrations and the current authority and
+lifecycle migrations.
 
 ```sh
 WRANGLER_LOG_PATH=/tmp/communicator-matrix-ingestion-wrangler.log pnpm --filter @communicator/control-plane exec wrangler d1 migrations apply CONTROL_DB --local

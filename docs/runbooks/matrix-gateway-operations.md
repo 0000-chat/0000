@@ -12,17 +12,22 @@ performed by daemon startup.
    at `/usr/local/bin/communicator-matrix-gateway`.
 2. Copy `deploy/matrix-gateway/config.example.json` to
    `/etc/communicator/matrix-gateway/config.json`. Set the deployment's
-   endpoint and identity values while retaining the fixed private Synapse
-   origin shape (`http://synapse:8008`). All paths must be absolute and must
-   remain within the protected runtime layout.
-3. Provision the four protected files named by the configuration separately:
+   endpoint and identity values, including `provisioning.authority_base_url`,
+   while retaining the fixed private Synapse origin shape
+   (`http://synapse:8008`). All paths must be absolute and must remain within
+   the protected runtime layout.
+3. Provision the four top-level protected files named by the configuration
+   separately:
    the Matrix password (for explicit bootstrap tooling), Matrix SDK
    passphrase, state key, and OAuth client secret. Keep them outside Git,
    images, environment interpolation, logs, and process arguments. The daemon
    reads the passphrase, state key, and OAuth secret; it does not read the
    password during normal receive-only operation. When the optional
    `provisioning` block is enabled, provision its bridge and gateway shared
-   secret files with the same protected ownership and mode.
+   secret files with the same protected ownership and mode. The value in
+   `gateway_shared_secret_file` must exactly match the Cloudflare Worker's
+   `CONNECTION_GATEWAY_TOKEN` secret. Set that Worker secret through the
+   protected procedure in the OAuth deployment runbook.
 4. Create the configured Matrix-store and state directories owned by the
    service account. Preserve the encrypted state database and SDK store across
    upgrades and restarts.
@@ -38,10 +43,15 @@ have passed. This package does not activate production or send live messages.
 
 ## Local review and health
 
-Run the repository checks from the repository root, including the focused
-gateway tests and the complete repository check. Review the exact binary and
-unit diff before installation. A local state database can be observed without
-the state key:
+Run these source checks from the repository root before installation:
+
+```sh
+cargo test -p communicator-matrix-gateway --all-features
+pnpm check
+```
+
+Review the exact binary and unit diff after the checks. A local state database
+can be observed without the state key:
 
 ```text
 communicator-matrix-gateway healthcheck --state-db /srv/communicator/matrix-gateway/state/gateway.sqlite3

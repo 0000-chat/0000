@@ -70,14 +70,10 @@ invent a token to make the browser appear live.
 ## Apply D1 migrations in order
 
 Apply the checked-in D1 migrations to the local `CONTROL_DB` binding. Wrangler
-applies pending files in numeric order:
-
-1. `0001_control_directory.sql` creates tenants, principals, memberships,
-   identities, grants, connections, and the control-directory tables.
-2. `0002_ingestion_routing.sql` creates gateway-route and account-mapping
-   metadata used by the ingestion boundary.
-3. `0003_connection_read_metadata.sql` adds connection synchronization and
-   attention fields, `sort_position`, and `connection_capabilities`.
+reads `apps/control-plane/migrations` and applies every pending SQL file in
+numeric filename order. The read route uses the earlier control-directory,
+ingestion, and connection metadata migrations. The same command also applies
+the current authority and lifecycle migrations.
 
 Apply them with:
 

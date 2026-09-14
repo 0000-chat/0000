@@ -43,16 +43,12 @@ an external service, live provider traffic, or a real credential.
 
 ## Apply the D1 migrations in order
 
-Apply the checked-in D1 migrations in this order:
-
-1. `0001_control_directory.sql` creates tenants, principals, memberships,
-   identities, grants, connections, and the directory tables.
-2. `0002_ingestion_routing.sql` creates gateway-route and account-mapping
-   metadata.
-3. `0003_connection_read_metadata.sql` adds connection synchronization,
-   attention, ordering, and capability metadata.
-4. `0004_realtime_tickets.sql` creates digest-only, single-use realtime ticket
-   storage and its expiry index.
+Apply the checked-in D1 migrations in this order. Wrangler reads
+`apps/control-plane/migrations` from the checked-in Worker configuration and
+applies every pending SQL file in numeric filename order.
+The first four files create the control directory, ingestion metadata,
+connection read metadata, and realtime tickets. The command below applies the
+full directory, including the current authority and lifecycle migrations.
 
 Run the migrations against the local `CONTROL_DB` binding:
 

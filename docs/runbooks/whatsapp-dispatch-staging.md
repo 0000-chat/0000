@@ -36,6 +36,12 @@ sacrificial linked account, one conversation, and one message body. Set
 templates; replace every angle-bracket placeholder with the values from the
 same staging tenant and keep the bearer tokens outside shell history.
 
+Before this proof, complete the protected secret procedure in the OAuth
+deployment runbook. The Worker secret `CONNECTION_GATEWAY_TOKEN` must match the
+value in the gateway's `provisioning.gateway_shared_secret_file`. Keep
+`LINKING_IDENTITY_HMAC_SECRET` independently managed and never reuse the
+gateway secret for it.
+
 ```sh
 export STAGING_BASE_URL='https://<staging-worker-host>'
 export STAGING_TOKEN='<agent-or-human-bearer-token>'
