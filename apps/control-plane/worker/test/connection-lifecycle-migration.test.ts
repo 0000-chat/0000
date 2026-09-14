@@ -370,14 +370,17 @@ describe("connection lifecycle migration", () => {
 
     await env.CONTROL_DB.prepare(
       `INSERT INTO connection_lifecycle_operations
-         (operation_id, tenant_id, connection_id, identity_id, provider, kind,
+         (operation_id, tenant_id, actor_principal_id, membership_id,
+          connection_id, identity_id, provider, kind,
           session_id, idempotency_key, expected_session_generation, provider_login_id,
           status, evidence_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'whatsapp', 'disconnect', NULL, ?, ?, ?, 'pending', '[]', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, 'whatsapp', 'disconnect', NULL, ?, ?, ?, 'pending', '[]', ?, ?)`,
     )
       .bind(
         "lifecycle_upgrade",
         "tenant_upgrade",
+        "principal_upgrade",
+        "membership_upgrade",
         "connection_upgrade",
         "identity_upgrade",
         "lifecycle-upgrade-key",

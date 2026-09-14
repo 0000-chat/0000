@@ -95,6 +95,7 @@ const seedConnection = async () => {
 const startRelink = (
   app: ReturnType<typeof createApp>,
   idempotencyKey: string,
+  expectedSessionGeneration?: string,
 ) =>
   request(
     app,
@@ -106,6 +107,9 @@ const startRelink = (
         provider: "whatsapp",
         method: "qr",
         confirmed_identity_id: "identity_human",
+        ...(expectedSessionGeneration === undefined
+          ? {}
+          : { expected_session_generation: expectedSessionGeneration }),
       }),
     },
   );
@@ -367,6 +371,25 @@ describe("administrator connection relink and disconnect", () => {
       attention_code: "disconnect_reconciliation_required",
     });
 
+    const retry = await startRelink(
+      appFor({
+        async start() {
+          return {
+            gateway_ref: "relink-after-unavailable-gateway",
+            action: "scan_qr",
+            qr: "qr-relink",
+            action_expires_at: "2026-09-13T00:01:00.000Z",
+          };
+        },
+        async poll() {
+          return connected("login-one");
+        },
+        async cancel() {},
+      }),
+      "relink-after-unavailable-001",
+    );
+    expect(retry.status).toBe(201);
+
     await seedConnection();
     const constructorUnavailable = createApp({
       createConnectionGateway: () => {
@@ -507,5 +530,207 @@ describe("administrator connection relink and disconnect", () => {
       .bind("connection_human_whatsapp")
       .first<{ status: string; attention_code: string | null }>();
     expect(finalRow?.status).toBe("disconnected");
+  });
+
+  it("allows one relink provider claim and binds idempotent replay identity", async () => {
+    let releaseStart!: () => void;
+    let startedStart!: () => void;
+    const startEntered = new Promise<void>((resolve) => {
+      startedStart = resolve;
+    });
+    const startRelease = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    let startCalls = 0;
+    const gateway: ConnectionGateway = {
+      async start() {
+        startCalls += 1;
+        startedStart();
+        await startRelease;
+        return {
+          gateway_ref: "relink-claim-gateway",
+          action: "scan_qr",
+          qr: "qr-relink",
+          action_expires_at: "2026-09-13T00:01:00.000Z",
+        };
+      },
+      async poll() {
+        return connected("login-one");
+      },
+      async cancel() {},
+    };
+    const app = appFor(gateway);
+    const firstPromise = startRelink(app, "relink-claim-001");
+    await startEntered;
+
+    const second = await startRelink(app, "relink-claim-002");
+    expect(second.status).toBe(409);
+    expect(startCalls).toBe(1);
+
+    releaseStart();
+    const first = await firstPromise;
+    expect(first.status).toBe(201);
+    const replayWithDifferentGeneration = await startRelink(
+      app,
+      "relink-claim-001",
+      "2026-09-13T00:00:01.000Z",
+    );
+    expect(replayWithDifferentGeneration.status).toBe(409);
+  });
+
+  it("allows one disconnect provider claim for distinct idempotency keys", async () => {
+    let releaseLogout!: () => void;
+    let startedLogout!: () => void;
+    const logoutEntered = new Promise<void>((resolve) => {
+      startedLogout = resolve;
+    });
+    const logoutRelease = new Promise<void>((resolve) => {
+      releaseLogout = resolve;
+    });
+    let logoutCalls = 0;
+    const gateway: ConnectionGateway = {
+      async start() {
+        throw new Error("not used");
+      },
+      async poll() {
+        throw new Error("not used");
+      },
+      async cancel() {},
+      async disconnect() {
+        logoutCalls += 1;
+        startedLogout();
+        await logoutRelease;
+        return { status: "disconnected", provider_login_id: "login-one" };
+      },
+    };
+    const app = appFor(gateway);
+    const firstPromise = request(
+      app,
+      "/api/v1/connections/connection_human_whatsapp/disconnect",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "disconnect-claim-001" },
+        body: "{}",
+      },
+    );
+    await logoutEntered;
+
+    const second = await request(
+      app,
+      "/api/v1/connections/connection_human_whatsapp/disconnect",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "disconnect-claim-002" },
+        body: "{}",
+      },
+    );
+    expect(second.status).toBe(409);
+    expect(logoutCalls).toBe(1);
+
+    releaseLogout();
+    const first = await firstPromise;
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as { status: string }).status).toBe(
+      "succeeded",
+    );
+  });
+
+  it("keeps a replacement uncreated when the old relink fence is lost", async () => {
+    const gateway: ConnectionGateway = {
+      async start() {
+        return {
+          gateway_ref: "relink-fence-gateway",
+          action: "scan_qr",
+          qr: "qr-relink",
+          action_expires_at: "2026-09-13T00:01:00.000Z",
+        };
+      },
+      async poll() {
+        return connected("login-two");
+      },
+      async cancel() {},
+    };
+    const app = appFor(gateway);
+    const started = await startRelink(app, "relink-fence-001");
+    expect(started.status).toBe(201);
+    const session = (await started.json()) as {
+      id: string;
+      generation: number;
+    };
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE connections SET lifecycle_operation_id = ?, status = 'disconnected', updated_at = ? WHERE id = ?",
+    )
+      .bind(
+        "foreign-lifecycle-operation",
+        "2026-09-13T00:00:01.000Z",
+        "connection_human_whatsapp",
+      )
+      .run();
+
+    const completed = await pollRelink(app, session.id, session.generation);
+    expect(completed.status).toBe(503);
+    const connections = await workerEnv.CONTROL_DB.prepare(
+      "SELECT id, status FROM connections WHERE tenant_id = ? ORDER BY id",
+    )
+      .bind("tenant_pilot")
+      .all<{ id: string; status: string }>();
+    expect(connections.results).toEqual([
+      { id: "connection_agent_whatsapp", status: "ready" },
+      { id: "connection_human_whatsapp", status: "disconnected" },
+    ]);
+  });
+
+  it("rechecks current administrator authority before relink finalization", async () => {
+    let releasePoll!: (result: GatewayPollResult) => void;
+    let enteredPoll!: () => void;
+    const pollEntered = new Promise<void>((resolve) => {
+      enteredPoll = resolve;
+    });
+    const pollResult = new Promise<GatewayPollResult>((resolve) => {
+      releasePoll = resolve;
+    });
+    const gateway: ConnectionGateway = {
+      async start() {
+        return {
+          gateway_ref: "relink-authority-gateway",
+          action: "scan_qr",
+          qr: "qr-relink",
+          action_expires_at: "2026-09-13T00:01:00.000Z",
+        };
+      },
+      async poll() {
+        enteredPoll();
+        return pollResult;
+      },
+      async cancel() {},
+    };
+    const app = appFor(gateway);
+    const started = await startRelink(app, "relink-authority-001");
+    const session = (await started.json()) as {
+      id: string;
+      generation: number;
+    };
+    const pollPromise = pollRelink(app, session.id, session.generation);
+    await pollEntered;
+    await workerEnv.CONTROL_DB.prepare(
+      "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND operation_scope = 'connection.manage'",
+    )
+      .bind("tenant_pilot", "membership_human", "identity_human")
+      .run();
+    releasePoll(connected("login-one"));
+    expect((await pollPromise).status).toBe(503);
+
+    const operation = await workerEnv.CONTROL_DB.prepare(
+      "SELECT status FROM connection_lifecycle_operations WHERE idempotency_key = ?",
+    )
+      .bind("relink-authority-001")
+      .first<{ status: string }>();
+    expect(operation?.status).toBe("reconciliation_required");
+    const connection = await workerEnv.CONTROL_DB.prepare(
+      "SELECT status FROM connections WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .first<{ status: string }>();
+    expect(connection?.status).toBe("ready");
   });
 });

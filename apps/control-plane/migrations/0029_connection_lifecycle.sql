@@ -1,11 +1,19 @@
 PRAGMA foreign_keys = ON;
 
+-- The marker is the durable owner of an in-flight lifecycle transition. It
+-- prevents a second idempotency key from starting provider I/O and lets an
+-- explicit disconnect supersede a pending relink without accepting its late
+-- callback.
+ALTER TABLE connections ADD COLUMN lifecycle_operation_id TEXT;
+
 -- Established connection lifecycle changes are durable before any provider I/O.
 -- The row is the replay/idempotency fence for relink and explicit disconnect;
 -- it never stores QR payloads, bridge process handles, or provider credentials.
 CREATE TABLE connection_lifecycle_operations (
   operation_id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
   connection_id TEXT NOT NULL,
   identity_id TEXT NOT NULL,
   provider TEXT NOT NULL CHECK (provider IN ('whatsapp', 'telegram', 'messenger', 'linkedin')),
@@ -31,6 +39,8 @@ CREATE TABLE connection_lifecycle_operations (
   UNIQUE (tenant_id, operation_id),
   FOREIGN KEY (tenant_id, connection_id)
     REFERENCES connections(tenant_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (actor_principal_id) REFERENCES principals(id) ON DELETE RESTRICT,
+  FOREIGN KEY (membership_id) REFERENCES memberships(id) ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, identity_id)
     REFERENCES identities(tenant_id, id) ON DELETE RESTRICT,
   FOREIGN KEY (replacement_connection_id)

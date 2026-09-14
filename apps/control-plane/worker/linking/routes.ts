@@ -706,7 +706,8 @@ export const createRelinkSessionHandler =
         provider: body.provider,
         generation: 1,
         status:
-          begun.operation.status === "reconciliation_required"
+          begun.operation.status === "reconciliation_required" ||
+          begun.operation.status === "failed"
             ? "reconciliation_required"
             : begun.operation.status === "succeeded"
               ? "connected"
@@ -723,7 +724,8 @@ export const createRelinkSessionHandler =
         account_id: begun.connection.account_id,
         provider_label: null,
         error_code:
-          begun.operation.status === "reconciliation_required"
+          begun.operation.status === "reconciliation_required" ||
+          begun.operation.status === "failed"
             ? "reconciliation_required"
             : null,
         request_key_digest: await sha256Hex(idempotencyKey),
@@ -738,7 +740,8 @@ export const createRelinkSessionHandler =
         return context.json(publicSession(created.state), 200);
       if (
         begun.operation.status === "succeeded" ||
-        begun.operation.status === "reconciliation_required"
+        begun.operation.status === "reconciliation_required" ||
+        begun.operation.status === "failed"
       ) {
         return context.json(publicSession(created.state), 200);
       }
