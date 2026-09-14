@@ -308,6 +308,31 @@ export const listRemovalAuthorities = async (
   });
 };
 
+/** Read a bounded cross-tenant page for scheduled controlled-copy work. */
+export const listAllRemovalAuthorities = async (
+  database: RemovalDatabase,
+  limit = MAX_REMOVAL_EXPIRY_BATCH,
+): Promise<RemovalAuthority[]> => {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+    throw new Error("removal authority page limit invalid");
+  }
+  const db = primarySession(database);
+  const rows = await db
+    .prepare(
+      `SELECT ${authorityColumns}
+       FROM removal_authority
+       ORDER BY updated_at ASC, id ASC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<AuthorityRow>();
+  return rows.results.map((row) => {
+    const parsed = parseAuthority(row);
+    if (parsed === null) throw new Error("removal authority row missing");
+    return parsed;
+  });
+};
+
 export const readTenantDeletionEpoch = async (
   database: RemovalDatabase,
   tenantId: string,

@@ -8,6 +8,7 @@ import { isAdministratorSession } from "../read/authorization";
 import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
 import { removalStatusForTenant } from "./service";
 import { scheduleRemovalExpiry } from "./ledger";
+import { createConfiguredControlledCopyAdapters } from "../retention";
 
 /** The authenticated context passed from the shared MCP transport. */
 export type RemovalMcpContext = {
@@ -125,6 +126,9 @@ export const registerRemovalMcpTools = (
           {
             database: databaseFor(context),
             bucket: context.env.EVENT_ARCHIVE,
+            retentionAdapters: createConfiguredControlledCopyAdapters(
+              context.env as unknown as Record<string, unknown>,
+            ),
           },
           parsed,
         );

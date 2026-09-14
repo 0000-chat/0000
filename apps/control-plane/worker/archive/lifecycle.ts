@@ -2,6 +2,7 @@ import type {
   RecordRemovalInput,
   RemovalAuthority,
 } from "../../../../packages/contracts/src/removals";
+import type { ControlledCopyCompletion } from "@communicator/contracts";
 import {
   recordRemovalWithSuppression,
   runRemovalExpiryAndSuppress,
@@ -14,6 +15,10 @@ import {
   type ArchivePurgeResult,
 } from "./purge";
 import { readRemovalAuthorityById } from "../removals/ledger";
+import {
+  runControlledCopyRetentionForRemoval,
+  type ControlledCopyAdapter,
+} from "../retention/service";
 
 type RemovalDatabase = D1Database | D1DatabaseSession;
 
@@ -22,11 +27,13 @@ export type ArchiveRemovalLifecycleContext = {
   database: RemovalDatabase;
   bucket: R2Bucket;
   safetyWindowMs?: number;
+  retentionAdapters?: readonly ControlledCopyAdapter[];
 };
 
 export type RecordedRemovalArchiveResult = {
   authority: RemovalAuthority;
   archive: ArchivePurgeResult;
+  controlled_copy: ControlledCopyCompletion;
 };
 
 /**
@@ -66,7 +73,22 @@ export const recordRemovalWithArchivePurge = async (
     now,
   );
   const archive = await purgeRecordedRemoval(context, authority, now);
-  return { authority, archive };
+  const controlledCopy = await runControlledCopyRetentionForRemoval({
+    database: context.database,
+    adapters: context.retentionAdapters ?? [],
+    lineage: {
+      tenant_id: authority.tenant_id,
+      removal_id: authority.id,
+      resource_type: authority.resource_type,
+      resource_id: authority.resource_id,
+      content_generation: authority.content_generation,
+      deletion_epoch: authority.deletion_epoch,
+    },
+    canonicalArchive:
+      archive.operation.status === "complete" ? "complete" : "incomplete",
+    ...(now === undefined ? {} : { now }),
+  });
+  return { authority, archive, controlled_copy: controlledCopy.completion };
 };
 
 export type RemovalExpiryArchiveTickResult = RemovalExpiryTickResult & {
@@ -110,9 +132,26 @@ export const runRemovalExpiryAndArchive = async (
 
   const archived: RecordedRemovalArchiveResult[] = [];
   for (const authority of authorities.values()) {
+    const archive = await purgeRecordedRemoval(context, authority, now);
+    const controlledCopy = await runControlledCopyRetentionForRemoval({
+      database: context.database,
+      adapters: context.retentionAdapters ?? [],
+      lineage: {
+        tenant_id: authority.tenant_id,
+        removal_id: authority.id,
+        resource_type: authority.resource_type,
+        resource_id: authority.resource_id,
+        content_generation: authority.content_generation,
+        deletion_epoch: authority.deletion_epoch,
+      },
+      canonicalArchive:
+        archive.operation.status === "complete" ? "complete" : "incomplete",
+      now,
+    });
     archived.push({
       authority,
-      archive: await purgeRecordedRemoval(context, authority, now),
+      archive,
+      controlled_copy: controlledCopy.completion,
     });
   }
   return { ...result, archived };

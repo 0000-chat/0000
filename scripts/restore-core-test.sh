@@ -19,6 +19,7 @@ restic restore latest --tag communicator-core --target "$restore_root/restic"
 
 payload=$(find "$restore_root/restic" -type f -name synapse.pgdump -printf '%h\n' -quit)
 [[ -n "$payload" ]]
+[[ -f "$payload/retention/controlled-copy-layout.json" ]]
 [[ -f "$payload/whatsapp.pgdump" ]]
 [[ -f "$payload/messenger.pgdump" ]]
 [[ -f "$payload/telegram.pgdump" ]]

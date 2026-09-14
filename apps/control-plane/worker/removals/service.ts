@@ -1,3 +1,4 @@
+import { type ControlledCopyCompletion } from "@communicator/contracts";
 import {
   RemovalStatusResponseSchema,
   type RecordRemovalInput,
@@ -5,6 +6,7 @@ import {
   type RemovalResourceType,
   type RemovalStatusResponse,
 } from "../../../../packages/contracts/src/removals";
+import { evaluateControlledCopyCompletion } from "../retention/service";
 import {
   listRemovalAuthorities,
   readRemovalAuthority,
@@ -146,6 +148,44 @@ export const removalStatusForTenant = async (
   tenantId: string,
 ): Promise<RemovalStatusResponse> => {
   const authorities = await listRemovalAuthorities(database, tenantId);
+  const archiveOperations = await listArchivePurgeOperations(
+    database,
+    tenantId,
+  );
+  const archiveByRemoval = new Map<
+    string,
+    (typeof archiveOperations)[number]
+  >();
+  for (const operation of archiveOperations) {
+    const current = archiveByRemoval.get(operation.removal_id);
+    if (
+      current === undefined ||
+      Date.parse(operation.updated_at) >= Date.parse(current.updated_at)
+    ) {
+      archiveByRemoval.set(operation.removal_id, operation);
+    }
+  }
+  const controlledCopy: ControlledCopyCompletion[] = [];
+  for (const authority of authorities) {
+    const archive = archiveByRemoval.get(authority.id);
+    const canonicalArchive =
+      archive === undefined
+        ? "missing"
+        : archive.status === "complete"
+          ? "complete"
+          : "incomplete";
+    controlledCopy.push(
+      await evaluateControlledCopyCompletion({
+        database,
+        tenantId: authority.tenant_id,
+        removalId: authority.id,
+        resourceId: authority.resource_id,
+        contentGeneration: authority.content_generation,
+        deletionEpoch: authority.deletion_epoch,
+        canonicalArchive,
+      }),
+    );
+  }
   return RemovalStatusResponseSchema.parse({
     tenant_id: tenantId,
     authorities,
@@ -154,17 +194,16 @@ export const removalStatusForTenant = async (
     ),
     active_suppression: "enforced",
     physical_purge: "not_implemented",
-    archive_purge: (await listArchivePurgeOperations(database, tenantId)).map(
-      (operation) => ({
-        operation_id: operation.id,
-        removal_id: operation.removal_id,
-        status: operation.status,
-        safety_deadline: operation.safety_deadline,
-        failure_code: operation.failure_code,
-        updated_at: operation.updated_at,
-        completed_at: operation.completed_at,
-      }),
-    ),
+    archive_purge: archiveOperations.map((operation) => ({
+      operation_id: operation.id,
+      removal_id: operation.removal_id,
+      status: operation.status,
+      safety_deadline: operation.safety_deadline,
+      failure_code: operation.failure_code,
+      updated_at: operation.updated_at,
+      completed_at: operation.completed_at,
+    })),
+    controlled_copy: controlledCopy,
   });
 };
 
