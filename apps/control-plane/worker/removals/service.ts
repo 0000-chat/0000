@@ -14,6 +14,7 @@ import {
   type RemovalAuthorityLookup,
 } from "./ledger";
 import { listArchivePurgeOperations } from "../archive/purge";
+import { cancelWebhookDeliveriesForRemoval } from "../webhooks/delivery";
 
 /**
  * Resource identity is the immutable content lineage. A message edit changes
@@ -126,44 +127,7 @@ export const cancelPendingWebhookDeliveriesForRemoval = async (
   authority: RemovalAuthority,
   now = new Date(),
 ): Promise<void> => {
-  if (
-    authority.resource_type !== "message" &&
-    authority.resource_type !== "conversation"
-  ) {
-    return;
-  }
-  const sourceColumn =
-    authority.resource_type === "message"
-      ? "source_message_id"
-      : "source_conversation_id";
-  const db =
-    "withSession" in database && typeof database.withSession === "function"
-      ? database.withSession("first-primary")
-      : database;
-  const timestamp = now.toISOString();
-  await db
-    .prepare(
-      `UPDATE webhook_deliveries
-       SET status = 'cancelled', cancelled_at = ?,
-           cancellation_reason = 'source_removed', lease_id = NULL,
-           lease_expires_at = NULL, next_attempt_at = NULL,
-           payload_json = NULL, manual_retry_at = NULL,
-           uncertain_at = NULL, uncertainty_reason = NULL
-       WHERE tenant_id = ? AND ${sourceColumn} = ?
-         AND status IN ('pending', 'leased')
-         AND (? IS NULL OR source_account_id = ?)
-         AND (? IS NULL OR source_conversation_id = ?)`,
-    )
-    .bind(
-      timestamp,
-      authority.tenant_id,
-      authority.resource_id,
-      authority.account_id,
-      authority.account_id,
-      authority.conversation_id,
-      authority.conversation_id,
-    )
-    .run();
+  await cancelWebhookDeliveriesForRemoval(database, authority, now);
 };
 
 /** Record the authority before any active redaction or delivery cancellation. */
