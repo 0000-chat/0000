@@ -158,7 +158,10 @@ export function ConnectionCard({
             setDisconnecting(true);
             setLifecycleError(null);
             void apiClient
-              .disconnectConnection(connection.id, `ui-disconnect-${crypto.randomUUID()}`)
+              .disconnectConnection(
+                connection.id,
+                `ui-disconnect-${crypto.randomUUID()}`,
+              )
               .then((operation) => {
                 if (operation.status === "reconciliation_required") {
                   setLifecycleError(

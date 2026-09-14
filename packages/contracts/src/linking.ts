@@ -128,9 +128,7 @@ export type ConnectionLifecycleOperationStatus = z.infer<
 export type ConnectionLifecycleErrorCode = z.infer<
   typeof ConnectionLifecycleErrorCodeSchema
 >;
-export type ConnectionRelinkStart = z.infer<
-  typeof ConnectionRelinkStartSchema
->;
+export type ConnectionRelinkStart = z.infer<typeof ConnectionRelinkStartSchema>;
 export type ConnectionDisconnectRequest = z.infer<
   typeof ConnectionDisconnectRequestSchema
 >;

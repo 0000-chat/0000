@@ -162,11 +162,21 @@ export const handlers = [
         .identities()
         .flatMap((identity) => simulatedStore.connections(identity.id))
         .find((item) => item.id === connectionId);
-      if (!input.success || !connection || input.data.confirmed_identity_id !== connection.identity_id)
+      if (
+        !input.success ||
+        !connection ||
+        input.data.confirmed_identity_id !== connection.identity_id
+      )
         return errorResponse(400, "invalid_request");
-      const session = simulatedStore.startLinkSession(connection.identity_id, input.data);
+      const session = simulatedStore.startLinkSession(
+        connection.identity_id,
+        input.data,
+      );
       return session
-        ? HttpResponse.json({ ...session, connection_id: connectionId }, { status: 201 })
+        ? HttpResponse.json(
+            { ...session, connection_id: connectionId },
+            { status: 201 },
+          )
         : errorResponse(403, "forbidden");
     },
   ),

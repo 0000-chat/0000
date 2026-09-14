@@ -7,7 +7,11 @@ import type {
   GatewayOwner,
   GatewayPollResult,
 } from "../../linking/gateway-client";
-import { clearDirectory, seedAccountAccess, seedDirectory } from "../support/directory-fixtures";
+import {
+  clearDirectory,
+  seedAccountAccess,
+  seedDirectory,
+} from "../support/directory-fixtures";
 
 const workerEnv = env as typeof env & {
   CONTROL_DB: D1Database;
@@ -92,15 +96,19 @@ const startRelink = (
   app: ReturnType<typeof createApp>,
   idempotencyKey: string,
 ) =>
-  request(app, "/api/v1/connections/connection_human_whatsapp/relink-sessions", {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({
-      provider: "whatsapp",
-      method: "qr",
-      confirmed_identity_id: "identity_human",
-    }),
-  });
+  request(
+    app,
+    "/api/v1/connections/connection_human_whatsapp/relink-sessions",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({
+        provider: "whatsapp",
+        method: "qr",
+        confirmed_identity_id: "identity_human",
+      }),
+    },
+  );
 
 const pollRelink = (
   app: ReturnType<typeof createApp>,
@@ -172,12 +180,14 @@ describe("administrator connection relink and disconnect", () => {
 
     const replay = await startRelink(app, "relink-same-001");
     expect(replay.status).toBe(200);
-    expect((await replay.json()).id).toBe(session.id);
+    expect(((await replay.json()) as { id: string }).id).toBe(session.id);
     expect(owners).toHaveLength(1);
 
     const completed = await pollRelink(app, session.id, session.generation);
     expect(completed.status).toBe(200);
-    expect((await completed.json()).status).toBe("connected");
+    expect(((await completed.json()) as { status: string }).status).toBe(
+      "connected",
+    );
     expect(pollCalls).toBe(1);
 
     const after = await workerEnv.CONTROL_DB.prepare(
@@ -225,11 +235,16 @@ describe("administrator connection relink and disconnect", () => {
     };
     const app = appFor(gateway);
     const started = await startRelink(app, "relink-different-001");
-    const session = (await started.json()) as { id: string; generation: number };
+    const session = (await started.json()) as {
+      id: string;
+      generation: number;
+    };
     expect(started.status).toBe(201);
     const completed = await pollRelink(app, session.id, session.generation);
     expect(completed.status).toBe(200);
-    expect((await completed.json()).status).toBe("connected");
+    expect(((await completed.json()) as { status: string }).status).toBe(
+      "connected",
+    );
 
     const rows = await workerEnv.CONTROL_DB.prepare(
       `SELECT c.id AS connection_id, c.identity_id, ca.account_id,
@@ -286,7 +301,9 @@ describe("administrator connection relink and disconnect", () => {
       },
     );
     expect(response.status).toBe(200);
-    expect((await response.json()).status).toBe("succeeded");
+    expect(((await response.json()) as { status: string }).status).toBe(
+      "succeeded",
+    );
     expect(logoutCalls).toHaveLength(1);
     expect(logoutCalls[0]).toMatchObject({
       connection_id: "connection_human_whatsapp",
@@ -297,7 +314,10 @@ describe("administrator connection relink and disconnect", () => {
     )
       .bind("connection_human_whatsapp")
       .first<{ status: string; attention_code: string | null }>();
-    expect(disconnected).toEqual({ status: "disconnected", attention_code: null });
+    expect(disconnected).toEqual({
+      status: "disconnected",
+      attention_code: null,
+    });
 
     const replay = await request(
       app,
@@ -309,7 +329,9 @@ describe("administrator connection relink and disconnect", () => {
       },
     );
     expect(replay.status).toBe(200);
-    expect((await replay.json()).status).toBe("succeeded");
+    expect(((await replay.json()) as { status: string }).status).toBe(
+      "succeeded",
+    );
     expect(logoutCalls).toHaveLength(1);
 
     await seedConnection();
@@ -332,9 +354,9 @@ describe("administrator connection relink and disconnect", () => {
       },
     );
     expect(unavailableResponse.status).toBe(200);
-    expect((await unavailableResponse.json()).status).toBe(
-      "reconciliation_required",
-    );
+    expect(
+      ((await unavailableResponse.json()) as { status: string }).status,
+    ).toBe("reconciliation_required");
     const attention = await workerEnv.CONTROL_DB.prepare(
       "SELECT status, attention_code FROM connections WHERE id = ?",
     )
@@ -344,6 +366,80 @@ describe("administrator connection relink and disconnect", () => {
       status: "disconnected",
       attention_code: "disconnect_reconciliation_required",
     });
+
+    await seedConnection();
+    const constructorUnavailable = createApp({
+      createConnectionGateway: () => {
+        throw new Error("gateway configuration unavailable");
+      },
+      createTokenVerifier: verifier,
+    });
+    const constructorUnavailableResponse = await request(
+      constructorUnavailable,
+      "/api/v1/connections/connection_human_whatsapp/disconnect",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "disconnect-constructor-001" },
+        body: "{}",
+      },
+    );
+    expect(constructorUnavailableResponse.status).toBe(200);
+    expect(
+      ((await constructorUnavailableResponse.json()) as { status: string })
+        .status,
+    ).toBe("reconciliation_required");
+  });
+
+  it("can relink an explicitly disconnected connection after local fencing", async () => {
+    const gateway: ConnectionGateway = {
+      async start() {
+        return {
+          gateway_ref: "relink-after-disconnect-gateway",
+          action: "scan_qr",
+          qr: "qr-relink",
+          action_expires_at: "2026-09-13T00:01:00.000Z",
+        };
+      },
+      async poll() {
+        return connected("login-one");
+      },
+      async cancel() {},
+      async disconnect() {
+        return { status: "disconnected", provider_login_id: "login-one" };
+      },
+    };
+    const app = appFor(gateway);
+    const disconnected = await request(
+      app,
+      "/api/v1/connections/connection_human_whatsapp/disconnect",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "disconnect-before-relink-001" },
+        body: "{}",
+      },
+    );
+    expect(disconnected.status).toBe(200);
+    expect(((await disconnected.json()) as { status: string }).status).toBe(
+      "succeeded",
+    );
+
+    const started = await startRelink(app, "relink-after-disconnect-001");
+    expect(started.status).toBe(201);
+    const session = (await started.json()) as {
+      id: string;
+      generation: number;
+    };
+    const completed = await pollRelink(app, session.id, session.generation);
+    expect(completed.status).toBe(200);
+    expect(((await completed.json()) as { status: string }).status).toBe(
+      "connected",
+    );
+    const connection = await workerEnv.CONTROL_DB.prepare(
+      "SELECT status, attention_code FROM connections WHERE id = ?",
+    )
+      .bind("connection_human_whatsapp")
+      .first<{ status: string; attention_code: string | null }>();
+    expect(connection).toEqual({ status: "connected", attention_code: null });
   });
 
   it("rejects agent mutation and ignores a late relink callback after disconnect", async () => {
@@ -370,7 +466,10 @@ describe("administrator connection relink and disconnect", () => {
     };
     const app = appFor(gateway);
     const started = await startRelink(app, "relink-race-001");
-    const session = (await started.json()) as { id: string; generation: number };
+    const session = (await started.json()) as {
+      id: string;
+      generation: number;
+    };
     const latePoll = pollRelink(app, session.id, session.generation);
     await new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -396,7 +495,9 @@ describe("administrator connection relink and disconnect", () => {
       },
     );
     expect(disconnected.status).toBe(200);
-    expect((await disconnected.json()).status).toBe("succeeded");
+    expect(((await disconnected.json()) as { status: string }).status).toBe(
+      "succeeded",
+    );
     releasePoll(connected("login-one"));
     expect((await latePoll).status).toBe(503);
 

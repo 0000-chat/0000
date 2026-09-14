@@ -7,7 +7,6 @@ import {
 import type { GatewayRoute } from "./gateway-client";
 import {
   commitLinkedAccount,
-  LinkingRepositoryError,
   type CommitLinkedAccountResult,
 } from "./repository";
 
@@ -105,8 +104,10 @@ const lifecycleMessages: Record<LifecycleRepositoryErrorCode, string> = {
   invalid_lifecycle: "Invalid connection lifecycle request",
   connection_not_found: "Connection not found",
   stale_generation: "Connection session is stale",
-  operation_conflict: "Connection lifecycle operation conflicts with an existing operation",
-  provider_identity_mismatch: "Provider identity did not match the selected connection",
+  operation_conflict:
+    "Connection lifecycle operation conflicts with an existing operation",
+  provider_identity_mismatch:
+    "Provider identity did not match the selected connection",
   reconciliation_required: "Connection lifecycle requires reconciliation",
 };
 
@@ -137,7 +138,9 @@ const normalizeProviderLogin = (value: string): string => {
   return normalized;
 };
 
-const connectionRow = (row: Record<string, unknown>): LifecycleConnection | null => {
+const connectionRow = (
+  row: Record<string, unknown>,
+): LifecycleConnection | null => {
   const provider = ProviderSchema.safeParse(row.provider);
   if (
     !provider.success ||
@@ -274,7 +277,9 @@ export async function getLifecycleOperation(
   operationId: string,
 ): Promise<LifecycleOperationRow | null> {
   const row = await db
-    .prepare(`${operationSelect} WHERE tenant_id = ? AND operation_id = ? LIMIT 1`)
+    .prepare(
+      `${operationSelect} WHERE tenant_id = ? AND operation_id = ? LIMIT 1`,
+    )
     .bind(tenantId, operationId)
     .first<Record<string, unknown>>();
   return row ? operationFromRow(row) : null;
@@ -317,7 +322,11 @@ const beginOperation = async (
   connection: LifecycleConnection,
   kind: "relink" | "disconnect",
 ): Promise<LifecycleOperationRow> => {
-  const prior = await existingOperation(input.db, input.tenant_id, input.idempotency_key);
+  const prior = await existingOperation(
+    input.db,
+    input.tenant_id,
+    input.idempotency_key,
+  );
   if (prior) {
     if (
       prior.connection_id !== input.connection_id ||
@@ -327,7 +336,8 @@ const beginOperation = async (
       throw new LifecycleRepositoryError("operation_conflict");
     return prior;
   }
-  const expected = input.expected_session_generation ?? connection.session_generation;
+  const expected =
+    input.expected_session_generation ?? connection.session_generation;
   if (expected !== connection.session_generation)
     throw new LifecycleRepositoryError("stale_generation");
   const operationId = input.operation_id;
@@ -341,7 +351,10 @@ const beginOperation = async (
     expected_session_generation: expected,
   });
   const hash = await requestHash(payload);
-  const mutationKey = `connection_${kind}_${input.idempotency_key}`.slice(0, 200);
+  const mutationKey = `connection_${kind}_${input.idempotency_key}`.slice(
+    0,
+    200,
+  );
   try {
     await input.db.batch([
       input.db
@@ -391,7 +404,10 @@ const beginOperation = async (
                     AND status NOT IN ('revoked', 'unlinked')`,
               )
               .bind(
-                ensureNextTimestamp(connection.session_generation, input.occurred_at),
+                ensureNextTimestamp(
+                  connection.session_generation,
+                  input.occurred_at,
+                ),
                 input.tenant_id,
                 input.connection_id,
                 connection.session_generation,
@@ -409,7 +425,9 @@ const beginOperation = async (
           `audit_${operationId}`,
           input.tenant_id,
           input.actor_principal_id,
-          kind === "relink" ? "connection.relink_requested" : "connection.disconnect_requested",
+          kind === "relink"
+            ? "connection.relink_requested"
+            : "connection.disconnect_requested",
           input.connection_id,
           JSON.stringify({
             operation_id: operationId,
@@ -427,7 +445,9 @@ const beginOperation = async (
         .bind(
           `control_${operationId}`,
           input.tenant_id,
-          kind === "relink" ? "connection.relink_requested" : "connection.disconnect_requested",
+          kind === "relink"
+            ? "connection.relink_requested"
+            : "connection.disconnect_requested",
           input.connection_id,
           JSON.stringify({
             operation_id: operationId,
@@ -438,18 +458,55 @@ const beginOperation = async (
         ),
     ]);
   } catch (error) {
-    const replay = await existingOperation(input.db, input.tenant_id, input.idempotency_key);
+    const replay = await existingOperation(
+      input.db,
+      input.tenant_id,
+      input.idempotency_key,
+    );
     if (replay) return replay;
     throw new LifecycleRepositoryError("operation_conflict", error);
   }
-  const created = await getLifecycleOperation(input.db, input.tenant_id, operationId);
+  if (kind === "disconnect") {
+    const fenced = await input.db
+      .prepare(
+        "SELECT status, updated_at FROM connections WHERE tenant_id = ? AND id = ? LIMIT 1",
+      )
+      .bind(input.tenant_id, input.connection_id)
+      .first<{ status: string; updated_at: string }>();
+    if (
+      !fenced ||
+      fenced.status !== "disconnected" ||
+      fenced.updated_at === connection.session_generation
+    ) {
+      await input.db
+        .prepare(
+          `UPDATE connection_lifecycle_operations
+              SET status = 'failed', error_code = 'stale_generation', updated_at = ?, completed_at = ?
+            WHERE tenant_id = ? AND operation_id = ? AND status = 'pending'`,
+        )
+        .bind(
+          input.occurred_at,
+          input.occurred_at,
+          input.tenant_id,
+          operationId,
+        )
+        .run();
+      throw new LifecycleRepositoryError("stale_generation");
+    }
+  }
+  const created = await getLifecycleOperation(
+    input.db,
+    input.tenant_id,
+    operationId,
+  );
   if (!created) throw new LifecycleRepositoryError("reconciliation_required");
   return created;
 };
 
-export async function beginConnectionRelink(
-  input: BeginRelinkInput,
-): Promise<{ operation: LifecycleOperationRow; connection: LifecycleConnection }> {
+export async function beginConnectionRelink(input: BeginRelinkInput): Promise<{
+  operation: LifecycleOperationRow;
+  connection: LifecycleConnection;
+}> {
   if (!ProviderSchema.safeParse(input.provider).success)
     throw new LifecycleRepositoryError("invalid_lifecycle");
   if (!(await administratorExists(input.db, input)))
@@ -460,7 +517,10 @@ export async function beginConnectionRelink(
     input.connection_id,
   );
   if (!connection) throw new LifecycleRepositoryError("connection_not_found");
-  if (connection.identity_id !== input.identity_id || connection.provider !== input.provider)
+  if (
+    connection.identity_id !== input.identity_id ||
+    connection.provider !== input.provider
+  )
     throw new LifecycleRepositoryError("invalid_lifecycle");
   if (["revoked", "unlinked"].includes(connection.status))
     throw new LifecycleRepositoryError("invalid_lifecycle");
@@ -472,7 +532,10 @@ export async function beginConnectionRelink(
 
 export async function beginConnectionDisconnect(
   input: BeginDisconnectInput,
-): Promise<{ operation: LifecycleOperationRow; connection: LifecycleConnection }> {
+): Promise<{
+  operation: LifecycleOperationRow;
+  connection: LifecycleConnection;
+}> {
   if (!(await administratorExists(input.db, input)))
     throw new LifecycleRepositoryError("authorization_required");
   const connection = await getLifecycleConnection(
@@ -512,7 +575,11 @@ export async function markLifecycleReconciliation(
   db: LifecycleDatabase,
   tenantId: string,
   operationId: string,
-  errorCode: "provider_unavailable" | "provider_error" | "reconciliation_required" | "stale_generation",
+  errorCode:
+    | "provider_unavailable"
+    | "provider_error"
+    | "reconciliation_required"
+    | "stale_generation",
   occurredAt: string,
 ): Promise<LifecycleOperationRow> {
   await db
@@ -559,12 +626,14 @@ export async function completeConnectionRelink(
   );
   if (!current || current.identity_id !== operation.identity_id)
     throw new LifecycleRepositoryError("connection_not_found");
-  const verifiedLogin = normalizeProviderLogin(input.provider_identity.user_login_id);
+  const verifiedLogin = normalizeProviderLogin(
+    input.provider_identity.user_login_id,
+  );
   if (operation.status === "succeeded")
     return { operation, connection: current, committed: null };
   if (current.session_generation !== operation.session_generation)
     throw new LifecycleRepositoryError("stale_generation");
-  if (current.status === "disconnected" || current.status === "revoked" || current.status === "unlinked")
+  if (current.status === "revoked" || current.status === "unlinked")
     throw new LifecycleRepositoryError("stale_generation");
 
   if (verifiedLogin !== normalizeProviderLogin(current.provider_login_id)) {
@@ -589,7 +658,12 @@ export async function completeConnectionRelink(
                 updated_at = ?, completed_at = ?
           WHERE tenant_id = ? AND operation_id = ?
             AND status IN ('pending', 'provider_pending')
-            AND expected_session_generation = ?`,
+            AND expected_session_generation = ?
+            AND EXISTS (
+              SELECT 1 FROM connections
+               WHERE tenant_id = ? AND id = ?
+                 AND status = 'connected' AND updated_at = ?
+            )`,
       )
       .bind(
         committed.connection_id,
@@ -598,6 +672,9 @@ export async function completeConnectionRelink(
         input.actor.tenant_id,
         input.operation_id,
         operation.session_generation,
+        input.actor.tenant_id,
+        committed.connection_id,
+        input.occurred_at,
       )
       .run();
     const updated = await getLifecycleOperation(
@@ -629,7 +706,7 @@ export async function completeConnectionRelink(
             SET status = 'connected', attention_code = NULL, updated_at = ?
           WHERE tenant_id = ? AND id = ? AND identity_id = ?
             AND provider = ? AND updated_at = ?
-            AND status IN ('connected', 'syncing', 'ready', 'attention_required')
+            AND status IN ('connected', 'syncing', 'ready', 'attention_required', 'disconnected')
             AND EXISTS (
               SELECT 1 FROM connection_lifecycle_operations
                WHERE tenant_id = ? AND operation_id = ?
@@ -654,7 +731,12 @@ export async function completeConnectionRelink(
             SET status = 'succeeded', error_code = NULL, updated_at = ?, completed_at = ?
           WHERE tenant_id = ? AND operation_id = ?
             AND status IN ('pending', 'provider_pending')
-            AND expected_session_generation = ?`,
+            AND expected_session_generation = ?
+            AND EXISTS (
+              SELECT 1 FROM connections
+               WHERE tenant_id = ? AND id = ?
+                 AND status = 'connected' AND updated_at = ?
+            )`,
       )
       .bind(
         input.occurred_at,
@@ -662,13 +744,20 @@ export async function completeConnectionRelink(
         input.actor.tenant_id,
         input.operation_id,
         operation.session_generation,
+        input.actor.tenant_id,
+        operation.connection_id,
+        nextGeneration,
       ),
     input.db
       .prepare(
         `INSERT INTO audit_events
            (id, tenant_id, actor_principal_id, action, target_type, target_id,
             reason, metadata_json, occurred_at)
-         VALUES (?, ?, ?, 'connection.relinked', 'connection', ?, NULL, ?, ?)`,
+         SELECT ?, ?, ?, 'connection.relinked', 'connection', ?, NULL, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM connection_lifecycle_operations
+             WHERE tenant_id = ? AND operation_id = ? AND status = 'succeeded'
+          )`,
       )
       .bind(
         `audit_${input.operation_id}_complete`,
@@ -681,6 +770,8 @@ export async function completeConnectionRelink(
           session_generation: nextGeneration,
         }),
         input.occurred_at,
+        input.actor.tenant_id,
+        input.operation_id,
       ),
   ]);
   const updated = await getLifecycleOperation(
@@ -712,7 +803,10 @@ export async function completeConnectionDisconnect(
   if (!operation || operation.kind !== "disconnect")
     throw new LifecycleRepositoryError("connection_not_found");
   if (operation.status === "succeeded") return operation;
-  if (normalizeProviderLogin(input.provider_login_id) !== normalizeProviderLogin(operation.provider_login_id))
+  if (
+    normalizeProviderLogin(input.provider_login_id) !==
+    normalizeProviderLogin(operation.provider_login_id)
+  )
     throw new LifecycleRepositoryError("provider_identity_mismatch");
   await input.db
     .prepare(
@@ -756,7 +850,10 @@ export async function completeConnectionDisconnect(
       input.actor.tenant_id,
       input.actor.actor_principal_id,
       operation.connection_id,
-      JSON.stringify({ operation_id: input.operation_id, provider_logout_verified: true }),
+      JSON.stringify({
+        operation_id: input.operation_id,
+        provider_logout_verified: true,
+      }),
       input.occurred_at,
     )
     .run();

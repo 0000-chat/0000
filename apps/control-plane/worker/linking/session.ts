@@ -463,14 +463,13 @@ async function execute(
           identity_hash_secret: identityHashSecret(env),
           occurred_at: input.occurred_at,
         });
-        committed =
-          relinked.committed ?? {
-            kind: "created",
-            account: null,
-            connection_id:
-              relinked.connection?.connection_id ?? state.connection_id,
-            account_id: relinked.connection?.account_id ?? state.account_id,
-          };
+        committed = relinked.committed ?? {
+          kind: "created",
+          account: null,
+          connection_id:
+            relinked.connection?.connection_id ?? state.connection_id,
+          account_id: relinked.connection?.account_id ?? state.account_id,
+        };
         state = {
           ...state,
           status: "connected",
