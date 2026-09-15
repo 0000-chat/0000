@@ -10,4 +10,4 @@ if [ "$#" -eq 0 ]; then
     set -- .
 fi
 
-exec npx --yes --prefer-offline --cache "$cache_dir" --package "oxlint@1.82.0" -- oxlint --config .oxlintrc.json --deny-warnings --no-error-on-unmatched-pattern "$@"
+exec bunx --package "oxlint@1.82.0" oxlint --config .oxlintrc.json --deny-warnings --no-error-on-unmatched-pattern "$@"

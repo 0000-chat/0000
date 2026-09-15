@@ -10,4 +10,4 @@ if [ "$#" -eq 0 ]; then
     set -- .
 fi
 
-exec npx --yes --prefer-offline --cache "$cache_dir" --package "@biomejs/biome@2.5.13" -- biome format --no-errors-on-unmatched "$@"
+exec bunx --package "@biomejs/biome@2.5.13" biome format --no-errors-on-unmatched "$@"
