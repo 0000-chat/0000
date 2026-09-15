@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "0000-database",
+  "visibility": "public",
+  "status": "scaffold-only",
+  "purpose": "Boundary for persistent data services and future database integration.",
+  "dependencies": [],
+  "standalone_authentication": "not-required",
+  "hosting_class": "cloudflare-public-ingress",
+  "application_code": false,
+  "license_selected": false
+}

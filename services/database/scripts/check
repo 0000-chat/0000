@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+repo_root=$(git rev-parse --show-toplevel)
+service_prefix=${root#"$repo_root"/}
+python3 - "$root" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+repo_root = Path(
+    subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+)
+service_prefix = root.relative_to(repo_root).as_posix()
+expected = {
+    ".github/workflows/quality.yml",
+    ".githooks/pre-commit",
+    ".gitignore",
+    ".gitkeep",
+    ".oxlintrc.json",
+    "0000-product.json",
+    "AGENTS.md",
+    "README.md",
+    "biome.json",
+    "docs/README.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "docs/agents/triage-labels.md",
+    "docs/migration/2026-09-16-monorepo-import.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "scripts/check",
+}
+tracked = {
+    path.removeprefix(f"{service_prefix}/")
+    for path in subprocess.check_output(
+        ["git", "-C", str(repo_root), "ls-files", "--", service_prefix], text=True
+    ).splitlines()
+}
+if tracked != expected:
+    raise SystemExit(f"tracked scaffold mismatch: missing={sorted(expected-tracked)} extra={sorted(tracked-expected)}")
+metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
+if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-database":
+    raise SystemExit("invalid product metadata")
+if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
+    raise SystemExit("product is not marked scaffold-only")
+if metadata.get("license_selected") is not False:
+    raise SystemExit("scaffold must not select a license")
+readme = (root / "README.md").read_text(encoding="utf-8")
+if "`0000-database` aims" not in readme or "`0000-streams` depends" not in readme:
+    raise SystemExit("README must state the database purpose and confirmed dependency")
+PY
+pnpm run lint
+pnpm run format:check
+git -C "$repo_root" diff --check -- "$service_prefix"
+echo "0000-database service checks passed"
