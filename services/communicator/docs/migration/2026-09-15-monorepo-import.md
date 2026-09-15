@@ -96,3 +96,41 @@ It records the 6,006,035,714-byte source archive
 `605d71b4b40654a38ce65c168cbca7967df5d927ee08d5010a9f33c08331abaa`, 35
 registered worktrees with one missing/prunable entry, 3,857 selected dirty or
 non-generated records, and zero archive/checksum failures.
+
+## GitHub migration result
+
+All 36 issues were transferred natively to `0000-chat/0000`: 9 open and 27
+closed, with all 166 comments preserved. Every issue has the
+`service:communicator` label. The transfer required restoring 14 parent links
+and one dependency link. Final content, parent, dependency, and child-list
+verification found no mismatches. Issue references in bodies and comments
+were updated using the recorded mapping.
+
+The source repository has no remaining non-PR issues. Source pull requests
+#6, #37, and #39 remain at their original URLs. Their records are preserved
+in the backup; PR #39's implementation is included in the imported source tip.
+
+The final issue report is
+`/home/ubuntu/0000-full/migration-backups/communicator-2026-09-15/issues/migration-report.md`.
+The enriched mapping is `issues/transfer/old-to-new.json` under that backup.
+
+## Codex project continuity
+
+Live Codex session files were left in place. The backup contains a manifest
+of 11,452 session files and a consistent SQLite snapshot whose integrity
+check passed. The service's 84 local skill links resolve to their original
+targets.
+
+The Codex app project entry was not changed. Open
+`/home/ubuntu/0000-full/0000/services/communicator` as the dedicated
+Communicator project in the app. Existing conversations remain stored with
+their historical directory metadata. The installed CLI can show them and
+resume one using the new service directory:
+
+```sh
+codex resume --all -C /home/ubuntu/0000-full/0000/services/communicator
+```
+
+The migration commits are local on `codex/import-communicator`. The monorepo
+`main` branch and remote code were not changed. The original checkout and
+linked worktrees remain available for recovery.
