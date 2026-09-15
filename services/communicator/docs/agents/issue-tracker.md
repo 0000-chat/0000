@@ -1,6 +1,13 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and specs for this service live as GitHub issues in
+[`0000-chat/0000`](https://github.com/0000-chat/0000). Use the `gh` CLI for all
+operations and apply the `service:communicator` label to service work.
+
+The imported planning links use the transferred destination issue numbers. The
+source-to-destination issue transfer record is retained with the migration
+backup; historical source issue references in other imported records remain
+explicit until the migration report maps them.
 
 ## Conventions
 

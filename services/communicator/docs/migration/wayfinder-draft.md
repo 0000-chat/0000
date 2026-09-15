@@ -1,7 +1,7 @@
 # Wayfinder pointer
 
 The canonical wayfinder map is [WhatsApp pilot with reusable provider
-boundaries](https://github.com/0000-chat/0000-communicator/issues/1).
+boundaries](https://github.com/0000-chat/0000/issues/1).
 
 Scope is settled: WhatsApp comes first, with reusable boundaries for adding
 other providers shortly thereafter. Preserve and reconcile the imported history

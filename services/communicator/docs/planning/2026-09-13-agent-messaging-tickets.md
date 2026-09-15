@@ -1,6 +1,6 @@
 # Agent messaging tickets
 
-Parent: GitHub issue [#11, "Spec: WhatsApp-first agent messaging through shared API and MCP"](https://github.com/0000-chat/0000-communicator/issues/11)
+Parent: GitHub issue [#11, "Spec: WhatsApp-first agent messaging through shared API and MCP"](https://github.com/0000-chat/0000/issues/11)
 
 Status: published to GitHub with `ready-for-agent` after the user's approval.
 The issue bodies preserve this breakdown, with planning references resolved to
@@ -10,31 +10,31 @@ Published issue index (stable planning ID → GitHub issue):
 
 | Planning ID | GitHub issue |
 | --- | --- |
-| T01 | [Account-scoped reads and grants #12](https://github.com/0000-chat/0000-communicator/issues/12) |
-| T02 | [OAuth remote MCP #13](https://github.com/0000-chat/0000-communicator/issues/13) |
-| T24 | [WhatsApp account linking #14](https://github.com/0000-chat/0000-communicator/issues/14) |
-| T03 | [Capabilities and history #15](https://github.com/0000-chat/0000-communicator/issues/15) |
-| T04 | [Incoming attachments #16](https://github.com/0000-chat/0000-communicator/issues/16) |
-| T05 | [Search and context #17](https://github.com/0000-chat/0000-communicator/issues/17) |
-| T06 | [Durable reply acceptance #18](https://github.com/0000-chat/0000-communicator/issues/18) |
-| T07 | [Offline waits and confirmation #19](https://github.com/0000-chat/0000-communicator/issues/19) |
-| T08 | [Uncertain-send recovery #20](https://github.com/0000-chat/0000-communicator/issues/20) |
-| T09 | [WhatsApp dispatch #21](https://github.com/0000-chat/0000-communicator/issues/21) |
-| T10 | [Contacts and new conversations #22](https://github.com/0000-chat/0000-communicator/issues/22) |
-| T11 | [Group creation #23](https://github.com/0000-chat/0000-communicator/issues/23) |
-| T12 | [Group management #24](https://github.com/0000-chat/0000-communicator/issues/24) |
-| T13 | [Webhook configuration #25](https://github.com/0000-chat/0000-communicator/issues/25) |
-| T14 | [Incoming webhook delivery #26](https://github.com/0000-chat/0000-communicator/issues/26) |
-| T15 | [Webhook reliability #27](https://github.com/0000-chat/0000-communicator/issues/27) |
-| T16 | [Active deletion and expiry #28](https://github.com/0000-chat/0000-communicator/issues/28) |
-| T17 | [Edit/removal notifications #29](https://github.com/0000-chat/0000-communicator/issues/29) |
-| T18 | [Explicit read receipts #30](https://github.com/0000-chat/0000-communicator/issues/30) |
-| T19 | [Archive purge #31](https://github.com/0000-chat/0000-communicator/issues/31) |
-| T20 | [Controlled-copy retention #32](https://github.com/0000-chat/0000-communicator/issues/32) |
-| T21 | [Safe restore #33](https://github.com/0000-chat/0000-communicator/issues/33) |
-| T25 | [Relink and disconnect #34](https://github.com/0000-chat/0000-communicator/issues/34) |
-| T22 | [ChatGPT Work acceptance #35](https://github.com/0000-chat/0000-communicator/issues/35) |
-| T23 | [Grok connector proof #36](https://github.com/0000-chat/0000-communicator/issues/36) |
+| T01 | [Account-scoped reads and grants #12](https://github.com/0000-chat/0000/issues/12) |
+| T02 | [OAuth remote MCP #13](https://github.com/0000-chat/0000/issues/13) |
+| T24 | [WhatsApp account linking #14](https://github.com/0000-chat/0000/issues/14) |
+| T03 | [Capabilities and history #15](https://github.com/0000-chat/0000/issues/15) |
+| T04 | [Incoming attachments #16](https://github.com/0000-chat/0000/issues/16) |
+| T05 | [Search and context #17](https://github.com/0000-chat/0000/issues/17) |
+| T06 | [Durable reply acceptance #18](https://github.com/0000-chat/0000/issues/18) |
+| T07 | [Offline waits and confirmation #19](https://github.com/0000-chat/0000/issues/19) |
+| T08 | [Uncertain-send recovery #20](https://github.com/0000-chat/0000/issues/20) |
+| T09 | [WhatsApp dispatch #21](https://github.com/0000-chat/0000/issues/21) |
+| T10 | [Contacts and new conversations #22](https://github.com/0000-chat/0000/issues/22) |
+| T11 | [Group creation #23](https://github.com/0000-chat/0000/issues/23) |
+| T12 | [Group management #24](https://github.com/0000-chat/0000/issues/24) |
+| T13 | [Webhook configuration #25](https://github.com/0000-chat/0000/issues/25) |
+| T14 | [Incoming webhook delivery #26](https://github.com/0000-chat/0000/issues/26) |
+| T15 | [Webhook reliability #27](https://github.com/0000-chat/0000/issues/27) |
+| T16 | [Active deletion and expiry #28](https://github.com/0000-chat/0000/issues/28) |
+| T17 | [Edit/removal notifications #29](https://github.com/0000-chat/0000/issues/29) |
+| T18 | [Explicit read receipts #30](https://github.com/0000-chat/0000/issues/30) |
+| T19 | [Archive purge #31](https://github.com/0000-chat/0000/issues/31) |
+| T20 | [Controlled-copy retention #32](https://github.com/0000-chat/0000/issues/32) |
+| T21 | [Safe restore #33](https://github.com/0000-chat/0000/issues/33) |
+| T25 | [Relink and disconnect #34](https://github.com/0000-chat/0000/issues/34) |
+| T22 | [ChatGPT Work acceptance #35](https://github.com/0000-chat/0000/issues/35) |
+| T23 | [Grok connector proof #36](https://github.com/0000-chat/0000/issues/36) |
 
 Every `Parent: #11` field below refers to that shared approved specification.
 Issue #1 is the coordination map for this work, not a second parent. Existing
