@@ -1,0 +1,746 @@
+/**
+ * The projection schema is deliberately versioned separately from SQLite's
+ * user_version pragma. Durable Object SQLite storage can be re-entered after
+ * an instance is evicted, so the migration table is the durable source of
+ * schema truth.
+ */
+
+import { safeProjectionError } from "./errors";
+
+export type ProjectionMigration = {
+  readonly version: number;
+  readonly name: string;
+  readonly appliedAt: string;
+  readonly statements: readonly string[];
+};
+
+const initialTenantProjectionStatements = Object.freeze([
+  `CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
+  version INTEGER PRIMARY KEY CHECK(version >= 1),
+  name TEXT NOT NULL UNIQUE,
+  applied_at TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE projection_meta (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  tenant_id TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK(state IN ('ready','rebuilding','rebuild_failed')),
+  generation INTEGER NOT NULL CHECK(generation >= 1 AND generation <= 9007199254740991),
+  rebuild_id TEXT,
+  rebuild_started_at TEXT,
+  last_completed_rebuild_id TEXT,
+  last_failed_rebuild_id TEXT,
+  last_rebuild_failure_code TEXT CHECK(last_rebuild_failure_code IS NULL OR last_rebuild_failure_code IN ('operator_abort','unsupported_archive','archive_gap','binding_conflict','validation_failed')),
+  initialized_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE connection_bindings (
+  account_id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL UNIQUE,
+  identity_id TEXT NOT NULL,
+  platform TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE completed_rebuilds (
+  rebuild_id TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL UNIQUE CHECK(generation >= 2 AND generation <= 9007199254740991),
+  completed_at TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE failed_rebuilds (
+  rebuild_id TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL UNIQUE CHECK(generation >= 2 AND generation <= 9007199254740991),
+  failed_at TEXT NOT NULL,
+  failure_code TEXT NOT NULL CHECK(failure_code IN ('operator_abort','unsupported_archive','archive_gap','binding_conflict','validation_failed'))
+) STRICT`,
+  `CREATE TABLE applied_events (
+  event_id TEXT PRIMARY KEY,
+  event_hash TEXT NOT NULL CHECK(length(event_hash) = 64),
+  event_type TEXT NOT NULL,
+  event_source TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  observed_ms INTEGER NOT NULL CHECK(observed_ms BETWEEN -9007199254740991 AND 9007199254740991),
+  generation INTEGER NOT NULL CHECK(generation >= 1)
+) STRICT`,
+  `CREATE TABLE conversations (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  title TEXT NOT NULL,
+  archived INTEGER NOT NULL CHECK(archived IN (0,1)),
+  muted INTEGER NOT NULL CHECK(muted IN (0,1)),
+  last_message_preview TEXT NOT NULL DEFAULT '',
+  shell_activity_at TEXT NOT NULL,
+  shell_activity_ms INTEGER NOT NULL,
+  shell_activity_event_id TEXT NOT NULL,
+  last_activity_at TEXT NOT NULL,
+  last_activity_ms INTEGER NOT NULL,
+  unread_count INTEGER NOT NULL DEFAULT 0 CHECK(unread_count >= 0),
+  message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count >= 0),
+  attachment_count INTEGER NOT NULL DEFAULT 0 CHECK(attachment_count >= 0),
+  metadata_observed_ms INTEGER NOT NULL CHECK(metadata_observed_ms BETWEEN -9007199254740991 AND 9007199254740991),
+  metadata_event_id TEXT NOT NULL,
+  deleted_at TEXT,
+  last_event_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE participants (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  remote_id TEXT,
+  avatar_url TEXT,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL,
+  deleted_at TEXT
+) STRICT`,
+  `CREATE TABLE messages (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('inbound','outbound')),
+  sender_participant_id TEXT,
+  sender_label TEXT NOT NULL,
+  body TEXT NOT NULL,
+  reply_to_message_id TEXT,
+  delivery_status TEXT NOT NULL CHECK(delivery_status IN ('unknown','accepted','sent','delivered','read','failed')),
+  unread INTEGER NOT NULL CHECK(unread IN (0,1)),
+  local_read_at TEXT,
+  occurred_at TEXT NOT NULL,
+  occurred_ms INTEGER NOT NULL,
+  observed_at TEXT NOT NULL,
+  current_observed_ms INTEGER NOT NULL,
+  current_event_id TEXT NOT NULL,
+  matrix_room_id TEXT,
+  matrix_event_id TEXT,
+  remote_message_id TEXT,
+  edited_at TEXT,
+  deleted_at TEXT,
+  deletion_reason TEXT,
+  attachment_count INTEGER NOT NULL DEFAULT 0 CHECK(attachment_count >= 0),
+  delivery_failure_code TEXT,
+  delivery_observed_ms INTEGER,
+  delivery_event_id TEXT
+) STRICT`,
+  `CREATE TABLE message_versions (
+  event_id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  version_kind TEXT NOT NULL CHECK(version_kind IN ('created','edited')),
+  body TEXT NOT NULL,
+  editor_participant_id TEXT,
+  occurred_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  observed_ms INTEGER NOT NULL
+) STRICT`,
+  `CREATE TABLE reactions (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  participant_id TEXT,
+  emoji TEXT,
+  occurred_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL,
+  removed_at TEXT
+) STRICT`,
+  `CREATE TABLE receipts (
+  message_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  receipt_type TEXT NOT NULL CHECK(receipt_type IN ('read','delivered')),
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  local_identity INTEGER NOT NULL CHECK(local_identity IN (0,1)),
+  occurred_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL,
+  PRIMARY KEY(message_id,participant_id,receipt_type)
+) STRICT`,
+  `CREATE TABLE typing_states (
+  conversation_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  is_typing INTEGER NOT NULL CHECK(is_typing IN (0,1)),
+  expires_at TEXT,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL,
+  PRIMARY KEY(conversation_id,participant_id)
+) STRICT`,
+  `CREATE TABLE attachments (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  file_name TEXT,
+  mime_type TEXT,
+  size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
+  sha256 TEXT CHECK(sha256 IS NULL OR length(sha256) = 64),
+  r2_key TEXT,
+  observed_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL,
+  deleted_at TEXT
+) STRICT`,
+  `CREATE TABLE commands (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation = 'message.send'),
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('accepted','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed')),
+  failure_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE message_delivery_updates (
+  message_id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  delivery_status TEXT NOT NULL CHECK(delivery_status IN ('unknown','accepted','sent','delivered','read','failed')),
+  failure_code TEXT,
+  occurred_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL
+) STRICT`,
+  `CREATE TABLE event_tombstones (
+  target_event_id TEXT PRIMARY KEY,
+  tombstone_event_id TEXT NOT NULL UNIQUE,
+  tombstone_type TEXT NOT NULL CHECK(tombstone_type IN ('replay.tombstone','correction.applied')),
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  observed_ms INTEGER NOT NULL
+) STRICT`,
+  `CREATE TABLE resource_tombstones (
+  resource_type TEXT NOT NULL CHECK(resource_type IN ('message','conversation','participant','attachment')),
+  resource_id TEXT NOT NULL,
+  tombstone_event_id TEXT NOT NULL UNIQUE,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  reason_code TEXT,
+  occurred_at TEXT NOT NULL,
+  observed_ms INTEGER NOT NULL,
+  PRIMARY KEY(resource_type,resource_id)
+) STRICT`,
+  `CREATE TABLE projection_changes (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  event_type TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1)
+) STRICT`,
+  `CREATE TABLE projection_change_floors (
+  identity_id TEXT PRIMARY KEY,
+  discarded_through_sequence INTEGER NOT NULL CHECK(discarded_through_sequence >= 0)
+) STRICT`,
+  `CREATE TABLE projection_checkpoints (
+  kind TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  source_cursor TEXT,
+  page_digest TEXT CHECK(page_digest IS NULL OR length(page_digest) = 64),
+  last_observed_at TEXT,
+  last_observed_ms INTEGER,
+  last_event_id TEXT,
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  updated_at TEXT NOT NULL,
+  last_applied_count INTEGER CHECK(last_applied_count IS NULL OR last_applied_count >= 0),
+  last_duplicate_count INTEGER CHECK(last_duplicate_count IS NULL OR last_duplicate_count >= 0),
+  last_sequence INTEGER CHECK(last_sequence IS NULL OR last_sequence >= 0)
+) STRICT`,
+  `CREATE INDEX idx_conversations_identity_activity ON conversations(identity_id,last_activity_ms DESC,id ASC)`,
+  `CREATE INDEX idx_conversations_identity_connection_activity ON conversations(identity_id,connection_id,last_activity_ms DESC,id ASC)`,
+  `CREATE INDEX idx_messages_identity_conversation_occurred ON messages(identity_id,conversation_id,occurred_ms DESC,id ASC)`,
+  `CREATE INDEX idx_messages_matrix_event ON messages(matrix_event_id) WHERE matrix_event_id IS NOT NULL`,
+  `CREATE INDEX idx_messages_remote_message ON messages(remote_message_id) WHERE remote_message_id IS NOT NULL`,
+  `CREATE INDEX idx_messages_reply_target ON messages(reply_to_message_id) WHERE reply_to_message_id IS NOT NULL`,
+  `CREATE INDEX idx_messages_sender_participant ON messages(sender_participant_id) WHERE sender_participant_id IS NOT NULL`,
+  `CREATE INDEX idx_messages_conversation_owner ON messages(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_message_versions_message_order ON message_versions(message_id,observed_ms DESC,event_id DESC)`,
+  `CREATE INDEX idx_message_versions_editor_participant ON message_versions(editor_participant_id) WHERE editor_participant_id IS NOT NULL`,
+  `CREATE INDEX idx_message_versions_conversation_owner ON message_versions(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_participants_conversation_name ON participants(conversation_id,display_name,id)`,
+  `CREATE INDEX idx_reactions_message_state ON reactions(message_id,removed_at,occurred_at)`,
+  `CREATE INDEX idx_reactions_participant ON reactions(participant_id) WHERE participant_id IS NOT NULL`,
+  `CREATE INDEX idx_reactions_conversation_owner ON reactions(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_receipts_message_type_time ON receipts(message_id,receipt_type,occurred_at)`,
+  `CREATE INDEX idx_receipts_participant ON receipts(participant_id)`,
+  `CREATE INDEX idx_receipts_conversation_owner ON receipts(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_typing_participant ON typing_states(participant_id)`,
+  `CREATE INDEX idx_attachments_message_state ON attachments(message_id,deleted_at,id)`,
+  `CREATE INDEX idx_attachments_conversation_owner ON attachments(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_delivery_message_order ON message_delivery_updates(message_id,last_observed_ms,last_event_id)`,
+  `CREATE INDEX idx_delivery_conversation_owner ON message_delivery_updates(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_event_tombstones_conversation_owner ON event_tombstones(conversation_id,identity_id,account_id,connection_id,platform)`,
+  `CREATE INDEX idx_applied_events_order ON applied_events(observed_ms,event_id)`,
+  `CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,sequence)`,
+  `CREATE INDEX idx_resource_tombstones_resource_order ON resource_tombstones(resource_type,resource_id,observed_ms)`,
+  `CREATE INDEX idx_resource_tombstones_id ON resource_tombstones(resource_id,resource_type)`,
+  `CREATE INDEX idx_resource_tombstones_conversation_owner ON resource_tombstones(conversation_id,identity_id,account_id,connection_id,platform)`,
+]);
+
+const initialTenantProjectionMigration: ProjectionMigration = Object.freeze({
+  version: 1,
+  name: "initial_tenant_projection",
+  appliedAt: "2026-09-07T00:00:00.000Z",
+  statements: initialTenantProjectionStatements,
+});
+
+const identityLocalProjectionSequencesStatements = Object.freeze([
+  `CREATE TABLE projection_changes_v2 (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  event_type TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  identity_sequence INTEGER NOT NULL CHECK(identity_sequence >= 1)
+) STRICT`,
+  `INSERT INTO projection_changes_v2 (sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation, identity_sequence)
+SELECT sequence, event_id, event_type, identity_id, account_id, connection_id, conversation_id, occurred_at, observed_at, generation,
+  ROW_NUMBER() OVER (PARTITION BY identity_id ORDER BY sequence) + CASE WHEN EXISTS (
+    SELECT 1 FROM projection_change_floors AS floors WHERE floors.identity_id = projection_changes.identity_id
+  ) THEN 1 ELSE 0 END
+FROM projection_changes
+ORDER BY sequence`,
+  "DROP INDEX IF EXISTS idx_projection_changes_identity_sequence",
+  "DROP INDEX IF EXISTS idx_projection_changes_global_sequence",
+  "DROP TABLE projection_changes",
+  "ALTER TABLE projection_changes_v2 RENAME TO projection_changes",
+  "CREATE INDEX idx_projection_changes_identity_sequence ON projection_changes(identity_id,identity_sequence)",
+  "CREATE INDEX idx_projection_changes_global_sequence ON projection_changes(sequence)",
+  "UPDATE projection_change_floors SET discarded_through_sequence = 1",
+  `CREATE TABLE projection_identity_sequences (
+  identity_id TEXT PRIMARY KEY,
+  latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= 0)
+) STRICT`,
+  `INSERT INTO projection_identity_sequences (identity_id, latest_sequence)
+SELECT identity_id, MAX(identity_sequence)
+FROM projection_changes
+GROUP BY identity_id
+UNION ALL
+SELECT floors.identity_id, floors.discarded_through_sequence
+FROM projection_change_floors AS floors
+WHERE NOT EXISTS (
+  SELECT 1 FROM projection_changes AS changes WHERE changes.identity_id = floors.identity_id
+)`,
+]);
+
+const identityLocalProjectionSequencesMigration: ProjectionMigration =
+  Object.freeze({
+    version: 2,
+    name: "identity_local_projection_sequences",
+    appliedAt: "2026-09-10T00:00:00.000Z",
+    statements: identityLocalProjectionSequencesStatements,
+  });
+
+/**
+ * The outbound ledger is intentionally separate from the receive-side command
+ * projection. It owns the request idempotency tuple and the dispatch wakeup
+ * handoff while the existing `messages` and `commands` tables remain the
+ * durable read model.
+ */
+const durableOutboundAcceptanceMigration: ProjectionMigration = Object.freeze({
+  version: 3,
+  name: "durable_outbound_acceptance",
+  appliedAt: "2026-09-13T00:00:00.000Z",
+  statements: [
+    `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','wakeup_failed','dispatching','dispatched')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key)
+) STRICT`,
+    "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+    "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+  ],
+});
+
+/**
+ * Offline acceptance extends the authoritative outbound ledger with a
+ * connection wait state and one immutable human decision. The receive-side
+ * command table is rebuilt here because SQLite cannot alter a CHECK constraint;
+ * all existing rows are copied verbatim before the old table is removed.
+ */
+const offlineOutboundConfirmationMigration: ProjectionMigration = Object.freeze(
+  {
+    version: 4,
+    name: "offline_outbound_confirmation",
+    appliedAt: "2026-09-14T00:00:00.000Z",
+    statements: [
+      "DROP INDEX IF EXISTS idx_commands_conversation_owner",
+      "ALTER TABLE commands RENAME TO commands_v3",
+      `CREATE TABLE commands (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation = 'message.send'),
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed')),
+  failure_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL
+) STRICT`,
+      "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) SELECT id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id FROM commands_v3",
+      "DROP TABLE commands_v3",
+      "CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)",
+      "DROP INDEX IF EXISTS idx_outbound_dispatches_account_conversation",
+      "DROP INDEX IF EXISTS idx_outbound_dispatches_actor_created",
+      "ALTER TABLE outbound_dispatches RENAME TO outbound_dispatches_v3",
+      `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','waiting_for_connection','confirmation_required','wakeup_failed','dispatching','dispatched','cancelled')),
+  confirmation_due_at TEXT,
+  confirmation_decision TEXT CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel')),
+  confirmation_actor_principal_id TEXT,
+  confirmation_actor_identity_id TEXT,
+  confirmation_decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key)
+) STRICT`,
+      "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, NULL, NULL, NULL, NULL, NULL, created_at, updated_at FROM outbound_dispatches_v3",
+      "DROP TABLE outbound_dispatches_v3",
+      "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+      "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+      `CREATE TABLE outbound_command_decisions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  command_id TEXT NOT NULL UNIQUE,
+  dispatch_id TEXT NOT NULL UNIQUE,
+  decision TEXT NOT NULL CHECK(decision IN ('confirm','cancel')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  decided_at TEXT NOT NULL
+) STRICT`,
+      "CREATE INDEX idx_outbound_command_decisions_tenant_decided ON outbound_command_decisions(tenant_id, decided_at, command_id)",
+    ],
+  },
+);
+
+/**
+ * Uncertainty reconciliation adds a stable transaction identity, lease
+ * evidence, and human action journal to the outbound ledger. Existing rows
+ * are backfilled from their immutable dispatch id and request digest so a
+ * schema upgrade never makes an accepted command unreadable.
+ */
+const uncertaintyReconciliationMigration: ProjectionMigration = Object.freeze({
+  version: 5,
+  name: "uncertainty_reconciliation",
+  appliedAt: "2026-09-14T00:30:00.000Z",
+  statements: [
+    "DROP INDEX IF EXISTS idx_commands_conversation_owner",
+    "ALTER TABLE commands RENAME TO commands_v4",
+    `CREATE TABLE commands (
+  id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation = 'message.send'),
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('accepted','waiting_for_connection','confirmation_required','delivery_uncertain','scheduled','reading','typing','submitted_to_matrix','matrix_confirmed','bridged','delivered','cancelled','unsupported','failed')),
+  failure_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_observed_ms INTEGER NOT NULL,
+  last_event_id TEXT NOT NULL
+) STRICT`,
+    "INSERT INTO commands (id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id) SELECT id, identity_id, account_id, connection_id, conversation_id, platform, operation, delivery_mode, status, failure_code, created_at, updated_at, last_observed_ms, last_event_id FROM commands_v4",
+    "DROP TABLE commands_v4",
+    "CREATE INDEX idx_commands_conversation_owner ON commands(conversation_id,identity_id,account_id,connection_id,platform)",
+    "DROP INDEX IF EXISTS idx_outbound_dispatches_account_conversation",
+    "DROP INDEX IF EXISTS idx_outbound_dispatches_actor_created",
+    "ALTER TABLE outbound_dispatches RENAME TO outbound_dispatches_v4",
+    `CREATE TABLE outbound_dispatches (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  tenant_id TEXT NOT NULL,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  resource_identity_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+  body TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK(delivery_mode IN ('direct','paced')),
+  status TEXT NOT NULL CHECK(status IN ('pending','waiting_for_connection','confirmation_required','delivery_uncertain','wakeup_failed','dispatching','dispatched','cancelled')),
+  transaction_id TEXT NOT NULL,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  dispatch_lease_id TEXT,
+  dispatch_lease_expires_at TEXT,
+  uncertainty_reason TEXT,
+  uncertain_at TEXT,
+  projection_generation INTEGER NOT NULL DEFAULT 1 CHECK(projection_generation >= 1),
+  matrix_stage TEXT NOT NULL DEFAULT 'unknown' CHECK(matrix_stage IN ('unknown','confirmed','accepted','delivered')),
+  bridge_stage TEXT NOT NULL DEFAULT 'unknown' CHECK(bridge_stage IN ('unknown','confirmed','accepted','delivered')),
+  provider_stage TEXT NOT NULL DEFAULT 'unknown' CHECK(provider_stage IN ('unknown','confirmed','accepted','delivered')),
+  last_evidence_at TEXT,
+  chat_paused INTEGER NOT NULL DEFAULT 0 CHECK(chat_paused IN (0,1)),
+  duplicate_risk INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_risk IN (0,1)),
+  resend_of_command_id TEXT,
+  last_action TEXT CHECK(last_action IS NULL OR last_action IN ('cancel','continue','resend')),
+  last_action_actor_principal_id TEXT,
+  last_action_at TEXT,
+  confirmation_due_at TEXT,
+  confirmation_decision TEXT CHECK(confirmation_decision IS NULL OR confirmation_decision IN ('confirm','cancel')),
+  confirmation_actor_principal_id TEXT,
+  confirmation_actor_identity_id TEXT,
+  confirmation_decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(idempotency_key),
+  UNIQUE(transaction_id)
+) STRICT`,
+    "INSERT INTO outbound_dispatches (id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, status, transaction_id, request_digest, dispatch_lease_id, dispatch_lease_expires_at, uncertainty_reason, uncertain_at, projection_generation, matrix_stage, bridge_stage, provider_stage, last_evidence_at, chat_paused, duplicate_risk, resend_of_command_id, last_action, last_action_actor_principal_id, last_action_at, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at) SELECT id, command_id, message_id, event_id, tenant_id, actor_principal_id, actor_identity_id, resource_identity_id, account_id, connection_id, conversation_id, platform, idempotency_key, body_digest, body, delivery_mode, CASE WHEN status = 'dispatching' THEN 'delivery_uncertain' ELSE status END, 'transaction_outbound_' || id, body_digest, NULL, NULL, CASE WHEN status = 'dispatching' THEN 'legacy_dispatch_lease_expired' ELSE NULL END, CASE WHEN status = 'dispatching' THEN updated_at ELSE NULL END, COALESCE((SELECT generation FROM projection_meta WHERE singleton = 1), 1), 'unknown', 'unknown', 'unknown', NULL, CASE WHEN status IN ('delivery_uncertain','dispatching') THEN 1 ELSE 0 END, 0, NULL, NULL, NULL, NULL, confirmation_due_at, confirmation_decision, confirmation_actor_principal_id, confirmation_actor_identity_id, confirmation_decided_at, created_at, updated_at FROM outbound_dispatches_v4",
+    "DROP TABLE outbound_dispatches_v4",
+    "UPDATE commands SET status = 'delivery_uncertain', updated_at = (SELECT uncertain_at FROM outbound_dispatches WHERE outbound_dispatches.command_id = commands.id) WHERE id IN (SELECT command_id FROM outbound_dispatches WHERE status = 'delivery_uncertain') AND status NOT IN ('cancelled','delivered')",
+    "CREATE INDEX idx_outbound_dispatches_account_conversation ON outbound_dispatches(account_id, conversation_id, created_at, id)",
+    "CREATE INDEX idx_outbound_dispatches_actor_created ON outbound_dispatches(actor_identity_id, created_at, id)",
+    "CREATE INDEX idx_outbound_dispatches_transaction ON outbound_dispatches(tenant_id, transaction_id, request_digest)",
+    `CREATE TABLE outbound_evidence (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  command_id TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('matrix','bridge','provider','refresh')),
+  evidence_id TEXT NOT NULL,
+  transaction_id TEXT NOT NULL,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  account_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  status TEXT NOT NULL CHECK(status IN ('confirmed','accepted','delivered','uncertain')),
+  observed_at TEXT NOT NULL,
+  provider_operation_id TEXT,
+  provider_message_id TEXT,
+  remote_echo_id TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(command_id, source, evidence_id)
+) STRICT`,
+    "CREATE INDEX idx_outbound_evidence_command_observed ON outbound_evidence(tenant_id, command_id, observed_at, id)",
+    `CREATE TABLE outbound_actions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  original_command_id TEXT NOT NULL,
+  new_command_id TEXT,
+  action TEXT NOT NULL CHECK(action IN ('cancel','continue','resend')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  actor_principal_id TEXT NOT NULL,
+  actor_identity_id TEXT NOT NULL,
+  duplicate_risk_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_risk_acknowledged IN (0,1)),
+  action_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(original_command_id, idempotency_key)
+) STRICT`,
+    "CREATE INDEX idx_outbound_actions_command_at ON outbound_actions(tenant_id, original_command_id, action_at, id)",
+  ],
+});
+
+/**
+ * Attachment expiry is optional provider metadata. Older projections keep
+ * their existing rows and become immediately compatible with the scoped file
+ * reader once this column is added.
+ */
+const attachmentExpiryMigration: ProjectionMigration = Object.freeze({
+  version: 6,
+  name: "attachment_expiry",
+  appliedAt: "2026-09-14T00:45:00.000Z",
+  statements: [
+    "ALTER TABLE attachments ADD COLUMN expires_at TEXT",
+    "CREATE INDEX idx_attachments_expiry ON attachments(expires_at) WHERE expires_at IS NOT NULL",
+  ],
+});
+
+/**
+ * Persist the D1 authority reservation on each accepted dispatch. Legacy
+ * rows remain readable, but the adapter must fail closed when these nullable
+ * columns are absent because no provider claim can safely be made for them.
+ */
+const privateDispatchAuthorityMigration: ProjectionMigration = Object.freeze({
+  version: 7,
+  name: "private_dispatch_authority",
+  appliedAt: "2026-09-14T01:00:00.000Z",
+  statements: [
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_reservation_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_membership_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_identity_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_capability_kind TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_capability_id TEXT",
+    "ALTER TABLE outbound_dispatches ADD COLUMN authority_capability_epoch INTEGER",
+    "CREATE INDEX idx_outbound_dispatches_authority_reservation ON outbound_dispatches(tenant_id, authority_reservation_id)",
+  ],
+});
+
+/** The complete immutable migration history for the projection database. */
+export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
+  Object.freeze([
+    initialTenantProjectionMigration,
+    identityLocalProjectionSequencesMigration,
+    durableOutboundAcceptanceMigration,
+    offlineOutboundConfirmationMigration,
+    uncertaintyReconciliationMigration,
+    attachmentExpiryMigration,
+    privateDispatchAuthorityMigration,
+  ]);
+
+/** Alias retained for callers that use the generic schema-migration name. */
+export const SCHEMA_MIGRATIONS = PROJECTION_MIGRATIONS;
+
+const migrationTableStatement = initialTenantProjectionStatements[0]!;
+
+type AppliedMigrationRow = {
+  version: number;
+  name: string;
+};
+
+/**
+ * Apply all missing schema migrations synchronously. This function intentionally
+ * performs no I/O beyond the supplied SQLite storage and never consults wall
+ * clock state. A migration's metadata row is inserted only after all of its
+ * statements have succeeded in the same SQLite transaction.
+ */
+export function runProjectionMigrations(storage: DurableObjectStorage): void {
+  try {
+    storage.sql.exec(migrationTableStatement);
+
+    const applied = storage.sql
+      .exec<AppliedMigrationRow>(
+        "SELECT version, name FROM _sql_schema_migrations ORDER BY version",
+      )
+      .toArray();
+    const knownByVersion = new Map(
+      PROJECTION_MIGRATIONS.map((migration) => [migration.version, migration]),
+    );
+    const latestVersion =
+      PROJECTION_MIGRATIONS[PROJECTION_MIGRATIONS.length - 1]?.version ?? 0;
+
+    for (const row of applied) {
+      const migration = knownByVersion.get(row.version);
+      if (migration === undefined) {
+        if (row.version > latestVersion) {
+          throw new Error("projection schema has an unknown newer version");
+        }
+        throw new Error("projection schema migration version mismatch");
+      }
+      if (row.name !== migration.name) {
+        throw new Error("projection schema migration name mismatch");
+      }
+    }
+
+    const appliedVersions = new Set(applied.map((row) => row.version));
+    for (const migration of PROJECTION_MIGRATIONS) {
+      if (appliedVersions.has(migration.version)) continue;
+
+      storage.transactionSync(() => {
+        for (const statement of migration.statements) {
+          storage.sql.exec(statement);
+        }
+        storage.sql.exec(
+          "INSERT INTO _sql_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+          migration.version,
+          migration.name,
+          migration.appliedAt,
+        );
+      });
+    }
+  } catch (error) {
+    throw safeProjectionError(error, "projection_unavailable");
+  }
+}

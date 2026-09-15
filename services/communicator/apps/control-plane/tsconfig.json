@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "paths": { "@/*": ["./src/*"] },
+    "types": ["vite/client", "@cloudflare/vitest-plugin/types"]
+  },
+  "include": [
+    "src",
+    "worker",
+    "worker-configuration.d.ts",
+    "vite.config.ts",
+    "vitest.*.config.ts"
+  ]
+}

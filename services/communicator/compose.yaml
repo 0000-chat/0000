@@ -1,0 +1,105 @@
+name: ${COMPOSE_PROJECT_NAME:-communicator}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    env_file:
+      - ${COMMUNICATOR_RUNTIME_DIR}/secrets/postgres.env
+    environment:
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks: [core]
+
+  synapse:
+    image: ${SYNAPSE_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/synapse:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8008/health\", timeout=3)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+    networks: [core]
+
+  whatsapp:
+    image: ${WHATSAPP_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/whatsapp:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:29318/_matrix/mau/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+    networks: [core]
+
+  messenger:
+    image: ${MESSENGER_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/messenger:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:29319/_matrix/mau/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+    networks: [core]
+
+  telegram:
+    image: ${TELEGRAM_IMAGE}
+    user: "1337:1337"
+    command: ["/usr/bin/mautrix-telegram", "--no-update", "--config", "/data/config.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ${COMMUNICATOR_RUNTIME_DIR}/telegram:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:29317/_matrix/mau/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+    networks: [core]
+
+  caddy:
+    image: ${CADDY_IMAGE}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${COMMUNICATOR_RUNTIME_DIR}/caddy/data:/data
+      - ${COMMUNICATOR_RUNTIME_DIR}/caddy/config:/config
+    restart: unless-stopped
+    networks: [core]
+
+networks:
+  core:
+    driver: bridge

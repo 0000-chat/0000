@@ -1,9 +1,17 @@
 {
   "name": "@0000/communicator",
   "private": true,
-  "version": "0.0.0",
-  "description": "Placeholder for the 0000 communication channel and bridge service.",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=24 <27"
+  },
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/communicator"
+    "build": "pnpm -r --if-present build",
+    "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "test:rust": "cargo test --workspace --all-features",
+    "check": "./scripts/check",
+    "check:application": "pnpm check:rust && pnpm -r --if-present check",
+    "test": "pnpm test:rust && pnpm -r --if-present test",
+    "test:python": "python3 -m unittest discover -s tests -v"
   }
 }

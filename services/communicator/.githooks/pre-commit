@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+if [ "$branch" = "main" ] && [ "${FULL_SCAFFOLD_BOOTSTRAP:-}" != "1" ]; then
+    echo "direct commits on main are blocked; use a task branch (or set FULL_SCAFFOLD_BOOTSTRAP=1 for an intentional bootstrap commit)" >&2
+    exit 1
+fi

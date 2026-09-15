@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+python3 - "$root" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+required = {
+    ".github/workflows/quality.yml",
+    ".githooks/pre-commit",
+    ".gitignore",
+    ".oxlintrc.json",
+    "0000-product.json",
+    "AGENTS.md",
+    "README.md",
+    "biome.json",
+    "Cargo.toml",
+    "package.json",
+    "pnpm-lock.yaml",
+    "services/matrix-gateway/Cargo.toml",
+    "docs/migration/2026-09-12-communicator-migration.md",
+    "docs/README.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "docs/agents/triage-labels.md",
+    "scripts/check",
+    "scripts/format",
+    "scripts/format-check",
+    "scripts/install-tools",
+    "scripts/lint",
+}
+tracked = set(subprocess.check_output(["git", "ls-files"], text=True).splitlines())
+# Include expected files added in the current worktree before they are staged.
+tracked.update(path for path in required if (root / path).is_file())
+missing = sorted(required - tracked)
+if missing:
+    raise SystemExit(f"required repository files are not tracked: {missing}")
+metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
+if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-communicator":
+    raise SystemExit("invalid product metadata")
+if metadata.get("status") == "scaffold-only" or metadata.get("application_code") is not True:
+    raise SystemExit("product metadata still describes a scaffold")
+if metadata.get("license_selected") is not False:
+    raise SystemExit("license selection changed during migration")
+
+readme = (root / "README.md").read_text(encoding="utf-8")
+for required_text in ("Cloudflare", "Matrix Gateway", "Standalone public"):
+    if required_text not in readme:
+        raise SystemExit(f"README is missing imported application guidance: {required_text}")
+PY
+git diff --check
+"$root/scripts/install-tools"
+"$root/scripts/lint"
+"$root/scripts/format-check"
+echo "0000-communicator application and tooling checks passed"

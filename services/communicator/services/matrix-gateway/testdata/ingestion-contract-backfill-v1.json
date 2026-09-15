@@ -1,0 +1,44 @@
+{
+  "canonical_jsonl": "{\"account_id\":\"account_demo\",\"conversation_id\":\"conversation_demo\",\"event_id\":\"evt_backfill_contract\",\"event_source\":\"backfill\",\"event_type\":\"message.created\",\"identity_id\":\"identity_demo\",\"matrix_event_id\":\"$evt_backfill_contract:example.org\",\"matrix_room_id\":\"!room:example.org\",\"observed_at\":\"2026-09-09T01:02:03.000Z\",\"occurred_at\":\"2026-09-09T01:02:02.000Z\",\"payload\":{\"body\":\"backfill\",\"delivery_status\":\"unknown\",\"direction\":\"inbound\",\"message_id\":\"message_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"reply_to_message_id\":null,\"sender_label\":\"Alice\",\"sender_participant_id\":\"participant_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"unread\":true},\"platform\":\"whatsapp\",\"remote_message_id\":null,\"schema_version\":1,\"tenant_id\":\"tenant_demo\"}\n",
+  "canonical_sha256": "d50c6da1374b6f31acb9276923f1ba268bf1a0cb28a037ecfcac03c88e7eab36",
+  "request": {
+    "archived_at": "2026-09-09T01:02:03.000Z",
+    "batch_id": "batch_1df628ff487a2a3adc2694422c0788db0621011122c8085a24acff90d3a37f6a",
+    "events": [
+      {
+        "account_id": "account_demo",
+        "conversation_id": "conversation_demo",
+        "event_id": "evt_backfill_contract",
+        "event_source": "backfill",
+        "event_type": "message.created",
+        "identity_id": "identity_demo",
+        "matrix_event_id": "$evt_backfill_contract:example.org",
+        "matrix_room_id": "!room:example.org",
+        "observed_at": "2026-09-09T01:02:03.000Z",
+        "occurred_at": "2026-09-09T01:02:02.000Z",
+        "payload": {
+          "body": "backfill",
+          "delivery_status": "unknown",
+          "direction": "inbound",
+          "message_id": "message_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "reply_to_message_id": null,
+          "sender_label": "Alice",
+          "sender_participant_id": "participant_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "unread": true
+        },
+        "platform": "whatsapp",
+        "remote_message_id": null,
+        "schema_version": 1,
+        "tenant_id": "tenant_demo"
+      }
+    ],
+    "gateway_route_id": "route_demo",
+    "producer_version": "matrix-gateway/0.1.0",
+    "schema_version": 1,
+    "source_checkpoint": {
+      "kind": "matrix_backfill_run_sha256",
+      "value": "sha256:1ffee795c3c350e2ff537a9446aa5ceb3fe24deca8608b91ed19f38b388f1b23"
+    },
+    "tenant_id": "tenant_demo"
+  }
+}

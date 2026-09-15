@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "name": "unknown-room",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_unknown_room"
+    },
+    {
+      "name": "unknown-sender",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_unknown_sender"
+    },
+    {
+      "name": "unsupported-ephemeral",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_unsupported_ephemeral"
+    },
+    {
+      "name": "unsupported-state",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_unsupported_state"
+    },
+    {
+      "name": "missing-relation-target",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_missing_relation_target"
+    },
+    {
+      "name": "oversized-body",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_body_too_large"
+    },
+    {
+      "name": "invalid-timestamp",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_invalid_timestamp"
+    },
+    {
+      "name": "unsupported-message",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_unsupported_message_type"
+    },
+    {
+      "name": "malformed-event",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_malformed_event"
+    },
+    {
+      "name": "oversized-metadata",
+      "outcome": "ignored",
+      "event_types": [],
+      "reason_code": "matrix_metadata_too_large"
+    }
+  ]
+}
