@@ -81,5 +81,18 @@ provenance.
   because `/tmp` was full during migration.
 
 The full nested Rust and pnpm application check was not rerun during import;
-the imported source tree is byte-identical outside the documented relocation
-adaptations, and that check can rebuild the unchanged application toolchain.
+the imported application and configuration files remain byte-identical outside
+the documented relocation adaptations. The follow-up documentation commit
+changed only agent guidance and destination issue URLs; no application
+implementation changed. The nested check can rebuild the unchanged application
+toolchain.
+
+## Preservation backup verification
+
+The final preservation report is
+`/home/ubuntu/0000-full/migration-backups/communicator-2026-09-15/REPORT.txt`.
+It records the 6,006,035,714-byte source archive
+`source/source.tar.zst` with SHA-256
+`605d71b4b40654a38ce65c168cbca7967df5d927ee08d5010a9f33c08331abaa`, 35
+registered worktrees with one missing/prunable entry, 3,857 selected dirty or
+non-generated records, and zero archive/checksum failures.
