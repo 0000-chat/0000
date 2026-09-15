@@ -131,6 +131,7 @@ resume one using the new service directory:
 codex resume --all -C /home/ubuntu/0000-full/0000/services/communicator
 ```
 
-The migration commits are local on `codex/import-communicator`. The monorepo
-`main` branch and remote code were not changed. The original checkout and
-linked worktrees remain available for recovery.
+At the initial handoff, the migration commits were local on
+`codex/import-communicator`; monorepo `main` and remote code had not changed.
+The user subsequently authorized merging and pushing the migration to main.
+The original checkout and linked worktrees remain available for recovery.

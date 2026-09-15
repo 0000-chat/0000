@@ -14,6 +14,27 @@ and every worktree until cutover has passed. Publish commits, archive or
 delete source repositories, change visibility, or cut over production only
 when those actions are within the authorized scope.
 
+## Start from the current project
+
+Infer the source from the current checkout's Git root and remote. Strip the
+`0000-` prefix from its repository name to derive the service name, and use
+`/home/ubuntu/0000-full/0000/services/<service>` as the destination. Inspect
+existing destination content first. Resolve ambiguity if the current root
+is the ecosystem controller or already the monorepo.
+
+The commands below use Communicator as an example. Substitute inferred paths
+and select the source branch from the inventory. Preserve the source's detected
+toolchain and run its actual checks; record missing checks explicitly.
+A Git archive contains committed files only: dirty and ignored work needs
+actual file backups as well as manifests. Retain originals and backups.
+
+When merging and pushing main is authorized, fetch current main, reconcile
+changes, run checks, merge normally, push without force, and verify the remote
+commit and CI. Do not ask again for authorization already provided.
+
+The [reusable migration prompt](migrate-current-project-prompt.md) starts this
+workflow from another project's checkout without manual name substitutions.
+
 ## 1. Set paths and storage
 
 Use absolute paths and resolve symlinks before copying a checkout or worktree.
