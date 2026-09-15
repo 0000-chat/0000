@@ -1,0 +1,9 @@
+{
+  "name": "@0000/sdk",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Placeholder for the 0000 developer SDK.",
+  "scripts": {
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/sdk"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@0000/platform-client",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Placeholder for a client for the 0000 Platform service.",
+  "scripts": {
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/platform-client"
+  }
+}

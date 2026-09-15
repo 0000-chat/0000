@@ -1,0 +1,9 @@
+{
+  "name": "@0000/database",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Placeholder for the 0000 durable data service.",
+  "scripts": {
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/database"
+  }
+}
