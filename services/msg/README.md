@@ -33,6 +33,10 @@ From the monorepo root, run:
 The service check validates the workspace entry, runs Worker tests and
 typechecks, checks Wrangler tooling, then tests, builds, and packs the CLI.
 The root Turbo check also runs the service check.
+The Miniflare Worker tests also require Node.js 22 or newer on `PATH`; they
+start Miniflare in a Node-owned process and forward requests to workerd over
+loopback HTTP. The fixture uses Miniflare's `MF-Original-URL` bridge header to
+preserve the caller's URL.
 
 ## Wrangler
 
