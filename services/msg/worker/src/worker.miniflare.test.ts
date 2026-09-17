@@ -2,7 +2,6 @@ import { rm } from "node:fs/promises";
 import { afterAll, expect, test } from "bun:test";
 import WebSocketClient from "ws";
 
-import { miniflareTestDiagnostic } from "../test-fixtures/miniflare-test-lock";
 import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
@@ -174,45 +173,27 @@ async function waitForStatus(miniflare: Awaited<ReturnType<typeof startMsgMinifl
 }
 
 test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async () => {
-  miniflareTestDiagnostic("restart_test.begin");
-  miniflareTestDiagnostic("restart_test.persistence_dir.create.begin");
   const persistenceDirectory = await createMsgMiniflareTempDirectory("state");
-  miniflareTestDiagnostic("restart_test.persistence_dir.create.done");
   let first: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
   let second: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
   let failed = false;
   let failure: unknown;
   try {
-    miniflareTestDiagnostic("restart_test.first_start.begin");
     first = await startMsgMiniflare(persistenceDirectory);
-    miniflareTestDiagnostic("restart_test.first_start.done");
-    miniflareTestDiagnostic("restart_test.room_create.begin");
     const { room } = await createRoom(first.miniflare);
-    miniflareTestDiagnostic("restart_test.room_create.done");
-    miniflareTestDiagnostic("restart_test.persisted_post.begin");
     expect((await post(first.miniflare, room.id, "persisted")).status).toBe(201);
-    miniflareTestDiagnostic("restart_test.persisted_post.done");
-    miniflareTestDiagnostic("restart_test.first_dispose.begin");
     await first.dispose();
     first = undefined;
-    miniflareTestDiagnostic("restart_test.first_dispose.done");
-    miniflareTestDiagnostic("restart_test.second_start.begin");
     second = await startMsgMiniflare(persistenceDirectory);
-    miniflareTestDiagnostic("restart_test.second_start.done");
-    miniflareTestDiagnostic("restart_test.persisted_read.begin");
     const read = await second.miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}`, { headers: { accept: "application/json" } });
-    miniflareTestDiagnostic("restart_test.persisted_read.done");
     expect((await read.json() as { latest_message: number }).latest_message).toBe(2);
   } catch (error) {
     failed = true;
     failure = error;
-    miniflareTestDiagnostic("restart_test.body.error", { errorName: error instanceof Error ? error.name : "unknown" });
   } finally {
     try {
       try {
-        miniflareTestDiagnostic("restart_test.first_cleanup.dispose.begin");
         await first?.dispose();
-        miniflareTestDiagnostic("restart_test.first_cleanup.dispose.done");
       } catch (error) {
         if (!failed) {
           failed = true;
@@ -222,9 +203,7 @@ test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async
     } finally {
       try {
         try {
-          miniflareTestDiagnostic("restart_test.second_cleanup.dispose.begin");
           await second?.dispose();
-          miniflareTestDiagnostic("restart_test.second_cleanup.dispose.done");
         } catch (error) {
           if (!failed) {
             failed = true;
@@ -233,9 +212,7 @@ test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async
         }
       } finally {
         try {
-          miniflareTestDiagnostic("restart_test.persistence_dir.remove.begin");
           await rm(persistenceDirectory, { force: true, recursive: true });
-          miniflareTestDiagnostic("restart_test.persistence_dir.remove.done");
         } catch (error) {
           if (!failed) {
             failed = true;
@@ -245,7 +222,6 @@ test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async
       }
     }
   }
-  miniflareTestDiagnostic("restart_test.done", { failed });
   if (failed) throw failure;
 });
 
