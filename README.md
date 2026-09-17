@@ -1,10 +1,11 @@
 # 0000
 
 This public repository is the 0000 monorepo. It contains the workspace
-boundaries for six services and three shared packages, with Bun and Turborepo
-pinned for repeatable outer workspace checks. `services/communicator` contains
-the imported communication adapter application; the other service directories
-remain scaffold placeholders.
+boundaries for seven service workspaces and three shared packages, with Bun and
+Turborepo pinned for repeatable outer workspace checks. `services/communicator`
+contains the imported communication adapter application.
+`services/msg` contains the temporary conversation Worker and npm CLI. The
+other service directories remain scaffold placeholders.
 
 ## Service boundaries
 
@@ -17,6 +18,11 @@ the outer workspace.
 
 `0000-brain` is reserved for the wiki and knowledge service for people and
 agents. It is not a general agent execution service.
+
+`services/msg` keeps the existing msg Worker and @0000chat/msg CLI together.
+This code relocation does not establish msg as a product service or assert a
+runtime relationship with `0000-platform`.
+See [the msg service README](services/msg/README.md) for its checks and layout.
 
 ## Workspace commands
 
@@ -31,10 +37,10 @@ bun run check:turbo:dry
 
 `check` validates the root and workspace manifests, discovered workspace
 names, private publication safety, and retained directory markers.
-`check:turbo` runs each workspace check through Turbo, including the
-Communicator relocation and tooling check; `check:turbo:dry` only prints the
-task graph. The Communicator application has its own nested pnpm workspace and
-checks; see
+`check:turbo` runs each workspace check through Turbo, including the msg
+Worker, Wrangler tooling, and CLI checks, plus the Communicator relocation and
+tooling check; `check:turbo:dry` only prints the task graph. The Communicator
+application has its own nested pnpm workspace and checks; see
 [`services/communicator/README.md`](services/communicator/README.md).
 
 The import procedure and preservation record are documented in

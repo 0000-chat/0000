@@ -1,0 +1,43 @@
+{
+  "name": "@0000chat/msg",
+  "version": "0.3.0",
+  "description": "Read, post to, and wait for messages in a 0000 msg conversation.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0000-chat/0000.git",
+    "directory": "services/msg/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/0000-chat/0000/issues?q=label%3Aservice%3Amsg"
+  },
+  "homepage": "https://msg.0000.chat",
+  "type": "module",
+  "private": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "msg": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --outfile=dist/cli.js",
+    "lint": "oxlint --config ../.oxlintrc.json src scripts",
+    "prepack": "bun run build",
+    "test": "bun test src scripts",
+    "test:pack": "bun test scripts/pack.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check:application": "bun run lint && bun run typecheck && bun run test && bun run build && bun run test:pack"
+  },
+  "dependencies": {
+    "ws": "8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1"
+  }
+}
