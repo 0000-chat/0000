@@ -1,7 +1,7 @@
 import { AGENT_INSTRUCTIONS, jsonResponse, OPENAPI_DOCUMENT, renderDiscovery } from "./discovery";
 import { buildAgentRepresentation, renderAgentText } from "./agent-representation";
 import { agentBrowserAsset, renderAgentHomePage, renderAgentRoomPage, renderAgentStatusPage } from "./agent-browser";
-import { browserAsset, browserIcon, renderBrowserPage } from "./browser";
+import { browserAsset, browserIcon, MERMAID_ASSET_PATH, renderBrowserDocument } from "./browser";
 import { browserViewRedirect, selectBrowserView } from "./browser-view";
 import { ERROR_CODES, ProtocolError, type ErrorCode } from "./errors";
 import {
@@ -39,7 +39,12 @@ export interface MsgRateLimits {
   readonly reads?: MsgRateLimit;
 }
 
+export interface MsgStaticAssets {
+  fetch(request: Request): Promise<Response>;
+}
+
 export interface MsgWorkerOptions {
+  readonly assets?: MsgStaticAssets;
   readonly createDisabled?: boolean;
   readonly operations?: Operations;
   readonly operatorToken?: string;
@@ -68,6 +73,7 @@ export interface Operations extends CreationOperations {
 }
 
 export interface MsgEnvironment {
+  readonly ASSETS?: MsgStaticAssets;
   readonly ROOM_SERVICE?: RoomService;
   readonly ConversationRoom?: RoomNamespace;
   readonly MSG_PUBLIC_ORIGIN?: string;
@@ -214,17 +220,27 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   if (request.method === "GET" && iconMatch) {
     return browserIcon(iconMatch[1]) ?? notFound();
   }
+  if (request.method === "GET" && url.pathname === MERMAID_ASSET_PATH) {
+    if (!options.assets) return notFound();
+    const asset = await options.assets.fetch(request);
+    return new Response(asset.body, {
+      headers: new Headers(asset.headers),
+      status: asset.status,
+      statusText: asset.statusText,
+    });
+  }
   const assetMatch = /^\/_msg\/asset\/((?:agent\.css)|(?:client\.(?:css|js)))$/.exec(url.pathname);
   if (request.method === "GET" && assetMatch) {
     return agentBrowserAsset(assetMatch[1]) ?? browserAsset(assetMatch[1]) ?? notFound();
   }
   if (request.method === "GET" && url.pathname === "/") {
     const representation = negotiateRepresentation(request.headers.get("accept"));
-    return representation === "html"
-      ? htmlResponse(selectBrowserView(url, request.headers.get("cookie")) === "agent"
-        ? renderAgentHomePage(url)
-        : renderBrowserPage({ title: "Start a temporary conversation", url }))
-      : renderDiscovery(representation);
+    if (representation !== "html") return renderDiscovery(representation);
+    if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
+      return htmlResponse(renderAgentHomePage(url));
+    }
+    const page = renderBrowserDocument({ title: "Start a temporary conversation", url });
+    return htmlResponse(page.html, 200, page.styleNonce);
   }
   if (request.method === "POST" && url.pathname === "/") {
     if (options.createDisabled) {
@@ -304,9 +320,11 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       const after = validateCursor(url.searchParams.get("after"));
       const result = stripLegacyAbsoluteExpiry(await service.read({ after, room })) as unknown as ReadRoomResponse;
       if (negotiateRepresentation(request.headers.get("accept")) === "html") {
-        return htmlResponse(selectBrowserView(url, request.headers.get("cookie")) === "agent"
-          ? renderAgentRoomPage(result, url)
-          : renderBrowserPage({ room, title: "Temporary conversation", url }));
+        if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
+          return htmlResponse(renderAgentRoomPage(result, url));
+        }
+        const page = renderBrowserDocument({ room, title: "Temporary conversation", url });
+        return htmlResponse(page.html, 200, page.styleNonce);
       }
       const etag = roomEtag(result.latest_message, after);
       if (request.headers.get("if-none-match") === etag) {
@@ -557,7 +575,9 @@ function errorRepresentation(request: Request): ErrorRepresentation {
 
 function secure(response: Response): Response {
   if (response.status === 101) return response;
-  applySecurityHeaders(response.headers);
+  const styleNonce = response.headers.get("x-msg-style-nonce") ?? undefined;
+  response.headers.delete("x-msg-style-nonce");
+  applySecurityHeaders(response.headers, styleNonce);
   return response;
 }
 
@@ -568,8 +588,10 @@ function textResponse(body: string, status = 200): Response {
   });
 }
 
-function htmlResponse(body: string, status = 200): Response {
-  return new Response(body, { headers: { "content-type": "text/html; charset=utf-8" }, status });
+function htmlResponse(body: string, status = 200, styleNonce?: string): Response {
+  const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
+  if (styleNonce) headers.set("x-msg-style-nonce", styleNonce);
+  return new Response(body, { headers, status });
 }
 
 const unavailableService: RoomService = {
@@ -585,6 +607,6 @@ const unavailableService: RoomService = {
 export default {
   fetch(request: Request, env: MsgEnvironment): Promise<Response> {
     const service = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : unavailableService);
-    return createWorker(service).fetch(request);
+    return createWorker(service, { assets: env.ASSETS }).fetch(request);
   },
 };
