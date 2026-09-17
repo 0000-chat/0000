@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(git -C "$root" rev-parse --show-toplevel)
+python3 - "$root" "$repo_root" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+repo = Path(sys.argv[2]).resolve()
+prefix = root.relative_to(repo).as_posix() + "/"
+required = {
+    ".github/workflows/quality.yml",
+    ".gitkeep",
+    ".githooks/pre-commit",
+    ".gitignore",
+    ".oxlintrc.json",
+    "0000-product.json",
+    "AGENTS.md",
+    "README.md",
+    "biome.json",
+    "docs/README.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "docs/agents/triage-labels.md",
+    "package.json",
+    "scripts/check",
+    "tooling/package.json",
+    "tooling/pnpm-lock.yaml",
+    "docs/migration/2026-09-17-monorepo-import.md",
+}
+tracked_all = subprocess.check_output(
+    ["git", "-C", str(repo), "ls-files", "--", prefix], text=True
+).splitlines()
+tracked = {path[len(prefix):] for path in tracked_all if path.startswith(prefix)}
+if tracked != required:
+    raise SystemExit(
+        f"gateway service file set mismatch: missing={sorted(required-tracked)} extra={sorted(tracked-required)}"
+    )
+metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
+if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-gateway":
+    raise SystemExit("invalid canonical gateway product metadata")
+if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
+    raise SystemExit("gateway must remain marked scaffold-only")
+if metadata.get("license_selected") is not False:
+    raise SystemExit("scaffold must not select a license")
+wrapper = json.loads((root / "package.json").read_text(encoding="utf-8"))
+if wrapper.get("name") != "@0000/gateway" or wrapper.get("private") is not True:
+    raise SystemExit("invalid monorepo workspace wrapper")
+readme = (root / "README.md").read_text(encoding="utf-8")
+if "`0000-gateway` aims" not in readme or "No hard dependency" not in readme:
+    raise SystemExit("README must preserve the gateway purpose and dependency status")
+PY
+git -C "$repo_root" diff --check
+pnpm --dir "$root/tooling" run lint
+pnpm --dir "$root/tooling" run format:check
+echo "0000-gateway service and tooling checks passed"

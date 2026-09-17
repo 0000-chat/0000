@@ -22,3 +22,8 @@ jobs:
       - run: bun run check
       - run: bun run check:turbo
       - run: bun run check:turbo:dry
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - run: pnpm --dir services/gateway/tooling install --frozen-lockfile
+      - run: pnpm --dir services/gateway run check:application
