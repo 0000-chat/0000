@@ -55,22 +55,23 @@ Gateway issues now belong in `0000-chat/0000` with the `service:gateway` label.
 
 ## Codex project continuity
 
-The full source-path inventory found two Codex tasks across active and archived
+The full source-path inventory found two tasks across active and archived
 state. The idle archived task was forked with the installed `codex fork`
-command into `/home/ubuntu/0000-full/0000/services/gateway`. Its original title,
-five turns, turn contents, destination working directory, and destination
-Codex project path were verified. The original task title and conversation history are unchanged and its archived
-state was restored after the CLI fork; the fork flow did update its metadata
-timestamp when it temporarily unarchived it. The copy can be read by ID, has
-the registered destination project
-path, and retains the original title and five turns. However, the Codex Desktop
-active and archived task listings do not enumerate this CLI-created copy, even
-after metadata refresh, so Desktop list visibility remains unverified. The task
-ID mapping is kept in the private backup, not in this public repository.
+command into `/home/ubuntu/0000-full/0000/services/gateway`. Its title, five
+turns, turn contents, destination working directory, and destination project
+path were verified. The original title and conversation history are unchanged,
+and its archived state was restored. The CLI flow temporarily unarchived the
+original and updated its metadata timestamp.
 
-The second task was this active migration task. Its copy is deferred until the
-task is idle so its history is complete. It remains the only pending Codex
-copy; its ID and the verified fork mapping are in the private task map.
+The copy can be read by ID and has the destination working directory, but the
+Codex Desktop active and archived task listings did not enumerate it after a
+metadata refresh. Desktop list visibility remains unverified. The task ID map
+is retained in the private backup, not this public repository.
+
+The other task was this active migration task. Its copy is deferred until it
+becomes idle so its history is complete. It is the only pending task copy. The
+private task map records its original ID and prevents duplicate forks when the
+migration resumes.
 
 ## Validation and publication
 
@@ -80,15 +81,19 @@ copy; its ID and the verified fork mapping are in the private task map.
   passed; the root `bun.lock` is unchanged.
 - Gateway frozen pnpm install and `pnpm run check:application` (Oxlint and
   Biome): passed.
-- The monorepo `service:gateway` label was created with the service label
-  convention; the source had no issues, PRs, or releases to transfer.
+- The destination `service:gateway` label was created. The source had no
+  issues, pull requests, or releases to transfer.
 - The import commit has the destination base and selected source tip as its two
-  parents. All seven source branch refs are ancestors of the selected tip and
-  are retained under `refs/migration/gateway/`. Git object verification passed.
+  parents. All seven source branch refs are retained under
+  `refs/migration/gateway/`; source branch tips are ancestors of the selected
+  source tip. Git object verification passed.
 - The service prefix and wrapper are present, all 84 skill links resolve to
-  their original targets, and the tracked import contains no dependency,
-  secret, database, or generated files. The root lockfile remains unchanged.
-- Push to monorepo `main` and CI verification: pending.
+  their original targets, and no dependencies, secrets, databases, or
+  generated files are tracked.
+- The import commit `e798f3ba7b044d4e090bdd9a7128afcccb59c73c` was pushed to
+  monorepo `main` as a fast-forward. GitHub Actions [Check workspace run
+  35188777356](https://github.com/0000-chat/0000/actions/runs/35188777356)
+  passed.
 
 ## Preservation backup
 
