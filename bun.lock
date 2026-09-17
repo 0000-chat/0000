@@ -24,6 +24,10 @@
       "name": "@0000/brain",
       "version": "0.0.0",
     },
+    "services/cloud": {
+      "name": "@0000/cloud",
+      "version": "0.0.0",
+    },
     "services/communicator": {
       "name": "@0000/communicator",
     },
@@ -50,6 +54,8 @@
   },
   "packages": {
     "@0000/brain": ["@0000/brain@workspace:services/brain"],
+
+    "@0000/cloud": ["@0000/cloud@workspace:services/cloud"],
 
     "@0000/communicator": ["@0000/communicator@workspace:services/communicator"],
 
