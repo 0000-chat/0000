@@ -5,3 +5,4 @@ dist/
 worker/.miniflare-tests/
 worker/.wrangler/
 cli/dist/
+worker/public/_msg/asset/mermaid-11.17.2.min.js

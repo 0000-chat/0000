@@ -1,6 +1,96 @@
 import { expect, test } from "bun:test";
 
-import { browserAsset, browserErrorState, renderBrowserPage, renderMarkdown } from "./browser";
+import { browserAsset, browserErrorState, MERMAID_ASSET_PATH, renderBrowserDocument, renderBrowserPage, renderMarkdown } from "./browser";
+
+test("renders eligible closed Mermaid fences with escaped source and preserves surrounding Markdown", () => {
+  const markdown = [
+    "## Request path",
+    "",
+    "```MERMAID",
+    "flowchart LR",
+    "  A[Start] --> B[Done]",
+    "```",
+    "",
+    "Ordinary prose remains here.",
+    "",
+    "```mermaid",
+    "sequenceDiagram",
+    "  Alice->>Bob: Hello & goodbye",
+    "```",
+    "",
+    "```ts",
+    "const answer = 42;",
+    "```",
+  ].join("\n");
+  const html = renderMarkdown(markdown);
+
+  expect(html.match(/data-mermaid-block="true"/g)).toHaveLength(2);
+  expect(html).toContain("<h2>Request path</h2>");
+  expect(html).toContain("Ordinary prose remains here.");
+  expect(html).toContain("Hello &amp; goodbye");
+  expect(html).toContain('class="language-ts"');
+  expect(html.match(/<summary>Show source<\/summary>/g)).toHaveLength(2);
+  expect(html.match(/class="message-mermaid-error" role="status" hidden/g)).toHaveLength(2);
+});
+
+test("keeps unclosed, empty, unsupported, and resource-capable Mermaid source readable", () => {
+  const html = renderMarkdown([
+    "```mermaid",
+    "flowchart LR",
+    "  A --> B",
+    "",
+    "```mermaid",
+    "",
+    "```",
+    "```mermaid",
+    "mindmap",
+    "  root((unsupported))",
+    "```",
+    "```mermaid",
+    "flowchart LR",
+    "  A@{ img: \"relative.png\" }",
+    "```",
+    "```mermaid",
+    "sequenceDiagram",
+    "  Alice->>Bob: <script>alert(1)</script>",
+    "```",
+    "```mermaid",
+    "%%{init: {\"theme\": \"dark\"}}%%",
+    "flowchart LR",
+    "  A --> B",
+    "```",
+  ].join("\n"));
+
+  expect(html).not.toContain("data-mermaid-block=\"true\"");
+  expect(html).toContain('<pre><code class="language-mermaid">flowchart LR');
+  expect(html).toContain("Diagram unavailable. The original source is shown below.");
+  expect(html).toContain("relative.png");
+  expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  expect(html).not.toContain("<script>alert(1)");
+  expect(html).toContain("%%{init:");
+});
+
+test("falls back to source when a Mermaid block exceeds renderer input limits", () => {
+  const oversizedBlock = `\`\`\`mermaid\nflowchart LR\nA[${"x".repeat(8 * 1024)}] --> B\n\`\`\``;
+  const fiveBlocks = Array.from({ length: 5 }, (_, index) => `\`\`\`mermaid\nflowchart LR\nA${index} --> B${index}\n\`\`\``).join("\n");
+  const oversizedHtml = renderMarkdown(oversizedBlock);
+  const manyHtml = renderMarkdown(fiveBlocks);
+
+  expect(oversizedHtml).not.toContain("data-mermaid-block=\"true\"");
+  expect(oversizedHtml).toContain("Diagram unavailable.");
+  expect(manyHtml.match(/data-mermaid-block="true"/g)).toHaveLength(4);
+  expect(manyHtml.match(/class="message-mermaid-error" role="status" hidden/g)).toHaveLength(4);
+  expect(manyHtml.match(/class="message-mermaid-error" role="status">/g)).toHaveLength(1);
+});
+
+test("generates a fresh page nonce for the served human-view client script", () => {
+  const first = renderBrowserDocument({ room: "nonce-room", title: "Temporary conversation" });
+  const second = renderBrowserDocument({ room: "nonce-room", title: "Temporary conversation" });
+
+  expect(first.styleNonce).toMatch(/^[A-Za-z0-9+/]{32}$/);
+  expect(second.styleNonce).not.toBe(first.styleNonce);
+  expect(first.html).toContain(`<script nonce="${first.styleNonce}" src="/_msg/asset/client.js"></script>`);
+});
 
 test("renders untrusted Markdown without executable markup or unsafe links", () => {
   const html = renderMarkdown("<script>alert(1)</script> [bad](javascript:alert(1)) [good](https://example.com)");
@@ -89,6 +179,10 @@ test("serves the browser code from same-origin assets for the strict page policy
   expect(source).not.toContain("Too many requests. Please wait and try again.");
   expect(source).not.toContain("Start the conversation below.</div>';return");
   expect(source).toContain("renderMarkdown");
+  expect(source).toContain(`const mermaidAssetPath='${MERMAID_ASSET_PATH}'`);
+  expect(source).toContain("securityLevel:'strict'");
+  expect(source).toContain("htmlLabels:false");
+  expect(source).toContain("maxEdges:100,logLevel:5");
   expect(source).toContain("createLiveController");
   expect(source).toContain("#create-room");
   expect(source).toContain(".conversation_url");
