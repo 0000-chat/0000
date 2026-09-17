@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { browserAsset, browserErrorState, renderBrowserDocument, renderBrowserPage, renderMarkdown } from "./browser";
+import { browserAsset, browserErrorState, MERMAID_ASSET_PATH, renderBrowserDocument, renderBrowserPage, renderMarkdown } from "./browser";
 
 test("renders eligible closed Mermaid fences with escaped source and preserves surrounding Markdown", () => {
   const markdown = [
@@ -179,6 +179,11 @@ test("serves the browser code from same-origin assets for the strict page policy
   expect(source).not.toContain("Too many requests. Please wait and try again.");
   expect(source).not.toContain("Start the conversation below.</div>';return");
   expect(source).toContain("renderMarkdown");
+  expect(source).toContain(`const mermaidAssetPath='${MERMAID_ASSET_PATH}'`);
+  expect(source).toContain("securityLevel:'strict'");
+  expect(source).toContain("htmlLabels:false");
+  expect(source).toContain("maxEdges:100,logLevel:5");
+  expect(source).toContain("preserveMermaidSvgSize(diagram,id)");
   expect(source).toContain("createLiveController");
   expect(source).toContain("#create-room");
   expect(source).toContain(".conversation_url");
