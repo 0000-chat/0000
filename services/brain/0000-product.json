@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "0000-brain",
+  "visibility": "public",
+  "status": "scaffold-only",
+  "purpose": "LLM-supported wiki and knowledge service for people and agents.",
+  "dependencies": ["0000-platform"],
+  "standalone_authentication": "platform-required; hosted-account-not-required",
+  "hosting_class": "cloudflare-public-ingress",
+  "application_code": false,
+  "license_selected": false
+}

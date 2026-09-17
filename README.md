@@ -15,8 +15,9 @@ and user or organization access; services authorize their own resources.
 Those are product/runtime relationships, not npm workspace dependencies in
 the outer workspace.
 
-`0000-brain` is reserved for the wiki and knowledge service for people and
-agents. It is not a general agent execution service.
+0000-brain is reserved for the wiki and knowledge service for people and
+agents. Its imported scaffold and standalone source checks live in services/brain.
+It is not a general agent execution service.
 
 ## Workspace commands
 
@@ -37,6 +38,7 @@ task graph. The Communicator application has its own nested pnpm workspace and
 checks; see
 [`services/communicator/README.md`](services/communicator/README.md).
 
-The import procedure and preservation record are documented in
+The import procedure and preservation records are documented in
+[`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
 [`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md)
 and [`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).

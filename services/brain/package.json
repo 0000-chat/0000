@@ -2,8 +2,9 @@
   "name": "@0000/brain",
   "private": true,
   "version": "0.0.0",
-  "description": "Placeholder for the 0000 wiki and knowledge service.",
+  "description": "Scaffold for the 0000 wiki and knowledge service.",
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/brain"
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/brain",
+    "check:application": "./scripts/check"
   }
 }

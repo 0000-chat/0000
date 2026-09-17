@@ -22,3 +22,6 @@ jobs:
       - run: bun run check
       - run: bun run check:turbo
       - run: bun run check:turbo:dry
+      - name: Check Brain service
+        working-directory: services/brain
+        run: bun run check:application

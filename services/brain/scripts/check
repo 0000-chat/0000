@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(git -C "$root" rev-parse --show-toplevel)
+service_prefix=$(python3 - "$root" "$repo_root" <<'PY'
+import sys
+from pathlib import Path
+
+print(Path(sys.argv[1]).relative_to(Path(sys.argv[2])).as_posix())
+PY
+)
+cd "$root"
+python3 - "$root" "$repo_root" "$service_prefix" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+repo_root = Path(sys.argv[2])
+service_prefix = sys.argv[3]
+expected = {
+    ".github/workflows/quality.yml",
+    ".githooks/pre-commit",
+    ".gitkeep",
+    ".gitignore",
+    ".oxlintrc.json",
+    "0000-product.json",
+    "AGENTS.md",
+    "README.md",
+    "biome.json",
+    "docs/README.md",
+    "scripts/check",
+    "scripts/format",
+    "scripts/format-check",
+    "scripts/install-tools",
+    "scripts/lint",
+    "docs/migration/2026-09-17-monorepo-import.md",
+    "package.json",
+}
+tracked = {
+    path.removeprefix(f"{service_prefix}/")
+    for path in subprocess.check_output(
+        ["git", "-C", str(repo_root), "ls-files", "--", service_prefix], text=True
+    ).splitlines()
+}
+if tracked != expected:
+    raise SystemExit(f"tracked scaffold mismatch: missing={sorted(expected-tracked)} extra={sorted(tracked-expected)}")
+metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
+if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-brain":
+    raise SystemExit("invalid product metadata")
+if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
+    raise SystemExit("product is not marked scaffold-only")
+if metadata.get("license_selected") is not False:
+    raise SystemExit("scaffold must not select a license")
+if metadata.get("dependencies") != ["0000-platform"]:
+    raise SystemExit("Brain must use Platform for common identity")
+readme = (root / "README.md").read_text(encoding="utf-8")
+if (
+    "LLM-supported wiki and knowledge service" not in readme
+    or "hosted 0000 account" not in readme
+    or "Platform" not in readme
+    or "Cloudflare" not in readme
+):
+    raise SystemExit("README must state the product role, Platform identity, and hosting intent")
+PY
+git -C "$repo_root" diff --check -- "$service_prefix"
+"$root/scripts/install-tools"
+"$root/scripts/lint"
+"$root/scripts/format-check"
+echo "0000-brain service checks passed"
