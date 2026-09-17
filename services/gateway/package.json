@@ -2,8 +2,10 @@
   "name": "@0000/gateway",
   "private": true,
   "version": "0.0.0",
-  "description": "Placeholder for the 0000 common service entry and adaptation boundary.",
+  "description": "Monorepo workspace wrapper for the 0000 gateway scaffold.",
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/gateway"
-  }
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/gateway",
+    "check:application": "./scripts/check"
+  },
+  "packageManager": "pnpm@10.14.0"
 }
