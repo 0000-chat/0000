@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "description": "Placeholder for the shared 0000 identity and control-plane service.",
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/platform"
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/platform",
+    "check:application": "./scripts/check"
   }
 }
