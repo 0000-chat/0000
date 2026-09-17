@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+.env
+.env.*
+.DS_Store
+.agents/
+.cache/
+node_modules/
+dist/
+build/
+coverage/
+target/
+generated/
+.wrangler/
