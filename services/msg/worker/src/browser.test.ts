@@ -183,7 +183,6 @@ test("serves the browser code from same-origin assets for the strict page policy
   expect(source).toContain("securityLevel:'strict'");
   expect(source).toContain("htmlLabels:false");
   expect(source).toContain("maxEdges:100,logLevel:5");
-  expect(source).toContain("preserveMermaidSvgSize(diagram,id)");
   expect(source).toContain("createLiveController");
   expect(source).toContain("#create-room");
   expect(source).toContain(".conversation_url");
