@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildMermaidAsset } from "./mermaid-asset";
 
 const serviceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const monorepoRoot = join(serviceRoot, "../..");
@@ -40,6 +41,7 @@ function main(args: readonly string[]): void {
       : undefined;
   if (!databaseId) throw new Error("MSG_D1_DATABASE_ID is required for a non-dry-run msg Wrangler command.");
 
+  buildMermaidAsset();
   const directory = mkdtempSync(join(tmpdir(), "0000-msg-wrangler-"));
   const generatedConfig = join(directory, "wrangler.msg.jsonc");
   try {
