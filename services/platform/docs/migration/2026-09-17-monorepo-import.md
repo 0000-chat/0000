@@ -71,8 +71,9 @@ Codex state was discovered through the installed CLI at
 state_5.sqlite and state_5-after-forks.sqlite passed PRAGMA integrity_check.
 Seven completed source/copy rollout files were also copied to
 codex/task-rollouts/ and individually SHA-256 verified against their originals;
-the manifest is codex/task-rollouts-manifest.json. The currently active
-migration task is not forked or included among those completed rollout copies.
+the manifest is codex/task-rollouts-manifest.json. A separate SHA-256-verified
+snapshot of the active migration task rollout was captured at 2026-09-17
+06:54 UTC; its independent fork remains deferred until the task is idle.
 
 The related thread_history_1.sqlite contains thread turns, but its online
 backup stopped advancing at 1,638,400,000 of 2,454,638,592 bytes while Codex
@@ -82,9 +83,10 @@ database. Other Codex database files were listed by path and size only; they
 were not opened or copied.
 
 The source's 84 managed skill links were retained in the original checkout,
-backed up in the ignored-path manifest, and recreated in the import worktree.
-They are local ignored symlinks to /home/ubuntu/0000-full/skills/ecosystem;
-their relative targets are recalculated for the final destination path.
+backed up in the ignored-path manifest, and recreated in the clean main
+worktree at /home/ubuntu/0000-full/worktrees/0000-main-msg-merge/0000/services/platform/.agents/skills.
+All links resolve under /home/ubuntu/0000-full/skills/ecosystem and are
+ignored by the imported service's .gitignore.
 
 ## Codex task inventory and mapping
 
@@ -130,5 +132,30 @@ It also records the incomplete guardian attempt and each visibility result.
 
 ## Validation and cutover
 
-Validation results, import commit, local and remote main status, and CI
-status are recorded below after the checks and cutover attempts complete.
+- `bun install --frozen-lockfile` passed in the isolated main integration
+  worktree.
+- Root `bun run check` passed with 11 workspace manifests.
+- `services/platform` `bun run check:application` passed.
+- `git diff --check`, the staged diff check, and the migration mapping JSON
+  parse passed.
+- The full root `bun run check:turbo` failed in the existing `@0000/msg`
+  package: the restart and expiry-alarm Miniflare tests both timed out after
+  15 seconds, and Miniflare reported that the Workers runtime failed to start.
+  176 tests passed, 2 failed, and 1 errored. Running
+  `src/worker.miniflare.test.ts` alone reproduced the restart timeout; its
+  alarm test passed (8 pass, 1 fail). No `services/msg` files were changed.
+- The service import merge commit is
+  17a154a809fe9979e9fc84d7ea74b82c325f2667. It has the destination base and
+  the reconciled source history as its two parents.
+- The final main integration commit at first push was
+  2dad3c4d14a900bd855803295df0240d43eb21d9. It includes the latest origin
+  main and the local msg, cloud, brain, and platform imports. The non-forced
+  push to `origin/main` succeeded, and the clean local `main` worktree and
+  `origin/main` both resolved to that SHA at verification.
+- GitHub Actions run
+  [35191748803](https://github.com/0000-chat/0000/actions/runs/35191748803)
+  completed with failure at `Run bun run check:turbo`. The previous main run
+  [35191274606](https://github.com/0000-chat/0000/actions/runs/35191274606),
+  for pre-platform commit b43ac3cb71681e4ee6388ecd27fa2481a1f11494, failed at
+  the same step. This confirms the root check failure predates the platform
+  import; the platform-specific check passes.
