@@ -1,0 +1,13 @@
+{
+  "name": "@0000/msg-worker",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun run typecheck",
+    "lint": "oxlint --config ../.oxlintrc.json src scripts",
+    "test": "bun test src scripts",
+    "check:application": "bun run lint && bun run typecheck && bun run test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://oxc.rs/schema/oxlint.json",
+  "plugins": ["eslint", "typescript", "oxc", "unicorn"],
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-debugger": "error",
+    "eqeqeq": "warn",
+    "no-var": "error",
+    "prefer-const": "warn",
+    "no-else-return": "warn"
+  },
+  "ignorePatterns": [
+    "**/.agents/**",
+    "**/.cache/**",
+    "**/.git/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/target/**",
+    "**/generated/**",
+    "**/vendor/**",
+    "**/.wrangler/**",
+    "**/.miniflare-tests/**"
+  ]
+}

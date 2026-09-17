@@ -1,0 +1,320 @@
+import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+
+import { parsePostCommand, postMessage } from "./post";
+
+const conversationUrl = "https://msg.0000.chat/room-1";
+
+test("parses a post command with inline content", () => {
+  expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--content", "Hello"])).toEqual({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+  });
+});
+
+test("parses a post command for stdin content and preserves an explicit client message ID", () => {
+  expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--client-message-id", "stable-id"])).toEqual({
+    author: "Agent A",
+    clientMessageId: "stable-id",
+    conversationUrl,
+  });
+});
+
+test("rejects invalid post command fields and flags", () => {
+  expect(() => parsePostCommand(["post", "https://example.test/room-1", "--author", "Agent A"])).toThrow("https://msg.0000.chat/{room}");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", ""])).toThrow("--author must not be empty");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--content", ""])).toThrow("--content must not be empty");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--client-message-id", "x".repeat(129)])).toThrow("--client-message-id must be at most 128 characters");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--author", "Agent B"])).toThrow("may be provided only once");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--unknown", "value"])).toThrow("Unknown post option");
+});
+
+test("retries an ambiguous transport failure with one generated client message ID", async () => {
+  const bodies: unknown[] = [];
+  const delays: number[] = [];
+  let attempts = 0;
+
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      attempts += 1;
+      if (attempts === 1) throw new TypeError("network failed");
+      return Response.json(successReceipt({ replayed: true }), { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async (delay) => { delays.push(delay); },
+  });
+
+  expect(receipt).toEqual(publicReceipt("generated-id", true));
+  expect(bodies).toEqual([
+    { author: "Agent A", client_message_id: "generated-id", content: "Hello" },
+    { author: "Agent A", client_message_id: "generated-id", content: "Hello" },
+  ]);
+  expect(delays).toEqual([250]);
+});
+
+test("preserves an explicit client message ID", async () => {
+  let body: unknown;
+  const receipt = await postMessage({
+    author: "Agent A",
+    clientMessageId: "caller-owned-id",
+    content: "Hello",
+    conversationUrl,
+    fetch: async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json(successReceipt({ replayed: false }), { status: 201 });
+    },
+    generatedClientMessageId: () => { throw new Error("An explicit ID must not be replaced."); },
+    sleep: async () => {},
+  });
+
+  expect(body).toEqual({ author: "Agent A", client_message_id: "caller-owned-id", content: "Hello" });
+  expect(receipt).toEqual(publicReceipt("caller-owned-id", false));
+});
+
+test("retries each retryable HTTP status with the bounded schedule", async () => {
+  for (const status of [408, 425, 429, 500, 502, 503, 504]) {
+    const delays: number[] = [];
+    let attempts = 0;
+    await expect(postMessage({
+      author: "Agent A",
+      content: "Hello",
+      conversationUrl,
+      fetch: async () => {
+        attempts += 1;
+        return attempts === 3 ? Response.json(successReceipt({ replayed: false }), { status: 201 }) : new Response("retry", { status });
+      },
+      generatedClientMessageId: () => "generated-id",
+      sleep: async (delay) => { delays.push(delay); },
+    })).resolves.toEqual(publicReceipt("generated-id", false));
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([250, 1_000]);
+  }
+});
+
+test("does not retry definite HTTP failures", async () => {
+  for (const status of [400, 409, 410, 413, 501]) {
+    let attempts = 0;
+    await expect(postMessage({
+      author: "Agent A",
+      content: "Hello",
+      conversationUrl,
+      fetch: async () => {
+        attempts += 1;
+        return new Response("failed", { status });
+      },
+      generatedClientMessageId: () => "generated-id",
+      sleep: async () => { throw new Error("A definite HTTP failure must not sleep."); },
+    })).rejects.toThrow(`HTTP ${status}`);
+    expect(attempts).toBe(1);
+  }
+});
+
+test("fails invalid successful receipts without another POST or private response fields", async () => {
+  let attempts = 0;
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => {
+      attempts += 1;
+      return Response.json({ manage_url: "https://msg.0000.chat/manage/room-1/private", message: { sequence: "2" }, replayed: false, wait: { after: 2, command: "wait" } }, { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => { throw new Error("An invalid receipt must not retry."); },
+  })).rejects.toThrow("invalid post receipt");
+  expect(attempts).toBe(1);
+});
+
+test("stops before a request when the operation is aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => { throw new Error("The request must not start."); },
+    generatedClientMessageId: () => "generated-id",
+    signal: controller.signal,
+    sleep: async () => {},
+  })).rejects.toThrow("interrupted");
+});
+
+test("does not return a successful receipt after the signal aborts during fetch", async () => {
+  const controller = new AbortController();
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => {
+      controller.abort();
+      return Response.json(successReceipt({ replayed: false }), { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    signal: controller.signal,
+    sleep: async () => {},
+  })).rejects.toThrow("interrupted");
+});
+
+test("normalizes abort errors from retry sleep and successful response parsing", async () => {
+  const sleepController = new AbortController();
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => new Response("retry", { status: 503 }),
+    generatedClientMessageId: () => "generated-id",
+    signal: sleepController.signal,
+    sleep: async () => {
+      sleepController.abort();
+      throw new DOMException("Aborted", "AbortError");
+    },
+  })).rejects.toThrow("interrupted");
+
+  const parseController = new AbortController();
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => ({
+      json: async () => {
+        parseController.abort();
+        throw new DOMException("Aborted", "AbortError");
+      },
+      ok: true,
+      status: 201,
+    }) as Response,
+    generatedClientMessageId: () => "generated-id",
+    signal: parseController.signal,
+    sleep: async () => {},
+  })).rejects.toThrow("interrupted");
+});
+
+test("cancels retryable and terminal HTTP response bodies", async () => {
+  const cancelled: number[] = [];
+  let attempts = 0;
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => {
+      attempts += 1;
+      const status = attempts === 1 ? 503 : 409;
+      return responseWithCancellableBody(status, () => cancelled.push(status));
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  })).rejects.toThrow("HTTP 409");
+  expect(cancelled).toEqual([503, 409]);
+});
+
+test("cancels a non-success response body before reporting an abort", async () => {
+  for (const status of [503, 409]) {
+    const controller = new AbortController();
+    let cancelled = false;
+    await expect(postMessage({
+      author: "Agent A",
+      content: "Hello",
+      conversationUrl,
+      fetch: async () => {
+        controller.abort();
+        return responseWithCancellableBody(status, () => { cancelled = true; });
+      },
+      generatedClientMessageId: () => "generated-id",
+      signal: controller.signal,
+      sleep: async () => {},
+    })).rejects.toThrow("interrupted");
+    expect(cancelled).toBe(true);
+  }
+});
+
+test("constructs the wait command instead of forwarding a server capability", async () => {
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => Response.json({
+      ...successReceipt({ replayed: false }),
+    wait: { after: 2, command: "npx msg wait https://msg.0000.chat/manage/room-1/private --after 2", requires_user_consent: true },
+    }, { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  });
+  expect(receipt).toEqual(publicReceipt("generated-id", false));
+  expect(JSON.stringify(receipt)).not.toContain("manage");
+});
+
+test("rejects a post receipt without explicit listening consent", async () => {
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => Response.json({
+      message: { sequence: 2 },
+      replayed: false,
+      wait: { after: 2, command: "npx msg wait https://msg.0000.chat/room-1 --after 2" },
+    }, { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  })).rejects.toThrow("invalid post receipt");
+});
+
+test("quotes a generated wait command as exact shell arguments", async () => {
+  const craftedConversationUrl = "https://msg.0000.chat/room'$(printf)'tail";
+  const canonicalConversationUrl = new URL(craftedConversationUrl).toString();
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl: craftedConversationUrl,
+    fetch: async () => Response.json(successReceipt({ replayed: false }), { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  });
+
+  const output = execFileSync("sh", [
+    "-c",
+    "npx() { for item do printf '%s\\n' \"$item\"; done; }; eval \"$1\"",
+    "msg-post-test",
+    receipt.wait.command,
+  ], { encoding: "utf8" });
+
+  expect(output.trimEnd().split("\n")).toEqual([
+    "--yes",
+    "@0000chat/msg@latest",
+    "wait",
+    canonicalConversationUrl,
+    "--after",
+    "2",
+  ]);
+});
+
+function successReceipt({ replayed }: { replayed: boolean }) {
+  return {
+    manage_url: "https://msg.0000.chat/manage/room-1/private",
+    message: { content: "Hello", sequence: 2 },
+    replayed,
+    wait: { after: 2, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 2", requires_user_consent: true },
+  };
+}
+
+function publicReceipt(clientMessageId: string, replayed: boolean) {
+  return {
+    client_message_id: clientMessageId,
+    conversation_url: conversationUrl,
+    message_sequence: 2,
+    replayed,
+    wait: { after: 2, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 2", requires_user_consent: true },
+  };
+}
+
+function responseWithCancellableBody(status: number, onCancel: () => void): Response {
+  return {
+    body: { cancel: async () => { onCancel(); } },
+    ok: false,
+    status,
+  } as unknown as Response;
+}
