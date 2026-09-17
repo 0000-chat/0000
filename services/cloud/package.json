@@ -1,0 +1,10 @@
+{
+  "name": "@0000/cloud",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Hosted-deployment coordination scaffold for the 0000 services.",
+  "scripts": {
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/cloud",
+    "check:application": "./scripts/check"
+  }
+}
