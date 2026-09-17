@@ -10,6 +10,7 @@ const appDirectory = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = join(appDirectory, ".miniflare-tests");
 const workerEntry = fileURLToPath(new URL("../src/worker-entry.ts", import.meta.url));
 let fixtureSequence = 0;
+let workerScriptPromise: Promise<string> | undefined;
 
 export const TEST_ROOM_LIMITS = {
   maxMessages: 4,
@@ -35,20 +36,24 @@ export async function createMsgMiniflareTempDirectory(label: string): Promise<st
   return directory;
 }
 
-/** Builds the production entry and starts it in an isolated workerd process. */
-export async function startMsgMiniflare(persistenceDirectory: string, limits = TEST_ROOM_LIMITS): Promise<MsgMiniflareFixture> {
-  const fixtureId = `${process.pid}-${++fixtureSequence}`;
+function workerScript(): Promise<string> {
+  if (workerScriptPromise) {
+    miniflareTestDiagnostic("worker_bundle.cache.hit");
+    return workerScriptPromise;
+  }
+  miniflareTestDiagnostic("worker_bundle.cache.miss");
+  workerScriptPromise = buildWorkerScript();
+  return workerScriptPromise;
+}
+
+async function buildWorkerScript(): Promise<string> {
   const startedAt = Date.now();
-  miniflareTestDiagnostic("fixture.start.begin", { fixtureId });
-  miniflareTestDiagnostic("fixture.lock.acquire.begin", { fixtureId });
-  const releaseRuntime = await acquireMiniflareTestLock();
-  miniflareTestDiagnostic("fixture.lock.acquire.done", { fixtureId, elapsedMs: Date.now() - startedAt });
-  miniflareTestDiagnostic("fixture.build_dir.create.begin", { fixtureId });
   const buildDirectory = await createMsgMiniflareTempDirectory("build");
-  miniflareTestDiagnostic("fixture.build_dir.create.done", { fixtureId, elapsedMs: Date.now() - startedAt });
-  let miniflare: Miniflare | undefined;
+  let script: string | undefined;
+  let failed = false;
+  let failure: unknown;
   try {
-    miniflareTestDiagnostic("fixture.bundle.begin", { fixtureId });
+    miniflareTestDiagnostic("worker_bundle.build.begin");
     const result = await Bun.build({
       entrypoints: [workerEntry],
       external: ["cloudflare:workers"],
@@ -57,8 +62,44 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
       outdir: buildDirectory,
       target: "browser",
     });
-    miniflareTestDiagnostic("fixture.bundle.done", { fixtureId, success: result.success, elapsedMs: Date.now() - startedAt });
+    miniflareTestDiagnostic("worker_bundle.build.done", { success: result.success, elapsedMs: Date.now() - startedAt });
     if (!result.success) throw new Error(result.logs.map((log) => log.message).join("\n"));
+    const entry = result.outputs.find((output) => output.kind === "entry-point");
+    if (!entry) throw new Error("The Miniflare test build did not emit an entry point.");
+    script = await entry.text();
+    miniflareTestDiagnostic("worker_bundle.read.done", { byteLength: entry.size, elapsedMs: Date.now() - startedAt });
+  } catch (error) {
+    failed = true;
+    failure = error;
+  }
+  try {
+    miniflareTestDiagnostic("worker_bundle.build_dir.remove.begin", { elapsedMs: Date.now() - startedAt });
+    await rm(buildDirectory, { force: true, recursive: true });
+    miniflareTestDiagnostic("worker_bundle.build_dir.remove.done", { elapsedMs: Date.now() - startedAt });
+  } catch (error) {
+    if (!failed) {
+      failed = true;
+      failure = error;
+    }
+  }
+  if (failed) throw failure;
+  if (script === undefined) throw new Error("The Miniflare test build output was unavailable.");
+  return script;
+}
+
+/** Builds the production entry and starts it in an isolated workerd process. */
+export async function startMsgMiniflare(persistenceDirectory: string, limits = TEST_ROOM_LIMITS): Promise<MsgMiniflareFixture> {
+  const fixtureId = `${process.pid}-${++fixtureSequence}`;
+  const startedAt = Date.now();
+  miniflareTestDiagnostic("fixture.start.begin", { fixtureId });
+  miniflareTestDiagnostic("fixture.lock.acquire.begin", { fixtureId });
+  const releaseRuntime = await acquireMiniflareTestLock();
+  miniflareTestDiagnostic("fixture.lock.acquire.done", { fixtureId, elapsedMs: Date.now() - startedAt });
+  let miniflare: Miniflare | undefined;
+  try {
+    miniflareTestDiagnostic("fixture.bundle.begin", { fixtureId });
+    const script = await workerScript();
+    miniflareTestDiagnostic("fixture.bundle.done", { fixtureId, elapsedMs: Date.now() - startedAt });
 
     miniflareTestDiagnostic("fixture.miniflare.construct.begin", { fixtureId });
     miniflare = new Miniflare({
@@ -73,7 +114,7 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
       durableObjectsPersist: persistenceDirectory,
       host: "127.0.0.1",
       modules: true,
-      scriptPath: join(buildDirectory, "worker.js"),
+      script,
     });
     miniflareTestDiagnostic("fixture.miniflare.construct.done", { fixtureId, elapsedMs: Date.now() - startedAt });
     miniflareTestDiagnostic("fixture.miniflare.ready.begin", { fixtureId });
@@ -86,25 +127,12 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
         let failed = false;
         let failure: unknown;
         try {
-          try {
-            miniflareTestDiagnostic("fixture.miniflare.dispose.begin", { fixtureId });
-            await miniflare.dispose();
-            miniflareTestDiagnostic("fixture.miniflare.dispose.done", { fixtureId, elapsedMs: Date.now() - startedAt });
-          } catch (error) {
-            failed = true;
-            failure = error;
-          }
-        } finally {
-          try {
-            miniflareTestDiagnostic("fixture.build_dir.remove.begin", { fixtureId });
-            await rm(buildDirectory, { force: true, recursive: true });
-            miniflareTestDiagnostic("fixture.build_dir.remove.done", { fixtureId, elapsedMs: Date.now() - startedAt });
-          } catch (error) {
-            if (!failed) {
-              failed = true;
-              failure = error;
-            }
-          }
+          miniflareTestDiagnostic("fixture.miniflare.dispose.begin", { fixtureId });
+          await miniflare.dispose();
+          miniflareTestDiagnostic("fixture.miniflare.dispose.done", { fixtureId, elapsedMs: Date.now() - startedAt });
+        } catch (error) {
+          failed = true;
+          failure = error;
         }
         try {
           miniflareTestDiagnostic("fixture.lock.release.begin", { fixtureId });
@@ -123,15 +151,9 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
   } catch (error) {
     miniflareTestDiagnostic("fixture.start.error", { fixtureId, errorName: error instanceof Error ? error.name : "unknown" });
     try {
-      try {
-        miniflareTestDiagnostic("fixture.start_cleanup.miniflare.dispose.begin", { fixtureId });
-        await miniflare?.dispose();
-        miniflareTestDiagnostic("fixture.start_cleanup.miniflare.dispose.done", { fixtureId });
-      } finally {
-        miniflareTestDiagnostic("fixture.start_cleanup.build_dir.remove.begin", { fixtureId });
-        await rm(buildDirectory, { force: true, recursive: true });
-        miniflareTestDiagnostic("fixture.start_cleanup.build_dir.remove.done", { fixtureId });
-      }
+      miniflareTestDiagnostic("fixture.start_cleanup.miniflare.dispose.begin", { fixtureId });
+      await miniflare?.dispose();
+      miniflareTestDiagnostic("fixture.start_cleanup.miniflare.dispose.done", { fixtureId });
     } catch {
       // Keep the original build or startup failure.
     }
