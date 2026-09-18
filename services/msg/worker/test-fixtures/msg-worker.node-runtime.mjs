@@ -125,7 +125,7 @@ async function handleTestControl(request, response) {
       response.end();
       return true;
     }
-    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || !["arm", "wait", "release"].includes(value.action) || !miniflare) {
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || !["arm", "wait", "release", "advance"].includes(value.action) || value.action === "advance" && (!Number.isSafeInteger(value.now_ms) || value.now_ms < 0) || value.action !== "advance" && value.now_ms !== undefined || !miniflare) {
       response.writeHead(400);
       response.end();
       return true;
@@ -133,7 +133,7 @@ async function handleTestControl(request, response) {
     const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
     const stub = namespace.get(namespace.idFromName(value.room));
     const result = await stub.fetch("https://room/__test/push-send-gate", {
-      body: JSON.stringify({ action: value.action }),
+      body: JSON.stringify({ action: value.action, ...(value.action === "advance" ? { now_ms: value.now_ms } : {}) }),
       headers: { "content-type": "application/json" },
       method: "POST",
     });

@@ -4,6 +4,7 @@ import { createDecipheriv, createECDH, createHmac, createPublicKey, verify } fro
 import { afterAll, expect, test } from "bun:test";
 import WebSocketClient from "ws";
 
+import { PUSH_DELIVERY_LEASE_MS, PUSH_INITIAL_DELAY_MS, PUSH_RETRY_INITIAL_DELAY_MS, PUSH_RETRY_WINDOW_MS } from "./push-policy";
 import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS, TEST_VAPID_PUBLIC_KEY, TEST_VAPID_SUBJECT } from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
@@ -635,6 +636,87 @@ test.serial("gives a replacement room alert its own 24-hour delivery deadline", 
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
+test.serial("uses send-time TTL after encryption and skips work that expires before send", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+
+  await withRestartedRuntime(async (initial, restart) => {
+    const firstRoom = await createRoom(initial, "before push enrollment");
+    const expiringRoom = await createRoom(initial, "before push enrollment");
+    expect((await enrollPush(initial, firstRoom.room.id, crypto.randomUUID())).status).toBe(201);
+    expect((await enrollPush(initial, expiringRoom.room.id, crypto.randomUUID())).status).toBe(201);
+    const firstPost = await post(initial, firstRoom.room.id, "fresh TTL after encryption");
+    const firstMessage = await firstPost.json() as { message: { created_at: string } };
+    const firstDeadline = Date.parse(firstMessage.message.created_at) + PUSH_RETRY_WINDOW_MS;
+    const expiringPost = await post(initial, expiringRoom.room.id, "expires during preparation");
+    const expiringMessage = await expiringPost.json() as { message: { created_at: string } };
+    const expiringDeadline = Date.parse(expiringMessage.message.created_at) + PUSH_RETRY_WINDOW_MS;
+
+    const runtime = await restart(fakeNow + PUSH_INITIAL_DELAY_MS);
+    await runtime.armPushSendGate(firstRoom.room.id);
+    const firstAlarm = runtime.triggerAlarm(firstRoom.room.id);
+    try {
+      await runtime.waitForPushSendGate(firstRoom.room.id);
+      const sendAt = fakeNow + PUSH_INITIAL_DELAY_MS + 2_000;
+      await runtime.advancePushSendClock(firstRoom.room.id, sendAt);
+    } finally {
+      await runtime.releasePushSendGate(firstRoom.room.id);
+      await firstAlarm;
+    }
+
+    const firstRequests = await runtime.inspectOutboundRequests();
+    expect(firstRequests).toHaveLength(1);
+    expect(firstRequests[0]!.headers.ttl).toBe(String(Math.floor((firstDeadline - (fakeNow + PUSH_INITIAL_DELAY_MS + 2_000)) / 1_000)));
+    expect(firstRequests[0]!.headers.ttl).toBe("86397");
+
+    await runtime.clearOutboundRequests();
+    await runtime.armPushSendGate(expiringRoom.room.id);
+    const expiringAlarm = runtime.triggerAlarm(expiringRoom.room.id);
+    try {
+      await runtime.waitForPushSendGate(expiringRoom.room.id);
+      await runtime.advancePushSendClock(expiringRoom.room.id, expiringDeadline + 1);
+    } finally {
+      await runtime.releasePushSendGate(expiringRoom.room.id);
+      await expiringAlarm;
+    }
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("does not retry an in-flight push after a newer eligible delivery replaces it", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const subscribedBrowser = crypto.randomUUID();
+  const otherBrowser = crypto.randomUUID();
+
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before push enrollment");
+    expect((await enrollPush(initial, room.id, subscribedBrowser)).status).toBe(201);
+    expect((await post(initial, room.id, "older push that will be in flight", undefined, otherBrowser)).status).toBe(201);
+
+    let runtime = await restart(fakeNow + PUSH_INITIAL_DELAY_MS);
+    await runtime.setOutboundResponse(503, undefined, 1_500);
+    const oldAttempt = runtime.triggerAlarm(room.id);
+    let newerCreatedAt: number | undefined;
+    try {
+      const firstAttempt = await waitForOutboundRequests(runtime, 1, 5_000);
+      expect(firstAttempt).toHaveLength(1);
+      const newerPost = await post(runtime, room.id, "newer push after the older request started", undefined, otherBrowser);
+      expect(newerPost.status).toBe(201);
+      const newerMessage = await newerPost.json() as { message: { created_at: string } };
+      newerCreatedAt = Date.parse(newerMessage.message.created_at);
+    } finally {
+      await oldAttempt;
+    }
+
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+    runtime = await restart(fakeNow + PUSH_INITIAL_DELAY_MS + PUSH_RETRY_INITIAL_DELAY_MS);
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    const retryWindowRequests = await runtime.inspectOutboundRequests();
+    expect(retryWindowRequests).toHaveLength(1);
+    expect(retryWindowRequests[0]!.headers.ttl).toBe(String(Math.floor((newerCreatedAt! + PUSH_RETRY_WINDOW_MS - (fakeNow + PUSH_INITIAL_DELAY_MS + PUSH_RETRY_INITIAL_DELAY_MS)) / 1_000)));
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
 test.serial("provider-held alerts replace by room Topic but remain separate across rooms", { timeout: 20_000 }, async () => {
   await withRuntime(async (miniflare) => {
     const firstRoom = await createRoom(miniflare, "first provider-held room");
@@ -877,16 +959,59 @@ test.serial("an old 410 cannot remove a same-endpoint enrollment whose keys chan
 
     miniflare = await restart(fakeNow + 10_501);
     await miniflare.triggerAlarm(room.id);
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
     miniflare = await restart(fakeNow + 40_502);
-    await miniflare.setOutboundResponse(204);
     await miniflare.triggerAlarm(room.id);
-    const oldDeliveryRetry = await waitForOutboundRequests(miniflare, 1);
-    expect(oldDeliveryRetry).toHaveLength(1);
-    expect(JSON.parse(Buffer.from(decryptWebPushBody(
-      new Uint8Array(Buffer.from(oldDeliveryRetry[0]!.body_base64, "base64")),
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
+    expect(await (await readPushStatus(miniflare, room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("recovers an unsuperseded push with the current same-endpoint keys", { timeout: 25_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const replacementPrivateKey = new Uint8Array(Buffer.alloc(32, 1));
+  const replacementReceiver = {
+    auth: encodeBase64Url(new Uint8Array(Buffer.alloc(16, 0x36))),
+    endpoint: pushReceiver.endpoint,
+    p256dh: encodeBase64Url(derivePublicKey(replacementPrivateKey)),
+    privateKey: encodeBase64Url(replacementPrivateKey),
+  };
+
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before push enrollment");
+    const browserId = crypto.randomUUID();
+    expect((await enrollPush(initial, room.id, browserId)).status).toBe(201);
+    expect((await post(initial, room.id, "future message for a replaced key without a newer event")).status).toBe(201);
+
+    let runtime = await restart(fakeNow + PUSH_INITIAL_DELAY_MS);
+    await runtime.setOutboundResponse(410, undefined, 500);
+    const inFlight = runtime.triggerAlarm(room.id);
+    const oldRequest = await waitForOutboundRequests(runtime, 1);
+    expect(oldRequest).toHaveLength(1);
+    expect((await enrollPush(runtime, room.id, browserId, replacementReceiver)).status).toBe(201);
+    await inFlight;
+    expect(await (await readPushStatus(runtime, room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+    runtime = await restart(fakeNow + PUSH_INITIAL_DELAY_MS + PUSH_DELIVERY_LEASE_MS + 1);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+
+    runtime = await restart(fakeNow + PUSH_INITIAL_DELAY_MS + PUSH_DELIVERY_LEASE_MS + 1 + PUSH_RETRY_INITIAL_DELAY_MS);
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    const retry = await waitForOutboundRequests(runtime, 1);
+    expect(retry).toHaveLength(1);
+    const payload = JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(retry[0]!.body_base64, "base64")),
       decodeBase64Url(replacementReceiver.privateKey),
       decodeBase64Url(replacementReceiver.auth),
-    )).toString("utf8"))).toEqual(payload);
+    )).toString("utf8")) as Record<string, unknown>;
+    expect(payload).toEqual({
+      room_id: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+      room_url: `https://msg.0000.chat/${room.id}`,
+      type: "message.created",
+    });
+    expect(await (await readPushStatus(runtime, room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 

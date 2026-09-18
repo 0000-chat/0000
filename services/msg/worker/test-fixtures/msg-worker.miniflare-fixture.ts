@@ -38,6 +38,7 @@ export interface MsgMiniflareRuntime {
   setOutboundResponse(status: number, location?: string, delayMs?: number): Promise<void>;
   triggerAlarm(room: string): Promise<void>;
   armPushSendGate(room: string): Promise<void>;
+  advancePushSendClock(room: string, nowMs: number): Promise<void>;
   waitForPushSendGate(room: string): Promise<void>;
   releasePushSendGate(room: string): Promise<void>;
   markWebhookDeliverySending(room: string, eventId: string): Promise<void>;
@@ -91,6 +92,7 @@ interface NodeRuntimeProcess {
   readonly setOutboundResponse: MsgMiniflareRuntime["setOutboundResponse"];
   readonly triggerAlarm: MsgMiniflareRuntime["triggerAlarm"];
   readonly armPushSendGate: MsgMiniflareRuntime["armPushSendGate"];
+  readonly advancePushSendClock: MsgMiniflareRuntime["advancePushSendClock"];
   readonly waitForPushSendGate: MsgMiniflareRuntime["waitForPushSendGate"];
   readonly releasePushSendGate: MsgMiniflareRuntime["releasePushSendGate"];
   readonly markWebhookDeliverySending: MsgMiniflareRuntime["markWebhookDeliverySending"];
@@ -257,6 +259,9 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
     async armPushSendGate(room) {
       await control("push-send-gate", { body: JSON.stringify({ action: "arm", room }), headers: { "content-type": "application/json" }, method: "POST" });
     },
+    async advancePushSendClock(room, nowMs) {
+      await control("push-send-gate", { body: JSON.stringify({ action: "advance", now_ms: nowMs, room }), headers: { "content-type": "application/json" }, method: "POST" });
+    },
     async waitForPushSendGate(room) {
       await control("push-send-gate", { body: JSON.stringify({ action: "wait", room }), headers: { "content-type": "application/json" }, method: "POST" });
     },
@@ -353,6 +358,7 @@ export async function startMsgMiniflare(
       setOutboundResponse: runtime.setOutboundResponse,
       triggerAlarm: runtime.triggerAlarm,
       armPushSendGate: runtime.armPushSendGate,
+      advancePushSendClock: runtime.advancePushSendClock,
       waitForPushSendGate: runtime.waitForPushSendGate,
       releasePushSendGate: runtime.releasePushSendGate,
       markWebhookDeliverySending: runtime.markWebhookDeliverySending,

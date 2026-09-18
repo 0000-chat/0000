@@ -161,6 +161,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private readonly limits: RoomLimits;
   private readonly now: () => number;
   private readonly signWebhook: typeof signWebhookPayload;
+  private testNowOverride: number | undefined;
   private scheduleRevision = 0;
   private scheduledRevision = 0;
   private schedulePromise: Promise<void> | undefined;
@@ -170,7 +171,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     super(ctx, env);
     this.config = env;
     this.limits = resolveRoomLimits(env);
-    this.now = now ?? (() => resolveNow(env));
+    this.now = now ?? (() => this.testNowOverride ?? resolveNow(env));
     this.signWebhook = signWebhook;
     migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs);
   }
@@ -648,8 +649,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   private async testPushSendGateControl(request: Request): Promise<Response> {
     const input: unknown = await request.json();
-    if (!isRecord(input) || (input.action !== "arm" && input.action !== "wait" && input.action !== "release")) {
+    if (!isRecord(input) || (input.action !== "arm" && input.action !== "wait" && input.action !== "release" && input.action !== "advance")) {
       throw new ProtocolError(ERROR_CODES.invalidBody, "The test push gate action is invalid.", 400);
+    }
+    if (input.action === "advance" && (typeof input.now_ms !== "number" || !Number.isSafeInteger(input.now_ms))) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The test clock value is invalid.", 400);
+    }
+    if (input.action !== "advance" && input.now_ms !== undefined) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The test push gate action does not accept a clock value.", 400);
     }
     if (input.action === "arm") {
       if (this.testPushSendGate) throw new ProtocolError(ERROR_CODES.conflict, "The test push gate is already armed.", 409);
@@ -658,6 +665,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     }
     const gate = this.testPushSendGate;
     if (!gate) throw new ProtocolError(ERROR_CODES.notFound, "The test push gate is not armed.", 404);
+    if (input.action === "advance") {
+      const now = input.now_ms as number;
+      if (now < this.now()) throw new ProtocolError(ERROR_CODES.invalidBody, "The test clock cannot move backwards.", 400);
+      this.testNowOverride = now;
+      return this.json({ advanced: true });
+    }
     if (input.action === "wait") {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let entered: boolean;
@@ -1151,7 +1164,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.schedule();
       return;
     }
-    const remainingSeconds = Math.max(0, Math.floor((claimed.delivery.retry_expires_at - startedAt) / 1_000));
+    const preparationTtlSeconds = Math.max(0, Math.floor((claimed.delivery.retry_expires_at - startedAt) / 1_000));
     let request: Awaited<ReturnType<typeof createWebPushRequest>>;
     let topic = "";
     try {
@@ -1182,7 +1195,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           privateKey: decodeBase64Url(this.config.MSG_VAPID_PRIVATE_KEY),
           subject: this.config.MSG_VAPID_SUBJECT,
         },
-        ttlSeconds: remainingSeconds,
+        ttlSeconds: preparationTtlSeconds,
         nowSeconds: Math.floor(startedAt / 1_000),
       });
       if (this.config.MSG_TEST_MODE === "1") await this.waitForTestPushSendGate();
@@ -1197,11 +1210,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.resolvePushClaimBeforeSend(claimed, sendAt);
       return;
     }
+    const ttlSeconds = Math.max(0, Math.floor((claimed.delivery.retry_expires_at - sendAt) / 1_000));
 
     try {
       const response = await fetch(request.endpoint, {
         body: byteBuffer(request.body),
-        headers: { ...request.headers, Topic: topic },
+        headers: { ...request.headers, TTL: String(ttlSeconds), Topic: topic },
         method: "POST",
         redirect: "manual",
         signal: AbortSignal.timeout(PUSH_DELIVERY_TIMEOUT_MS),
@@ -1236,7 +1250,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       claimed.subscription.id, claimed.subscription.endpoint, claimed.subscription.p256dh, claimed.subscription.auth,
     ))[0];
     const message = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM messages WHERE id = ?", delivery.message_id))[0];
-    return subscription !== undefined && message !== undefined;
+    return subscription !== undefined && message !== undefined && !this.hasNewerPushDelivery(delivery);
+  }
+
+  private hasNewerPushDelivery(delivery: Pick<StoredPushDelivery, "message_sequence" | "subscription_id">): boolean {
+    return rows<{ id: string }>(this.ctx.storage.sql.exec(
+      "SELECT id FROM push_deliveries WHERE subscription_id = ? AND message_sequence > ? LIMIT 1",
+      delivery.subscription_id, delivery.message_sequence,
+    )).length > 0;
   }
 
   private async resolvePushClaimBeforeSend(claimed: ClaimedPushDelivery, now: number): Promise<void> {
@@ -1252,6 +1273,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       ))[0];
       if (!delivery) return;
       if (now >= delivery.retry_expires_at) {
+        this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+        return;
+      }
+      if (this.hasNewerPushDelivery(delivery)) {
         this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
         return;
       }
@@ -1272,6 +1297,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       ))[0];
       if (!delivery) return;
       if (now >= delivery.retry_expires_at) {
+        this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+        return;
+      }
+      if (retry && this.hasNewerPushDelivery(delivery)) {
         this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
         return;
       }
@@ -1306,6 +1335,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       ));
       for (const delivery of expired) {
         if (delivery.retry_expires_at <= now) {
+          this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+          continue;
+        }
+        if (this.hasNewerPushDelivery(delivery)) {
           this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
           continue;
         }
