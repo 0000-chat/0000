@@ -28,13 +28,14 @@ test("decrypts the RFC 8291 vector and independently decrypts a generated Web Pu
     },
     payload: "New message in msg",
     vapid: { ...vapid, subject: "mailto:push@example.com" },
+    ttlSeconds: 300,
     nowSeconds: 1_700_000_000,
   });
 
   expect(request.endpoint).toBe(rfc8291.endpoint);
   expect(request.headers["Content-Encoding"]).toBe("aes128gcm");
   expect(request.headers["Content-Type"]).toBe("application/octet-stream");
-  expect(request.headers.TTL).toBe("86400");
+  expect(request.headers.TTL).toBe("300");
   expect(decoder.decode(decryptWireBody(request.body, decodeBase64Url(rfc8291.receiverPrivateKey), decodeBase64Url(rfc8291.auth))))
     .toBe("New message in msg");
 
@@ -77,6 +78,7 @@ test("fits the RFC 8291 maximum body and rejects payloads above its plaintext li
     subscription,
     payload: new Uint8Array(MAX_WEB_PUSH_PAYLOAD_BYTES),
     vapid: { ...vapid, subject: "https://msg.example.com/contact" },
+    ttlSeconds: 86400,
     nowSeconds: 1_700_000_000,
   });
 
@@ -86,9 +88,47 @@ test("fits the RFC 8291 maximum body and rejects payloads above its plaintext li
       subscription,
       payload: new Uint8Array(MAX_WEB_PUSH_PAYLOAD_BYTES + 1),
       vapid: { ...vapid, subject: "https://msg.example.com/contact" },
+      ttlSeconds: 86400,
       nowSeconds: 1_700_000_000,
     }),
   ).rejects.toThrow("payload exceeds");
+});
+
+test("uses a bounded caller-supplied TTL without extending provider retention", async () => {
+  const vapid = await makeVapidKeys();
+  const subscription = {
+    auth: decodeBase64Url(rfc8291.auth),
+    endpoint: rfc8291.endpoint,
+    p256dh: decodeBase64Url(rfc8291.publicKey),
+  };
+  const request = await createWebPushRequest({
+    subscription,
+    payload: "New message in msg",
+    vapid: { ...vapid, subject: "mailto:push@example.com" },
+    ttlSeconds: 37,
+    nowSeconds: 1_700_000_000,
+  });
+  expect(request.headers.TTL).toBe("37");
+  const immediateRequest = await createWebPushRequest({
+    subscription,
+    payload: "New message in msg",
+    vapid: { ...vapid, subject: "mailto:push@example.com" },
+    ttlSeconds: 0,
+    nowSeconds: 1_700_000_000,
+  });
+  expect(immediateRequest.headers.TTL).toBe("0");
+
+  for (const ttlSeconds of [-1, 86401, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await expect(
+      createWebPushRequest({
+        subscription,
+        payload: "x",
+        vapid: { ...vapid, subject: "mailto:push@example.com" },
+        ttlSeconds,
+        nowSeconds: 1_700_000_000,
+      }),
+    ).rejects.toThrow("TTL must be an integer between 0 and 86400 seconds");
+  }
 });
 
 test("rejects malformed subscriptions, non-HTTPS endpoints, and invalid contact URIs", async () => {
@@ -101,30 +141,30 @@ test("rejects malformed subscriptions, non-HTTPS endpoints, and invalid contact 
   const validVapid = { ...vapid, subject: "mailto:push@example.com" };
 
   await expect(
-    createWebPushRequest({ subscription: { ...validSubscription, auth: new Uint8Array(15) }, payload: "x", vapid: validVapid }),
+    createWebPushRequest({ subscription: { ...validSubscription, auth: new Uint8Array(15) }, payload: "x", vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("authentication secret");
   await expect(
-    createWebPushRequest({ subscription: { ...validSubscription, p256dh: new Uint8Array(64) }, payload: "x", vapid: validVapid }),
+    createWebPushRequest({ subscription: { ...validSubscription, p256dh: new Uint8Array(64) }, payload: "x", vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("uncompressed P-256 point");
   const invalidPoint = new Uint8Array(65);
   invalidPoint[0] = 0x04;
   await expect(
-    createWebPushRequest({ subscription: { ...validSubscription, p256dh: invalidPoint }, payload: "x", vapid: validVapid }),
+    createWebPushRequest({ subscription: { ...validSubscription, p256dh: invalidPoint }, payload: "x", vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("not a valid P-256 point");
   await expect(
-    createWebPushRequest({ subscription: validSubscription, payload: {} as Uint8Array, vapid: validVapid }),
+    createWebPushRequest({ subscription: validSubscription, payload: {} as Uint8Array, vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("payload must be a byte array");
   await expect(
-    createWebPushRequest({ subscription: { ...validSubscription, endpoint: "http://push.example.net/send" }, payload: "x", vapid: validVapid }),
+    createWebPushRequest({ subscription: { ...validSubscription, endpoint: "http://push.example.net/send" }, payload: "x", vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("HTTPS URL");
   await expect(
-    createWebPushRequest({ subscription: { ...validSubscription, endpoint: "https://user:pass@push.example.net/send" }, payload: "x", vapid: validVapid }),
+    createWebPushRequest({ subscription: { ...validSubscription, endpoint: "https://user:pass@push.example.net/send" }, payload: "x", vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("HTTPS URL");
   await expect(
-    createWebPushRequest({ subscription: { ...validSubscription, endpoint: "https://push.example.net/send#" }, payload: "x", vapid: validVapid }),
+    createWebPushRequest({ subscription: { ...validSubscription, endpoint: "https://push.example.net/send#" }, payload: "x", vapid: validVapid, ttlSeconds: 86400 }),
   ).rejects.toThrow("HTTPS URL");
   await expect(
-    createWebPushRequest({ subscription: validSubscription, payload: "x", vapid: { ...vapid, subject: "javascript:alert(1)" } }),
+    createWebPushRequest({ subscription: validSubscription, payload: "x", vapid: { ...vapid, subject: "javascript:alert(1)" }, ttlSeconds: 86400 }),
   ).rejects.toThrow("mailto: or https:");
 });
 
@@ -138,13 +178,13 @@ test("rejects mismatched or malformed VAPID key material", async () => {
   };
 
   await expect(
-    createWebPushRequest({ subscription, payload: "x", vapid: { ...first, publicKey: second.publicKey, subject: "mailto:push@example.com" } }),
+    createWebPushRequest({ subscription, payload: "x", vapid: { ...first, publicKey: second.publicKey, subject: "mailto:push@example.com" }, ttlSeconds: 86400 }),
   ).rejects.toThrow(/invalid|do not match/u);
   await expect(
-    createWebPushRequest({ subscription, payload: "x", vapid: { ...first, privateKey: new Uint8Array(31), subject: "mailto:push@example.com" } }),
+    createWebPushRequest({ subscription, payload: "x", vapid: { ...first, privateKey: new Uint8Array(31), subject: "mailto:push@example.com" }, ttlSeconds: 86400 }),
   ).rejects.toThrow("private key must be 32 bytes");
   await expect(
-    createWebPushRequest({ subscription, payload: "x", vapid: { ...first, publicKey: new Uint8Array(65), subject: "mailto:push@example.com" } }),
+    createWebPushRequest({ subscription, payload: "x", vapid: { ...first, publicKey: new Uint8Array(65), subject: "mailto:push@example.com" }, ttlSeconds: 86400 }),
   ).rejects.toThrow("uncompressed P-256 point");
 });
 

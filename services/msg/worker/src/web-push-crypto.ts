@@ -3,7 +3,7 @@ export const MAX_WEB_PUSH_PAYLOAD_BYTES = 3993;
 const WEB_PUSH_RECORD_SIZE = 4096;
 const WEB_PUSH_BODY_LIMIT = 4096;
 const VAPID_TOKEN_LIFETIME_SECONDS = 12 * 60 * 60;
-const PUSH_TTL_SECONDS = 24 * 60 * 60;
+const MAX_PUSH_TTL_SECONDS = 24 * 60 * 60;
 
 const encoder = new TextEncoder();
 
@@ -23,6 +23,7 @@ export interface WebPushRequestInput {
   readonly subscription: WebPushSubscriptionKeyMaterial;
   readonly payload: string | Uint8Array;
   readonly vapid: WebPushVapidKeyMaterial;
+  readonly ttlSeconds: number;
   readonly nowSeconds?: number;
 }
 
@@ -35,6 +36,10 @@ export interface WebPushRequest {
 export async function createWebPushRequest(input: WebPushRequestInput): Promise<WebPushRequest> {
   if (typeof input !== "object" || input === null || typeof input.subscription !== "object" || input.subscription === null || typeof input.vapid !== "object" || input.vapid === null) {
     throw new Error("The Web Push request input is invalid.");
+  }
+
+  if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds < 0 || input.ttlSeconds > MAX_PUSH_TTL_SECONDS) {
+    throw new Error("The Web Push TTL must be an integer between 0 and 86400 seconds.");
   }
 
   const endpoint = validateEndpoint(input.subscription.endpoint);
@@ -109,7 +114,7 @@ export async function createWebPushRequest(input: WebPushRequestInput): Promise<
       Authorization: authorization,
       "Content-Encoding": "aes128gcm",
       "Content-Type": "application/octet-stream",
-      TTL: String(PUSH_TTL_SECONDS),
+      TTL: String(input.ttlSeconds),
     },
     body,
   };
