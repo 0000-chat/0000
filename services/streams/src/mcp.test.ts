@@ -1,7 +1,26 @@
 import { describe, expect, test } from "bun:test";
-import { toolDefinitions, validateToolInput } from "./mcp";
+import { handleMcpRequest, toolDefinitions, validateToolInput } from "./mcp";
 
 describe("Helm Streams MCP contracts", () => {
+  test("identifies the MCP server as 0000-streams", async () => {
+    const response = await handleMcpRequest(
+      new Request("https://don.0000.gold/mcp", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+      }),
+      "test-token",
+      async () => null,
+    );
+
+    expect(await response.json()).toMatchObject({
+      result: { serverInfo: { name: "0000-streams" } },
+    });
+  });
+
   test("accepts modern upsert fields and preserves legacy aliases", () => {
     expect(
       validateToolInput("upsert_stream", {

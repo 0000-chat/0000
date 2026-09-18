@@ -424,7 +424,7 @@ export async function handleMcpRequest(
         result: {
           protocolVersion,
           capabilities: { tools: {} },
-          serverInfo: { name: "helm-streams", version: "0.1.0" },
+          serverInfo: { name: "0000-streams", version: "0.1.0" },
         },
       });
     if (method === "ping") return response({ jsonrpc: "2.0", id, result: {} });
