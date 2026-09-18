@@ -1,10 +1,11 @@
 # T02 human account implementation report
 
-**Status:** Implementation checkpoints `4f94a09` and `f346e07` are on
-`codex/platform-t02`. The full Platform check and root workspace check pass;
-parent aggregate review remains pending. The root check validates workspace
-manifests only and is not authentication integration evidence. This is not
-production deployment or full-MVP acceptance.
+**Status:** T02 is reviewed, integrated and verified on
+`0000-chat/0000:codex/platform-mvp` at `7152bcd`. Worker checkpoints `4f94a09`,
+`f346e07` and `851f4ba` were integrated as `3149eeb`, `b3a4cf0` and `7152bcd`.
+The parent independently passed the full Platform check and root workspace
+check on the aggregate. The root check validates manifests only, not auth
+integration. This accepts T02, not production deployment or the full MVP.
 
 ## Implemented behavior
 
@@ -95,6 +96,20 @@ Checks completed at the code checkpoint:
 - `bun run check` — passed: formatting, typecheck, all 3 Worker/D1 test files (3 tests), and persistent Miniflare D1 restart probe.
 - `bun run check` from the monorepo root — passed the workspace scaffold check for 11 manifests; this does not run auth integration tests.
 - `bun x wrangler d1 migrations apply platform-identity --local` — successfully applied local migrations `0001_better_auth.sql` and `0002_platform_authority.sql`.
+
+Independent Standards and Spec reviews used Astra medium. The Spec review's
+callback-session concern was reproduced, fixed and independently rechecked.
+A bounded Grok 4.6 high review found no remaining callback-authorization bypass;
+its reviewed auth source matched the final fix exactly. Its excerpt and runtime
+limits were checked against the dependency source and the account tests by the
+parent. The optional repeated provider-button handler cleanup is not an
+acceptance blocker.
+
+On aggregate `7152bcd`, the parent reran the full Platform check (all three
+Worker/D1 tests and persistent restart) and the root manifest check, both passing.
+A separate Chromium mobile smoke check passed login assets/CSP, both provider
+authorization initiations, account-to-login redirect and viewport fit. Provider
+navigation was intercepted; this browser check does not establish live callbacks.
 
 The full Platform run prints existing non-fatal warnings for form-urlencoded
 OAuth test requests, then exits successfully. The complete MVP also still

@@ -1,6 +1,6 @@
 # Platform MVP ticket proposal
 
-**Status:** Published as issues #55–#69. T01 is reviewed, integrated and verified on `codex/platform-mvp` at `fa17ad4`. T02's implementation checkpoints are `4f94a09` and callback-guard fix `f346e07` on `codex/platform-t02`; the Platform check and root workspace scaffold check pass, while parent aggregate acceptance remains pending. T02 and the full MVP are not yet accepted. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
+**Status:** Published as issues #55–#69. T01 is reviewed, integrated and verified on `codex/platform-mvp` at `fa17ad4`; T02 is reviewed, integrated and independently verified at `7152bcd`. The full MVP remains incomplete. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
 
 | Slice | Published issue | Title | Label |
 | --- | --- | --- | --- |
@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T02 is the current preparation frontier after verified T01 integration. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
+T03 and T04 are eligible for parent preparation after verified T02 integration; T03 is next because their account/organization boundaries overlap. Neither is dispatched by dependency completion alone. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
 
 ## Existing issue disposition
 
@@ -50,7 +50,7 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
-**Readiness:** Implementation is committed on `codex/platform-t02` at `f346e07`; local checks pass and parent aggregate review remains pending. This does not mark the ticket or MVP accepted.
+**Readiness:** T02 is reviewed, integrated and independently verified on `codex/platform-mvp` at `7152bcd`. It unblocks dependency preparation; the issue stays open until repository closure policy is met. The full MVP is not accepted.
 
 **Blocked by (contract):** T01's accepted human principal, session and D1 behavior.
 
@@ -58,13 +58,13 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 **Existing pattern:** Better Auth is selected; magic links are superseded and there are no Platform users to import.
 
-**Open decisions:** T01's Better Auth/provider compatibility results only.
+**Open decisions:** None for T02; provider and callback authority behavior is implemented and verified.
 
-**Verification:** [T02_ACCOUNT_REPORT.md](../T02_ACCOUNT_REPORT.md) records the exact boundary and evidence. The focused Worker/D1 test passes with synthetic Google/GitHub HTTP endpoints and exercises login/callback/session persistence, explicit linking, same-email non-linking, default-organization retries, signup gates, safe profile editing, stale/cross-origin/concurrent unlink, callback denial after logout/disablement or a different user's session, OAuth admin denial, logout and guest/human credential survival. Platform `bun run check` and root `bun run check` pass; the root command is a workspace-manifest scaffold check, not auth integration evidence. Parent aggregate acceptance remains pending.
+**Verification:** [T02_ACCOUNT_REPORT.md](../T02_ACCOUNT_REPORT.md) records the exact boundary and evidence. The Worker/D1 tests exercise login/callback/session persistence, explicit linking, same-email non-linking, default-organization retries, signup gates, safe profile editing, stale/cross-origin/concurrent unlink, callback denial after logout/disablement or a different user's session, OAuth admin denial, logout and guest/human credential survival. Parent aggregate Platform checks and a separate Chromium login smoke pass at `7152bcd`. The passing root check validates workspace manifests, not auth integration. Provider HTTP remains simulated.
 
 ### T03. Administer organizations and memberships
 
-**Readiness:** Not ready; depends on T02.
+**Readiness:** T02 dependency integrated and verified at `7152bcd`; eligible for parent-owned brief preparation, not yet dispatched.
 
 **Blocked by (contract):** T02's signed-in human and organization-owner semantics.
 
@@ -78,7 +78,7 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 ### T04. Register a consumer and use a scoped human API credential
 
-**Readiness:** Not ready until T01's shared contract decisions are reviewed.
+**Readiness:** T01/T02 dependencies are integrated and verified; consumer-binding and credential-lifecycle preparation remains before dispatch.
 
 **Blocked by (contract):** T01 principal, authority, audience, error and service-verifier contract; T02 supplies the human. This ticket defines the bearer source: a human issues a scoped opaque API credential in the Platform account UI.
 
@@ -246,4 +246,4 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 ## Publication and execution
 
-The breakdown is published. T01 is integrated and accepted at `fa17ad4`; T02's local implementation and evidence are pending parent aggregate review, not a new policy interview. Its Platform checks pass, while the root command only checks workspace manifests. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.
+The breakdown is published. T01 is integrated and accepted at `fa17ad4`; T02 is integrated, reviewed and independently verified at `7152bcd`. Platform checks pass; the root command only checks workspace manifests. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.

@@ -4,7 +4,7 @@ Start here when working on Platform. This document defines its scope and
 ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
 agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
 and [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md) record bounded Worker/D1
-evidence. T01 and the initial T02 account slice are implemented locally; the
+evidence. T01 and T02 are reviewed and verified on the aggregate branch; the
 full MVP is not implemented or accepted, and these reports do not establish
 production readiness or consumer adoption.
 

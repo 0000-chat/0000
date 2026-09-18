@@ -301,8 +301,8 @@ alone:
 - Confirm managed configuration's real owning workspace and keep runtime
   anonymous enforcement independent of a Cloud network call.
 
-The initial T02 login, account and signup-policy behavior has a local Worker/D1
-test, with provider HTTP simulated and aggregate review pending. The full
+T02 login, account and signup-policy behavior is reviewed and verified on the
+aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. The full
 Platform authentication MVP remains unimplemented until every acceptance gate
 passes. T01 and T02 evidence is limited to the flows and fixtures named in their
 reports.
