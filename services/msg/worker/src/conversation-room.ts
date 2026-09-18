@@ -3,15 +3,20 @@ import { DurableObject } from "cloudflare:workers";
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { compareCapabilities, messageStorageBytes, ROOM_LIMITS } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { PROTOCOL_VERSION, type CreateWebhookResponse, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
+import { PROTOCOL_VERSION, type CreateWebhookResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
+import {
+  WEBHOOK_FAILURE_WINDOW_MS,
+  WEBHOOK_HISTORY_TTL_MS,
+  WEBHOOK_INITIAL_DELAY_MS,
+  WEBHOOK_RETRY_WINDOW_MS,
+  webhookRetryDelayMs,
+} from "./webhook-policy";
 
 const MAX_WEBHOOKS_PER_ROOM = 5;
-const WEBHOOK_INITIAL_DELAY_MS = 250;
 const WEBHOOK_REQUEST_TIMEOUT_MS = 5_000;
 const WEBHOOK_DELIVERY_LEASE_MS = WEBHOOK_REQUEST_TIMEOUT_MS + 5_000;
-const WEBHOOK_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const WEBHOOK_HISTORY_LIMIT = 50;
 
 export interface ConversationRoomEnv {
@@ -46,15 +51,21 @@ interface StoredMessage extends MessageInput {
 
 interface StoredWebhookEndpoint {
   readonly created_at: number;
+  readonly disabled_at: number | null;
+  readonly failure_started_at: number | null;
   readonly id: string;
+  readonly last_failure_at: number | null;
+  readonly last_success_at: number | null;
+  readonly recovered_at: number | null;
   readonly secret: string;
-  readonly status: "active";
+  readonly status: "active" | "disabled";
   readonly url: string;
 }
 
 interface StoredWebhookDelivery {
   readonly attempt_count: number;
   readonly attempted_at: number | null;
+  readonly cancelled_at: number | null;
   readonly completed_at: number | null;
   readonly created_at: number;
   readonly due_at: number;
@@ -65,13 +76,24 @@ interface StoredWebhookDelivery {
   readonly lease_expires_at: number | null;
   readonly message_id: string;
   readonly message_sequence: number;
-  readonly status: "delivered" | "failed" | "pending" | "sending";
+  readonly retry_expires_at: number;
+  readonly status: "cancelled" | "delivered" | "failed" | "pending" | "retrying" | "sending";
+}
+
+interface StoredWebhookAttempt {
+  readonly attempt_number: number;
+  readonly attempted_at: number;
+  readonly completed_at: number | null;
+  readonly delivery_id: string;
+  readonly failure_category: string | null;
+  readonly status: "delivered" | "failed" | "sending";
 }
 
 interface ClaimedWebhookDelivery {
   readonly delivery: StoredWebhookDelivery;
   readonly endpoint: StoredWebhookEndpoint;
   readonly message: StoredMessage;
+  readonly previousDelivery: StoredWebhookDelivery;
   readonly roomId: string;
 }
 
@@ -108,6 +130,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "GET" && url.pathname === "/webhooks") return await this.listWebhooks();
       const webhookMatch = /^\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
       if (request.method === "DELETE" && webhookMatch) return await this.removeWebhook(webhookMatch[1]!);
+      if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/mark-webhook-sending") return await this.testMarkWebhookSending(request);
       if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/run-alarm") {
         await this.alarm();
         return this.json({ triggered: true });
@@ -133,6 +156,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.tombstone_expires_at !== null && now >= state.tombstone_expires_at) {
         this.ctx.storage.transactionSync(() => {
           this.ctx.storage.sql.exec("DELETE FROM messages");
+          this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
           this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
           this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
@@ -145,9 +169,16 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.expire(now, "Conversation expired");
       return;
     }
+    this.finishExpiredWebhookRetries(now);
+    this.recoverExpiredWebhookLeases(now);
+    this.disableUnhealthyWebhooks(now);
     this.pruneWebhookHistory(now);
     for (let batch = 0; batch < MAX_WEBHOOKS_PER_ROOM; batch += 1) {
-      const claimed = this.claimDueWebhookDelivery(this.now());
+      const attemptNow = this.now();
+      this.finishExpiredWebhookRetries(attemptNow);
+      this.recoverExpiredWebhookLeases(attemptNow);
+      this.disableUnhealthyWebhooks(attemptNow);
+      const claimed = this.claimDueWebhookDelivery(attemptNow);
       if (!claimed) break;
       await this.deliverWebhook(claimed);
       const current = this.state();
@@ -263,7 +294,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.status !== "active" || now >= state.inactivity_expires_at) return { kind: "expired" as const };
       const count = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM webhook_endpoints"))[0]?.count ?? 0;
       if (count >= MAX_WEBHOOKS_PER_ROOM) return { kind: "limit" as const };
-      this.ctx.storage.sql.exec("INSERT INTO webhook_endpoints (id, url, secret, created_at, status) VALUES (?, ?, ?, ?, 'active')", id, url, secret, now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO webhook_endpoints (id, url, secret, created_at, status, failure_started_at, last_success_at, last_failure_at, recovered_at, disabled_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL)",
+        id, url, secret, now,
+      );
       return { kind: "created" as const };
     });
     if (result.kind === "expired") {
@@ -272,7 +306,18 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     }
     if (result.kind === "limit") throw new ProtocolError(ERROR_CODES.conflict, "A room can have at most five webhook endpoints.", 409);
     await this.schedule();
-    const webhook: WebhookSummary = { id, url: redactWebhookUrl(url), created_at: iso(now), status: "active", deliveries: [] };
+    const webhook = this.webhookSummary({
+      created_at: now,
+      disabled_at: null,
+      failure_started_at: null,
+      id,
+      last_failure_at: null,
+      last_success_at: null,
+      recovered_at: null,
+      secret,
+      status: "active",
+      url,
+    }, now);
     const response: CreateWebhookResponse = { protocol_version: PROTOCOL_VERSION, secret, webhook };
     return this.json(response);
   }
@@ -280,6 +325,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async listWebhooks(): Promise<Response> {
     const now = this.now();
     await this.requireActive(now);
+    this.finishExpiredWebhookRetries(now);
+    this.recoverExpiredWebhookLeases(now);
+    this.disableUnhealthyWebhooks(now);
     this.pruneWebhookHistory(now);
     const endpoints = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints ORDER BY created_at ASC, id ASC"));
     const webhooks = endpoints.map((endpoint) => this.webhookSummary(endpoint, now));
@@ -294,6 +342,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
       const endpoint = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE id = ?", id))[0];
       if (!endpoint) return "missing" as const;
+      this.ctx.storage.sql.exec(
+        "DELETE FROM webhook_delivery_attempts WHERE delivery_id IN (SELECT id FROM webhook_deliveries WHERE endpoint_id = ?)",
+        id,
+      );
       this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE endpoint_id = ?", id);
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints WHERE id = ?", id);
       return "removed" as const;
@@ -305,6 +357,34 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (result === "missing") throw new ProtocolError(ERROR_CODES.notFound, "The webhook was not found.", 404);
     await this.schedule();
     return this.json({ protocol_version: PROTOCOL_VERSION, removed: true });
+  }
+
+  private async testMarkWebhookSending(request: Request): Promise<Response> {
+    const input: unknown = await request.json();
+    if (!isRecord(input) || typeof input.event_id !== "string" || input.event_id.length === 0 || input.event_id.length > 128) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The test delivery identifier is invalid.", 400);
+    }
+    const now = this.now();
+    const marked = this.ctx.storage.transactionSync(() => {
+      const delivery = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_deliveries WHERE event_id = ? AND status IN ('pending', 'retrying') ORDER BY created_at ASC, id ASC LIMIT 1",
+        input.event_id,
+      ))[0];
+      if (!delivery) return false;
+      const attemptCount = delivery.attempt_count + 1;
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_deliveries SET status = 'sending', attempt_count = ?, attempted_at = ?, completed_at = NULL, lease_expires_at = ?, failure_category = NULL WHERE id = ?",
+        attemptCount, now, now + WEBHOOK_DELIVERY_LEASE_MS, delivery.id,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO webhook_delivery_attempts (delivery_id, attempt_number, attempted_at, completed_at, status, failure_category) VALUES (?, ?, ?, NULL, 'sending', NULL)",
+        delivery.id, attemptCount, now,
+      );
+      return true;
+    });
+    if (!marked) throw new ProtocolError(ERROR_CODES.notFound, "The pending test delivery was not found.", 404);
+    await this.schedule();
+    return this.json({ marked: true });
   }
 
   /** This path is reachable only from the Worker-to-Durable-Object service boundary. */
@@ -340,6 +420,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const state = this.requireState();
       if (state.status === "deleted") return false;
       this.ctx.storage.sql.exec("DELETE FROM messages");
+      this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
       this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
@@ -351,8 +432,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const endpoints = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE status = 'active'"));
     for (const endpoint of endpoints) {
       this.ctx.storage.sql.exec(
-        "INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, attempted_at, completed_at, lease_expires_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', 0, NULL)",
-        crypto.randomUUID(), endpoint.id, message.id, message.id, message.sequence, now, now + WEBHOOK_INITIAL_DELAY_MS,
+        "INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, cancelled_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'pending', 0, NULL)",
+        crypto.randomUUID(), endpoint.id, message.id, message.id, message.sequence, now, now + WEBHOOK_INITIAL_DELAY_MS, now + WEBHOOK_RETRY_WINDOW_MS,
       );
     }
   }
@@ -361,23 +442,140 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const deliveries = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
       "SELECT * FROM webhook_deliveries WHERE endpoint_id = ? AND created_at > ? ORDER BY created_at DESC, id DESC LIMIT ?",
       endpoint.id, now - WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_LIMIT,
-    )).map((delivery): WebhookDeliveryMetadata => ({
-      attempt_count: delivery.attempt_count,
-      attempted_at: delivery.attempted_at === null ? null : iso(delivery.attempted_at),
-      completed_at: delivery.completed_at === null ? null : iso(delivery.completed_at),
-      created_at: iso(delivery.created_at),
-      event_id: delivery.event_id,
-      failure_category: delivery.failure_category,
-      message_id: delivery.message_id,
-      message_sequence: delivery.message_sequence,
-      status: delivery.status,
-    }));
-    return { id: endpoint.id, url: redactWebhookUrl(endpoint.url), created_at: iso(endpoint.created_at), status: "active", deliveries };
+    )).map((delivery): WebhookDeliveryMetadata => {
+      const attempts = rows<StoredWebhookAttempt>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_delivery_attempts WHERE delivery_id = ? ORDER BY attempt_number ASC",
+        delivery.id,
+      )).map((attempt): WebhookAttemptMetadata => ({
+        attempt_number: attempt.attempt_number,
+        attempted_at: iso(attempt.attempted_at),
+        completed_at: attempt.completed_at === null ? null : iso(attempt.completed_at),
+        failure_category: attempt.failure_category,
+        status: attempt.status,
+      }));
+      return {
+        attempts,
+        attempt_count: delivery.attempt_count,
+        attempted_at: delivery.attempted_at === null ? null : iso(delivery.attempted_at),
+        cancelled_at: delivery.cancelled_at === null ? null : iso(delivery.cancelled_at),
+        completed_at: delivery.completed_at === null ? null : iso(delivery.completed_at),
+        created_at: iso(delivery.created_at),
+        event_id: delivery.event_id,
+        failure_category: delivery.failure_category,
+        message_id: delivery.message_id,
+        message_sequence: delivery.message_sequence,
+        next_attempt_at: delivery.status === "pending" || delivery.status === "retrying" ? iso(delivery.due_at) : null,
+        retry_expires_at: iso(delivery.retry_expires_at),
+        status: delivery.status,
+      };
+    });
+    return {
+      id: endpoint.id,
+      url: redactWebhookUrl(endpoint.url),
+      created_at: iso(endpoint.created_at),
+      disabled_at: endpoint.disabled_at === null ? null : iso(endpoint.disabled_at),
+      failure_started_at: endpoint.failure_started_at === null ? null : iso(endpoint.failure_started_at),
+      last_failure_at: endpoint.last_failure_at === null ? null : iso(endpoint.last_failure_at),
+      last_success_at: endpoint.last_success_at === null ? null : iso(endpoint.last_success_at),
+      recovered_at: endpoint.recovered_at === null ? null : iso(endpoint.recovered_at),
+      status: endpoint.status,
+      deliveries,
+    };
   }
 
   private pruneWebhookHistory(now: number): void {
+    const expiredAt = now - WEBHOOK_HISTORY_TTL_MS;
     this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE created_at <= ?", now - WEBHOOK_HISTORY_TTL_MS);
+      this.ctx.storage.sql.exec(
+        "DELETE FROM webhook_delivery_attempts WHERE delivery_id IN (SELECT id FROM webhook_deliveries WHERE created_at <= ?)",
+        expiredAt,
+      );
+      this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE created_at <= ?", expiredAt);
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_endpoints SET failure_started_at = CASE WHEN failure_started_at <= ? THEN NULL ELSE failure_started_at END, last_success_at = CASE WHEN last_success_at <= ? THEN NULL ELSE last_success_at END, last_failure_at = CASE WHEN last_failure_at <= ? THEN NULL ELSE last_failure_at END, recovered_at = CASE WHEN recovered_at <= ? THEN NULL ELSE recovered_at END, disabled_at = CASE WHEN disabled_at <= ? THEN NULL ELSE disabled_at END",
+        expiredAt, expiredAt, expiredAt, expiredAt, expiredAt,
+      );
+    });
+  }
+
+  private finishExpiredWebhookRetries(now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_deliveries SET status = 'failed', completed_at = retry_expires_at, lease_expires_at = NULL WHERE status IN ('pending', 'retrying') AND retry_expires_at <= ?",
+        now,
+      );
+    });
+  }
+
+  private recoverExpiredWebhookLeases(now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      const expired = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_deliveries WHERE status = 'sending' AND lease_expires_at <= ? ORDER BY lease_expires_at ASC LIMIT ?",
+        now, MAX_WEBHOOKS_PER_ROOM,
+      ));
+      for (const delivery of expired) {
+        const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec(
+          "SELECT * FROM webhook_endpoints WHERE id = ?",
+          delivery.endpoint_id,
+        ))[0];
+        if (!endpoint) {
+          this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts WHERE delivery_id = ?", delivery.id);
+          this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE id = ?", delivery.id);
+          continue;
+        }
+        if (delivery.retry_expires_at <= now) {
+          this.ctx.storage.sql.exec(
+            "UPDATE webhook_delivery_attempts SET status = 'failed', completed_at = ?, failure_category = 'retry_window_expired' WHERE delivery_id = ? AND attempt_number = ? AND status = 'sending'",
+            delivery.retry_expires_at, delivery.id, delivery.attempt_count,
+          );
+          this.ctx.storage.sql.exec(
+            "UPDATE webhook_deliveries SET status = 'failed', completed_at = retry_expires_at, lease_expires_at = NULL, failure_category = 'retry_window_expired' WHERE id = ?",
+            delivery.id,
+          );
+          continue;
+        }
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_delivery_attempts SET status = 'failed', completed_at = ?, failure_category = 'timeout' WHERE delivery_id = ? AND attempt_number = ? AND status = 'sending'",
+          now, delivery.id, delivery.attempt_count,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_endpoints SET last_failure_at = ?, failure_started_at = CASE WHEN status = 'active' THEN COALESCE(failure_started_at, ?) ELSE failure_started_at END WHERE id = ?",
+          now, now, endpoint.id,
+        );
+        const retryAt = now + webhookRetryDelayMs(delivery.attempt_count);
+        if (endpoint.status === "active" && retryAt < delivery.retry_expires_at) {
+          this.ctx.storage.sql.exec(
+            "UPDATE webhook_deliveries SET status = 'retrying', due_at = ?, completed_at = ?, lease_expires_at = NULL, failure_category = 'timeout' WHERE id = ?",
+            retryAt, now, delivery.id,
+          );
+        } else if (endpoint.status === "disabled") {
+          this.ctx.storage.sql.exec(
+            "UPDATE webhook_deliveries SET status = 'cancelled', completed_at = ?, lease_expires_at = NULL, cancelled_at = COALESCE(?, ?) , failure_category = 'timeout' WHERE id = ?",
+            now, endpoint.disabled_at, now, delivery.id,
+          );
+        } else {
+          this.ctx.storage.sql.exec(
+            "UPDATE webhook_deliveries SET status = 'failed', completed_at = ?, lease_expires_at = NULL, failure_category = 'timeout' WHERE id = ?",
+            now, delivery.id,
+          );
+        }
+      }
+    });
+  }
+
+  private disableUnhealthyWebhooks(now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      const unhealthy = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_endpoints WHERE status = 'active' AND failure_started_at IS NOT NULL AND failure_started_at + ? <= ?",
+        WEBHOOK_FAILURE_WINDOW_MS, now,
+      ));
+      for (const endpoint of unhealthy) {
+        this.ctx.storage.sql.exec("UPDATE webhook_endpoints SET status = 'disabled', disabled_at = ? WHERE id = ? AND status = 'active'", now, endpoint.id);
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_deliveries SET status = 'cancelled', cancelled_at = ? WHERE endpoint_id = ? AND status IN ('pending', 'retrying')",
+          now, endpoint.id,
+        );
+      }
     });
   }
 
@@ -386,14 +584,22 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const state = this.state();
       if (!state || state.status !== "active" || now >= state.inactivity_expires_at) return undefined;
       const delivery = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
-        "SELECT * FROM webhook_deliveries WHERE (status = 'pending' AND due_at <= ?) OR (status = 'sending' AND lease_expires_at <= ?) ORDER BY due_at ASC, created_at ASC LIMIT 1",
+        "SELECT * FROM webhook_deliveries WHERE status IN ('pending', 'retrying') AND due_at <= ? AND retry_expires_at > ? ORDER BY due_at ASC, created_at ASC, id ASC LIMIT 1",
         now, now,
       ))[0];
       if (!delivery) return undefined;
-      const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ? AND status = 'active'", delivery.endpoint_id))[0];
+      const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", delivery.endpoint_id))[0];
       const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", delivery.message_id))[0];
       if (!endpoint || !message) {
+        this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts WHERE delivery_id = ?", delivery.id);
         this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE id = ?", delivery.id);
+        return undefined;
+      }
+      if (endpoint.status !== "active") {
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_deliveries SET status = 'cancelled', cancelled_at = COALESCE(?, ?) WHERE id = ?",
+          endpoint.disabled_at, now, delivery.id,
+        );
         return undefined;
       }
       const attemptCount = delivery.attempt_count + 1;
@@ -402,10 +608,15 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         "UPDATE webhook_deliveries SET status = 'sending', attempt_count = ?, attempted_at = ?, completed_at = NULL, lease_expires_at = ?, failure_category = NULL WHERE id = ?",
         attemptCount, now, leaseExpiresAt, delivery.id,
       );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO webhook_delivery_attempts (delivery_id, attempt_number, attempted_at, completed_at, status, failure_category) VALUES (?, ?, ?, NULL, 'sending', NULL)",
+        delivery.id, attemptCount, now,
+      );
       return {
         delivery: { ...delivery, attempt_count: attemptCount, attempted_at: now, completed_at: null, lease_expires_at: leaseExpiresAt, status: "sending", failure_category: null },
         endpoint,
         message,
+        previousDelivery: delivery,
         roomId: state.notification_id,
       };
     });
@@ -424,9 +635,15 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     let failureCategory: string | null = "network_error";
     try {
       const target = webhookRequestTarget(claimed.endpoint.url);
+      const signature = await signWebhookPayload(claimed.endpoint.secret, timestamp, body);
+      const sendAt = this.now();
+      if (!this.webhookClaimCanSend(claimed, sendAt)) {
+        await this.resolveWebhookClaimBeforeSend(claimed, sendAt);
+        return;
+      }
       const headers = new Headers({
         "content-type": "application/json; charset=utf-8",
-        "x-msg-signature": await signWebhookPayload(claimed.endpoint.secret, timestamp, body),
+        "x-msg-signature": signature,
         "x-msg-timestamp": timestamp,
       });
       if (target.authorization) headers.set("authorization", target.authorization);
@@ -454,13 +671,89 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     }
     this.ctx.storage.transactionSync(() => {
       const state = this.state();
-      const delivery = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_deliveries WHERE id = ? AND status = 'sending'", claimed.delivery.id))[0];
-      const endpoint = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE id = ? AND status = 'active'", claimed.endpoint.id))[0];
+      const delivery = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec("SELECT * FROM webhook_deliveries WHERE id = ? AND status = 'sending' AND attempt_count = ?", claimed.delivery.id, claimed.delivery.attempt_count))[0];
+      const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", claimed.endpoint.id))[0];
       if (!state || state.status !== "active" || !delivery || !endpoint) return;
+      const retryAt = completedAt + webhookRetryDelayMs(delivery.attempt_count);
+      const canRetry = status === "failed" && endpoint.status === "active" && retryAt < delivery.retry_expires_at;
+      const deliveryStatus = status === "delivered"
+        ? "delivered"
+        : endpoint.status === "disabled"
+          ? "cancelled"
+          : canRetry ? "retrying" : "failed";
+      const cancelledAt = deliveryStatus === "cancelled" ? endpoint.disabled_at ?? completedAt : null;
       this.ctx.storage.sql.exec(
-        "UPDATE webhook_deliveries SET status = ?, completed_at = ?, lease_expires_at = NULL, failure_category = ? WHERE id = ?",
-        status, completedAt, failureCategory, claimed.delivery.id,
+        "UPDATE webhook_delivery_attempts SET status = ?, completed_at = ?, failure_category = ? WHERE delivery_id = ? AND attempt_number = ?",
+        status, completedAt, failureCategory, claimed.delivery.id, delivery.attempt_count,
       );
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_deliveries SET status = ?, due_at = ?, completed_at = ?, lease_expires_at = NULL, cancelled_at = ?, failure_category = ? WHERE id = ?",
+        deliveryStatus, canRetry ? retryAt : delivery.due_at, completedAt, cancelledAt, failureCategory, claimed.delivery.id,
+      );
+      if (status === "delivered") {
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_endpoints SET last_success_at = ?, failure_started_at = CASE WHEN status = 'active' THEN NULL ELSE failure_started_at END, recovered_at = CASE WHEN status = 'active' AND failure_started_at IS NOT NULL THEN ? ELSE recovered_at END WHERE id = ?",
+          completedAt, completedAt, endpoint.id,
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_endpoints SET last_failure_at = ?, failure_started_at = CASE WHEN status = 'active' THEN COALESCE(failure_started_at, ?) ELSE failure_started_at END WHERE id = ?",
+          completedAt, completedAt, endpoint.id,
+        );
+      }
+    });
+    await this.schedule();
+  }
+
+  private webhookClaimCanSend(claimed: ClaimedWebhookDelivery, now: number): boolean {
+    const state = this.state();
+    if (!state || state.status !== "active" || now >= state.inactivity_expires_at) return false;
+    const delivery = rows<{ attempt_count: number; retry_expires_at: number; status: string }>(this.ctx.storage.sql.exec(
+      "SELECT attempt_count, retry_expires_at, status FROM webhook_deliveries WHERE id = ?",
+      claimed.delivery.id,
+    ))[0];
+    if (!delivery || delivery.status !== "sending" || delivery.attempt_count !== claimed.delivery.attempt_count || now >= delivery.retry_expires_at) return false;
+    const endpoint = rows<{ status: string }>(this.ctx.storage.sql.exec(
+      "SELECT status FROM webhook_endpoints WHERE id = ?",
+      claimed.endpoint.id,
+    ))[0];
+    return endpoint?.status === "active";
+  }
+
+  private async resolveWebhookClaimBeforeSend(claimed: ClaimedWebhookDelivery, now: number): Promise<void> {
+    const state = this.state();
+    if (state?.status === "active" && now >= state.inactivity_expires_at) {
+      await this.expire(now, "Conversation expired");
+      return;
+    }
+    this.ctx.storage.transactionSync(() => {
+      const current = this.state();
+      const delivery = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_deliveries WHERE id = ? AND status = 'sending' AND attempt_count = ?",
+        claimed.delivery.id, claimed.delivery.attempt_count,
+      ))[0];
+      const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_endpoints WHERE id = ?",
+        claimed.endpoint.id,
+      ))[0];
+      if (!current || current.status !== "active" || !delivery || !endpoint) return;
+      const expired = now >= delivery.retry_expires_at;
+      if (!expired && endpoint.status === "active") return;
+      this.ctx.storage.sql.exec(
+        "DELETE FROM webhook_delivery_attempts WHERE delivery_id = ? AND attempt_number = ?",
+        delivery.id, delivery.attempt_count,
+      );
+      if (expired) {
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_deliveries SET status = 'failed', attempt_count = ?, attempted_at = ?, completed_at = retry_expires_at, lease_expires_at = NULL, failure_category = ? WHERE id = ?",
+          claimed.previousDelivery.attempt_count, claimed.previousDelivery.attempted_at, claimed.previousDelivery.failure_category, delivery.id,
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_deliveries SET status = 'cancelled', attempt_count = ?, attempted_at = ?, completed_at = ?, lease_expires_at = NULL, cancelled_at = COALESCE(?, ?), failure_category = ? WHERE id = ?",
+          claimed.previousDelivery.attempt_count, claimed.previousDelivery.attempted_at, claimed.previousDelivery.completed_at, endpoint.disabled_at, now, claimed.previousDelivery.failure_category, delivery.id,
+        );
+      }
     });
     await this.schedule();
   }
@@ -486,15 +779,26 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (!state) {
         await this.ctx.storage.deleteAlarm();
       } else {
-        const delivery = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
-          "SELECT MIN(CASE WHEN status = 'pending' THEN due_at ELSE lease_expires_at END) AS at FROM webhook_deliveries WHERE status IN ('pending', 'sending')",
+        const retry = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(CASE WHEN due_at < retry_expires_at THEN due_at ELSE retry_expires_at END) AS at FROM webhook_deliveries WHERE status IN ('pending', 'retrying')",
+        ))[0]?.at;
+        const lease = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(lease_expires_at) AS at FROM webhook_deliveries WHERE status = 'sending'",
+        ))[0]?.at;
+        const failureDeadline = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(failure_started_at + ?) AS at FROM webhook_endpoints WHERE status = 'active' AND failure_started_at IS NOT NULL",
+          WEBHOOK_FAILURE_WINDOW_MS,
         ))[0]?.at;
         const history = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
           "SELECT MIN(created_at + ?) AS at FROM webhook_deliveries",
           WEBHOOK_HISTORY_TTL_MS,
         ))[0]?.at;
+        const healthHistory = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(at) AS at FROM (SELECT last_success_at + ? AS at FROM webhook_endpoints WHERE last_success_at IS NOT NULL UNION ALL SELECT last_failure_at + ? AS at FROM webhook_endpoints WHERE last_failure_at IS NOT NULL UNION ALL SELECT failure_started_at + ? AS at FROM webhook_endpoints WHERE failure_started_at IS NOT NULL UNION ALL SELECT recovered_at + ? AS at FROM webhook_endpoints WHERE recovered_at IS NOT NULL UNION ALL SELECT disabled_at + ? AS at FROM webhook_endpoints WHERE disabled_at IS NOT NULL)",
+          WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS,
+        ))[0]?.at;
         const stateDeadline = state.status === "deleted" ? state.tombstone_expires_at : state.inactivity_expires_at;
-        const deadlines = [stateDeadline, delivery, history].filter((value): value is number => typeof value === "number");
+        const deadlines = [stateDeadline, retry, lease, failureDeadline, history, healthHistory].filter((value): value is number => typeof value === "number");
         if (deadlines.length === 0) await this.ctx.storage.deleteAlarm();
         else await this.ctx.storage.setAlarm(Math.min(...deadlines));
       }

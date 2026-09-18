@@ -188,22 +188,39 @@ export interface RemoveWebhookInput {
 }
 
 export interface WebhookDeliveryMetadata {
+  readonly attempts: readonly WebhookAttemptMetadata[];
   readonly attempt_count: number;
   readonly attempted_at: string | null;
+  readonly cancelled_at: string | null;
   readonly completed_at: string | null;
   readonly created_at: string;
   readonly event_id: string;
   readonly failure_category: string | null;
   readonly message_id: string;
   readonly message_sequence: number;
-  readonly status: "delivered" | "failed" | "pending" | "sending";
+  readonly next_attempt_at: string | null;
+  readonly retry_expires_at: string;
+  readonly status: "cancelled" | "delivered" | "failed" | "pending" | "retrying" | "sending";
+}
+
+export interface WebhookAttemptMetadata {
+  readonly attempt_number: number;
+  readonly attempted_at: string;
+  readonly completed_at: string | null;
+  readonly failure_category: string | null;
+  readonly status: "delivered" | "failed" | "sending";
 }
 
 export interface WebhookSummary {
   readonly created_at: string;
   readonly deliveries: readonly WebhookDeliveryMetadata[];
+  readonly disabled_at: string | null;
+  readonly failure_started_at: string | null;
   readonly id: string;
-  readonly status: "active";
+  readonly last_failure_at: string | null;
+  readonly last_success_at: string | null;
+  readonly recovered_at: string | null;
+  readonly status: "active" | "disabled";
   readonly url: string;
 }
 
