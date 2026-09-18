@@ -1,4 +1,5 @@
 import { request as sendWorkerRequest, createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 import { Miniflare } from "miniflare";
@@ -286,8 +287,12 @@ async function dispatch(request, response) {
   }
 }
 
-async function start(configuration) {
+async function start(configurationPath) {
   try {
+    const configuration = JSON.parse(await readFile(configurationPath, "utf8"));
+    if (!isRecord(configuration) || !isRecord(configuration.bindings) || typeof configuration.compatibilityDate !== "string" || !isRecord(configuration.durableObjects) || typeof configuration.persistenceDirectory !== "string" || typeof configuration.script !== "string") {
+      throw new Error("Invalid Node-owned Miniflare startup configuration file.");
+    }
     miniflare = new Miniflare({
       bindings: configuration.bindings,
       compatibilityDate: configuration.compatibilityDate,
@@ -385,9 +390,9 @@ input.on("line", (line) => {
     return;
   }
 
-  if (isRecord(message) && message.type === "start" && !startupRequested && isRecord(message.configuration)) {
+  if (isRecord(message) && message.type === "start" && !startupRequested) {
     startupRequested = true;
-    void start(message.configuration);
+    void start(typeof message.configurationPath === "string" && message.configurationPath.length > 0 ? message.configurationPath : "");
   } else if (isRecord(message) && message.type === "stop") {
     void shutdown();
   }

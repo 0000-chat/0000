@@ -1,13 +1,16 @@
-import { rm } from "node:fs/promises";
+import { readdir, rm, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { createDecipheriv, createECDH, createHmac, createPublicKey, verify } from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import WebSocketClient from "ws";
 
 import { PUSH_DELIVERY_LEASE_MS, PUSH_INITIAL_DELAY_MS, PUSH_RETRY_INITIAL_DELAY_MS, PUSH_RETRY_WINDOW_MS } from "./push-policy";
 import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS, TEST_VAPID_PUBLIC_KEY, TEST_VAPID_SUBJECT } from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
+const fixtureTemporaryDirectory = fileURLToPath(new URL("../.miniflare-tests/", import.meta.url));
 
 let sharedFixture: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
 let sharedPersistenceDirectory: string | undefined;
@@ -41,6 +44,13 @@ async function disposeSharedRuntime() {
     }
   }
   if (failed) throw failure;
+}
+
+async function nodeRuntimeConfigurationDirectories(): Promise<string[]> {
+  return (await readdir(fixtureTemporaryDirectory, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("node-runtime-config-"))
+    .map((entry) => entry.name)
+    .sort();
 }
 
 async function withSharedRuntime(run: (miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"]) => Promise<void>) {
@@ -425,6 +435,41 @@ async function readPushStatus(
     headers: { accept: "application/json", "x-msg-browser-id": browserId },
   });
 }
+
+test.serial("uses a private startup file and cleans it after Node runtime success or failure", { timeout: 20_000 }, async () => {
+  await disposeSharedRuntime();
+  const persistenceDirectory = await createMsgMiniflareTempDirectory("startup-handoff-state");
+  const before = await nodeRuntimeConfigurationDirectories();
+  let fixture: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
+  try {
+    fixture = await startMsgMiniflare(persistenceDirectory);
+    expect(await nodeRuntimeConfigurationDirectories()).toEqual(before);
+  } finally {
+    try {
+      await fixture?.dispose();
+    } finally {
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  }
+
+  const failureDirectory = await createMsgMiniflareTempDirectory("startup-handoff-failure");
+  const invalidPersistenceDirectory = join(failureDirectory, "persistence-is-a-file");
+  await writeFile(invalidPersistenceDirectory, "not a directory");
+  let startupFailure: unknown;
+  let unexpectedFixture: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
+  try {
+    try {
+      unexpectedFixture = await startMsgMiniflare(invalidPersistenceDirectory);
+    } catch (error) {
+      startupFailure = error;
+    }
+    await unexpectedFixture?.dispose();
+    expect(startupFailure).toBeInstanceOf(Error);
+    expect(await nodeRuntimeConfigurationDirectories()).toEqual(before);
+  } finally {
+    await rm(failureDirectory, { force: true, recursive: true });
+  }
+});
 
 test.serial("push send barriers stay unavailable outside test mode and public Worker routes", { timeout: 15_000 }, async () => {
   await withRuntime(async (miniflare) => {

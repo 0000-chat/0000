@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,7 +146,11 @@ async function buildWorkerScript(): Promise<string> {
   return script;
 }
 
-async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promise<NodeRuntimeProcess> {
+async function startNodeRuntime(configurationPath: string): Promise<NodeRuntimeProcess> {
+  const startupLine = `${JSON.stringify({ type: "start", configurationPath })}\n`;
+  if (Buffer.byteLength(startupLine, "utf8") > 4_096) {
+    throw new Error("Node-owned Miniflare startup control message exceeded its size limit.");
+  }
   const child = spawn("node", [nodeRuntimeEntry], {
     cwd: appDirectory,
     stdio: ["pipe", "pipe", "inherit"],
@@ -188,7 +192,7 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
       lines.close();
       resolve({ type: "ready", dispatchUrl: message.dispatchUrl, workerUrl: message.workerUrl });
     });
-    child.stdin.write(`${JSON.stringify({ type: "start", configuration })}\n`, (error) => {
+    child.stdin.write(startupLine, (error) => {
       if (error) fail(error);
     });
   }).catch(async (error: unknown) => {
@@ -303,6 +307,39 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
   };
 }
 
+async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfiguration): Promise<NodeRuntimeProcess> {
+  const configurationDirectory = await createMsgMiniflareTempDirectory("node-runtime-config");
+  const configurationPath = join(configurationDirectory, "configuration.json");
+  let runtime: NodeRuntimeProcess | undefined;
+  let failed = false;
+  let failure: unknown;
+  try {
+    await writeFile(configurationPath, JSON.stringify(configuration), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    runtime = await startNodeRuntime(configurationPath);
+  } catch (error) {
+    failed = true;
+    failure = error;
+  }
+  try {
+    await rm(configurationDirectory, { force: true, recursive: true });
+  } catch (error) {
+    if (!failed) {
+      failed = true;
+      failure = error;
+    }
+  }
+  if (failed) {
+    try {
+      await runtime?.dispose();
+    } catch {
+      // Preserve the startup or temporary-file cleanup error.
+    }
+    throw failure;
+  }
+  if (!runtime) throw new Error("Node-owned Miniflare startup returned no runtime.");
+  return runtime;
+}
+
 /** Builds the production entry and starts it in an isolated Node-owned workerd process. */
 export async function startMsgMiniflare(
   persistenceDirectory: string,
@@ -317,7 +354,7 @@ export async function startMsgMiniflare(
   let failure: unknown;
   try {
     const script = await workerScript();
-    runtime = await startNodeRuntime({
+    runtime = await startNodeRuntimeWithConfiguration({
       bindings: {
         ...(testMode ? { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify(limits) } : {}),
         ...(options.nowMs === undefined ? {} : { MSG_TEST_NOW_MS: String(options.nowMs) }),
