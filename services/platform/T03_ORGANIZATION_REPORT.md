@@ -1,9 +1,9 @@
 # T03 organization and lifecycle account slice
 
-Date: 2026-09-19. Status: implemented and verified in the isolated
-`codex/platform-t03` worktree; parent review and aggregate integration are
-pending. This report does not claim full MVP acceptance, deployment readiness or
-consumer adoption.
+Date: 2026-09-19. Status: reviewed, integrated and independently verified on
+`codex/platform-mvp` at `c51d285`. Worker commits `2804448` and `05b899f` map to
+aggregate commits `077ca0e` and `c51d285`. This report does not claim full MVP
+acceptance, deployment readiness or consumer adoption.
 
 ## Behavior
 
@@ -79,12 +79,26 @@ The Worker tests simulate Google and GitHub provider HTTP. Chromium intercepted
 provider navigation and used seeded Worker sessions for the organization flow;
 neither check proves live provider callbacks, deployed Worker configuration or
 remote D1 behavior. The account UI does not include the later credential
-management, OAuth installation or agent controls. Aggregate integration and
-independent parent review remain pending.
+management, OAuth installation or agent controls.
+
+Independent Standards and Spec reviews used Astra medium. Two UI findings
+(hidden disabled memberships and stale organization responses) were reproduced
+in Chromium, fixed, and rechecked by the parent; the Spec reviewer confirmed
+the fixes at `05b899f`. A bounded authenticated Grok4.6 high review of final-owner
+and invitation mutation concurrency found no confirmed defect. Role type and
+validator duplication was removed. Further centralization of mutation-failure
+diagnostics remains an optional P3 maintainability suggestion.
+
+The parent independently passed the full Platform check at `c51d285` (four
+Worker/D1 test files and persistent restart), the root manifest check (11 manifests), and
+Chromium login/CSP/mobile plus authenticated organization, disabled-member and
+delayed-selection regression flows. Provider navigation was intercepted and
+organization browser sessions were seeded; live provider/deployment claims
+remain excluded.
 
 ## Follow-up fixes
 
-The fixed review follow-up on commit `2804448` exports one
+The review fix commit `05b899f`, following `2804448`, exports one
 `isOrganizationRole` validator and `OrganizationRole` type for Worker and
 account UI callers. Organization detail loads use a request generation and
 the current organization selector as a freshness check, so delayed responses

@@ -1,8 +1,7 @@
 # Platform authentication MVP
 
-Date: 2026-09-19. Status: agreed MVP design; T01/T02 verified on the aggregate,
-T03 organization slice implemented locally and awaiting aggregate review; full
-MVP not accepted.
+Date: 2026-09-19. Status: agreed MVP design; T01/T02/T03 reviewed and verified
+on the aggregate; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -10,8 +9,8 @@ Implementation details marked for validation must be proven against the selected
 Better Auth version and Workers/D1 runtime. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
 records the T01 investigation; [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md)
 records local evidence for the initial account slice. [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md)
-records the organization and lifecycle slice, which is still under parent
-review. The evidence does not complete the design's acceptance gates or
+records the organization and lifecycle slice, reviewed and verified on the
+aggregate at `c51d285`. The evidence does not complete the design's acceptance gates or
 establish production authentication.
 
 ## MVP outcome and deployment
@@ -293,8 +292,8 @@ alone:
 - A real Miniflare runtime restart preserves a bounded guest grant and resource
   fixture in persistent D1. Human login/session and social linking work across
   local Worker requests with simulated provider HTTP. T03's local Worker/D1
-  tests exercise final-owner and invitation races; the report is awaiting
-  aggregate review. Human-session process restart, concurrent signup and OAuth
+  tests exercise final-owner and invitation races and pass on the reviewed
+  aggregate at `c51d285`. Human-session process restart, concurrent signup and OAuth
   rotation races remain unproven.
 - The versioned principal, verification route, service registration fixture,
   service-verifier bootstrap and guest-grant exchange are candidate T01
@@ -310,8 +309,8 @@ alone:
 
 T02 login, account and signup-policy behavior is reviewed and verified on the
 aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. T03
-organization, invitation and operator behavior is implemented on an isolated
-local branch with real Worker/D1 route tests; parent review and aggregate
-integration remain pending. The full Platform authentication MVP remains
+organization, invitation and operator behavior and review fixes are integrated
+and independently verified at `c51d285` with real Worker/D1 route tests and
+Chromium organization flows. The full Platform authentication MVP remains
 unimplemented until every acceptance gate passes. Each report limits its claims
 to the named flows and fixtures.

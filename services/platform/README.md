@@ -5,9 +5,8 @@ ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
 agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md),
 [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md), and
 [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md) record bounded
-Worker/D1 evidence. T01 and T02 are reviewed and verified on the aggregate
-branch. T03 implementation and evidence are local review candidates; its
-aggregate review is pending. The full MVP is not implemented or accepted, and
+Worker/D1 evidence. T01, T02 and T03 are reviewed and verified on the aggregate
+branch. T03 aggregate checks passed at `c51d285`. The full MVP is not implemented or accepted, and
 these reports do not establish production readiness or consumer adoption.
 
 ## Purpose and deployment
@@ -197,8 +196,8 @@ As of 2026-09-19, Platform has a reviewed T01 Worker/D1 investigation and T02
 human account slice, plus runnable principal/client contracts in
 `packages/contracts` and `packages/platform-client`. T03 adds organization and
 membership administration, invitation acceptance and explicitly configured
-operator lifecycle controls; its implementation and report await aggregate
-review. Local Worker tests exercise Better Auth callbacks, sessions, D1
+operator lifecycle controls; its implementation and review fixes are integrated
+and verified at `c51d285`. Local Worker tests exercise Better Auth callbacks, sessions, D1
 persistence, signup policy, profile and organization controls and logout;
 Google/GitHub HTTP responses are simulated at the provider boundary. The
 service and protected-resource checks are fixtures. This is not a deployed

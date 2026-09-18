@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T03 is dispatched from verified `098f4ae` to isolated `codex/platform-t03`. T04 remains in preparation because its account/organization authority boundary overlaps T03. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
+T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca0e` and `c51d285`; parent Platform and Chromium checks pass on the aggregate. T04 is now eligible for final preparation against the verified explicit-organization authority boundary; dispatch still requires its completed implementation brief. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
 
 ## Existing issue disposition
 
