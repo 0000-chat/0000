@@ -84,6 +84,7 @@ class CdpConnection {
 
 assert(process.env.DBUS_SESSION_BUS_ADDRESS, "run this command through dbus-run-session");
 
+const chromiumPath = resolveChromiumPath();
 const runDirectory = mkdtempSync(join(tmpdir(), "msg-push-browser-smoke-"));
 const roomPath = "/" + randomBytes(32).toString("base64url");
 const roomId = randomUUID();
@@ -107,7 +108,6 @@ const server = Bun.serve({
 roomUrl.port = String(server.port);
 const origin = roomUrl.origin;
 const exactRoomUrl = roomUrl.href;
-const chromiumPath = resolveChromiumPath();
 
 let xvfb;
 let bridge;
