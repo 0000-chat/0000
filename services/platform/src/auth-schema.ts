@@ -49,6 +49,10 @@ export const createAuthPlugins = () => [
     clientRegistrationAllowedResources: ["https://fixture.0000.test"],
     clientRegistrationRequirePKCE: true,
     allowDynamicClientRegistration: false,
+    // T02 does not expose operator provisioning. Keep the Better Auth admin
+    // endpoints closed until a Platform-owned provisioning path is approved.
+    clientPrivileges: async () => false,
+    resourcePrivileges: async () => false,
   }),
 ];
 

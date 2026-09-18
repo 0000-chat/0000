@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 const testSecrets = {
+  GOOGLE_CLIENT_SECRET: "test-only-google-client-secret",
   GITHUB_CLIENT_SECRET: "test-only-github-client-secret",
   BETTER_AUTH_SECRET: "test-only-better-auth-secret-with-at-least-32-chars",
 };
@@ -24,6 +25,9 @@ export default defineConfig(async () => {
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
           bindings: {
+            PLATFORM_BASE_URL: "http://localhost",
+            PLATFORM_DEPLOYMENT_MODE: "self-hosted",
+            PLATFORM_SIGNUP_POLICY: "open",
             ...testSecrets,
             TEST_MIGRATIONS: identityMigrations,
             TEST_FIXTURE_MIGRATIONS: fixtureMigrations,

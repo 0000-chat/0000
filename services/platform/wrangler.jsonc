@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "platform-t01-probe",
+  "name": "platform",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-18",
   "compatibility_flags": ["nodejs_compat"],
@@ -13,11 +13,18 @@
     }
   ],
   "vars": {
-    "PLATFORM_BASE_URL": "http://localhost",
+    "PLATFORM_BASE_URL": "http://localhost:8787",
     "PLATFORM_AUTHORITY_ID": "platform-t01-authority",
+    "PLATFORM_DEPLOYMENT_MODE": "self-hosted",
+    "PLATFORM_SIGNUP_POLICY": "open",
+    "GOOGLE_CLIENT_ID": "platform-google-client",
     "GITHUB_CLIENT_ID": "platform-t01-probe"
   },
   "secrets": {
-    "required": ["GITHUB_CLIENT_SECRET", "BETTER_AUTH_SECRET"]
+    "required": [
+      "GOOGLE_CLIENT_SECRET",
+      "GITHUB_CLIENT_SECRET",
+      "BETTER_AUTH_SECRET"
+    ]
   }
 }

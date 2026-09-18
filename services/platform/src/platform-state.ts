@@ -138,7 +138,11 @@ export async function issueHumanCredential(
   }
   const membership = await database
     .prepare(
-      "SELECT id FROM member WHERE id = ? AND organizationId = ? AND userId = ?",
+      `SELECT member.id
+       FROM member
+       JOIN organization ON organization.id = member.organizationId
+       WHERE member.id = ? AND member.organizationId = ? AND member.userId = ?
+         AND organization.suspendedAt IS NULL`,
     )
     .bind(input.membershipId, input.organizationId, input.userId)
     .first<{ id: string }>();

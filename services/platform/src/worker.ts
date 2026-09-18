@@ -1,4 +1,12 @@
-import { createAuth } from "./auth";
+import { createAuth, PLATFORM_SESSION_FRESH_AGE_SECONDS } from "./auth";
+import {
+  accountPage,
+  accountScript,
+  accountCss,
+  assetResponse,
+  loginPage,
+  safeAvatarUrl,
+} from "./account-ui";
 import {
   ensureDefaultOrganization,
   hashOpaque,
@@ -13,11 +21,320 @@ function json(status: number, body: unknown): Response {
 }
 
 function hasTrustedOrigin(request: Request, env: Cloudflare.Env): boolean {
-  return request.headers.get("origin") === env.PLATFORM_BASE_URL;
+  try {
+    return (
+      request.headers.get("origin") === new URL(env.PLATFORM_BASE_URL).origin
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizedPathname(pathname: string): string {
+  let decoded = pathname;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    // Keep malformed paths unmatched by the Worker route table.
+  }
+  return decoded.length > 1 ? decoded.replace(/\/+$/, "") : decoded;
+}
+
+async function getRawSession(request: Request, env: Cloudflare.Env) {
+  return createAuth(env).api.getSession({ headers: request.headers });
+}
+
+async function isActiveUser(
+  env: Cloudflare.Env,
+  userId: string,
+): Promise<boolean> {
+  const activeUser = await env.IDENTITY_DB.withSession("first-primary")
+    .prepare('SELECT id FROM "user" WHERE id = ? AND disabledAt IS NULL')
+    .bind(userId)
+    .first<{ id: string }>();
+  return activeUser !== null;
 }
 
 async function getSession(request: Request, env: Cloudflare.Env) {
-  return createAuth(env).api.getSession({ headers: request.headers });
+  const current = await getRawSession(request, env);
+  if (!current || !(await isActiveUser(env, current.user.id))) return null;
+  return current;
+}
+
+function isAllowedAccountCallback(
+  value: unknown,
+  env: Cloudflare.Env,
+): boolean {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  try {
+    const base = new URL(env.PLATFORM_BASE_URL);
+    const callback = new URL(value, base);
+    return (
+      callback.origin === base.origin &&
+      (callback.pathname === "/account" || callback.pathname === "/login") &&
+      !callback.search &&
+      !callback.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function authPathNeedsBrowserOrigin(pathname: string): boolean {
+  if (
+    pathname === "/api/auth/oauth2/token" ||
+    pathname === "/api/auth/oauth2/introspect" ||
+    pathname === "/api/auth/oauth2/revoke" ||
+    pathname === "/api/auth/oauth2/register" ||
+    pathname.startsWith("/api/auth/callback/")
+  ) {
+    return false;
+  }
+  return pathname.startsWith("/api/auth/");
+}
+
+async function validateAuthRequest(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const pathname = normalizedPathname(url.pathname);
+  if (
+    request.method === "POST" &&
+    authPathNeedsBrowserOrigin(pathname) &&
+    !hasTrustedOrigin(request, env)
+  ) {
+    return json(403, { error: "untrusted_origin" });
+  }
+
+  if (
+    request.method === "POST" &&
+    (pathname === "/api/auth/sign-in/social" ||
+      pathname === "/api/auth/link-social")
+  ) {
+    let body: unknown;
+    try {
+      body = await request.clone().json();
+    } catch {
+      return null;
+    }
+    if (
+      body &&
+      typeof body === "object" &&
+      ("callbackURL" in body ||
+        "errorCallbackURL" in body ||
+        "newUserCallbackURL" in body)
+    ) {
+      const callbackBody = body as Record<string, unknown>;
+      for (const field of [
+        "callbackURL",
+        "errorCallbackURL",
+        "newUserCallbackURL",
+      ] as const) {
+        if (
+          field in callbackBody &&
+          !isAllowedAccountCallback(callbackBody[field], env)
+        ) {
+          return json(400, { error: "invalid_callback_destination" });
+        }
+      }
+    }
+  }
+
+  if (pathname !== "/api/auth/sign-out") {
+    const current = await getRawSession(request, env);
+    if (current && !(await isActiveUser(env, current.user.id))) {
+      return json(401, { error: "disabled_user" });
+    }
+  }
+  return null;
+}
+
+function loginErrorMessage(code: string | null): string {
+  switch (code) {
+    case "signup_invitation_required":
+      return "Sign-up is invitation-only. A current invitation for your verified email is required.";
+    case "email_not_verified":
+      return "Verify your provider email before signing in to Platform.";
+    case "account_not_linked":
+      return "This provider is not linked yet. Sign in with an existing provider, then link it from your account settings.";
+    case "unable_to_create_user":
+    case "signup_disabled":
+      return "Platform could not create an account. If you are using a self-hosted service, ask the operator about signup access.";
+    default:
+      return code
+        ? "Sign-in could not be completed. Try again or choose another provider."
+        : "";
+  }
+}
+
+async function unlinkSocialAccount(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  if (!hasTrustedOrigin(request, env))
+    return json(403, { error: "untrusted_origin" });
+  const current = await createAuth(env).api.getSession({
+    headers: request.headers,
+    query: { disableCookieCache: true },
+  });
+  if (!current || !(await isActiveUser(env, current.user.id)))
+    return json(401, { error: "unauthenticated" });
+  const createdAt = new Date(current.session.createdAt).getTime();
+  if (
+    !Number.isFinite(createdAt) ||
+    Date.now() - createdAt >= PLATFORM_SESSION_FRESH_AGE_SECONDS * 1000
+  ) {
+    return json(403, { error: "session_not_fresh" });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json(400, { error: "invalid_request" });
+  }
+  if (
+    !body ||
+    typeof body !== "object" ||
+    !("accountId" in body) ||
+    typeof body.accountId !== "string" ||
+    !body.accountId ||
+    body.accountId.length > 256
+  ) {
+    return json(400, { error: "invalid_request" });
+  }
+
+  const database = env.IDENTITY_DB.withSession("first-primary");
+  const unlinked = await database
+    .prepare(
+      `DELETE FROM account
+       WHERE id = ? AND userId = ?
+         AND EXISTS (
+           SELECT 1 FROM account AS another
+           WHERE another.userId = ? AND another.id <> ?
+         )`,
+    )
+    .bind(body.accountId, current.user.id, current.user.id, body.accountId)
+    .run();
+  if (unlinked.meta.changes === 1) return json(200, { status: true });
+
+  const ownedAccount = await database
+    .prepare("SELECT id FROM account WHERE id = ? AND userId = ?")
+    .bind(body.accountId, current.user.id)
+    .first<{ id: string }>();
+  return ownedAccount
+    ? json(400, { error: "failed_to_unlink_last_account" })
+    : json(400, { error: "account_not_found" });
+}
+
+async function accountRoute(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const pathname = normalizedPathname(url.pathname);
+  if (pathname === "/api/auth/unlink-account" && request.method === "POST") {
+    return unlinkSocialAccount(request, env);
+  }
+  if (pathname === "/account.js" && request.method === "GET") {
+    return assetResponse(
+      accountScript,
+      "application/javascript; charset=utf-8",
+    );
+  }
+  if (pathname === "/account.css" && request.method === "GET") {
+    return assetResponse(accountCss, "text/css; charset=utf-8");
+  }
+  if (pathname === "/login" && request.method === "GET") {
+    return loginPage(loginErrorMessage(url.searchParams.get("error")));
+  }
+  if (
+    (pathname === "/error" || pathname === "/api/auth/error") &&
+    request.method === "GET"
+  ) {
+    return loginPage(loginErrorMessage(url.searchParams.get("error")));
+  }
+  if (pathname === "/account" && request.method === "GET") {
+    const auth = createAuth(env);
+    const current = await auth.api.getSession({ headers: request.headers });
+    if (!current || !(await isActiveUser(env, current.user.id))) {
+      return Response.redirect(new URL("/login", env.PLATFORM_BASE_URL), 302);
+    }
+    const organization = await ensureDefaultOrganization(env.IDENTITY_DB, {
+      id: current.user.id,
+      name: current.user.name,
+    });
+    const [orgState, linkedAccounts] = await Promise.all([
+      env.IDENTITY_DB.prepare(
+        `SELECT owning_org.name, owning_org.suspendedAt, membership.role
+         FROM platform_default_organization AS receipt
+         LEFT JOIN organization AS owning_org ON owning_org.id = receipt.organization_id
+         LEFT JOIN member AS membership
+           ON membership.id = receipt.membership_id
+          AND membership.organizationId = receipt.organization_id
+          AND membership.userId = receipt.user_id
+         WHERE receipt.user_id = ? AND receipt.organization_id = ?`,
+      )
+        .bind(current.user.id, organization.organizationId)
+        .first<{
+          name: string | null;
+          suspendedAt: number | null;
+          role: string | null;
+        }>(),
+      auth.api.listUserAccounts({ headers: request.headers }),
+    ]);
+    return accountPage({
+      name: current.user.name,
+      email: current.user.email,
+      image: current.user.image ?? null,
+      organizationName: orgState?.name ?? null,
+      membershipRole: orgState?.role ?? null,
+      organizationSuspended:
+        orgState?.suspendedAt !== null && orgState !== null,
+      providers: linkedAccounts.map((account) => ({
+        id: account.id,
+        providerId: account.providerId,
+      })),
+    });
+  }
+  if (pathname === "/api/account/profile" && request.method === "POST") {
+    if (!hasTrustedOrigin(request, env))
+      return json(403, { error: "untrusted_origin" });
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { error: "invalid_request" });
+    }
+    if (
+      !body ||
+      typeof body !== "object" ||
+      !("name" in body) ||
+      typeof body.name !== "string" ||
+      body.name.trim().length === 0 ||
+      body.name.length > 100 ||
+      /[\u0000-\u001f\u007f]/.test(body.name) ||
+      !("avatarUrl" in body) ||
+      typeof body.avatarUrl !== "string" ||
+      body.avatarUrl.length > 2048
+    ) {
+      return json(400, { error: "invalid_profile" });
+    }
+    const image = body.avatarUrl.trim()
+      ? safeAvatarUrl(body.avatarUrl.trim())
+      : null;
+    if (body.avatarUrl.trim() && !image)
+      return json(400, { error: "avatar_url_must_use_https" });
+    await createAuth(env).api.updateUser({
+      headers: request.headers,
+      body: { name: body.name.trim(), image },
+    });
+    return json(200, { updated: true });
+  }
+  return null;
 }
 
 function serviceFromRow(row: {
@@ -443,13 +760,17 @@ export default {
       return Response.json({ status: "ok" });
     }
     try {
+      const account = await accountRoute(request, env);
+      if (account) return account;
       const response = await platformRoute(request, env);
       if (response) return response;
+      if (url.pathname.startsWith("/api/auth/")) {
+        const denied = await validateAuthRequest(request, env);
+        if (denied) return denied;
+        return createAuth(env).handler(request);
+      }
     } catch {
       return json(503, { status: "authority_unavailable" });
-    }
-    if (url.pathname.startsWith("/api/auth/")) {
-      return createAuth(env).handler(request);
     }
     return new Response("Not Found", { status: 404 });
   },
