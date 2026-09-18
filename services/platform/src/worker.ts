@@ -39,7 +39,7 @@ import {
   renameOrganization,
   updateOrganizationMemberRole,
   leaveOrganization,
-  ORGANIZATION_ROLES,
+  isOrganizationRole,
   type OrganizationRole,
 } from "./organization-state";
 
@@ -285,13 +285,6 @@ async function requestBody(
   } catch {
     return null;
   }
-}
-
-function isOrganizationRole(value: unknown): value is OrganizationRole {
-  return (
-    typeof value === "string" &&
-    ORGANIZATION_ROLES.includes(value as OrganizationRole)
-  );
 }
 
 function validOrganizationName(value: unknown): value is string {

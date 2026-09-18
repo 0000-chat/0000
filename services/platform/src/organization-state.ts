@@ -25,6 +25,7 @@ export interface OrganizationMember {
   name: string;
   email: string;
   role: OrganizationRole;
+  disabled: boolean;
 }
 
 export interface OrganizationInvitation {
@@ -50,7 +51,7 @@ export interface OperatorUser {
   disabled: boolean;
 }
 
-function isOrganizationRole(value: unknown): value is OrganizationRole {
+export function isOrganizationRole(value: unknown): value is OrganizationRole {
   return (
     typeof value === "string" &&
     ORGANIZATION_ROLES.includes(value as OrganizationRole)
@@ -208,10 +209,11 @@ export async function listOrganizationMembers(
               member.userId AS userId,
               active_user.name AS name,
               active_user.email AS email,
+              active_user.disabledAt AS disabledAt,
               member.role AS role
        FROM member
        JOIN "user" AS active_user ON active_user.id = member.userId
-       WHERE member.organizationId = ? AND active_user.disabledAt IS NULL
+       WHERE member.organizationId = ?
        ORDER BY CASE member.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
                 lower(active_user.name), member.id`,
     )
@@ -221,10 +223,13 @@ export async function listOrganizationMembers(
       userId: string;
       name: string;
       email: string;
+      disabledAt: number | null;
       role: string;
     }>();
   const bounded = rows.results.flatMap((row) =>
-    isOrganizationRole(row.role) ? [{ ...row, role: row.role }] : [],
+    isOrganizationRole(row.role)
+      ? [{ ...row, role: row.role, disabled: row.disabledAt !== null }]
+      : [],
   );
   return authority.role === "owner" || authority.role === "admin"
     ? bounded

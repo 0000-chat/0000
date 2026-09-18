@@ -1111,6 +1111,47 @@ describe("Platform organization account management", () => {
     expect((await sharedClient.authenticate(currentCredential)).status).toBe(
       "invalid_credential",
     );
+    const tenantCannotRestoreDisabledMember = await post(
+      "/api/account/operator/lifecycle",
+      survivor.cookie,
+      {
+        kind: "user",
+        targetId: member.id,
+        action: "restore",
+      },
+    );
+    expect(tenantCannotRestoreDisabledMember.status).toBe(403);
+    const disabledMemberDetails = await accountRequest(
+      `/api/account/organizations/detail?organizationId=${encodeURIComponent(createdOrg.organizationId)}`,
+      { cookie: survivor.cookie },
+    );
+    expect(disabledMemberDetails.status).toBe(200);
+    expect(await disabledMemberDetails.text()).toContain("disabled account");
+    const disabledMemberMembership = await membership(
+      createdOrg.organizationId,
+      member.id,
+    );
+    expect(disabledMemberMembership).not.toBeNull();
+    const updateDisabledMemberRole = await post(
+      "/api/account/members/role",
+      survivor.cookie,
+      {
+        organizationId: createdOrg.organizationId,
+        membershipId: disabledMemberMembership!.id,
+        role: "admin",
+      },
+    );
+    expect(updateDisabledMemberRole.status).toBe(200);
+    const removeDisabledMember = await post(
+      "/api/account/members/remove",
+      survivor.cookie,
+      {
+        organizationId: createdOrg.organizationId,
+        membershipId: disabledMemberMembership!.id,
+      },
+    );
+    expect(removeDisabledMember.status).toBe(200);
+    expect(await membership(createdOrg.organizationId, member.id)).toBeNull();
     const disabledAccountPage = await SELF.fetch("http://localhost/account", {
       headers: { cookie: member.cookie },
       redirect: "manual",
@@ -1128,7 +1169,7 @@ describe("Platform organization account management", () => {
     );
     expect(restoreMember.status).toBe(200);
     expect((await sharedClient.authenticate(currentCredential)).status).toBe(
-      "authenticated",
+      "invalid_credential",
     );
 
     await testEnv.IDENTITY_DB.prepare(
@@ -1170,9 +1211,7 @@ describe("Platform organization account management", () => {
       .bind(createdOrg.organizationId)
       .first<{ id: string; suspendedAt: number | null }>();
     expect(persistentOrganization?.suspendedAt).toBeNull();
-    expect(
-      await membership(createdOrg.organizationId, member.id),
-    ).not.toBeNull();
+    expect(await membership(createdOrg.organizationId, member.id)).toBeNull();
     expect(
       await testEnv.IDENTITY_DB.prepare('SELECT id FROM "user" WHERE id = ?')
         .bind(owner.id)

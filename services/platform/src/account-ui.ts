@@ -1,3 +1,5 @@
+import type { OrganizationRole } from "./organization-state";
+
 export interface AccountProvider {
   id: string;
   providerId: string;
@@ -6,7 +8,7 @@ export interface AccountProvider {
 export interface AccountOrganization {
   id: string;
   name: string;
-  role: "owner" | "admin" | "member";
+  role: OrganizationRole;
   suspended: boolean;
 }
 
@@ -15,7 +17,8 @@ export interface AccountMember {
   userId: string;
   name: string;
   email: string;
-  role: "owner" | "admin" | "member";
+  role: OrganizationRole;
+  disabled: boolean;
 }
 
 export interface AccountInvitation {
@@ -23,7 +26,7 @@ export interface AccountInvitation {
   organizationId: string;
   organizationName: string;
   email: string;
-  role: "owner" | "admin" | "member";
+  role: OrganizationRole;
   expiresAt: number;
   suspended: boolean;
 }
@@ -31,7 +34,7 @@ export interface AccountInvitation {
 export interface OrganizationDetails {
   id: string;
   name: string;
-  role: "owner" | "admin" | "member";
+  role: OrganizationRole;
   suspended: boolean;
   viewerUserId: string;
   members: AccountMember[];
@@ -208,7 +211,7 @@ export function organizationDetailsMarkup(
         ? `<button type="button" class="quiet-button" data-remove-member="${escapeHtml(member.id)}">Remove</button>`
         : "";
       return `<li class="management-row">
-        <div><strong>${escapeHtml(member.name)}</strong><span>${escapeHtml(member.email)}</span><small>${escapeHtml(member.role)}${isSelf ? " · you" : ""}</small></div>
+        <div><strong>${escapeHtml(member.name)}</strong><span>${escapeHtml(member.email)}</span><small>${escapeHtml(member.role)}${member.disabled ? " · disabled account" : ""}${isSelf ? " · you" : ""}</small></div>
         <div class="row-actions">${roleControl}${removeControl}</div>
       </li>`;
     })
@@ -558,29 +561,41 @@ async function postAccountJson(path, body) {
   }));
 }
 
+let organizationDetailsGeneration = 0;
+
 async function loadOrganizationDetails(organizationId) {
+  const requestGeneration = ++organizationDetailsGeneration;
   const details = document.getElementById("organization-details");
-  if (!details || !organizationId) return;
+  const isCurrentRequest = () =>
+    requestGeneration === organizationDetailsGeneration &&
+    organizationSelect?.value === organizationId;
+  if (!details || !organizationId) return false;
   showMessage(details, "Loading organization…");
-  const response = await fetch(
-    "/api/account/organizations/detail?organizationId=" + encodeURIComponent(organizationId),
-    { credentials: "same-origin" },
-  );
-  if (!response.ok) {
-    const data = await responseData(response);
-    throw new Error(data.message || "Organization access could not be loaded.");
+  try {
+    const response = await fetch(
+      "/api/account/organizations/detail?organizationId=" + encodeURIComponent(organizationId),
+      { credentials: "same-origin" },
+    );
+    if (!isCurrentRequest()) return false;
+    if (!response.ok) {
+      const data = await responseData(response);
+      throw new Error(data.message || "Organization access could not be loaded.");
+    }
+    const markup = await response.text();
+    if (!isCurrentRequest()) return false;
+    details.innerHTML = markup;
+    return true;
+  } catch (error) {
+    if (isCurrentRequest()) {
+      showMessage(details, error instanceof Error ? error.message : "Organization access could not be loaded.");
+    }
+    return false;
   }
-  details.innerHTML = await response.text();
 }
 
 const organizationSelect = document.getElementById("organization-select");
 organizationSelect?.addEventListener("change", async () => {
-  const details = document.getElementById("organization-details");
-  try {
-    await loadOrganizationDetails(organizationSelect.value);
-  } catch (error) {
-    if (details) showMessage(details, error instanceof Error ? error.message : "Organization access could not be loaded.");
-  }
+  await loadOrganizationDetails(organizationSelect.value);
 });
 
 const organizationDetails = document.getElementById("organization-details");
@@ -618,9 +633,13 @@ organizationDetails?.addEventListener("submit", async (event) => {
       window.location.assign(accountLocation());
       return;
     }
-    await loadOrganizationDetails(organizationId);
-    const refreshedStatus = document.querySelector("[data-organization-status]");
-    showMessage(refreshedStatus, result.message || "Changes saved.");
+    if (organizationSelect?.value === organizationId) {
+      const loaded = await loadOrganizationDetails(organizationId);
+      if (loaded) {
+        const refreshedStatus = document.querySelector("[data-organization-status]");
+        showMessage(refreshedStatus, result.message || "Changes saved.");
+      }
+    }
   } catch (error) {
     if (button) button.disabled = false;
     showMessage(status, error instanceof Error ? error.message : "Changes could not be saved.");

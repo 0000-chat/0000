@@ -14,6 +14,10 @@ copy invitation links. Only owner, admin and member roles are accepted. Admins
 cannot invite, promote, demote or remove owners. Members can view their own
 membership and leave an active organization. The final owner cannot leave or be
 demoted; guarded D1 mutations protect owner changes under concurrent requests.
+Disabled user accounts remain visible to owner and admin member lists with an
+explicit disabled status, and their retained memberships can still be role
+managed or removed. Disabling a user does not restore a membership or any
+credential after an operator later restores the account.
 
 Better Auth's existing `organization`, `member` and `invitation` rows remain the
 source of truth. Migration `0003_organization_authority.sql` adds unique current
@@ -77,3 +81,21 @@ neither check proves live provider callbacks, deployed Worker configuration or
 remote D1 behavior. The account UI does not include the later credential
 management, OAuth installation or agent controls. Aggregate integration and
 independent parent review remain pending.
+
+## Follow-up fixes
+
+The fixed review follow-up on commit `2804448` exports one
+`isOrganizationRole` validator and `OrganizationRole` type for Worker and
+account UI callers. Organization detail loads use a request generation and
+the current organization selector as a freshness check, so delayed responses
+and errors cannot replace or report over a newer selection; rename refreshes
+use the same guard. The disabled-member regression also asserts that an
+ordinary tenant cannot use the operator lifecycle endpoint, that an owner can
+manage and remove a disabled member, and that restoring the user leaves the
+removed membership-bound credential invalid.
+
+- `bunx vitest run --config vitest.worker.config.ts worker/test/organizations.test.ts` passed (1 file, 1 test).
+- `bunx vitest run --config vitest.worker.config.ts worker/test/account.test.ts` passed (1 file, 1 test).
+- `bun run typecheck` passed.
+- `bun -e 'import {accountScript} from "./src/account-ui.ts"; new Function(accountScript)'` passed.
+- Parent Chromium smoke passed with `--organizations --disabled-member --selection-race`, including disabled-member visibility/management/removal and delayed-selection response protection.
