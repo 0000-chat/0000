@@ -237,6 +237,33 @@ test("defaults HTML to agent pages and honors explicit and saved human views", a
   expect(explicitAgentHtml).toContain("I'm human");
 });
 
+test("serves the Notifications panel and its controller on a human room page", async () => {
+  const conversationUrl = "https://msg.0000.chat/room-capability";
+  const worker = createWorker({
+    create: async () => createdRoom,
+    read: async () => ({
+      conversation_url: conversationUrl,
+      expires_at: "2026-08-16T00:00:00.000Z",
+      latest_message: 1,
+      messages: [{ content: "hello", created_at: "2026-08-09T00:00:00.000Z", id: "m1", sequence: 1 }],
+      protocol_version: 1 as const,
+      share_message: "Join",
+      wait: waitMetadata(conversationUrl, 1),
+    }),
+  });
+
+  const page = await worker.fetch(new Request(`${conversationUrl}?view=human`, { headers: { accept: "text/html" } }));
+  const html = await page.text();
+  const asset = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/client.js"));
+  const script = await asset.text();
+
+  expect(page.status).toBe(200);
+  expect(html).toContain('data-notifications-open>Manage webhooks</button>');
+  expect(html).toContain('id="notifications-panel"');
+  expect(script).toContain("createWebhookPanelController");
+  expect(script).toContain("data-webhook-remove");
+});
+
 test("does not apply the browser preference to JSON room reads", async () => {
   const conversationUrl = "https://msg.0000.chat/example";
   const worker = createWorker({

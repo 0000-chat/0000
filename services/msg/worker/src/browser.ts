@@ -3,7 +3,7 @@ import clock from "./assets/icons/clock.svg" with { type: "text" };
 import download from "./assets/icons/download.svg" with { type: "text" };
 import link from "./assets/icons/link.svg" with { type: "text" };
 import userPlusWhite from "./assets/icons/user-plus-white.svg" with { type: "text" };
-import { browserFailureState, copyText, createLiveController, createThemeController, handleAgentPromptCopy } from "./browser-controller";
+import { browserFailureState, copyText, createLiveController, createThemeController, createWebhookPanelController, handleAgentPromptCopy, type WebhookPanelEntry } from "./browser-controller";
 import { viewSwitchHref } from "./browser-view";
 
 /** The public browser has no access to a room management capability. */
@@ -140,6 +140,8 @@ export function renderMarkdown(markdown: string): string {
 
 const mermaidStyles = String.raw`.message-mermaid{max-width:100%;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--soft)}.message-mermaid-diagram{display:block;max-width:100%;overflow:auto;overscroll-behavior:contain}.message-mermaid-diagram[hidden],.message-mermaid-error[hidden]{display:none}.message-mermaid-source{min-width:0}.message-mermaid-source summary{display:flex;min-height:44px;align-items:center;padding:8px 12px;border-top:1px solid var(--line);cursor:pointer;color:var(--muted-strong);font-size:12px;font-weight:700;list-style:none}.message-mermaid-source summary::-webkit-details-marker{display:none}.message-mermaid-source summary:after{margin-left:auto;content:"+";font-size:16px;font-weight:400}.message-mermaid-source[open] summary:after{content:"−"}.message-mermaid-source pre{max-width:100%;max-height:420px;margin:0;border:0;border-top:1px solid var(--line);border-radius:0 0 8px 8px}.message-mermaid-error{margin:0;padding:11px 13px;border-bottom:1px solid var(--line);color:var(--muted-strong);font-size:13px}.message-mermaid-diagram svg{display:block}`;
 
+const notificationPanelStyles = String.raw`.notifications-panel{max-height:min(88dvh,760px);overflow:auto}.notifications-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px 24px 16px;border-bottom:1px solid var(--line)}.notifications-header h2{margin:0;font-size:21px}.notifications-header p{margin:0 0 5px;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.notifications-body{display:grid;gap:18px;padding:20px 24px 24px}.webhook-form{display:grid;gap:9px}.webhook-form label,.webhook-list-title{font-size:13px;font-weight:700}.webhook-form input{width:100%;min-height:44px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}.notifications-help,.webhook-empty,.webhook-status{margin:0;color:var(--muted-strong);font-size:13px;line-height:1.5}.webhook-status:empty{display:none}.webhook-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}.webhook-list-item{display:grid;gap:8px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.webhook-list-item strong{overflow-wrap:anywhere;font-size:13px}.webhook-list-meta{margin:0;color:var(--muted-strong);font-size:12px;line-height:1.5;overflow-wrap:anywhere}.webhook-secret{display:grid;gap:8px;padding:14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue)}.webhook-secret p{margin:0;color:var(--muted-strong);font-size:13px}.webhook-secret code{display:block;overflow-wrap:anywhere;padding:9px;border-radius:6px;background:var(--surface);font:12px/1.5 ui-monospace,monospace}.webhook-list-actions{display:flex;justify-content:flex-end}@media(max-width:760px){.notifications-header{padding:18px}.notifications-body{padding:18px}.notifications-header h2{font-size:19px}}`;
+
 const productionMermaidRuntime = String.raw`
 const mermaidStyleNonce=document.currentScript?.nonce||'';
 const mermaidAssetPath='${MERMAID_ASSET_PATH}';
@@ -174,13 +176,13 @@ const mobileComposerContract = String.raw`@media(max-width:760px){.shell{--mobil
 
 export function browserAsset(name: string): Response | undefined {
   if (name === "client.css") {
-    const responsiveStyles = `${styles}${humanBannerStyles}${mobileLayoutContract}${mobileComposerContract}${mermaidStyles}`.replaceAll("@media(max-width:760px)", "@media(max-width:820px)").replace(".intro-eyebrow{", ".agent-join-notice{display:flex;flex-wrap:wrap;gap:6px 10px;margin:18px 0 2px;padding:12px 14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue);color:var(--muted-strong);font-size:13px}.agent-join-notice strong{color:var(--ink)}.agent-join-notice code{overflow-wrap:anywhere;font:12px/1.4 ui-monospace,monospace}.intro-eyebrow{");
+    const responsiveStyles = `${styles}${humanBannerStyles}${mobileLayoutContract}${mobileComposerContract}${mermaidStyles}${notificationPanelStyles}`.replaceAll("@media(max-width:760px)", "@media(max-width:820px)").replace(".intro-eyebrow{", ".agent-join-notice{display:flex;flex-wrap:wrap;gap:6px 10px;margin:18px 0 2px;padding:12px 14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue);color:var(--muted-strong);font-size:13px}.agent-join-notice strong{color:var(--ink)}.agent-join-notice code{overflow-wrap:anywhere;font:12px/1.4 ui-monospace,monospace}.intro-eyebrow{");
     return new Response(responsiveStyles, { headers: { "content-type": "text/css; charset=utf-8" } });
   }
   if (name !== "client.js") return undefined;
   const nameHelper = 'const __name=(target,value)=>Object.defineProperty(target,"name",{value,configurable:true});';
   const helpers = `const MERMAID_MAX_BLOCKS_PER_MESSAGE=${MERMAID_MAX_BLOCKS_PER_MESSAGE},MERMAID_MAX_SOURCE_BYTES=${MERMAID_MAX_SOURCE_BYTES},MERMAID_MAX_TOTAL_SOURCE_BYTES=${MERMAID_MAX_TOTAL_SOURCE_BYTES},MERMAID_MAX_LINES=${MERMAID_MAX_LINES};`
-    + [escapeHtml, safeLink, renderInlineMarkdown, startsMarkdownBlock, supportsMermaidSource, renderMermaidBlock, renderMarkdown, createLiveController, browserFailureState, createThemeController, copyText, handleAgentPromptCopy].map((fn) => `const ${fn.name}=${fn.toString()};`).join("");
+    + [escapeHtml, safeLink, renderInlineMarkdown, startsMarkdownBlock, supportsMermaidSource, renderMermaidBlock, renderMarkdown, createLiveController, browserFailureState, createThemeController, copyText, createWebhookPanelController, handleAgentPromptCopy].map((fn) => `const ${fn.name}=${fn.toString()};`).join("");
   const client = productionBrowserClient
     .replace("if(typeof document==='undefined')return;", `if(typeof document==='undefined')return;${productionMermaidRuntime}${productionMermaidSvgSizing}`)
     .replace("if(!sanitizeMermaidSvg(diagram,result.svg,id))throw Error('unsafe renderer output');", "if(!sanitizeMermaidSvg(diagram,result.svg,id)||!preserveMermaidSvgSize(diagram,id))throw Error('unsafe renderer output');")
@@ -193,17 +195,169 @@ export function browserAsset(name: string): Response | undefined {
     .replace(",showToast:say}));document.querySelectorAll('[data-copy-link]'", ",showToast:say}):say('Agent invitation is still loading.'));document.querySelectorAll('[data-copy-link]'")
     .replace("const expiry=document.querySelector('#expiry');if(expiry&&data.expires_at)expiry.textContent='Deletes '+new Date(data.expires_at).toLocaleString();", "const expiryText=data.expires_at?'Deletes '+new Date(data.expires_at).toLocaleString():'';const expiry=document.querySelector('#expiry');if(expiry&&expiryText)expiry.textContent=expiryText;document.querySelectorAll('.js-expiry time').forEach(node=>node.textContent=expiryText);")
     .replace("const created=document.querySelector('#room-created');if(created&&loaded[0])created.textContent=date(loaded[0].created_at);", "const createdText=loaded[0]?date(loaded[0].created_at):'';const created=document.querySelector('#room-created');if(created&&createdText)created.textContent=createdText;document.querySelectorAll('.js-room-created').forEach(node=>node.textContent=createdText);");
-  return new Response(`${nameHelper}${helpers}${client}`, { headers: { "content-type": "text/javascript; charset=utf-8" } });
+  return new Response(`${nameHelper}${helpers}${client};(${bootWebhookPanel.toString()})();`, { headers: { "content-type": "text/javascript; charset=utf-8" } });
+}
+
+interface BrowserPanelTarget {
+  closest<T extends BrowserPanelElement>(selector: string): T | null;
+}
+
+interface BrowserPanelEvent {
+  preventDefault(): void;
+  readonly target: BrowserPanelTarget | null;
+}
+
+interface BrowserPanelElement {
+  addEventListener(type: string, listener: (event: BrowserPanelEvent) => void): void;
+  append(...nodes: BrowserPanelElement[]): void;
+  className: string;
+  close(): void;
+  dataset: Record<string, string>;
+  disabled: boolean;
+  hidden: boolean;
+  querySelector<T extends BrowserPanelElement>(selector: string): T | null;
+  querySelectorAll<T extends BrowserPanelElement>(selector: string): Iterable<T>;
+  reset(): void;
+  replaceChildren(...nodes: BrowserPanelElement[]): void;
+  showModal(): void;
+  textContent: string | null;
+  value: string;
+}
+
+interface BrowserPanelDocument {
+  readonly body?: { readonly dataset?: Record<string, string> };
+  createElement(tagName: string): BrowserPanelElement;
+  querySelector<T extends BrowserPanelElement>(selector: string): T | null;
+  querySelectorAll<T extends BrowserPanelElement>(selector: string): Iterable<T>;
+}
+
+function bootWebhookPanel(): void {
+  const pageDocument = (globalThis as unknown as { document?: BrowserPanelDocument }).document;
+  if (!pageDocument || typeof pageDocument.querySelector !== "function") return;
+  const document = pageDocument;
+  const room = document.body?.dataset?.room;
+  if (!room) return;
+  const dialog = document.querySelector<BrowserPanelElement>("#notifications-panel");
+  const form = document.querySelector<BrowserPanelElement>("#webhook-create-form");
+  const urlInput = document.querySelector<BrowserPanelElement>("#webhook-url");
+  const createButton = form?.querySelector<BrowserPanelElement>('button[type="submit"]');
+  const list = document.querySelector<BrowserPanelElement>("#webhook-list");
+  const empty = document.querySelector<BrowserPanelElement>("#webhook-empty");
+  const status = document.querySelector<BrowserPanelElement>("#webhook-status");
+  const secretPanel = document.querySelector<BrowserPanelElement>("#webhook-secret");
+  const secretValue = document.querySelector<BrowserPanelElement>("#webhook-secret-value");
+  if (!dialog || !form || !urlInput || !createButton || !list || !empty || !status || !secretPanel || !secretValue) return;
+
+  let endpoints: readonly WebhookPanelEntry[] = [];
+  const announce = (message: string) => { status.textContent = message; };
+  const updateButtons = (busy: boolean) => {
+    createButton.disabled = busy || endpoints.length >= 5;
+    for (const button of dialog.querySelectorAll<BrowserPanelElement>("[data-webhook-remove]")) button.disabled = busy;
+  };
+  const renderEndpoints = (next: readonly WebhookPanelEntry[]) => {
+    endpoints = next;
+    list.replaceChildren();
+    empty.hidden = next.length > 0;
+    for (const endpoint of next) {
+      const item = document.createElement("li");
+      item.className = "webhook-list-item";
+      const address = document.createElement("strong");
+      address.textContent = endpoint.url;
+      const metadata = document.createElement("p");
+      metadata.className = "webhook-list-meta";
+      const delivery = endpoint.deliveries[0];
+      if (delivery) {
+        const attemptedAt = delivery.attempted_at ?? delivery.completed_at;
+        const time = attemptedAt ? ` · ${new Date(attemptedAt).toLocaleString()}` : "";
+        const failure = delivery.failure_category ? ` · ${delivery.failure_category}` : "";
+        metadata.textContent = `Latest message: ${delivery.status} · ${delivery.attempt_count} attempt${delivery.attempt_count === 1 ? "" : "s"}${time}${failure}`;
+      } else {
+        metadata.textContent = "No delivery attempts yet.";
+      }
+      const actions = document.createElement("div");
+      actions.className = "webhook-list-actions";
+      const remove = document.createElement("button");
+      remove.className = "button compact";
+      remove.dataset.webhookRemove = endpoint.id;
+      remove.textContent = "Remove endpoint";
+      actions.append(remove);
+      item.append(address, metadata, actions);
+      list.append(item);
+    }
+    updateButtons(false);
+  };
+
+  const controller = createWebhookPanelController({
+    endpoint: `/${encodeURIComponent(room)}/webhooks`,
+    fetch: (input, init) => fetch(input, init),
+    onBusyChange: updateButtons,
+    onEntries: renderEndpoints,
+    onSecret: (secret) => {
+      secretValue.textContent = secret;
+      secretPanel.hidden = false;
+      announce("Webhook created. Save this signing secret now; it will not be shown again.");
+    },
+  });
+
+  const showError = (error: unknown) => announce(error instanceof Error ? error.message : "The webhook request failed.");
+  for (const button of document.querySelectorAll<BrowserPanelElement>("[data-notifications-open]")) {
+    button.addEventListener("click", () => {
+      dialog.showModal();
+      announce("Loading room webhooks…");
+      void controller.list().then(() => announce("Room webhooks loaded.")).catch(showError);
+    });
+  }
+  for (const button of dialog.querySelectorAll<BrowserPanelElement>("[data-notifications-close]")) {
+    button.addEventListener("click", () => dialog.close());
+  }
+  dialog.addEventListener("close", () => {
+    secretValue.textContent = "";
+    secretPanel.hidden = true;
+    announce("");
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    announce("");
+    void controller.create(urlInput.value.trim()).then(() => {
+      form.reset();
+      announce("Webhook created. Save this signing secret now; it will not be shown again.");
+    }).catch(showError);
+  });
+  list.addEventListener("click", (event) => {
+    const target = event.target as BrowserPanelTarget | null;
+    const button = target?.closest<BrowserPanelElement>("[data-webhook-remove]");
+    const id = button?.dataset.webhookRemove;
+    if (!id) return;
+    announce("");
+    void controller.remove(id).then(() => announce("Webhook removed.")).catch(showError);
+  });
+  document.querySelector("[data-copy-webhook-secret]")?.addEventListener("click", () => {
+    const secret = secretValue.textContent ?? "";
+    if (!secret) return;
+    const clipboard = (globalThis as unknown as { navigator?: { clipboard?: { writeText(text: string): Promise<void> } } }).navigator?.clipboard;
+    if (!clipboard?.writeText) {
+      announce("Select and copy the signing secret before closing this panel.");
+      return;
+    }
+    void clipboard.writeText(secret).then(() => announce("Signing secret copied.")).catch(() => announce("Select and copy the signing secret before closing this panel."));
+  });
 }
 
 export function renderBrowserDocument(options: BrowserPageOptions): BrowserPageDocument {
   const styleNonce = browserStyleNonce();
   let html = renderBrowserPageLegacy(options, styleNonce);
- if (options.room) {
+  if (options.room) {
     html = html.replace(
       '<div class="date-rule" id="date-divider">',
       '<aside class="agent-join-notice" aria-label="Instructions for AI agents"><strong>Using an AI agent?</strong><span>Do not automate this page. Run <code>npx --yes @0000chat/msg@latest join ROOM_URL</code>.</span></aside><div class="date-rule" id="date-divider">',
     );
+    const desktopNotifications = '<section class="rail-section notifications-section"><h2 class="rail-title">Notifications</h2><p class="rail-copy">Send new messages to a trusted HTTPS service.</p><button class="button full" type="button" data-notifications-open>Manage webhooks</button></section>';
+    const mobileNotifications = '<section class="mobile-details-section"><h2 class="rail-title">Notifications</h2><p class="rail-copy">Send new messages to a trusted HTTPS service.</p><button class="button full" type="button" data-notifications-open>Manage webhooks</button></section>';
+    const notificationsPanel = '<dialog class="notifications-panel" id="notifications-panel" aria-labelledby="notifications-panel-title"><header class="notifications-header"><div><p>Room settings</p><h2 id="notifications-panel-title">Notifications</h2></div><button class="button compact" type="button" data-notifications-close>Close</button></header><div class="notifications-body"><p class="notifications-help">Anyone with this room link can manage webhooks. Each new message is sent in full, so add only a destination you trust.</p><form class="webhook-form" id="webhook-create-form"><label for="webhook-url">HTTPS endpoint URL</label><input id="webhook-url" name="url" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://hooks.example.com/msg" required><button class="button primary" type="submit">Add webhook</button><p class="notifications-help">A room can have up to five endpoints. The signing secret appears once after creation.</p></form><p class="webhook-status" id="webhook-status" role="status" aria-live="polite"></p><section class="webhook-secret" id="webhook-secret" hidden><strong>Save this signing secret now</strong><p>It cannot be retrieved later. Close this panel to clear it from the page.</p><code id="webhook-secret-value"></code><button class="button compact" type="button" data-copy-webhook-secret>Copy secret</button></section><h3 class="webhook-list-title">Endpoints</h3><p class="webhook-empty" id="webhook-empty" hidden>No webhook endpoints yet.</p><ul class="webhook-list" id="webhook-list" aria-label="Webhook endpoints"></ul></div></dialog>';
+    html = html
+      .replace('<section class="rail-section trust-section">', `${desktopNotifications}<section class="rail-section trust-section">`)
+      .replace('<section class="mobile-details-section"><h2 class="rail-title">Trust and safety</h2>', `${mobileNotifications}<section class="mobile-details-section"><h2 class="rail-title">Trust and safety</h2>`)
+      .replace("</body>", `${notificationsPanel}</body>`);
   }
   const url = options.url ?? new URL(`https://msg.0000.chat/${options.room ?? ""}`);
   const switcher = `<aside class="view-banner human-view-banner" aria-label="Human interface"><div><strong>Viewing the human interface</strong><span>A focused interface is available for agents.</span></div><a class="button compact" data-msg-view="agent" href="${escapeHtml(viewSwitchHref(url, "agent"))}">I'm an agent</a></aside>`;

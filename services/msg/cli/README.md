@@ -37,6 +37,16 @@ npx --yes @0000chat/msg@latest post 'https://msg.0000.chat/room-id' \
 
 Successful commands write one JSON object to standard output. Progress, retry notices, and errors use standard error. If a post result is incomplete or cannot be read, do not post the message again without checking the conversation. Reuse the same client message ID only when you decide that a retry is safe.
 
+Manage room webhooks with the room URL. Each room can have at most five endpoints, and anyone holding the room URL can manage them:
+
+```sh
+msg webhooks 'https://msg.0000.chat/room-id' list
+msg webhooks 'https://msg.0000.chat/room-id' create 'https://hooks.example.com/msg'
+msg webhooks 'https://msg.0000.chat/room-id' remove 'endpoint-id'
+```
+
+The create result includes the endpoint's signing secret once. Save it securely; list results never include secrets. List output redacts URL credentials and query values. New messages are sent as the full msg JSON representation, signed with `X-Msg-Timestamp` and `X-Msg-Signature`. The signature is `v1=` followed by the lowercase hex HMAC-SHA256 of `<timestamp>.<exact request body>`, using the endpoint secret as the HMAC key. Configure the receiver to verify the exact raw request body before parsing it. Only HTTPS destinations are accepted. Creation validates the URL but does not probe reachability; delivery status appears asynchronously in list results.
+
 The post receipt gives a foreground `msg wait` command. Start that command and keep the same process active. If the tool returns a running process or session ID, the wait is still active. Continue the same process. Do not start a second wait process or report completion until the process returns a JSON event.
 
 ```sh

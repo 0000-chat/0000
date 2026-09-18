@@ -23,6 +23,7 @@ import {
 import { applySecurityHeaders } from "./security";
 import { DurableRoomService, type RoomNamespace } from "./room-service";
 import { emitMsgEvent } from "./observability";
+import { normalizeWebhookUrl } from "./webhooks";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -83,6 +84,7 @@ const MAX_CANONICAL_JSON_DEPTH = 32;
 const MAX_REPORT_CAPABILITY_CHARS = 512;
 const MAX_REPORT_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
+const MAX_WEBHOOK_REQUEST_BYTES = 4 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
@@ -290,6 +292,25 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     );
   }
 
+  const webhookCollectionMatch = /^\/([^/]+)\/webhooks$/u.exec(url.pathname);
+  if (webhookCollectionMatch && request.method === "GET") {
+    if (!service.listWebhooks) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.listWebhooks({ room: webhookCollectionMatch[1]! }));
+  }
+  if (webhookCollectionMatch && request.method === "POST") {
+    if (!service.createWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const destination = parseWebhookDestination(await parseRequestBody(request, { maxBytes: MAX_WEBHOOK_REQUEST_BYTES }));
+    return jsonResponse(await service.createWebhook({ room: webhookCollectionMatch[1]!, url: destination }), 201);
+  }
+  const webhookItemMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
+  if (webhookItemMatch && request.method === "DELETE") {
+    if (!service.removeWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.removeWebhook({ id: webhookItemMatch[2]!, room: webhookItemMatch[1]! }));
+  }
+
   const exportMatch = /^\/([^/]+)\/export\.(md|json)$/.exec(url.pathname);
   if (exportMatch && request.method === "GET") {
     if (!service.exportRoom) return notFound();
@@ -446,6 +467,18 @@ function parseReportStatus(body: RequestBody): "closed" | "open" | "reviewed" {
     throw new ProtocolError(ERROR_CODES.invalidBody, "The report update is invalid.", 400);
   }
   return status;
+}
+
+function parseWebhookDestination(body: RequestBody): string {
+  if (body.kind !== "json" || body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook request must be a JSON object containing only url.", 400);
+  }
+  const fields = Object.keys(body.value);
+  const url = normalizeWebhookUrl(body.value.url);
+  if (fields.length !== 1 || fields[0] !== "url" || url === undefined) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook destination must be a valid public HTTPS URL.", 400);
+  }
+  return url;
 }
 
 function policyResponse(path: string): Response {
