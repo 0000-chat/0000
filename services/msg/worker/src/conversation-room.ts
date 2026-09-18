@@ -310,7 +310,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   /** This path is reachable only from the Worker-to-Durable-Object service boundary. */
   private async operatorDelete(): Promise<Response> {
     await this.expire(this.now(), "Conversation deleted by an operator");
-    const state = this.requireState();
+    this.requireState();
     await this.schedule();
     return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true });
   }
