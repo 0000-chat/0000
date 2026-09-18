@@ -63,6 +63,12 @@
     "services/streams": {
       "name": "@0000/streams",
       "version": "0.0.0",
+      "devDependencies": {
+        "@types/node": "22.20.3",
+        "oxlint": "1.82.0",
+        "typescript": "6.0.3",
+        "wrangler": "4.133.0",
+      },
     },
   },
   "packages": {

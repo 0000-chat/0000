@@ -6,6 +6,10 @@ Turborepo pinned for repeatable outer workspace checks. `services/communicator`
 contains the imported communication adapter application.
 `services/msg` contains the temporary conversation Worker and npm CLI. The
 `services/brain` contains the imported wiki and knowledge-service scaffold.
+`services/streams` contains the imported Cloudflare Worker application in
+active development. Its current Durable Object storage has not been verified
+against the declared `0000-database` dependency.
+
 Several other service directories remain scaffold placeholders.
 
 ## Service boundaries
@@ -41,11 +45,13 @@ bun run check:turbo:dry
 names, private publication safety, and retained directory markers.
 `check:turbo` runs each workspace check through Turbo, including the msg
 Worker, Wrangler tooling, and CLI checks, plus the Communicator relocation and
-tooling check; `check:turbo:dry` only prints the task graph. The Communicator
-application has its own nested pnpm workspace and checks; see
+tooling check; `check:turbo:dry` only prints the task graph. Run
+`bun run check:application` from `services/streams` for its app checks. The
+Communicator application has its own nested pnpm workspace and checks; see
 [`services/communicator/README.md`](services/communicator/README.md).
 
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
-[`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md)
+[`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),
+[`services/streams/docs/migration/2026-09-17-monorepo-import.md`](services/streams/docs/migration/2026-09-17-monorepo-import.md),
 and [`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).
