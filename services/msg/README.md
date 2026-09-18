@@ -38,6 +38,34 @@ start Miniflare in a Node-owned process and forward requests to workerd over
 loopback HTTP. The fixture uses Miniflare's `MF-Original-URL` bridge header to
 preserve the caller's URL.
 
+## Real browser notification smoke
+
+On Linux, run this service-local acceptance smoke with:
+
+    bun run browser:notifications
+
+It requires `dbus-run-session`, `Xvfb`, Python 3 with the system `dbus` and
+PyGObject (`gi`) modules, and Bun. The runner finds `chromium`,
+`chromium-browser`, `google-chrome`, or `google-chrome-stable` on `PATH`; set
+`MSG_CHROME_BIN` to a cached Chromium executable when none of those names are
+available. Set `MSG_PYTHON_BIN` to choose a Python executable. The browser
+profile and loopback server are temporary and are removed when the run ends.
+
+The smoke serves the Worker's `pushServiceWorkerResponse()` output unchanged,
+registers it in Chromium, closes the room tab, then uses CDP
+`ServiceWorker.deliverPushMessage` to inject the documented push payload. This
+simulates delivery at the browser boundary; it does not test a push provider,
+VAPID signing, or Web Push encryption. It checks Chromium's actual notification
+title, empty `Notification.body`, tag, and room URL. An isolated
+`org.freedesktop.Notifications` service emits `ActionInvoked(default)` so
+Chromium dispatches the native notification click and opens the room through
+its real service-worker client API. This activates the native bridge
+programmatically; it is not a physical desktop click. The bridge reports only
+booleans comparing any platform body metadata with the temporary origin, app
+name, title, page title, and room path, plus whether its characters are
+invisible. The browser `Notification.body` check is the preview-free
+assertion.
+
 ## Wrangler
 
 The service config is wrangler.jsonc. The local helper replaces the D1

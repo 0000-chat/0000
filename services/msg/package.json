@@ -10,6 +10,7 @@
     "check:worker": "bun run assets:mermaid && bun run --cwd worker check:application",
     "check:tooling": "bun test scripts",
     "check:cli": "bun run --cwd cli check:application",
+    "browser:notifications": "dbus-run-session -- bun scripts/push-notification-browser-smoke.mjs",
     "wrangler:types": "bun scripts/wrangler-config.ts types worker/worker-configuration.d.ts --include-runtime=true",
     "wrangler": "bun scripts/wrangler-config.ts",
     "assets:mermaid": "bun scripts/mermaid-asset.ts",
