@@ -2,8 +2,10 @@
 
 Start here when working on Platform. This document defines its scope and
 ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
-agreed first authentication MVP and its acceptance gates. Its status is not
-implemented; a design or fixture is not evidence of working authentication.
+agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
+records the bounded Worker/D1 investigation. The full MVP is not implemented
+or accepted; the T01 probe does not establish production readiness or consumer
+adoption.
 
 ## Purpose and deployment
 
@@ -142,13 +144,19 @@ local work; Platform cannot retract data already cached on a device.
 
 ## Status and first outcome
 
-As of 2026-09-18, Platform and packages/contracts and packages/platform-client
-are metadata-only scaffolds, not a working shared auth implementation. Database
-is also a scaffold. Communicator and the message service have existing auth
-paths that the MVP must move to the shared Platform path while leaving resource
-ACLs local. No apps/0000 implementation was found, so its login and offline-sync
-integration is neither implemented nor required for this MVP. Platform's own
-account UI is in scope.
+As of 2026-09-19, Platform has a bounded Worker/D1 T01 investigation in
+services/platform and runnable principal/client contracts in
+packages/contracts and packages/platform-client. Its real Better Auth callback,
+credential verifier and guest-grant route are exercised through local Worker
+tests; the external GitHub HTTP boundary and protected resource service are
+fixtures. This is evidence for the first slice, not a deployed identity service
+or a complete shared-auth integration. The account UI, lifecycle administration,
+OAuth installation state, production service provisioning and consumer adoption
+remain unimplemented. Database is also a scaffold. Communicator and the message
+service have existing auth paths that the MVP must move to the shared Platform
+path while leaving resource ACLs local. No apps/0000 implementation was found,
+so its login and offline-sync integration is neither implemented nor required
+for this MVP. Platform's own account UI is in scope.
 
 The MVP outcome is a user who signs in, manages an organization and grants,
 connects a harness or obtains a scoped API credential, and uses existing

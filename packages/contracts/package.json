@@ -2,8 +2,13 @@
   "name": "@0000/contracts",
   "private": true,
   "version": "0.0.0",
-  "description": "Placeholder for shared 0000 service contracts.",
+  "description": "Versioned shared contracts for 0000 services.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/contracts"
+    "check": "bun run typecheck && bun run test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler src/index.ts"
   }
 }

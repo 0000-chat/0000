@@ -1,12 +1,14 @@
 # Platform authentication MVP
 
-Date: 2026-09-18. Status: agreed MVP design, not implemented.
+Date: 2026-09-19. Status: agreed MVP design; full MVP not implemented.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the first implementation.
 Implementation details marked for validation must be proven against the selected
-Better Auth version and Workers/D1 runtime. The current Platform, contracts and
-client are scaffolds; the design below is not a claim of working authentication.
+Better Auth version and Workers/D1 runtime. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
+records the current probe evidence and unresolved decisions. That bounded probe
+does not complete the design's acceptance gates or establish production
+authentication.
 
 ## MVP outcome and deployment
 
@@ -271,22 +273,29 @@ production adoption is tracked separately and cannot be claimed from a fixture.
 
 ## Technical validation still required
 
-The product decisions above are settled. The following implementation details
-must be selected and verified rather than inferred from documentation alone:
+The product decisions above are settled. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
+records the pinned versions and the flows exercised in Workers/D1. The following
+items remain open and must be verified rather than inferred from documentation
+alone:
 
-- Pin compatible Better Auth, social-provider, OAuth-provider and D1 adapter
-  versions. Prove the selected OAuth implementation can meet the required
-  PKCE, consent, refresh-reuse and revocation behavior; choose another standard
-  OAuth server component if it cannot.
-- Run against the actual Workers/D1 runtime. Verify transaction/atomicity and
-  authoritative-read behavior for default organizations, final-owner protection
-  and refresh rotation. The system SQLite API alone is not proof of D1 behavior.
-- Define the wire schema, exact route and transport details, service-verifier
-  bootstrap process, OAuth token lifetimes, and guest-proof/grant exchange based
-  on those tests. Preserve the requirements above without freezing speculative
-  endpoint names or accepting caller-supplied authority.
+- The pinned OAuth Provider passes a sequential D1 PKCE/code/refresh-reuse
+  probe. Its family invalidation is a sequence of adapter deletes with a
+  concurrent race documented in the pinned source. T06/T07 must add authoritative
+  Platform installation/grant checks and prove concurrent replay and revocation
+  before OAuth acceptance.
+- A real Miniflare runtime restart preserves a bounded guest grant and resource
+  fixture in persistent D1. Human login/session is proven across fresh Better
+  Auth instances and requests, but a human-session process restart, concurrent
+  signup, final-owner protection and OAuth rotation races remain unproven.
+- The versioned principal, verification route, service registration fixture,
+  service-verifier bootstrap and guest-grant exchange are candidate T01
+  contracts. OAuth access tokens are configured as opaque and hashed, but are
+  not yet normalized through `/internal/v1/authenticate` or bound to a Platform
+  installation. T06/T07 must resolve that seam without caller-supplied
+  authority.
 - Confirm managed configuration's real owning workspace and keep runtime
   anonymous enforcement independent of a Cloud network call.
 
-Until those checks and acceptance gates pass, Platform authentication remains
-unimplemented.
+The full Platform authentication MVP remains unimplemented until the complete
+acceptance gates pass. T01 evidence is limited to the flows and fixtures named in
+its report.

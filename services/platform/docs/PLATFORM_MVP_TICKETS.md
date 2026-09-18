@@ -1,6 +1,6 @@
 # Platform MVP ticket proposal
 
-**Status:** Published as issues #55–#69. No implementation has begun. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
+**Status:** Published as issues #55–#69. The T01 investigation code and report are on `codex/platform-t01` for parent review; no later ticket is complete. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
 
 | Slice | Published issue | Title | Label |
 | --- | --- | --- | --- |
@@ -36,17 +36,17 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T01. Trace runtime and resolve the first auth contracts
 
-**Readiness:** First-slice candidate after approval of this breakdown.
+**Readiness:** T01 probe implementation is awaiting review. It is not the complete auth MVP or production acceptance.
 
 **Blocked by (contract):** None; investigation scope is bounded by the accepted MVP.
 
-**Change:** Build one runnable Worker/D1 trace from human sign-in and retry-safe default organization through a candidate shared verifier to a protected resource fixture. Add narrow executable feasibility probes for OAuth lifecycle support and guest-bootstrap-to-resource-grant exchange. Record evidence and candidate decisions; do not claim a production integration or freeze downstream public contracts.
+**Change:** Implemented one runnable Worker/D1 trace from human sign-in and retry-safe default organization through a candidate shared verifier to a protected resource fixture. Added a Miniflare D1 restart probe and narrow OAuth lifecycle and guest-bootstrap-to-resource-grant probes. [T01_RUNTIME_REPORT.md](../T01_RUNTIME_REPORT.md) records the evidence, candidate decisions and unresolved production blockers; this does not claim production integration or freeze downstream public contracts.
 
-**Existing pattern:** Worker/D1 runtime conventions, Communicator's human/install separation and msg's observable HTTP behavior. Platform itself has no working auth path.
+**Existing pattern:** Worker/D1 runtime conventions, Communicator's human/install separation and msg's observable HTTP behavior. Platform now has an experimental test path, but no deployed identity service or production consumer path.
 
 **Open decisions:** None for the investigation scope. Capture pinned runtime/component versions, principal/error/verifier/bootstrap/OAuth/guest grant-proof findings for parent review; no new user policy vote.
 
-**Verification:** Run on Workers/D1. Demonstrate one protected request, retry/restart behavior and current-state denial; report which technical findings are proven and which remain unresolved. T02–T15 stay non-ready until that record is reviewed.
+**Verification:** Local Workers/D1 tests exercise one protected request, membership and revocation denial, receipt-based organization retries, a persistent Miniflare runtime restart, sequential OAuth refresh reuse and a bounded guest grant. The report distinguishes proven behavior from unresolved concurrency, installation-binding and deployment work. Contract-dependent tickets remain blocked pending review of those findings.
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
@@ -246,4 +246,4 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ## Publication and execution
 
-The breakdown is published; implementation has not begun. T01 findings are implementation evidence for parent review, not a new policy interview. Dispatch T01 first. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.
+The breakdown is published. T01's implementation evidence is awaiting parent review, not a new policy interview. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.

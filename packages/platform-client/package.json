@@ -2,8 +2,16 @@
   "name": "@0000/platform-client",
   "private": true,
   "version": "0.0.0",
-  "description": "Placeholder for a client for the 0000 Platform service.",
+  "description": "Portable HTTP verification client for the 0000 Platform authority.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@0000/contracts": "workspace:*"
+  },
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/platform-client"
+    "check": "bun run typecheck && bun run test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM src/index.ts"
   }
 }

@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "platform-t01-probe",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "IDENTITY_DB",
+      "database_name": "platform-identity",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "PLATFORM_BASE_URL": "http://localhost",
+    "PLATFORM_AUTHORITY_ID": "platform-t01-authority",
+    "GITHUB_CLIENT_ID": "platform-t01-probe",
+    "GITHUB_CLIENT_SECRET": "local-probe-only",
+    "BETTER_AUTH_SECRET": "local-probe-secret-not-for-deployment"
+  }
+}
