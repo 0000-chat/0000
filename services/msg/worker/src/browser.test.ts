@@ -33,6 +33,29 @@ test("renders eligible closed Mermaid fences with escaped source and preserves s
   expect(html.match(/class="message-mermaid-error" role="status" hidden/g)).toHaveLength(2);
 });
 
+test("allows attribute-free br label breaks while rejecting other HTML", () => {
+  const htmlFor = (source: string) => renderMarkdown(["```mermaid", source, "```"].join("\n"));
+  const supportedSources = [
+    "flowchart TD\n  A[First<br>Second] --> B",
+    "flowchart LR\n  A[First<br/>Second] --> B",
+    "sequenceDiagram\n  Alice->>Bob: first<br />second",
+  ];
+  const rejectedSources = [
+    'flowchart TD\n  A[First<br class="label">Second] --> B',
+    "flowchart TD\n  A[First<span>Second</span>] --> B",
+    'flowchart TD\n  A[<img src="https://example.test/image.svg">] --> B',
+  ];
+
+  for (const source of supportedSources) {
+    const html = htmlFor(source);
+    expect(html).toContain('data-mermaid-block="true"');
+    expect(html).toContain("&lt;br");
+  }
+  for (const source of rejectedSources) {
+    expect(htmlFor(source)).not.toContain('data-mermaid-block="true"');
+  }
+});
+
 test("keeps unclosed, empty, unsupported, and resource-capable Mermaid source readable", () => {
   const html = renderMarkdown([
     "```mermaid",

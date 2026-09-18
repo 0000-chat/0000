@@ -2,7 +2,7 @@
 
 Closed code fences labelled `mermaid` render in the human conversation view. The language label is case-insensitive. The current supported diagram families are flowcharts (`flowchart` or `graph` with an optional direction for `flowchart`) and sequence diagrams (`sequenceDiagram`). Other Mermaid diagram families keep their source and show a short unavailable notice. Unclosed fences remain ordinary code blocks.
 
-The renderer accepts a deliberately restricted source subset. It rejects Mermaid directives and frontmatter, HTML labels, custom class/style rules, click and link directives, image/icon nodes, URL schemes, and CSS `url(...)` forms before calling Mermaid. This keeps Mermaid configuration and resource-loading syntax out of the runtime. Empty, oversized, unsupported, malformed, or unsafe output leaves the escaped source open under a “Show source” disclosure. Successful diagrams close that disclosure; readers can open it to inspect the original text. Message storage, API contracts, agent views, CLI output, and Markdown exports continue to use the original message content.
+The renderer accepts a deliberately restricted source subset. It allows attribute-free `<br>` line breaks in labels, including the self-closing form, and rejects all other HTML labels. It also rejects Mermaid directives and frontmatter, custom class/style rules, click and link directives, image/icon nodes, URL schemes, and CSS `url(...)` forms before calling Mermaid. These exclusions keep Mermaid configuration and external resource loading out of the runtime. Empty, oversized, unsupported, malformed, or unsafe output leaves the escaped source open under a “Show source” disclosure. Successful diagrams close that disclosure; readers can open it to inspect the original text. Message storage, API contracts, agent views, CLI output, and Markdown exports continue to use the original message content.
 
 | Limit | Value |
 | --- | ---: |
@@ -12,7 +12,7 @@ The renderer accepts a deliberately restricted source subset. It rejects Mermaid
 | Source lines per block | 200 |
 | Diagrams rendered in one transcript | 20 |
 | Mermaid edges | 100 |
-| Returned SVG | 100,000 bytes |
+| Returned SVG | 256 KiB |
 | Renderer stylesheet | 32 KiB |
 | Intrinsic SVG width and height | 10,000 units each |
 
@@ -24,4 +24,4 @@ The client initializes Mermaid with `securityLevel: "strict"`, `htmlLabels: fals
 
 Each transcript rebuild receives a new generation. Async results from an older rebuild are discarded, each diagram gets a distinct identifier, and rendering runs after initial reads, live refreshes, successful posts, and theme changes. Mermaid receives the current light or dark theme. After layout, the client rechecks long-message collapse and preserves the reader's position when the reader is away from the latest message.
 
-Feature tests remain within the existing Markdown renderer unit-test boundary, as requested. They cover closed and case-insensitive fences, flowchart and sequence source recognition, multiple blocks, surrounding Markdown and code, escaped source, unsafe or unsupported forms, limits, and fresh page nonces. The pinned Mermaid parser cannot run in the current Bun test runtime: its isomorphic DOMPurify adapter fails because `DOMPurify.addHook` is unavailable there. As a result, those tests verify message recognition and fallback markup, not Mermaid's actual layout. Browser layout, actual generated SVG through the sanitizer, keyboard interaction, theme repainting, live DOM updates, runtime asset requests, and browser CSP enforcement are not covered by automated tests in this change.
+Feature tests remain within the existing Markdown renderer unit-test boundary, as requested. They cover closed and case-insensitive fences, flowchart and sequence source recognition, attribute-free `<br>` label breaks, rejected HTML with attributes or other tags, multiple blocks, surrounding Markdown and code, escaped source, limits, and fresh page nonces. The pinned Mermaid parser cannot run in the current Bun test runtime: its isomorphic DOMPurify adapter fails because `DOMPurify.addHook` is unavailable there. As a result, those tests verify message recognition and fallback markup, not Mermaid's actual layout. Browser layout, actual generated SVG through the sanitizer, keyboard interaction, theme repainting, live DOM updates, runtime asset requests, and browser CSP enforcement are not covered by automated tests in this change.
