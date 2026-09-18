@@ -206,6 +206,7 @@ test("migrates a capped legacy room before its old alarm can expire it", async (
   const oldAbsolute = start + 30 * DAY_MS;
   database.query("DELETE FROM messages").run();
   database.query("DELETE FROM room_state").run();
+  database.exec("DROP TABLE push_deliveries; DROP TABLE push_subscriptions; ALTER TABLE messages DROP COLUMN source_browser_id;");
   database.exec("DROP TABLE webhook_delivery_attempts; DROP TABLE webhook_deliveries; DROP TABLE webhook_endpoints;");
   database.query("UPDATE room_schema SET version = 2").run();
   database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash) VALUES (1, 2, 1, ?, ?, ?, ?, 2, 1, 5, 'active', NULL, 'hash')").run(start, lastMessageAt, oldAbsolute, oldAbsolute);

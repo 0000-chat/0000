@@ -105,6 +105,30 @@ async function handleTestControl(request, response) {
     response.end(body);
     return true;
   }
+  if (path === "/__test/push-send-gate" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || !["arm", "wait", "release"].includes(value.action) || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/push-send-gate", {
+      body: JSON.stringify({ action: value.action }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
   if (path === "/__test/mark-webhook-sending" && request.method === "POST") {
     let value;
     try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
@@ -259,10 +283,11 @@ async function start(configuration) {
       host: "127.0.0.1",
       modules: true,
       outboundService: async (request) => {
-        const body = await request.text();
+        const bodyBytes = Buffer.from(await request.arrayBuffer());
         const responseConfig = outboundResponse;
         const captured = {
-          body,
+          body: bodyBytes.toString("utf8"),
+          body_base64: bodyBytes.toString("base64"),
           headers: Object.fromEntries(request.headers.entries()),
           method: request.method,
           url: request.url,

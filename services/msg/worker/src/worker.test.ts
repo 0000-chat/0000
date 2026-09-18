@@ -250,7 +250,7 @@ test("serves the Notifications panel and its controller on a human room page", a
       share_message: "Join",
       wait: waitMetadata(conversationUrl, 1),
     }),
-  });
+  }, { pushConfigured: true, pushVapidPublicKey: "public-key" });
 
   const page = await worker.fetch(new Request(`${conversationUrl}?view=human`, { headers: { accept: "text/html" } }));
   const html = await page.text();
@@ -258,14 +258,118 @@ test("serves the Notifications panel and its controller on a human room page", a
   const script = await asset.text();
 
   expect(page.status).toBe(200);
-  expect(html).toContain('data-notifications-open>Manage webhooks</button>');
+  expect(html).toContain('data-notifications-open>Manage notifications</button>');
   expect(html).toContain('id="notifications-panel"');
+  expect(html).toContain('data-push-public-key="public-key"');
+  expect(html).toContain('id="push-status"');
   expect(script).toContain("createWebhookPanelController");
+  expect(script).toContain("createPushEnrollmentController");
+  expect(script).toContain("/_msg/push-service-worker.js");
   expect(script).toContain("data-webhook-remove");
   expect(script).toContain("Last success:");
   expect(script).toContain("Last failure:");
   expect(script).toContain("Recovery:");
   expect(script).toContain("Attempt history:");
+});
+
+test("serves the registered push worker with root scope and safe cache/content headers", async () => {
+  const worker = createWorker({ create: async () => createdRoom });
+  const response = await worker.fetch(new Request("https://msg.0000.chat/_msg/push-service-worker.js"));
+  const source = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/javascript");
+  expect(response.headers.get("service-worker-allowed")).toBe("/");
+  expect(response.headers.get("cache-control")).toContain("no-store");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(source).toContain('"New message in msg"');
+  expect(source).toContain('self.addEventListener("push"');
+  expect(source).toContain('self.addEventListener("notificationclick"');
+});
+
+test("validates browser identity at room push routes while preserving anonymous room posts", async () => {
+  const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
+  const browserId = "123e4567-e89b-42d3-a456-426614174000";
+  const observed: Array<{ browserId?: string; room: string; subscription?: { auth: string; endpoint: string; p256dh: string } }> = [];
+  const worker = createWorker({
+    create: async () => createdRoom,
+    readPushEnrollment: async (input) => {
+      observed.push({ browserId: input.browserId, room: input.room });
+      return { enrolled: true, protocol_version: 1 };
+    },
+    enrollPush: async (input) => {
+      observed.push({ browserId: input.browserId, room: input.room, subscription: input.subscription });
+      return { enrolled: true, protocol_version: 1 };
+    },
+    removePushEnrollment: async (input) => {
+      observed.push({ browserId: input.browserId, room: input.room });
+      return { protocol_version: 1, removed: true };
+    },
+    post: async (input) => {
+      observed.push({ ...(input.browserId ? { browserId: input.browserId } : {}), room: input.room });
+      return postedMessage();
+    },
+  }, { pushConfigured: true, pushVapidPublicKey: "public-key" });
+  const base = "https://msg.0000.chat/example-room";
+
+  for (const header of [undefined, "not-a-uuid"]) {
+    const response = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+      headers: header === undefined ? { accept: "application/json" } : { accept: "application/json", "x-msg-browser-id": header },
+    }));
+    expect(response.status).toBe(400);
+  }
+  const upperBrowserId = browserId.toUpperCase();
+  const status = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+    headers: { accept: "application/json", "x-msg-browser-id": upperBrowserId },
+  }));
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+  const enrolled = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+    body: JSON.stringify({
+      endpoint: "https://push.example.net/push/subscription-token",
+      expirationTime: null,
+      keys: {
+        auth: "BTBZMqHH6r4Tts7J_aSIgg",
+        p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+      },
+    }),
+    headers: { ...jsonHeaders, "x-msg-browser-id": upperBrowserId },
+    method: "POST",
+  }));
+  expect(enrolled.status).toBe(201);
+  const removed = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+    headers: { accept: "application/json", "x-msg-browser-id": upperBrowserId }, method: "DELETE",
+  }));
+  expect(removed.status).toBe(200);
+
+  const anonymousPost = await worker.fetch(new Request(base, {
+    body: JSON.stringify({ author: "Anonymous", content: "hello" }),
+    headers: jsonHeaders,
+    method: "POST",
+  }));
+  expect(anonymousPost.status).toBe(201);
+  const invalidIdentityPost = await worker.fetch(new Request(base, {
+    body: JSON.stringify({ author: "Anonymous", content: "hello" }),
+    headers: { ...jsonHeaders, "x-msg-browser-id": "invalid" },
+    method: "POST",
+  }));
+  expect(invalidIdentityPost.status).toBe(400);
+
+  expect(observed).toEqual([
+    { browserId, room: "example-room" },
+    {
+      browserId,
+      room: "example-room",
+      subscription: {
+        auth: "BTBZMqHH6r4Tts7J_aSIgg",
+        endpoint: "https://push.example.net/push/subscription-token",
+        p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+      },
+    },
+    { browserId, room: "example-room" },
+    { room: "example-room" },
+  ]);
 });
 
 test("does not apply the browser preference to JSON room reads", async () => {

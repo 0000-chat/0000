@@ -1,8 +1,10 @@
 import { rm } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { createDecipheriv, createECDH, createHmac, createPublicKey, verify } from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
 import WebSocketClient from "ws";
 
-import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS, TEST_VAPID_PUBLIC_KEY, TEST_VAPID_SUBJECT } from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
 
@@ -51,6 +53,8 @@ async function withSharedRuntime(run: (miniflare: Awaited<ReturnType<typeof star
 async function withRuntime(
   run: (miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"]) => Promise<void>,
   limits?: typeof SHORT_LIVED_TEST_ROOM_LIMITS,
+  nowMs?: number,
+  testMode = true,
 ) {
   // A Miniflare runtime owns the process-wide workerd test slot. The shared
   // default runtime must close before a test starts with different limits.
@@ -60,7 +64,7 @@ async function withRuntime(
   let failed = false;
   let failure: unknown;
   try {
-    fixture = await startMsgMiniflare(persistenceDirectory, limits);
+    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(nowMs === undefined ? {} : { nowMs }), testMode });
     await run(fixture.miniflare);
   } catch (error) {
     failed = true;
@@ -145,10 +149,10 @@ async function createRoom(miniflare: Awaited<ReturnType<typeof startMsgMiniflare
   return await response.json() as { conversation_url: string; manage_url: string; room: { id: string } };
 }
 
-async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string) {
+async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string, browserId?: string) {
   return miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, {
     body: JSON.stringify({ content, author: "beta", display_name: "Beta", semantic_type: "message" }),
-    headers: { ...jsonHeaders, ...(idempotencyKey !== undefined ? { "idempotency-key": idempotencyKey } : {}) },
+    headers: { ...jsonHeaders, ...(idempotencyKey !== undefined ? { "idempotency-key": idempotencyKey } : {}), ...(browserId !== undefined ? { "x-msg-browser-id": browserId } : {}) },
     method: "POST",
   });
 }
@@ -304,6 +308,414 @@ async function verifyWebhookSignature(secret: string, timestamp: string, body: s
   if (!digest) return false;
   return await crypto.subtle.verify("HMAC", key, new Uint8Array(digest), new TextEncoder().encode(`${timestamp}.${body}`));
 }
+
+function decodeBase64Url(value: string): Uint8Array {
+  return new Uint8Array(Buffer.from(value.replaceAll("-", "+").replaceAll("_", "/"), "base64"));
+}
+
+function encodeBase64Url(value: Uint8Array): string {
+  return Buffer.from(value).toString("base64url");
+}
+
+function decryptWebPushBody(body: Uint8Array, receiverPrivateKey: Uint8Array, authSecret: Uint8Array): Uint8Array {
+  if (body.byteLength < 103 || body[20] !== 65) throw new Error("The encrypted push body has an invalid header.");
+  if (Buffer.from(body).readUInt32BE(16) !== 4096) throw new Error("The encrypted push body has an unexpected record size.");
+  const salt = Buffer.from(body.subarray(0, 16));
+  const senderPublicKey = Buffer.from(body.subarray(21, 86));
+  const ciphertextAndTag = Buffer.from(body.subarray(86));
+  const receiver = createECDH("prime256v1");
+  receiver.setPrivateKey(Buffer.from(receiverPrivateKey));
+  const sharedSecret = receiver.computeSecret(senderPublicKey);
+  const receiverPublicKey = derivePublicKey(receiverPrivateKey);
+  const authPrk = hmacSha256(Buffer.from(authSecret), sharedSecret);
+  const inputKeyMaterial = hkdfExpand(authPrk, Buffer.concat([Buffer.from("WebPush: info\0"), receiverPublicKey, senderPublicKey]), 32);
+  const contentPrk = hmacSha256(salt, inputKeyMaterial);
+  const key = hkdfExpand(contentPrk, Buffer.from("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = hkdfExpand(contentPrk, Buffer.from("Content-Encoding: nonce\0"), 12);
+  const decipher = createDecipheriv("aes-128-gcm", key, nonce, { authTagLength: 16 });
+  decipher.setAuthTag(ciphertextAndTag.subarray(ciphertextAndTag.byteLength - 16));
+  const plaintext = Buffer.concat([
+    decipher.update(ciphertextAndTag.subarray(0, ciphertextAndTag.byteLength - 16)),
+    decipher.final(),
+  ]);
+  if (plaintext.at(-1) !== 0x02) throw new Error("The encrypted push body has an invalid padding delimiter.");
+  return new Uint8Array(plaintext.subarray(0, plaintext.byteLength - 1));
+}
+
+function derivePublicKey(privateKey: Uint8Array): Buffer {
+  const ecdh = createECDH("prime256v1");
+  ecdh.setPrivateKey(Buffer.from(privateKey));
+  return ecdh.getPublicKey(undefined, "uncompressed");
+}
+
+function hmacSha256(key: Uint8Array, data: Uint8Array): Buffer {
+  return createHmac("sha256", key).update(data).digest();
+}
+
+function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Buffer {
+  const output: Buffer[] = [];
+  let previous = Buffer.alloc(0);
+  let outputLength = 0;
+  for (let counter = 1; outputLength < length; counter += 1) {
+    previous = hmacSha256(prk, Buffer.concat([previous, Buffer.from(info), Buffer.from([counter])]));
+    output.push(previous);
+    outputLength += previous.byteLength;
+  }
+  return Buffer.concat(output).subarray(0, length);
+}
+
+function verifyVapidAuthorization(authorization: string, endpoint: string, nowSeconds: number): void {
+  const matched = /^vapid t=([^,]+), k=([A-Za-z0-9_-]+)$/u.exec(authorization);
+  expect(matched).not.toBeNull();
+  const token = matched![1]!;
+  const publicKeyParameter = matched![2]!;
+  const [encodedHeader, encodedClaims, encodedSignature] = token.split(".");
+  expect(encodedHeader).toBeDefined();
+  expect(encodedClaims).toBeDefined();
+  expect(encodedSignature).toBeDefined();
+  const publicKey = decodeBase64Url(TEST_VAPID_PUBLIC_KEY);
+  const x = encodeBase64Url(publicKey.subarray(1, 33));
+  const y = encodeBase64Url(publicKey.subarray(33, 65));
+  expect(publicKeyParameter).toBe(TEST_VAPID_PUBLIC_KEY);
+  expect(JSON.parse(Buffer.from(decodeBase64Url(encodedHeader!)).toString("utf8"))).toEqual({ alg: "ES256", typ: "JWT" });
+  const claims = JSON.parse(Buffer.from(decodeBase64Url(encodedClaims!)).toString("utf8")) as { aud: string; exp: number; sub: string };
+  expect(claims.aud).toBe(new URL(endpoint).origin);
+  expect(claims.sub).toBe(TEST_VAPID_SUBJECT);
+  expect(claims.exp).toBeGreaterThanOrEqual(nowSeconds + 12 * 60 * 60 - 5);
+  expect(claims.exp).toBeLessThanOrEqual(nowSeconds + 12 * 60 * 60);
+  expect(verify(
+    "sha256",
+    Buffer.from(`${encodedHeader}.${encodedClaims}`),
+    { key: createPublicKey({ key: { crv: "P-256", kty: "EC", x, y }, format: "jwk" }), dsaEncoding: "ieee-p1363" },
+    Buffer.from(decodeBase64Url(encodedSignature!)),
+  )).toBe(true);
+}
+
+const pushReceiver = {
+  auth: "BTBZMqHH6r4Tts7J_aSIgg",
+  endpoint: "https://push.example.net/push/subscription-token",
+  p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+  privateKey: "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94",
+} as const;
+
+function nativePushSubscription(receiver: { readonly auth: string; readonly endpoint: string; readonly p256dh: string }) {
+  return { expirationTime: null, endpoint: receiver.endpoint, keys: { auth: receiver.auth, p256dh: receiver.p256dh } };
+}
+
+async function enrollPush(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  room: string,
+  browserId: string,
+  receiver: { readonly auth: string; readonly endpoint: string; readonly p256dh: string } = pushReceiver,
+) {
+  return await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/push-subscriptions`, {
+    body: JSON.stringify(nativePushSubscription(receiver)),
+    headers: { ...jsonHeaders, "x-msg-browser-id": browserId },
+    method: "POST",
+  });
+}
+
+async function readPushStatus(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  room: string,
+  browserId: string,
+) {
+  return await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/push-subscriptions`, {
+    headers: { accept: "application/json", "x-msg-browser-id": browserId },
+  });
+}
+
+test.serial("push send barriers stay unavailable outside test mode and public Worker routes", { timeout: 15_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    let error: unknown;
+    try { await miniflare.armPushSendGate("uninitialized-room"); } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("HTTP 404");
+
+    const response = await miniflare.dispatchFetch("https://msg.0000.chat/uninitialized-room/__test/push-send-gate", {
+      body: JSON.stringify({ action: "arm" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(response.status).toBe(404);
+  }, TEST_ROOM_LIMITS, undefined, false);
+});
+
+test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTTP and the SQLite alarm queue", { timeout: 15_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before push enrollment");
+    const browserId = crypto.randomUUID();
+    const enrollment = await initial.dispatchFetch(`https://msg.0000.chat/${room.id}/push-subscriptions`, {
+      body: JSON.stringify({ expirationTime: null, endpoint: pushReceiver.endpoint, keys: { auth: pushReceiver.auth, p256dh: pushReceiver.p256dh } }),
+      headers: { ...jsonHeaders, "x-msg-browser-id": browserId },
+      method: "POST",
+    });
+    expect(enrollment.status).toBe(201);
+    expect(await enrollment.json()).toMatchObject({ enrolled: true });
+
+    const status = await initial.dispatchFetch(`https://msg.0000.chat/${room.id}/push-subscriptions`, {
+      headers: { accept: "application/json", "x-msg-browser-id": browserId },
+    });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+    const posted = await post(initial, room.id, "private message preview must stay encrypted", "push-message-key", browserId);
+    expect(posted.status).toBe(201);
+    const message = await posted.json() as { message: { id: string; sequence: number }; replayed: boolean };
+    expect(message.replayed).toBe(false);
+
+    const miniflare = await restart(fakeNow + 500);
+    await miniflare.triggerAlarm(room.id);
+    const requests = await waitForOutboundRequests(miniflare, 1, 5_000);
+    expect(requests).toHaveLength(1);
+    const request = requests[0]!;
+    expect(request.url).toBe(pushReceiver.endpoint);
+    expect(request.method).toBe("POST");
+    expect(request.headers["content-encoding"]).toBe("aes128gcm");
+    expect(request.headers["content-type"]).toBe("application/octet-stream");
+    expect(Number(request.headers.ttl)).toBeGreaterThanOrEqual(86_399);
+    expect(Number(request.headers.ttl)).toBeLessThanOrEqual(86_400);
+    verifyVapidAuthorization(request.headers.authorization!, pushReceiver.endpoint, Math.floor(fakeNow / 1_000));
+
+    const decrypted = decryptWebPushBody(
+      new Uint8Array(Buffer.from(request.body_base64, "base64")),
+      decodeBase64Url(pushReceiver.privateKey),
+      decodeBase64Url(pushReceiver.auth),
+    );
+    const payload = JSON.parse(Buffer.from(decrypted).toString("utf8")) as Record<string, unknown>;
+    expect(payload).toEqual({
+      room_id: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+      room_url: `https://msg.0000.chat/${room.id}`,
+      type: "message.created",
+    });
+    expect(payload).not.toHaveProperty("content");
+    expect(payload).not.toHaveProperty("message");
+    expect(payload).not.toHaveProperty("browser_id");
+    expect(JSON.stringify(payload)).not.toContain("private message preview");
+    expect(request.body).not.toContain("private message preview");
+    expect(message.message.sequence).toBe(2);
+
+    const replay = await post(miniflare, room.id, "private message preview must stay encrypted", "push-message-key", browserId);
+    expect(replay.status).toBe(201);
+    expect((await replay.json() as { replayed: boolean }).replayed).toBe(true);
+    expect(await waitForOutboundRequests(miniflare, 1)).toHaveLength(1);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("removes one room enrollment while preserving the same browser subscription in another room", { timeout: 15_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRuntime(async (miniflare) => {
+    const firstRoom = await createRoom(miniflare, "first room before enrollment");
+    const secondRoom = await createRoom(miniflare, "second room before enrollment");
+    const browserId = crypto.randomUUID();
+
+    expect((await enrollPush(miniflare, firstRoom.room.id, browserId)).status).toBe(201);
+    expect((await enrollPush(miniflare, secondRoom.room.id, browserId)).status).toBe(201);
+    expect(await (await readPushStatus(miniflare, firstRoom.room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+    expect(await (await readPushStatus(miniflare, secondRoom.room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+    const removed = await miniflare.dispatchFetch(`https://msg.0000.chat/${firstRoom.room.id}/push-subscriptions`, {
+      headers: { accept: "application/json", "x-msg-browser-id": browserId }, method: "DELETE",
+    });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ protocol_version: 1, removed: true });
+    expect(await (await readPushStatus(miniflare, firstRoom.room.id, browserId)).json()).toEqual({ enrolled: false, protocol_version: 1 });
+    expect(await (await readPushStatus(miniflare, secondRoom.room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+    await miniflare.triggerAlarm(firstRoom.room.id);
+    await miniflare.triggerAlarm(secondRoom.room.id);
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("unsubscribing or deleting a room during push encryption prevents the provider fetch", { timeout: 25_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (initial, restart) => {
+    let miniflare = initial;
+    const browserId = crypto.randomUUID();
+    const subscribedRoom = await createRoom(initial, "before push enrollment");
+    expect((await enrollPush(initial, subscribedRoom.room.id, browserId)).status).toBe(201);
+    expect((await post(initial, subscribedRoom.room.id, "pending before room unsubscribe")).status).toBe(201);
+
+    miniflare = await restart(fakeNow + 500);
+    await miniflare.armPushSendGate(subscribedRoom.room.id);
+    const unsubscribeAlarm = miniflare.triggerAlarm(subscribedRoom.room.id);
+    try {
+      await miniflare.waitForPushSendGate(subscribedRoom.room.id);
+      const removed = await miniflare.dispatchFetch(`https://msg.0000.chat/${subscribedRoom.room.id}/push-subscriptions`, {
+        headers: { accept: "application/json", "x-msg-browser-id": browserId },
+        method: "DELETE",
+      });
+      expect(removed.status).toBe(200);
+      expect(await removed.json()).toEqual({ protocol_version: 1, removed: true });
+    } finally {
+      await miniflare.releasePushSendGate(subscribedRoom.room.id);
+      await unsubscribeAlarm;
+    }
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
+    expect(await (await readPushStatus(miniflare, subscribedRoom.room.id, browserId)).json()).toEqual({ enrolled: false, protocol_version: 1 });
+
+    const deletedRoom = await createRoom(miniflare, "before room deletion");
+    const deletedBrowserId = crypto.randomUUID();
+    expect((await enrollPush(miniflare, deletedRoom.room.id, deletedBrowserId)).status).toBe(201);
+    expect((await post(miniflare, deletedRoom.room.id, "pending before room deletion")).status).toBe(201);
+
+    miniflare = await restart(fakeNow + 751);
+    await miniflare.armPushSendGate(deletedRoom.room.id);
+    const deleteAlarm = miniflare.triggerAlarm(deletedRoom.room.id);
+    try {
+      await miniflare.waitForPushSendGate(deletedRoom.room.id);
+      const deleted = await miniflare.dispatchFetch(deletedRoom.manage_url, { headers: { accept: "application/json" }, method: "DELETE" });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toMatchObject({ deleted: true });
+    } finally {
+      await miniflare.releasePushSendGate(deletedRoom.room.id);
+      await deleteAlarm;
+    }
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
+    expect((await readPushStatus(miniflare, deletedRoom.room.id, deletedBrowserId)).status).toBe(410);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("cleans up a provider-rejected push subscription without creating another delivery", { timeout: 15_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before push enrollment");
+    const browserId = crypto.randomUUID();
+    expect((await enrollPush(initial, room.id, browserId)).status).toBe(201);
+    expect((await post(initial, room.id, "future message for an invalid endpoint")).status).toBe(201);
+
+    const miniflare = await restart(fakeNow + 500);
+    await miniflare.setOutboundResponse(410);
+    await miniflare.triggerAlarm(room.id);
+    const requests = await waitForOutboundRequests(miniflare, 1);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe(pushReceiver.endpoint);
+    expect(await (await readPushStatus(miniflare, room.id, browserId)).json()).toEqual({ enrolled: false, protocol_version: 1 });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("retries offline push independently and stops at the original 24-hour deadline", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before push enrollment");
+    const browserId = crypto.randomUUID();
+    expect((await enrollPush(initial, room.id, browserId)).status).toBe(201);
+    expect((await post(initial, room.id, "future message for an offline device")).status).toBe(201);
+
+    let miniflare = await restart(fakeNow + 500);
+    await miniflare.setOutboundResponse(503);
+    await miniflare.triggerAlarm(room.id);
+    const firstAttempt = await waitForOutboundRequests(miniflare, 1);
+    expect(firstAttempt).toHaveLength(1);
+    expect(firstAttempt[0]!.headers.ttl).toBeDefined();
+
+    await registerWebhook(miniflare, room.id, "https://receiver.example.com/after-push-outage");
+    const webhookList = await readWebhookList(miniflare, room.id);
+    expect(webhookList.webhooks[0]).toMatchObject({ failure_started_at: null, last_failure_at: null, last_success_at: null });
+    expect(webhookList.webhooks[0]!.deliveries).toEqual([]);
+
+    miniflare = await restart(fakeNow + 30_501);
+    await miniflare.setOutboundResponse(204);
+    await miniflare.triggerAlarm(room.id);
+    const retry = await waitForOutboundRequests(miniflare, 1);
+    expect(retry).toHaveLength(1);
+    expect(Number(retry[0]!.headers.ttl)).toBeLessThan(86_400);
+    expect(Number(retry[0]!.headers.ttl)).toBeGreaterThan(86_000);
+
+    miniflare = await restart(fakeNow + 86_400_000);
+    await miniflare.triggerAlarm(room.id);
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
+    expect(await (await readPushStatus(miniflare, room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("an old 410 cannot remove a same-endpoint enrollment whose keys changed in flight", { timeout: 25_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const replacementPrivateKey = new Uint8Array(Buffer.alloc(32, 1));
+  const replacementReceiver = {
+    auth: encodeBase64Url(new Uint8Array(Buffer.alloc(16, 0x36))),
+    endpoint: pushReceiver.endpoint,
+    p256dh: encodeBase64Url(derivePublicKey(replacementPrivateKey)),
+    privateKey: encodeBase64Url(replacementPrivateKey),
+  };
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before push enrollment");
+    const browserId = crypto.randomUUID();
+    expect((await enrollPush(initial, room.id, browserId)).status).toBe(201);
+    expect((await post(initial, room.id, "future message for a replaced key")).status).toBe(201);
+
+    let miniflare = await restart(fakeNow + 500);
+    await miniflare.setOutboundResponse(410, undefined, 500);
+    const inFlight = miniflare.triggerAlarm(room.id);
+    const oldRequest = await waitForOutboundRequests(miniflare, 1);
+    expect(oldRequest).toHaveLength(1);
+
+    const replacement = await enrollPush(miniflare, room.id, browserId, replacementReceiver);
+    expect(replacement.status).toBe(201);
+    await inFlight;
+    expect(await (await readPushStatus(miniflare, room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+    await miniflare.clearOutboundRequests();
+    expect((await post(miniflare, room.id, "the next message after replacing keys")).status).toBe(201);
+    miniflare = await restart(fakeNow + 751);
+    await miniflare.setOutboundResponse(204);
+    await miniflare.triggerAlarm(room.id);
+    const nextMessage = await waitForOutboundRequests(miniflare, 1);
+    expect(nextMessage).toHaveLength(1);
+    const payload = JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(nextMessage[0]!.body_base64, "base64")),
+      decodeBase64Url(replacementReceiver.privateKey),
+      decodeBase64Url(replacementReceiver.auth),
+    )).toString("utf8")) as Record<string, unknown>;
+    expect(payload).toEqual({
+      room_id: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+      room_url: `https://msg.0000.chat/${room.id}`,
+      type: "message.created",
+    });
+    expect(await (await readPushStatus(miniflare, room.id, browserId)).json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+    miniflare = await restart(fakeNow + 10_501);
+    await miniflare.triggerAlarm(room.id);
+    miniflare = await restart(fakeNow + 40_502);
+    await miniflare.setOutboundResponse(204);
+    await miniflare.triggerAlarm(room.id);
+    const oldDeliveryRetry = await waitForOutboundRequests(miniflare, 1);
+    expect(oldDeliveryRetry).toHaveLength(1);
+    expect(JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(oldDeliveryRetry[0]!.body_base64, "base64")),
+      decodeBase64Url(replacementReceiver.privateKey),
+      decodeBase64Url(replacementReceiver.auth),
+    )).toString("utf8"))).toEqual(payload);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("room deletion and inactivity expiry clear subscriptions and pending push work", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const shortRoomLimits = { ...TEST_ROOM_LIMITS, inactivityTtlMs: 1_000 };
+  await withRestartedRuntime(async (initial, restart) => {
+    const deletedRoom = await createRoom(initial, "room to delete");
+    const expiredRoom = await createRoom(initial, "room to expire");
+    const browserId = crypto.randomUUID();
+    expect((await enrollPush(initial, deletedRoom.room.id, browserId)).status).toBe(201);
+    expect((await enrollPush(initial, expiredRoom.room.id, browserId)).status).toBe(201);
+    expect((await post(initial, deletedRoom.room.id, "pending before deletion")).status).toBe(201);
+    expect((await post(initial, expiredRoom.room.id, "pending before inactivity expiry")).status).toBe(201);
+
+    const deletion = await initial.dispatchFetch(deletedRoom.manage_url, { headers: { accept: "application/json" }, method: "DELETE" });
+    expect(deletion.status).toBe(200);
+    expect(await deletion.json()).toMatchObject({ deleted: true });
+    await initial.triggerAlarm(deletedRoom.room.id);
+    expect(await initial.inspectOutboundRequests()).toEqual([]);
+
+    const miniflare = await restart(fakeNow + 1_001);
+    await miniflare.triggerAlarm(expiredRoom.room.id);
+    expect(await miniflare.inspectOutboundRequests()).toEqual([]);
+    expect((await readPushStatus(miniflare, deletedRoom.room.id, browserId)).status).toBe(410);
+    expect((await readPushStatus(miniflare, expiredRoom.room.id, browserId)).status).toBe(410);
+  }, shortRoomLimits, fakeNow);
+});
 
 test.serial("delivers one signed full-message webhook from a durable outbox after restart", { timeout: 15_000 }, async () => {
   const persistenceDirectory = await createMsgMiniflareTempDirectory("webhook-restart");

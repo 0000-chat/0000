@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 6;
+export const CURRENT_ROOM_SCHEMA_VERSION = 7;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -203,6 +203,29 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
   }
   if (version === 6) {
     sql.exec("ALTER TABLE webhook_deliveries ADD COLUMN manual_redelivery_requested_at INTEGER");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 7) {
+    sql.exec("ALTER TABLE messages ADD COLUMN source_browser_id TEXT");
+    sql.exec(`
+      CREATE TABLE push_subscriptions (
+        id TEXT PRIMARY KEY, source_browser_id TEXT NOT NULL UNIQUE,
+        endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE push_deliveries (
+        id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL, retry_expires_at INTEGER NOT NULL,
+        attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'retrying', 'delivered', 'failed')),
+        attempt_count INTEGER NOT NULL, failure_category TEXT
+      );
+      CREATE INDEX push_deliveries_due ON push_deliveries(status, due_at, retry_expires_at, created_at);
+      CREATE INDEX push_deliveries_subscription ON push_deliveries(subscription_id, created_at DESC);
+      CREATE INDEX push_deliveries_retention ON push_deliveries(created_at);
+    `);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

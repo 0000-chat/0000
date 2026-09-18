@@ -116,20 +116,31 @@ test("generates a fresh page nonce for the served human-view client script", () 
 });
 
 test("renders the human Notifications panel and wires its served controller", async () => {
-  const page = renderBrowserDocument({ room: "room-capability", title: "Temporary conversation" });
+  const page = renderBrowserDocument({ pushPublicKey: "public&key", room: "room-capability", title: "Temporary conversation" });
   const home = renderBrowserDocument({ title: "Start a temporary conversation" });
   const source = await browserAsset("client.js")?.text();
 
-  expect(page.html).toContain('data-notifications-open>Manage webhooks</button>');
+  expect(page.html).toContain('data-notifications-open>Manage notifications</button>');
+  expect(page.html).toContain('data-push-public-key="public&amp;key"');
   expect(page.html).toContain('id="notifications-panel"');
+  expect(page.html).toContain('id="push-status" role="status" aria-live="polite"');
+  expect(page.html).toContain("Turning them off here removes only this room");
   expect(page.html).toContain('id="webhook-create-form"');
   expect(page.html).toContain('id="webhook-list"');
   expect(page.html).toContain("Each new message is sent in full");
   expect(page.html).toContain("Save this signing secret now");
   expect(page.html).toContain("Redelivering a failed event makes one explicit attempt");
   expect(home.html).not.toContain("notifications-panel");
+  expect(home.html).not.toContain("data-push-public-key");
+  expect(page.html.indexOf('id="notifications-panel"')).toBeLessThan(page.html.indexOf('src="/_msg/asset/client.js"'));
   expect(source).toContain("createWebhookPanelController");
+  expect(source).toContain("createPushEnrollmentController");
+  expect(source).toContain("readPushBrowserId");
+  expect(source).toContain("/_msg/push-service-worker.js");
+  expect(source).toContain("x-msg-browser-id");
+  expect(source).toContain("pushPublicKey");
   expect(source).toContain("data-notifications-open");
+  expect(source).toContain("#push-enable");
   expect(source).toContain("data-webhook-remove");
   expect(source).toContain("data-webhook-disable");
   expect(source).toContain("data-webhook-enable");

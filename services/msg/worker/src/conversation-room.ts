@@ -6,6 +6,8 @@ import type { MessageInput } from "./room-domain";
 import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
+import { createWebPushRequest } from "./web-push-crypto";
+import { PUSH_DELIVERY_LEASE_MS, PUSH_DELIVERY_TIMEOUT_MS, PUSH_INITIAL_DELAY_MS, PUSH_RETRY_WINDOW_MS, pushRetryDelayMs } from "./push-policy";
 import {
   WEBHOOK_FAILURE_WINDOW_MS,
   WEBHOOK_HISTORY_TTL_MS,
@@ -20,10 +22,14 @@ const WEBHOOK_DELIVERY_LEASE_MS = WEBHOOK_REQUEST_TIMEOUT_MS + 5_000;
 const WEBHOOK_HISTORY_LIMIT = 50;
 
 export interface ConversationRoomEnv {
+  readonly MSG_PUBLIC_ORIGIN?: string;
   readonly MSG_POST_DISABLED?: string;
   readonly MSG_TEST_MODE?: string;
   readonly MSG_TEST_NOW_MS?: string;
   readonly MSG_TEST_ROOM_LIMITS?: string;
+  readonly MSG_VAPID_PRIVATE_KEY?: string;
+  readonly MSG_VAPID_PUBLIC_KEY?: string;
+  readonly MSG_VAPID_SUBJECT?: string;
 }
 
 type RoomLimits = { -readonly [Key in keyof typeof ROOM_LIMITS]: number };
@@ -47,6 +53,33 @@ interface StoredMessage extends MessageInput {
   readonly id: string;
   readonly idempotency_key?: string;
   readonly sequence: number;
+  readonly source_browser_id: string | null;
+}
+
+interface StoredPushSubscription {
+  readonly auth: string;
+  readonly created_at: number;
+  readonly endpoint: string;
+  readonly id: string;
+  readonly p256dh: string;
+  readonly source_browser_id: string;
+}
+
+interface StoredPushDelivery {
+  readonly attempt_count: number;
+  readonly attempted_at: number | null;
+  readonly completed_at: number | null;
+  readonly created_at: number;
+  readonly due_at: number;
+  readonly event_id: string;
+  readonly failure_category: string | null;
+  readonly id: string;
+  readonly lease_expires_at: number | null;
+  readonly message_id: string;
+  readonly message_sequence: number;
+  readonly retry_expires_at: number;
+  readonly status: "delivered" | "failed" | "pending" | "retrying" | "sending";
+  readonly subscription_id: string;
 }
 
 interface StoredWebhookEndpoint {
@@ -99,6 +132,22 @@ interface ClaimedWebhookDelivery {
   readonly roomId: string;
 }
 
+interface ClaimedPushDelivery {
+  readonly delivery: StoredPushDelivery;
+  readonly message: StoredMessage;
+  readonly subscription: StoredPushSubscription;
+}
+
+interface DeferredSignal {
+  readonly promise: Promise<void>;
+  resolve(): void;
+}
+
+interface TestPushSendGate {
+  readonly entered: DeferredSignal;
+  readonly released: DeferredSignal;
+}
+
 type HibernatingSocket = WebSocket & {
   deserializeAttachment(): unknown;
   serializeAttachment(value: unknown): void;
@@ -115,6 +164,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private scheduleRevision = 0;
   private scheduledRevision = 0;
   private schedulePromise: Promise<void> | undefined;
+  private testPushSendGate: TestPushSendGate | undefined;
 
   constructor(ctx: DurableObjectState, env: ConversationRoomEnv, now?: () => number, signWebhook: typeof signWebhookPayload = signWebhookPayload) {
     super(ctx, env);
@@ -132,6 +182,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "POST" && url.pathname === "/operator-delete") return await this.operatorDelete();
       if (request.method === "POST" && url.pathname === "/webhooks") return await this.createWebhook(request);
       if (request.method === "GET" && url.pathname === "/webhooks") return await this.listWebhooks();
+      if (request.method === "POST" && url.pathname === "/push-subscriptions") return await this.enrollPush(request);
+      if (request.method === "GET" && url.pathname === "/push-subscriptions") return await this.readPushEnrollment(request);
+      if (request.method === "DELETE" && url.pathname === "/push-subscriptions") return await this.removePushEnrollment(request);
       const webhookActionMatch = /^\/webhooks\/([0-9a-f-]{36})\/(disable|enable|rotate-secret)$/iu.exec(url.pathname);
       if (request.method === "POST" && webhookActionMatch) {
         if (webhookActionMatch[2] === "rotate-secret") return await this.rotateWebhookSecret(webhookActionMatch[1]!);
@@ -143,6 +196,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "DELETE" && webhookMatch) return await this.removeWebhook(webhookMatch[1]!);
       if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/mark-webhook-sending") return await this.testMarkWebhookSending(request);
       if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/delete-webhook-source") return await this.testDeleteWebhookSource(request);
+      if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/push-send-gate") return await this.testPushSendGateControl(request);
       if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/run-alarm") {
         await this.alarm();
         return this.json({ triggered: true });
@@ -171,6 +225,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
           this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
           this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
+          this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
+          this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
         });
         await this.ctx.storage.deleteAlarm();
@@ -185,6 +241,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.recoverExpiredWebhookLeases(now);
     this.disableUnhealthyWebhooks(now);
     this.pruneWebhookHistory(now);
+    this.recoverExpiredPushLeases(now);
+    this.prunePushDeliveries(now);
     for (let batch = 0; batch < MAX_WEBHOOKS_PER_ROOM; batch += 1) {
       const attemptNow = this.now();
       this.finishExpiredWebhookRetries(attemptNow);
@@ -193,6 +251,20 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const claimed = this.claimDueWebhookDelivery(attemptNow);
       if (!claimed) break;
       await this.deliverWebhook(claimed);
+      const current = this.state();
+      if (!current || current.status === "deleted") return;
+      if (this.now() >= current.inactivity_expires_at) {
+        await this.expire(this.now(), "Conversation expired");
+        return;
+      }
+    }
+    for (let batch = 0; batch < MAX_WEBHOOKS_PER_ROOM * 2; batch += 1) {
+      const attemptNow = this.now();
+      this.recoverExpiredPushLeases(attemptNow);
+      this.prunePushDeliveries(attemptNow);
+      const claimed = this.claimDuePushDelivery(attemptNow);
+      if (!claimed) break;
+      await this.deliverPush(claimed);
       const current = this.state();
       if (!current || current.status === "deleted") return;
       if (this.now() >= current.inactivity_expires_at) {
@@ -223,7 +295,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
-      this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1 });
+      this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
       return { created: true, message: this.messageBySequence(1), state: this.requireState() };
     });
     await this.schedule();
@@ -241,7 +313,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
-    const input = await request.json() as { input: MessageInput; idempotency_key?: string };
+    const input = await request.json() as { browser_id?: string; input: MessageInput; idempotency_key?: string };
     const key = input.idempotency_key ?? input.input.client_message_id;
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
@@ -260,9 +332,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.message_count >= this.limits.maxMessages || state.total_bytes + bytes > this.limits.maxRoomBytes) {
         throw new ProtocolError(ERROR_CODES.rateLimited, "The room storage limit is reached.", 429);
       }
-      const message: StoredMessage = { ...input.input, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence };
+      const message: StoredMessage = { ...input.input, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence, source_browser_id: input.browser_id ?? null };
       this.insertMessage(message);
       this.queueWebhookDeliveries(message, now);
+      this.queuePushDeliveries(message, now);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec("UPDATE room_state SET last_message_at = ?, inactivity_expires_at = ?, next_sequence = ?, message_count = ?, total_bytes = ? WHERE singleton = 1", now, inactivity, state.next_sequence + 1, state.message_count + 1, state.total_bytes + bytes);
       return { expired: false as const, message, replayed: false, state: this.requireState() };
@@ -345,6 +418,90 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const webhooks = endpoints.map((endpoint) => this.webhookSummary(endpoint, now));
     await this.schedule();
     return this.json({ protocol_version: PROTOCOL_VERSION, webhooks });
+  }
+
+  private async readPushEnrollment(request: Request): Promise<Response> {
+    const browserId = request.headers.get("x-msg-browser-id");
+    if (!browserId) throw new ProtocolError(ERROR_CODES.invalidBody, "A browser identifier is required.", 400);
+    await this.requireActive(this.now());
+    const subscription = rows<{ id: string }>(this.ctx.storage.sql.exec(
+      "SELECT id FROM push_subscriptions WHERE source_browser_id = ?",
+      browserId,
+    ))[0];
+    return this.json({ protocol_version: PROTOCOL_VERSION, enrolled: subscription !== undefined });
+  }
+
+  private async enrollPush(request: Request): Promise<Response> {
+    const input: unknown = await request.json();
+    if (!isRecord(input) || typeof input.browser_id !== "string" || !isRecord(input.subscription)
+      || typeof input.subscription.endpoint !== "string" || typeof input.subscription.p256dh !== "string" || typeof input.subscription.auth !== "string") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The browser push enrollment is invalid.", 400);
+    }
+    const { browser_id: browserId, subscription } = input;
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
+      const byBrowser = rows<StoredPushSubscription>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_subscriptions WHERE source_browser_id = ?",
+        browserId,
+      ))[0];
+      const byEndpoint = rows<StoredPushSubscription>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_subscriptions WHERE endpoint = ?",
+        subscription.endpoint,
+      ))[0];
+      let existing = byBrowser ?? byEndpoint;
+      if (byBrowser && byEndpoint && byBrowser.id !== byEndpoint.id) {
+        this.deletePushSubscription(byBrowser.id);
+        existing = byEndpoint;
+      }
+      if (existing) {
+        this.ctx.storage.sql.exec(
+          "UPDATE push_subscriptions SET source_browser_id = ?, endpoint = ?, p256dh = ?, auth = ? WHERE id = ?",
+          browserId, subscription.endpoint, subscription.p256dh, subscription.auth, existing.id,
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO push_subscriptions (id, source_browser_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          crypto.randomUUID(), browserId, subscription.endpoint, subscription.p256dh, subscription.auth, now,
+        );
+      }
+      return "enrolled" as const;
+    });
+    if (result === "expired") {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    await this.schedule();
+    return this.json({ protocol_version: PROTOCOL_VERSION, enrolled: true });
+  }
+
+  private async removePushEnrollment(request: Request): Promise<Response> {
+    const browserId = request.headers.get("x-msg-browser-id");
+    if (!browserId) throw new ProtocolError(ERROR_CODES.invalidBody, "A browser identifier is required.", 400);
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
+      const subscription = rows<{ id: string }>(this.ctx.storage.sql.exec(
+        "SELECT id FROM push_subscriptions WHERE source_browser_id = ?",
+        browserId,
+      ))[0];
+      if (!subscription) return false;
+      this.deletePushSubscription(subscription.id);
+      return true;
+    });
+    if (result === "expired") {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    await this.schedule();
+    return this.json({ protocol_version: PROTOCOL_VERSION, removed: result });
+  }
+
+  private deletePushSubscription(id: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE subscription_id = ?", id);
+    this.ctx.storage.sql.exec("DELETE FROM push_subscriptions WHERE id = ?", id);
   }
 
   private async removeWebhook(id: string): Promise<Response> {
@@ -489,6 +646,44 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json(response);
   }
 
+  private async testPushSendGateControl(request: Request): Promise<Response> {
+    const input: unknown = await request.json();
+    if (!isRecord(input) || (input.action !== "arm" && input.action !== "wait" && input.action !== "release")) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The test push gate action is invalid.", 400);
+    }
+    if (input.action === "arm") {
+      if (this.testPushSendGate) throw new ProtocolError(ERROR_CODES.conflict, "The test push gate is already armed.", 409);
+      this.testPushSendGate = { entered: createDeferredSignal(), released: createDeferredSignal() };
+      return this.json({ armed: true });
+    }
+    const gate = this.testPushSendGate;
+    if (!gate) throw new ProtocolError(ERROR_CODES.notFound, "The test push gate is not armed.", 404);
+    if (input.action === "wait") {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let entered: boolean;
+      try {
+        entered = await Promise.race([
+          gate.entered.promise.then(() => true),
+          new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (!entered) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The test push gate was not reached.", 503);
+      return this.json({ entered: true });
+    }
+    this.testPushSendGate = undefined;
+    gate.released.resolve();
+    return this.json({ released: true });
+  }
+
+  private async waitForTestPushSendGate(): Promise<void> {
+    const gate = this.testPushSendGate;
+    if (!gate) return;
+    gate.entered.resolve();
+    await gate.released.promise;
+  }
+
   private async testMarkWebhookSending(request: Request): Promise<Response> {
     const input: unknown = await request.json();
     if (!isRecord(input) || typeof input.event_id !== "string" || input.event_id.length === 0 || input.event_id.length > 128) {
@@ -567,6 +762,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
       this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
+      this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
+      this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
@@ -578,6 +775,16 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec(
         "INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, cancelled_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'pending', 0, NULL)",
         crypto.randomUUID(), endpoint.id, message.id, message.id, message.sequence, now, now + WEBHOOK_INITIAL_DELAY_MS, now + WEBHOOK_RETRY_WINDOW_MS,
+      );
+    }
+  }
+
+  private queuePushDeliveries(message: StoredMessage, now: number): void {
+    const subscriptions = rows<StoredPushSubscription>(this.ctx.storage.sql.exec("SELECT * FROM push_subscriptions ORDER BY created_at ASC, id ASC"));
+    for (const subscription of subscriptions) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO push_deliveries (id, subscription_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', 0, NULL)",
+        crypto.randomUUID(), subscription.id, message.id, message.id, message.sequence, now, now + PUSH_INITIAL_DELAY_MS, now + PUSH_RETRY_WINDOW_MS,
       );
     }
   }
@@ -900,6 +1107,218 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     await this.schedule();
   }
 
+  private claimDuePushDelivery(now: number): ClaimedPushDelivery | undefined {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.state();
+      if (!state || state.status !== "active" || now >= state.inactivity_expires_at) return undefined;
+      const delivery = rows<StoredPushDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_deliveries WHERE status IN ('pending', 'retrying') AND due_at <= ? AND retry_expires_at > ? ORDER BY due_at ASC, created_at ASC, id ASC LIMIT 1",
+        now, now,
+      ))[0];
+      if (!delivery) return undefined;
+      const subscription = rows<StoredPushSubscription>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_subscriptions WHERE id = ?",
+        delivery.subscription_id,
+      ))[0];
+      const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", delivery.message_id))[0];
+      if (!subscription || !message) {
+        this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+        return undefined;
+      }
+      const attemptCount = delivery.attempt_count + 1;
+      const leaseExpiresAt = now + PUSH_DELIVERY_LEASE_MS;
+      this.ctx.storage.sql.exec(
+        "UPDATE push_deliveries SET status = 'sending', attempt_count = ?, attempted_at = ?, completed_at = NULL, lease_expires_at = ?, failure_category = NULL WHERE id = ?",
+        attemptCount, now, leaseExpiresAt, delivery.id,
+      );
+      return {
+        delivery: { ...delivery, attempt_count: attemptCount, attempted_at: now, completed_at: null, lease_expires_at: leaseExpiresAt, status: "sending", failure_category: null },
+        message,
+        subscription,
+      };
+    });
+  }
+
+  private async deliverPush(claimed: ClaimedPushDelivery): Promise<void> {
+    const startedAt = this.now();
+    if (startedAt >= claimed.delivery.retry_expires_at) {
+      this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ? AND status = 'sending' AND attempt_count = ?", claimed.delivery.id, claimed.delivery.attempt_count);
+      await this.schedule();
+      return;
+    }
+    const remainingSeconds = Math.max(0, Math.floor((claimed.delivery.retry_expires_at - startedAt) / 1_000));
+    let request: Awaited<ReturnType<typeof createWebPushRequest>>;
+    try {
+      const roomCapability = this.ctx.id.name;
+      const publicOrigin = new URL(this.config.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat").origin;
+      if (!roomCapability || !this.config.MSG_VAPID_PUBLIC_KEY || !this.config.MSG_VAPID_PRIVATE_KEY || !this.config.MSG_VAPID_SUBJECT) {
+        throw new Error("Browser push configuration is unavailable.");
+      }
+      const state = this.state();
+      if (!state || state.status !== "active" || startedAt >= state.inactivity_expires_at || !this.pushClaimIsCurrent(claimed, startedAt)) {
+        await this.resolvePushClaimBeforeSend(claimed, startedAt);
+        return;
+      }
+      request = await createWebPushRequest({
+        subscription: {
+          auth: decodeBase64Url(claimed.subscription.auth),
+          endpoint: claimed.subscription.endpoint,
+          p256dh: decodeBase64Url(claimed.subscription.p256dh),
+        },
+        payload: JSON.stringify({
+          type: "message.created",
+          room_id: state.notification_id,
+          room_url: `${publicOrigin}/${roomCapability}`,
+        }),
+        vapid: {
+          publicKey: decodeBase64Url(this.config.MSG_VAPID_PUBLIC_KEY),
+          privateKey: decodeBase64Url(this.config.MSG_VAPID_PRIVATE_KEY),
+          subject: this.config.MSG_VAPID_SUBJECT,
+        },
+        ttlSeconds: remainingSeconds,
+        nowSeconds: Math.floor(startedAt / 1_000),
+      });
+      if (this.config.MSG_TEST_MODE === "1") await this.waitForTestPushSendGate();
+    } catch {
+      this.finishPushDelivery(claimed, this.now(), "configuration_error", false);
+      await this.schedule();
+      return;
+    }
+
+    const sendAt = this.now();
+    if (sendAt >= claimed.delivery.retry_expires_at || !this.pushClaimIsCurrent(claimed, sendAt)) {
+      await this.resolvePushClaimBeforeSend(claimed, sendAt);
+      return;
+    }
+
+    try {
+      const response = await fetch(request.endpoint, {
+        body: byteBuffer(request.body),
+        headers: request.headers,
+        method: "POST",
+        redirect: "manual",
+        signal: AbortSignal.timeout(PUSH_DELIVERY_TIMEOUT_MS),
+      });
+      try { await response.body?.cancel(); } catch {}
+      const completedAt = this.now();
+      if (response.status >= 200 && response.status < 300) {
+        this.finishPushDelivery(claimed, completedAt, null, false);
+      } else if (response.status === 404 || response.status === 410) {
+        this.removeInvalidPushSubscription(claimed);
+      } else if (response.status === 429 || response.status >= 500) {
+        this.finishPushDelivery(claimed, completedAt, "provider_unavailable", true);
+      } else {
+        this.finishPushDelivery(claimed, completedAt, "provider_rejected", false);
+      }
+    } catch {
+      this.finishPushDelivery(claimed, this.now(), "provider_unavailable", true);
+    }
+    await this.schedule();
+  }
+
+  private pushClaimIsCurrent(claimed: ClaimedPushDelivery, now: number): boolean {
+    const state = this.state();
+    if (!state || state.status !== "active" || now >= state.inactivity_expires_at) return false;
+    const delivery = rows<StoredPushDelivery>(this.ctx.storage.sql.exec(
+      "SELECT * FROM push_deliveries WHERE id = ? AND status = 'sending' AND attempt_count = ?",
+      claimed.delivery.id, claimed.delivery.attempt_count,
+    ))[0];
+    if (!delivery || now >= delivery.retry_expires_at) return false;
+    const subscription = rows<{ id: string }>(this.ctx.storage.sql.exec(
+      "SELECT id FROM push_subscriptions WHERE id = ? AND endpoint = ? AND p256dh = ? AND auth = ?",
+      claimed.subscription.id, claimed.subscription.endpoint, claimed.subscription.p256dh, claimed.subscription.auth,
+    ))[0];
+    const message = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM messages WHERE id = ?", delivery.message_id))[0];
+    return subscription !== undefined && message !== undefined;
+  }
+
+  private async resolvePushClaimBeforeSend(claimed: ClaimedPushDelivery, now: number): Promise<void> {
+    const state = this.state();
+    if (state?.status === "active" && now >= state.inactivity_expires_at) {
+      await this.expire(now, "Conversation expired");
+      return;
+    }
+    this.ctx.storage.transactionSync(() => {
+      const delivery = rows<StoredPushDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_deliveries WHERE id = ? AND status = 'sending' AND attempt_count = ?",
+        claimed.delivery.id, claimed.delivery.attempt_count,
+      ))[0];
+      if (!delivery) return;
+      if (now >= delivery.retry_expires_at) {
+        this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+        return;
+      }
+      const retryAt = now + PUSH_INITIAL_DELAY_MS;
+      this.ctx.storage.sql.exec(
+        "UPDATE push_deliveries SET status = 'pending', due_at = ?, completed_at = NULL, lease_expires_at = NULL, failure_category = NULL WHERE id = ?",
+        Math.min(retryAt, delivery.retry_expires_at), delivery.id,
+      );
+    });
+    await this.schedule();
+  }
+
+  private finishPushDelivery(claimed: ClaimedPushDelivery, now: number, failureCategory: string | null, retry: boolean): void {
+    this.ctx.storage.transactionSync(() => {
+      const delivery = rows<StoredPushDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_deliveries WHERE id = ? AND status = 'sending' AND attempt_count = ?",
+        claimed.delivery.id, claimed.delivery.attempt_count,
+      ))[0];
+      if (!delivery) return;
+      if (now >= delivery.retry_expires_at) {
+        this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+        return;
+      }
+      const retryAt = now + pushRetryDelayMs(delivery.attempt_count);
+      const canRetry = retry && retryAt < delivery.retry_expires_at;
+      this.ctx.storage.sql.exec(
+        "UPDATE push_deliveries SET status = ?, due_at = ?, completed_at = ?, lease_expires_at = NULL, failure_category = ? WHERE id = ?",
+        failureCategory === null ? "delivered" : canRetry ? "retrying" : "failed",
+        canRetry ? retryAt : delivery.due_at,
+        now,
+        failureCategory,
+        delivery.id,
+      );
+    });
+  }
+
+  private removeInvalidPushSubscription(claimed: ClaimedPushDelivery): void {
+    this.ctx.storage.transactionSync(() => {
+      const current = rows<{ id: string }>(this.ctx.storage.sql.exec(
+        "SELECT id FROM push_subscriptions WHERE id = ? AND endpoint = ? AND p256dh = ? AND auth = ?",
+        claimed.subscription.id, claimed.subscription.endpoint, claimed.subscription.p256dh, claimed.subscription.auth,
+      ))[0];
+      if (current) this.deletePushSubscription(current.id);
+    });
+  }
+
+  private recoverExpiredPushLeases(now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      const expired = rows<StoredPushDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM push_deliveries WHERE status = 'sending' AND lease_expires_at <= ? ORDER BY lease_expires_at ASC LIMIT ?",
+        now, MAX_WEBHOOKS_PER_ROOM * 2,
+      ));
+      for (const delivery of expired) {
+        if (delivery.retry_expires_at <= now) {
+          this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+          continue;
+        }
+        const retryAt = now + pushRetryDelayMs(delivery.attempt_count);
+        if (retryAt >= delivery.retry_expires_at) {
+          this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE id = ?", delivery.id);
+          continue;
+        }
+        this.ctx.storage.sql.exec(
+          "UPDATE push_deliveries SET status = 'retrying', due_at = ?, completed_at = ?, lease_expires_at = NULL, failure_category = 'timeout' WHERE id = ?",
+          retryAt, now, delivery.id,
+        );
+      }
+    });
+  }
+
+  private prunePushDeliveries(now: number): void {
+    this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE retry_expires_at <= ?", now);
+  }
+
   private webhookClaimSecret(claimed: ClaimedWebhookDelivery, now: number): string | undefined {
     const state = this.state();
     if (!state || state.status !== "active" || now >= state.inactivity_expires_at) return undefined;
@@ -1030,8 +1449,17 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           "SELECT MIN(at) AS at FROM (SELECT last_success_at + ? AS at FROM webhook_endpoints WHERE last_success_at IS NOT NULL UNION ALL SELECT last_failure_at + ? AS at FROM webhook_endpoints WHERE last_failure_at IS NOT NULL UNION ALL SELECT failure_started_at + ? AS at FROM webhook_endpoints WHERE failure_started_at IS NOT NULL UNION ALL SELECT recovered_at + ? AS at FROM webhook_endpoints WHERE recovered_at IS NOT NULL UNION ALL SELECT disabled_at + ? AS at FROM webhook_endpoints WHERE disabled_at IS NOT NULL)",
           WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_TTL_MS,
         ))[0]?.at;
+        const pushDue = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(CASE WHEN due_at < retry_expires_at THEN due_at ELSE retry_expires_at END) AS at FROM push_deliveries WHERE status IN ('pending', 'retrying')",
+        ))[0]?.at;
+        const pushLease = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(lease_expires_at) AS at FROM push_deliveries WHERE status = 'sending'",
+        ))[0]?.at;
+        const pushHistory = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(retry_expires_at) AS at FROM push_deliveries",
+        ))[0]?.at;
         const stateDeadline = state.status === "deleted" ? state.tombstone_expires_at : state.inactivity_expires_at;
-        const deadlines = [stateDeadline, retry, lease, failureDeadline, history, healthHistory].filter((value): value is number => typeof value === "number");
+        const deadlines = [stateDeadline, retry, lease, failureDeadline, history, healthHistory, pushDue, pushLease, pushHistory].filter((value): value is number => typeof value === "number");
         if (deadlines.length === 0) await this.ctx.storage.deleteAlarm();
         else await this.ctx.storage.setAlarm(Math.min(...deadlines));
       }
@@ -1040,7 +1468,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private insertMessage(message: StoredMessage): void {
-    this.ctx.storage.sql.exec("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", message.sequence, message.id, message.content, message.author, message.display_name, message.client ?? null, message.semantic_type, message.reply_to ?? null, message.created_at, message.client_message_id ?? null, message.byte_count, message.idempotency_key ?? null);
+    this.ctx.storage.sql.exec("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", message.sequence, message.id, message.content, message.author, message.display_name, message.client ?? null, message.semantic_type, message.reply_to ?? null, message.created_at, message.client_message_id ?? null, message.byte_count, message.idempotency_key ?? null, message.source_browser_id);
   }
 
   private state(): RoomState | undefined { return rows<RoomState>(this.ctx.storage.sql.exec("SELECT * FROM room_state WHERE singleton = 1"))[0]; }
@@ -1057,9 +1485,23 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private error(code: string, message: string, status: number): Response { return new Response(JSON.stringify({ error: { code, message } }), { headers: { "content-type": "application/json; charset=utf-8" }, status }); }
 }
 
+function createDeferredSignal(): DeferredSignal {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = () => done(); });
+  return { promise, resolve };
+}
+
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function iso(value: number): string { return new Date(value).toISOString(); }
+function decodeBase64Url(value: string): Uint8Array {
+  const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
+  const decoded = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
+  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+}
+function byteBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
 function resolveNow(env: ConversationRoomEnv): number {
   if (env.MSG_TEST_NOW_MS === undefined) return Date.now();
   if (env.MSG_TEST_MODE !== "1" || !/^[0-9]+$/u.test(env.MSG_TEST_NOW_MS)) throw new Error("The test clock requires explicit test mode and a valid timestamp.");

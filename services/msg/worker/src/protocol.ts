@@ -117,6 +117,9 @@ export interface RoomService {
   enableWebhook?(input: ManageWebhookInput): Promise<ManageWebhookResponse>;
   rotateWebhookSecret?(input: ManageWebhookInput): Promise<RotateWebhookSecretResponse>;
   redeliverWebhook?(input: RedeliverWebhookInput): Promise<RedeliverWebhookResponse>;
+  readPushEnrollment?(input: PushEnrollmentInput): Promise<PushEnrollmentResponse>;
+  enrollPush?(input: EnrollPushInput): Promise<PushEnrollmentResponse>;
+  removePushEnrollment?(input: PushEnrollmentInput): Promise<RemovePushEnrollmentResponse>;
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
@@ -154,8 +157,34 @@ export type ReadRoomResponse = RoomReadResult;
 
 export interface PostMessageInput {
   readonly body: RequestBody;
+  readonly browserId?: string;
   readonly idempotencyKey?: string;
   readonly room: string;
+}
+
+export interface PushSubscriptionInput {
+  readonly auth: string;
+  readonly endpoint: string;
+  readonly p256dh: string;
+}
+
+export interface PushEnrollmentInput {
+  readonly browserId: string;
+  readonly room: string;
+}
+
+export interface EnrollPushInput extends PushEnrollmentInput {
+  readonly subscription: PushSubscriptionInput;
+}
+
+export interface PushEnrollmentResponse {
+  readonly enrolled: boolean;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+}
+
+export interface RemovePushEnrollmentResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly removed: boolean;
 }
 
 export interface PostMessageResponse {

@@ -15,6 +15,12 @@ Deliver push asynchronously for new messages, including closed-tab delivery thro
 - [ ] Room expiry or deletion removes its push subscriptions and pending push work and does not extend room life. Already in-flight push requests may complete.
 - [ ] Worker integration tests use the approved fake push transport and controllable clock/alarm for enrollment, delivery, invalid-subscription cleanup, offline expiry, and room cleanup. Browser tests cover enrollment and unsubscribe. A real-browser smoke test verifies closed-tab delivery and click-through.
 
+## Browser enrollment contract
+
+The human page asks for notification permission only after the user chooses to enable browser alerts. After permission and native `PushSubscription` acquisition succeed, it creates or reuses an origin-local UUID shared across tabs. Posts may send an existing UUID in `X-Msg-Browser-Id`; it remains private internal routing metadata and is not added to public messages, webhook events, or push payloads. If storage is unavailable, enrollment reports that cross-tab identity cannot be saved.
+
+Subscription enrollment and unsubscribe are scoped to the room capability. Removing one room association does not call the native subscription's `unsubscribe()` method, because the browser-level subscription can serve other rooms. The HTTP boundary accepts the native subscription's optional `expirationTime` (`null` or a non-negative integer) and stores only the endpoint and keys.
+
 ## Blocked by
 
 None (can start immediately).
@@ -22,4 +28,3 @@ None (can start immediately).
 ## Parent
 
 [Room Notifications spec](https://github.com/0000-chat/0000-full/issues/24)
-

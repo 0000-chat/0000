@@ -20,6 +20,8 @@ function storage(database: Database) {
 
 function restoreVersionFourWebhookTables(database: Database) {
   database.exec(`
+    DROP TABLE IF EXISTS push_deliveries;
+    DROP TABLE IF EXISTS push_subscriptions;
     DROP TABLE IF EXISTS webhook_delivery_attempts;
     DROP TABLE IF EXISTS webhook_deliveries;
     DROP TABLE IF EXISTS webhook_endpoints;
@@ -39,6 +41,8 @@ function restoreVersionFourWebhookTables(database: Database) {
     CREATE INDEX webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
     CREATE INDEX webhook_deliveries_retention ON webhook_deliveries(created_at);
   `);
+  const messageColumns = database.query("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (messageColumns.some(({ name }) => name === "source_browser_id")) database.exec("ALTER TABLE messages DROP COLUMN source_browser_id");
 }
 
 test("initializes a fresh durable schema at the current version", () => {
@@ -69,6 +73,7 @@ test("rebuilds legacy inactivity expiry from the last message without an absolut
   migrateRoomSchema(roomStorage);
   const lastMessageAt = 29 * 24 * 60 * 60 * 1000;
   const oldAbsoluteExpiry = 30 * 24 * 60 * 60 * 1000;
+  database.exec("DROP TABLE push_deliveries; DROP TABLE push_subscriptions; ALTER TABLE messages DROP COLUMN source_browser_id;");
   database.exec("DROP TABLE webhook_delivery_attempts; DROP TABLE webhook_deliveries; DROP TABLE webhook_endpoints;");
   database.query("UPDATE room_schema SET version = 2").run();
   database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash) VALUES (1, 2, 1, ?, ?, ?, ?, 2, 1, 5, 'active', NULL, 'hash')").run(0, lastMessageAt, oldAbsoluteExpiry, oldAbsoluteExpiry);

@@ -18,6 +18,11 @@ export const TEST_ROOM_LIMITS = {
   tombstoneTtlMs: 100,
 };
 
+// Reuses the RFC 8291 receiver vector only inside the local fake push service.
+export const TEST_VAPID_PUBLIC_KEY = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+export const TEST_VAPID_PRIVATE_KEY = "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94";
+export const TEST_VAPID_SUBJECT = "mailto:push@example.com";
+
 export const SHORT_LIVED_TEST_ROOM_LIMITS = {
   ...TEST_ROOM_LIMITS,
   inactivityTtlMs: 100,
@@ -31,12 +36,16 @@ export interface MsgMiniflareRuntime {
   clearOutboundRequests(): Promise<void>;
   setOutboundResponse(status: number, location?: string, delayMs?: number): Promise<void>;
   triggerAlarm(room: string): Promise<void>;
+  armPushSendGate(room: string): Promise<void>;
+  waitForPushSendGate(room: string): Promise<void>;
+  releasePushSendGate(room: string): Promise<void>;
   markWebhookDeliverySending(room: string, eventId: string): Promise<void>;
   deleteWebhookSource(room: string, messageId: string): Promise<void>;
 }
 
 export interface CapturedOutboundRequest {
   readonly body: string;
+  readonly body_base64: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly method: string;
   readonly url: string;
@@ -58,7 +67,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface NodeRuntimeConfiguration {
-  bindings: { MSG_TEST_MODE: string; MSG_TEST_NOW_MS?: string; MSG_TEST_ROOM_LIMITS: string };
+  bindings: {
+    MSG_TEST_MODE?: string;
+    MSG_TEST_NOW_MS?: string;
+    MSG_TEST_ROOM_LIMITS?: string;
+    MSG_VAPID_PRIVATE_KEY: string;
+    MSG_VAPID_PUBLIC_KEY: string;
+    MSG_VAPID_SUBJECT: string;
+  };
   compatibilityDate: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
@@ -72,6 +88,9 @@ interface NodeRuntimeProcess {
   readonly ready: Promise<URL>;
   readonly setOutboundResponse: MsgMiniflareRuntime["setOutboundResponse"];
   readonly triggerAlarm: MsgMiniflareRuntime["triggerAlarm"];
+  readonly armPushSendGate: MsgMiniflareRuntime["armPushSendGate"];
+  readonly waitForPushSendGate: MsgMiniflareRuntime["waitForPushSendGate"];
+  readonly releasePushSendGate: MsgMiniflareRuntime["releasePushSendGate"];
   readonly markWebhookDeliverySending: MsgMiniflareRuntime["markWebhookDeliverySending"];
   readonly deleteWebhookSource: MsgMiniflareRuntime["deleteWebhookSource"];
   dispose(): Promise<void>;
@@ -230,6 +249,15 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
         method: "POST",
       });
     },
+    async armPushSendGate(room) {
+      await control("push-send-gate", { body: JSON.stringify({ action: "arm", room }), headers: { "content-type": "application/json" }, method: "POST" });
+    },
+    async waitForPushSendGate(room) {
+      await control("push-send-gate", { body: JSON.stringify({ action: "wait", room }), headers: { "content-type": "application/json" }, method: "POST" });
+    },
+    async releasePushSendGate(room) {
+      await control("push-send-gate", { body: JSON.stringify({ action: "release", room }), headers: { "content-type": "application/json" }, method: "POST" });
+    },
     async markWebhookDeliverySending(room, eventId) {
       await control("mark-webhook-sending", {
         body: JSON.stringify({ room, event_id: eventId }),
@@ -269,8 +297,10 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
 export async function startMsgMiniflare(
   persistenceDirectory: string,
   limits = TEST_ROOM_LIMITS,
-  options: { readonly nowMs?: number } = {},
+  options: { readonly nowMs?: number; readonly testMode?: boolean } = {},
 ): Promise<MsgMiniflareFixture> {
+  const testMode = options.testMode !== false;
+  if (!testMode && options.nowMs !== undefined) throw new Error("The test clock requires explicit test mode.");
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
   let failed = false;
@@ -279,9 +309,11 @@ export async function startMsgMiniflare(
     const script = await workerScript();
     runtime = await startNodeRuntime({
       bindings: {
-        MSG_TEST_MODE: "1",
+        ...(testMode ? { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify(limits) } : {}),
         ...(options.nowMs === undefined ? {} : { MSG_TEST_NOW_MS: String(options.nowMs) }),
-        MSG_TEST_ROOM_LIMITS: JSON.stringify(limits),
+        MSG_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
+        MSG_VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC_KEY,
+        MSG_VAPID_SUBJECT: TEST_VAPID_SUBJECT,
       },
       compatibilityDate: "2026-05-15",
       durableObjects: {
@@ -314,6 +346,9 @@ export async function startMsgMiniflare(
       clearOutboundRequests: runtime.clearOutboundRequests,
       setOutboundResponse: runtime.setOutboundResponse,
       triggerAlarm: runtime.triggerAlarm,
+      armPushSendGate: runtime.armPushSendGate,
+      waitForPushSendGate: runtime.waitForPushSendGate,
+      releasePushSendGate: runtime.releasePushSendGate,
       markWebhookDeliverySending: runtime.markWebhookDeliverySending,
       deleteWebhookSource: runtime.deleteWebhookSource,
       dispatchFetch: runtime.dispatchFetch,

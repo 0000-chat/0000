@@ -46,3 +46,20 @@ config for Wrangler. Keep database IDs and secrets out of tracked files.
 
 The migration did not run Wrangler against production. The old source
 repository and its production cutover path remain unchanged.
+
+## Browser push
+
+The Worker enables browser push enrollment only when `MSG_VAPID_PUBLIC_KEY`,
+`MSG_VAPID_PRIVATE_KEY`, and `MSG_VAPID_SUBJECT` are configured together. Keep
+all three in Wrangler's secret store. The public key is the unpadded base64url
+encoding of a 65-byte uncompressed P-256 point; the private key is the
+matching 32-byte scalar in unpadded base64url. The subject must be a contact
+URI using `mailto:` or `https:`. The browser page receives only the public key.
+
+Enrollment is explicit and room-scoped. The browser creates an origin-local
+UUID after permission and native subscription succeed, then uses that private
+ID only in the `X-Msg-Browser-Id` request header. Turning off alerts for one
+room removes that room's association without revoking the browser-level push
+subscription, which may still serve other rooms. Push attempts use encrypted,
+generic payloads and expire within 24 hours; provider outages do not affect
+webhook delivery state.
