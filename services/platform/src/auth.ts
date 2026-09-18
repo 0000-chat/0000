@@ -42,6 +42,24 @@ async function requireCurrentInvitation(
   }
 }
 
+async function hasActiveLinkSession(
+  env: Cloudflare.Env,
+  headers: Headers | undefined,
+  expectedUserId: string,
+): Promise<boolean> {
+  if (!headers) return false;
+  const current = await createAuth(env).api.getSession({
+    headers,
+    query: { disableCookieCache: true },
+  });
+  if (!current || current.user.id !== expectedUserId) return false;
+  const activeUser = await env.IDENTITY_DB.withSession("first-primary")
+    .prepare('SELECT id FROM "user" WHERE id = ? AND disabledAt IS NULL')
+    .bind(expectedUserId)
+    .first<{ id: string }>();
+  return activeUser !== null;
+}
+
 export function createAuth(env: Cloudflare.Env) {
   const schema = authSchema;
   return betterAuth({
@@ -50,7 +68,24 @@ export function createAuth(env: Cloudflare.Env) {
     secret: env.BETTER_AUTH_SECRET,
     disabledPaths: ["/unlink-account"],
     trustedOrigins: [env.PLATFORM_BASE_URL],
-    user: { additionalFields: platformUserAdditionalFields },
+    user: {
+      additionalFields: platformUserAdditionalFields,
+      validateUserInfo: async ({ user, source }, context) => {
+        if (source.action !== "link-account" || source.method !== "oauth") {
+          return;
+        }
+        if (
+          typeof user.id !== "string" ||
+          !(await hasActiveLinkSession(env, context.headers, user.id))
+        ) {
+          return {
+            error: "link_session_required",
+            errorDescription:
+              "Sign in again before linking a provider account.",
+          };
+        }
+      },
+    },
     session: { freshAge: PLATFORM_SESSION_FRESH_AGE_SECONDS },
     database: drizzleAdapter(drizzle(env.IDENTITY_DB, { schema }), {
       provider: "sqlite",

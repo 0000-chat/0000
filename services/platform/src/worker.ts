@@ -158,6 +158,8 @@ function loginErrorMessage(code: string | null): string {
       return "Verify your provider email before signing in to Platform.";
     case "account_not_linked":
       return "This provider is not linked yet. Sign in with an existing provider, then link it from your account settings.";
+    case "link_session_required":
+      return "Sign in again before linking a provider account.";
     case "unable_to_create_user":
     case "signup_disabled":
       return "Platform could not create an account. If you are using a self-hosted service, ask the operator about signup access.";

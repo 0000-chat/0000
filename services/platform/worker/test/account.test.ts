@@ -162,6 +162,15 @@ async function signupRows(
   return rows;
 }
 
+async function accountSnapshot(): Promise<Record<string, unknown>[]> {
+  const accounts = await testEnv.IDENTITY_DB.prepare(
+    `SELECT id, providerId, accountId, userId, accessToken, refreshToken,
+            idToken, scope, accessTokenExpiresAt, refreshTokenExpiresAt
+     FROM account ORDER BY id`,
+  ).all<Record<string, unknown>>();
+  return accounts.results;
+}
+
 describe("Platform human account providers", () => {
   beforeEach(() => {
     githubIdentity = {
@@ -257,7 +266,7 @@ describe("Platform human account providers", () => {
     expect(new URL(callback.headers.get("location")!).pathname).toBe(
       "/account",
     );
-    const cookies = cookiesFrom(callback);
+    let cookies = cookiesFrom(callback);
     expect(cookies).toContain("better-auth.session_token=");
 
     const sessionResponse = await SELF.fetch(
@@ -265,7 +274,7 @@ describe("Platform human account providers", () => {
       { headers: { cookie: cookies, origin: testEnv.PLATFORM_BASE_URL } },
     );
     expect(sessionResponse.status).toBe(200);
-    const session = (await sessionResponse.json()) as {
+    let session = (await sessionResponse.json()) as {
       user?: { id: string; email: string; name: string };
       session?: { id: string };
     };
@@ -308,6 +317,161 @@ describe("Platform human account providers", () => {
     expect(scriptBody).not.toMatch(
       /localStorage|sessionStorage|accessToken|refreshToken|bearer/i,
     );
+
+    githubIdentity = {
+      id: 812356,
+      login: "link-after-logout",
+      name: "Link After Logout",
+      email: "link-after-logout@example.test",
+      verified: true,
+    };
+    const linkBeforeLogout = await SELF.fetch(
+      "http://localhost/api/auth/link-social",
+      {
+        method: "POST",
+        headers: {
+          cookie: cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "github",
+          callbackURL: "http://localhost/account",
+        }),
+      },
+    );
+    expect(linkBeforeLogout.status).toBe(200);
+    const accountsBeforeLogoutLinkCallback = await accountSnapshot();
+    const logoutBeforeLinkCallback = await SELF.fetch(
+      "http://localhost/api/auth/sign-out",
+      {
+        method: "POST",
+        headers: {
+          cookie: cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ disableRedirect: true }),
+      },
+    );
+    expect(logoutBeforeLinkCallback.status).toBe(200);
+    const linkCallbackAfterLogout = await completeSocialCallback(
+      "github",
+      linkBeforeLogout,
+      "link-callback-after-logout",
+    );
+    const linkCallbackAfterLogoutUrl = new URL(
+      linkCallbackAfterLogout.headers.get("location")!,
+    );
+    expect(linkCallbackAfterLogoutUrl.searchParams.get("error")).toBe(
+      "link_session_required",
+    );
+    expect(
+      await testEnv.IDENTITY_DB.prepare(
+        "SELECT id FROM account WHERE accountId = ?",
+      )
+        .bind("812356")
+        .first(),
+    ).toBeNull();
+    expect(await accountSnapshot()).toEqual(accountsBeforeLogoutLinkCallback);
+
+    const resumedLogin = await startSocialLogin("google");
+    const resumedCallback = await completeSocialCallback(
+      "google",
+      resumedLogin,
+      "login-after-link-logout",
+    );
+    expect(resumedCallback.status).toBe(302);
+    cookies = cookiesFrom(resumedCallback);
+    const resumedSessionResponse = await SELF.fetch(
+      "http://localhost/api/auth/get-session",
+      { headers: { cookie: cookies, origin: testEnv.PLATFORM_BASE_URL } },
+    );
+    expect(resumedSessionResponse.status).toBe(200);
+    session = (await resumedSessionResponse.json()) as typeof session;
+
+    githubIdentity = {
+      id: 812357,
+      login: "link-to-disabled-user",
+      name: "Link To Disabled User",
+      email: "link-to-disabled-user@example.test",
+      verified: true,
+    };
+    const linkBeforeDisable = await SELF.fetch(
+      "http://localhost/api/auth/link-social",
+      {
+        method: "POST",
+        headers: {
+          cookie: cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "github",
+          callbackURL: "http://localhost/account",
+        }),
+      },
+    );
+    expect(linkBeforeDisable.status).toBe(200);
+    const linkBeforeDisableBody = (await linkBeforeDisable.json()) as {
+      url: string;
+    };
+    const linkBeforeDisableState = new URL(
+      linkBeforeDisableBody.url,
+    ).searchParams.get("state");
+    expect(linkBeforeDisableState).toBeTruthy();
+    const callbackAfterDisableUrl = `http://localhost/api/auth/callback/github?code=link-callback-after-disable&state=${encodeURIComponent(linkBeforeDisableState!)}`;
+    const linkCallbackCookies = mergeCookieStrings(
+      cookies,
+      cookiesFrom(linkBeforeDisable),
+    );
+    const accountsBeforeDisableCallback = await accountSnapshot();
+    await testEnv.IDENTITY_DB.prepare(
+      'UPDATE "user" SET disabledAt = ? WHERE id = ?',
+    )
+      .bind(Date.now(), session.user?.id)
+      .run();
+    const retainedDisabledUserSession = await testEnv.IDENTITY_DB.prepare(
+      'SELECT id FROM "session" WHERE id = ?',
+    )
+      .bind(session.session?.id)
+      .first<{ id: string }>();
+    expect(retainedDisabledUserSession?.id).toBe(session.session?.id);
+    const workerDisabledLinkCallback = await SELF.fetch(
+      callbackAfterDisableUrl,
+      {
+        headers: {
+          cookie: linkCallbackCookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+        },
+        redirect: "manual",
+      },
+    );
+    expect(workerDisabledLinkCallback.status).toBe(401);
+    expect(await workerDisabledLinkCallback.json()).toEqual({
+      error: "disabled_user",
+    });
+    const rawDisabledLinkCallback = await createAuth(testEnv).handler(
+      new Request(callbackAfterDisableUrl, {
+        headers: {
+          cookie: linkCallbackCookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+        },
+        redirect: "manual",
+      }),
+    );
+    expect(rawDisabledLinkCallback.status).toBe(302);
+    expect(
+      new URL(
+        rawDisabledLinkCallback.headers.get("location")!,
+      ).searchParams.get("error"),
+    ).toBe("link_session_required");
+    expect(await accountSnapshot()).toEqual(accountsBeforeDisableCallback);
+    await testEnv.IDENTITY_DB.prepare(
+      'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
+    )
+      .bind(session.user?.id)
+      .run();
 
     const badStateStart = await startSocialLogin("github");
     const badStateCallback = await SELF.fetch(
@@ -433,6 +597,58 @@ describe("Platform human account providers", () => {
     expect(usersAfterImplicitAttempt.results).toHaveLength(1);
     expect(accountsAfterImplicitAttempt.results).toHaveLength(1);
 
+    const switchedProviderLogin = await attemptGithubLogin(
+      {
+        id: 812354,
+        login: "switched-session-user",
+        name: "Switched Session User",
+        email: "switched-session@example.test",
+        verified: true,
+      },
+      "switched-session-user-signin",
+    );
+    expect(switchedProviderLogin.status).toBe(302);
+    const switchedUserCookies = cookiesFrom(switchedProviderLogin);
+    githubIdentity = {
+      id: 812355,
+      login: "link-to-original-user",
+      name: "Link To Original User",
+      email: "different-linked@example.test",
+      verified: true,
+    };
+    const switchedSessionLinkStart = await SELF.fetch(
+      "http://localhost/api/auth/link-social",
+      {
+        method: "POST",
+        headers: {
+          cookie: cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "github",
+          callbackURL: "http://localhost/account",
+        }),
+      },
+    );
+    expect(switchedSessionLinkStart.status).toBe(200);
+    const accountsBeforeSwitchedSessionCallback = await accountSnapshot();
+    const switchedSessionCallback = await completeSocialCallback(
+      "github",
+      switchedSessionLinkStart,
+      "switched-session-link-callback",
+      switchedUserCookies,
+    );
+    const switchedSessionCallbackUrl = new URL(
+      switchedSessionCallback.headers.get("location")!,
+    );
+    expect(switchedSessionCallbackUrl.searchParams.get("error")).toBe(
+      "link_session_required",
+    );
+    expect(await accountSnapshot()).toEqual(
+      accountsBeforeSwitchedSessionCallback,
+    );
+
     githubIdentity = {
       id: 812347,
       login: "different-email-github",
@@ -467,13 +683,15 @@ describe("Platform human account providers", () => {
       "/account",
     );
     const linkedAccounts = await testEnv.IDENTITY_DB.prepare(
-      "SELECT id, providerId, accountId, userId FROM account ORDER BY providerId",
-    ).all<{
-      id: string;
-      providerId: string;
-      accountId: string;
-      userId: string;
-    }>();
+      "SELECT id, providerId, accountId, userId FROM account WHERE userId = ? ORDER BY providerId",
+    )
+      .bind(session.user?.id)
+      .all<{
+        id: string;
+        providerId: string;
+        accountId: string;
+        userId: string;
+      }>();
     expect(linkedAccounts.results).toEqual([
       {
         id: expect.any(String),
@@ -586,10 +804,10 @@ describe("Platform human account providers", () => {
       [200, 400],
     );
     const remainingProviderAccounts = await testEnv.IDENTITY_DB.prepare(
-      "SELECT id, providerId FROM account WHERE userId = ?",
+      "SELECT id, providerId, accountId FROM account WHERE userId = ?",
     )
       .bind(session.user?.id)
-      .all<{ id: string; providerId: string }>();
+      .all<{ id: string; providerId: string; accountId: string }>();
     expect(remainingProviderAccounts.results).toHaveLength(1);
     const unlinkLastProvider = await SELF.fetch(
       "http://localhost/api/auth/unlink-account",
@@ -812,11 +1030,24 @@ describe("Platform human account providers", () => {
       .first<{ email: string }>();
     expect(invitationUser?.email).toBe("validinvite@example.test");
 
-    const existingUserStart = await startSocialLogin("google");
+    const remainingProvider = remainingProviderAccounts.results[0];
+    expect(remainingProvider).toBeDefined();
+    const existingProvider =
+      remainingProvider?.providerId === "google" ? "google" : "github";
+    if (existingProvider === "github") {
+      githubIdentity = {
+        id: Number(remainingProvider?.accountId),
+        login: "existing-user-provider",
+        name: "Existing User Provider",
+        email: "linked@example.test",
+        verified: true,
+      };
+    }
+    const existingUserStart = await startSocialLogin(existingProvider);
     const existingUserCallback = await completeSocialCallback(
-      "google",
+      existingProvider,
       existingUserStart,
-      "existing-google-sign-in",
+      "existing-provider-sign-in",
     );
     expect(existingUserCallback.status).toBe(302);
     expect(
