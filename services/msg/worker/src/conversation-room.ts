@@ -782,6 +782,11 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private queuePushDeliveries(message: StoredMessage, now: number): void {
     const subscriptions = rows<StoredPushSubscription>(this.ctx.storage.sql.exec("SELECT * FROM push_subscriptions ORDER BY created_at ASC, id ASC"));
     for (const subscription of subscriptions) {
+      if (message.source_browser_id !== null && message.source_browser_id === subscription.source_browser_id) continue;
+      this.ctx.storage.sql.exec(
+        "DELETE FROM push_deliveries WHERE subscription_id = ? AND status IN ('pending', 'retrying')",
+        subscription.id,
+      );
       this.ctx.storage.sql.exec(
         "INSERT INTO push_deliveries (id, subscription_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', 0, NULL)",
         crypto.randomUUID(), subscription.id, message.id, message.id, message.sequence, now, now + PUSH_INITIAL_DELAY_MS, now + PUSH_RETRY_WINDOW_MS,
@@ -1148,6 +1153,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     }
     const remainingSeconds = Math.max(0, Math.floor((claimed.delivery.retry_expires_at - startedAt) / 1_000));
     let request: Awaited<ReturnType<typeof createWebPushRequest>>;
+    let topic = "";
     try {
       const roomCapability = this.ctx.id.name;
       const publicOrigin = new URL(this.config.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat").origin;
@@ -1159,6 +1165,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         await this.resolvePushClaimBeforeSend(claimed, startedAt);
         return;
       }
+      topic = state.notification_id.replaceAll("-", "");
       request = await createWebPushRequest({
         subscription: {
           auth: decodeBase64Url(claimed.subscription.auth),
@@ -1194,7 +1201,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     try {
       const response = await fetch(request.endpoint, {
         body: byteBuffer(request.body),
-        headers: request.headers,
+        headers: { ...request.headers, Topic: topic },
         method: "POST",
         redirect: "manual",
         signal: AbortSignal.timeout(PUSH_DELIVERY_TIMEOUT_MS),

@@ -13,6 +13,7 @@ let stopRequested = false;
 let parentDisconnected = false;
 let shutdownPromise;
 let outboundRequests = [];
+let providerPendingPushes = new Map();
 let outboundResponse = { status: 204, delayMs: 0 };
 
 function send(message) {
@@ -56,8 +57,20 @@ function sendJson(response, value, status = 200) {
   response.end(body);
 }
 
+function pendingPushRequests() {
+  const now = Date.now();
+  for (const [key, pending] of providerPendingPushes) {
+    if (pending.expiresAt <= now) providerPendingPushes.delete(key);
+  }
+  return [...providerPendingPushes.values()].map(({ request }) => request);
+}
+
 async function handleTestControl(request, response) {
   const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+  if (path === "/__test/pending-pushes" && request.method === "GET") {
+    sendJson(response, pendingPushRequests());
+    return true;
+  }
   if (path === "/__test/outbound" && request.method === "GET") {
     sendJson(response, outboundRequests);
     return true;
@@ -294,6 +307,15 @@ async function start(configuration) {
         };
         outboundRequests.push(captured);
         if (responseConfig.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, responseConfig.delayMs));
+        const topic = captured.headers.topic;
+        const ttlSeconds = Number(captured.headers.ttl);
+        if (responseConfig.status >= 200 && responseConfig.status < 300 && typeof topic === "string" && Number.isSafeInteger(ttlSeconds) && ttlSeconds >= 0) {
+          // A successful response models an offline push service retaining the latest body for this endpoint and Topic until TTL.
+          providerPendingPushes.set(`${captured.url}\u0000${topic}`, {
+            expiresAt: Date.now() + ttlSeconds * 1_000,
+            request: captured,
+          });
+        }
         const responseBody = responseConfig.status === 204 || responseConfig.status === 304 ? null : new ReadableStream({
           start(controller) {
             controller.enqueue(Buffer.from("test-only response body"));

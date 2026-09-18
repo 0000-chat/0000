@@ -33,6 +33,7 @@ export interface MsgMiniflareRuntime {
   readonly ready: Promise<URL>;
   dispatchFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   inspectOutboundRequests(): Promise<readonly CapturedOutboundRequest[]>;
+  inspectPendingPushes(): Promise<readonly CapturedOutboundRequest[]>;
   clearOutboundRequests(): Promise<void>;
   setOutboundResponse(status: number, location?: string, delayMs?: number): Promise<void>;
   triggerAlarm(room: string): Promise<void>;
@@ -85,6 +86,7 @@ interface NodeRuntimeProcess {
   readonly clearOutboundRequests: MsgMiniflareRuntime["clearOutboundRequests"];
   readonly dispatchFetch: MsgMiniflareRuntime["dispatchFetch"];
   readonly inspectOutboundRequests: MsgMiniflareRuntime["inspectOutboundRequests"];
+  readonly inspectPendingPushes: MsgMiniflareRuntime["inspectPendingPushes"];
   readonly ready: Promise<URL>;
   readonly setOutboundResponse: MsgMiniflareRuntime["setOutboundResponse"];
   readonly triggerAlarm: MsgMiniflareRuntime["triggerAlarm"];
@@ -211,6 +213,9 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
     ready: Promise.resolve(workerUrl),
     async inspectOutboundRequests() {
       return await (await control("outbound")).json() as CapturedOutboundRequest[];
+    },
+    async inspectPendingPushes() {
+      return await (await control("pending-pushes")).json() as CapturedOutboundRequest[];
     },
     async dispatchFetch(input, init) {
       const request = new Request(input, init);
@@ -343,6 +348,7 @@ export async function startMsgMiniflare(
     miniflare: {
       ready: runtime.ready,
       inspectOutboundRequests: runtime.inspectOutboundRequests,
+      inspectPendingPushes: runtime.inspectPendingPushes,
       clearOutboundRequests: runtime.clearOutboundRequests,
       setOutboundResponse: runtime.setOutboundResponse,
       triggerAlarm: runtime.triggerAlarm,

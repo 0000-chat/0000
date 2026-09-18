@@ -460,7 +460,9 @@ test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTT
     expect(status.status).toBe(200);
     expect(await status.json()).toEqual({ enrolled: true, protocol_version: 1 });
 
-    const posted = await post(initial, room.id, "private message preview must stay encrypted", "push-message-key", browserId);
+    // This transport tracer exercises an ordinary API post. Browser-local
+    // self-post suppression has its own case below.
+    const posted = await post(initial, room.id, "private message preview must stay encrypted", "push-message-key");
     expect(posted.status).toBe(201);
     const message = await posted.json() as { message: { id: string; sequence: number }; replayed: boolean };
     expect(message.replayed).toBe(false);
@@ -489,6 +491,9 @@ test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTT
       room_url: `https://msg.0000.chat/${room.id}`,
       type: "message.created",
     });
+    expect(request.headers.topic).toBe((payload.room_id as string).replaceAll("-", ""));
+    expect(request.headers.topic).toMatch(/^[A-Za-z0-9_-]{1,32}$/u);
+    expect(request.headers.topic).not.toContain(room.id);
     expect(payload).not.toHaveProperty("content");
     expect(payload).not.toHaveProperty("message");
     expect(payload).not.toHaveProperty("browser_id");
@@ -496,11 +501,205 @@ test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTT
     expect(request.body).not.toContain("private message preview");
     expect(message.message.sequence).toBe(2);
 
-    const replay = await post(miniflare, room.id, "private message preview must stay encrypted", "push-message-key", browserId);
+    const replay = await post(miniflare, room.id, "private message preview must stay encrypted", "push-message-key");
     expect(replay.status).toBe(201);
     expect((await replay.json() as { replayed: boolean }).replayed).toBe(true);
     expect(await waitForOutboundRequests(miniflare, 1)).toHaveLength(1);
   }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("suppresses only the source browser while keeping another browser's pending alert", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const browserA = crypto.randomUUID();
+  const browserB = crypto.randomUUID();
+  const receiverB = { ...pushReceiver, endpoint: "https://push.example.net/push/subscription-token-browser-b" };
+
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before browser push enrollment");
+    expect((await enrollPush(initial, room.id, browserA)).status).toBe(201);
+    expect((await enrollPush(initial, room.id, browserB, receiverB)).status).toBe(201);
+    await registerWebhook(initial, room.id, "https://receiver.example.com/push-suppression");
+
+    const earlier = await post(initial, room.id, "earlier message from browser B", "browser-b-message", browserB);
+    expect(earlier.status).toBe(201);
+    const replay = await post(initial, room.id, "earlier message from browser B", "browser-b-message", browserA);
+    expect(replay.status).toBe(201);
+    expect((await replay.json() as { replayed: boolean }).replayed).toBe(true);
+
+    let miniflare = await restart(fakeNow + 60_000);
+    const ownPost = await post(miniflare, room.id, "new message from browser A", "browser-a-message", browserA);
+    expect(ownPost.status).toBe(201);
+    expect((await ownPost.json() as { replayed: boolean }).replayed).toBe(false);
+
+    miniflare = await restart(fakeNow + 60_500);
+    await miniflare.triggerAlarm(room.id);
+    const outbound = await miniflare.inspectOutboundRequests();
+    const pushRequests = outbound.filter(({ url }) => url.startsWith("https://push.example.net/"));
+    const webhookRequests = outbound.filter(({ url }) => url === "https://receiver.example.com/push-suppression");
+    expect(pushRequests).toHaveLength(2);
+    expect(new Set(pushRequests.map(({ url }) => url))).toEqual(new Set([pushReceiver.endpoint, receiverB.endpoint]));
+    expect(webhookRequests).toHaveLength(2);
+
+    const pushForA = pushRequests.find(({ url }) => url === pushReceiver.endpoint)!;
+    const pushForB = pushRequests.find(({ url }) => url === receiverB.endpoint)!;
+    expect(Number(pushForA.headers.ttl)).toBe(86_339);
+    expect(Number(pushForB.headers.ttl)).toBe(86_399);
+    const payloads = [pushForA, pushForB].map((request) => JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(request.body_base64, "base64")),
+      decodeBase64Url(pushReceiver.privateKey),
+      decodeBase64Url(pushReceiver.auth),
+    )).toString("utf8")) as Record<string, unknown>);
+    expect(payloads[0]).toEqual({ room_id: expect.stringMatching(/^[0-9a-f-]{36}$/iu), room_url: `https://msg.0000.chat/${room.id}`, type: "message.created" });
+    expect(payloads[1]).toEqual(payloads[0]);
+    expect(pushForA.headers.topic).toBe(pushForB.headers.topic);
+    expect(pushForA.headers.topic).toBe((payloads[0]!.room_id as string).replaceAll("-", ""));
+    expect(pushForA.headers.topic).not.toContain(room.id);
+    expect(pushForA.headers.topic).not.toContain(browserA);
+    expect(pushForA.headers.topic).not.toContain(browserB);
+
+    const events = webhookRequests.map(({ body }) => JSON.parse(body) as { message: { content: string }; source_browser_id?: string });
+    expect(events.map(({ message }) => message.content).sort()).toEqual([
+      "earlier message from browser B",
+      "new message from browser A",
+    ]);
+    expect(events.every((event) => !Object.hasOwn(event, "source_browser_id"))).toBe(true);
+
+    miniflare = await restart(fakeNow + 60_500);
+    const anonymous = await post(miniflare, room.id, "anonymous API message");
+    expect(anonymous.status).toBe(201);
+    miniflare = await restart(fakeNow + 61_000);
+    await miniflare.triggerAlarm(room.id);
+    const anonymousOutbound = await miniflare.inspectOutboundRequests();
+    const anonymousPushes = anonymousOutbound.filter(({ url }) => url.startsWith("https://push.example.net/"));
+    const anonymousWebhooks = anonymousOutbound.filter(({ url }) => url === "https://receiver.example.com/push-suppression");
+    expect(anonymousPushes.map(({ url }) => url).sort()).toEqual([pushReceiver.endpoint, receiverB.endpoint].sort());
+    expect(anonymousWebhooks).toHaveLength(1);
+    expect(JSON.parse(anonymousWebhooks[0]!.body)).toMatchObject({ message: { content: "anonymous API message" } });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("collapses unsent room alerts separately for each enrolled browser", { timeout: 15_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const browserA = crypto.randomUUID();
+  const browserB = crypto.randomUUID();
+  const receiverB = { ...pushReceiver, endpoint: "https://push.example.net/push/subscription-token-collapse-b" };
+
+  await withRestartedRuntime(async (initial, restart) => {
+    const { room } = await createRoom(initial, "before browser push enrollment");
+    expect((await enrollPush(initial, room.id, browserA)).status).toBe(201);
+    expect((await enrollPush(initial, room.id, browserB, receiverB)).status).toBe(201);
+    expect((await post(initial, room.id, "first pending room message")).status).toBe(201);
+    expect((await post(initial, room.id, "latest pending room message")).status).toBe(201);
+
+    const miniflare = await restart(fakeNow + 500);
+    await miniflare.triggerAlarm(room.id);
+    const pushRequests = (await miniflare.inspectOutboundRequests()).filter(({ url }) => url.startsWith("https://push.example.net/"));
+    expect(pushRequests).toHaveLength(2);
+    expect(pushRequests.map(({ url }) => url).sort()).toEqual([pushReceiver.endpoint, receiverB.endpoint].sort());
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("gives a replacement room alert its own 24-hour delivery deadline", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const browserId = crypto.randomUUID();
+
+  await withRestartedRuntime(async (initial, restart) => {
+    const expiredRoom = await createRoom(initial, "room whose only alert expires");
+    const replacedRoom = await createRoom(initial, "room whose alert will be replaced");
+    expect((await enrollPush(initial, expiredRoom.room.id, browserId)).status).toBe(201);
+    expect((await enrollPush(initial, replacedRoom.room.id, browserId)).status).toBe(201);
+    expect((await post(initial, expiredRoom.room.id, "old event without a replacement")).status).toBe(201);
+    expect((await post(initial, replacedRoom.room.id, "old event that will be replaced")).status).toBe(201);
+
+    let miniflare = await restart(fakeNow + 12 * 60 * 60 * 1_000);
+    expect((await post(miniflare, replacedRoom.room.id, "replacement message with a fresh event lifetime")).status).toBe(201);
+
+    miniflare = await restart(fakeNow + 24 * 60 * 60 * 1_000 + 5 * 60 * 1_000);
+    await miniflare.triggerAlarm(expiredRoom.room.id);
+    await miniflare.triggerAlarm(replacedRoom.room.id);
+    const pushRequests = (await miniflare.inspectOutboundRequests()).filter(({ url }) => url.startsWith("https://push.example.net/"));
+    expect(pushRequests).toHaveLength(1);
+    expect(pushRequests[0]!.url).toBe(pushReceiver.endpoint);
+    expect(pushRequests[0]!.headers.ttl).toBe("42900");
+    const payload = JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(pushRequests[0]!.body_base64, "base64")),
+      decodeBase64Url(pushReceiver.privateKey),
+      decodeBase64Url(pushReceiver.auth),
+    )).toString("utf8")) as Record<string, unknown>;
+    expect(payload).toEqual({
+      room_id: expect.stringMatching(/^[0-9a-f-]{36}$/iu),
+      room_url: `https://msg.0000.chat/${replacedRoom.room.id}`,
+      type: "message.created",
+    });
+    expect(JSON.stringify(payload)).not.toContain("replacement message with a fresh event lifetime");
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("provider-held alerts replace by room Topic but remain separate across rooms", { timeout: 20_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const firstRoom = await createRoom(miniflare, "first provider-held room");
+    const secondRoom = await createRoom(miniflare, "second provider-held room");
+    const browserId = crypto.randomUUID();
+    expect((await enrollPush(miniflare, firstRoom.room.id, browserId)).status).toBe(201);
+    expect((await enrollPush(miniflare, secondRoom.room.id, browserId)).status).toBe(201);
+    await miniflare.setOutboundResponse(201);
+
+    const send = async (room: string, content: string, expectedCount: number) => {
+      const posted = await post(miniflare, room, content);
+      expect(posted.status).toBe(201);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await miniflare.triggerAlarm(room);
+      const requests = await waitForOutboundRequests(miniflare, expectedCount, 5_000);
+      return requests[expectedCount - 1]!;
+    };
+
+    const firstRoomFirst = await send(firstRoom.room.id, "first offline push for room one", 1);
+    const pendingAfterFirst = await miniflare.inspectPendingPushes();
+    expect(pendingAfterFirst).toHaveLength(1);
+    expect(pendingAfterFirst[0]!.body_base64).toBe(firstRoomFirst.body_base64);
+
+    const firstRoomSecond = await send(firstRoom.room.id, "replacement offline push for room one", 2);
+    const pendingAfterReplacement = await miniflare.inspectPendingPushes();
+    expect(pendingAfterReplacement).toHaveLength(1);
+    expect(pendingAfterReplacement[0]!.headers.topic).toBe(firstRoomFirst.headers.topic);
+    expect(pendingAfterReplacement[0]!.body_base64).toBe(firstRoomSecond.body_base64);
+    expect(pendingAfterReplacement[0]!.body_base64).not.toBe(firstRoomFirst.body_base64);
+
+    const secondRoomFirst = await send(secondRoom.room.id, "first offline push for room two", 3);
+    const pendingWithBothRooms = await miniflare.inspectPendingPushes();
+    expect(pendingWithBothRooms).toHaveLength(2);
+    expect(secondRoomFirst.url).toBe(pushReceiver.endpoint);
+    expect(firstRoomFirst.url).toBe(pushReceiver.endpoint);
+    expect(secondRoomFirst.headers.topic).not.toBe(firstRoomFirst.headers.topic);
+
+    const secondRoomSecond = await send(secondRoom.room.id, "replacement offline push for room two", 4);
+    const finalPending = await miniflare.inspectPendingPushes();
+    expect(finalPending).toHaveLength(2);
+    const pendingByTopic = new Map(finalPending.map((request) => [request.headers.topic ?? "", request]));
+    expect(pendingByTopic.get(firstRoomFirst.headers.topic!)?.body_base64).toBe(firstRoomSecond.body_base64);
+    expect(pendingByTopic.get(secondRoomFirst.headers.topic!)?.body_base64).toBe(secondRoomSecond.body_base64);
+
+    for (const request of [firstRoomFirst, firstRoomSecond, secondRoomFirst, secondRoomSecond]) {
+      expect(request.headers.topic).toMatch(/^[A-Za-z0-9_-]{1,32}$/u);
+      expect(request.headers).not.toHaveProperty("x-msg-browser-id");
+      expect(request.headers.topic).not.toContain(firstRoom.room.id);
+      expect(request.headers.topic).not.toContain(secondRoom.room.id);
+    }
+    const firstRoomPayload = JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(firstRoomFirst.body_base64, "base64")),
+      decodeBase64Url(pushReceiver.privateKey),
+      decodeBase64Url(pushReceiver.auth),
+    )).toString("utf8")) as Record<string, unknown>;
+    const secondRoomPayload = JSON.parse(Buffer.from(decryptWebPushBody(
+      new Uint8Array(Buffer.from(secondRoomFirst.body_base64, "base64")),
+      decodeBase64Url(pushReceiver.privateKey),
+      decodeBase64Url(pushReceiver.auth),
+    )).toString("utf8")) as Record<string, unknown>;
+    expect(firstRoomFirst.headers.topic).toBe((firstRoomPayload.room_id as string).replaceAll("-", ""));
+    expect(firstRoomPayload.room_url).toBe(`https://msg.0000.chat/${firstRoom.room.id}`);
+    expect(secondRoomFirst.headers.topic).toBe((secondRoomPayload.room_id as string).replaceAll("-", ""));
+    expect(secondRoomPayload.room_url).toBe(`https://msg.0000.chat/${secondRoom.room.id}`);
+  });
 });
 
 test.serial("removes one room enrollment while preserving the same browser subscription in another room", { timeout: 15_000 }, async () => {

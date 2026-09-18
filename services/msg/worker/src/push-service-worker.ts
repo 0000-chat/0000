@@ -65,7 +65,7 @@ const PUSH_SERVICE_WORKER_SCRIPT = String.raw`(() => {
     }
 
     const destination = safeRoomUrl(value.room_url);
-    return destination ? destination.href : null;
+    return destination ? { room_id: value.room_id, room_url: destination } : null;
   }
 
   function isMatchingRoomClient(client, destination) {
@@ -82,12 +82,21 @@ const PUSH_SERVICE_WORKER_SCRIPT = String.raw`(() => {
   }
 
   self.addEventListener("push", (event) => {
-    const roomUrl = parsePushPayload(event.data);
-    if (!roomUrl) return;
+    const room = parsePushPayload(event.data);
+    if (!room) return;
 
-    event.waitUntil(self.registration.showNotification(notificationTitle, {
-      data: { room_url: roomUrl },
-    }));
+    event.waitUntil((async () => {
+      let windowClients = [];
+      try {
+        windowClients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      } catch {}
+      if (windowClients.some((client) => client.focused === true && isMatchingRoomClient(client, room.room_url))) return;
+
+      await self.registration.showNotification(notificationTitle, {
+        data: { room_url: room.room_url.href },
+        tag: "msg-room-" + room.room_id,
+      });
+    })());
   });
 
   self.addEventListener("notificationclick", (event) => {

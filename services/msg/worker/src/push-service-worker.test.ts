@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { pushServiceWorkerResponse, type MsgPushPayload } from "./push-service-worker";
 
 interface FakeWindowClient {
+  focused?: boolean;
   url: string;
   navigate(url: string): Promise<FakeWindowClient | null>;
   focus(): Promise<FakeWindowClient>;
@@ -40,6 +41,7 @@ function createHarness(existingClients: readonly FakeWindowClient[] = []) {
   const origin = "https://msg.0000.chat";
   const listeners = new Map<string, (event: FakeEvent) => void>();
   const notifications: FakeNotificationCall[] = [];
+  const visibleNotifications = new Map<string, FakeNotificationCall>();
   const openedUrls: string[] = [];
   const source = pushServiceWorkerResponse();
 
@@ -50,7 +52,10 @@ function createHarness(existingClients: readonly FakeWindowClient[] = []) {
     location: { origin },
     registration: {
       async showNotification(title, options) {
-        notifications.push({ title, options });
+        const notification = { title, options };
+        notifications.push(notification);
+        const tag = typeof options.tag === "string" && options.tag.length > 0 ? options.tag : `untagged-${notifications.length}`;
+        visibleNotifications.set(tag, notification);
       },
     },
     clients: {
@@ -69,6 +74,7 @@ function createHarness(existingClients: readonly FakeWindowClient[] = []) {
 
     return {
       notifications,
+      visibleNotifications: () => [...visibleNotifications.values()],
       openedUrls,
       dispatchPush(data: unknown) {
         let lifetime: Promise<unknown> | undefined;
@@ -100,10 +106,10 @@ function createHarness(existingClients: readonly FakeWindowClient[] = []) {
   });
 }
 
-function roomPayload(roomUrl: string): MsgPushPayload {
+function roomPayload(roomUrl: string, roomId = "550e8400-e29b-41d4-a716-446655440000"): MsgPushPayload {
   return {
     type: "message.created",
-    room_id: "550e8400-e29b-41d4-a716-446655440000",
+    room_id: roomId,
     room_url: roomUrl,
   };
 }
@@ -142,7 +148,7 @@ test("shows only the generic notification and focuses a matching room client wit
 
   expect(harness.notifications).toEqual([{
     title: "New message in msg",
-    options: { data: { room_url: `https://msg.0000.chat/${roomId}?view=agent` } },
+    options: { data: { room_url: `https://msg.0000.chat/${roomId}?view=agent` }, tag: "msg-room-550e8400-e29b-41d4-a716-446655440000" },
   }]);
 
   const click = harness.dispatchClick(harness.notifications[0]?.options.data);
@@ -180,6 +186,72 @@ test("focuses an already open room with a valid view without navigating or disca
   expect(navigations).toEqual([]);
   expect(focusCount).toBe(1);
   expect(harness.openedUrls).toEqual([]);
+});
+
+test("suppresses a push when any same-room tab is focused, across human and agent views", async () => {
+  const roomId = "H".repeat(43);
+  const otherRoomId = "I".repeat(43);
+  const client = (url: string, focused: boolean): FakeWindowClient => ({
+    focused,
+    url,
+    async navigate(nextUrl) { this.url = nextUrl; return this; },
+    async focus() { this.focused = true; return this; },
+  });
+  const harness = await createHarness([
+    client(`https://msg.0000.chat/${roomId}?view=agent`, false),
+    client(`https://msg.0000.chat/${otherRoomId}?view=human`, true),
+    client(`https://msg.0000.chat/${roomId}`, true),
+  ]);
+
+  await harness.dispatchPush(roomPayload(`https://msg.0000.chat/${roomId}?view=human`));
+
+  expect(harness.notifications).toEqual([]);
+  expect(harness.visibleNotifications()).toEqual([]);
+});
+
+test("does not suppress for an unfocused room tab or a focused different room", async () => {
+  const roomId = "J".repeat(43);
+  const otherRoomId = "K".repeat(43);
+  const client = (url: string, focused: boolean): FakeWindowClient => ({
+    focused,
+    url,
+    async navigate(nextUrl) { this.url = nextUrl; return this; },
+    async focus() { this.focused = true; return this; },
+  });
+  const harness = await createHarness([
+    client(`https://msg.0000.chat/${roomId}?view=human`, false),
+    client(`https://msg.0000.chat/${otherRoomId}`, true),
+  ]);
+
+  await harness.dispatchPush(roomPayload(`https://msg.0000.chat/${roomId}`));
+
+  expect(harness.notifications).toEqual([{
+    title: "New message in msg",
+    options: { data: { room_url: `https://msg.0000.chat/${roomId}?view=human` }, tag: "msg-room-550e8400-e29b-41d4-a716-446655440000" },
+  }]);
+});
+
+test("replaces a visible alert for the same room while keeping another room alert", async () => {
+  const firstRoom = "L".repeat(43);
+  const secondRoom = "M".repeat(43);
+  const firstRoomId = "550e8400-e29b-41d4-a716-446655440000";
+  const secondRoomId = "123e4567-e89b-42d3-a456-426614174000";
+  const harness = await createHarness();
+
+  await harness.dispatchPush(roomPayload(`https://msg.0000.chat/${firstRoom}?view=human`, firstRoomId));
+  await harness.dispatchPush(roomPayload(`https://msg.0000.chat/${secondRoom}`, secondRoomId));
+  await harness.dispatchPush(roomPayload(`https://msg.0000.chat/${firstRoom}?view=agent`, firstRoomId));
+
+  expect(harness.notifications.map(({ options }) => options.tag)).toEqual([
+    `msg-room-${firstRoomId}`,
+    `msg-room-${secondRoomId}`,
+    `msg-room-${firstRoomId}`,
+  ]);
+  expect(harness.visibleNotifications()).toHaveLength(2);
+  expect(harness.visibleNotifications().map(({ title }) => title)).toEqual(["New message in msg", "New message in msg"]);
+  expect(harness.visibleNotifications().find(({ options }) => options.tag === `msg-room-${firstRoomId}`)?.options.data).toEqual({
+    room_url: `https://msg.0000.chat/${firstRoom}?view=agent`,
+  });
 });
 
 test("opens a human room view when no valid view was supplied", async () => {
