@@ -127,7 +127,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
       },
       body: JSON.stringify({
         provider: "github",
-        callbackURL: "http://localhost/after-login",
+        callbackURL: "http://localhost/account",
       }),
     });
     expect(start.status).toBe(200);

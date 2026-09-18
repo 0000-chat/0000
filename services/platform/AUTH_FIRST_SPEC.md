@@ -1,14 +1,15 @@
 # Platform authentication MVP
 
-Date: 2026-09-19. Status: agreed MVP design; full MVP not implemented.
+Date: 2026-09-19. Status: agreed MVP design; initial T02 human account slice
+implemented locally; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
-the agreed product and security decisions for the first implementation.
+the agreed product and security decisions for the implementation.
 Implementation details marked for validation must be proven against the selected
 Better Auth version and Workers/D1 runtime. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
-records the current probe evidence and unresolved decisions. That bounded probe
-does not complete the design's acceptance gates or establish production
-authentication.
+records the T01 investigation; [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md)
+records local evidence for the initial account slice. The evidence does not
+complete the design's acceptance gates or establish production authentication.
 
 ## MVP outcome and deployment
 
@@ -284,18 +285,24 @@ alone:
   Platform installation/grant checks and prove concurrent replay and revocation
   before OAuth acceptance.
 - A real Miniflare runtime restart preserves a bounded guest grant and resource
-  fixture in persistent D1. Human login/session is proven across fresh Better
-  Auth instances and requests, but a human-session process restart, concurrent
-  signup, final-owner protection and OAuth rotation races remain unproven.
+  fixture in persistent D1. Human login/session and social linking work across
+  local Worker requests with simulated provider HTTP, but a human-session
+  process restart, concurrent signup, final-owner protection and OAuth rotation
+  races remain unproven.
 - The versioned principal, verification route, service registration fixture,
   service-verifier bootstrap and guest-grant exchange are candidate T01
-  contracts. OAuth access tokens are configured as opaque and hashed, but are
-  not yet normalized through `/internal/v1/authenticate` or bound to a Platform
-  installation. T06/T07 must resolve that seam without caller-supplied
+  contracts. Better Auth encrypts stored Google/GitHub access and refresh
+  tokens. The pinned callback assigns `idToken` directly, and T02's test
+  asserts only that the stored Google access token differs from its synthetic
+  raw value. OAuth server access tokens are configured as opaque and hashed,
+  but are not yet normalized through `/internal/v1/authenticate` or bound to a
+  Platform installation. T06/T07 must resolve that seam without caller-supplied
   authority.
 - Confirm managed configuration's real owning workspace and keep runtime
   anonymous enforcement independent of a Cloud network call.
 
-The full Platform authentication MVP remains unimplemented until the complete
-acceptance gates pass. T01 evidence is limited to the flows and fixtures named in
-its report.
+The initial T02 login, account and signup-policy behavior has a local Worker/D1
+test, with provider HTTP simulated and aggregate review pending. The full
+Platform authentication MVP remains unimplemented until every acceptance gate
+passes. T01 and T02 evidence is limited to the flows and fixtures named in their
+reports.

@@ -3,9 +3,10 @@
 Start here when working on Platform. This document defines its scope and
 ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
 agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
-records the bounded Worker/D1 investigation. The full MVP is not implemented
-or accepted; the T01 probe does not establish production readiness or consumer
-adoption.
+and [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md) record bounded Worker/D1
+evidence. T01 and the initial T02 account slice are implemented locally; the
+full MVP is not implemented or accepted, and these reports do not establish
+production readiness or consumer adoption.
 
 ## Purpose and deployment
 
@@ -65,9 +66,11 @@ harness connection instead remains bounded by the member's current membership
 and delegated access; it cannot inherit the member's administrator privileges,
 and removing that membership cuts off its access.
 
-The Platform account UI covers profile, organizations, memberships, agent
-identities, OAuth consent and credentials. It does not own product Spaces,
-threads, agent execution or the full product's agent-control experience.
+The current T02 account UI covers profile, linked sign-in providers, default
+organization access status and sign-out. Organization and membership
+administration, agent identities, OAuth consent and credentials remain later
+Platform work. Platform does not own product Spaces, threads, agent execution
+or the full product's agent-control experience.
 
 ## Guest identity and resource ownership
 
@@ -129,16 +132,34 @@ non-TypeScript service must be able to implement the same wire contract.
 Cloudflare Workers is the initial runtime direction; the monorepo's Bun and
 Turborepo tooling does not select the production runtime.
 
-## Operator-supplied secrets
+## Local setup and operator credentials
 
-Wrangler configuration contains no provider or Better Auth secret values.
-Operators supply GITHUB_CLIENT_SECRET and BETTER_AUTH_SECRET for each runtime.
-For local development, copy .dev.vars.example to .dev.vars and replace both
-placeholders; .dev.vars is ignored by Git. For a deployed Worker, add both with
-Wrangler secrets (wrangler secret put GITHUB_CLIENT_SECRET and wrangler secret
-put BETTER_AUTH_SECRET) in the target environment. Set GITHUB_CLIENT_ID as a
-non-secret Worker variable for that environment. The committed example values
-are placeholders and must not be used as deployment credentials.
+Install the monorepo dependencies with `bun install --frozen-lockfile` from the
+repository root. From `services/platform`, initialize the local identity schema
+with `bun x wrangler d1 migrations apply platform-identity --local`, then start
+Wrangler with `bun run dev`. It serves `http://localhost:8787`. Copy
+`.dev.vars.example` to `.dev.vars` and replace its Google/GitHub client IDs and
+secrets plus `BETTER_AUTH_SECRET`. Register these local callback URLs with the
+provider applications:
+`http://localhost:8787/api/auth/callback/google` and
+`http://localhost:8787/api/auth/callback/github`. If the local port or public
+Worker URL changes, set `PLATFORM_BASE_URL` to that exact origin and update the
+provider callback URLs to match.
+
+Wrangler configuration contains only example IDs and no provider or Better Auth
+secret values. Deployed operators set `GOOGLE_CLIENT_ID` and `GITHUB_CLIENT_ID`
+as Worker variables and provide `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_SECRET`
+and `BETTER_AUTH_SECRET` with Wrangler secrets in the target environment. The
+Better Auth secret also protects its encrypted social-provider access and
+refresh tokens. Example values are placeholders and must not be used as
+deployment credentials.
+
+`PLATFORM_DEPLOYMENT_MODE=self-hosted` with
+`PLATFORM_SIGNUP_POLICY=open` is the local default. Managed deployments always
+allow signup. Self-hosted operators may choose `open` or `invite-only`; the
+latter requires a verified provider email matching an unexpired pending
+invitation to an active organization. T02 does not include invitation
+management UI, which is planned for T03.
 
 Rate limits for Platform login, credential issuance and guest bootstrap belong
 to Platform. Anonymous operation quotas and enforcement belong to each resource
@@ -155,19 +176,21 @@ local work; Platform cannot retract data already cached on a device.
 
 ## Status and first outcome
 
-As of 2026-09-19, Platform has a bounded Worker/D1 T01 investigation in
-services/platform and runnable principal/client contracts in
-packages/contracts and packages/platform-client. Its real Better Auth callback,
-credential verifier and guest-grant route are exercised through local Worker
-tests; the external GitHub HTTP boundary and protected resource service are
-fixtures. This is evidence for the first slice, not a deployed identity service
-or a complete shared-auth integration. The account UI, lifecycle administration,
-OAuth installation state, production service provisioning and consumer adoption
-remain unimplemented. Database is also a scaffold. Communicator and the message
-service have existing auth paths that the MVP must move to the shared Platform
-path while leaving resource ACLs local. No apps/0000 implementation was found,
-so its login and offline-sync integration is neither implemented nor required
-for this MVP. Platform's own account UI is in scope.
+As of 2026-09-19, Platform has a reviewed T01 Worker/D1 investigation and an
+initial T02 human account implementation, plus runnable principal/client
+contracts in `packages/contracts` and `packages/platform-client`. Local Worker
+tests exercise Better Auth callbacks, sessions, D1 persistence, signup policy,
+profile controls and logout; Google/GitHub HTTP responses are simulated at the
+provider boundary. The service and protected-resource checks are fixtures. This
+is local implementation evidence, not a deployed identity service or a complete
+shared-auth integration. Organization lifecycle administration, API credential
+and agent UI, production OAuth installation state, service provisioning and
+consumer adoption remain unimplemented. Database is also a scaffold.
+Communicator and the message service still need to move their authentication
+paths to the shared Platform path while leaving resource ACLs local. No
+apps/0000 implementation was found, so its login and offline-sync integration
+is neither implemented nor required for this MVP. Platform's own account UI is
+in scope.
 
 The MVP outcome is a user who signs in, manages an organization and grants,
 connects a harness or obtains a scoped API credential, and uses existing

@@ -93,7 +93,7 @@ describe("Better Auth OAuth Provider D1 lifecycle", () => {
       },
       body: JSON.stringify({
         provider: "github",
-        callbackURL: "http://localhost/after-login",
+        callbackURL: "http://localhost/account",
       }),
     });
     const startBody = (await start.json()) as { url: string };

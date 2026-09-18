@@ -1,6 +1,6 @@
 # Platform MVP ticket proposal
 
-**Status:** Published as issues #55–#69. T01 is reviewed, integrated and verified on `codex/platform-mvp` at `fa17ad4`; no later ticket is complete. T02 is eligible for dispatch preparation. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
+**Status:** Published as issues #55–#69. T01 is reviewed, integrated and verified on `codex/platform-mvp` at `fa17ad4`. T02's implementation checkpoints are `4f94a09` and callback-guard fix `f346e07` on `codex/platform-t02`; the Platform check and root workspace scaffold check pass, while parent aggregate acceptance remains pending. T02 and the full MVP are not yet accepted. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
 
 | Slice | Published issue | Title | Label |
 | --- | --- | --- | --- |
@@ -50,17 +50,17 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
-**Readiness:** T01 runtime/provider findings accepted at `fa17ad4`; ready for a parent-owned implementation brief and verified-base dispatch.
+**Readiness:** Implementation is committed on `codex/platform-t02` at `f346e07`; local checks pass and parent aggregate review remains pending. This does not mark the ticket or MVP accepted.
 
 **Blocked by (contract):** T01's accepted human principal, session and D1 behavior.
 
-**Change:** Implement Google/GitHub login, proof-based provider linking, Platform browser session, profile controls, retry-safe default organization with owner membership, managed open signup and configurable self-hosted open/invite-only signup. Logout revokes the browser session only.
+**Change:** Implemented Google/GitHub login, proof-based provider linking, Platform browser session, profile controls, retry-safe default organization with owner membership, managed open signup and configurable self-hosted open/invite-only signup. Logout revokes the browser session only. Better Auth's direct unlink endpoint is disabled; the Worker uses an atomic D1 conditional delete to preserve the last provider under concurrency. Explicit OAuth client/resource administration routes are denied until a later approved operator flow.
 
 **Existing pattern:** Better Auth is selected; magic links are superseded and there are no Platform users to import.
 
 **Open decisions:** T01's Better Auth/provider compatibility results only.
 
-**Verification:** Stub providers at their boundary; observe login, both-account linking proof, owner membership after retry, origin/CSRF rejection and browser logout through the Worker/D1 path.
+**Verification:** [T02_ACCOUNT_REPORT.md](../T02_ACCOUNT_REPORT.md) records the exact boundary and evidence. The focused Worker/D1 test passes with synthetic Google/GitHub HTTP endpoints and exercises login/callback/session persistence, explicit linking, same-email non-linking, default-organization retries, signup gates, safe profile editing, stale/cross-origin/concurrent unlink, callback denial after logout/disablement or a different user's session, OAuth admin denial, logout and guest/human credential survival. Platform `bun run check` and root `bun run check` pass; the root command is a workspace-manifest scaffold check, not auth integration evidence. Parent aggregate acceptance remains pending.
 
 ### T03. Administer organizations and memberships
 
@@ -246,4 +246,4 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 ## Publication and execution
 
-The breakdown is published. T01's implementation evidence is awaiting parent review, not a new policy interview. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.
+The breakdown is published. T01 is integrated and accepted at `fa17ad4`; T02's local implementation and evidence are pending parent aggregate review, not a new policy interview. Its Platform checks pass, while the root command only checks workspace manifests. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.
