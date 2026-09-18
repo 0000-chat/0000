@@ -935,6 +935,65 @@ test.serial("keeps the health deadline after an event expires and preserves canc
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
+test.serial("retains webhook delivery and health metadata for seven days, then prunes it without re-enabling the endpoint", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const dayMs = 24 * 60 * 60 * 1_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    await registerWebhook(first, room.id, "https://receiver.example.com/history-retention");
+    const posted = await post(first, room.id, "event retained for seven days");
+    const eventId = (await posted.json() as { message: { id: string } }).message.id;
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    const failureStartedAt = Date.parse(endpoint.failure_started_at!);
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === eventId)).toMatchObject({
+      attempt_count: 1,
+      status: "retrying",
+    });
+
+    const disableAt = failureStartedAt + dayMs;
+    runtime = await restart(disableAt);
+    await runtime.triggerAlarm(room.id);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.status).toBe("disabled");
+    expect(endpoint.disabled_at).toBe(new Date(disableAt).toISOString());
+
+    runtime = await restart(fakeNow + 6 * dayMs);
+    const refresh = await post(runtime, room.id, "room remains active while disabled webhook history ages");
+    expect(refresh.status).toBe(201);
+    expect((await readWebhookList(runtime, room.id)).webhooks[0]!.deliveries.map(({ event_id }) => event_id)).toEqual([eventId]);
+
+    // The delivery and endpoint health dates remain available up to the
+    // seven-day boundary, even though the endpoint is already disabled.
+    runtime = await restart(fakeNow + 7 * dayMs - 1);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({
+      disabled_at: new Date(disableAt).toISOString(),
+      failure_started_at: new Date(failureStartedAt).toISOString(),
+      last_failure_at: new Date(failureStartedAt).toISOString(),
+      status: "disabled",
+    });
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === eventId)).toMatchObject({ attempt_count: 1 });
+
+    // Disabled status is durable, while its associated delivery and health
+    // timestamps age out after their individual seven-day retention period.
+    runtime = await restart(disableAt + 7 * dayMs + 1);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({
+      disabled_at: null,
+      failure_started_at: null,
+      last_failure_at: null,
+      last_success_at: null,
+      recovered_at: null,
+      status: "disabled",
+    });
+    expect(endpoint.deliveries).toEqual([]);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
 test.serial("room deletion during an outbound await removes notification state and allows the in-flight request to finish", { timeout: 15_000 }, async () => {
   const limits = { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 10_000 };
   await withRuntime(async (miniflare) => {
