@@ -27,6 +27,17 @@ export const SHORT_LIVED_TEST_ROOM_LIMITS = {
 export interface MsgMiniflareRuntime {
   readonly ready: Promise<URL>;
   dispatchFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  inspectOutboundRequests(): Promise<readonly CapturedOutboundRequest[]>;
+  clearOutboundRequests(): Promise<void>;
+  setOutboundResponse(status: number, location?: string, delayMs?: number): Promise<void>;
+  triggerAlarm(room: string): Promise<void>;
+}
+
+export interface CapturedOutboundRequest {
+  readonly body: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly method: string;
+  readonly url: string;
 }
 
 export interface MsgMiniflareFixture {
@@ -45,7 +56,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface NodeRuntimeConfiguration {
-  bindings: { MSG_TEST_MODE: string; MSG_TEST_ROOM_LIMITS: string };
+  bindings: { MSG_TEST_MODE: string; MSG_TEST_NOW_MS?: string; MSG_TEST_ROOM_LIMITS: string };
   compatibilityDate: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
@@ -53,8 +64,12 @@ interface NodeRuntimeConfiguration {
 }
 
 interface NodeRuntimeProcess {
+  readonly clearOutboundRequests: MsgMiniflareRuntime["clearOutboundRequests"];
   readonly dispatchFetch: MsgMiniflareRuntime["dispatchFetch"];
+  readonly inspectOutboundRequests: MsgMiniflareRuntime["inspectOutboundRequests"];
   readonly ready: Promise<URL>;
+  readonly setOutboundResponse: MsgMiniflareRuntime["setOutboundResponse"];
+  readonly triggerAlarm: MsgMiniflareRuntime["triggerAlarm"];
   dispose(): Promise<void>;
 }
 
@@ -158,10 +173,22 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
 
   const dispatchUrl = new URL(readyMessage.dispatchUrl);
   const workerUrl = new URL(readyMessage.workerUrl);
+  const controlUrl = new URL("/__test/", dispatchUrl);
+  async function control(path: string, init?: RequestInit): Promise<Response> {
+    const response = await fetch(new URL(path, controlUrl), { redirect: "manual", ...init });
+    if (!response.ok) throw new Error(`Miniflare test control returned HTTP ${response.status}.`);
+    return response;
+  }
   let disposal: Promise<void> | undefined;
 
   return {
+    async clearOutboundRequests() {
+      await control("outbound", { method: "DELETE" });
+    },
     ready: Promise.resolve(workerUrl),
+    async inspectOutboundRequests() {
+      return await (await control("outbound")).json() as CapturedOutboundRequest[];
+    },
     async dispatchFetch(input, init) {
       const request = new Request(input, init);
       const hasBody = request.body !== null;
@@ -185,6 +212,20 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
       }
       return response;
     },
+    async setOutboundResponse(status, location, delayMs) {
+      await control("outbound", {
+        body: JSON.stringify({ status, ...(location === undefined ? {} : { location }), ...(delayMs === undefined ? {} : { delay_ms: delayMs }) }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+    },
+    async triggerAlarm(room) {
+      await control("alarm", {
+        body: JSON.stringify({ room }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+    },
     dispose() {
       if (disposal) return disposal;
       disposal = (async () => {
@@ -207,7 +248,11 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
 }
 
 /** Builds the production entry and starts it in an isolated Node-owned workerd process. */
-export async function startMsgMiniflare(persistenceDirectory: string, limits = TEST_ROOM_LIMITS): Promise<MsgMiniflareFixture> {
+export async function startMsgMiniflare(
+  persistenceDirectory: string,
+  limits = TEST_ROOM_LIMITS,
+  options: { readonly nowMs?: number } = {},
+): Promise<MsgMiniflareFixture> {
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
   let failed = false;
@@ -217,6 +262,7 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
     runtime = await startNodeRuntime({
       bindings: {
         MSG_TEST_MODE: "1",
+        ...(options.nowMs === undefined ? {} : { MSG_TEST_NOW_MS: String(options.nowMs) }),
         MSG_TEST_ROOM_LIMITS: JSON.stringify(limits),
       },
       compatibilityDate: "2026-05-15",
@@ -246,6 +292,10 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
   return {
     miniflare: {
       ready: runtime.ready,
+      inspectOutboundRequests: runtime.inspectOutboundRequests,
+      clearOutboundRequests: runtime.clearOutboundRequests,
+      setOutboundResponse: runtime.setOutboundResponse,
+      triggerAlarm: runtime.triggerAlarm,
       dispatchFetch: runtime.dispatchFetch,
     },
     async dispose() {

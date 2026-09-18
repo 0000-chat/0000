@@ -3,12 +3,21 @@ import { DurableObject } from "cloudflare:workers";
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { compareCapabilities, messageStorageBytes, ROOM_LIMITS } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { PROTOCOL_VERSION } from "./protocol";
+import { PROTOCOL_VERSION, type CreateWebhookResponse, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
+import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
+
+const MAX_WEBHOOKS_PER_ROOM = 5;
+const WEBHOOK_INITIAL_DELAY_MS = 250;
+const WEBHOOK_REQUEST_TIMEOUT_MS = 5_000;
+const WEBHOOK_DELIVERY_LEASE_MS = WEBHOOK_REQUEST_TIMEOUT_MS + 5_000;
+const WEBHOOK_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const WEBHOOK_HISTORY_LIMIT = 50;
 
 export interface ConversationRoomEnv {
   readonly MSG_POST_DISABLED?: string;
   readonly MSG_TEST_MODE?: string;
+  readonly MSG_TEST_NOW_MS?: string;
   readonly MSG_TEST_ROOM_LIMITS?: string;
 }
 
@@ -21,6 +30,7 @@ interface RoomState {
   readonly management_hash: string | null;
   readonly message_count: number;
   readonly next_sequence: number;
+  readonly notification_id: string;
   readonly status: "active" | "deleted";
   readonly tombstone_expires_at: number | null;
   readonly total_bytes: number;
@@ -34,6 +44,37 @@ interface StoredMessage extends MessageInput {
   readonly sequence: number;
 }
 
+interface StoredWebhookEndpoint {
+  readonly created_at: number;
+  readonly id: string;
+  readonly secret: string;
+  readonly status: "active";
+  readonly url: string;
+}
+
+interface StoredWebhookDelivery {
+  readonly attempt_count: number;
+  readonly attempted_at: number | null;
+  readonly completed_at: number | null;
+  readonly created_at: number;
+  readonly due_at: number;
+  readonly endpoint_id: string;
+  readonly event_id: string;
+  readonly failure_category: string | null;
+  readonly id: string;
+  readonly lease_expires_at: number | null;
+  readonly message_id: string;
+  readonly message_sequence: number;
+  readonly status: "delivered" | "failed" | "pending" | "sending";
+}
+
+interface ClaimedWebhookDelivery {
+  readonly delivery: StoredWebhookDelivery;
+  readonly endpoint: StoredWebhookEndpoint;
+  readonly message: StoredMessage;
+  readonly roomId: string;
+}
+
 type HibernatingSocket = WebSocket & {
   deserializeAttachment(): unknown;
   serializeAttachment(value: unknown): void;
@@ -45,11 +86,16 @@ const socketTag = "conversation-live";
 export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private readonly config: ConversationRoomEnv;
   private readonly limits: RoomLimits;
+  private readonly now: () => number;
+  private scheduleRevision = 0;
+  private scheduledRevision = 0;
+  private schedulePromise: Promise<void> | undefined;
 
-  constructor(ctx: DurableObjectState, env: ConversationRoomEnv, private readonly now: () => number = () => Date.now()) {
+  constructor(ctx: DurableObjectState, env: ConversationRoomEnv, now?: () => number) {
     super(ctx, env);
     this.config = env;
     this.limits = resolveRoomLimits(env);
+    this.now = now ?? (() => resolveNow(env));
     migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs);
   }
 
@@ -58,6 +104,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const url = new URL(request.url);
       if (request.method === "POST" && url.pathname === "/initialize") return await this.initialize(request);
       if (request.method === "POST" && url.pathname === "/operator-delete") return await this.operatorDelete();
+      if (request.method === "POST" && url.pathname === "/webhooks") return await this.createWebhook(request);
+      if (request.method === "GET" && url.pathname === "/webhooks") return await this.listWebhooks();
+      const webhookMatch = /^\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
+      if (request.method === "DELETE" && webhookMatch) return await this.removeWebhook(webhookMatch[1]!);
+      if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/run-alarm") {
+        await this.alarm();
+        return this.json({ triggered: true });
+      }
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
@@ -79,17 +133,31 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.tombstone_expires_at !== null && now >= state.tombstone_expires_at) {
         this.ctx.storage.transactionSync(() => {
           this.ctx.storage.sql.exec("DELETE FROM messages");
+          this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
+          this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
         });
         await this.ctx.storage.deleteAlarm();
-      } else await this.schedule(state);
+      } else await this.schedule();
       return;
     }
     if (now >= state.inactivity_expires_at) {
       await this.expire(now, "Conversation expired");
+      return;
     }
-    const current = this.state();
-    if (current) await this.schedule(current);
+    this.pruneWebhookHistory(now);
+    for (let batch = 0; batch < MAX_WEBHOOKS_PER_ROOM; batch += 1) {
+      const claimed = this.claimDueWebhookDelivery(this.now());
+      if (!claimed) break;
+      await this.deliverWebhook(claimed);
+      const current = this.state();
+      if (!current || current.status === "deleted") return;
+      if (this.now() >= current.inactivity_expires_at) {
+        await this.expire(this.now(), "Conversation expired");
+        return;
+      }
+    }
+    await this.schedule();
   }
 
   async webSocketMessage(socket: WebSocket): Promise<void> {
@@ -105,16 +173,17 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const prior = this.state();
       if (prior) return { created: false, message: this.messageBySequence(1), state: prior };
       const id = crypto.randomUUID();
+      const notificationId = crypto.randomUUID();
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?)",
-        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash,
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?)",
+        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1 });
       return { created: true, message: this.messageBySequence(1), state: this.requireState() };
     });
-    await this.schedule(result.state);
+    await this.schedule();
     return this.json({ ...this.toMessage(result.message), created: result.created, created_at: iso(result.state.created_at), expires_at: iso(result.state.inactivity_expires_at) });
   }
 
@@ -150,6 +219,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       }
       const message: StoredMessage = { ...input.input, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence };
       this.insertMessage(message);
+      this.queueWebhookDeliveries(message, now);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec("UPDATE room_state SET last_message_at = ?, inactivity_expires_at = ?, next_sequence = ?, message_count = ?, total_bytes = ? WHERE singleton = 1", now, inactivity, state.next_sequence + 1, state.message_count + 1, state.total_bytes + bytes);
       return { expired: false as const, message, replayed: false, state: this.requireState() };
@@ -158,7 +228,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.expire(now, "Conversation expired");
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     }
-    await this.schedule(result.state);
+    await this.schedule();
     if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
     return this.json({ protocol_version: PROTOCOL_VERSION, message: this.toMessage(result.message), expires_at: iso(result.state.inactivity_expires_at), replayed: result.replayed });
   }
@@ -172,17 +242,76 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (deleteRoom) {
       await this.expire(this.now(), "Conversation deleted");
       const deleted = this.requireState();
-      await this.schedule(deleted);
+      await this.schedule();
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
     return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at) });
+  }
+
+  private async createWebhook(request: Request): Promise<Response> {
+    const input: unknown = await request.json();
+    if (!isRecord(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, "url")) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook request must contain only url.", 400);
+    }
+    const url = normalizeWebhookUrl(input.url);
+    if (!url) throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook destination must be a valid public HTTPS URL.", 400);
+    const now = this.now();
+    const id = crypto.randomUUID();
+    const secret = generateWebhookSecret();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { kind: "expired" as const };
+      const count = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM webhook_endpoints"))[0]?.count ?? 0;
+      if (count >= MAX_WEBHOOKS_PER_ROOM) return { kind: "limit" as const };
+      this.ctx.storage.sql.exec("INSERT INTO webhook_endpoints (id, url, secret, created_at, status) VALUES (?, ?, ?, ?, 'active')", id, url, secret, now);
+      return { kind: "created" as const };
+    });
+    if (result.kind === "expired") {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    if (result.kind === "limit") throw new ProtocolError(ERROR_CODES.conflict, "A room can have at most five webhook endpoints.", 409);
+    await this.schedule();
+    const webhook: WebhookSummary = { id, url: redactWebhookUrl(url), created_at: iso(now), status: "active", deliveries: [] };
+    const response: CreateWebhookResponse = { protocol_version: PROTOCOL_VERSION, secret, webhook };
+    return this.json(response);
+  }
+
+  private async listWebhooks(): Promise<Response> {
+    const now = this.now();
+    await this.requireActive(now);
+    this.pruneWebhookHistory(now);
+    const endpoints = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints ORDER BY created_at ASC, id ASC"));
+    const webhooks = endpoints.map((endpoint) => this.webhookSummary(endpoint, now));
+    await this.schedule();
+    return this.json({ protocol_version: PROTOCOL_VERSION, webhooks });
+  }
+
+  private async removeWebhook(id: string): Promise<Response> {
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
+      const endpoint = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE id = ?", id))[0];
+      if (!endpoint) return "missing" as const;
+      this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE endpoint_id = ?", id);
+      this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints WHERE id = ?", id);
+      return "removed" as const;
+    });
+    if (result === "expired") {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    if (result === "missing") throw new ProtocolError(ERROR_CODES.notFound, "The webhook was not found.", 404);
+    await this.schedule();
+    return this.json({ protocol_version: PROTOCOL_VERSION, removed: true });
   }
 
   /** This path is reachable only from the Worker-to-Durable-Object service boundary. */
   private async operatorDelete(): Promise<Response> {
     await this.expire(this.now(), "Conversation deleted by an operator");
     const state = this.requireState();
-    await this.schedule(state);
+    await this.schedule();
     return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true });
   }
 
@@ -211,9 +340,166 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const state = this.requireState();
       if (state.status === "deleted") return false;
       this.ctx.storage.sql.exec("DELETE FROM messages");
+      this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
+      this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
+  }
+
+  private queueWebhookDeliveries(message: StoredMessage, now: number): void {
+    const endpoints = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE status = 'active'"));
+    for (const endpoint of endpoints) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, attempted_at, completed_at, lease_expires_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', 0, NULL)",
+        crypto.randomUUID(), endpoint.id, message.id, message.id, message.sequence, now, now + WEBHOOK_INITIAL_DELAY_MS,
+      );
+    }
+  }
+
+  private webhookSummary(endpoint: StoredWebhookEndpoint, now: number): WebhookSummary {
+    const deliveries = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
+      "SELECT * FROM webhook_deliveries WHERE endpoint_id = ? AND created_at > ? ORDER BY created_at DESC, id DESC LIMIT ?",
+      endpoint.id, now - WEBHOOK_HISTORY_TTL_MS, WEBHOOK_HISTORY_LIMIT,
+    )).map((delivery): WebhookDeliveryMetadata => ({
+      attempt_count: delivery.attempt_count,
+      attempted_at: delivery.attempted_at === null ? null : iso(delivery.attempted_at),
+      completed_at: delivery.completed_at === null ? null : iso(delivery.completed_at),
+      created_at: iso(delivery.created_at),
+      event_id: delivery.event_id,
+      failure_category: delivery.failure_category,
+      message_id: delivery.message_id,
+      message_sequence: delivery.message_sequence,
+      status: delivery.status,
+    }));
+    return { id: endpoint.id, url: redactWebhookUrl(endpoint.url), created_at: iso(endpoint.created_at), status: "active", deliveries };
+  }
+
+  private pruneWebhookHistory(now: number): void {
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE created_at <= ?", now - WEBHOOK_HISTORY_TTL_MS);
+    });
+  }
+
+  private claimDueWebhookDelivery(now: number): ClaimedWebhookDelivery | undefined {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.state();
+      if (!state || state.status !== "active" || now >= state.inactivity_expires_at) return undefined;
+      const delivery = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
+        "SELECT * FROM webhook_deliveries WHERE (status = 'pending' AND due_at <= ?) OR (status = 'sending' AND lease_expires_at <= ?) ORDER BY due_at ASC, created_at ASC LIMIT 1",
+        now, now,
+      ))[0];
+      if (!delivery) return undefined;
+      const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ? AND status = 'active'", delivery.endpoint_id))[0];
+      const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", delivery.message_id))[0];
+      if (!endpoint || !message) {
+        this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries WHERE id = ?", delivery.id);
+        return undefined;
+      }
+      const attemptCount = delivery.attempt_count + 1;
+      const leaseExpiresAt = now + WEBHOOK_DELIVERY_LEASE_MS;
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_deliveries SET status = 'sending', attempt_count = ?, attempted_at = ?, completed_at = NULL, lease_expires_at = ?, failure_category = NULL WHERE id = ?",
+        attemptCount, now, leaseExpiresAt, delivery.id,
+      );
+      return {
+        delivery: { ...delivery, attempt_count: attemptCount, attempted_at: now, completed_at: null, lease_expires_at: leaseExpiresAt, status: "sending", failure_category: null },
+        endpoint,
+        message,
+        roomId: state.notification_id,
+      };
+    });
+  }
+
+  private async deliverWebhook(claimed: ClaimedWebhookDelivery): Promise<void> {
+    const timestamp = String(Math.floor(this.now() / 1_000));
+    const body = JSON.stringify({
+      event_id: claimed.delivery.event_id,
+      message: this.toMessage(claimed.message),
+      protocol_version: PROTOCOL_VERSION,
+      room_id: claimed.roomId,
+      type: "message.created",
+    });
+    let status: "delivered" | "failed" = "failed";
+    let failureCategory: string | null = "network_error";
+    try {
+      const target = webhookRequestTarget(claimed.endpoint.url);
+      const headers = new Headers({
+        "content-type": "application/json; charset=utf-8",
+        "x-msg-signature": await signWebhookPayload(claimed.endpoint.secret, timestamp, body),
+        "x-msg-timestamp": timestamp,
+      });
+      if (target.authorization) headers.set("authorization", target.authorization);
+      const response = await fetch(target.url, {
+        body,
+        headers,
+        method: "POST",
+        redirect: "manual",
+        signal: AbortSignal.timeout(WEBHOOK_REQUEST_TIMEOUT_MS),
+      });
+      await discardWebhookResponseBody(response);
+      if (response.status >= 200 && response.status < 300) {
+        status = "delivered";
+        failureCategory = null;
+      } else failureCategory = response.status >= 300 && response.status < 400 ? "redirect" : "http_status";
+    } catch (error) {
+      failureCategory = error instanceof Error && /timeout/iu.test(error.name) ? "timeout" : "network_error";
+    }
+
+    const completedAt = this.now();
+    const current = this.state();
+    if (current?.status === "active" && completedAt >= current.inactivity_expires_at) {
+      await this.expire(completedAt, "Conversation expired");
+      return;
+    }
+    this.ctx.storage.transactionSync(() => {
+      const state = this.state();
+      const delivery = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_deliveries WHERE id = ? AND status = 'sending'", claimed.delivery.id))[0];
+      const endpoint = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE id = ? AND status = 'active'", claimed.endpoint.id))[0];
+      if (!state || state.status !== "active" || !delivery || !endpoint) return;
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_deliveries SET status = ?, completed_at = ?, lease_expires_at = NULL, failure_category = ? WHERE id = ?",
+        status, completedAt, failureCategory, claimed.delivery.id,
+      );
+    });
+    await this.schedule();
+  }
+
+  private async schedule(): Promise<void> {
+    this.scheduleRevision += 1;
+    while (this.scheduledRevision !== this.scheduleRevision) {
+      let pending = this.schedulePromise;
+      if (!pending) {
+        pending = this.drainSchedule().finally(() => {
+          if (this.schedulePromise === pending) this.schedulePromise = undefined;
+        });
+        this.schedulePromise = pending;
+      }
+      await pending;
+    }
+  }
+
+  private async drainSchedule(): Promise<void> {
+    while (this.scheduledRevision !== this.scheduleRevision) {
+      const revision = this.scheduleRevision;
+      const state = this.state();
+      if (!state) {
+        await this.ctx.storage.deleteAlarm();
+      } else {
+        const delivery = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(CASE WHEN status = 'pending' THEN due_at ELSE lease_expires_at END) AS at FROM webhook_deliveries WHERE status IN ('pending', 'sending')",
+        ))[0]?.at;
+        const history = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(created_at + ?) AS at FROM webhook_deliveries",
+          WEBHOOK_HISTORY_TTL_MS,
+        ))[0]?.at;
+        const stateDeadline = state.status === "deleted" ? state.tombstone_expires_at : state.inactivity_expires_at;
+        const deadlines = [stateDeadline, delivery, history].filter((value): value is number => typeof value === "number");
+        if (deadlines.length === 0) await this.ctx.storage.deleteAlarm();
+        else await this.ctx.storage.setAlarm(Math.min(...deadlines));
+      }
+      this.scheduledRevision = revision;
+    }
   }
 
   private insertMessage(message: StoredMessage): void {
@@ -222,13 +508,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   private state(): RoomState | undefined { return rows<RoomState>(this.ctx.storage.sql.exec("SELECT * FROM room_state WHERE singleton = 1"))[0]; }
   private requireState(): RoomState { const state = this.state(); if (!state) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404); return state; }
-  private async requireActive(now: number): Promise<RoomState> { const state = this.requireState(); if (state.status === "deleted") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); if (now >= state.inactivity_expires_at) { await this.expire(now, "Conversation expired"); throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); } await this.schedule(state); return state; }
+  private async requireActive(now: number): Promise<RoomState> { const state = this.requireState(); if (state.status === "deleted") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); if (now >= state.inactivity_expires_at) { await this.expire(now, "Conversation expired"); throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); } await this.schedule(); return state; }
   private messageBySequence(sequence: number): StoredMessage { const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence = ?", sequence))[0]; if (!message) throw new Error("Initial message was not stored."); return message; }
   private messageByIdempotencyKey(key: string): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE idempotency_key = ?", key))[0]; }
   private messageByClientMessageId(key: string): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE client_message_id = ?", key))[0]; }
   private toMessage(message: StoredMessage) { return { id: message.id, sequence: message.sequence, content: message.content, author: message.author, display_name: message.display_name, identity_verified: false as const, ...(message.client ? { client: message.client } : {}), semantic_type: message.semantic_type, ...(message.reply_to ? { reply_to: message.reply_to } : {}), created_at: iso(message.created_at), ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}), byte_count: message.byte_count }; }
-  private async expire(now: number, reason: string): Promise<void> { if (!this.deleteToTombstone(now)) return; const state = this.requireState(); this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.expired" }); this.closeSockets(1001, reason); await this.schedule(state); }
-  private async schedule(state: RoomState): Promise<void> { const at = state.status === "deleted" ? state.tombstone_expires_at : state.inactivity_expires_at; if (at === null || at === undefined) await this.ctx.storage.deleteAlarm(); else await this.ctx.storage.setAlarm(at); }
+  private async expire(now: number, reason: string): Promise<void> { if (!this.deleteToTombstone(now)) return; this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.expired" }); this.closeSockets(1001, reason); await this.schedule(); }
   private broadcast(frame: unknown): void { const payload = JSON.stringify(frame); for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.send(payload); }
   private closeSockets(code: number, reason: string): void { for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.close(code, reason); }
   private json(value: unknown): Response { return new Response(JSON.stringify(value), { headers: { "content-type": "application/json; charset=utf-8" } }); }
@@ -236,7 +521,15 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 }
 
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function iso(value: number): string { return new Date(value).toISOString(); }
+function resolveNow(env: ConversationRoomEnv): number {
+  if (env.MSG_TEST_NOW_MS === undefined) return Date.now();
+  if (env.MSG_TEST_MODE !== "1" || !/^[0-9]+$/u.test(env.MSG_TEST_NOW_MS)) throw new Error("The test clock requires explicit test mode and a valid timestamp.");
+  const now = Number(env.MSG_TEST_NOW_MS);
+  if (!Number.isSafeInteger(now)) throw new Error("The test clock timestamp is invalid.");
+  return now;
+}
 function sameInput(message: StoredMessage, input: MessageInput): boolean { return message.content === input.content && message.author === input.author && message.display_name === input.display_name && message.client === (input.client ?? null) && message.semantic_type === input.semantic_type && message.reply_to === (input.reply_to ?? null) && message.client_message_id === (input.client_message_id ?? null); }
 function resolveRoomLimits(env: ConversationRoomEnv): RoomLimits {
   if (env.MSG_TEST_MODE === undefined && env.MSG_TEST_ROOM_LIMITS === undefined) return ROOM_LIMITS;

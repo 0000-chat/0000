@@ -137,3 +137,102 @@ export async function handleAgentPromptCopy(options: {
     return false;
   }
 }
+
+export interface WebhookPanelDelivery {
+  readonly attempt_count: number;
+  readonly attempted_at: string | null;
+  readonly completed_at: string | null;
+  readonly failure_category: string | null;
+  readonly status: string;
+}
+
+export interface WebhookPanelEntry {
+  readonly deliveries: readonly WebhookPanelDelivery[];
+  readonly id: string;
+  readonly status: string;
+  readonly url: string;
+}
+
+export interface WebhookPanelControllerOptions {
+  readonly endpoint: string;
+  readonly fetch: (input: string, init?: RequestInit) => Promise<Response>;
+  readonly onBusyChange: (busy: boolean) => void;
+  readonly onEntries: (entries: readonly WebhookPanelEntry[]) => void;
+  readonly onSecret: (secret: string) => void;
+}
+
+/** Room-scoped webhook operations used by the human Notifications panel. */
+export function createWebhookPanelController(options: WebhookPanelControllerOptions) {
+  let busy = false;
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+  async function request(path: string, init: RequestInit): Promise<unknown> {
+    const headers = new Headers(init.headers);
+    headers.set("accept", "application/json");
+    const response = await options.fetch(`${options.endpoint}${path}`, { ...init, headers });
+    let value: unknown;
+    try { value = await response.json(); } catch { value = undefined; }
+    if (!response.ok) {
+      const message = isRecord(value) && isRecord(value.error) && typeof value.error.message === "string"
+        ? value.error.message
+        : `The request failed with HTTP ${response.status}.`;
+      throw new Error(message);
+    }
+    if (value === undefined) throw new Error("The service returned an invalid webhook response.");
+    return value;
+  }
+
+  function parseEntries(value: unknown): readonly WebhookPanelEntry[] {
+    if (!isRecord(value) || !Array.isArray(value.webhooks)) throw new Error("The service returned an invalid webhook list.");
+    for (const entry of value.webhooks) {
+      if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.url !== "string" || typeof entry.status !== "string" || !Array.isArray(entry.deliveries)) {
+        throw new Error("The service returned an invalid webhook list.");
+      }
+    }
+    return value.webhooks as WebhookPanelEntry[];
+  }
+
+  async function refreshEntries(): Promise<readonly WebhookPanelEntry[]> {
+    const entries = parseEntries(await request("", { method: "GET" }));
+    options.onEntries(entries);
+    return entries;
+  }
+
+  async function runExclusive<T>(operation: () => Promise<T>): Promise<T | undefined> {
+    if (busy) return undefined;
+    busy = true;
+    options.onBusyChange(true);
+    try {
+      return await operation();
+    } finally {
+      busy = false;
+      options.onBusyChange(false);
+    }
+  }
+
+  return {
+    async list() {
+      return await runExclusive(refreshEntries);
+    },
+    async create(url: string) {
+      return await runExclusive(async () => {
+        const value = await request("", {
+          body: JSON.stringify({ url }),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        });
+        if (!isRecord(value) || typeof value.secret !== "string" || !isRecord(value.webhook)) {
+          throw new Error("The service returned an invalid webhook creation result.");
+        }
+        options.onSecret(value.secret);
+        return await refreshEntries();
+      });
+    },
+    async remove(id: string) {
+      return await runExclusive(async () => {
+        await request(`/${encodeURIComponent(id)}`, { method: "DELETE" });
+        return await refreshEntries();
+      });
+    },
+  };
+}

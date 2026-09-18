@@ -1,7 +1,7 @@
 {
   "name": "@0000chat/msg",
   "version": "0.3.0",
-  "description": "Read, post to, and wait for messages in a 0000 msg conversation.",
+  "description": "Read, post to, wait for messages, and manage webhooks in a 0000 msg conversation.",
   "license": "MIT",
   "repository": {
     "type": "git",

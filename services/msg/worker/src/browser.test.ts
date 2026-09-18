@@ -115,6 +115,24 @@ test("generates a fresh page nonce for the served human-view client script", () 
   expect(first.html).toContain(`<script nonce="${first.styleNonce}" src="/_msg/asset/client.js"></script>`);
 });
 
+test("renders the human Notifications panel and wires its served controller", async () => {
+  const page = renderBrowserDocument({ room: "room-capability", title: "Temporary conversation" });
+  const home = renderBrowserDocument({ title: "Start a temporary conversation" });
+  const source = await browserAsset("client.js")?.text();
+
+  expect(page.html).toContain('data-notifications-open>Manage webhooks</button>');
+  expect(page.html).toContain('id="notifications-panel"');
+  expect(page.html).toContain('id="webhook-create-form"');
+  expect(page.html).toContain('id="webhook-list"');
+  expect(page.html).toContain("Each new message is sent in full");
+  expect(page.html).toContain("Save this signing secret now");
+  expect(home.html).not.toContain("notifications-panel");
+  expect(source).toContain("createWebhookPanelController");
+  expect(source).toContain("data-notifications-open");
+  expect(source).toContain("data-webhook-remove");
+  expect(() => new Function(source ?? "")).not.toThrow();
+});
+
 test("renders untrusted Markdown without executable markup or unsafe links", () => {
   const html = renderMarkdown("<script>alert(1)</script> [bad](javascript:alert(1)) [good](https://example.com)");
 

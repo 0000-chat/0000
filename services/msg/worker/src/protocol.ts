@@ -110,6 +110,9 @@ export interface RoomService {
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
+  createWebhook?(input: CreateWebhookInput): Promise<CreateWebhookResponse>;
+  listWebhooks?(input: ListWebhooksInput): Promise<ListWebhooksResponse>;
+  removeWebhook?(input: RemoveWebhookInput): Promise<RemoveWebhookResponse>;
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
@@ -168,6 +171,56 @@ export interface ManageRoomResponse {
   readonly deleted?: boolean;
   readonly expires_at?: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+}
+
+export interface CreateWebhookInput {
+  readonly room: string;
+  readonly url: string;
+}
+
+export interface ListWebhooksInput {
+  readonly room: string;
+}
+
+export interface RemoveWebhookInput {
+  readonly id: string;
+  readonly room: string;
+}
+
+export interface WebhookDeliveryMetadata {
+  readonly attempt_count: number;
+  readonly attempted_at: string | null;
+  readonly completed_at: string | null;
+  readonly created_at: string;
+  readonly event_id: string;
+  readonly failure_category: string | null;
+  readonly message_id: string;
+  readonly message_sequence: number;
+  readonly status: "delivered" | "failed" | "pending" | "sending";
+}
+
+export interface WebhookSummary {
+  readonly created_at: string;
+  readonly deliveries: readonly WebhookDeliveryMetadata[];
+  readonly id: string;
+  readonly status: "active";
+  readonly url: string;
+}
+
+export interface CreateWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly secret: string;
+  readonly webhook: WebhookSummary;
+}
+
+export interface ListWebhooksResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly webhooks: readonly WebhookSummary[];
+}
+
+export interface RemoveWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly removed: true;
 }
 
 export interface LiveRoomInput {

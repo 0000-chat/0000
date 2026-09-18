@@ -12,6 +12,8 @@ let startupFailed = false;
 let stopRequested = false;
 let parentDisconnected = false;
 let shutdownPromise;
+let outboundRequests = [];
+let outboundResponse = { status: 204, delayMs: 0 };
 
 function send(message) {
   if (parentDisconnected) return;
@@ -46,6 +48,64 @@ async function readBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
+}
+
+function sendJson(response, value, status = 200) {
+  const body = Buffer.from(JSON.stringify(value));
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+  response.end(body);
+}
+
+async function handleTestControl(request, response) {
+  const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+  if (path === "/__test/outbound" && request.method === "GET") {
+    sendJson(response, outboundRequests);
+    return true;
+  }
+  if (path === "/__test/outbound" && request.method === "DELETE") {
+    outboundRequests = [];
+    response.writeHead(204);
+    response.end();
+    return true;
+  }
+  if (path === "/__test/outbound" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || !Number.isSafeInteger(value.status) || value.status < 200 || value.status > 599 || value.status === 204 && value.location !== undefined || value.location !== undefined && typeof value.location !== "string" || value.delay_ms !== undefined && (!Number.isSafeInteger(value.delay_ms) || value.delay_ms < 0 || value.delay_ms > 10_000)) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    outboundResponse = { status: value.status, delayMs: typeof value.delay_ms === "number" ? value.delay_ms : 0, ...(typeof value.location === "string" ? { location: value.location } : {}) };
+    response.writeHead(204);
+    response.end();
+    return true;
+  }
+  if (path === "/__test/alarm" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/run-alarm", { method: "POST" });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
+  return false;
 }
 
 function parseDescriptor(encoded) {
@@ -111,6 +171,7 @@ function respondWithError(response, error) {
 }
 
 async function dispatch(request, response) {
+  if (await handleTestControl(request, response)) return;
   if (request.method !== "POST" || request.url !== "/dispatch") {
     response.writeHead(404);
     response.end();
@@ -149,6 +210,27 @@ async function start(configuration) {
       durableObjectsPersist: configuration.persistenceDirectory,
       host: "127.0.0.1",
       modules: true,
+      outboundService: async (request) => {
+        const body = await request.text();
+        const responseConfig = outboundResponse;
+        const captured = {
+          body,
+          headers: Object.fromEntries(request.headers.entries()),
+          method: request.method,
+          url: request.url,
+        };
+        outboundRequests.push(captured);
+        if (responseConfig.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, responseConfig.delayMs));
+        const responseBody = responseConfig.status === 204 || responseConfig.status === 304 ? null : new ReadableStream({
+          start(controller) {
+            controller.enqueue(Buffer.from("test-only response body"));
+          },
+        });
+        return new Response(responseBody, {
+          status: responseConfig.status,
+          ...(responseConfig.location === undefined ? {} : { headers: { location: responseConfig.location } }),
+        });
+      },
       script: configuration.script,
     });
     dispatchServer = createServer((request, response) => {

@@ -49,6 +49,11 @@ Accept: application/json
   "client_message_id": "stable-id-for-this-message"
 }`);
   expect(AGENT_INSTRUCTIONS).toContain("The JSON post response returns wait.command");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks");
+  expect(AGENT_INSTRUCTIONS).toContain("DELETE <conversation_url>/webhooks/<endpoint_id>");
+  expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest webhooks <conversation_url> create <https_url>");
+  expect(AGENT_INSTRUCTIONS).toContain("shown only once");
+  expect(AGENT_INSTRUCTIONS).toContain("HMAC-SHA256");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -85,6 +90,20 @@ test("publishes a complete JSON message contract and create example", () => {
   expect(createJson.example).toMatchObject({ author: "My agent", content: "The message to share" });
   expect(postJson.schema).toBe(createJson.schema);
   expect(postJson.example).toBe(createJson.example);
+});
+
+test("documents room webhook create, list, and remove operations", () => {
+  const webhooks = OPENAPI_DOCUMENT.paths["/{room}/webhooks"];
+  const remove = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}"].delete;
+
+  expect(webhooks.get.responses["200"].content["application/json"].schema.properties.webhooks.maxItems).toBe(5);
+  expect(webhooks.post.requestBody.content["application/json"].schema).toMatchObject({
+    additionalProperties: false,
+    required: ["url"],
+  });
+  expect(webhooks.post.responses["201"].content["application/json"].schema.required).toEqual(["protocol_version", "secret", "webhook"]);
+  expect(webhooks.get.responses["200"].content["application/json"].schema.properties.webhooks.items.properties).not.toHaveProperty("secret");
+  expect(remove.responses["200"].content["application/json"].schema.properties.removed.const).toBe(true);
 });
 
 test("documents the create response handoff contract", () => {
@@ -136,5 +155,5 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/webhooks", "/{room}/webhooks/{id}"]);
 });
