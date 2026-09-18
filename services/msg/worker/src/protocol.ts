@@ -113,6 +113,10 @@ export interface RoomService {
   createWebhook?(input: CreateWebhookInput): Promise<CreateWebhookResponse>;
   listWebhooks?(input: ListWebhooksInput): Promise<ListWebhooksResponse>;
   removeWebhook?(input: RemoveWebhookInput): Promise<RemoveWebhookResponse>;
+  disableWebhook?(input: ManageWebhookInput): Promise<ManageWebhookResponse>;
+  enableWebhook?(input: ManageWebhookInput): Promise<ManageWebhookResponse>;
+  rotateWebhookSecret?(input: ManageWebhookInput): Promise<RotateWebhookSecretResponse>;
+  redeliverWebhook?(input: RedeliverWebhookInput): Promise<RedeliverWebhookResponse>;
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
@@ -187,6 +191,15 @@ export interface RemoveWebhookInput {
   readonly room: string;
 }
 
+export interface ManageWebhookInput {
+  readonly id: string;
+  readonly room: string;
+}
+
+export interface RedeliverWebhookInput extends ManageWebhookInput {
+  readonly eventId: string;
+}
+
 export interface WebhookDeliveryMetadata {
   readonly attempts: readonly WebhookAttemptMetadata[];
   readonly attempt_count: number;
@@ -238,6 +251,21 @@ export interface ListWebhooksResponse {
 export interface RemoveWebhookResponse {
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly removed: true;
+}
+
+export interface ManageWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly webhook: WebhookSummary;
+}
+
+export interface RotateWebhookSecretResponse extends ManageWebhookResponse {
+  readonly secret: string;
+}
+
+export interface RedeliverWebhookResponse {
+  readonly delivery: WebhookDeliveryMetadata;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly result: "already_queued" | "queued";
 }
 
 export interface LiveRoomInput {

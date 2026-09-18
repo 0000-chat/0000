@@ -14,9 +14,19 @@ test("parses the documented webhook management commands", () => {
     operation: "create",
   });
   expect(parseWebhooksCommand(["webhooks", roomUrl, "remove", endpointId])).toEqual({ conversationUrl: roomUrl, endpointId, operation: "remove" });
+  expect(parseWebhooksCommand(["webhooks", roomUrl, "disable", endpointId])).toEqual({ conversationUrl: roomUrl, endpointId, operation: "disable" });
+  expect(parseWebhooksCommand(["webhooks", roomUrl, "enable", endpointId])).toEqual({ conversationUrl: roomUrl, endpointId, operation: "enable" });
+  expect(parseWebhooksCommand(["webhooks", roomUrl, "rotate", endpointId])).toEqual({ conversationUrl: roomUrl, endpointId, operation: "rotate" });
+  expect(parseWebhooksCommand(["webhooks", roomUrl, "redeliver", endpointId, "b0000000-0000-4000-8000-000000000001"])).toEqual({
+    conversationUrl: roomUrl,
+    endpointId,
+    eventId: "b0000000-0000-4000-8000-000000000001",
+    operation: "redeliver",
+  });
 
   expect(() => parseWebhooksCommand(["webhooks", "https://example.com/room", "list"])).toThrow("conversation URL");
   expect(() => parseWebhooksCommand(["webhooks", roomUrl, "remove", "not-an-id"])).toThrow("Usage: msg webhooks");
+  expect(() => parseWebhooksCommand(["webhooks", roomUrl, "redeliver", endpointId, "not-an-event"])).toThrow("Usage: msg webhooks");
 });
 
 test("sends list, create, and remove requests to the room's webhook API", async () => {
@@ -115,4 +125,51 @@ test("does not write a result when a webhook request fails", async () => {
   expect(code).toBe(1);
   expect(stdout).toEqual([]);
   expect(stderr).toEqual(["The conversation has expired.\n"]);
+});
+
+test("sends webhook recovery commands and exposes the rotation secret only in that result", async () => {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const calls: Array<{ method?: string; redirect?: string; url?: string }> = [];
+  const responses = [
+    { protocol_version: 1, webhook: { id: endpointId, status: "disabled" } },
+    { protocol_version: 1, webhook: { id: endpointId, status: "active" } },
+    { protocol_version: 1, secret: "replacement-secret", webhook: { id: endpointId, status: "active" } },
+    { protocol_version: 1, result: "queued", delivery: { event_id: "b0000000-0000-4000-8000-000000000001", status: "pending" } },
+    { protocol_version: 1, result: "already_queued", delivery: { event_id: "b0000000-0000-4000-8000-000000000001", status: "pending" } },
+  ];
+  let index = 0;
+  const dependencies = {
+    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ method: init?.method, redirect: init?.redirect, url: String(input) });
+      const response = responses[index++];
+      return Response.json(response, { status: index === 4 ? 202 : 200 });
+    },
+    stderr: (text: string) => stderr.push(text),
+    stdout: (text: string) => stdout.push(text),
+    websocket: () => { throw new Error("WebSocket must not connect."); },
+  };
+
+  expect(await runCli(["webhooks", roomUrl, "disable", endpointId], dependencies)).toBe(0);
+  expect(await runCli(["webhooks", roomUrl, "enable", endpointId], dependencies)).toBe(0);
+  expect(await runCli(["webhooks", roomUrl, "rotate", endpointId], dependencies)).toBe(0);
+  expect(await runCli(["webhooks", roomUrl, "redeliver", endpointId, "b0000000-0000-4000-8000-000000000001"], dependencies)).toBe(0);
+  expect(await runCli(["webhooks", roomUrl, "redeliver", endpointId, "b0000000-0000-4000-8000-000000000001"], dependencies)).toBe(0);
+
+  expect(calls).toEqual([
+    { method: "POST", redirect: "error", url: `${roomUrl}/webhooks/${endpointId}/disable` },
+    { method: "POST", redirect: "error", url: `${roomUrl}/webhooks/${endpointId}/enable` },
+    { method: "POST", redirect: "error", url: `${roomUrl}/webhooks/${endpointId}/rotate-secret` },
+    { method: "POST", redirect: "error", url: `${roomUrl}/webhooks/${endpointId}/deliveries/b0000000-0000-4000-8000-000000000001/redeliver` },
+    { method: "POST", redirect: "error", url: `${roomUrl}/webhooks/${endpointId}/deliveries/b0000000-0000-4000-8000-000000000001/redeliver` },
+  ]);
+  expect(stdout.map((line) => JSON.parse(line))).toMatchObject([
+    { webhook: { status: "disabled" } },
+    { webhook: { status: "active" } },
+    { secret: "replacement-secret" },
+    { result: "queued" },
+    { result: "already_queued" },
+  ]);
+  expect(stdout.filter((_line, position) => position !== 2).join("")).not.toContain("replacement-secret");
+  expect(stderr).toEqual([]);
 });

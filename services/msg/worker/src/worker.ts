@@ -310,6 +310,28 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     await enforceRateLimit(request, options.rateLimits?.posts);
     return jsonResponse(await service.removeWebhook({ id: webhookItemMatch[2]!, room: webhookItemMatch[1]! }));
   }
+  const webhookActionMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})\/(disable|enable|rotate-secret)$/iu.exec(url.pathname);
+  if (webhookActionMatch && request.method === "POST") {
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const input = { id: webhookActionMatch[2]!, room: webhookActionMatch[1]! };
+    if (webhookActionMatch[3] === "disable") {
+      if (!service.disableWebhook) return notFound();
+      return jsonResponse(await service.disableWebhook(input));
+    }
+    if (webhookActionMatch[3] === "enable") {
+      if (!service.enableWebhook) return notFound();
+      return jsonResponse(await service.enableWebhook(input));
+    }
+    if (!service.rotateWebhookSecret) return notFound();
+    return jsonResponse(await service.rotateWebhookSecret(input));
+  }
+  const webhookRedeliveryMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})\/deliveries\/([0-9a-f-]{36})\/redeliver$/iu.exec(url.pathname);
+  if (webhookRedeliveryMatch && request.method === "POST") {
+    if (!service.redeliverWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = await service.redeliverWebhook({ eventId: webhookRedeliveryMatch[3]!, id: webhookRedeliveryMatch[2]!, room: webhookRedeliveryMatch[1]! });
+    return jsonResponse(result, result.result === "queued" ? 202 : 200);
+  }
 
   const exportMatch = /^\/([^/]+)\/export\.(md|json)$/.exec(url.pathname);
   if (exportMatch && request.method === "GET") {

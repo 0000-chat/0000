@@ -98,12 +98,12 @@ test("migrates v4 pending, sending, delivered, and failed webhook history", () =
 
   migrateRoomSchema(roomStorage);
 
-  const deliveries = database.query("SELECT id, retry_expires_at, due_at, status, attempt_count FROM webhook_deliveries ORDER BY id").all();
+  const deliveries = database.query("SELECT id, retry_expires_at, due_at, status, attempt_count, manual_redelivery_requested_at FROM webhook_deliveries ORDER BY id").all();
   expect(deliveries).toEqual([
-    { id: "delivered", retry_expires_at: base + 200 + 24 * 60 * 60 * 1_000, due_at: base + 450, status: "delivered", attempt_count: 1 },
-    { id: "failed", retry_expires_at: base + 300 + 24 * 60 * 60 * 1_000, due_at: base + 600 + 30_000, status: "retrying", attempt_count: 1 },
-    { id: "pending", retry_expires_at: base + 24 * 60 * 60 * 1_000, due_at: base + 250, status: "pending", attempt_count: 0 },
-    { id: "sending", retry_expires_at: base + 100 + 24 * 60 * 60 * 1_000, due_at: base + 350, status: "sending", attempt_count: 1 },
+    { id: "delivered", retry_expires_at: base + 200 + 24 * 60 * 60 * 1_000, due_at: base + 450, status: "delivered", attempt_count: 1, manual_redelivery_requested_at: null },
+    { id: "failed", retry_expires_at: base + 300 + 24 * 60 * 60 * 1_000, due_at: base + 600 + 30_000, status: "retrying", attempt_count: 1, manual_redelivery_requested_at: null },
+    { id: "pending", retry_expires_at: base + 24 * 60 * 60 * 1_000, due_at: base + 250, status: "pending", attempt_count: 0, manual_redelivery_requested_at: null },
+    { id: "sending", retry_expires_at: base + 100 + 24 * 60 * 60 * 1_000, due_at: base + 350, status: "sending", attempt_count: 1, manual_redelivery_requested_at: null },
   ]);
   expect(database.query("SELECT attempt_number, attempted_at, completed_at, status, failure_category FROM webhook_delivery_attempts WHERE delivery_id = 'sending'").get())
     .toEqual({ attempt_number: 1, attempted_at: base + 351, completed_at: null, status: "sending", failure_category: null });

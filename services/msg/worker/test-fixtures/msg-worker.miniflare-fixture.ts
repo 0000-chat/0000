@@ -32,6 +32,7 @@ export interface MsgMiniflareRuntime {
   setOutboundResponse(status: number, location?: string, delayMs?: number): Promise<void>;
   triggerAlarm(room: string): Promise<void>;
   markWebhookDeliverySending(room: string, eventId: string): Promise<void>;
+  deleteWebhookSource(room: string, messageId: string): Promise<void>;
 }
 
 export interface CapturedOutboundRequest {
@@ -72,6 +73,7 @@ interface NodeRuntimeProcess {
   readonly setOutboundResponse: MsgMiniflareRuntime["setOutboundResponse"];
   readonly triggerAlarm: MsgMiniflareRuntime["triggerAlarm"];
   readonly markWebhookDeliverySending: MsgMiniflareRuntime["markWebhookDeliverySending"];
+  readonly deleteWebhookSource: MsgMiniflareRuntime["deleteWebhookSource"];
   dispose(): Promise<void>;
 }
 
@@ -235,6 +237,13 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
         method: "POST",
       });
     },
+    async deleteWebhookSource(room, messageId) {
+      await control("delete-webhook-source", {
+        body: JSON.stringify({ room, message_id: messageId }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+    },
     dispose() {
       if (disposal) return disposal;
       disposal = (async () => {
@@ -306,6 +315,7 @@ export async function startMsgMiniflare(
       setOutboundResponse: runtime.setOutboundResponse,
       triggerAlarm: runtime.triggerAlarm,
       markWebhookDeliverySending: runtime.markWebhookDeliverySending,
+      deleteWebhookSource: runtime.deleteWebhookSource,
       dispatchFetch: runtime.dispatchFetch,
     },
     async dispose() {

@@ -670,10 +670,14 @@ test.serial("cancels queued deliveries when an endpoint is removed or its room i
     expect(removed.status).toBe(200);
 
     const deletedRoom = await createRoom(first);
-    await registerWebhook(first, deletedRoom.room.id, "https://receiver.example.com/deleted-room");
-    expect((await post(first, deletedRoom.room.id, "cancel on deletion")).status).toBe(201);
+    const deletedRegistration = await registerWebhook(first, deletedRoom.room.id, "https://receiver.example.com/deleted-room");
+    const deletedPost = await post(first, deletedRoom.room.id, "cancel on deletion");
+    expect(deletedPost.status).toBe(201);
+    const deletedSource = (await deletedPost.json() as { message: { id: string } }).message;
     const deleted = await first.dispatchFetch(deletedRoom.manage_url, { headers: { accept: "application/json" }, method: "DELETE" });
     expect(deleted.status).toBe(200);
+    const redeliveryAfterDelete = await first.dispatchFetch(`https://msg.0000.chat/${deletedRoom.room.id}/webhooks/${deletedRegistration.webhook.id}/deliveries/${deletedSource.id}/redeliver`, { method: "POST" });
+    expect(redeliveryAfterDelete.status).toBe(410);
 
     const restarted = await restart(fakeNow + 5_000);
     await restarted.triggerAlarm(endpointRoom.room.id);
@@ -689,19 +693,309 @@ test.serial("cancels queued deliveries when an endpoint is removed or its room i
   }, limits, fakeNow);
 });
 
+test.serial("manual disable cancels queued work and re-enable starts with only later messages across restart", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/disable-and-enable");
+    const beforeDisable = await post(first, room.id, "queued before disable");
+    const beforeDisableId = (await beforeDisable.json() as { message: { id: string } }).message.id;
+
+    const disabled = await first.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/disable`, { method: "POST" });
+    expect(disabled.status).toBe(200);
+    expect(await disabled.json()).toMatchObject({ webhook: { id: registration.webhook.id, status: "disabled" } });
+    expect((await post(first, room.id, "created while disabled")).status).toBe(201);
+
+    let runtime = await restart(fakeNow + 1_000);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ status: "disabled", deliveries: [{ cancelled_at: new Date(fakeNow).toISOString(), event_id: beforeDisableId, status: "cancelled" }] });
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+
+    const enabled = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/enable`, { method: "POST" });
+    expect(enabled.status).toBe(200);
+    expect(await enabled.json()).toMatchObject({ webhook: { disabled_at: null, failure_started_at: null, status: "active" } });
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+
+    const afterEnable = await post(runtime, room.id, "created after re-enable");
+    const afterEnableId = (await afterEnable.json() as { message: { id: string } }).message.id;
+    runtime = await restart(fakeNow + 2_000);
+    await runtime.triggerAlarm(room.id);
+    const requests = await waitForOutboundRequests(runtime, 1);
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]!.body)).toMatchObject({ event_id: afterEnableId, message: { content: "created after re-enable" } });
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({
+      status: "active",
+      deliveries: [
+        { event_id: afterEnableId, status: "delivered" },
+        { event_id: beforeDisableId, status: "cancelled" },
+      ],
+    });
+    expect(endpoint.deliveries.some(({ event_id }) => event_id !== afterEnableId && event_id !== beforeDisableId)).toBe(false);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("a disable followed by re-enable does not resurrect an automatic request already in flight", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/disable-in-flight");
+    const oldPost = await post(first, room.id, "in-flight event canceled by disable");
+    const oldEventId = (await oldPost.json() as { message: { id: string } }).message.id;
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503, undefined, 750);
+    const alarm = runtime.triggerAlarm(room.id);
+    expect(await waitForOutboundRequests(runtime, 1)).toHaveLength(1);
+
+    const disabled = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/disable`, { method: "POST" });
+    expect(disabled.status).toBe(200);
+    const enabled = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/enable`, { method: "POST" });
+    expect(enabled.status).toBe(200);
+    expect(await enabled.json()).toMatchObject({ webhook: { failure_started_at: null, status: "active" } });
+    await alarm;
+
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ status: "active", deliveries: [{ attempt_count: 1, cancelled_at: new Date(fakeNow + 250).toISOString(), event_id: oldEventId, status: "cancelled" }] });
+    expect(endpoint.deliveries[0]?.attempts.map(({ status }) => status)).toEqual(["failed"]);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+
+    runtime = await restart(fakeNow + 500);
+    await runtime.setOutboundResponse(204);
+    const newPost = await post(runtime, room.id, "new message after re-enable");
+    const newEventId = (await newPost.json() as { message: { id: string } }).message.id;
+    runtime = await restart(fakeNow + 751);
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    const requests = await waitForOutboundRequests(runtime, 1);
+    expect(JSON.parse(requests[0]!.body)).toMatchObject({ event_id: newEventId, message: { content: "new message after re-enable" } });
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.deliveries.map(({ event_id, status }) => [event_id, status])).toEqual([[newEventId, "delivered"], [oldEventId, "cancelled"]]);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("secret rotation reveals once and signs later dispatches with the current key", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/secret-rotation");
+    const oldSecret = registration.secret;
+    const inFlightPost = await post(first, room.id, "already in flight under the old key");
+    const inFlightEventId = (await inFlightPost.json() as { message: { id: string } }).message.id;
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(204, undefined, 750);
+    const alarm = runtime.triggerAlarm(room.id);
+    const inFlight = await waitForOutboundRequests(runtime, 1);
+    expect(inFlight).toHaveLength(1);
+
+    const rotated = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/rotate-secret`, { method: "POST" });
+    expect(rotated.status).toBe(200);
+    const rotation = await rotated.json() as { secret: string; webhook: { id: string } };
+    expect(rotation.webhook.id).toBe(registration.webhook.id);
+    expect(rotation.secret).not.toBe(oldSecret);
+    const listed = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
+    const listing = await listed.text();
+    expect(listing).not.toContain(oldSecret);
+    expect(listing).not.toContain(rotation.secret);
+    await alarm;
+
+    const oldRequest = inFlight[0]!;
+    expect(JSON.parse(oldRequest.body)).toMatchObject({ event_id: inFlightEventId, message: { content: "already in flight under the old key" } });
+    expect(await verifyWebhookSignature(oldSecret, oldRequest.headers["x-msg-timestamp"]!, oldRequest.body, oldRequest.headers["x-msg-signature"]!)).toBe(true);
+    expect(await verifyWebhookSignature(rotation.secret, oldRequest.headers["x-msg-timestamp"]!, oldRequest.body, oldRequest.headers["x-msg-signature"]!)).toBe(false);
+
+    const afterRotation = await post(runtime, room.id, "signed with the new key");
+    const afterRotationId = (await afterRotation.json() as { message: { id: string } }).message.id;
+    runtime = await restart(fakeNow + 500);
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    const requests = await waitForOutboundRequests(runtime, 1);
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]!.body)).toMatchObject({ event_id: afterRotationId, message: { content: "signed with the new key" } });
+    expect(await verifyWebhookSignature(rotation.secret, requests[0]!.headers["x-msg-timestamp"]!, requests[0]!.body, requests[0]!.headers["x-msg-signature"]!)).toBe(true);
+    expect(await verifyWebhookSignature(oldSecret, requests[0]!.headers["x-msg-timestamp"]!, requests[0]!.body, requests[0]!.headers["x-msg-signature"]!)).toBe(false);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("redelivers one retained failed event while disabled after its automatic window without an automatic backlog", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const dayMs = 24 * 60 * 60 * 1_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/targeted-redelivery");
+    const posted = await post(first, room.id, "the retained source message");
+    const source = (await posted.json() as { message: { id: string } }).message;
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.deliveries[0]).toMatchObject({ attempt_count: 1, event_id: source.id, status: "retrying" });
+    const automaticDeadline = Date.parse(endpoint.failure_started_at!) + dayMs;
+
+    runtime = await restart(automaticDeadline);
+    await runtime.triggerAlarm(room.id);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ status: "disabled", deliveries: [{ attempt_count: 1, event_id: source.id, status: "failed" }] });
+
+    const beforeRead = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}`, { headers: { accept: "application/json" } });
+    const expiresAt = (await beforeRead.json() as { expires_at: string }).expires_at;
+    const redeliveryUrl = `https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/deliveries/${source.id}/redeliver`;
+    const queued = await runtime.dispatchFetch(redeliveryUrl, { method: "POST" });
+    expect(queued.status).toBe(202);
+    expect(await queued.json()).toMatchObject({ result: "queued", delivery: { attempt_count: 1, event_id: source.id, status: "pending" } });
+    const duplicate = await runtime.dispatchFetch(redeliveryUrl, { method: "POST" });
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toMatchObject({ result: "already_queued", delivery: { attempt_count: 1, event_id: source.id, status: "pending" } });
+
+    const disabledAgain = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/disable`, { method: "POST" });
+    expect(disabledAgain.status).toBe(200);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ status: "disabled", deliveries: [{ attempt_count: 1, event_id: source.id, failure_category: "http_status", status: "failed" }] });
+    expect(endpoint.deliveries[0]?.attempts.map(({ status }) => status)).toEqual(["failed"]);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+
+    const queuedAgain = await runtime.dispatchFetch(redeliveryUrl, { method: "POST" });
+    expect(queuedAgain.status).toBe(202);
+    expect(await queuedAgain.json()).toMatchObject({ result: "queued", delivery: { attempt_count: 1, event_id: source.id, status: "pending" } });
+
+    const rotated = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/rotate-secret`, { method: "POST" });
+    expect(rotated.status).toBe(200);
+    const activeSecret = (await rotated.json() as { secret: string }).secret;
+    expect(activeSecret).not.toBe(registration.secret);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.status).toBe("disabled");
+
+    runtime = await restart(automaticDeadline + 1_000);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    let requests = await waitForOutboundRequests(runtime, 1);
+    expect(requests).toHaveLength(1);
+    const firstManualAttempt = requests[0]!;
+    expect(await verifyWebhookSignature(activeSecret, firstManualAttempt.headers["x-msg-timestamp"]!, firstManualAttempt.body, firstManualAttempt.headers["x-msg-signature"]!)).toBe(true);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ status: "disabled", deliveries: [{ attempt_count: 2, event_id: source.id, failure_category: "http_status", status: "failed" }] });
+    expect(endpoint.deliveries[0]?.attempts.map(({ status }) => status)).toEqual(["failed", "failed"]);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+
+    await runtime.clearOutboundRequests();
+    const retryAfterFailure = await runtime.dispatchFetch(redeliveryUrl, { method: "POST" });
+    expect(retryAfterFailure.status).toBe(202);
+    expect(await retryAfterFailure.json()).toMatchObject({ result: "queued", delivery: { attempt_count: 2, event_id: source.id, status: "pending" } });
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    requests = await waitForOutboundRequests(runtime, 1);
+    expect(requests).toHaveLength(1);
+    const outbound = requests[0]!;
+    const event = JSON.parse(outbound.body) as { event_id: string; message: { content: string; id: string; sequence: number } };
+    expect(event).toMatchObject({ event_id: source.id, message: { content: "the retained source message", id: source.id, sequence: source.sequence } });
+    expect(await verifyWebhookSignature(activeSecret, outbound.headers["x-msg-timestamp"]!, outbound.body, outbound.headers["x-msg-signature"]!)).toBe(true);
+    expect(await verifyWebhookSignature(registration.secret, outbound.headers["x-msg-timestamp"]!, outbound.body, outbound.headers["x-msg-signature"]!)).toBe(false);
+
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({
+      disabled_at: new Date(automaticDeadline).toISOString(),
+      last_success_at: new Date(automaticDeadline + 1_000).toISOString(),
+      status: "disabled",
+      deliveries: [{ attempt_count: 3, event_id: source.id, status: "delivered" }],
+    });
+    expect(endpoint.deliveries[0]?.attempts.map(({ status }) => status)).toEqual(["failed", "failed", "delivered"]);
+    const afterRead = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}`, { headers: { accept: "application/json" } });
+    expect((await afterRead.json() as { expires_at: string }).expires_at).toBe(expiresAt);
+    const rejected = await runtime.dispatchFetch(redeliveryUrl, { method: "POST" });
+    expect(rejected.status).toBe(409);
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("rejects redelivery when a failed event or its source is no longer retained", { timeout: 25_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const dayMs = 24 * 60 * 60 * 1_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/missing-redelivery-source");
+    const firstPost = await post(first, room.id, "source removed before request");
+    const firstSource = (await firstPost.json() as { message: { id: string } }).message;
+    const secondPost = await post(first, room.id, "source removed after queue");
+    const secondSource = (await secondPost.json() as { message: { id: string } }).message;
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    expect(await waitForOutboundRequests(runtime, 2)).toHaveLength(2);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.deliveries.map(({ status }) => status)).toEqual(["retrying", "retrying"]);
+    const automaticDeadline = Date.parse(endpoint.failure_started_at!) + dayMs;
+
+    runtime = await restart(automaticDeadline);
+    await runtime.triggerAlarm(room.id);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ status: "disabled" });
+    expect(endpoint.deliveries.map(({ status }) => status)).toEqual(["failed", "failed"]);
+
+    const unknownEvent = await runtime.dispatchFetch(
+      `https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/deliveries/c0000000-0000-4000-8000-000000000001/redeliver`,
+      { method: "POST" },
+    );
+    expect(unknownEvent.status).toBe(404);
+
+    await runtime.deleteWebhookSource(room.id, firstSource.id);
+    const missingAtRequest = await runtime.dispatchFetch(
+      `https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/deliveries/${firstSource.id}/redeliver`,
+      { method: "POST" },
+    );
+    expect(missingAtRequest.status).toBe(404);
+    const retainedEventIds = (await readWebhookList(runtime, room.id)).webhooks[0]?.deliveries.map(({ event_id }) => event_id) ?? [];
+    expect(retainedEventIds).toHaveLength(2);
+    expect(retainedEventIds.sort()).toEqual([firstSource.id, secondSource.id].sort());
+
+    const secondRedeliveryUrl = `https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/deliveries/${secondSource.id}/redeliver`;
+    const queued = await runtime.dispatchFetch(secondRedeliveryUrl, { method: "POST" });
+    expect(queued.status).toBe(202);
+    await runtime.deleteWebhookSource(room.id, secondSource.id);
+    await runtime.clearOutboundRequests();
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.deliveries.map(({ event_id, status }) => [event_id, status])).toEqual([[firstSource.id, "failed"]]);
+    expect((await runtime.dispatchFetch(secondRedeliveryUrl, { method: "POST" })).status).toBe(404);
+
+    runtime = await restart(fakeNow + 6 * dayMs);
+    expect((await post(runtime, room.id, "keep the room active past the original event retention")).status).toBe(201);
+    runtime = await restart(fakeNow + 7 * dayMs + 1);
+    const activeRoom = await runtime.dispatchFetch(`https://msg.0000.chat/${room.id}`, { headers: { accept: "application/json" } });
+    expect(activeRoom.status).toBe(200);
+    const expiredDelivery = await runtime.dispatchFetch(
+      `https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/deliveries/${firstSource.id}/redeliver`,
+      { method: "POST" },
+    );
+    expect(expiredDelivery.status).toBe(404);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
 test.serial("expires a room with pending webhook work without extending its message lifetime", { timeout: 15_000 }, async () => {
   const fakeNow = 4_000_000_000_000;
   const limits = { ...TEST_ROOM_LIMITS, inactivityTtlMs: 1_000 };
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
-    await registerWebhook(first, room.id, "https://receiver.example.com/expiring-room");
-    expect((await post(first, room.id, "expires before delivery")).status).toBe(201);
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/expiring-room");
+    const posted = await post(first, room.id, "expires before delivery");
+    expect(posted.status).toBe(201);
+    const source = (await posted.json() as { message: { id: string } }).message;
 
     const restarted = await restart(fakeNow + limits.inactivityTtlMs);
     await restarted.triggerAlarm(room.id);
     expect(await restarted.inspectOutboundRequests()).toEqual([]);
     const gone = await restarted.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
     expect(gone.status).toBe(410);
+    const redelivery = await restarted.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks/${registration.webhook.id}/deliveries/${source.id}/redeliver`, { method: "POST" });
+    expect(redelivery.status).toBe(410);
   }, limits, fakeNow);
 });
 

@@ -139,6 +139,9 @@ export async function handleAgentPromptCopy(options: {
 }
 
 export interface WebhookPanelDelivery {
+  readonly created_at: string;
+  readonly event_id: string;
+  readonly message_sequence: number;
   readonly attempts: readonly {
     readonly attempt_number: number;
     readonly attempted_at: string;
@@ -173,7 +176,7 @@ export interface WebhookPanelControllerOptions {
   readonly fetch: (input: string, init?: RequestInit) => Promise<Response>;
   readonly onBusyChange: (busy: boolean) => void;
   readonly onEntries: (entries: readonly WebhookPanelEntry[]) => void;
-  readonly onSecret: (secret: string) => void;
+  readonly onSecret: (secret: string, operation: "created" | "rotated") => void;
 }
 
 /** Room-scoped webhook operations used by the human Notifications panel. */
@@ -239,8 +242,40 @@ export function createWebhookPanelController(options: WebhookPanelControllerOpti
         if (!isRecord(value) || typeof value.secret !== "string" || !isRecord(value.webhook)) {
           throw new Error("The service returned an invalid webhook creation result.");
         }
-        options.onSecret(value.secret);
+        options.onSecret(value.secret, "created");
         return await refreshEntries();
+      });
+    },
+    async disable(id: string) {
+      return await runExclusive(async () => {
+        await request(`/${encodeURIComponent(id)}/disable`, { method: "POST" });
+        return await refreshEntries();
+      });
+    },
+    async enable(id: string) {
+      return await runExclusive(async () => {
+        await request(`/${encodeURIComponent(id)}/enable`, { method: "POST" });
+        return await refreshEntries();
+      });
+    },
+    async rotate(id: string) {
+      return await runExclusive(async () => {
+        const value = await request(`/${encodeURIComponent(id)}/rotate-secret`, { method: "POST" });
+        if (!isRecord(value) || typeof value.secret !== "string" || !isRecord(value.webhook)) {
+          throw new Error("The service returned an invalid webhook rotation result.");
+        }
+        options.onSecret(value.secret, "rotated");
+        return await refreshEntries();
+      });
+    },
+    async redeliver(id: string, eventId: string) {
+      return await runExclusive(async () => {
+        const value = await request(`/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(eventId)}/redeliver`, { method: "POST" });
+        if (!isRecord(value) || (value.result !== "queued" && value.result !== "already_queued") || !isRecord(value.delivery)) {
+          throw new Error("The service returned an invalid webhook redelivery result.");
+        }
+        await refreshEntries();
+        return value.result;
       });
     },
     async remove(id: string) {

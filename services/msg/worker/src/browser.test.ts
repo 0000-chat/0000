@@ -126,10 +126,16 @@ test("renders the human Notifications panel and wires its served controller", as
   expect(page.html).toContain('id="webhook-list"');
   expect(page.html).toContain("Each new message is sent in full");
   expect(page.html).toContain("Save this signing secret now");
+  expect(page.html).toContain("Redelivering a failed event makes one explicit attempt");
   expect(home.html).not.toContain("notifications-panel");
   expect(source).toContain("createWebhookPanelController");
   expect(source).toContain("data-notifications-open");
   expect(source).toContain("data-webhook-remove");
+  expect(source).toContain("data-webhook-disable");
+  expect(source).toContain("data-webhook-enable");
+  expect(source).toContain("data-webhook-rotate");
+  expect(source).toContain("data-webhook-redeliver-event");
+  expect(source).toContain("controller.redeliver");
   expect(() => new Function(source ?? "")).not.toThrow();
 });
 

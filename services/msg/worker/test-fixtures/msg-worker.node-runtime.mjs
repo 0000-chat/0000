@@ -129,6 +129,30 @@ async function handleTestControl(request, response) {
     response.end(body);
     return true;
   }
+  if (path === "/__test/delete-webhook-source" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || typeof value.message_id !== "string" || !value.message_id || value.message_id.length > 128 || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/delete-webhook-source", {
+      body: JSON.stringify({ message_id: value.message_id }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
   return false;
 }
 

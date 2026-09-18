@@ -140,7 +140,7 @@ export function renderMarkdown(markdown: string): string {
 
 const mermaidStyles = String.raw`.message-mermaid{max-width:100%;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--soft)}.message-mermaid-diagram{display:block;max-width:100%;overflow:auto;overscroll-behavior:contain}.message-mermaid-diagram[hidden],.message-mermaid-error[hidden]{display:none}.message-mermaid-source{min-width:0}.message-mermaid-source summary{display:flex;min-height:44px;align-items:center;padding:8px 12px;border-top:1px solid var(--line);cursor:pointer;color:var(--muted-strong);font-size:12px;font-weight:700;list-style:none}.message-mermaid-source summary::-webkit-details-marker{display:none}.message-mermaid-source summary:after{margin-left:auto;content:"+";font-size:16px;font-weight:400}.message-mermaid-source[open] summary:after{content:"−"}.message-mermaid-source pre{max-width:100%;max-height:420px;margin:0;border:0;border-top:1px solid var(--line);border-radius:0 0 8px 8px}.message-mermaid-error{margin:0;padding:11px 13px;border-bottom:1px solid var(--line);color:var(--muted-strong);font-size:13px}.message-mermaid-diagram svg{display:block}`;
 
-const notificationPanelStyles = String.raw`.notifications-panel{max-height:min(88dvh,760px);overflow:auto}.notifications-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px 24px 16px;border-bottom:1px solid var(--line)}.notifications-header h2{margin:0;font-size:21px}.notifications-header p{margin:0 0 5px;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.notifications-body{display:grid;gap:18px;padding:20px 24px 24px}.webhook-form{display:grid;gap:9px}.webhook-form label,.webhook-list-title{font-size:13px;font-weight:700}.webhook-form input{width:100%;min-height:44px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}.notifications-help,.webhook-empty,.webhook-status{margin:0;color:var(--muted-strong);font-size:13px;line-height:1.5}.webhook-status:empty{display:none}.webhook-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}.webhook-list-item{display:grid;gap:8px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.webhook-list-item strong{overflow-wrap:anywhere;font-size:13px}.webhook-list-meta{margin:0;color:var(--muted-strong);font-size:12px;line-height:1.5;overflow-wrap:anywhere}.webhook-secret{display:grid;gap:8px;padding:14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue)}.webhook-secret p{margin:0;color:var(--muted-strong);font-size:13px}.webhook-secret code{display:block;overflow-wrap:anywhere;padding:9px;border-radius:6px;background:var(--surface);font:12px/1.5 ui-monospace,monospace}.webhook-list-actions{display:flex;justify-content:flex-end}@media(max-width:760px){.notifications-header{padding:18px}.notifications-body{padding:18px}.notifications-header h2{font-size:19px}}`;
+const notificationPanelStyles = String.raw`.notifications-panel{max-height:min(88dvh,760px);overflow:auto}.notifications-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px 24px 16px;border-bottom:1px solid var(--line)}.notifications-header h2{margin:0;font-size:21px}.notifications-header p{margin:0 0 5px;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.notifications-body{display:grid;gap:18px;padding:20px 24px 24px}.webhook-form{display:grid;gap:9px}.webhook-form label,.webhook-list-title{font-size:13px;font-weight:700}.webhook-form input{width:100%;min-height:44px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}.notifications-help,.webhook-empty,.webhook-status{margin:0;color:var(--muted-strong);font-size:13px;line-height:1.5}.webhook-status:empty{display:none}.webhook-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}.webhook-list-item{display:grid;gap:8px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.webhook-list-item strong{overflow-wrap:anywhere;font-size:13px}.webhook-list-meta{margin:0;color:var(--muted-strong);font-size:12px;line-height:1.5;overflow-wrap:anywhere}.webhook-delivery{display:grid;gap:7px;padding-top:8px;border-top:1px solid var(--line)}.webhook-secret{display:grid;gap:8px;padding:14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue)}.webhook-secret p{margin:0;color:var(--muted-strong);font-size:13px}.webhook-secret code{display:block;overflow-wrap:anywhere;padding:9px;border-radius:6px;background:var(--surface);font:12px/1.5 ui-monospace,monospace}.webhook-list-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-start}@media(max-width:760px){.notifications-header{padding:18px}.notifications-body{padding:18px}.notifications-header h2{font-size:19px}}`;
 
 const productionMermaidRuntime = String.raw`
 const mermaidStyleNonce=document.currentScript?.nonce||'';
@@ -250,9 +250,13 @@ function bootWebhookPanel(): void {
 
   let endpoints: readonly WebhookPanelEntry[] = [];
   const announce = (message: string) => { status.textContent = message; };
-  const updateButtons = (busy: boolean) => {
+  let busy = false;
+  const updateButtons = (nextBusy: boolean) => {
+    busy = nextBusy;
     createButton.disabled = busy || endpoints.length >= 5;
-    for (const button of dialog.querySelectorAll<BrowserPanelElement>("[data-webhook-remove]")) button.disabled = busy;
+    for (const selector of ["[data-webhook-remove]", "[data-webhook-disable]", "[data-webhook-enable]", "[data-webhook-rotate]", "[data-webhook-redeliver-event]"]) {
+      for (const button of dialog.querySelectorAll<BrowserPanelElement>(selector)) button.disabled = busy;
+    }
   };
   const renderEndpoints = (next: readonly WebhookPanelEntry[]) => {
     endpoints = next;
@@ -265,7 +269,6 @@ function bootWebhookPanel(): void {
       address.textContent = endpoint.url;
       const metadata = document.createElement("p");
       metadata.className = "webhook-list-meta";
-      const delivery = endpoint.deliveries[0];
       const date = (value: string | null) => value ? new Date(value).toLocaleString() : "never";
       const health = [
         `State: ${endpoint.status}`,
@@ -277,30 +280,58 @@ function bootWebhookPanel(): void {
       ];
       metadata.textContent = health.join(" · ");
       item.append(address, metadata);
-      if (delivery) {
-        const details = document.createElement("p");
-        details.className = "webhook-list-meta";
-        details.textContent = `Latest delivery: ${delivery.status} · ${delivery.attempt_count} attempt${delivery.attempt_count === 1 ? "" : "s"} · next retry: ${date(delivery.next_attempt_at)} · retry deadline: ${date(delivery.retry_expires_at)}${delivery.failure_category ? ` · ${delivery.failure_category}` : ""}${delivery.cancelled_at ? ` · cancelled: ${date(delivery.cancelled_at)}` : ""}`;
-        item.append(details);
-        if (delivery.attempts.length > 0) {
-          const attemptHistory = document.createElement("p");
-          attemptHistory.className = "webhook-list-meta";
-          attemptHistory.textContent = `Attempt history: ${delivery.attempts.map((attempt) => `#${attempt.attempt_number} ${attempt.status} at ${date(attempt.attempted_at)}${attempt.failure_category ? ` (${attempt.failure_category})` : ""}`).join("; ")}`;
-          item.append(attemptHistory);
-        }
-      } else {
+      if (endpoint.deliveries.length === 0) {
         const emptyDelivery = document.createElement("p");
         emptyDelivery.className = "webhook-list-meta";
         emptyDelivery.textContent = "No delivery attempts yet.";
         item.append(emptyDelivery);
       }
+      for (const delivery of endpoint.deliveries) {
+        const deliverySection = document.createElement("div");
+        deliverySection.className = "webhook-delivery";
+        const details = document.createElement("p");
+        details.className = "webhook-list-meta";
+        details.textContent = `Event ${delivery.event_id} · message #${delivery.message_sequence} · ${delivery.status} · ${delivery.attempt_count} attempt${delivery.attempt_count === 1 ? "" : "s"} · next retry: ${date(delivery.next_attempt_at)} · original retry deadline: ${date(delivery.retry_expires_at)}${delivery.failure_category ? ` · ${delivery.failure_category}` : ""}${delivery.cancelled_at ? ` · cancelled: ${date(delivery.cancelled_at)}` : ""}`;
+        deliverySection.append(details);
+        if (delivery.attempts.length > 0) {
+          const attemptHistory = document.createElement("p");
+          attemptHistory.className = "webhook-list-meta";
+          attemptHistory.textContent = `Attempt history: ${delivery.attempts.map((attempt) => `#${attempt.attempt_number} ${attempt.status} at ${date(attempt.attempted_at)}${attempt.failure_category ? ` (${attempt.failure_category})` : ""}`).join("; ")}`;
+          deliverySection.append(attemptHistory);
+        }
+        if (delivery.status === "failed") {
+          const redeliverActions = document.createElement("div");
+          redeliverActions.className = "webhook-list-actions";
+          const redeliver = document.createElement("button");
+          redeliver.className = "button compact";
+          redeliver.dataset.webhookRedeliverEndpoint = endpoint.id;
+          redeliver.dataset.webhookRedeliverEvent = delivery.event_id;
+          redeliver.textContent = "Redeliver this event once";
+          redeliverActions.append(redeliver);
+          deliverySection.append(redeliverActions);
+        }
+        item.append(deliverySection);
+      }
       const actions = document.createElement("div");
       actions.className = "webhook-list-actions";
+      const toggle = document.createElement("button");
+      toggle.className = "button compact";
+      if (endpoint.status === "disabled") {
+        toggle.dataset.webhookEnable = endpoint.id;
+        toggle.textContent = "Re-enable";
+      } else {
+        toggle.dataset.webhookDisable = endpoint.id;
+        toggle.textContent = "Disable";
+      }
+      const rotate = document.createElement("button");
+      rotate.className = "button compact";
+      rotate.dataset.webhookRotate = endpoint.id;
+      rotate.textContent = "Rotate secret";
       const remove = document.createElement("button");
       remove.className = "button compact";
       remove.dataset.webhookRemove = endpoint.id;
       remove.textContent = "Remove endpoint";
-      actions.append(remove);
+      actions.append(toggle, rotate, remove);
       item.append(actions);
       list.append(item);
     }
@@ -312,10 +343,12 @@ function bootWebhookPanel(): void {
     fetch: (input, init) => fetch(input, init),
     onBusyChange: updateButtons,
     onEntries: renderEndpoints,
-    onSecret: (secret) => {
+    onSecret: (secret, operation) => {
       secretValue.textContent = secret;
       secretPanel.hidden = false;
-      announce("Webhook created. Save this signing secret now; it will not be shown again.");
+      announce(operation === "rotated"
+        ? "Webhook secret rotated. Save this signing secret now; it will not be shown again."
+        : "Webhook created. Save this signing secret now; it will not be shown again.");
     },
   });
 
@@ -345,11 +378,41 @@ function bootWebhookPanel(): void {
   });
   list.addEventListener("click", (event) => {
     const target = event.target as BrowserPanelTarget | null;
-    const button = target?.closest<BrowserPanelElement>("[data-webhook-remove]");
-    const id = button?.dataset.webhookRemove;
-    if (!id) return;
-    announce("");
-    void controller.remove(id).then(() => announce("Webhook removed.")).catch(showError);
+    const redeliverButton = target?.closest<BrowserPanelElement>("[data-webhook-redeliver-event]");
+    const redeliverEndpoint = redeliverButton?.dataset.webhookRedeliverEndpoint;
+    const eventId = redeliverButton?.dataset.webhookRedeliverEvent;
+    if (redeliverEndpoint && eventId) {
+      announce("");
+      void controller.redeliver(redeliverEndpoint, eventId).then((result) => {
+        if (result === "queued") announce("One redelivery attempt was queued. A failed attempt will need another explicit request.");
+        else if (result === "already_queued") announce("A redelivery attempt for this event is already queued or sending.");
+      }).catch(showError);
+      return;
+    }
+    const removeButton = target?.closest<BrowserPanelElement>("[data-webhook-remove]");
+    const removeId = removeButton?.dataset.webhookRemove;
+    if (removeId) {
+      announce("");
+      void controller.remove(removeId).then(() => announce("Webhook removed.")).catch(showError);
+      return;
+    }
+    const disableId = target?.closest<BrowserPanelElement>("[data-webhook-disable]")?.dataset.webhookDisable;
+    if (disableId) {
+      announce("");
+      void controller.disable(disableId).then(() => announce("Webhook disabled. Pending automatic deliveries were cancelled.")).catch(showError);
+      return;
+    }
+    const enableId = target?.closest<BrowserPanelElement>("[data-webhook-enable]")?.dataset.webhookEnable;
+    if (enableId) {
+      announce("");
+      void controller.enable(enableId).then(() => announce("Webhook re-enabled for new messages. No backlog was replayed.")).catch(showError);
+      return;
+    }
+    const rotateId = target?.closest<BrowserPanelElement>("[data-webhook-rotate]")?.dataset.webhookRotate;
+    if (rotateId) {
+      announce("");
+      void controller.rotate(rotateId).then(() => announce("Webhook secret rotated. Save this signing secret now; it will not be shown again.")).catch(showError);
+    }
   });
   document.querySelector("[data-copy-webhook-secret]")?.addEventListener("click", () => {
     const secret = secretValue.textContent ?? "";
@@ -373,7 +436,7 @@ export function renderBrowserDocument(options: BrowserPageOptions): BrowserPageD
     );
     const desktopNotifications = '<section class="rail-section notifications-section"><h2 class="rail-title">Notifications</h2><p class="rail-copy">Send new messages to a trusted HTTPS service.</p><button class="button full" type="button" data-notifications-open>Manage webhooks</button></section>';
     const mobileNotifications = '<section class="mobile-details-section"><h2 class="rail-title">Notifications</h2><p class="rail-copy">Send new messages to a trusted HTTPS service.</p><button class="button full" type="button" data-notifications-open>Manage webhooks</button></section>';
-    const notificationsPanel = '<dialog class="notifications-panel" id="notifications-panel" aria-labelledby="notifications-panel-title"><header class="notifications-header"><div><p>Room settings</p><h2 id="notifications-panel-title">Notifications</h2></div><button class="button compact" type="button" data-notifications-close>Close</button></header><div class="notifications-body"><p class="notifications-help">Anyone with this room link can manage webhooks. Each new message is sent in full, so add only a destination you trust.</p><form class="webhook-form" id="webhook-create-form"><label for="webhook-url">HTTPS endpoint URL</label><input id="webhook-url" name="url" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://hooks.example.com/msg" required><button class="button primary" type="submit">Add webhook</button><p class="notifications-help">A room can have up to five endpoints. The signing secret appears once after creation.</p></form><p class="webhook-status" id="webhook-status" role="status" aria-live="polite"></p><section class="webhook-secret" id="webhook-secret" hidden><strong>Save this signing secret now</strong><p>It cannot be retrieved later. Close this panel to clear it from the page.</p><code id="webhook-secret-value"></code><button class="button compact" type="button" data-copy-webhook-secret>Copy secret</button></section><h3 class="webhook-list-title">Endpoints</h3><p class="webhook-empty" id="webhook-empty" hidden>No webhook endpoints yet.</p><ul class="webhook-list" id="webhook-list" aria-label="Webhook endpoints"></ul></div></dialog>';
+    const notificationsPanel = '<dialog class="notifications-panel" id="notifications-panel" aria-labelledby="notifications-panel-title"><header class="notifications-header"><div><p>Room settings</p><h2 id="notifications-panel-title">Notifications</h2></div><button class="button compact" type="button" data-notifications-close>Close</button></header><div class="notifications-body"><p class="notifications-help">Anyone with this room link can manage webhooks. Each new message is sent in full, so add only a destination you trust.</p><form class="webhook-form" id="webhook-create-form"><label for="webhook-url">HTTPS endpoint URL</label><input id="webhook-url" name="url" type="url" inputmode="url" autocomplete="url" maxlength="2048" placeholder="https://hooks.example.com/msg" required><button class="button primary" type="submit">Add webhook</button><p class="notifications-help">A room can have up to five endpoints. The secret appears once after creation or rotation. Disable stops new automatic messages and cancels queued attempts; a canceled manual request stays failed. Re-enable sends only future messages. Redelivering a failed event makes one explicit attempt and does not enable the endpoint or restart automatic retries.</p></form><p class="webhook-status" id="webhook-status" role="status" aria-live="polite"></p><section class="webhook-secret" id="webhook-secret" hidden><strong>Save this signing secret now</strong><p>It cannot be retrieved later. Close this panel to clear it from the page.</p><code id="webhook-secret-value"></code><button class="button compact" type="button" data-copy-webhook-secret>Copy secret</button></section><h3 class="webhook-list-title">Endpoints</h3><p class="webhook-empty" id="webhook-empty" hidden>No webhook endpoints yet.</p><ul class="webhook-list" id="webhook-list" aria-label="Webhook endpoints"></ul></div></dialog>';
     html = html
       .replace('<section class="rail-section trust-section">', `${desktopNotifications}<section class="rail-section trust-section">`)
       .replace('<section class="mobile-details-section"><h2 class="rail-title">Trust and safety</h2>', `${mobileNotifications}<section class="mobile-details-section"><h2 class="rail-title">Trust and safety</h2>`)

@@ -1,11 +1,12 @@
 import { validateConversationUrl } from "./wait.js";
 
-const USAGE = "Usage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id>";
+const USAGE = "Usage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id> | disable <endpoint-id> | enable <endpoint-id> | rotate <endpoint-id> | redeliver <endpoint-id> <event-id>";
 
 export type WebhooksCommand =
   | { readonly conversationUrl: string; readonly operation: "list" }
   | { readonly conversationUrl: string; readonly operation: "create"; readonly destinationUrl: string }
-  | { readonly conversationUrl: string; readonly endpointId: string; readonly operation: "remove" };
+  | { readonly conversationUrl: string; readonly endpointId: string; readonly operation: "remove" | "disable" | "enable" | "rotate" }
+  | { readonly conversationUrl: string; readonly endpointId: string; readonly eventId: string; readonly operation: "redeliver" };
 
 export type WebhooksOptions = WebhooksCommand & {
   readonly fetch: typeof globalThis.fetch;
@@ -24,8 +25,15 @@ export function parseWebhooksCommand(args: readonly string[]): WebhooksCommand {
   if (operation === "create" && args.length === 4 && args[3]) {
     return { conversationUrl, destinationUrl: args[3], operation };
   }
-  if (operation === "remove" && args.length === 4 && /^[0-9a-f-]{36}$/iu.test(args[3] ?? "")) {
-    return { conversationUrl, endpointId: args[3]!, operation };
+  const endpointId = args[3];
+  if ((operation === "remove" || operation === "disable" || operation === "enable" || operation === "rotate")
+    && args.length === 4 && endpointId && /^[0-9a-f-]{36}$/iu.test(endpointId)) {
+    return { conversationUrl, endpointId, operation };
+  }
+  const eventId = args[4];
+  if (operation === "redeliver" && args.length === 5 && endpointId && eventId
+    && /^[0-9a-f-]{36}$/iu.test(endpointId) && /^[0-9a-f-]{36}$/iu.test(eventId)) {
+    return { conversationUrl, endpointId, eventId, operation };
   }
   throw new Error(USAGE);
 }
@@ -41,6 +49,12 @@ export async function manageWebhooks(options: WebhooksOptions): Promise<unknown>
   } else if (options.operation === "create") {
     method = "POST";
     body = JSON.stringify({ url: options.destinationUrl });
+  } else if (options.operation === "disable" || options.operation === "enable" || options.operation === "rotate") {
+    endpoint.pathname += `/${encodeURIComponent(options.endpointId)}/${options.operation === "rotate" ? "rotate-secret" : options.operation}`;
+    method = "POST";
+  } else if (options.operation === "redeliver") {
+    endpoint.pathname += `/${encodeURIComponent(options.endpointId)}/deliveries/${encodeURIComponent(options.eventId)}/redeliver`;
+    method = "POST";
   } else {
     method = "GET";
   }

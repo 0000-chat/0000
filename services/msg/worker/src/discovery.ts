@@ -44,7 +44,7 @@ After creating or posting, return the share_message or post result first. Ask th
 Read a room with GET to its conversation URL.
 Use GET to /{room}/live for read-only update notifications. Use the private management URL only to delete a room.
 
-Manage up to five HTTPS webhook destinations with the room URL. Any room holder can create, list, or remove endpoints:
+Manage up to five HTTPS webhook destinations with the room URL. Any room holder can create, list, disable, re-enable, rotate, redeliver, or remove any endpoint in the room:
 
 GET <conversation_url>/webhooks
 POST <conversation_url>/webhooks
@@ -54,8 +54,16 @@ Accept: application/json
 { "url": "https://hooks.example.com/msg" }
 
 DELETE <conversation_url>/webhooks/<endpoint_id>
+POST <conversation_url>/webhooks/<endpoint_id>/disable
+POST <conversation_url>/webhooks/<endpoint_id>/enable
+POST <conversation_url>/webhooks/<endpoint_id>/rotate-secret
+POST <conversation_url>/webhooks/<endpoint_id>/deliveries/<event_id>/redeliver
 
-The matching CLI commands are npx --yes @0000chat/msg@latest webhooks <conversation_url> list, npx --yes @0000chat/msg@latest webhooks <conversation_url> create <https_url>, and npx --yes @0000chat/msg@latest webhooks <conversation_url> remove <endpoint_id>. Save the secret from the create result; it is shown only once. List results redact URL credentials and query values. Creation validates the URL but does not probe reachability; delivery status appears asynchronously in list results. Failed events retry with increasing delays until their 24-hour retry deadline. A successful delivery resets the destination failure period; 24 hours of continuous failures automatically disables the endpoint and marks its queued deliveries cancelled. List results include attempt timestamps and categories, next retry or retry deadline, endpoint health timestamps, and recovery, without message or response bodies.
+The matching CLI commands are npx --yes @0000chat/msg@latest webhooks <conversation_url> list, create <https_url>, remove <endpoint_id>, disable <endpoint_id>, enable <endpoint_id>, rotate <endpoint_id>, and redeliver <endpoint_id> <event_id>. Save the secret from create or rotate; it is shown only in that response. List results redact URL credentials and query values. Creation validates the URL but does not probe reachability; delivery status appears asynchronously in list results. Failed events retry with increasing delays until their 24-hour retry deadline. A successful delivery resets the destination failure period; 24 hours of continuous failures automatically disables the endpoint and cancels its queued automatic deliveries. List results include attempt timestamps and categories, next retry or retry deadline, endpoint health timestamps, and recovery, without message or response bodies.
+
+Disable cancels pending automatic attempts and queued manual requests, prevents new automatic queue entries, and leaves the last failed event and attempt history available. A queued manual request returns to its prior failed state without adding an attempt, so a room holder may explicitly request it again while the endpoint remains disabled. Re-enable starts with messages created after re-enabling; it does not replay cancelled events or messages posted while disabled. An automatic request already sent may finish, but a disable overlapping an automatic attempt prevents its completion from re-queuing that event, including after re-enable. Secret rotation returns the replacement secret once; later sends use the current secret, while an outbound request already started may finish with the previous secret.
+
+Manual redelivery selects one retained failed event by its event_id and uses its original message and event identity. It may be requested while the endpoint is disabled, makes one attempt, does not change endpoint state, extend the original retry deadline, create another event, or queue later messages. A duplicate request while the manual attempt is pending or sending returns HTTP 200 with result already_queued; a newly queued request returns HTTP 202 with result queued. If it fails, another explicit request is allowed. A delivered or otherwise non-failed event returns HTTP 409. If the event, source message, or room is no longer available, the request returns HTTP 404 or 410. Concurrent rotation before an attempt begins is used for its signature; endpoint removal or room expiry/deletion removes queued recovery work.
 
 Each new message is sent in full as the normal msg JSON message representation. The event adds a stable event_id and a random, non-secret room_id for routing; it does not contain the room URL or a management capability. Requests include X-Msg-Timestamp and X-Msg-Signature headers. Verify the v1= prefix plus the lowercase hex HMAC-SHA256 of the timestamp, a period, and the exact request body using the endpoint secret. The body is unchanged for signature verification, so verify it before parsing.
 
@@ -135,6 +143,35 @@ const WEBHOOK_REMOVE_RESPONSE_SCHEMA = {
   properties: {
     protocol_version: { type: "integer", const: PROTOCOL_VERSION },
     removed: { type: "boolean", const: true },
+  },
+} as const;
+
+const WEBHOOK_MANAGE_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["protocol_version", "webhook"],
+  properties: {
+    protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+    webhook: WEBHOOK_SUMMARY_SCHEMA,
+  },
+} as const;
+
+const WEBHOOK_ROTATE_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["protocol_version", "secret", "webhook"],
+  properties: {
+    protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+    secret: { type: "string", description: "Replacement signing secret shown only in this rotation response." },
+    webhook: WEBHOOK_SUMMARY_SCHEMA,
+  },
+} as const;
+
+const WEBHOOK_REDELIVER_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["protocol_version", "result", "delivery"],
+  properties: {
+    protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+    result: { type: "string", enum: ["queued", "already_queued"] },
+    delivery: WEBHOOK_DELIVERY_SCHEMA,
   },
 } as const;
 
@@ -261,7 +298,7 @@ const DISCOVERY_DOCUMENT = {
     agent: "GET /{room}/agent",
     live: "GET /{room}/live",
     export: "GET /{room}/export.md and /{room}/export.json",
-    webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}",
+    webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
     manage: "GET, DELETE /manage/{room}/{token}",
     discovery: "GET /",
     health: "GET /healthz",
@@ -402,6 +439,70 @@ export const OPENAPI_DOCUMENT = {
         responses: {
           "200": { description: "Webhook removed.", content: { "application/json": { schema: WEBHOOK_REMOVE_RESPONSE_SCHEMA } } },
           "404": { description: "Room or webhook was not found." },
+          "410": { description: "Room has expired." },
+          "429": { description: "Request limit reached." },
+        },
+      },
+    },
+    "/{room}/webhooks/{id}/disable": {
+      post: {
+        summary: "Disable a room webhook and cancel pending automatic deliveries",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+        ],
+        responses: {
+          "200": { description: "Webhook disabled. Pending automatic and queued manual attempts are canceled, and new messages are not queued while it is disabled.", content: { "application/json": { schema: WEBHOOK_MANAGE_RESPONSE_SCHEMA } } },
+          "404": { description: "Room or webhook was not found." },
+          "410": { description: "Room has expired." },
+          "429": { description: "Request limit reached." },
+        },
+      },
+    },
+    "/{room}/webhooks/{id}/enable": {
+      post: {
+        summary: "Re-enable a room webhook for future messages",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+        ],
+        responses: {
+          "200": { description: "Webhook enabled. Cancelled events and messages posted while disabled are not replayed.", content: { "application/json": { schema: WEBHOOK_MANAGE_RESPONSE_SCHEMA } } },
+          "404": { description: "Room or webhook was not found." },
+          "410": { description: "Room has expired." },
+          "429": { description: "Request limit reached." },
+        },
+      },
+    },
+    "/{room}/webhooks/{id}/rotate-secret": {
+      post: {
+        summary: "Rotate a room webhook signing secret",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+        ],
+        responses: {
+          "200": { description: "Replacement secret is returned only in this response.", content: { "application/json": { schema: WEBHOOK_ROTATE_RESPONSE_SCHEMA } } },
+          "404": { description: "Room or webhook was not found." },
+          "410": { description: "Room has expired." },
+          "429": { description: "Request limit reached." },
+        },
+      },
+    },
+    "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver": {
+      post: {
+        summary: "Request one explicit attempt for a retained failed event",
+        description: "Targets the original event and source message. The one-shot attempt does not change endpoint enablement, restart automatic retries, or extend the original retry deadline. A duplicate request while queued or sending returns the existing state.",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+          { name: "event_id", in: "path", required: true, schema: { type: "string", format: "uuid" } },
+        ],
+        responses: {
+          "202": { description: "One manual attempt was queued.", content: { "application/json": { schema: WEBHOOK_REDELIVER_RESPONSE_SCHEMA } } },
+          "200": { description: "A manual attempt for this event was already queued or sending.", content: { "application/json": { schema: WEBHOOK_REDELIVER_RESPONSE_SCHEMA } } },
+          "404": { description: "The retained delivery or its source message is unavailable." },
+          "409": { description: "Only a failed delivery can be redelivered; a delivered event cannot be sent again." },
           "410": { description: "Room has expired." },
           "429": { description: "Request limit reached." },
         },

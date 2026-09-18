@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 5;
+export const CURRENT_ROOM_SCHEMA_VERSION = 6;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -198,6 +198,11 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     sql.exec("CREATE INDEX webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC)");
     sql.exec("CREATE INDEX webhook_deliveries_retention ON webhook_deliveries(created_at)");
     sql.exec("CREATE INDEX webhook_delivery_attempts_delivery ON webhook_delivery_attempts(delivery_id, attempt_number)");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 6) {
+    sql.exec("ALTER TABLE webhook_deliveries ADD COLUMN manual_redelivery_requested_at INTEGER");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
