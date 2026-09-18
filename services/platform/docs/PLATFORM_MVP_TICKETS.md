@@ -46,7 +46,7 @@ T02 is the current preparation frontier after verified T01 integration. The read
 
 **Open decisions:** None for the investigation scope. Capture pinned runtime/component versions, principal/error/verifier/bootstrap/OAuth/guest grant-proof findings for parent review; no new user policy vote.
 
-**Verification:** Local Workers/D1 tests exercise one protected request, membership and revocation denial, receipt-based organization retries, a persistent Miniflare runtime restart, sequential OAuth refresh reuse and a bounded guest grant. The report distinguishes proven behavior from unresolved concurrency, installation-binding and deployment work. Contract-dependent tickets remain blocked pending review of those findings.
+**Verification:** Parent aggregate checks passed for local Worker/D1 protected requests, membership/lifecycle/revocation denial, receipt-based organization retries, a persistent Miniflare runtime restart, sequential OAuth refresh reuse and stored-owner guest attestation. The report distinguishes proven behavior from unresolved concurrency, installation-binding and deployment work. T02's runtime gate is resolved; other tickets retain their specific dependency and contract gates.
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
