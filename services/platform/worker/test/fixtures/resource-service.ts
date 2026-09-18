@@ -75,7 +75,6 @@ export async function attestGuestResource(
   input: {
     guestCredential: string;
     resourceId: string;
-    resourceOwnerId: string;
     capabilities: string[];
   },
 ): Promise<{
@@ -83,6 +82,12 @@ export async function attestGuestResource(
   credentialId: string;
   grantId: string;
 } | null> {
+  const resource = await config.database
+    .prepare("SELECT owner_kind, owner_id FROM fixture_resource WHERE id = ?")
+    .bind(input.resourceId)
+    .first<{ owner_kind: string; owner_id: string }>();
+  if (!resource || resource.owner_kind !== "guest") return null;
+
   const response = await config.fetch(
     new URL("/internal/v1/guest-grants", config.platformBaseUrl),
     {
@@ -92,7 +97,12 @@ export async function attestGuestResource(
         "content-type": "application/json",
         accept: "application/json",
       },
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        guestCredential: input.guestCredential,
+        resourceId: input.resourceId,
+        resourceOwnerId: resource.owner_id,
+        capabilities: input.capabilities,
+      }),
     },
   );
   if (response.status !== 201) return null;

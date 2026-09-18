@@ -15,8 +15,9 @@
   "vars": {
     "PLATFORM_BASE_URL": "http://localhost",
     "PLATFORM_AUTHORITY_ID": "platform-t01-authority",
-    "GITHUB_CLIENT_ID": "platform-t01-probe",
-    "GITHUB_CLIENT_SECRET": "local-probe-only",
-    "BETTER_AUTH_SECRET": "local-probe-secret-not-for-deployment"
+    "GITHUB_CLIENT_ID": "platform-t01-probe"
+  },
+  "secrets": {
+    "required": ["GITHUB_CLIENT_SECRET", "BETTER_AUTH_SECRET"]
   }
 }

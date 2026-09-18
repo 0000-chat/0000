@@ -1,0 +1,2 @@
+GITHUB_CLIENT_SECRET=replace-with-your-GitHub-OAuth-client-secret
+BETTER_AUTH_SECRET=replace-with-a-random-secret-of-at-least-32-characters

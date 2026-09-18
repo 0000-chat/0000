@@ -150,7 +150,15 @@ async function authenticateCredential(
     }
     const membership = await database
       .prepare(
-        "SELECT id FROM member WHERE id = ? AND organizationId = ? AND userId = ?",
+        `SELECT membership.id
+         FROM member AS membership
+         JOIN "user" AS subject_user ON subject_user.id = membership.userId
+         JOIN organization AS owning_org ON owning_org.id = membership.organizationId
+         WHERE membership.id = ?
+           AND membership.organizationId = ?
+           AND membership.userId = ?
+           AND subject_user.disabledAt IS NULL
+           AND owning_org.suspendedAt IS NULL`,
       )
       .bind(row.membership_id, row.organization_id, row.subject_id)
       .first<{ id: string }>();
@@ -181,6 +189,13 @@ async function authenticateCredential(
     ) {
       return json(503, { status: "authority_unavailable" });
     }
+    const guest = await database
+      .prepare(
+        "SELECT id FROM platform_guest WHERE id = ? AND disabled_at IS NULL",
+      )
+      .bind(row.subject_id)
+      .first<{ id: string }>();
+    if (!guest) return json(401, { status: "invalid_credential" });
     return json(200, {
       status: "authenticated",
       principal: {
@@ -266,7 +281,12 @@ async function attestGuestGrant(
   }
   const guestBootstrap = await database
     .prepare(
-      "SELECT guest_id FROM platform_guest_bootstrap WHERE credential_hash = ? AND revoked_at IS NULL",
+      `SELECT bootstrap.guest_id
+       FROM platform_guest_bootstrap AS bootstrap
+       JOIN platform_guest AS guest ON guest.id = bootstrap.guest_id
+       WHERE bootstrap.credential_hash = ?
+         AND bootstrap.revoked_at IS NULL
+         AND guest.disabled_at IS NULL`,
     )
     .bind(await hashOpaque(body.guestCredential))
     .first<{ guest_id: string }>();

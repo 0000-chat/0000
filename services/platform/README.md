@@ -129,6 +129,17 @@ non-TypeScript service must be able to implement the same wire contract.
 Cloudflare Workers is the initial runtime direction; the monorepo's Bun and
 Turborepo tooling does not select the production runtime.
 
+## Operator-supplied secrets
+
+Wrangler configuration contains no provider or Better Auth secret values.
+Operators supply GITHUB_CLIENT_SECRET and BETTER_AUTH_SECRET for each runtime.
+For local development, copy .dev.vars.example to .dev.vars and replace both
+placeholders; .dev.vars is ignored by Git. For a deployed Worker, add both with
+Wrangler secrets (wrangler secret put GITHUB_CLIENT_SECRET and wrangler secret
+put BETTER_AUTH_SECRET) in the target environment. Set GITHUB_CLIENT_ID as a
+non-secret Worker variable for that environment. The committed example values
+are placeholders and must not be used as deployment credentials.
+
 Rate limits for Platform login, credential issuance and guest bootstrap belong
 to Platform. Anonymous operation quotas and enforcement belong to each resource
 service. Managed allowances are configured by their actual Cloud owner and must

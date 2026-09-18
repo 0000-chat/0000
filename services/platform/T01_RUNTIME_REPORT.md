@@ -24,17 +24,24 @@ registration is disabled.
 
 Better Auth core, organization, JWT and OAuth tables are generated from the
 pinned plugins into migrations/0001_better_auth.sql. Platform-owned authority
-state, including bootstrap receipts and hashed credentials, is in
-migrations/0002_platform_authority.sql. The resource table belongs to the test
-fixture. The SQLite Drizzle adapter uses transaction:false and camelCase:true;
-extension writes requiring atomicity use D1 batch(). A durable default-org
-receipt makes completed retries return their saved IDs without recreating a
-membership removed later.
+state, including bootstrap receipts, hashed credentials and guest disabled
+state, is in migrations/0002_platform_authority.sql. Better Auth owns
+server-only user.disabledAt and organization.suspendedAt fields; both are
+input:false and returned:false. The resource table belongs to the test fixture.
+The SQLite Drizzle adapter uses transaction:false and camelCase:true; extension
+writes requiring atomicity use D1 batch(). A durable default-org receipt makes
+completed retries return saved IDs without recreating a removed membership.
+
+wrangler.jsonc declares GITHUB_CLIENT_SECRET and BETTER_AUTH_SECRET as required
+secrets without values. Wrangler generates their string types; Vitest and the
+restart probe provide separate synthetic values. Local setup and operator
+provisioning are documented in README.md, and .dev.vars is gitignored.
 
 The candidate v1 principal carries kind, authority, subject, credential,
-audience, capabilities and expiry. Human adds organization/membership; agent and
-service add organization/grant; guest adds grant/resource IDs and has no expiry.
-Runtime routes here exercise human and guest principals only.
+audience and capabilities. Human, agent and service variants have string
+expiry; guest has null expiry plus grant/resource IDs. Human adds
+organization/membership; agent and service add organization/grant. Runtime
+routes here exercise human and guest only.
 
 Every verifier and guest-grant request starts a fresh
 IDENTITY_DB.withSession("first-primary") session; no session or positive auth
@@ -47,10 +54,10 @@ based on documented D1 session semantics, not a live remote-replica test.
 | Routes or seam | Evidence |
 | --- | --- |
 | POST /api/auth/sign-in/social; GET /api/auth/callback/github | Better Auth handles callback state and persists user, provider account and session in D1; only GitHub HTTP responses are simulated. New requests and Better Auth instances read the session. |
-| GET /api/me | Repeated calls return the receipt-backed default org and owner IDs. Removing the owner membership does not recreate it; the existing human credential then fails verification. |
-| POST /api/credentials; POST /api/credentials/revoke; /internal/v1/authenticate | Issuance requires a Platform session and trusted Origin, binds authority to registered service/current membership, and stores only a SHA-256 verifier. The client sends its verifier separately from the presented credential and validates/rebuilds the unknown wire principal. Wrong audience, revocation or removed membership returns 401; malformed authority or transport failure fails closed as 503. |
+| GET /api/me | Repeated calls return receipt-backed default org and owner IDs. Removing the owner membership does not recreate it; the existing human credential then fails verification. |
+| POST /api/credentials; POST /api/credentials/revoke; /internal/v1/authenticate | Issuance requires a Platform session and trusted Origin, binds authority to registered service/current membership, and stores only a SHA-256 verifier. The client sends its verifier separately from the presented credential and validates/rebuilds the unknown wire principal. Wrong audience, revocation, removed membership, disabled user or suspended organization returns 401; malformed authority or transport failure fails closed as 503. |
 | Protected resource fixture | Authorization uses its own stored owner row after Platform authentication. A different tenant gets non-enumerating 404. The fixture is not a production consumer. |
-| POST /api/guest/bootstrap; POST /internal/v1/guest-grants | A bootstrap guest alone cannot access a resource. A separately registered guest:grant issuer proves the guest bootstrap and resource owner; excess capabilities and mismatched proof are rejected. The resulting credential is bounded to guest, audience, resource and capability. The verifier cannot issue grants, and the grant issuer cannot authenticate arbitrary credentials. |
+| POST /api/guest/bootstrap; POST /internal/v1/guest-grants | A bootstrap guest alone cannot access a resource. The resource fixture reads its stored row, requires guest ownership and derives the owner ID there before sending proof. A foreign guest resource is rejected. Grants are bounded to guest, audience, resource and capability; a disabled guest cannot use an existing grant or obtain another. The verifier cannot issue grants, and the grant issuer cannot authenticate arbitrary credentials. |
 | /api/auth/oauth2/authorize; /api/auth/oauth2/consent; /api/auth/oauth2/token | D1/Worker test exercises PKCE, redirect, consent, code exchange, opaque hashed access-token configuration and sequential refresh replay; details and limitations follow. |
 
 The guest restart script bundles the Worker, applies migrations and issues a
@@ -113,13 +120,18 @@ the stated package directory:
 - packages/platform-client: bun run check passed TypeScript and 3 unit tests /
   16 assertions for credential separation, malformed/expired/wrong authority
   or audience, rejected credentials and outage behavior.
-- services/platform: bun run check passed Biome (20 files), Worker typecheck,
+- services/platform: bun run check passed Biome (19 files), Worker typecheck,
   both workerd/D1 test files (2 tests), Miniflare restart and git diff check.
 - services/platform: bun run generate:migration preserved the Better Auth
   migration byte-for-byte.
 - services/platform: bun x wrangler types worker-configuration.d.ts regenerated
-  the Env/runtime types with no diff.
+  string-typed required-secret bindings; a repeat generation was stable.
 
-The OAuth test emits non-fatal Miniflare warnings about inspecting
-application/x-www-form-urlencoded request bodies. OAuth and provider fixtures
-are synthetic; tests print no token values.
+Both shared packages pin TypeScript 7.0.2 as a direct devDependency, so their
+typecheck commands do not rely on Platform's hoisted tool installation. The
+OAuth test emits non-fatal Miniflare warnings about inspecting
+application/x-www-form-urlencoded request bodies. OAuth, test bindings and
+provider fixtures are synthetic; tests print no token values. The fixture does
+not add admin routes; disabling users, suspending organizations and disabling
+guests are exercised through authoritative D1 state, while raw Better Auth
+session/profile restrictions remain T02 work.

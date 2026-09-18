@@ -10,5 +10,8 @@
     "check": "bun run typecheck && bun run test",
     "test": "bun test",
     "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler src/index.ts"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

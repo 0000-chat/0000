@@ -5,23 +5,25 @@ export interface PrincipalBase {
   credentialId: string;
   audience: string;
   capabilities: string[];
-  /** Guests remain valid while their service-owned resource grants exist. */
-  expiresAt: string | null;
 }
 
-export interface HumanPrincipal extends PrincipalBase {
+export interface ExpiringPrincipalBase extends PrincipalBase {
+  expiresAt: string;
+}
+
+export interface HumanPrincipal extends ExpiringPrincipalBase {
   kind: "human";
   organizationId: string;
   membershipId: string;
 }
 
-export interface AgentPrincipal extends PrincipalBase {
+export interface AgentPrincipal extends ExpiringPrincipalBase {
   kind: "agent";
   organizationId: string;
   grantId: string;
 }
 
-export interface ServicePrincipal extends PrincipalBase {
+export interface ServicePrincipal extends ExpiringPrincipalBase {
   kind: "service";
   organizationId: string;
   grantId: string;
@@ -29,6 +31,8 @@ export interface ServicePrincipal extends PrincipalBase {
 
 export interface GuestPrincipal extends PrincipalBase {
   kind: "guest";
+  /** Guest credentials remain valid while service-owned resource grants exist. */
+  expiresAt: null;
   grantId: string;
   resourceIds: string[];
 }

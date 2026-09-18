@@ -2,6 +2,12 @@ import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
+const testSecrets = {
+  GITHUB_CLIENT_SECRET: "test-only-github-client-secret",
+  BETTER_AUTH_SECRET: "test-only-better-auth-secret-with-at-least-32-chars",
+};
+Object.assign(process.env, testSecrets);
+
 export default defineConfig(async () => {
   const identityMigrations = await readD1Migrations(
     fileURLToPath(new URL("./migrations", import.meta.url)),
@@ -18,6 +24,7 @@ export default defineConfig(async () => {
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
           bindings: {
+            ...testSecrets,
             TEST_MIGRATIONS: identityMigrations,
             TEST_FIXTURE_MIGRATIONS: fixtureMigrations,
           },

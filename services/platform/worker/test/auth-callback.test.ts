@@ -116,7 +116,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
     );
   });
 
-  it("signs in, creates an owner idempotently, verifies scoped keys, and denies revoked or foreign access", async () => {
+  it("signs in, enforces current principal state, issues scoped keys, and denies foreign access", async () => {
     expect((await SELF.fetch("http://localhost/healthz")).status).toBe(200);
 
     const start = await SELF.fetch("http://localhost/api/auth/sign-in/social", {
@@ -277,6 +277,40 @@ describe("Platform shared-auth T01 runtime trace", () => {
         expect(authenticated.principal.membershipId).toBe(owner.membershipId);
       }
     }
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+    )
+      .bind(Date.now(), owner.organizationId)
+      .run();
+    expect(
+      (await sharedClient.authenticate(secondIssued.credential)).status,
+    ).toBe("invalid_credential");
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+    )
+      .bind(owner.organizationId)
+      .run();
+    expect(
+      (await sharedClient.authenticate(secondIssued.credential)).status,
+    ).toBe("authenticated");
+
+    await testEnv.IDENTITY_DB.prepare(
+      'UPDATE "user" SET disabledAt = ? WHERE id = ?',
+    )
+      .bind(Date.now(), owner.userId)
+      .run();
+    expect(
+      (await sharedClient.authenticate(secondIssued.credential)).status,
+    ).toBe("invalid_credential");
+    await testEnv.IDENTITY_DB.prepare(
+      'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
+    )
+      .bind(owner.userId)
+      .run();
+    expect(
+      (await sharedClient.authenticate(secondIssued.credential)).status,
+    ).toBe("authenticated");
+
     expect(
       (
         await fixtureRead(
@@ -329,24 +363,6 @@ describe("Platform shared-auth T01 runtime trace", () => {
       ).status,
     ).toBe(503);
 
-    const rejectedIssueWithVerifier = await attestGuestResource(
-      {
-        database: testEnv.IDENTITY_DB,
-        platformBaseUrl: testEnv.PLATFORM_BASE_URL,
-        authority: testEnv.PLATFORM_AUTHORITY_ID,
-        audience: service.audience,
-        serviceVerifier: service.verifier,
-        guestGrantIssuer: service.verifier,
-        fetch: requestFetch,
-      },
-      {
-        guestCredential: "absent",
-        resourceId: "owned-resource",
-        resourceOwnerId: owner.userId,
-        capabilities: ["resource:read"],
-      },
-    );
-    expect(rejectedIssueWithVerifier).toBeNull();
     const rejectedAuthentication = createPlatformClient({
       baseUrl: testEnv.PLATFORM_BASE_URL,
       authority: testEnv.PLATFORM_AUTHORITY_ID,
@@ -367,6 +383,18 @@ describe("Platform shared-auth T01 runtime trace", () => {
       guestId: string;
       credential: string;
     };
+    const otherBootstrap = await SELF.fetch(
+      "http://localhost/api/guest/bootstrap",
+      {
+        method: "POST",
+        headers: { origin: testEnv.PLATFORM_BASE_URL },
+      },
+    );
+    expect(otherBootstrap.status).toBe(201);
+    const otherGuest = (await otherBootstrap.json()) as {
+      guestId: string;
+      credential: string;
+    };
     await testEnv.IDENTITY_DB.prepare(
       "INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at) VALUES (?, 'guest', ?, ?), (?, 'guest', ?, ?)",
     )
@@ -375,7 +403,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
         guest.guestId,
         Date.now(),
         "guest-other-resource",
-        guest.guestId,
+        otherGuest.guestId,
         Date.now(),
       )
       .run();
@@ -400,25 +428,25 @@ describe("Platform shared-auth T01 runtime trace", () => {
       fetch: requestFetch,
     };
     expect(
-      await attestGuestResource(guestGrantConfig, {
-        guestCredential: guest.credential,
-        resourceId: "guest-resource",
-        resourceOwnerId: "forged-owner",
-        capabilities: ["resource:read"],
-      }),
+      await attestGuestResource(
+        { ...guestGrantConfig, guestGrantIssuer: service.verifier },
+        {
+          guestCredential: guest.credential,
+          resourceId: "guest-resource",
+          capabilities: ["resource:read"],
+        },
+      ),
     ).toBeNull();
     expect(
       await attestGuestResource(guestGrantConfig, {
         guestCredential: guest.credential,
         resourceId: "guest-resource",
-        resourceOwnerId: guest.guestId,
         capabilities: ["resource:admin"],
       }),
     ).toBeNull();
     const guestGrant = await attestGuestResource(guestGrantConfig, {
       guestCredential: guest.credential,
       resourceId: "guest-resource",
-      resourceOwnerId: guest.guestId,
       capabilities: ["resource:read"],
     });
     expect(guestGrant).toBeTruthy();
@@ -442,6 +470,36 @@ describe("Platform shared-auth T01 runtime trace", () => {
         )
       ).status,
     ).toBe(404);
+    expect(
+      await attestGuestResource(guestGrantConfig, {
+        guestCredential: guest.credential,
+        resourceId: "guest-other-resource",
+        capabilities: ["resource:read"],
+      }),
+    ).toBeNull();
+
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_guest SET disabled_at = ? WHERE id = ?",
+    )
+      .bind(Date.now(), guest.guestId)
+      .run();
+    expect(
+      (
+        await fixtureRead(
+          service,
+          testEnv.IDENTITY_DB,
+          "guest-resource",
+          guestGrant!.credential,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      await attestGuestResource(guestGrantConfig, {
+        guestCredential: guest.credential,
+        resourceId: "guest-resource",
+        capabilities: ["resource:read"],
+      }),
+    ).toBeNull();
 
     const revoke = await SELF.fetch("http://localhost/api/credentials/revoke", {
       method: "POST",

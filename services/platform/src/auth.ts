@@ -1,7 +1,11 @@
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { betterAuth } from "better-auth";
 import { drizzle } from "drizzle-orm/d1";
-import { authSchema, createAuthPlugins } from "./auth-schema";
+import {
+  authSchema,
+  createAuthPlugins,
+  platformUserAdditionalFields,
+} from "./auth-schema";
 
 export function createAuth(env: Cloudflare.Env) {
   const schema = authSchema;
@@ -10,6 +14,7 @@ export function createAuth(env: Cloudflare.Env) {
     baseURL: env.PLATFORM_BASE_URL,
     secret: env.BETTER_AUTH_SECRET,
     trustedOrigins: [env.PLATFORM_BASE_URL],
+    user: { additionalFields: platformUserAdditionalFields },
     database: drizzleAdapter(drizzle(env.IDENTITY_DB, { schema }), {
       provider: "sqlite",
       schema,

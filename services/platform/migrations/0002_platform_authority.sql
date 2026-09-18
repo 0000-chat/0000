@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS platform_credential (
 
 CREATE TABLE IF NOT EXISTS platform_guest (
   id TEXT PRIMARY KEY NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  disabled_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS platform_guest_bootstrap (

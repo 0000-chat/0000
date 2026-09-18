@@ -8,9 +8,28 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+const serverOwnedTimestamp = {
+  type: "date" as const,
+  required: false,
+  input: false,
+  returned: false,
+};
+
+export const platformUserAdditionalFields = {
+  disabledAt: serverOwnedTimestamp,
+};
+
 export const createAuthPlugins = () => [
   jwt({ disableSettingJwtHeader: true }),
-  organization(),
+  organization({
+    schema: {
+      organization: {
+        additionalFields: {
+          suspendedAt: serverOwnedTimestamp,
+        },
+      },
+    },
+  }),
   oauthProvider({
     disableJwtPlugin: true,
     storeTokens: "hashed",
@@ -33,7 +52,10 @@ export const createAuthPlugins = () => [
   }),
 ];
 
-const authTables = getAuthTables({ plugins: createAuthPlugins() });
+const authTables = getAuthTables({
+  user: { additionalFields: platformUserAdditionalFields },
+  plugins: createAuthPlugins(),
+});
 
 type Field = {
   type: string;

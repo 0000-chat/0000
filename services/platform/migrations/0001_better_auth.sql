@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS "user" (
   "emailVerified" INTEGER NOT NULL,
   "image" TEXT,
   "createdAt" INTEGER NOT NULL,
-  "updatedAt" INTEGER NOT NULL
+  "updatedAt" INTEGER NOT NULL,
+  "disabledAt" INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS "session" (
@@ -63,7 +64,8 @@ CREATE TABLE IF NOT EXISTS "organization" (
   "slug" TEXT NOT NULL UNIQUE,
   "logo" TEXT,
   "createdAt" INTEGER NOT NULL,
-  "metadata" TEXT
+  "metadata" TEXT,
+  "suspendedAt" INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS "member" (
