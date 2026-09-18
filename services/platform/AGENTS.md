@@ -1,32 +1,18 @@
-# 0000-platform
+# Platform task entry
 
-This repository is the scaffold for the shared platform boundary. It is an
-independent repository, not a package inside `0000-full`.
+Read [README.md](README.md) for Platform's scope, ownership boundaries and
+ecosystem relationships. For authentication work, then read
+[AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md), including its status and acceptance
+gates. Proposed mechanisms in the spec are not claims of implemented behavior.
 
-The current delivery contains metadata, documentation, a local check, a
-pre-commit hook, and CI only. It contains no application source, package
-manifest, generated dependency tree, database, API, deployment configuration,
-secret, or license.
+Platform owns shared identity and credential issuance. Services own resource
+authorization. Do not introduce another service-local auth system, require
+Spaces for service access, or make Platform bootstrap depend on Database.
 
-Standalone public components do not require hosted platform authentication.
-When application code is added, this boundary can expose an authentication
-adapter without choosing a provider in this scaffold.
+This directory belongs to the 0000 monorepo, not a separate Git repository.
+Inspect current repository instructions, status and ongoing migrations before
+editing. Preserve other tasks' staged and unstaged changes. Shared contracts
+and Platform client changes belong in the monorepo's corresponding packages.
 
-Run `./scripts/check` from this repository before committing. The check
-validates metadata, formats supported files with Biome, and lints supported
-JavaScript and TypeScript files with pinned tools. Work on a task branch;
-direct commits on `main` are blocked after bootstrap.
-
-## Agent skills
-
-### Issue tracker
-
-Issues and specs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Triage uses the five default canonical labels. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This repository uses a single-context layout. See `docs/agents/domain.md`.
+Keep the README status and auth acceptance gates accurate as work lands.
+Never describe a scaffold check as a working authentication integration test.
