@@ -256,6 +256,45 @@ async function waitForWebhookDeliveryStatus(
   throw new Error(`The webhook delivery did not reach ${status}.`);
 }
 
+interface TestWebhookDelivery {
+  readonly attempt_count: number;
+  readonly attempts: Array<{
+    readonly attempt_number: number;
+    readonly attempted_at: string;
+    readonly completed_at: string | null;
+    readonly failure_category: string | null;
+    readonly status: string;
+  }>;
+  readonly attempted_at: string | null;
+  readonly cancelled_at: string | null;
+  readonly completed_at: string | null;
+  readonly event_id: string;
+  readonly failure_category: string | null;
+  readonly next_attempt_at: string | null;
+  readonly retry_expires_at: string;
+  readonly status: string;
+}
+
+interface TestWebhookEndpoint {
+  readonly deliveries: TestWebhookDelivery[];
+  readonly disabled_at: string | null;
+  readonly failure_started_at: string | null;
+  readonly id: string;
+  readonly last_failure_at: string | null;
+  readonly last_success_at: string | null;
+  readonly recovered_at: string | null;
+  readonly status: string;
+}
+
+async function readWebhookList(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  room: string,
+) {
+  const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/webhooks`, { headers: { accept: "application/json" } });
+  expect(response.status).toBe(200);
+  return await response.json() as { webhooks: TestWebhookEndpoint[] };
+}
+
 async function verifyWebhookSignature(secret: string, timestamp: string, body: string, signature: string): Promise<boolean> {
   const encoded = secret.replaceAll("-", "+").replaceAll("_", "/");
   const padded = encoded + "=".repeat((4 - encoded.length % 4) % 4);
@@ -678,8 +717,8 @@ test.serial("accepts a message before an unavailable webhook receiver fails", { 
     const requests = await waitForOutboundRequests(miniflare, 1);
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0]!.body)).toMatchObject({ event_id: posted.message.id, message: { content: "accepted despite delivery failure" } });
-    const delivery = await waitForWebhookDeliveryStatus(miniflare, room.id, registration.webhook.id, "failed");
-    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "http_status", status: "failed" });
+    const delivery = await waitForWebhookDeliveryStatus(miniflare, room.id, registration.webhook.id, "retrying");
+    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "http_status", status: "retrying" });
 
     const listed = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
     const listing = await listed.text();
@@ -700,8 +739,8 @@ test.serial("does not follow webhook redirects and cancels response bodies", { t
     const requests = await waitForOutboundRequests(miniflare, 1);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe("https://receiver.example.com/original?token=private-query");
-    const delivery = await waitForWebhookDeliveryStatus(miniflare, room.id, registration.webhook.id, "failed");
-    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "redirect", status: "failed" });
+    const delivery = await waitForWebhookDeliveryStatus(miniflare, room.id, registration.webhook.id, "retrying");
+    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "redirect", status: "retrying" });
     const listed = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
     expect(await listed.text()).not.toContain("test-only response body");
   });
@@ -716,8 +755,201 @@ test.serial("times out a webhook fetch without changing the accepted message", {
     expect(posted.status).toBe(201);
 
     expect(await waitForOutboundRequests(miniflare, 1)).toHaveLength(1);
-    const delivery = await waitForWebhookDeliveryStatus(miniflare, room.id, registration.webhook.id, "failed", 7_000);
-    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "timeout", status: "failed" });
+    const delivery = await waitForWebhookDeliveryStatus(miniflare, room.id, registration.webhook.id, "retrying", 7_000);
+    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "timeout", status: "retrying" });
     await new Promise((resolve) => setTimeout(resolve, 600));
   });
+});
+
+test.serial("retries each event on increasing durable delays and preserves its event ID across duplicates", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    await registerWebhook(first, room.id, "https://receiver.example.com/retries");
+    const posted = await post(first, room.id, "retry with one stable event");
+    const eventId = (await posted.json() as { message: { id: string } }).message.id;
+    const bodies: string[] = [];
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    bodies.push((await runtime.inspectOutboundRequests())[0]!.body);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    let delivery = endpoint.deliveries.find(({ event_id }) => event_id === eventId)!;
+    expect(delivery).toMatchObject({ attempt_count: 1, failure_category: "http_status", status: "retrying" });
+    expect(delivery.attempts).toHaveLength(1);
+    const firstDelayMs = Date.parse(delivery.next_attempt_at!) - Date.parse(delivery.completed_at!);
+    expect(firstDelayMs).toBeGreaterThan(0);
+
+    runtime = await restart(Date.parse(delivery.next_attempt_at!));
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    bodies.push((await runtime.inspectOutboundRequests())[0]!.body);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    delivery = endpoint.deliveries.find(({ event_id }) => event_id === eventId)!;
+    expect(delivery).toMatchObject({ attempt_count: 2, failure_category: "http_status", status: "retrying" });
+    expect(delivery.attempts.map(({ status }) => status)).toEqual(["failed", "failed"]);
+    const secondDelayMs = Date.parse(delivery.next_attempt_at!) - Date.parse(delivery.completed_at!);
+    expect(secondDelayMs).toBeGreaterThan(firstDelayMs);
+
+    runtime = await restart(Date.parse(delivery.next_attempt_at!));
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    bodies.push((await runtime.inspectOutboundRequests())[0]!.body);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    delivery = endpoint.deliveries.find(({ event_id }) => event_id === eventId)!;
+    expect(delivery).toMatchObject({ attempt_count: 3, failure_category: null, status: "delivered" });
+    expect(delivery.attempts.map(({ status }) => status)).toEqual(["failed", "failed", "delivered"]);
+    expect(new Set(bodies).size).toBe(1);
+    expect(JSON.parse(bodies[0]!).event_id).toBe(eventId);
+    expect(endpoint).toMatchObject({
+      disabled_at: null,
+      failure_started_at: null,
+      last_failure_at: expect.any(String),
+      last_success_at: expect.any(String),
+      recovered_at: expect.any(String),
+      status: "active",
+    });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("a newer success resets endpoint health before an older event expires", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    await registerWebhook(first, room.id, "https://receiver.example.com/independent-events");
+    const oldPost = await post(first, room.id, "older event");
+    const oldEventId = (await oldPost.json() as { message: { id: string } }).message.id;
+
+    let runtime = await restart(fakeNow + 1);
+    const newPost = await post(runtime, room.id, "newer event");
+    const newEventId = (await newPost.json() as { message: { id: string } }).message.id;
+
+    runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === oldEventId)?.status).toBe("retrying");
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === newEventId)?.status).toBe("pending");
+
+    runtime = await restart(fakeNow + 251);
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    const recoveredAt = endpoint.recovered_at;
+    expect(endpoint).toMatchObject({ failure_started_at: null, last_success_at: expect.any(String), recovered_at: expect.any(String), status: "active" });
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === newEventId)?.status).toBe("delivered");
+
+    runtime = await restart(fakeNow + 24 * 60 * 60 * 1_000);
+    await runtime.triggerAlarm(room.id);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.status).toBe("active");
+    expect(endpoint.failure_started_at).toBeNull();
+    expect(endpoint.recovered_at).toBe(recoveredAt);
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === oldEventId)).toMatchObject({
+      attempt_count: 1,
+      completed_at: new Date(fakeNow + 24 * 60 * 60 * 1_000).toISOString(),
+      failure_category: "http_status",
+      status: "failed",
+    });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("a newer success survives recovery of an expired persisted sending lease", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    await registerWebhook(first, room.id, "https://receiver.example.com/stale-lease");
+    const oldPost = await post(first, room.id, "persisted sending event");
+    const oldEventId = (await oldPost.json() as { message: { id: string } }).message.id;
+    await first.markWebhookDeliverySending(room.id, oldEventId);
+
+    const newPost = await post(first, room.id, "later successful event");
+    const newEventId = (await newPost.json() as { message: { id: string } }).message.id;
+    let runtime = await restart(fakeNow + 250);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    const oldDelivery = endpoint.deliveries.find(({ event_id }) => event_id === oldEventId)!;
+    expect(oldDelivery).toMatchObject({ attempt_count: 1, status: "sending" });
+    expect(oldDelivery.attempts).toMatchObject([{ attempt_number: 1, status: "sending" }]);
+
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toHaveLength(1);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === newEventId)?.status).toBe("delivered");
+    expect(endpoint).toMatchObject({ failure_started_at: null, last_failure_at: null, last_success_at: expect.any(String), status: "active" });
+
+    runtime = await restart(fakeNow + 24 * 60 * 60 * 1_000 + 1);
+    await runtime.triggerAlarm(room.id);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({ failure_started_at: null, last_failure_at: null, last_success_at: new Date(fakeNow + 250).toISOString(), status: "active" });
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === oldEventId)).toMatchObject({
+      attempt_count: 1,
+      completed_at: new Date(fakeNow + 24 * 60 * 60 * 1_000).toISOString(),
+      failure_category: "retry_window_expired",
+      status: "failed",
+    });
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === oldEventId)?.attempts).toMatchObject([
+      { attempt_number: 1, failure_category: "retry_window_expired", status: "failed" },
+    ]);
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("keeps the health deadline after an event expires and preserves cancelled history on automatic disable", { timeout: 20_000 }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first);
+    await registerWebhook(first, room.id, "https://receiver.example.com/unhealthy");
+    const oldPost = await post(first, room.id, "event that will expire");
+    const oldEventId = (await oldPost.json() as { message: { id: string } }).message.id;
+
+    let runtime = await restart(fakeNow + 250);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    let endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    const failureStartedAt = Date.parse(endpoint.failure_started_at!);
+
+    runtime = await restart(fakeNow + 23 * 60 * 60 * 1_000);
+    const queuedPost = await post(runtime, room.id, "queued before automatic disable");
+    const queuedEventId = (await queuedPost.json() as { message: { id: string } }).message.id;
+    const disableAt = failureStartedAt + 24 * 60 * 60 * 1_000;
+
+    runtime = await restart(disableAt);
+    await runtime.triggerAlarm(room.id);
+    expect(await runtime.inspectOutboundRequests()).toEqual([]);
+    endpoint = (await readWebhookList(runtime, room.id)).webhooks[0]!;
+    expect(endpoint).toMatchObject({
+      disabled_at: new Date(disableAt).toISOString(),
+      failure_started_at: new Date(failureStartedAt).toISOString(),
+      last_failure_at: new Date(failureStartedAt).toISOString(),
+      status: "disabled",
+    });
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === oldEventId)).toMatchObject({ status: "failed", attempt_count: 1 });
+    expect(endpoint.deliveries.find(({ event_id }) => event_id === queuedEventId)).toMatchObject({
+      attempt_count: 0,
+      cancelled_at: new Date(disableAt).toISOString(),
+      status: "cancelled",
+    });
+  }, TEST_ROOM_LIMITS, fakeNow);
+});
+
+test.serial("room deletion during an outbound await removes notification state and allows the in-flight request to finish", { timeout: 15_000 }, async () => {
+  const limits = { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 10_000 };
+  await withRuntime(async (miniflare) => {
+    await miniflare.setOutboundResponse(204, undefined, 750);
+    const created = await createRoom(miniflare);
+    const { room } = created;
+    await registerWebhook(miniflare, room.id, "https://receiver.example.com/delete-during-send");
+    expect((await post(miniflare, room.id, "message sent before room deletion")).status).toBe(201);
+
+    expect(await waitForOutboundRequests(miniflare, 1)).toHaveLength(1);
+    const deletion = await miniflare.dispatchFetch(created.manage_url, { headers: { accept: "application/json" }, method: "DELETE" });
+    expect(deletion.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect((await miniflare.inspectOutboundRequests()).length).toBe(1);
+    const gone = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
+    expect(gone.status).toBe(410);
+  }, limits);
 });

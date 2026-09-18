@@ -262,6 +262,10 @@ test("serves the Notifications panel and its controller on a human room page", a
   expect(html).toContain('id="notifications-panel"');
   expect(script).toContain("createWebhookPanelController");
   expect(script).toContain("data-webhook-remove");
+  expect(script).toContain("Last success:");
+  expect(script).toContain("Last failure:");
+  expect(script).toContain("Recovery:");
+  expect(script).toContain("Attempt history:");
 });
 
 test("does not apply the browser preference to JSON room reads", async () => {

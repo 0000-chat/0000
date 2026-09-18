@@ -266,13 +266,33 @@ function bootWebhookPanel(): void {
       const metadata = document.createElement("p");
       metadata.className = "webhook-list-meta";
       const delivery = endpoint.deliveries[0];
+      const date = (value: string | null) => value ? new Date(value).toLocaleString() : "never";
+      const health = [
+        `State: ${endpoint.status}`,
+        `Last success: ${date(endpoint.last_success_at)}`,
+        `Last failure: ${date(endpoint.last_failure_at)}`,
+        `Recovery: ${date(endpoint.recovered_at)}`,
+        ...(endpoint.failure_started_at ? [`Continuous failure since ${date(endpoint.failure_started_at)}`] : []),
+        ...(endpoint.disabled_at ? [`Disabled: ${date(endpoint.disabled_at)}`] : []),
+      ];
+      metadata.textContent = health.join(" · ");
+      item.append(address, metadata);
       if (delivery) {
-        const attemptedAt = delivery.attempted_at ?? delivery.completed_at;
-        const time = attemptedAt ? ` · ${new Date(attemptedAt).toLocaleString()}` : "";
-        const failure = delivery.failure_category ? ` · ${delivery.failure_category}` : "";
-        metadata.textContent = `Latest message: ${delivery.status} · ${delivery.attempt_count} attempt${delivery.attempt_count === 1 ? "" : "s"}${time}${failure}`;
+        const details = document.createElement("p");
+        details.className = "webhook-list-meta";
+        details.textContent = `Latest delivery: ${delivery.status} · ${delivery.attempt_count} attempt${delivery.attempt_count === 1 ? "" : "s"} · next retry: ${date(delivery.next_attempt_at)} · retry deadline: ${date(delivery.retry_expires_at)}${delivery.failure_category ? ` · ${delivery.failure_category}` : ""}${delivery.cancelled_at ? ` · cancelled: ${date(delivery.cancelled_at)}` : ""}`;
+        item.append(details);
+        if (delivery.attempts.length > 0) {
+          const attemptHistory = document.createElement("p");
+          attemptHistory.className = "webhook-list-meta";
+          attemptHistory.textContent = `Attempt history: ${delivery.attempts.map((attempt) => `#${attempt.attempt_number} ${attempt.status} at ${date(attempt.attempted_at)}${attempt.failure_category ? ` (${attempt.failure_category})` : ""}`).join("; ")}`;
+          item.append(attemptHistory);
+        }
       } else {
-        metadata.textContent = "No delivery attempts yet.";
+        const emptyDelivery = document.createElement("p");
+        emptyDelivery.className = "webhook-list-meta";
+        emptyDelivery.textContent = "No delivery attempts yet.";
+        item.append(emptyDelivery);
       }
       const actions = document.createElement("div");
       actions.className = "webhook-list-actions";
@@ -281,7 +301,7 @@ function bootWebhookPanel(): void {
       remove.dataset.webhookRemove = endpoint.id;
       remove.textContent = "Remove endpoint";
       actions.append(remove);
-      item.append(address, metadata, actions);
+      item.append(actions);
       list.append(item);
     }
     updateButtons(false);

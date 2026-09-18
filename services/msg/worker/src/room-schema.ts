@@ -1,6 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
+import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 4;
+export const CURRENT_ROOM_SCHEMA_VERSION = 5;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -91,6 +92,112 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
     `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 5) {
+    sql.exec("ALTER TABLE webhook_endpoints RENAME TO webhook_endpoints_v4");
+    sql.exec(`
+      CREATE TABLE webhook_endpoints (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
+        created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+        failure_started_at INTEGER, last_success_at INTEGER, last_failure_at INTEGER,
+        recovered_at INTEGER, disabled_at INTEGER
+      )
+    `);
+    sql.exec(`
+      INSERT INTO webhook_endpoints (id, url, secret, created_at, status)
+      SELECT id, url, secret, created_at, status FROM webhook_endpoints_v4
+    `);
+    sql.exec("DROP TABLE webhook_endpoints_v4");
+
+    sql.exec("ALTER TABLE webhook_deliveries RENAME TO webhook_deliveries_v4");
+    sql.exec(`
+      CREATE TABLE webhook_deliveries (
+        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL, retry_expires_at INTEGER NOT NULL,
+        attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER, cancelled_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'retrying', 'delivered', 'failed', 'cancelled')),
+        attempt_count INTEGER NOT NULL, failure_category TEXT
+      )
+    `);
+    sql.exec(`
+      INSERT INTO webhook_deliveries (
+        id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at,
+        retry_expires_at, attempted_at, completed_at, lease_expires_at, cancelled_at,
+        status, attempt_count, failure_category
+      )
+      SELECT id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at,
+        created_at + ${WEBHOOK_RETRY_WINDOW_MS}, attempted_at, completed_at, lease_expires_at, NULL,
+        status, attempt_count, failure_category
+      FROM webhook_deliveries_v4
+    `);
+    sql.exec("DROP TABLE webhook_deliveries_v4");
+
+    sql.exec(`
+      CREATE TABLE webhook_delivery_attempts (
+        delivery_id TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+        attempted_at INTEGER NOT NULL, completed_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('sending', 'delivered', 'failed')),
+        failure_category TEXT,
+        PRIMARY KEY (delivery_id, attempt_number)
+      )
+    `);
+    sql.exec(`
+      INSERT INTO webhook_delivery_attempts (
+        delivery_id, attempt_number, attempted_at, completed_at, status, failure_category
+      )
+      SELECT id, attempt_count, COALESCE(attempted_at, created_at), completed_at,
+        CASE status WHEN 'delivered' THEN 'delivered' WHEN 'failed' THEN 'failed' ELSE 'sending' END,
+        failure_category
+      FROM webhook_deliveries
+      WHERE attempt_count > 0
+    `);
+    sql.exec(`
+      UPDATE webhook_endpoints
+      SET last_success_at = (
+            SELECT MAX(attempts.completed_at) FROM webhook_delivery_attempts AS attempts
+            JOIN webhook_deliveries AS deliveries ON deliveries.id = attempts.delivery_id
+            WHERE deliveries.endpoint_id = webhook_endpoints.id AND attempts.status = 'delivered'
+          ),
+          last_failure_at = (
+            SELECT MAX(attempts.completed_at) FROM webhook_delivery_attempts AS attempts
+            JOIN webhook_deliveries AS deliveries ON deliveries.id = attempts.delivery_id
+            WHERE deliveries.endpoint_id = webhook_endpoints.id AND attempts.status = 'failed'
+          ),
+          failure_started_at = (
+            SELECT MIN(attempts.completed_at) FROM webhook_delivery_attempts AS attempts
+            JOIN webhook_deliveries AS deliveries ON deliveries.id = attempts.delivery_id
+            WHERE deliveries.endpoint_id = webhook_endpoints.id AND attempts.status = 'failed'
+              AND attempts.completed_at > COALESCE((
+                SELECT MAX(success.completed_at) FROM webhook_delivery_attempts AS success
+                JOIN webhook_deliveries AS success_deliveries ON success_deliveries.id = success.delivery_id
+                WHERE success_deliveries.endpoint_id = webhook_endpoints.id AND success.status = 'delivered'
+              ), -1)
+          ),
+          recovered_at = CASE WHEN (
+            SELECT MAX(failure.completed_at) FROM webhook_delivery_attempts AS failure
+            JOIN webhook_deliveries AS failure_deliveries ON failure_deliveries.id = failure.delivery_id
+            WHERE failure_deliveries.endpoint_id = webhook_endpoints.id AND failure.status = 'failed'
+          ) < (
+            SELECT MAX(success.completed_at) FROM webhook_delivery_attempts AS success
+            JOIN webhook_deliveries AS success_deliveries ON success_deliveries.id = success.delivery_id
+            WHERE success_deliveries.endpoint_id = webhook_endpoints.id AND success.status = 'delivered'
+          ) THEN (
+            SELECT MAX(success.completed_at) FROM webhook_delivery_attempts AS success
+            JOIN webhook_deliveries AS success_deliveries ON success_deliveries.id = success.delivery_id
+            WHERE success_deliveries.endpoint_id = webhook_endpoints.id AND success.status = 'delivered'
+          ) ELSE NULL END
+    `);
+    sql.exec(
+      `UPDATE webhook_deliveries SET status = 'retrying', due_at = COALESCE(completed_at, attempted_at, created_at) + ? WHERE status = 'failed' AND attempt_count > 0`,
+      WEBHOOK_RETRY_INITIAL_DELAY_MS,
+    );
+    sql.exec("CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, due_at, retry_expires_at, created_at)");
+    sql.exec("CREATE INDEX webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC)");
+    sql.exec("CREATE INDEX webhook_deliveries_retention ON webhook_deliveries(created_at)");
+    sql.exec("CREATE INDEX webhook_delivery_attempts_delivery ON webhook_delivery_attempts(delivery_id, attempt_number)");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

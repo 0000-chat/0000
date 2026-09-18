@@ -139,16 +139,31 @@ export async function handleAgentPromptCopy(options: {
 }
 
 export interface WebhookPanelDelivery {
+  readonly attempts: readonly {
+    readonly attempt_number: number;
+    readonly attempted_at: string;
+    readonly completed_at: string | null;
+    readonly failure_category: string | null;
+    readonly status: string;
+  }[];
   readonly attempt_count: number;
   readonly attempted_at: string | null;
+  readonly cancelled_at: string | null;
   readonly completed_at: string | null;
   readonly failure_category: string | null;
+  readonly next_attempt_at: string | null;
+  readonly retry_expires_at: string;
   readonly status: string;
 }
 
 export interface WebhookPanelEntry {
   readonly deliveries: readonly WebhookPanelDelivery[];
+  readonly disabled_at: string | null;
+  readonly failure_started_at: string | null;
   readonly id: string;
+  readonly last_failure_at: string | null;
+  readonly last_success_at: string | null;
+  readonly recovered_at: string | null;
   readonly status: string;
   readonly url: string;
 }

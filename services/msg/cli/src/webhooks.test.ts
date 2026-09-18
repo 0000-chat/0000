@@ -24,7 +24,38 @@ test("sends list, create, and remove requests to the room's webhook API", async 
   const stderr: string[] = [];
   const calls: Array<{ body?: string; method?: string; redirect?: string; url?: string }> = [];
   const responses = [
-    { protocol_version: 1, webhooks: [] },
+    {
+      protocol_version: 1,
+      webhooks: [{
+        created_at: "2026-09-18T23:59:00.000Z",
+        deliveries: [{
+          attempts: [
+            { attempt_number: 1, attempted_at: "2026-09-19T00:00:00.000Z", completed_at: "2026-09-19T00:00:01.000Z", failure_category: "http_status", status: "failed" },
+            { attempt_number: 2, attempted_at: "2026-09-19T00:00:31.000Z", completed_at: null, failure_category: null, status: "sending" },
+          ],
+          attempt_count: 2,
+          attempted_at: "2026-09-19T00:00:31.000Z",
+          cancelled_at: null,
+          completed_at: null,
+          created_at: "2026-09-19T00:00:00.000Z",
+          event_id: "b0000000-0000-4000-8000-000000000001",
+          failure_category: null,
+          message_id: "b0000000-0000-4000-8000-000000000001",
+          message_sequence: 2,
+          next_attempt_at: null,
+          retry_expires_at: "2026-09-20T00:00:00.000Z",
+          status: "sending",
+        }],
+        disabled_at: null,
+        failure_started_at: "2026-09-19T00:00:01.000Z",
+        id: endpointId,
+        last_failure_at: "2026-09-19T00:00:01.000Z",
+        last_success_at: null,
+        recovered_at: null,
+        status: "active",
+        url: "https://receiver.example.com/hook?token=redacted",
+      }],
+    },
     { protocol_version: 1, secret: "one-time-secret", webhook: { id: endpointId, url: "https://receiver.example.com/hook?token=redacted" } },
     { protocol_version: 1, removed: true },
   ];
@@ -60,6 +91,13 @@ test("sends list, create, and remove requests to the room's webhook API", async 
     { method: "DELETE", redirect: "error", url: `${roomUrl}/webhooks/${endpointId}` },
   ]);
   expect(JSON.parse(stdout[1] ?? "")).toMatchObject({ secret: "one-time-secret" });
+  expect(JSON.parse(stdout[0] ?? "")).toMatchObject({
+    webhooks: [{
+      failure_started_at: "2026-09-19T00:00:01.000Z",
+      last_failure_at: "2026-09-19T00:00:01.000Z",
+      deliveries: [{ attempt_count: 2, attempts: [{ failure_category: "http_status" }, { status: "sending" }], status: "sending" }],
+    }],
+  });
   expect(stdout.join("")).not.toContain("token=private");
   expect(stderr).toEqual([]);
 });

@@ -17,8 +17,26 @@ test("loads, creates, and removes endpoints through the room webhook API", async
       if (method === "GET") return Response.json({ protocol_version: 1, webhooks: registered ? [registered] : [] });
       if (method === "POST") {
         registered = {
-          deliveries: [],
+          deliveries: [{
+            attempts: [
+              { attempt_number: 1, attempted_at: "2026-09-19T00:00:00.000Z", completed_at: "2026-09-19T00:00:01.000Z", failure_category: "http_status", status: "failed" },
+              { attempt_number: 2, attempted_at: "2026-09-19T00:00:31.000Z", completed_at: null, failure_category: null, status: "sending" },
+            ],
+            attempt_count: 2,
+            attempted_at: "2026-09-19T00:00:31.000Z",
+            cancelled_at: null,
+            completed_at: null,
+            failure_category: null,
+            next_attempt_at: null,
+            retry_expires_at: "2026-09-20T00:00:00.000Z",
+            status: "sending",
+          }],
+          disabled_at: null,
+          failure_started_at: "2026-09-19T00:00:01.000Z",
           id: "a0000000-0000-4000-8000-000000000001",
+          last_failure_at: "2026-09-19T00:00:01.000Z",
+          last_success_at: null,
+          recovered_at: null,
           status: "active",
           url: "https://receiver.example.com/hook?token=redacted",
         };
@@ -39,7 +57,12 @@ test("loads, creates, and removes endpoints through the room webhook API", async
   expect(entries).toHaveLength(3);
   expect(entries[0]).toEqual([]);
   expect(entries[1]).toHaveLength(1);
-  expect(entries[1]?.[0]).toMatchObject({ id: "a0000000-0000-4000-8000-000000000001" });
+  expect(entries[1]?.[0]).toMatchObject({
+    failure_started_at: "2026-09-19T00:00:01.000Z",
+    id: "a0000000-0000-4000-8000-000000000001",
+    last_failure_at: "2026-09-19T00:00:01.000Z",
+    deliveries: [{ attempt_count: 2, attempts: [{ attempt_number: 1 }, { attempt_number: 2 }], status: "sending" }],
+  });
   expect(entries[2]).toEqual([]);
   expect(secrets).toEqual(["created-once"]);
   expect(calls.map(({ method, url }) => [method, url])).toEqual([
