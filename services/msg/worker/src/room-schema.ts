@@ -73,7 +73,7 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
     if (!columns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
     const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
-    for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = 1", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION);
+    for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = ?", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION, room.singleton);
     sql.exec(`
       CREATE TABLE IF NOT EXISTS webhook_endpoints (
         id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
