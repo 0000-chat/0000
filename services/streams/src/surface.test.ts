@@ -37,6 +37,12 @@ const stream = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("Helm Streams surface", () => {
+  test("publishes the 0000-streams web identity and keeps its browser cache key", () => {
+    expect(manifest.name).toBe("0000-streams");
+    expect(html).toContain("<title>0000-streams</title>");
+    expect(serviceWorker).toContain('const CACHE = "helm-streams-v3";');
+  });
+
   test("requires the exact MCP bearer secret", () => {
     const env = { MCP_AUTH_TOKEN: "test-token" } as Env;
     expect(authorizeMcp(new Request("https://don.0000.gold/mcp"), env)).toBe(

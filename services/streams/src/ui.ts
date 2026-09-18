@@ -190,7 +190,7 @@ export function groupStreamsForDisplay<T extends DisplayStream>(
 }
 
 export const manifest = {
-  name: "Helm Streams",
+  name: "0000-streams",
   short_name: "Streams",
   start_url: "/",
   display: "standalone",
@@ -228,7 +228,7 @@ self.addEventListener("fetch", event => {
 export const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#171914"><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="/icon.svg">
-<title>Helm Streams</title><style>
+<title>0000-streams</title><style>
 :root{color-scheme:light;--ink:#171914;--paper:#f4f0e8;--acid:#d7ff67;--muted:#4d5148;--line:#b9b5ab;--red:#8f2c20;--card:#fffdf8;--shadow:#d8d3c8}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,textarea{font:inherit}.shell{max-width:760px;margin:auto;padding:24px 18px calc(64px + env(safe-area-inset-bottom))}.mast{display:flex;justify-content:space-between;align-items:end;border-bottom:2px solid var(--ink);padding:14px 0}.mono,.zone,.card-meta,.chip,time{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 h1{font:800 clamp(2rem,10vw,4.5rem)/.9 system-ui,sans-serif;letter-spacing:-.045em;margin:0}.zone{font-size:.72rem;text-transform:uppercase;color:var(--muted)}.count{margin:24px 0 10px;font:700 .75rem/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}.stream-section{margin:24px 0 30px}.section-heading{font:800 1.15rem/1.2 system-ui,sans-serif;letter-spacing:-.025em;margin:0 0 10px}.section-empty{border:1px dashed var(--muted);padding:16px;color:var(--muted);margin:0}.stream{display:block;width:100%;min-height:44px;text-align:left;border:1px solid var(--line);border-left:5px solid var(--ink);border-radius:8px;background:var(--card);padding:14px 15px;margin:0 0 10px;box-shadow:2px 3px 0 var(--shadow);cursor:pointer}.stream[data-needs-don=true]{border-left-color:var(--acid)}.eyebrow{display:flex;justify-content:space-between;align-items:center;gap:12px;color:var(--muted);font-size:.72rem;text-transform:uppercase}.stream h3{font:750 1.25rem/1.15 system-ui,sans-serif;margin:9px 0 6px}.summary{display:-webkit-box;max-width:65ch;overflow:hidden;color:#30342d;line-height:1.45;-webkit-box-orient:vertical;-webkit-line-clamp:3}.card-meta{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--muted);font-size:.68rem}.card-meta .priority{opacity:.75}.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{display:inline-flex;align-items:center;min-height:28px;border:1px solid var(--line);border-radius:999px;padding:3px 9px;color:var(--ink);font-size:.68rem;font-weight:800;line-height:1.15;text-transform:uppercase;letter-spacing:.02em}.chip.status-needs{background:var(--acid);border-color:#809900}.chip.status-ongoing,.chip.status-no-action{background:#eeece5}.chip.delivery-submitted{background:#e1ebcf;border-color:#8ba36b}.chip.delivery-pending{background:#f5e8bb;border-color:#a78627}.chip.delivery-failed{background:#f3d5cc;border-color:var(--red);color:#641d15}
