@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+bunx --yes --package "oxlint@1.82.0" oxlint --version
+bunx --yes --package "@biomejs/biome@2.5.13" biome --version
