@@ -1,11 +1,11 @@
 # Platform MVP ticket proposal
 
-**Status:** Published as issues #55–#69. The T01 investigation code and report are on `codex/platform-t01` for parent review; no later ticket is complete. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
+**Status:** Published as issues #55–#69. T01 is reviewed, integrated and verified on `codex/platform-mvp` at `fa17ad4`; no later ticket is complete. T02 is eligible for dispatch preparation. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
 
 | Slice | Published issue | Title | Label |
 | --- | --- | --- | --- |
 | T01 | [#55](https://github.com/0000-chat/0000/issues/55) | Trace runtime and resolve the first auth contracts | ready-for-agent |
-| T02 | [#56](https://github.com/0000-chat/0000/issues/56) | Deliver social sign-in, default organization, profile and logout | needs-info |
+| T02 | [#56](https://github.com/0000-chat/0000/issues/56) | Deliver social sign-in, default organization, profile and logout | ready-for-agent |
 | T03 | [#57](https://github.com/0000-chat/0000/issues/57) | Administer organizations and memberships | ready-for-agent |
 | T04 | [#58](https://github.com/0000-chat/0000/issues/58) | Register a consumer and use a scoped human API credential | needs-info |
 | T05 | [#59](https://github.com/0000-chat/0000/issues/59) | Add organization-owned agents across service audiences | ready-for-agent |
@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T01 is the only current dispatch frontier. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. The needs-info labels track tickets that need specific T01 findings before their contract-dependent work can proceed.
+T02 is the current preparation frontier after verified T01 integration. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
 
 ## Existing issue disposition
 
@@ -36,7 +36,7 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T01. Trace runtime and resolve the first auth contracts
 
-**Readiness:** T01 probe implementation is awaiting review. It is not the complete auth MVP or production acceptance.
+**Readiness:** T01 investigation accepted after independent review and aggregate verification at `fa17ad4`. It is not the complete auth MVP or production acceptance.
 
 **Blocked by (contract):** None; investigation scope is bounded by the accepted MVP.
 
@@ -50,7 +50,7 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
-**Readiness:** Not ready until T01's runtime/provider findings are reviewed.
+**Readiness:** T01 runtime/provider findings accepted at `fa17ad4`; ready for a parent-owned implementation brief and verified-base dispatch.
 
 **Blocked by (contract):** T01's accepted human principal, session and D1 behavior.
 

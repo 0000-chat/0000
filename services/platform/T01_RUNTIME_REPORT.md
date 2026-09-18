@@ -1,7 +1,9 @@
 # T01 runtime findings
 
-Date: 2026-09-19. Status: implementation evidence assembled for parent review;
-T01 and the full authentication MVP are not accepted.
+Date: 2026-09-19. Status: T01 investigation accepted and integrated into
+`codex/platform-mvp` at `fa17ad4` after independent review and aggregate checks.
+The full authentication MVP is not accepted. OAuth concurrency and installation
+revocation remain explicit downstream gates.
 
 ## Scope and runtime
 
