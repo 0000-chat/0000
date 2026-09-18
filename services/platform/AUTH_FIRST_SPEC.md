@@ -1,15 +1,18 @@
 # Platform authentication MVP
 
-Date: 2026-09-19. Status: agreed MVP design; initial T02 human account slice
-implemented locally; full MVP not accepted.
+Date: 2026-09-19. Status: agreed MVP design; T01/T02 verified on the aggregate,
+T03 organization slice implemented locally and awaiting aggregate review; full
+MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
 Implementation details marked for validation must be proven against the selected
 Better Auth version and Workers/D1 runtime. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
 records the T01 investigation; [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md)
-records local evidence for the initial account slice. The evidence does not
-complete the design's acceptance gates or establish production authentication.
+records local evidence for the initial account slice. [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md)
+records the organization and lifecycle slice, which is still under parent
+review. The evidence does not complete the design's acceptance gates or
+establish production authentication.
 
 ## MVP outcome and deployment
 
@@ -45,8 +48,10 @@ and CSRF checks. Do not distribute session cookies to services or put long-lived
 credentials in URLs or browser local storage.
 
 Platform owns the account experience for profile, organizations, memberships,
-organization-owned agent identities, consent and credentials. It includes the
-identity administration needed by service-only customers. Product Spaces,
+organization-owned agent identities, consent and credentials. The current T03
+slice adds explicit organization selection, member and invitation management,
+atomic owner protection and configured operator lifecycle recovery. It includes
+the identity administration needed by service-only customers. Product Spaces,
 threads, agent execution and full-product agent control remain with the product
 UI. Integrate a full application's login only where that application exists;
 no apps/0000 implementation was found. Building full-product login or offline
@@ -236,8 +241,9 @@ The MVP is accepted when all of the following are demonstrated:
 
 - Google and GitHub sign-in, account linking with proof of both accounts,
   retry-safe default-organization creation with owner membership, self-hosted
-  open/invitation-only configuration, origin/CSRF protections and the
-  Platform-owned account controls work in the selected Workers/D1 runtime.
+  open/invitation-only configuration, origin/CSRF protections, organization and
+  invitation administration, final-owner protection, and Platform-owned
+  operator lifecycle controls work in the selected Workers/D1 runtime.
 - Shared contracts, client and middleware validate authority, principal kind,
   audience, expiry, membership/grant and failure results. Existing Communicator
   and message-service consumers use this path; a fixture is reported only as a
@@ -286,9 +292,10 @@ alone:
   before OAuth acceptance.
 - A real Miniflare runtime restart preserves a bounded guest grant and resource
   fixture in persistent D1. Human login/session and social linking work across
-  local Worker requests with simulated provider HTTP, but a human-session
-  process restart, concurrent signup, final-owner protection and OAuth rotation
-  races remain unproven.
+  local Worker requests with simulated provider HTTP. T03's local Worker/D1
+  tests exercise final-owner and invitation races; the report is awaiting
+  aggregate review. Human-session process restart, concurrent signup and OAuth
+  rotation races remain unproven.
 - The versioned principal, verification route, service registration fixture,
   service-verifier bootstrap and guest-grant exchange are candidate T01
   contracts. Better Auth encrypts stored Google/GitHub access and refresh
@@ -302,7 +309,9 @@ alone:
   anonymous enforcement independent of a Cloud network call.
 
 T02 login, account and signup-policy behavior is reviewed and verified on the
-aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. The full
-Platform authentication MVP remains unimplemented until every acceptance gate
-passes. T01 and T02 evidence is limited to the flows and fixtures named in their
-reports.
+aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. T03
+organization, invitation and operator behavior is implemented on an isolated
+local branch with real Worker/D1 route tests; parent review and aggregate
+integration remain pending. The full Platform authentication MVP remains
+unimplemented until every acceptance gate passes. Each report limits its claims
+to the named flows and fixtures.

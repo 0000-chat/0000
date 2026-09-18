@@ -314,6 +314,7 @@ describe("Platform human account providers", () => {
     expect(accountScript.headers.get("content-type")).toContain(
       "application/javascript",
     );
+    expect(() => new Function(scriptBody)).not.toThrow();
     expect(scriptBody).not.toMatch(
       /localStorage|sessionStorage|accessToken|refreshToken|bearer/i,
     );
@@ -1177,7 +1178,7 @@ describe("Platform human account providers", () => {
         }),
       },
     );
-    expect([200, 400]).toContain(rawOrganizationUpdate.status);
+    expect(rawOrganizationUpdate.status).toBe(404);
     const trailingOrganizationUpdate = await SELF.fetch(
       "http://localhost/api/auth/organization/update/",
       {
@@ -1258,6 +1259,7 @@ describe("Platform human account providers", () => {
         },
         body: JSON.stringify({
           serviceId: service.serviceId,
+          organizationId: defaultOrganization!.organization_id,
           capabilities: ["resource:read"],
         }),
       });
@@ -1309,6 +1311,7 @@ describe("Platform human account providers", () => {
         },
         body: JSON.stringify({
           serviceId: service.serviceId,
+          organizationId: defaultOrganization!.organization_id,
           capabilities: ["resource:read"],
         }),
       },
@@ -1373,7 +1376,7 @@ describe("Platform human account providers", () => {
       { headers: { cookie: afterLogoutCookies } },
     );
     expect(await accountAfterMembershipRemoval.text()).toContain(
-      "You no longer have access to this organization. Ask an owner to invite you again.",
+      "You no longer have access to the default organization. Ask an owner to invite you again.",
     );
     const retainedMembership = await testEnv.IDENTITY_DB.prepare(
       "SELECT id FROM member WHERE id = ?",
@@ -1436,6 +1439,7 @@ describe("Platform human account providers", () => {
           },
           body: JSON.stringify({
             serviceId: service.serviceId,
+            organizationId: defaultOrganization!.organization_id,
             capabilities: ["resource:read"],
           }),
         }),

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPlatformClient } from "@0000/platform-client";
+import { readD1Migrations } from "@cloudflare/vitest-plugin";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { opaqueSecret } from "../src/platform-state.ts";
 import { handleResourceRequest } from "../worker/test/fixtures/resource-service.ts";
@@ -34,19 +35,14 @@ async function buildWorkerScript() {
   return entry.text();
 }
 
-async function applyMigration(database, path) {
-  const source = await readFile(path, "utf8");
-  const statements = source
-    .split(";")
-    .map((statement) =>
-      statement
-        .split(/\r?\n/)
-        .filter((line) => !line.trimStart().startsWith("--"))
-        .join("\n")
-        .trim(),
-    )
-    .filter(Boolean);
-  for (const statement of statements) await database.prepare(statement).run();
+async function applyMigrations(database, migrationsPath) {
+  const migrations = await readD1Migrations(migrationsPath);
+  for (const migration of migrations) {
+    if (migration.queries.length === 0) continue;
+    await database.batch(
+      migration.queries.map((query) => database.prepare(query)),
+    );
+  }
 }
 
 function createRuntime(script, persistenceDirectory) {
@@ -86,20 +82,10 @@ try {
   await first.ready;
   const firstFetch = (input, init) => first.dispatchFetch(input, init);
   const database = await first.getD1Database("IDENTITY_DB");
-  await applyMigration(
+  await applyMigrations(database, join(platformRoot, "migrations"));
+  await applyMigrations(
     database,
-    join(platformRoot, "migrations/0001_better_auth.sql"),
-  );
-  await applyMigration(
-    database,
-    join(platformRoot, "migrations/0002_platform_authority.sql"),
-  );
-  await applyMigration(
-    database,
-    join(
-      platformRoot,
-      "worker/test/fixtures/migrations/test_fixture_0001_resource.sql",
-    ),
+    join(platformRoot, "worker/test/fixtures/migrations"),
   );
 
   const service = {

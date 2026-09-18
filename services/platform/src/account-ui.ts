@@ -3,14 +3,56 @@ export interface AccountProvider {
   providerId: string;
 }
 
+export interface AccountOrganization {
+  id: string;
+  name: string;
+  role: "owner" | "admin" | "member";
+  suspended: boolean;
+}
+
+export interface AccountMember {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+}
+
+export interface AccountInvitation {
+  id: string;
+  organizationId: string;
+  organizationName: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+  expiresAt: number;
+  suspended: boolean;
+}
+
+export interface OrganizationDetails {
+  id: string;
+  name: string;
+  role: "owner" | "admin" | "member";
+  suspended: boolean;
+  viewerUserId: string;
+  members: AccountMember[];
+  invitations: AccountInvitation[];
+}
+
 export interface AccountView {
   name: string;
   email: string;
   image: string | null;
   providers: AccountProvider[];
-  organizationName: string | null;
-  membershipRole: string | null;
-  organizationSuspended: boolean;
+  defaultOrganization: {
+    name: string | null;
+    role: string | null;
+    suspended: boolean;
+  };
+  organizations: AccountOrganization[];
+  selectedOrganizationId: string | null;
+  selectedOrganization: OrganizationDetails | null;
+  invitations: AccountInvitation[];
+  isOperator: boolean;
 }
 
 const securityHeaders = {
@@ -118,6 +160,107 @@ function availableProviderMarkup(providerId: string): string {
   </li>`;
 }
 
+export function organizationDetailsMarkup(
+  organization: OrganizationDetails | null,
+): string {
+  if (!organization) {
+    return `<p class="access access-missing">You have no current organization memberships. Use an invitation to join an organization, or create one below.</p>`;
+  }
+
+  const isManager =
+    organization.role === "owner" || organization.role === "admin";
+  const canManage = isManager && !organization.suspended;
+  const nameForm = canManage
+    ? `<form data-rename-organization>
+        <input type="hidden" name="organizationId" value="${escapeHtml(organization.id)}">
+        <label for="organization-name">Organization name</label>
+        <input id="organization-name" name="name" type="text" value="${escapeHtml(organization.name)}" maxlength="100" required>
+        <button type="submit" class="primary-button">Save organization name</button>
+      </form>`
+    : `<p class="organization-name">${escapeHtml(organization.name)}</p>`;
+  const memberRoleChoices =
+    organization.role === "owner"
+      ? ["owner", "admin", "member"]
+      : ["admin", "member"];
+  const invitationRoleOptions =
+    organization.role === "owner"
+      ? `<option value="member" selected>Member</option><option value="admin">Admin</option><option value="owner">Owner</option>`
+      : `<option value="member" selected>Member</option><option value="admin">Admin</option>`;
+  const members = organization.members
+    .map((member) => {
+      const memberRoleOptions = memberRoleChoices
+        .map(
+          (role) =>
+            `<option value="${role}"${role === member.role ? " selected" : ""}>${role[0]!.toUpperCase()}${role.slice(1)}</option>`,
+        )
+        .join("");
+      const isSelf = member.userId === organization.viewerUserId;
+      const canManageMember =
+        canManage &&
+        !isSelf &&
+        (organization.role === "owner" || member.role !== "owner");
+      const roleControl = canManageMember
+        ? `<label class="visually-hidden" for="member-role-${escapeHtml(member.id)}">Role for ${escapeHtml(member.name)}</label>
+           <select id="member-role-${escapeHtml(member.id)}" data-member-role="${escapeHtml(member.id)}">${memberRoleOptions}</select>
+           <button type="button" class="quiet-button" data-update-member-role="${escapeHtml(member.id)}">Save role</button>`
+        : "";
+      const removeControl = canManageMember
+        ? `<button type="button" class="quiet-button" data-remove-member="${escapeHtml(member.id)}">Remove</button>`
+        : "";
+      return `<li class="management-row">
+        <div><strong>${escapeHtml(member.name)}</strong><span>${escapeHtml(member.email)}</span><small>${escapeHtml(member.role)}${isSelf ? " · you" : ""}</small></div>
+        <div class="row-actions">${roleControl}${removeControl}</div>
+      </li>`;
+    })
+    .join("");
+  const invitations = organization.invitations
+    .map((invitation) => {
+      const canCancel =
+        canManage &&
+        (organization.role === "owner" || invitation.role !== "owner");
+      const link = `/account?invitation=${encodeURIComponent(invitation.id)}`;
+      return `<li class="management-row">
+        <div><strong>${escapeHtml(invitation.email)}</strong><span>Invited as ${escapeHtml(invitation.role)} · expires ${escapeHtml(new Date(invitation.expiresAt).toLocaleString())}</span>
+          <p class="invitation-link"><a href="${escapeHtml(link)}">Invitation link</a> <button type="button" class="quiet-button" data-copy-invitation="${escapeHtml(invitation.id)}">Copy link</button></p>
+        </div>
+        ${canCancel ? `<button type="button" class="quiet-button" data-cancel-invitation="${escapeHtml(invitation.id)}">Cancel invitation</button>` : ""}
+      </li>`;
+    })
+    .join("");
+  const invitationForm = canManage
+    ? `<form data-create-invitation>
+        <input type="hidden" name="organizationId" value="${escapeHtml(organization.id)}">
+        <label for="invite-email">Invite by email</label>
+        <input id="invite-email" name="email" type="email" maxlength="254" autocomplete="email" required>
+        <label for="invite-role">Role</label>
+        <select id="invite-role" name="role">${invitationRoleOptions}</select>
+        <button type="submit" class="primary-button">Create invitation</button>
+      </form>`
+    : "";
+  const suspensionNotice = organization.suspended
+    ? `<p class="notice" role="status">This organization is suspended. An operator must restore it before tenant administration can continue.</p>`
+    : "";
+  const leaveControl = organization.suspended
+    ? `<p class="hint">Membership changes are unavailable while this organization is suspended.</p>`
+    : `<form data-leave-organization>
+        <input type="hidden" name="organizationId" value="${escapeHtml(organization.id)}">
+        <button type="submit" class="quiet-button">Leave organization</button>
+      </form>`;
+
+  return `<div class="organization-details" data-organization-id="${escapeHtml(organization.id)}">
+    ${suspensionNotice}
+    <p class="access ${organization.suspended ? "access-missing" : "access-current"}">Your current role is ${escapeHtml(organization.role)}.</p>
+    ${nameForm}
+    <h3>Members</h3>
+    <ul class="management-list">${members}</ul>
+    ${invitationForm}
+    <h3>Pending invitations</h3>
+    <ul class="management-list">${invitations || `<li class="muted">No pending invitations.</li>`}</ul>
+    ${leaveControl}
+    <p data-organization-status class="status" role="status" aria-live="polite"></p>
+  </div>`;
+}
+
 export function accountPage(view: AccountView): Response {
   const image = safeAvatarUrl(view.image);
   const avatar = image
@@ -135,14 +278,39 @@ export function accountPage(view: AccountView): Response {
   const missing = (["google", "github"] as const)
     .filter((providerId) => !providers.has(providerId))
     .map(availableProviderMarkup);
-  const membership = view.organizationSuspended
+  const defaultMembership = view.defaultOrganization.suspended
     ? `<p class="access access-missing">This organization is suspended and access is unavailable.</p>`
-    : view.membershipRole
-      ? `<p class="access access-current">Current access: ${escapeHtml(view.membershipRole)} membership is active.</p>`
-      : `<p class="access access-missing">You no longer have access to this organization. Ask an owner to invite you again.</p>`;
-  const organization = view.organizationName
-    ? `<p class="organization-name">${escapeHtml(view.organizationName)}</p>${membership}`
+    : view.defaultOrganization.role
+      ? `<p class="access access-current">Current access: ${escapeHtml(view.defaultOrganization.role)} membership is active.</p>`
+      : `<p class="access access-missing">You no longer have access to the default organization. Ask an owner to invite you again.</p>`;
+  const defaultOrganization = view.defaultOrganization.name
+    ? `<p class="organization-name">${escapeHtml(view.defaultOrganization.name)}</p>${defaultMembership}`
     : `<p class="access access-missing">The default organization is unavailable.</p>`;
+  const organizationOptions = view.organizations
+    .map(
+      (organization) =>
+        `<option value="${escapeHtml(organization.id)}"${organization.id === view.selectedOrganizationId ? " selected" : ""}>${escapeHtml(organization.name)} · ${escapeHtml(organization.role)}${organization.suspended ? " · suspended" : ""}</option>`,
+    )
+    .join("");
+  const pendingInvitations = view.invitations
+    .map(
+      (invitation) =>
+        `<li class="management-row">
+          <div><strong>${escapeHtml(invitation.organizationName)}</strong><span>${escapeHtml(invitation.role)} invitation for ${escapeHtml(invitation.email)}</span></div>
+          ${invitation.suspended ? `<span class="muted">Unavailable while suspended</span>` : `<button type="button" class="quiet-button" data-accept-invitation="${escapeHtml(invitation.id)}">Accept invitation</button>`}
+        </li>`,
+    )
+    .join("");
+  const operatorSection = view.isOperator
+    ? `<section class="card" aria-labelledby="operator-heading">
+        <h2 id="operator-heading">Platform operator</h2>
+        <p class="hint">Restricted lifecycle controls for the configured operator account.</p>
+        <div id="operator-panel" data-operator-panel>
+          <p class="status">Loading operator controls…</p>
+        </div>
+        <p id="operator-status" class="status" role="status" aria-live="polite"></p>
+      </section>`
+    : "";
 
   return htmlResponse(
     document(
@@ -168,8 +336,23 @@ export function accountPage(view: AccountView): Response {
         </form>
       </section>
       <section class="card" aria-labelledby="organization-heading">
-        <h2 id="organization-heading">Default organization</h2>
-        ${organization}
+        <h2 id="organization-heading">Organizations</h2>
+        <label for="organization-select">Choose an organization</label>
+        <select id="organization-select"${view.organizations.length ? "" : " disabled"}>${organizationOptions}</select>
+        <div id="organization-details">${organizationDetailsMarkup(view.selectedOrganization)}</div>
+        <form id="create-organization-form">
+          <label for="new-organization-name">Create an organization</label>
+          <input id="new-organization-name" name="name" type="text" maxlength="100" required>
+          <button type="submit" class="primary-button">Create organization</button>
+        </form>
+        <p id="organization-create-status" class="status" role="status" aria-live="polite"></p>
+        <h3>Default organization receipt</h3>
+        ${defaultOrganization}
+      </section>
+      <section class="card" aria-labelledby="invitations-heading">
+        <h2 id="invitations-heading">Invitations for you</h2>
+        <ul class="management-list">${pendingInvitations || `<li class="muted">No current invitations for your verified email.</li>`}</ul>
+        <p id="invitation-status" class="status" role="status" aria-live="polite"></p>
       </section>
       <section class="card" aria-labelledby="providers-heading">
         <h2 id="providers-heading">Sign-in providers</h2>
@@ -180,7 +363,8 @@ export function accountPage(view: AccountView): Response {
         <button type="button" id="sign-out" class="quiet-button">Sign out</button>
         <a href="/login">Sign-in page</a>
       </footer>
-      <p id="page-status" class="status" role="status" aria-live="polite"></p>`,
+      <p id="page-status" class="status" role="status" aria-live="polite"></p>
+      ${operatorSection}`,
     ),
   );
 }
@@ -246,11 +430,21 @@ input:focus, button:focus-visible, a:focus-visible { outline: 3px solid #91b7f4;
 .account-footer a { color: #2459a8; }
 .notice { max-width: 520px; margin: 0 0 18px; padding: 12px 14px; border: 1px solid #edce98; border-radius: 10px; background: #fff8e9; color: #634819; line-height: 1.5; }
 .status { min-height: 1.2em; margin: 8px 0 0; color: #4d627e; line-height: 1.45; }
+h3 { margin: 22px 0 12px; font-size: 1rem; }
+.management-list { display: grid; gap: 12px; margin: 0 0 18px; padding: 0; list-style: none; }
+.management-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #e8edf5; }
+.management-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.management-row span, .management-row small, .muted { color: #677895; font-size: 0.87rem; overflow-wrap: anywhere; }
+.row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.row-actions select { width: auto; min-height: 38px; }
+.invitation-link { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; }
+.invitation-link a { color: #2459a8; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 @media (max-width: 520px) {
   .shell { margin: 24px auto; }
   .card { padding: 18px; }
-  .provider-row { align-items: flex-start; flex-direction: column; }
+  .provider-row, .management-row { align-items: flex-start; flex-direction: column; }
 }`;
 
 export const accountScript = `const providerHosts = {
@@ -346,6 +540,240 @@ document.querySelectorAll("[data-unlink-account]").forEach((button) => {
     }
   });
 });
+
+function accountLocation(organizationId) {
+  const target = new URL("/account", window.location.origin);
+  if (typeof organizationId === "string" && organizationId) {
+    target.searchParams.set("organizationId", organizationId);
+  }
+  return target.href;
+}
+
+async function postAccountJson(path, body) {
+  return responseData(await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+}
+
+async function loadOrganizationDetails(organizationId) {
+  const details = document.getElementById("organization-details");
+  if (!details || !organizationId) return;
+  showMessage(details, "Loading organization…");
+  const response = await fetch(
+    "/api/account/organizations/detail?organizationId=" + encodeURIComponent(organizationId),
+    { credentials: "same-origin" },
+  );
+  if (!response.ok) {
+    const data = await responseData(response);
+    throw new Error(data.message || "Organization access could not be loaded.");
+  }
+  details.innerHTML = await response.text();
+}
+
+const organizationSelect = document.getElementById("organization-select");
+organizationSelect?.addEventListener("change", async () => {
+  const details = document.getElementById("organization-details");
+  try {
+    await loadOrganizationDetails(organizationSelect.value);
+  } catch (error) {
+    if (details) showMessage(details, error instanceof Error ? error.message : "Organization access could not be loaded.");
+  }
+});
+
+const organizationDetails = document.getElementById("organization-details");
+organizationDetails?.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const formData = new FormData(form);
+  const organizationId = String(formData.get("organizationId") || "");
+  let path;
+  let body;
+  if (form.matches("[data-rename-organization]")) {
+    path = "/api/account/organizations/update";
+    body = { organizationId, name: formData.get("name") };
+  } else if (form.matches("[data-create-invitation]")) {
+    path = "/api/account/invitations/create";
+    body = { organizationId, email: formData.get("email"), role: formData.get("role") };
+  } else if (form.matches("[data-leave-organization]")) {
+    path = "/api/account/members/leave";
+    body = { organizationId };
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const status = form.parentElement?.querySelector("[data-organization-status]");
+  const button = form.querySelector("button[type=submit]");
+  if (button) button.disabled = true;
+  showMessage(status, "Saving…");
+  try {
+    const result = await postAccountJson(path, body);
+    if (path === "/api/account/invitations/create") {
+      window.location.assign(accountLocation(organizationId));
+      return;
+    }
+    if (path === "/api/account/members/leave") {
+      window.location.assign(accountLocation());
+      return;
+    }
+    await loadOrganizationDetails(organizationId);
+    const refreshedStatus = document.querySelector("[data-organization-status]");
+    showMessage(refreshedStatus, result.message || "Changes saved.");
+  } catch (error) {
+    if (button) button.disabled = false;
+    showMessage(status, error instanceof Error ? error.message : "Changes could not be saved.");
+  }
+});
+
+organizationDetails?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("button[data-update-member-role], button[data-remove-member], button[data-cancel-invitation], button[data-copy-invitation]")
+    : null;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const organizationId = organizationDetails.querySelector("[data-organization-id]")?.dataset.organizationId || "";
+  const status = organizationDetails.querySelector("[data-organization-status]");
+  const memberId = button.dataset.updateMemberRole || button.dataset.removeMember;
+  const invitationId = button.dataset.cancelInvitation;
+  try {
+    if (button.dataset.copyInvitation) {
+      const link = new URL("/account", window.location.origin);
+      link.searchParams.set("invitation", button.dataset.copyInvitation);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(link.href);
+      } else {
+        const temporary = document.createElement("textarea");
+        temporary.value = link.href;
+        document.body.append(temporary);
+        temporary.select();
+        document.execCommand("copy");
+        temporary.remove();
+      }
+      showMessage(status, "Invitation link copied.");
+      return;
+    }
+    button.disabled = true;
+    if (button.dataset.updateMemberRole && memberId) {
+      const role = document.getElementById("member-role-" + memberId)?.value;
+      await postAccountJson("/api/account/members/role", { organizationId, membershipId: memberId, role });
+    } else if (button.dataset.removeMember && memberId) {
+      await postAccountJson("/api/account/members/remove", { organizationId, membershipId: memberId });
+    } else if (invitationId) {
+      await postAccountJson("/api/account/invitations/cancel", { organizationId, invitationId });
+    }
+    window.location.assign(accountLocation(organizationId));
+  } catch (error) {
+    button.disabled = false;
+    showMessage(status, error instanceof Error ? error.message : "The change could not be completed.");
+  }
+});
+
+document.getElementById("create-organization-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const status = document.getElementById("organization-create-status");
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  showMessage(status, "Creating organization…");
+  try {
+    const result = await postAccountJson("/api/account/organizations/create", {
+      name: new FormData(form).get("name"),
+    });
+    window.location.assign(accountLocation(result.organizationId));
+  } catch (error) {
+    button.disabled = false;
+    showMessage(status, error instanceof Error ? error.message : "Organization could not be created.");
+  }
+});
+
+document.querySelectorAll("[data-accept-invitation]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const status = document.getElementById("invitation-status");
+    button.disabled = true;
+    showMessage(status, "Accepting invitation…");
+    try {
+      const result = await postAccountJson("/api/account/invitations/accept", {
+        invitationId: button.dataset.acceptInvitation,
+      });
+      window.location.assign(accountLocation(result.organizationId));
+    } catch (error) {
+      button.disabled = false;
+      showMessage(status, error instanceof Error ? error.message : "Invitation could not be accepted.");
+    }
+  });
+});
+
+function makeOperatorForm(kind, targets, status) {
+  const form = document.createElement("form");
+  form.dataset.operatorKind = kind;
+  const label = document.createElement("label");
+  label.textContent = kind === "organization" ? "Organization" : "Human account";
+  const select = document.createElement("select");
+  select.required = true;
+  for (const target of targets) {
+    const option = document.createElement("option");
+    option.value = target.id;
+    const state = kind === "organization" ? target.suspended : target.disabled;
+    option.textContent = target.name + " · " + target.id + " · " + (state ? "restricted" : "active");
+    select.append(option);
+  }
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.className = "quiet-button";
+  const updateLabel = () => {
+    const target = targets.find((candidate) => candidate.id === select.value);
+    const restricted = kind === "organization" ? target?.suspended : target?.disabled;
+    button.textContent = restricted ? "Restore" : "Restrict";
+  };
+  select.addEventListener("change", updateLabel);
+  updateLabel();
+  label.append(select);
+  form.append(label, button);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const target = targets.find((candidate) => candidate.id === select.value);
+    if (!target) return;
+    const restricted = kind === "organization" ? target.suspended : target.disabled;
+    const action = kind === "organization"
+      ? (restricted ? "restore" : "suspend")
+      : (restricted ? "restore" : "disable");
+    button.disabled = true;
+    showMessage(status, "Applying operator change…");
+    try {
+      await postAccountJson("/api/account/operator/lifecycle", {
+        kind,
+        targetId: target.id,
+        action,
+      });
+      window.location.reload();
+    } catch (error) {
+      button.disabled = false;
+      showMessage(status, error instanceof Error ? error.message : "Operator change failed.");
+    }
+  });
+  return form;
+}
+
+const operatorPanel = document.querySelector("[data-operator-panel]");
+if (operatorPanel) {
+  const status = document.getElementById("operator-status");
+  fetch("/api/account/operator", { credentials: "same-origin" })
+    .then(responseData)
+    .then((data) => {
+      operatorPanel.replaceChildren();
+      const organizations = document.createElement("section");
+      const organizationHeading = document.createElement("h3");
+      organizationHeading.textContent = "Organizations";
+      organizations.append(organizationHeading, makeOperatorForm("organization", data.organizations, status));
+      const users = document.createElement("section");
+      const userHeading = document.createElement("h3");
+      userHeading.textContent = "Human accounts";
+      users.append(userHeading, makeOperatorForm("user", data.users, status));
+      operatorPanel.append(organizations, users);
+    })
+    .catch((error) => showMessage(status, error instanceof Error ? error.message : "Operator controls are unavailable."));
+}
 
 const profileForm = document.getElementById("profile-form");
 profileForm?.addEventListener("submit", async (event) => {

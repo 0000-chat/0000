@@ -10,6 +10,41 @@ import {
 
 export const PLATFORM_SESSION_FRESH_AGE_SECONDS = 24 * 60 * 60;
 
+export const disabledOrganizationPaths = [
+  "/organization/create",
+  "/organization/update",
+  "/organization/delete",
+  "/organization/set-active",
+  "/organization/invite-member",
+  "/organization/accept-invitation",
+  "/organization/reject-invitation",
+  "/organization/cancel-invitation",
+  "/organization/remove-member",
+  "/organization/update-member-role",
+  "/organization/leave",
+  "/organization/list",
+  "/organization/list-members",
+  "/organization/list-invitations",
+  "/organization/list-user-invitations",
+  "/organization/get-organization",
+  "/organization/get-full-organization",
+  "/organization/get-invitation",
+  "/organization/get-active-member",
+  "/organization/get-active-member-role",
+  "/organization/check-slug",
+  "/organization/has-permission",
+  "/organization/create-team",
+  "/organization/remove-team",
+  "/organization/update-team",
+  "/organization/set-active-team",
+  "/organization/list-teams",
+  "/organization/list-user-teams",
+  "/organization/list-team-members",
+  "/organization/add-team-member",
+  "/organization/remove-team-member",
+  "/delete-user",
+];
+
 function requiresSignupInvitation(env: Cloudflare.Env): boolean {
   const deploymentMode: string = env.PLATFORM_DEPLOYMENT_MODE;
   const signupPolicy: string = env.PLATFORM_SIGNUP_POLICY;
@@ -66,7 +101,7 @@ export function createAuth(env: Cloudflare.Env) {
     appName: "0000 Platform",
     baseURL: env.PLATFORM_BASE_URL,
     secret: env.BETTER_AUTH_SECRET,
-    disabledPaths: ["/unlink-account"],
+    disabledPaths: ["/unlink-account", ...disabledOrganizationPaths],
     trustedOrigins: [env.PLATFORM_BASE_URL],
     user: {
       additionalFields: platformUserAdditionalFields,

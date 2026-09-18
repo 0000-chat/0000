@@ -2,11 +2,13 @@
 
 Start here when working on Platform. This document defines its scope and
 ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
-agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
-and [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md) record bounded Worker/D1
-evidence. T01 and T02 are reviewed and verified on the aggregate branch; the
-full MVP is not implemented or accepted, and these reports do not establish
-production readiness or consumer adoption.
+agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md),
+[T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md), and
+[T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md) record bounded
+Worker/D1 evidence. T01 and T02 are reviewed and verified on the aggregate
+branch. T03 implementation and evidence are local review candidates; its
+aggregate review is pending. The full MVP is not implemented or accepted, and
+these reports do not establish production readiness or consumer adoption.
 
 ## Purpose and deployment
 
@@ -66,11 +68,15 @@ harness connection instead remains bounded by the member's current membership
 and delegated access; it cannot inherit the member's administrator privileges,
 and removing that membership cuts off its access.
 
-The current T02 account UI covers profile, linked sign-in providers, default
-organization access status and sign-out. Organization and membership
-administration, agent identities, OAuth consent and credentials remain later
-Platform work. Platform does not own product Spaces, threads, agent execution
-or the full product's agent-control experience.
+The account UI covers profile, linked sign-in providers, default-organization
+access status and sign-out. T03 adds explicit organization selection and
+creation, organization naming, member roles/removal/leave, copyable invitations
+and verified-email acceptance. A separate operator section can suspend or
+restore organizations and disable or restore human accounts when an existing
+user ID is explicitly configured. See the T03 report for the local evidence and
+its review status. Agent identities, OAuth consent and credential controls
+remain later Platform work. Platform does not own product Spaces, threads,
+agent execution or the full product's agent-control experience.
 
 ## Guest identity and resource ownership
 
@@ -154,12 +160,23 @@ Better Auth secret also protects its encrypted social-provider access and
 refresh tokens. Example values are placeholders and must not be used as
 deployment credentials.
 
+Operator lifecycle controls are disabled unless the Worker variable
+`PLATFORM_OPERATOR_USER_ID` names an existing Better Auth user ID. An operator
+chooses the account using trusted access to the identity database, then sets
+that ID in the target Worker environment; the account's email or organization
+role is not authority. Keep the variable empty until an operator is explicitly
+chosen. Changing it rotates the operator identity and uses the same mechanism
+for self-hosted and managed deployments. There is no first-signup promotion or
+shared bootstrap password.
+
 `PLATFORM_DEPLOYMENT_MODE=self-hosted` with
 `PLATFORM_SIGNUP_POLICY=open` is the local default. Managed deployments always
 allow signup. Self-hosted operators may choose `open` or `invite-only`; the
 latter requires a verified provider email matching an unexpired pending
-invitation to an active organization. T02 does not include invitation
-management UI, which is planned for T03.
+invitation to an active organization. T03 provides invitation management and
+acceptance in the account UI without sending email. Membership, invitation and
+operator lifecycle checks remain in Platform's shared identity boundary; see
+the bounded T03 report for implementation and local test evidence.
 
 Rate limits for Platform login, credential issuance and guest bootstrap belong
 to Platform. Anonymous operation quotas and enforcement belong to each resource
@@ -176,15 +193,17 @@ local work; Platform cannot retract data already cached on a device.
 
 ## Status and first outcome
 
-As of 2026-09-19, Platform has a reviewed T01 Worker/D1 investigation and an
-initial T02 human account implementation, plus runnable principal/client
-contracts in `packages/contracts` and `packages/platform-client`. Local Worker
-tests exercise Better Auth callbacks, sessions, D1 persistence, signup policy,
-profile controls and logout; Google/GitHub HTTP responses are simulated at the
-provider boundary. The service and protected-resource checks are fixtures. This
-is local implementation evidence, not a deployed identity service or a complete
-shared-auth integration. Organization lifecycle administration, API credential
-and agent UI, production OAuth installation state, service provisioning and
+As of 2026-09-19, Platform has a reviewed T01 Worker/D1 investigation and T02
+human account slice, plus runnable principal/client contracts in
+`packages/contracts` and `packages/platform-client`. T03 adds organization and
+membership administration, invitation acceptance and explicitly configured
+operator lifecycle controls; its implementation and report await aggregate
+review. Local Worker tests exercise Better Auth callbacks, sessions, D1
+persistence, signup policy, profile and organization controls and logout;
+Google/GitHub HTTP responses are simulated at the provider boundary. The
+service and protected-resource checks are fixtures. This is not a deployed
+identity service or a complete shared-auth integration. API credential and
+agent UI, production OAuth installation state, service provisioning and
 consumer adoption remain unimplemented. Database is also a scaffold.
 Communicator and the message service still need to move their authentication
 paths to the shared Platform path while leaving resource ACLs local. No

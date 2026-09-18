@@ -15,6 +15,7 @@
   "vars": {
     "PLATFORM_BASE_URL": "http://localhost:8787",
     "PLATFORM_AUTHORITY_ID": "platform-t01-authority",
+    "PLATFORM_OPERATOR_USER_ID": "",
     "PLATFORM_DEPLOYMENT_MODE": "self-hosted",
     "PLATFORM_SIGNUP_POLICY": "open",
     "GOOGLE_CLIENT_ID": "platform-google-client",

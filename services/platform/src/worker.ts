@@ -4,8 +4,13 @@ import {
   accountScript,
   accountCss,
   assetResponse,
+  htmlResponse,
   loginPage,
+  organizationDetailsMarkup,
   safeAvatarUrl,
+  type AccountInvitation,
+  type AccountOrganization,
+  type OrganizationDetails,
 } from "./account-ui";
 import {
   ensureDefaultOrganization,
@@ -15,6 +20,28 @@ import {
   parseStringArray,
   type ServiceRegistration,
 } from "./platform-state";
+import {
+  acceptOrganizationInvitation,
+  cancelOrganizationInvitation,
+  changeOrganizationLifecycle,
+  changeUserLifecycle,
+  createOrganizationInvitation,
+  createOwnedOrganization,
+  getCurrentOrganizationAuthority,
+  getOrganizationMembershipForDisplay,
+  listCurrentOrganizations,
+  listOperatorOrganizations,
+  listOperatorUsers,
+  listOrganizationInvitations,
+  listOrganizationMembers,
+  listRecipientInvitations,
+  removeOrganizationMember,
+  renameOrganization,
+  updateOrganizationMemberRole,
+  leaveOrganization,
+  ORGANIZATION_ROLES,
+  type OrganizationRole,
+} from "./organization-state";
 
 function json(status: number, body: unknown): Response {
   return Response.json(body, { status });
@@ -32,12 +59,27 @@ function hasTrustedOrigin(request: Request, env: Cloudflare.Env): boolean {
 
 function normalizedPathname(pathname: string): string {
   let decoded = pathname;
-  try {
-    decoded = decodeURIComponent(pathname);
-  } catch {
-    // Keep malformed paths unmatched by the Worker route table.
+  for (let pass = 0; pass < 5; pass += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      // Keep malformed paths unmatched by the Worker route table.
+      break;
+    }
   }
+  decoded = decoded.replace(/\/{2,}/g, "/");
   return decoded.length > 1 ? decoded.replace(/\/+$/, "") : decoded;
+}
+
+function isDisabledBetterAuthPath(pathname: string): boolean {
+  return (
+    pathname === "/api/auth/organization" ||
+    pathname.startsWith("/api/auth/organization/") ||
+    pathname === "/api/auth/delete-user" ||
+    pathname.startsWith("/api/auth/delete-user/")
+  );
 }
 
 async function getRawSession(request: Request, env: Cloudflare.Env) {
@@ -230,12 +272,707 @@ async function unlinkSocialAccount(
     : json(400, { error: "account_not_found" });
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function requestBody(
+  request: Request,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = await request.json();
+    return isObject(body) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOrganizationRole(value: unknown): value is OrganizationRole {
+  return (
+    typeof value === "string" &&
+    ORGANIZATION_ROLES.includes(value as OrganizationRole)
+  );
+}
+
+function validOrganizationName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= 100 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function validOrganizationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+function isOperator(env: Cloudflare.Env, userId: string): boolean {
+  const configuredId = env.PLATFORM_OPERATOR_USER_ID;
+  return (
+    typeof configuredId === "string" &&
+    configuredId.length > 0 &&
+    configuredId === userId
+  );
+}
+
+async function authorizeOrganizationRequest(
+  request: Request,
+  env: Cloudflare.Env,
+  organizationId: string,
+): Promise<
+  | {
+      current: NonNullable<Awaited<ReturnType<typeof getSession>>>;
+      authority: NonNullable<
+        Awaited<ReturnType<typeof getCurrentOrganizationAuthority>>
+      >;
+    }
+  | Response
+> {
+  const current = await getSession(request, env);
+  if (!current)
+    return json(401, {
+      error: "unauthenticated",
+      message: "Sign in to manage this organization.",
+    });
+  const database = env.IDENTITY_DB.withSession("first-primary");
+  const authority = await getCurrentOrganizationAuthority(
+    database,
+    current.user.id,
+    organizationId,
+  );
+  if (authority) return { current, authority };
+  const membership = await getOrganizationMembershipForDisplay(
+    database,
+    current.user.id,
+    organizationId,
+  );
+  return membership?.suspendedAt !== null && membership
+    ? json(403, {
+        error: "organization_suspended",
+        message:
+          "An operator must restore this organization before tenant administration can continue.",
+      })
+    : json(404, {
+        error: "organization_not_found",
+        message: "You do not have current membership in this organization.",
+      });
+}
+
+async function accountManagementRoute(
+  request: Request,
+  env: Cloudflare.Env,
+  pathname: string,
+): Promise<Response | null> {
+  if (!pathname.startsWith("/api/account/")) return null;
+  if (request.method !== "GET" && !hasTrustedOrigin(request, env)) {
+    return json(403, {
+      error: "untrusted_origin",
+      message: "Use the Platform account page to make this change.",
+    });
+  }
+
+  if (
+    pathname === "/api/account/organizations/detail" &&
+    request.method === "GET"
+  ) {
+    const current = await getSession(request, env);
+    if (!current)
+      return json(401, {
+        error: "unauthenticated",
+        message: "Sign in to view this organization.",
+      });
+    const organizationId = new URL(request.url).searchParams.get(
+      "organizationId",
+    );
+    if (!validOrganizationId(organizationId)) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose an organization first.",
+      });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const authority = await getOrganizationMembershipForDisplay(
+      database,
+      current.user.id,
+      organizationId,
+    );
+    if (!authority) {
+      return json(404, {
+        error: "organization_not_found",
+        message:
+          "You no longer have current membership in this organization. Refresh the page to update your access.",
+      });
+    }
+    const [members, invitations] = await Promise.all([
+      listOrganizationMembers(database, authority),
+      listOrganizationInvitations(database, authority),
+    ]);
+    const details: OrganizationDetails = {
+      id: authority.organizationId,
+      name: authority.organizationName,
+      role: authority.role,
+      suspended: authority.suspendedAt !== null,
+      viewerUserId: current.user.id,
+      members,
+      invitations,
+    };
+    return htmlResponse(organizationDetailsMarkup(details));
+  }
+
+  if (
+    pathname === "/api/account/organizations/create" &&
+    request.method === "POST"
+  ) {
+    const current = await getSession(request, env);
+    if (!current)
+      return json(401, {
+        error: "unauthenticated",
+        message: "Sign in to create an organization.",
+      });
+    const body = await requestBody(request);
+    if (!body || !validOrganizationName(body.name)) {
+      return json(400, {
+        error: "invalid_organization_name",
+        message: "Enter an organization name of 1 to 100 characters.",
+      });
+    }
+    const created = await createOwnedOrganization(
+      env.IDENTITY_DB,
+      { id: current.user.id, name: current.user.name },
+      body.name.trim(),
+    );
+    return created
+      ? json(201, created)
+      : json(401, {
+          error: "unauthenticated",
+          message: "Your account is no longer active.",
+        });
+  }
+
+  if (
+    pathname === "/api/account/organizations/update" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validOrganizationName(body.name)
+    ) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Enter an organization name of 1 to 100 characters.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can change its name.",
+      });
+    }
+    const updated = await renameOrganization(
+      env.IDENTITY_DB.withSession("first-primary"),
+      authorization.current.user.id,
+      body.organizationId,
+      body.name.trim(),
+    );
+    return updated
+      ? json(200, { updated: true })
+      : json(409, {
+          error: "organization_changed",
+          message: "Organization access changed. Refresh and try again.",
+        });
+  }
+
+  if (
+    pathname === "/api/account/invitations/create" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      typeof body.email !== "string" ||
+      body.email.trim().length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) ||
+      !isOrganizationRole(body.role)
+    ) {
+      return json(400, {
+        error: "invalid_invitation",
+        message: "Enter a valid email address and one organization role.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can invite people.",
+      });
+    }
+    if (body.role === "owner" && authorization.authority.role !== "owner") {
+      return json(403, {
+        error: "owner_required",
+        message: "Only an owner can invite another owner.",
+      });
+    }
+    const invitation = await createOrganizationInvitation(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        email: body.email.trim().toLowerCase(),
+        role: body.role,
+      },
+    );
+    return invitation
+      ? json(201, {
+          ...invitation,
+          organizationId: body.organizationId,
+          link: new URL(
+            `/account?invitation=${encodeURIComponent(invitation.id)}`,
+            env.PLATFORM_BASE_URL,
+          ).href,
+        })
+      : json(409, {
+          error: "invitation_conflict",
+          message:
+            "This person is already a member or has a current invitation.",
+        });
+  }
+
+  if (
+    pathname === "/api/account/invitations/cancel" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validOrganizationId(body.invitationId)
+    ) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose an invitation to cancel.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can manage invitations.",
+      });
+    }
+    const invitation = await env.IDENTITY_DB.prepare(
+      "SELECT role, status FROM invitation WHERE id = ? AND organizationId = ?",
+    )
+      .bind(body.invitationId, body.organizationId)
+      .first<{ role: string | null; status: string }>();
+    if (!invitation) {
+      return json(404, {
+        error: "invitation_not_found",
+        message: "This invitation could not be found.",
+      });
+    }
+    if (invitation.status !== "pending") {
+      return json(409, {
+        error: "invitation_changed",
+        message: "This invitation is no longer pending.",
+      });
+    }
+    if (
+      invitation.role === "owner" &&
+      authorization.authority.role !== "owner"
+    ) {
+      return json(403, {
+        error: "owner_required",
+        message: "Only an owner can cancel an owner invitation.",
+      });
+    }
+    const cancelled = await cancelOrganizationInvitation(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        invitationId: body.invitationId,
+      },
+    );
+    return cancelled
+      ? json(200, { cancelled: true })
+      : json(409, {
+          error: "invitation_changed",
+          message: "This invitation changed. Refresh the page and try again.",
+        });
+  }
+
+  if (
+    pathname === "/api/account/invitations/accept" &&
+    request.method === "POST"
+  ) {
+    const current = await getSession(request, env);
+    if (!current)
+      return json(401, {
+        error: "unauthenticated",
+        message: "Sign in to accept an invitation.",
+      });
+    const body = await requestBody(request);
+    if (!body || !validOrganizationId(body.invitationId)) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose an invitation to accept.",
+      });
+    }
+    const result = await acceptOrganizationInvitation(
+      env.IDENTITY_DB,
+      current.user.id,
+      body.invitationId,
+    );
+    if (result.status === "accepted") return json(200, result);
+    const errors = {
+      not_found: [
+        404,
+        "invitation_not_found",
+        "This invitation is unavailable.",
+      ],
+      email_unverified: [
+        403,
+        "email_unverified",
+        "Verify this email with your sign-in provider before accepting the invitation.",
+      ],
+      wrong_email: [
+        403,
+        "wrong_email",
+        "Sign in with the verified email address that received this invitation.",
+      ],
+      organization_suspended: [
+        403,
+        "organization_suspended",
+        "An operator must restore this organization before the invitation can be accepted.",
+      ],
+      expired: [
+        410,
+        "invitation_expired",
+        "This invitation has expired. Ask an organization owner for a new invitation.",
+      ],
+      cancelled: [
+        410,
+        "invitation_cancelled",
+        "This invitation was cancelled.",
+      ],
+      membership_removed: [
+        409,
+        "membership_removed",
+        "This invitation was already accepted, but your membership was later removed. Ask an owner for a new invitation.",
+      ],
+    } as const;
+    const [status, error, message] = errors[result.status];
+    return json(status, { error, message });
+  }
+
+  if (pathname === "/api/account/members/role" && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validOrganizationId(body.membershipId) ||
+      !isOrganizationRole(body.role)
+    ) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose one of the supported organization roles.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can change member roles.",
+      });
+    }
+    if (body.role === "owner" && authorization.authority.role !== "owner") {
+      return json(403, {
+        error: "owner_required",
+        message: "Only an owner can assign the owner role.",
+      });
+    }
+    const target = await env.IDENTITY_DB.prepare(
+      "SELECT userId, role FROM member WHERE id = ? AND organizationId = ?",
+    )
+      .bind(body.membershipId, body.organizationId)
+      .first<{ userId: string; role: string }>();
+    if (!target)
+      return json(404, {
+        error: "member_not_found",
+        message: "This membership is no longer current.",
+      });
+    if (
+      target.userId === authorization.current.user.id &&
+      body.role === "owner" &&
+      authorization.authority.role !== "owner"
+    ) {
+      return json(403, {
+        error: "owner_required",
+        message: "An admin cannot promote themselves to owner.",
+      });
+    }
+    const updated = await updateOrganizationMemberRole(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        membershipId: body.membershipId,
+        role: body.role,
+      },
+    );
+    if (updated) return json(200, { updated: true });
+    const targetOwner = target.role === "owner";
+    if (targetOwner) {
+      const owners = await env.IDENTITY_DB.prepare(
+        "SELECT COUNT(*) AS count FROM member WHERE organizationId = ? AND role = 'owner'",
+      )
+        .bind(body.organizationId)
+        .first<{ count: number }>();
+      if ((owners?.count ?? 0) <= 1 && body.role !== "owner") {
+        return json(409, {
+          error: "final_owner_required",
+          message: "This organization must keep at least one owner.",
+        });
+      }
+      if (authorization.authority.role !== "owner") {
+        return json(403, {
+          error: "owner_required",
+          message: "Only an owner can change another owner's role.",
+        });
+      }
+    }
+    return json(409, {
+      error: "membership_changed",
+      message: "This membership changed. Refresh the page and try again.",
+    });
+  }
+
+  if (pathname === "/api/account/members/remove" && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validOrganizationId(body.membershipId)
+    ) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose a current membership to remove.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can remove members.",
+      });
+    }
+    const target = await env.IDENTITY_DB.prepare(
+      "SELECT userId, role FROM member WHERE id = ? AND organizationId = ?",
+    )
+      .bind(body.membershipId, body.organizationId)
+      .first<{ userId: string; role: string }>();
+    if (!target)
+      return json(404, {
+        error: "member_not_found",
+        message: "This membership is no longer current.",
+      });
+    if (target.userId === authorization.current.user.id) {
+      return json(400, {
+        error: "use_leave",
+        message: "Use Leave organization to remove your own membership.",
+      });
+    }
+    if (target.role === "owner" && authorization.authority.role !== "owner") {
+      return json(403, {
+        error: "owner_required",
+        message: "Only an owner can remove another owner.",
+      });
+    }
+    const removed = await removeOrganizationMember(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        membershipId: body.membershipId,
+      },
+    );
+    if (removed) return json(200, { removed: true });
+    if (target.role === "owner") {
+      const owners = await env.IDENTITY_DB.prepare(
+        "SELECT COUNT(*) AS count FROM member WHERE organizationId = ? AND role = 'owner'",
+      )
+        .bind(body.organizationId)
+        .first<{ count: number }>();
+      if ((owners?.count ?? 0) <= 1) {
+        return json(409, {
+          error: "final_owner_required",
+          message: "This organization must keep at least one owner.",
+        });
+      }
+    }
+    return json(409, {
+      error: "membership_changed",
+      message: "This membership changed. Refresh the page and try again.",
+    });
+  }
+
+  if (pathname === "/api/account/members/leave" && request.method === "POST") {
+    const body = await requestBody(request);
+    if (!body || !validOrganizationId(body.organizationId)) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose an organization to leave.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    const left = await leaveOrganization(
+      env.IDENTITY_DB.withSession("first-primary"),
+      authorization.current.user.id,
+      body.organizationId,
+    );
+    return left
+      ? json(200, { left: true })
+      : json(409, {
+          error: "final_owner_required",
+          message: "This organization must keep at least one owner.",
+        });
+  }
+
+  if (pathname === "/api/account/operator" && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current)
+      return json(401, {
+        error: "unauthenticated",
+        message: "Sign in to use operator controls.",
+      });
+    if (!isOperator(env, current.user.id)) {
+      return json(403, {
+        error: "operator_required",
+        message:
+          "These controls are limited to the configured Platform operator.",
+      });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const [organizations, users] = await Promise.all([
+      listOperatorOrganizations(database),
+      listOperatorUsers(database),
+    ]);
+    return json(200, { organizations, users });
+  }
+
+  if (
+    pathname === "/api/account/operator/lifecycle" &&
+    request.method === "POST"
+  ) {
+    const current = await getSession(request, env);
+    if (!current)
+      return json(401, {
+        error: "unauthenticated",
+        message: "Sign in to use operator controls.",
+      });
+    if (!isOperator(env, current.user.id)) {
+      return json(403, {
+        error: "operator_required",
+        message:
+          "Only the configured active Platform operator can change global account or organization status.",
+      });
+    }
+    const body = await requestBody(request);
+    if (!body || !validOrganizationId(body.targetId)) {
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose an organization or human account.",
+      });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    if (
+      body.kind === "organization" &&
+      (body.action === "suspend" || body.action === "restore")
+    ) {
+      const changed = await changeOrganizationLifecycle(
+        database,
+        current.user.id,
+        body.targetId,
+        body.action === "suspend",
+      );
+      return changed
+        ? json(200, { changed: true })
+        : json(409, {
+            error: "organization_changed",
+            message:
+              "Organization status already changed. Refresh the operator list.",
+          });
+    }
+    if (
+      body.kind === "user" &&
+      (body.action === "disable" || body.action === "restore")
+    ) {
+      const changed = await changeUserLifecycle(
+        database,
+        current.user.id,
+        body.targetId,
+        body.action === "disable",
+      );
+      return changed
+        ? json(200, { changed: true })
+        : json(409, {
+            error: "account_changed",
+            message:
+              "Account status already changed. Refresh the operator list.",
+          });
+    }
+    return json(400, {
+      error: "invalid_request",
+      message: "Choose a supported lifecycle action.",
+    });
+  }
+
+  return null;
+}
+
 async function accountRoute(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const pathname = normalizedPathname(url.pathname);
+  const management = await accountManagementRoute(request, env, pathname);
+  if (management) return management;
   if (pathname === "/api/auth/unlink-account" && request.method === "POST") {
     return unlinkSocialAccount(request, env);
   }
@@ -259,41 +996,97 @@ async function accountRoute(
   }
   if (pathname === "/account" && request.method === "GET") {
     const auth = createAuth(env);
-    const current = await auth.api.getSession({ headers: request.headers });
-    if (!current || !(await isActiveUser(env, current.user.id))) {
+    const current = await getSession(request, env);
+    if (!current) {
       return Response.redirect(new URL("/login", env.PLATFORM_BASE_URL), 302);
     }
-    const organization = await ensureDefaultOrganization(env.IDENTITY_DB, {
-      id: current.user.id,
-      name: current.user.name,
-    });
-    const [orgState, linkedAccounts] = await Promise.all([
-      env.IDENTITY_DB.prepare(
-        `SELECT owning_org.name, owning_org.suspendedAt, membership.role
+    const defaultOrganization = await ensureDefaultOrganization(
+      env.IDENTITY_DB,
+      {
+        id: current.user.id,
+        name: current.user.name,
+      },
+    );
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const [defaultState, organizations, invitations, linkedAccounts] =
+      await Promise.all([
+        database
+          .prepare(
+            `SELECT owning_org.name, owning_org.suspendedAt, membership.role
          FROM platform_default_organization AS receipt
          LEFT JOIN organization AS owning_org ON owning_org.id = receipt.organization_id
          LEFT JOIN member AS membership
            ON membership.id = receipt.membership_id
           AND membership.organizationId = receipt.organization_id
-          AND membership.userId = receipt.user_id
+         AND membership.userId = receipt.user_id
          WHERE receipt.user_id = ? AND receipt.organization_id = ?`,
-      )
-        .bind(current.user.id, organization.organizationId)
-        .first<{
-          name: string | null;
-          suspendedAt: number | null;
-          role: string | null;
-        }>(),
-      auth.api.listUserAccounts({ headers: request.headers }),
-    ]);
+          )
+          .bind(current.user.id, defaultOrganization.organizationId)
+          .first<{
+            name: string | null;
+            suspendedAt: number | null;
+            role: string | null;
+          }>(),
+        listCurrentOrganizations(database, current.user.id),
+        listRecipientInvitations(database, current.user.id),
+        auth.api.listUserAccounts({ headers: request.headers }),
+      ]);
+    const requestedOrganizationId = url.searchParams.get("organizationId");
+    const selectedOrganization =
+      organizations.find(
+        (entry) => entry.organizationId === requestedOrganizationId,
+      ) ??
+      organizations.find(
+        (entry) => entry.organizationId === defaultOrganization.organizationId,
+      ) ??
+      organizations[0] ??
+      null;
+    let selectedDetails: OrganizationDetails | null = null;
+    if (selectedOrganization) {
+      const authority = await getOrganizationMembershipForDisplay(
+        database,
+        current.user.id,
+        selectedOrganization.organizationId,
+      );
+      if (authority) {
+        const [members, pending] = await Promise.all([
+          listOrganizationMembers(database, authority),
+          listOrganizationInvitations(database, authority),
+        ]);
+        selectedDetails = {
+          id: authority.organizationId,
+          name: authority.organizationName,
+          role: authority.role,
+          suspended: authority.suspendedAt !== null,
+          viewerUserId: current.user.id,
+          members,
+          invitations: pending,
+        };
+      }
+    }
+    const accountOrganizations: AccountOrganization[] = organizations.map(
+      (entry) => ({
+        id: entry.organizationId,
+        name: entry.organizationName,
+        role: entry.role,
+        suspended: entry.suspendedAt !== null,
+      }),
+    );
+    const accountInvitations: AccountInvitation[] = invitations;
     return accountPage({
       name: current.user.name,
       email: current.user.email,
       image: current.user.image ?? null,
-      organizationName: orgState?.name ?? null,
-      membershipRole: orgState?.role ?? null,
-      organizationSuspended:
-        orgState?.suspendedAt !== null && orgState !== null,
+      defaultOrganization: {
+        name: defaultState?.name ?? null,
+        role: defaultState?.role ?? null,
+        suspended: defaultState !== null && defaultState.suspendedAt !== null,
+      },
+      organizations: accountOrganizations,
+      selectedOrganizationId: selectedOrganization?.organizationId ?? null,
+      selectedOrganization: selectedDetails,
+      invitations: accountInvitations,
+      isOperator: isOperator(env, current.user.id),
       providers: linkedAccounts.map((account) => ({
         id: account.id,
         providerId: account.providerId,
@@ -659,29 +1452,33 @@ async function platformRoute(
       return json(403, { error: "untrusted_origin" });
     const current = await getSession(request, env);
     if (!current) return json(401, { error: "unauthenticated" });
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return json(400, { error: "invalid_request" });
-    }
+    const body = await requestBody(request);
     if (
       !body ||
-      typeof body !== "object" ||
-      !("serviceId" in body) ||
       typeof body.serviceId !== "string" ||
-      !("capabilities" in body) ||
+      !validOrganizationId(body.organizationId) ||
       !Array.isArray(body.capabilities) ||
       !body.capabilities.every(
         (item) => typeof item === "string" && item.length > 0,
       )
     ) {
-      return json(400, { error: "invalid_request" });
+      return json(400, {
+        error: "invalid_request",
+        message: "Choose a service, organization and one or more capabilities.",
+      });
     }
-    const organization = await ensureDefaultOrganization(env.IDENTITY_DB, {
-      id: current.user.id,
-      name: current.user.name,
-    });
+    const authority = await getCurrentOrganizationAuthority(
+      env.IDENTITY_DB.withSession("first-primary"),
+      current.user.id,
+      body.organizationId,
+    );
+    if (!authority) {
+      return json(403, {
+        error: "grant_exceeds_membership",
+        message:
+          "Choose an organization where your current membership is active.",
+      });
+    }
     const rawService = await env.IDENTITY_DB.prepare(
       "SELECT service_id, audience, verifier_hash, allowed_capabilities FROM platform_service WHERE service_id = ? AND disabled = 0",
     )
@@ -698,14 +1495,19 @@ async function platformRoute(
     try {
       const issued = await issueHumanCredential(env.IDENTITY_DB, {
         service,
-        userId: current.user.id,
-        ...organization,
+        userId: authority.userId,
+        organizationId: authority.organizationId,
+        membershipId: authority.membershipId,
         capabilities: body.capabilities as string[],
       });
       return json(201, { ...issued, audience: service.audience });
     } catch (error) {
       if (error instanceof RangeError)
-        return json(403, { error: "grant_exceeds_membership" });
+        return json(403, {
+          error: "grant_exceeds_membership",
+          message:
+            "Choose an organization where your current membership is active.",
+        });
       throw error;
     }
   }
@@ -758,15 +1560,22 @@ async function platformRoute(
 export default {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/healthz") {
+    const pathname = normalizedPathname(url.pathname);
+    if (pathname === "/healthz") {
       return Response.json({ status: "ok" });
+    }
+    if (isDisabledBetterAuthPath(pathname)) {
+      return new Response(null, {
+        status: 404,
+        headers: { "cache-control": "no-store" },
+      });
     }
     try {
       const account = await accountRoute(request, env);
       if (account) return account;
       const response = await platformRoute(request, env);
       if (response) return response;
-      if (url.pathname.startsWith("/api/auth/")) {
+      if (pathname.startsWith("/api/auth/")) {
         const denied = await validateAuthRequest(request, env);
         if (denied) return denied;
         return createAuth(env).handler(request);

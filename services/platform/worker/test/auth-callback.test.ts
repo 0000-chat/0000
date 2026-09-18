@@ -57,6 +57,7 @@ async function fixtureRead(
 async function issueCredential(
   cookies: string,
   serviceId: string,
+  organizationId: string,
 ): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
   const response = await SELF.fetch("http://localhost/api/credentials", {
     method: "POST",
@@ -65,7 +66,11 @@ async function issueCredential(
       origin: testEnv.PLATFORM_BASE_URL,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ serviceId, capabilities: ["resource:read"] }),
+    body: JSON.stringify({
+      serviceId,
+      organizationId,
+      capabilities: ["resource:read"],
+    }),
   });
   expect(response.status).toBe(201);
   return response.json() as Promise<{
@@ -230,11 +235,20 @@ describe("Platform shared-auth T01 runtime trace", () => {
     await registerTestService(testEnv.IDENTITY_DB, service);
     await registerTestService(testEnv.IDENTITY_DB, otherService);
 
-    const issued = await issueCredential(cookies, service.serviceId);
-    const secondIssued = await issueCredential(cookies, service.serviceId);
+    const issued = await issueCredential(
+      cookies,
+      service.serviceId,
+      owner.organizationId,
+    );
+    const secondIssued = await issueCredential(
+      cookies,
+      service.serviceId,
+      owner.organizationId,
+    );
     const wrongAudienceIssued = await issueCredential(
       cookies,
       otherService.serviceId,
+      owner.organizationId,
     );
     const storedSecret = await testEnv.IDENTITY_DB.prepare(
       "SELECT credential_hash FROM platform_credential WHERE id = ?",

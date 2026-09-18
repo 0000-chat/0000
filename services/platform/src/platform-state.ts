@@ -141,8 +141,10 @@ export async function issueHumanCredential(
       `SELECT member.id
        FROM member
        JOIN organization ON organization.id = member.organizationId
+       JOIN "user" AS active_user ON active_user.id = member.userId
        WHERE member.id = ? AND member.organizationId = ? AND member.userId = ?
-         AND organization.suspendedAt IS NULL`,
+         AND organization.suspendedAt IS NULL
+         AND active_user.disabledAt IS NULL`,
     )
     .bind(input.membershipId, input.organizationId, input.userId)
     .first<{ id: string }>();
@@ -153,11 +155,20 @@ export async function issueHumanCredential(
   const credentialHash = await hashOpaque(credential);
   const credentialId = crypto.randomUUID();
   const expiresAt = Date.now() + 90 * DAY_MS;
-  await database
+  const inserted = await database
     .prepare(
       `INSERT INTO platform_credential
        (id, credential_hash, kind, subject_id, organization_id, membership_id, grant_id, audience, capabilities, resource_ids, expires_at, revoked_at)
-       VALUES (?, ?, 'human', ?, ?, ?, NULL, ?, ?, '[]', ?, NULL)`,
+       SELECT ?, ?, 'human', ?, ?, ?, NULL, ?, ?, '[]', ?, NULL
+       WHERE EXISTS (
+         SELECT 1 FROM member
+         JOIN organization ON organization.id = member.organizationId
+         JOIN "user" AS active_user ON active_user.id = member.userId
+         WHERE member.id = ? AND member.organizationId = ?
+           AND member.userId = ?
+           AND organization.suspendedAt IS NULL
+           AND active_user.disabledAt IS NULL
+       )`,
     )
     .bind(
       credentialId,
@@ -168,8 +179,14 @@ export async function issueHumanCredential(
       input.service.audience,
       JSON.stringify(input.capabilities),
       expiresAt,
+      input.membershipId,
+      input.organizationId,
+      input.userId,
     )
     .run();
+  if (inserted.meta.changes !== 1) {
+    throw new RangeError("Current organization membership is required");
+  }
   return { credential, credentialId, expiresAt };
 }
 
