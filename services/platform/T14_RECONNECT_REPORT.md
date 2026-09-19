@@ -1,5 +1,8 @@
 # T14 reconnect proof
 
+Reviewed, integrated and independently verified at aggregate `166e54d`.
+Worker commits `1b4d5ed` and `c4491b8` map to aggregate `6ae1d24` and `166e54d`.
+
 This report records a focused Worker/D1/shared-client fixture. It is evidence
 for the Platform boundary and application-owned queue behavior; it is not a
 Database operation, an apps/0000 implementation, or a product offline-sync
@@ -50,3 +53,19 @@ Verification completed on the isolated branch:
   and diff validation.
 - Root `bun run check` passed: all 11 workspace manifests passed the workspace
   scaffold check.
+
+Independent Astra medium Standards and Spec reviews completed. The Spec review
+found that removed-member issuance was checked before reauthentication; the
+fix now uses the fresh session and asserts `403`, and the reviewer confirmed it.
+An unused transport hook was removed. A nonblocking duplicated fixture ACL
+predicate observation remains; the write's conditional SQL guard is separate.
+
+One bounded authenticated Grok 4.6 high review of the fixture ownership/apply
+and queue proof found no in-scope defect. Tools, web and subagents were disabled
+and only an isolated nonsecret source package was provided. This does not claim
+exactly-once sync under arbitrary post-write acknowledgment loss.
+
+Parent independently passed the reconnect regression before and after the fix.
+Aggregate `bun run check` passes formatting/typecheck, six Worker/D1 files
+(eight tests), persistent runtime restart and diff checks at `166e54d`; root
+manifest checks also pass. No production code changed in this slice.

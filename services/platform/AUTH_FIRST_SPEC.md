@@ -1,7 +1,8 @@
 # Platform authentication MVP
 
 Date: 2026-09-19. Status: agreed MVP design; T01 through T04 reviewed and verified
-on the aggregate; full MVP not accepted.
+on the aggregate; T14 reconnect fixture reviewed and verified at `166e54d`;
+full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -220,6 +221,13 @@ Stale offline authority cannot make the server accept a write after revocation.
 If access was revoked, preserve unsynced local work for the user to resolve;
 Platform cannot remotely retract data already cached on a device.
 Building an offline-sync product flow is deferred.
+
+[T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the reviewed fixture
+at aggregate `166e54d`: actual social reauthentication with simulated provider
+HTTP, current membership/credential checks, conditional resource ownership at
+write, and local queue retention after denial. Aggregate checks pass. This is
+session re-establishment, not proof of sliding renewal or a production sync
+engine; no application or Database adoption is claimed.
 
 ## Adoption scope and acceptance
 

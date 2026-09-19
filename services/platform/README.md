@@ -8,6 +8,8 @@ agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_
 [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md) record bounded
 Worker/D1 evidence. T01 through T04 are reviewed and verified on the aggregate
 branch. T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
+[T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
+reviewed reconnect fixture, integrated and verified at `166e54d`.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness or consumer adoption.
 

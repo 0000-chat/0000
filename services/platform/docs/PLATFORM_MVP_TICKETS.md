@@ -218,7 +218,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T14. Prove reconnect authorization without building offline sync
 
-**Readiness:** Dispatched from verified aggregate `80fc62d` to isolated `codex/platform-t14`; scoped to new reconnect fixture/test/report files so it is independent of T05. Parent inspected the executable boundary and baseline; review and aggregate verification remain pending.
+**Readiness:** Reviewed, integrated and independently verified at aggregate `166e54d` (worker `1b4d5ed`/`c4491b8`, aggregate `6ae1d24`/`166e54d`). Platform checks pass six Worker/D1 files/eight tests plus persistent restart; root manifest checks pass. This accepts the focused reconnect fixture, not product offline sync.
 
 **Blocked by (contract):** T02 supplies human session and reauthentication; T04 verifies current state. This slice implements or proves Platform renewal where needed.
 
