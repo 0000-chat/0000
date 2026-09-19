@@ -217,6 +217,7 @@ const baseBindingQuery = `
   JOIN principals AS p
     ON p.id = b.local_principal_id
    AND p.status = 'active'
+   AND p.revoked_at IS NULL
   JOIN memberships AS m
     ON m.tenant_id = b.local_tenant_id
    AND m.id = b.local_membership_id
@@ -246,7 +247,7 @@ const baseBindingQuery = `
         i.status = 'active' AND
         (
           (b.platform_kind = 'human' AND i.identity_kind = 'human') OR
-          (b.platform_kind = 'agent' AND i.identity_kind = 'agent')
+          (b.platform_kind IN ('agent', 'service') AND i.identity_kind = 'agent')
         ) AND EXISTS (
           SELECT 1
           FROM identity_grants AS ig

@@ -3,6 +3,14 @@ import { SessionResponseSchema } from "@communicator/contracts";
 import { HTTPException } from "hono/http-exception";
 import type { AuthorizationVariables } from "./auth/middleware";
 import { createAuthorizationMiddleware } from "./auth/middleware";
+import {
+  requirePlatformCapability,
+  requirePlatformCapabilityForMethods,
+} from "./auth/capability";
+import {
+  createPlatformAuthenticator,
+  type PlatformAuthenticator,
+} from "./auth/platform";
 import { parseBearerToken } from "./auth/bearer";
 import {
   createIngestionAuthorizationMiddleware,
@@ -190,6 +198,7 @@ import {
 } from "./routes/receipts";
 import type { ReceiptServices } from "./receipts/service";
 import { dispatchClaimHandler } from "./outbound/dispatch-claim-route";
+import { registerPlatformBrowserRoutes } from "./auth/browser-routes";
 
 const REALTIME_TICKET_PATH = "/api/v1/realtime/tickets";
 const MALFORMED_JSON_MESSAGE = "Malformed JSON in request body";
@@ -202,6 +211,9 @@ const decorateRealtimeTicketResponse = (response: Response): Response => {
 };
 
 export type AppServices = {
+  createPlatformAuthenticator?: (
+    env: Cloudflare.Env,
+  ) => PlatformAuthenticator | null;
   createTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createAccessTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
   createOAuthAccessTokenVerifier?: (env: Cloudflare.Env) => TokenVerifier;
@@ -374,6 +386,16 @@ export function createApp(services: AppServices = {}) {
     return ingestionVerifier;
   };
 
+  let platformAuthenticator: PlatformAuthenticator | null | undefined;
+  const getPlatformAuthenticator = (runtimeEnv: Cloudflare.Env) => {
+    if (platformAuthenticator !== undefined) return platformAuthenticator;
+    platformAuthenticator = (
+      services.createPlatformAuthenticator ??
+      ((env) => createPlatformAuthenticator(env))
+    )(runtimeEnv);
+    return platformAuthenticator;
+  };
+
   app.openapi(healthRoute, (context) =>
     context.json(
       {
@@ -391,6 +413,9 @@ export function createApp(services: AppServices = {}) {
     bearerFormat: "JWT",
   });
   const productAuthorization = createAuthorizationMiddleware({
+    ...(services.createTokenVerifier === undefined
+      ? { getPlatformAuthenticator }
+      : {}),
     getVerifier,
     getAccessVerifier,
     getOAuthVerifier,
@@ -442,6 +467,10 @@ export function createApp(services: AppServices = {}) {
   }
   if (services.signOAuthAccessToken)
     oauthServices.signAccessToken = services.signOAuthAccessToken;
+  // The browser UI delegates login to Platform's first-party OAuth endpoints.
+  // The historical local issuer routes remain available only to isolated
+  // compatibility fixtures; deployed requests use the Platform routes above.
+  registerPlatformBrowserRoutes(app);
   registerOAuthRoutes(app, oauthServices);
   const outboundAcceptanceServices: OutboundAcceptanceServices = {
     ...services.outboundAcceptance,
@@ -456,6 +485,12 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/session", productAuthorization);
   app.use("/mcp", productAuthorization);
   app.use(REALTIME_TICKET_PATH, productAuthorization);
+  // Upgrade requests use the current Platform credential in production. The
+  // explicit legacy verifier seam remains available to component tests that
+  // exercise ticket consumption without a Platform worker.
+  if (services.createTokenVerifier === undefined) {
+    app.use("/api/v1/realtime", productAuthorization);
+  }
   app.use("/api/v1/identities", productAuthorization);
   app.use("/api/v1/identities/*", productAuthorization);
   app.use("/api/v1/connections", productAuthorization);
@@ -491,6 +526,63 @@ export function createApp(services: AppServices = {}) {
   app.use("/api/v1/attachments/*", productAuthorization);
   app.use("/api/v1/receipts", productAuthorization);
   app.use("/api/v1/receipts/*", productAuthorization);
+
+  // Platform capability ceilings sit after shared authentication and before
+  // the route handlers. Resource grants and endpoint-specific ownership checks
+  // below remain mandatory second factors.
+  app.use(
+    "/api/v1/grant-targets",
+    requirePlatformCapability("directory.manage"),
+  );
+  app.use(
+    "/api/v1/grants",
+    requirePlatformCapabilityForMethods(
+      new Map([
+        ["GET", ["directory.read"]],
+        ["POST", ["directory.manage"]],
+      ]),
+      ["directory.manage"],
+    ),
+  );
+  app.use(
+    "/api/v1/grants/*",
+    requirePlatformCapabilityForMethods(
+      new Map([
+        ["GET", ["directory.read"]],
+        ["PATCH", ["directory.manage"]],
+        ["DELETE", ["directory.manage"]],
+      ]),
+      ["directory.manage"],
+    ),
+  );
+  app.use("/api/v1/accounts", requirePlatformCapability("directory.read"));
+  app.use("/api/v1/accounts/*", requirePlatformCapability("directory.read"));
+  app.use(
+    "/api/v1/permission-requests",
+    requirePlatformCapabilityForMethods(
+      new Map([["POST", ["directory.request"]]]),
+      ["directory.read"],
+    ),
+  );
+  app.use("/api/v1/removals", requirePlatformCapability("retention.manage"));
+  app.use("/api/v1/removals/*", requirePlatformCapability("retention.manage"));
+  app.use(
+    "/api/v1/removal-expiries",
+    requirePlatformCapability("retention.manage"),
+  );
+  app.use(
+    "/api/v1/webhook-subscriptions",
+    requirePlatformCapability("webhook.manage"),
+  );
+  app.use(
+    "/api/v1/webhook-subscriptions/*",
+    requirePlatformCapability("webhook.manage"),
+  );
+  app.use(
+    "/api/v1/webhook-deliveries/*",
+    requirePlatformCapability("webhook.manage"),
+  );
+  app.use(REALTIME_TICKET_PATH, requirePlatformCapability("conversation.read"));
   app.openapi(sessionRoute, (context) =>
     context.json(
       SessionResponseSchema.parse(context.get("authorization")),
@@ -662,12 +754,13 @@ export function createApp(services: AppServices = {}) {
     info: { title: "Communicator API", version: "1.0.0" },
   });
 
-  app.use(
-    "/internal/v1/ingestion/batches",
-    createIngestionAuthorizationMiddleware({
-      getVerifier: getIngestionVerifier,
-    }),
-  );
+  const ingestionAuthorization =
+    services.createIngestionTokenVerifier === undefined
+      ? createIngestionAuthorizationMiddleware({ getPlatformAuthenticator })
+      : createIngestionAuthorizationMiddleware({
+          getVerifier: getIngestionVerifier,
+        });
+  app.use("/internal/v1/ingestion/batches", ingestionAuthorization);
   app.post(
     "/internal/v1/ingestion/batches",
     createIngestionBatchHandler(services),

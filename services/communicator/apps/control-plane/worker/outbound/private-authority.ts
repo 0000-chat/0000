@@ -423,7 +423,7 @@ export async function reservePrivateAuthority(
         AND p.status = 'active' AND p.revoked_at IS NULL
         AND i.status = 'active'
         AND ((p.principal_type IN ('human', 'operator') AND i.identity_kind = 'human')
-          OR (p.principal_type = 'agent' AND i.identity_kind = 'agent'))
+          OR (p.principal_type IN ('agent', 'service') AND i.identity_kind = 'agent'))
         AND ${operationSql}
         AND ${authorityPredicate(input.operation_scope)}
       ON CONFLICT DO NOTHING

@@ -18,7 +18,9 @@ export type RealtimeStatus =
   | "idle"
   | "connecting"
   | "connected"
-  | "reconnecting";
+  | "reconnecting"
+  | "unauthorized"
+  | "unavailable";
 
 export type RealtimeStatusListener = (status: RealtimeStatus) => void;
 

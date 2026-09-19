@@ -2,6 +2,12 @@ import {
   OutboundCapabilitySchema,
   CommunicatorIdSchema,
 } from "@communicator/contracts";
+import { parseBearerToken } from "../auth/bearer";
+import {
+  createPlatformAuthenticator,
+  getPlatformRuntimeConfig,
+} from "../auth/platform";
+import { resolvePlatformBinding } from "../control-directory/platform-bindings";
 import type { Context } from "hono";
 import { z } from "zod";
 import { claimOutboundDispatch } from "./authority";
@@ -67,6 +73,15 @@ type RuntimeEnvironment = Cloudflare.Env & {
   CONNECTION_GATEWAY_TOKEN?: string;
 };
 
+const platformConfigured = (env: Cloudflare.Env): boolean => {
+  const runtime = env as unknown as Record<string, unknown>;
+  return [
+    "COMMUNICATOR_PLATFORM_BASE_URL",
+    "COMMUNICATOR_PLATFORM_AUTHORITY",
+    "COMMUNICATOR_PLATFORM_AUDIENCE",
+  ].some((key) => typeof runtime[key] === "string" && runtime[key].length > 0);
+};
+
 type BoundedBody =
   | { status: "ok"; bytes: Uint8Array }
   | { status: "too_large" };
@@ -127,13 +142,53 @@ const unauthorized = (context: Context): Response =>
 const jsonResponse = (
   context: Context,
   body: unknown,
-  status: 200 | 400 | 403 | 413 | 500 | 503,
+  status: 200 | 400 | 403 | 404 | 413 | 500 | 503,
 ): Response =>
   context.json(body, status, {
     "Cache-Control": "no-store",
     Pragma: "no-cache",
     "Referrer-Policy": "no-referrer",
   });
+
+const platformGatewayAuthorized = async (
+  context: Context,
+  token: string,
+  value: DispatchClaim,
+): Promise<"authorized" | "unauthorized" | "not_found" | "unavailable"> => {
+  const authenticator = createPlatformAuthenticator(context.env);
+  if (authenticator === null) return "unavailable";
+  const authenticated = await authenticator.authenticate(token);
+  if (authenticated.status === "authority_unavailable") return "unavailable";
+  if (
+    authenticated.status !== "authenticated" ||
+    authenticated.principal.kind !== "service" ||
+    !authenticated.principal.capabilities.includes("outbound.claim")
+  ) {
+    return "unauthorized";
+  }
+  const binding = await resolvePlatformBinding(
+    context.env.CONTROL_DB,
+    authenticated.principal,
+    value.tenant_id,
+  );
+  if (!binding.ok) {
+    return binding.code === "not_found" ? "not_found" : "unavailable";
+  }
+  if (binding.binding.localPrincipalKind !== "service") return "unauthorized";
+  const route = (await context.env.CONTROL_DB.withSession("first-primary")
+    .prepare(
+      `SELECT 1 AS authorized
+       FROM connection_routes AS cr
+       JOIN gateway_routes AS gr ON gr.id = cr.gateway_route_id
+       WHERE cr.connection_id = ?
+         AND gr.service_principal_id = ?
+         AND gr.status = 'active'
+       LIMIT 1`,
+    )
+    .bind(value.connection_id, binding.binding.localPrincipalId)
+    .first()) as { authorized: number } | null;
+  return route === null ? "unauthorized" : "authorized";
+};
 
 const capabilityInput = (capability: OutboundCapability): OutboundCapability =>
   capability;
@@ -203,7 +258,18 @@ export const dispatchClaimHandlerAt = async (
   const runtime = context.env as RuntimeEnvironment;
   const secret = runtime.CONNECTION_GATEWAY_TOKEN ?? "";
   const authorization = context.req.header("Authorization");
-  if (secret.length < 16 || authorization !== `Bearer ${secret}`) {
+  const platformMode = platformConfigured(context.env);
+  let token: string;
+  try {
+    token = parseBearerToken(authorization);
+  } catch {
+    return unauthorized(context);
+  }
+  if (platformMode) {
+    if (getPlatformRuntimeConfig(context.env) === null) {
+      return jsonResponse(context, { error: "service_unavailable" }, 503);
+    }
+  } else if (secret.length < 16 || authorization !== `Bearer ${secret}`) {
     return unauthorized(context);
   }
   const contentLength = context.req.header("Content-Length");
@@ -232,6 +298,27 @@ export const dispatchClaimHandlerAt = async (
   const parsed = DispatchClaimSchema.safeParse(parsedJson);
   if (!parsed.success)
     return jsonResponse(context, { error: "invalid_request" }, 400);
+  if (platformMode) {
+    let authorizationResult: Awaited<
+      ReturnType<typeof platformGatewayAuthorized>
+    >;
+    try {
+      authorizationResult = await platformGatewayAuthorized(
+        context,
+        token,
+        parsed.data,
+      );
+    } catch {
+      return jsonResponse(context, { error: "service_unavailable" }, 503);
+    }
+    if (authorizationResult === "unavailable") {
+      return jsonResponse(context, { error: "service_unavailable" }, 503);
+    }
+    if (authorizationResult === "not_found") {
+      return jsonResponse(context, { error: "not_found" }, 404);
+    }
+    if (authorizationResult !== "authorized") return unauthorized(context);
+  }
   const workerClock = clock();
   if (
     !validClaimWindow(

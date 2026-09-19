@@ -6,6 +6,7 @@ import {
   type ApiErrorResponse,
   type RealtimeTicketRequest,
 } from "@communicator/contracts";
+import type { AuthenticatedPrincipal } from "@0000/contracts";
 import type { Context, Handler } from "hono";
 import type { AuthorizationVariables } from "../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../auth/ingestion-middleware";
@@ -14,16 +15,22 @@ import {
   RealtimeAuthorizationError,
   realtimeReadScopeSupported,
 } from "./authorization";
-import { parseRealtimeUpgradeContext } from "./contracts";
+import {
+  parseRealtimeUpgradeContext,
+  type RealtimePlatformContext,
+} from "./contracts";
 import {
   consumeRealtimeTicket,
   issueRealtimeTicket,
   RealtimeTicketError,
 } from "./ticket-repository";
 import { isRealtimeTicket } from "./token";
+import type { ResolvedPlatformBinding } from "../control-directory/platform-bindings";
 
 export const REALTIME_INTERNAL_CONTEXT_HEADER =
   "X-Communicator-Realtime-Context";
+export const REALTIME_PLATFORM_CREDENTIAL_HEADER =
+  "X-Communicator-Platform-Credential";
 export const REALTIME_INTERNAL_UPGRADE_URL =
   "https://tenant-projection.internal/realtime";
 
@@ -63,6 +70,38 @@ const noStore = (response: Response): Response => {
   response.headers.set("Referrer-Policy", "no-referrer");
   return response;
 };
+
+const realtimePlatformContext = (
+  principal: Exclude<AuthenticatedPrincipal, { kind: "guest" }>,
+  binding: ResolvedPlatformBinding,
+): RealtimePlatformContext => ({
+  binding_id: binding.bindingId,
+  authority: principal.authority,
+  kind: principal.kind,
+  subject_id: principal.subjectId,
+  organization_id: principal.organizationId,
+  membership_id: principal.kind === "human" ? principal.membershipId : null,
+  grant_id:
+    principal.kind === "agent" || principal.kind === "service"
+      ? principal.grantId
+      : null,
+  credential_id: principal.credentialId,
+  expires_at: principal.expiresAt,
+});
+
+const samePlatformContext = (
+  left: RealtimePlatformContext,
+  right: RealtimePlatformContext,
+): boolean =>
+  left.binding_id === right.binding_id &&
+  left.authority === right.authority &&
+  left.kind === right.kind &&
+  left.subject_id === right.subject_id &&
+  left.organization_id === right.organization_id &&
+  left.membership_id === right.membership_id &&
+  left.grant_id === right.grant_id &&
+  left.credential_id === right.credential_id &&
+  left.expires_at === right.expires_at;
 
 const responseForError = (
   context: RealtimeRouteContext,
@@ -119,10 +158,22 @@ export const realtimeTicketHandler: Handler<
     const authorization = authorizeRealtimeRequest(
       context.get("authorization"),
       request,
+      context.get("platformPrincipal") === undefined ||
+        context.get("platformBinding") === undefined
+        ? undefined
+        : realtimePlatformContext(
+            context.get("platformPrincipal")!,
+            context.get("platformBinding")!,
+          ),
     );
     const supported = await realtimeReadScopeSupported(
       context.env.CONTROL_DB.withSession("first-primary"),
       authorization,
+      {
+        allowMachine:
+          authorization.platform !== undefined &&
+          authorization.platform.kind !== "human",
+      },
     );
     if (!supported) throw new RealtimeAuthorizationError("not_found");
     const issued = await issueRealtimeTicket(
@@ -162,7 +213,10 @@ const ticketFromUpgradeUrl = (request: Request): UpgradeTicketResult => {
   return { kind: "ticket", value: entries[0][1] };
 };
 
-const internalUpgradeRequest = (contextJson: string): Request =>
+const internalUpgradeRequest = (
+  contextJson: string,
+  credential: string | undefined,
+): Request =>
   new Request(REALTIME_INTERNAL_UPGRADE_URL, {
     method: "GET",
     headers: {
@@ -170,6 +224,9 @@ const internalUpgradeRequest = (contextJson: string): Request =>
       Upgrade: "websocket",
       "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
       [REALTIME_INTERNAL_CONTEXT_HEADER]: contextJson,
+      ...(credential === undefined
+        ? {}
+        : { [REALTIME_PLATFORM_CREDENTIAL_HEADER]: credential }),
     },
   });
 
@@ -211,6 +268,18 @@ export const realtimeUpgradeHandler: Handler<RealtimeRouteEnv> = async (
     return responseForError(context, "unauthenticated", 401);
   }
 
+  const currentPrincipal = context.get("platformPrincipal");
+  const currentBinding = context.get("platformBinding");
+  if (consumed.platform !== undefined) {
+    if (currentPrincipal === undefined || currentBinding === undefined) {
+      return responseForError(context, "unauthenticated", 401);
+    }
+    const current = realtimePlatformContext(currentPrincipal, currentBinding);
+    if (!samePlatformContext(consumed.platform, current)) {
+      return responseForError(context, "unauthenticated", 401);
+    }
+  }
+
   let contextJson: string;
   try {
     contextJson = JSON.stringify(parseRealtimeUpgradeContext(consumed));
@@ -226,7 +295,12 @@ export const realtimeUpgradeHandler: Handler<RealtimeRouteEnv> = async (
 
   try {
     const stub = projectionStub(context.env, consumed.tenant_id);
-    const response = await stub.fetch(internalUpgradeRequest(contextJson));
+    const response = await stub.fetch(
+      internalUpgradeRequest(
+        contextJson,
+        context.get("authorizationCredential"),
+      ),
+    );
     if (
       response.status !== 101 ||
       response.headers.get("Sec-WebSocket-Protocol") !== REALTIME_SUBPROTOCOL

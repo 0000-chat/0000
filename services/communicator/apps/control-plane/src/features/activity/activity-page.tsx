@@ -21,8 +21,11 @@ export function ActivityPage() {
     session,
     identities,
     isLoading: identityLoading,
+    authStatus,
   } = useIdentityContext();
+  const protectedApiReady = authStatus === "authenticated";
   const isAdministrator =
+    protectedApiReady &&
     (session?.membership.role === "owner" ||
       session?.membership.role === "admin") &&
     (session?.principal.type === "human" ||

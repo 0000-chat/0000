@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import { parseBearerToken } from "../auth/bearer";
+import { getPlatformRuntimeConfig } from "../auth/platform";
 import {
   constantTimeEqual,
   decryptVerifier,
@@ -723,7 +724,18 @@ export function registerOAuthRoutes(
   app: Hono<any>,
   services: OAuthRouteServices,
 ): void {
+  const localIssuerRetired = (context: OAuthContext): boolean => {
+    return getPlatformRuntimeConfig(context.env) !== null;
+  };
+  const retired = (context: OAuthContext): Response =>
+    oauthError(
+      context,
+      "temporarily_unavailable",
+      "Communicator no longer issues local OAuth credentials",
+      503,
+    );
   app.get("/.well-known/oauth-authorization-server", (context) => {
+    if (localIssuerRetired(context)) return retired(context);
     try {
       const config = runtimeConfig(services, context.env);
       const origin = new URL(context.req.url).origin;
@@ -772,15 +784,32 @@ export function registerOAuthRoutes(
       );
     }
   };
-  app.get("/.well-known/oauth-protected-resource", protectedResourceMetadata);
-  app.get(
-    "/.well-known/oauth-protected-resource/mcp",
-    protectedResourceMetadata,
+  app.get("/.well-known/oauth-protected-resource", (context) =>
+    localIssuerRetired(context)
+      ? retired(context)
+      : protectedResourceMetadata(context),
   );
-  app.get("/oauth/authorize", (context) => authorize(context, services));
-  app.get("/oauth/callback", (context) => upstreamCallback(context, services));
-  app.post("/oauth/consent", (context) => consent(context, services));
-  app.post("/oauth/token", (context) => token(context, services));
+  app.get("/.well-known/oauth-protected-resource/mcp", (context) =>
+    localIssuerRetired(context)
+      ? retired(context)
+      : protectedResourceMetadata(context),
+  );
+  app.get("/oauth/authorize", (context) =>
+    localIssuerRetired(context)
+      ? retired(context)
+      : authorize(context, services),
+  );
+  app.get("/oauth/callback", (context) =>
+    localIssuerRetired(context)
+      ? retired(context)
+      : upstreamCallback(context, services),
+  );
+  app.post("/oauth/consent", (context) =>
+    localIssuerRetired(context) ? retired(context) : consent(context, services),
+  );
+  app.post("/oauth/token", (context) =>
+    localIssuerRetired(context) ? retired(context) : token(context, services),
+  );
 }
 
 export function parseHumanBearer(request: Request): string {

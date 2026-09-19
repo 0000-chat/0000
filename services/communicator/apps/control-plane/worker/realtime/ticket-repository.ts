@@ -99,8 +99,9 @@ INSERT INTO realtime_tickets (
   resume_json,
   created_at,
   expires_at,
-  expires_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  expires_at_ms,
+  platform_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 const CONSUME_TICKET_SQL = `
 DELETE FROM realtime_tickets
@@ -115,7 +116,8 @@ RETURNING
   resume_json,
   created_at,
   expires_at,
-  expires_at_ms`;
+  expires_at_ms,
+  platform_json`;
 
 type StoredRealtimeTicketRow = {
   ticket_digest: unknown;
@@ -127,6 +129,7 @@ type StoredRealtimeTicketRow = {
   created_at: unknown;
   expires_at: unknown;
   expires_at_ms: unknown;
+  platform_json: unknown;
 };
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
@@ -190,9 +193,14 @@ const parseConsumedAuthorization = (
 
   let subscriptions: unknown;
   let resume: unknown;
+  let platform: unknown;
   try {
     subscriptions = JSON.parse(row.subscriptions_json);
     resume = JSON.parse(row.resume_json);
+    platform =
+      row.platform_json === null
+        ? undefined
+        : JSON.parse(String(row.platform_json));
   } catch {
     return null;
   }
@@ -204,6 +212,7 @@ const parseConsumedAuthorization = (
     membership_id: row.membership_id,
     subscriptions,
     resume,
+    ...(platform === undefined ? {} : { platform }),
     issued_at: row.created_at,
     expires_at: row.expires_at,
   });
@@ -214,10 +223,18 @@ const parseConsumedAuthorization = (
   if (
     !Number.isSafeInteger(createdMilliseconds) ||
     !Number.isSafeInteger(expiresMilliseconds) ||
-    expiresMilliseconds - createdMilliseconds !== REALTIME_TICKET_TTL_MS ||
+    expiresMilliseconds <= createdMilliseconds ||
+    expiresMilliseconds - createdMilliseconds > REALTIME_TICKET_TTL_MS ||
     expiresAtMilliseconds !== expiresMilliseconds ||
     createdMilliseconds > nowMilliseconds ||
     expiresMilliseconds <= nowMilliseconds
+  ) {
+    return null;
+  }
+
+  if (
+    candidate.data.platform !== undefined &&
+    Date.parse(candidate.data.platform.expires_at) < expiresMilliseconds
   ) {
     return null;
   }
@@ -234,8 +251,21 @@ export async function issueRealtimeTicket(
   if (nowMilliseconds === null) throw invalidTicketRequest();
 
   const createdAt = isoTimestamp(nowMilliseconds);
-  const expiresAt = isoTimestamp(nowMilliseconds + REALTIME_TICKET_TTL_MS);
+  const platformExpiryMilliseconds =
+    authorizedRequest.platform === undefined
+      ? null
+      : Date.parse(authorizedRequest.platform.expires_at);
+  const expiresAtMilliseconds =
+    platformExpiryMilliseconds !== null &&
+    Number.isSafeInteger(platformExpiryMilliseconds)
+      ? Math.min(
+          nowMilliseconds + REALTIME_TICKET_TTL_MS,
+          platformExpiryMilliseconds,
+        )
+      : nowMilliseconds + REALTIME_TICKET_TTL_MS;
+  const expiresAt = isoTimestamp(expiresAtMilliseconds);
   if (createdAt === null || expiresAt === null) throw invalidTicketRequest();
+  if (expiresAtMilliseconds <= nowMilliseconds) throw invalidTicketRequest();
 
   const context = RealtimeUpgradeContextSchema.safeParse({
     ...asRecord(authorizedRequest),
@@ -243,7 +273,9 @@ export async function issueRealtimeTicket(
     issued_at: createdAt,
     expires_at: expiresAt,
   });
-  if (!context.success) throw invalidTicketRequest(context.error);
+  if (!context.success) {
+    throw invalidTicketRequest(context.error);
+  }
 
   let ticket: string;
   let digest: string;
@@ -271,7 +303,10 @@ export async function issueRealtimeTicket(
         JSON.stringify(context.data.resume),
         context.data.issued_at,
         context.data.expires_at,
-        nowMilliseconds + REALTIME_TICKET_TTL_MS,
+        expiresAtMilliseconds,
+        context.data.platform === undefined
+          ? null
+          : JSON.stringify(context.data.platform),
       )
       .run();
   } catch (error) {

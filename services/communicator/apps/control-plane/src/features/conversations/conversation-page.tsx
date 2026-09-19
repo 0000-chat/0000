@@ -14,6 +14,7 @@ import { queryKeys } from "@/lib/api/query-keys";
 import { MessageComposer } from "./message-composer";
 import { chronologicalMessages, MessageTimeline } from "./message-timeline";
 import { ProviderIcon } from "./provider-icon";
+import { useIdentityContext } from "@/components/identity/identity-switcher";
 
 export type ConversationPageProps = {
   identity: Identity;
@@ -49,6 +50,7 @@ export function ConversationPage({
   selectedChannelId,
   selectedMessageId,
 }: ConversationPageProps) {
+  const { authStatus } = useIdentityContext();
   const navigate = useNavigate();
   const isSafe =
     conversation.identity_id === identity.id &&
@@ -66,7 +68,7 @@ export function ConversationPage({
       ),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor,
-    enabled: isSafe,
+    enabled: isSafe && authStatus === "authenticated",
   });
   const loadedMessages = messagesQuery.data
     ? chronologicalMessages(messagesQuery.data.pages)
@@ -90,7 +92,10 @@ export function ConversationPage({
       );
       return page.items[0] ?? null;
     },
-    enabled: isSafe && selectedMessageId !== undefined,
+    enabled:
+      isSafe &&
+      authStatus === "authenticated" &&
+      selectedMessageId !== undefined,
   });
   const selectedMessage =
     selectedMessageId !== undefined && targetedMessageQuery.isSuccess
@@ -111,7 +116,9 @@ export function ConversationPage({
   if (!isSafe) return <ConversationUnavailable identityId={identity.id} />;
 
   const canSend =
-    channel.status === "ready" && channel.capabilities.includes("message.send");
+    authStatus === "authenticated" &&
+    channel.status === "ready" &&
+    channel.capabilities.includes("message.send");
 
   return (
     <section
@@ -247,7 +254,12 @@ export function ConversationPage({
           {...(!canSend
             ? {
                 unavailableReason:
-                  "Sending is unavailable until this connection is repaired.",
+                  authStatus === "unavailable" ||
+                  authStatus === "unauthenticated"
+                    ? "Sending is paused until you sign in again. Your draft remains here."
+                    : authStatus === "context_changed"
+                      ? "Sending is paused until you review the renewed identity."
+                      : "Sending is unavailable until this connection is repaired.",
               }
             : {})}
         />
