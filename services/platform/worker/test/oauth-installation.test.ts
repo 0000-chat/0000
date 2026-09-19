@@ -486,6 +486,79 @@ describe("T06 production OAuth installation", () => {
     const loginPage = await SELF.fetch(loginLocation, { redirect: "manual" });
     expect(loginPage.status).toBe(200);
     expect(await loginPage.text()).toContain('id="oauth-query"');
+
+    const failedLoginStart = await SELF.fetch(
+      "http://localhost/api/auth/sign-in/social",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: testEnv.PLATFORM_BASE_URL,
+        },
+        body: JSON.stringify({
+          provider: "github",
+          callbackURL: "http://localhost/account",
+          errorCallbackURL: "http://localhost/login",
+          disableRedirect: true,
+        }),
+      },
+    );
+    expect(failedLoginStart.status).toBe(200);
+    const failedLoginState = new URL(
+      ((await failedLoginStart.json()) as { url: string }).url,
+    ).searchParams.get("state");
+    expect(failedLoginState).toBeTruthy();
+    const failedLoginCallback = await SELF.fetch(
+      `http://localhost/api/auth/callback/github?error=access_denied&state=${encodeURIComponent(failedLoginState!)}`,
+      {
+        headers: { cookie: cookiesFrom(failedLoginStart) },
+        redirect: "manual",
+      },
+    );
+    expect(failedLoginCallback.status).toBe(302);
+    const failedLoginLocation = new URL(
+      failedLoginCallback.headers.get("location")!,
+    );
+    expect(failedLoginLocation.pathname).toBe("/login");
+    expect(failedLoginLocation.searchParams.get("error")).toBe("access_denied");
+    const failedLoginPage = await SELF.fetch(failedLoginLocation);
+    expect(failedLoginPage.status).toBe(200);
+    expect(await failedLoginPage.text()).not.toContain('id="oauth-query"');
+    const retryStart = await SELF.fetch(
+      "http://localhost/api/auth/sign-in/social",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: testEnv.PLATFORM_BASE_URL,
+        },
+        body: JSON.stringify({
+          provider: "github",
+          callbackURL: "http://localhost/account",
+          errorCallbackURL: "http://localhost/login",
+          disableRedirect: true,
+        }),
+      },
+    );
+    expect(retryStart.status).toBe(200);
+    const malformedRetry = await SELF.fetch(
+      "http://localhost/api/auth/sign-in/social",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: testEnv.PLATFORM_BASE_URL,
+        },
+        body: JSON.stringify({
+          provider: "github",
+          callbackURL: "http://localhost/oauth2/selection?error=access_denied",
+        }),
+      },
+    );
+    expect(malformedRetry.status).toBe(400);
+    expect(await malformedRetry.json()).toEqual({
+      error: "invalid_callback_destination",
+    });
     const resumed = await signIn(
       {
         id: 816345,

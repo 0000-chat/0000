@@ -2036,9 +2036,10 @@ async function accountRoute(
     return assetResponse(accountCss, "text/css; charset=utf-8");
   }
   if (pathname === "/login" && request.method === "GET") {
+    const rawQuery = url.search.slice(1);
     return loginPage(
       loginErrorMessage(url.searchParams.get("error")),
-      url.search.slice(1),
+      parseOAuthQuery(rawQuery) ? rawQuery : "",
     );
   }
   if (
