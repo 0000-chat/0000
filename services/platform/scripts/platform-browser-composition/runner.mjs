@@ -1,0 +1,1516 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import {
+  chmod,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { readD1Migrations } from "@cloudflare/vitest-plugin";
+import { convertV4MiniflareOptions, Miniflare } from "miniflare";
+import { provisionTrustedOAuthClient } from "../../src/oauth-installation.ts";
+import { opaqueSecret } from "../../src/platform-state.ts";
+import { registerTestService } from "../../worker/test/fixtures/provision.ts";
+import { PLATFORM_TEST_MINIFLARE_RATE_LIMITS } from "../test-rate-limits.ts";
+import {
+  FIXTURE,
+  alternateBindingSql,
+  baseDirectorySql,
+  humanBindingSql,
+  initialProjectionEvents,
+  postRevocationProjectionEvents,
+  projectionBatch,
+  projectionInitialization,
+} from "./fixture.mjs";
+
+const harnessRoot = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(harnessRoot, "../../../../");
+const platformRoot = join(repoRoot, "services/platform");
+const communicatorRoot = join(repoRoot, "services/communicator");
+const communicatorApp = join(communicatorRoot, "apps/control-plane");
+const communicatorMigrations = join(communicatorApp, "migrations");
+const wrapperPath = join(harnessRoot, "communicator-wrapper.mjs");
+const workerEntry = join(platformRoot, "src/worker.ts");
+const operationTimeoutMs = 30_000;
+const startupTimeoutMs = 120_000;
+const cleanupTimeoutMs = 8_000;
+const compatibilityDate = "2026-09-18";
+const authority = "platform-composition-browser-authority";
+const service = {
+  serviceId: "composition-browser-service",
+  audience: "https://composition-browser.0000.test",
+  verifier: opaqueSecret("composition_service_verify_"),
+  guestGrantIssuer: opaqueSecret("composition_guest_grant_"),
+  allowedCapabilities: ["conversation.read", "message.send", "connection.read"],
+};
+const providerIdentity = {
+  id: 817321,
+  login: "composition-browser-user",
+  name: "Composition Browser User",
+  email: "composition-browser@example.test",
+};
+
+const safeLog = [];
+const state = {
+  failed: false,
+  failure: null,
+  tempRoot: null,
+  platform: null,
+  platformBridge: null,
+  platformProxy: null,
+  communicator: null,
+  browser: null,
+};
+
+function record(event, fields = {}) {
+  const line = JSON.stringify({ event, ...fields });
+  safeLog.push(line);
+  console.log(line);
+}
+
+function safeFailure(error) {
+  return error instanceof Error ? error.name : "unknown";
+}
+
+async function within(label, operation, timeoutMs = operationTimeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label}_timeout`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sleep(milliseconds) {
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+async function waitFor(label, predicate, timeoutMs = operationTimeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await predicate()) return;
+    await sleep(100);
+  }
+  throw new Error(`${label}_timeout`);
+}
+
+async function writePrivate(path, contents) {
+  await writeFile(path, contents, { encoding: "utf8", mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
+async function hashFile(path) {
+  const digest = createHash("sha256");
+  digest.update(await readFile(path));
+  return digest.digest("hex");
+}
+
+async function hashSources(paths) {
+  const entries = {};
+  for (const path of paths)
+    entries[path.replace(`${repoRoot}/`, "")] = await hashFile(path);
+  return entries;
+}
+
+async function allocateFreePort() {
+  const server = createServer();
+  await within(
+    "free_port_listen",
+    new Promise((resolveListen, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolveListen();
+      });
+    }),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await within(
+    "free_port_close",
+    new Promise((resolveClose, reject) =>
+      server.close((error) => (error ? reject(error) : resolveClose())),
+    ),
+  );
+  return port;
+}
+
+async function requestFromNode(request, origin) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (
+      value !== undefined &&
+      name !== "content-length" &&
+      name !== "connection"
+    ) {
+      headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+    }
+  }
+  const init = { method: request.method, headers, redirect: "manual" };
+  if (
+    chunks.length > 0 &&
+    request.method !== "GET" &&
+    request.method !== "HEAD"
+  ) {
+    init.body = Buffer.concat(chunks);
+  }
+  return new Request(`${origin}${request.url ?? "/"}`, init);
+}
+
+async function writeNodeResponse(response, nodeResponse) {
+  const outputHeaders = {};
+  for (const [name, value] of response.headers) {
+    if (
+      [
+        "connection",
+        "content-length",
+        "keep-alive",
+        "transfer-encoding",
+        "set-cookie",
+      ].includes(name)
+    )
+      continue;
+    outputHeaders[name] = value;
+  }
+  const cookies =
+    response.headers.getSetCookie?.() ??
+    [response.headers.get("set-cookie") ?? ""].filter(Boolean);
+  if (cookies.length > 0) outputHeaders["set-cookie"] = cookies;
+  const body = Buffer.from(await response.arrayBuffer());
+  outputHeaders["content-length"] = String(body.byteLength);
+  nodeResponse.writeHead(response.status, outputHeaders);
+  nodeResponse.end(body);
+}
+
+function forwardHeaders(request, host) {
+  const headers = {};
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (
+      value === undefined ||
+      ["connection", "content-length", "host"].includes(name)
+    )
+      continue;
+    headers[name] = Array.isArray(value) ? value.join(", ") : value;
+  }
+  headers.host = host;
+  return headers;
+}
+
+async function readNodeBody(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return chunks.length === 0 ? undefined : Buffer.concat(chunks);
+}
+
+async function listenPlatformBridge(platformOrigin) {
+  let requestOrigin = platformOrigin;
+  let platform;
+  const server = createServer((request, response) => {
+    void (async () => {
+      if (!platform) {
+        await writeNodeResponse(
+          Response.json({ error: "platform_unavailable" }, { status: 503 }),
+          response,
+        );
+        return;
+      }
+      const webRequest = await requestFromNode(request, requestOrigin);
+      await writeNodeResponse(
+        await platform.dispatchFetch(webRequest),
+        response,
+      );
+    })().catch(async () => {
+      await writeNodeResponse(
+        Response.json({ error: "platform_unavailable" }, { status: 503 }),
+        response,
+      );
+    });
+  });
+  await within(
+    "platform_bridge_listen",
+    new Promise((resolveListen, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolveListen();
+      });
+    }),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    setPlatform(value) {
+      platform = value;
+    },
+    setOrigin(value) {
+      requestOrigin = value;
+    },
+    async close() {
+      await within(
+        "platform_bridge_close",
+        new Promise((resolveClose, reject) =>
+          server.close((error) => (error ? reject(error) : resolveClose())),
+        ),
+        cleanupTimeoutMs,
+      );
+    },
+  };
+}
+
+async function listenPlatformProxy(upstreamOrigin) {
+  let outage = false;
+  let proxyOrigin = "";
+  const server = createServer((request, response) => {
+    void (async () => {
+      const pathname = new URL(request.url ?? "/", "http://composition.invalid")
+        .pathname;
+      if (pathname === "/__composition/outage" && request.method === "POST") {
+        outage = true;
+        await writeNodeResponse(Response.json({ ok: true }), response);
+        return;
+      }
+      if (pathname === "/__composition/recover" && request.method === "POST") {
+        outage = false;
+        await writeNodeResponse(Response.json({ ok: true }), response);
+        return;
+      }
+      if (outage) {
+        await writeNodeResponse(
+          Response.json({ error: "platform_unavailable" }, { status: 503 }),
+          response,
+        );
+        return;
+      }
+      const body = await readNodeBody(request);
+      const upstream = await fetch(`${upstreamOrigin}${request.url ?? "/"}`, {
+        method: request.method,
+        headers: forwardHeaders(request, new URL(proxyOrigin).host),
+        body,
+        redirect: "manual",
+      });
+      const headers = new Headers(upstream.headers);
+      const location = headers.get("location");
+      if (location)
+        headers.set("location", location.replace(upstreamOrigin, proxyOrigin));
+      await writeNodeResponse(
+        new Response(await upstream.arrayBuffer(), {
+          status: upstream.status,
+          headers,
+        }),
+        response,
+      );
+    })().catch(async () => {
+      await writeNodeResponse(
+        Response.json({ error: "platform_unavailable" }, { status: 503 }),
+        response,
+      );
+    });
+  });
+  await within(
+    "platform_proxy_listen",
+    new Promise((resolveListen, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolveListen();
+      });
+    }),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  proxyOrigin = `http://127.0.0.1:${address.port}`;
+  return {
+    origin: proxyOrigin,
+    outage: () => outage,
+    async close() {
+      await within(
+        "platform_proxy_close",
+        new Promise((resolveClose, reject) =>
+          server.close((error) => (error ? reject(error) : resolveClose())),
+        ),
+        cleanupTimeoutMs,
+      );
+    },
+  };
+}
+
+function providerOutbound(request) {
+  const url = new URL(request.url);
+  if (
+    url.hostname === "github.com" &&
+    url.pathname === "/login/oauth/access_token"
+  ) {
+    return Response.json({
+      access_token: "composition-provider-access",
+      token_type: "bearer",
+      scope: "read:user user:email",
+    });
+  }
+  if (url.hostname === "api.github.com" && url.pathname === "/user") {
+    return Response.json({
+      id: providerIdentity.id,
+      login: providerIdentity.login,
+      name: providerIdentity.name,
+      avatar_url: null,
+    });
+  }
+  if (url.hostname === "api.github.com" && url.pathname === "/user/emails") {
+    return Response.json([
+      { email: providerIdentity.email, primary: true, verified: true },
+    ]);
+  }
+  throw new Error("unexpected_provider_request");
+}
+
+async function buildPlatformWorker() {
+  const result = await Bun.build({
+    entrypoints: [workerEntry],
+    external: ["cloudflare:workers"],
+    format: "esm",
+    naming: "worker.js",
+    target: "browser",
+  });
+  if (!result.success) throw new Error("platform_worker_build_failed");
+  const entry = result.outputs.find((output) => output.kind === "entry-point");
+  if (!entry) throw new Error("platform_worker_entry_missing");
+  return entry.text();
+}
+
+async function applyMigrations(database, directory) {
+  const migrations = await readD1Migrations(directory);
+  for (const migration of migrations) {
+    if (migration.queries.length > 0) {
+      await within(
+        "platform_migration_batch",
+        database.batch(
+          migration.queries.map((query) => database.prepare(query)),
+        ),
+      );
+    }
+  }
+}
+
+async function createPlatformRuntime(tempRoot, proxyOrigin) {
+  const bridge = await listenPlatformBridge(proxyOrigin);
+  const proxy = await listenPlatformProxy(bridge.origin);
+  bridge.setOrigin(proxy.origin);
+  state.platformBridge = bridge;
+  state.platformProxy = proxy;
+  const script = await buildPlatformWorker();
+  const secret = opaqueSecret("composition_platform_secret_");
+  const platformState = join(tempRoot, "platform-state");
+  const platform = new Miniflare(
+    convertV4MiniflareOptions({
+      bindings: {
+        BETTER_AUTH_SECRET: secret,
+        GITHUB_CLIENT_ID: "composition-github-client",
+        GITHUB_CLIENT_SECRET: opaqueSecret("composition_github_secret_"),
+        PLATFORM_AUTHORITY_ID: authority,
+        PLATFORM_BASE_URL: proxy.origin,
+        PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
+        PLATFORM_SERVER_DEADLINE_MS: "8000",
+        PLATFORM_RATE_LIMIT_POLICY: "",
+        PLATFORM_DEPLOYMENT_MODE: "self-hosted",
+        PLATFORM_SIGNUP_POLICY: "open",
+      },
+      compatibilityDate,
+      compatibilityFlags: ["nodejs_compat"],
+      d1Databases: { IDENTITY_DB: "composition-platform-identity" },
+      ratelimits: PLATFORM_TEST_MINIFLARE_RATE_LIMITS,
+      host: "127.0.0.1",
+      modules: true,
+      name: "composition-platform-runtime",
+      outboundService: providerOutbound,
+      resourcePersistencePath: platformState,
+      script,
+    }),
+  );
+  await within("platform_ready", platform.ready);
+  const database = await platform.getD1Database("IDENTITY_DB");
+  await applyMigrations(database, join(platformRoot, "migrations"));
+  await registerTestService(database, service);
+  bridge.setPlatform(platform);
+  state.platform = platform;
+  return { platform, database, proxyOrigin: proxy.origin, secret };
+}
+
+async function runCommand(args, options) {
+  const logHandle = await open(options.logPath, "w", 0o600);
+  const child = spawn("pnpm", args, {
+    cwd: options.cwd,
+    env: { ...process.env, ...(options.env ?? {}) },
+    detached: true,
+    stdio: ["ignore", logHandle.fd, logHandle.fd],
+  });
+  const result = await within(
+    "child_command",
+    new Promise((resolveCommand, rejectCommand) => {
+      child.once("error", rejectCommand);
+      child.once("close", (code, signal) => resolveCommand({ code, signal }));
+    }),
+    options.timeoutMs ?? startupTimeoutMs,
+  ).catch(async (error) => {
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {}
+    }
+    throw error;
+  });
+  await logHandle.close();
+  if (result.code !== 0) throw new Error("child_command_failed");
+}
+
+async function stopProcess(child) {
+  if (!child || child.exitCode !== null) return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {}
+  await within(
+    "child_shutdown",
+    new Promise((resolveClose) => child.once("close", resolveClose)),
+    cleanupTimeoutMs,
+  ).catch(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {}
+  });
+}
+
+async function buildCommunicatorAssets(tempRoot) {
+  const buildRoot = join(tempRoot, "communicator-build");
+  const buildLog = join(tempRoot, "communicator-build.log");
+  await runCommand(["vite", "build", "--outDir", buildRoot], {
+    cwd: communicatorApp,
+    env: { VITE_DEPLOYMENT_ENV: "local", VITE_DATA_MODE: "live" },
+    logPath: buildLog,
+  });
+  const files = [];
+  async function visit(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else files.push(path);
+    }
+  }
+  await visit(buildRoot);
+  for (const file of files) {
+    const contents = await readFile(file);
+    assert.equal(contents.includes(Buffer.from("DEBUG_BROWSER_")), false);
+    assert.equal(contents.includes(Buffer.from("T11_BROWSER")), false);
+  }
+  return buildRoot;
+}
+
+async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
+  const port = values.port;
+  const baseUrl = `http://localhost:${port}`;
+  const buildRoot = await buildCommunicatorAssets(tempRoot);
+  const configRoot = join(tempRoot, "communicator-config");
+  const stateRoot = join(tempRoot, "communicator-state");
+  await import("node:fs/promises").then(({ mkdir }) =>
+    mkdir(configRoot, { recursive: true, mode: 0o700 }),
+  );
+  const configPath = join(configRoot, "wrangler.jsonc");
+  const config = {
+    name: `composition-communicator-${process.pid}`,
+    main: wrapperPath,
+    compatibility_date: "2026-08-27",
+    compatibility_flags: ["nodejs_compat"],
+    assets: {
+      not_found_handling: "single-page-application",
+      run_worker_first: [
+        "/api/*",
+        "/internal/*",
+        "/auth/*",
+        "/oauth/*",
+        "/.well-known/*",
+        "/mcp",
+        "/__composition/*",
+      ],
+    },
+    exports: {
+      TenantProjectionDO: { type: "durable-object", storage: "sqlite" },
+      LinkSessionDO: { type: "durable-object", storage: "sqlite" },
+    },
+    durable_objects: {
+      bindings: [
+        { name: "TENANT_PROJECTION", class_name: "TenantProjectionDO" },
+        { name: "LINK_SESSIONS", class_name: "LinkSessionDO" },
+      ],
+    },
+    d1_databases: [
+      {
+        binding: "CONTROL_DB",
+        database_name: `composition-control-${process.pid}`,
+        database_id: "00000000-0000-0000-0000-000000000001",
+        migrations_dir: communicatorMigrations,
+      },
+    ],
+    r2_buckets: [
+      {
+        binding: "EVENT_ARCHIVE",
+        bucket_name: `composition-archive-${process.pid}`,
+      },
+    ],
+    queues: {
+      producers: [
+        {
+          binding: "INGESTION_QUEUE",
+          queue: `composition-ingestion-${process.pid}`,
+        },
+      ],
+      consumers: [
+        {
+          queue: `composition-ingestion-${process.pid}`,
+          max_batch_size: 10,
+          max_batch_timeout: 5,
+          max_retries: 10,
+          retry_delay: 60,
+          max_concurrency: 5,
+          dead_letter_queue: `composition-ingestion-dlq-${process.pid}`,
+        },
+      ],
+    },
+  };
+  await writePrivate(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  const devVars = [
+    ["COMMUNICATOR_ENV", "local"],
+    ["COMMUNICATOR_DATA_MODE", "live"],
+    ["COMMUNICATOR_PLATFORM_BASE_URL", platformRuntime.proxyOrigin],
+    ["COMMUNICATOR_PLATFORM_AUTHORITY", authority],
+    ["COMMUNICATOR_PLATFORM_AUDIENCE", service.audience],
+    ["COMMUNICATOR_PLATFORM_SERVICE_VERIFIER", service.verifier],
+    ["COMMUNICATOR_PLATFORM_BROWSER_CLIENT_ID", values.clientId],
+    ["COMMUNICATOR_PLATFORM_BROWSER_CLIENT_SECRET", values.clientSecret],
+    ["COMMUNICATOR_PLATFORM_BROWSER_REDIRECT_URI", `${baseUrl}/auth/callback`],
+    ["COMMUNICATOR_PLATFORM_BROWSER_RESOURCE", service.audience],
+    [
+      "COMMUNICATOR_PLATFORM_BROWSER_SCOPES",
+      service.allowedCapabilities.join(" "),
+    ],
+    ["COMMUNICATOR_INGRESS_ENABLED", "false"],
+    ["CONNECTION_GATEWAY_URL", "https://composition-gateway.0000.test"],
+    ["COMPOSITION_HARNESS_TOKEN", values.harnessToken],
+  ]
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+  await writePrivate(join(configRoot, ".dev.vars"), `${devVars}\n`);
+  const logs = join(tempRoot, "communicator-logs");
+  await import("node:fs/promises").then(({ mkdir }) =>
+    mkdir(logs, { recursive: true, mode: 0o700 }),
+  );
+  const migrationLog = join(logs, "migrations.log");
+  await runCommand(
+    [
+      "exec",
+      "wrangler",
+      "d1",
+      "migrations",
+      "apply",
+      "CONTROL_DB",
+      "--local",
+      "--persist-to",
+      stateRoot,
+      "--config",
+      configPath,
+    ],
+    { cwd: communicatorApp, logPath: migrationLog },
+  );
+  const baseSqlPath = join(configRoot, "base-directory.sql");
+  await writePrivate(baseSqlPath, baseDirectorySql());
+  await runCommand(
+    [
+      "exec",
+      "wrangler",
+      "d1",
+      "execute",
+      "CONTROL_DB",
+      "--local",
+      "--persist-to",
+      stateRoot,
+      "--file",
+      baseSqlPath,
+      "--config",
+      configPath,
+    ],
+    { cwd: communicatorApp, logPath: join(logs, "base-directory.log") },
+  );
+  const childLogPath = join(logs, "worker.log");
+  const child = spawn(
+    "pnpm",
+    [
+      "exec",
+      "wrangler",
+      "dev",
+      "--local",
+      "--ip",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--persist-to",
+      stateRoot,
+      "--assets",
+      join(buildRoot, "client"),
+      "--config",
+      configPath,
+    ],
+    {
+      cwd: communicatorApp,
+      env: process.env,
+      detached: true,
+      stdio: ["ignore", "ignore", "ignore"],
+    },
+  );
+  const logFile = await open(childLogPath, "w", 0o600);
+  child.stdout?.pipe(logFile.createWriteStream());
+  child.stderr?.pipe(logFile.createWriteStream());
+  child.once("error", () => {});
+  await waitFor(
+    "communicator_health",
+    async () => {
+      try {
+        const response = await fetch(`${baseUrl}/api/v1/health`);
+        return response.status === 200;
+      } catch {
+        return false;
+      }
+    },
+    startupTimeoutMs,
+  );
+  return { baseUrl, port, child, buildRoot, configRoot, stateRoot, logFile };
+}
+
+async function seedBinding(communicator, sql, label) {
+  const path = join(communicator.configRoot, `${label}.sql`);
+  await writePrivate(path, sql);
+  await runCommand(
+    [
+      "exec",
+      "wrangler",
+      "d1",
+      "execute",
+      "CONTROL_DB",
+      "--local",
+      "--persist-to",
+      communicator.stateRoot,
+      "--file",
+      path,
+      "--config",
+      join(communicator.configRoot, "wrangler.jsonc"),
+    ],
+    {
+      cwd: communicatorApp,
+      logPath: join(communicator.configRoot, `${label}.log`),
+    },
+  );
+}
+
+async function postJson(url, body, headers = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+    redirect: "manual",
+  });
+  return { response, body: await response.json().catch(() => ({})) };
+}
+
+async function safeJson(response) {
+  return response.json().catch(() => ({}));
+}
+
+function cookieMetadata(cookie) {
+  return cookie === undefined
+    ? { present: false }
+    : {
+        present: true,
+        secure: cookie.secure,
+        httpOnly: cookie.httpOnly,
+        sameSite: cookie.sameSite,
+        path: cookie.path,
+        hostOnly: !cookie.domain.startsWith("."),
+      };
+}
+
+async function platformLogin(page, platformOrigin, callbackOrigin) {
+  await page.goto(`${platformOrigin}/login`, { waitUntil: "domcontentloaded" });
+  const start = await page.evaluate(async (callbackURL) => {
+    const response = await fetch("/api/auth/sign-in/social", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        callbackURL,
+        disableRedirect: true,
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { status: response.status, url: body.url };
+  }, callbackOrigin);
+  assert.equal(start.status, 200);
+  assert.equal(typeof start.url, "string");
+  const stateValue = new URL(start.url).searchParams.get("state");
+  assert.equal(typeof stateValue, "string");
+  await page.goto(
+    `${platformOrigin}/api/auth/callback/github?code=composition-browser-callback&state=${encodeURIComponent(stateValue)}`,
+    { waitUntil: "domcontentloaded" },
+  );
+  const account = await page.evaluate(async () => {
+    const session = await fetch("/api/auth/get-session");
+    const me = await fetch("/api/me");
+    const sessionBody = await session.json().catch(() => ({}));
+    const meBody = await me.json().catch(() => ({}));
+    return {
+      sessionStatus: session.status,
+      authenticated: Boolean(sessionBody?.user),
+      meStatus: me.status,
+      hasUserId: typeof meBody?.userId === "string",
+      hasOrganizationId: typeof meBody?.organizationId === "string",
+      hasMembershipId: typeof meBody?.membershipId === "string",
+      userId: meBody?.userId,
+      organizationId: meBody?.organizationId,
+      membershipId: meBody?.membershipId,
+    };
+  });
+  assert.equal(account.sessionStatus, 200);
+  assert.equal(account.authenticated, true);
+  assert.equal(account.meStatus, 200);
+  assert.equal(account.hasUserId, true);
+  assert.equal(account.hasOrganizationId, true);
+  assert.equal(account.hasMembershipId, true);
+  return account;
+}
+
+async function createAlternateOrganization(page, platformOrigin) {
+  const response = await page.request.post(
+    `${platformOrigin}/api/account/organizations/create`,
+    {
+      headers: { origin: platformOrigin, "content-type": "application/json" },
+      data: JSON.stringify({ name: `Composition Alternate ${Date.now()}` }),
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  assert.equal(response.status(), 201);
+  assert.equal(typeof body.organizationId, "string");
+  assert.equal(typeof body.membershipId, "string");
+  return {
+    organizationId: body.organizationId,
+    membershipId: body.membershipId,
+  };
+}
+
+async function communicatorLogin(
+  page,
+  values,
+  selectedOrganizationId,
+  returnTo,
+) {
+  const commBase = values.commBase;
+  const platformOrigin = values.platformOrigin;
+  await page.goto(
+    `${commBase}/auth/login?return_to=${encodeURIComponent(returnTo)}`,
+    { waitUntil: "domcontentloaded" },
+  );
+  await page.waitForURL((url) => url.pathname === "/oauth2/selection", {
+    waitUntil: "domcontentloaded",
+  });
+  const selection = page.locator("form").first();
+  await selection
+    .locator('select[name="organizationId"]')
+    .selectOption(selectedOrganizationId);
+  const selectionResponse = await page.request.post(
+    `${platformOrigin}/oauth2/selection`,
+    {
+      headers: { origin: platformOrigin },
+      form: {
+        flowId: await selection.locator('input[name="flowId"]').inputValue(),
+        organizationId: selectedOrganizationId,
+      },
+      maxRedirects: 0,
+    },
+  );
+  assert.equal(selectionResponse.status(), 303);
+  const consentLocation = selectionResponse.headers().location;
+  assert.equal(typeof consentLocation, "string");
+  await page.goto(consentLocation, { waitUntil: "domcontentloaded" });
+  await page.locator("h1").filter({ hasText: "Approve access" }).waitFor();
+  const consent = page
+    .locator('form[action="/api/auth/oauth2/consent"]')
+    .first();
+  const consentResponse = await page.request.post(
+    `${platformOrigin}/api/auth/oauth2/consent`,
+    {
+      headers: { origin: platformOrigin },
+      form: {
+        accept: "true",
+        oauth_query: await consent
+          .locator('input[name="oauth_query"]')
+          .inputValue(),
+        flow_id: await consent.locator('input[name="flow_id"]').inputValue(),
+      },
+      maxRedirects: 0,
+    },
+  );
+  assert.equal(consentResponse.status(), 303);
+  const callbackLocation = consentResponse.headers().location;
+  assert.equal(typeof callbackLocation, "string");
+  await page.goto(callbackLocation, { waitUntil: "networkidle" });
+}
+
+async function inspectCommunicatorSession(page, expected) {
+  const response = await page.request.get(
+    `${expected.commBase}/api/v1/session`,
+  );
+  const body = await safeJson(response);
+  const identityIds = Array.isArray(body.identities)
+    ? body.identities.map((identity) => identity.identity_id)
+    : [];
+  return {
+    status: response.status(),
+    expectedBinding: body.binding_id === expected.bindingId,
+    expectedTenant: body.tenant?.id === expected.tenantId,
+    expectedMembership: body.membership?.id === expected.membershipId,
+    expectedIdentity: identityIds.includes(expected.identityId),
+  };
+}
+
+async function projectionCall(baseUrl, token, path, input) {
+  const response = await fetch(`${baseUrl}/__composition/projection/${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-composition-harness-token": token,
+    },
+    body: JSON.stringify({ tenant_id: FIXTURE.tenantId, input }),
+  });
+  return response.status;
+}
+
+async function realtimeObservation(page, ticketBody) {
+  const result = await page.evaluate(
+    ({ websocketUrl }) =>
+      new Promise((resolve, reject) => {
+        const socket = new WebSocket(websocketUrl, "communicator.realtime.v1");
+        window.__compositionRealtime = socket;
+        const state = {
+          connected: false,
+          allowedChangeCount: 0,
+          deniedChangeVisible: false,
+          resetReason: null,
+          subprotocol: "",
+        };
+        const timer = setTimeout(
+          () => reject(new Error("realtime_observation_timeout")),
+          20_000,
+        );
+        socket.addEventListener("open", () => {
+          state.subprotocol = socket.protocol;
+        });
+        socket.addEventListener("message", (event) => {
+          let body;
+          try {
+            body = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+          if (body.type === "connected") state.connected = true;
+          if (body.type === "projection.changes") {
+            const changes = Array.isArray(body.changes) ? body.changes : [];
+            state.allowedChangeCount += changes.filter(
+              (change) =>
+                change?.connection_id === "connection_composition_allowed",
+            ).length;
+            if (
+              changes.some(
+                (change) =>
+                  change?.connection_id === "connection_composition_denied",
+              )
+            )
+              state.deniedChangeVisible = true;
+          }
+          if (body.type === "reset_required")
+            state.resetReason =
+              typeof body.reason === "string" ? body.reason : "unknown";
+          if (
+            state.connected &&
+            state.allowedChangeCount >= 1 &&
+            state.resetReason !== null
+          ) {
+            clearTimeout(timer);
+            resolve(state);
+          }
+        });
+        socket.addEventListener("error", () =>
+          reject(new Error("realtime_socket_error")),
+        );
+        socket.addEventListener("close", (event) =>
+          reject(new Error(`realtime_closed_${event.code}`)),
+        );
+      }),
+    { websocketUrl: ticketBody.websocket_url },
+  );
+  return result;
+}
+
+async function observeSocketClose(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolveClose, reject) => {
+        const socket = window.__compositionRealtime;
+        if (!socket) {
+          reject(new Error("realtime_socket_missing"));
+          return;
+        }
+        if (socket.readyState === WebSocket.CLOSED) {
+          resolve(socket.closeCode ?? 1006);
+          return;
+        }
+        const timer = setTimeout(
+          () => reject(new Error("realtime_close_timeout")),
+          20_000,
+        );
+        socket.addEventListener(
+          "close",
+          (event) => {
+            clearTimeout(timer);
+            resolve(event.code);
+          },
+          { once: true },
+        );
+      }),
+  );
+}
+
+async function runBrowserComposition(
+  platformRuntime,
+  communicator,
+  client,
+  phase = "full",
+) {
+  const playwrightCandidates = [
+    process.env.T11_PLAYWRIGHT_MODULE,
+    join(communicatorApp, "node_modules/@playwright/test/index.mjs"),
+    join(communicatorRoot, "node_modules/@playwright/test/index.mjs"),
+  ].filter(Boolean);
+  let playwrightModule;
+  for (const candidate of playwrightCandidates) {
+    try {
+      playwrightModule = await import(pathToFileURL(resolve(candidate)).href);
+      break;
+    } catch {}
+  }
+  if (!playwrightModule) throw new Error("playwright_module_missing");
+  const browser = await playwrightModule.chromium.launch({ headless: true });
+  state.browser = browser;
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  page.setDefaultTimeout(operationTimeoutMs);
+  page.setDefaultNavigationTimeout(operationTimeoutMs);
+  let browserErrors = 0;
+  let failedRequests = 0;
+  page.on("pageerror", () => {
+    browserErrors += 1;
+  });
+  page.on("requestfailed", () => {
+    failedRequests += 1;
+  });
+  const platformAccount = await platformLogin(
+    page,
+    platformRuntime.proxyOrigin,
+    `${platformRuntime.proxyOrigin}/account`,
+  );
+  record("platform_startup", {
+    status: 200,
+    authenticated: true,
+    selectionRoutesReachable: true,
+    consentRoutesReachable: true,
+    callbackRoutesReachable: true,
+  });
+  const alternate = await createAlternateOrganization(
+    page,
+    platformRuntime.proxyOrigin,
+  );
+  record("platform_alternate_organization", { status: 201, created: true });
+  await seedBinding(
+    communicator,
+    humanBindingSql({
+      authority,
+      subjectId: platformAccount.userId,
+      organizationId: platformAccount.organizationId,
+      membershipId: platformAccount.membershipId,
+    }),
+    "primary-binding",
+  );
+  await seedBinding(
+    communicator,
+    alternateBindingSql({
+      authority,
+      subjectId: platformAccount.userId,
+      organizationId: alternate.organizationId,
+      membershipId: alternate.membershipId,
+    }),
+    "alternate-binding",
+  );
+  record("communicator_local_seed", {
+    directory: true,
+    primaryBinding: true,
+    alternateBinding: true,
+    allowedAccountGrant: true,
+    deniedAccountGrant: false,
+  });
+
+  const unauthenticated = await page.request.get(
+    `${communicator.baseUrl}/api/v1/session`,
+  );
+  assert.equal(unauthenticated.status(), 401);
+  record("protected_before_login", { status: unauthenticated.status() });
+  await communicatorLogin(
+    page,
+    {
+      commBase: communicator.baseUrl,
+      platformOrigin: platformRuntime.proxyOrigin,
+      platformDatabase: platformRuntime.database,
+    },
+    platformAccount.organizationId,
+    "/conversations/conversation_composition_allowed?identity=identity_composition_human&channel=connection_composition_allowed",
+  );
+  const session = await inspectCommunicatorSession(page, {
+    commBase: communicator.baseUrl,
+    bindingId: "binding_composition_human",
+    tenantId: FIXTURE.tenantId,
+    membershipId: FIXTURE.membershipId,
+    identityId: FIXTURE.identityId,
+  });
+  assert.deepEqual(session, {
+    status: 200,
+    expectedBinding: true,
+    expectedTenant: true,
+    expectedMembership: true,
+    expectedIdentity: true,
+  });
+  const cookies = await context.cookies(communicator.baseUrl);
+  const accessCookie = cookies.find(
+    (cookie) => cookie.name === "__Host-0000-access",
+  );
+  const metadata = cookieMetadata(accessCookie);
+  assert.deepEqual(metadata, {
+    present: true,
+    secure: true,
+    httpOnly: true,
+    sameSite: "Lax",
+    path: "/",
+    hostOnly: true,
+  });
+  record("communicator_callback_session", { ...session, cookie: metadata });
+  if (phase === "oauth") {
+    record("oauth_phase_complete", {
+      protectedSessionStatus: session.status,
+      expectedBinding: session.expectedBinding,
+      expectedTenant: session.expectedTenant,
+      expectedMembership: session.expectedMembership,
+      expectedIdentity: session.expectedIdentity,
+      cookieAttributesVerified: true,
+    });
+    await context.close();
+    return;
+  }
+
+  const initializationStatus = await projectionCall(
+    communicator.baseUrl,
+    client.harnessToken,
+    "initialize",
+    projectionInitialization(),
+  );
+  assert.equal(initializationStatus, 200);
+  const initialApplyStatus = await projectionCall(
+    communicator.baseUrl,
+    client.harnessToken,
+    "apply",
+    projectionBatch(initialProjectionEvents()),
+  );
+  assert.equal(initialApplyStatus, 200);
+  const ticketResponse = await page.request.post(
+    `${communicator.baseUrl}/api/v1/realtime/tickets`,
+    {
+      headers: { origin: communicator.baseUrl },
+      data: {
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: FIXTURE.identityId, families: ["projection"] },
+        ],
+        resume: [
+          { identity_id: FIXTURE.identityId, generation: 1, after_sequence: 0 },
+        ],
+      },
+    },
+  );
+  const ticket = await safeJson(ticketResponse);
+  assert.equal(ticketResponse.status(), 201);
+  assert.equal(typeof ticket.websocket_url, "string");
+  const realtime = await realtimeObservation(page, ticket);
+  assert.deepEqual(realtime, {
+    connected: true,
+    allowedChangeCount: 1,
+    deniedChangeVisible: false,
+    resetReason: "history_unavailable",
+    subprotocol: "communicator.realtime.v1",
+  });
+  record("realtime_actual_platform_authority", {
+    ticketStatus: ticketResponse.status(),
+    connected: realtime.connected,
+    authorizedDeliveryCount: realtime.allowedChangeCount,
+    deniedAccountVisible: realtime.deniedChangeVisible,
+    resetReason: realtime.resetReason,
+    subprotocol: realtime.subprotocol,
+  });
+
+  let mutationCount = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() !== "GET" &&
+      request.method() !== "HEAD" &&
+      request.url().includes("/api/v1/") &&
+      !request.url().includes("/api/v1/realtime/")
+    )
+      mutationCount += 1;
+  });
+  const draft401 = "draft survives actual Platform revocation";
+  await page.locator("textarea").fill(draft401);
+  const accountPage = await context.newPage();
+  accountPage.setDefaultTimeout(operationTimeoutMs);
+  await accountPage.goto(`${platformRuntime.proxyOrigin}/account`, {
+    waitUntil: "networkidle",
+  });
+  const activeInstallation = accountPage
+    .locator("li[data-oauth-installation-id]")
+    .filter({
+      has: accountPage.locator("button[data-revoke-oauth-installation]"),
+    })
+    .first();
+  await activeInstallation
+    .locator("button[data-revoke-oauth-installation]")
+    .click();
+  await accountPage.waitForLoadState("networkidle");
+  await accountPage.close();
+  await page.bringToFront();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const unauthStatus = page
+    .locator("div[role=status]")
+    .filter({
+      hasText: "Sign in to read and change protected Communicator data.",
+    })
+    .first();
+  await unauthStatus.waitFor({ state: "visible" });
+  assert.equal(await page.locator("textarea").inputValue(), draft401);
+  assert.equal(mutationCount, 0);
+  const revokedSession = await page.request.get(
+    `${communicator.baseUrl}/api/v1/session`,
+  );
+  const revokedTicket = await page.request.post(
+    `${communicator.baseUrl}/api/v1/realtime/tickets`,
+    {
+      headers: { origin: communicator.baseUrl },
+      data: {
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: FIXTURE.identityId, families: ["projection"] },
+        ],
+      },
+    },
+  );
+  assert.equal(revokedSession.status(), 401);
+  assert.equal(revokedTicket.status(), 401);
+  const afterRevocationApply = await projectionCall(
+    communicator.baseUrl,
+    client.harnessToken,
+    "apply",
+    projectionBatch(postRevocationProjectionEvents()),
+  );
+  assert.equal(afterRevocationApply, 200);
+  const closeCode = await observeSocketClose(page);
+  assert.equal(closeCode, 1008);
+  record("actual_platform_revocation", {
+    uiUnauthorized: true,
+    draftPreserved: true,
+    mutationCount,
+    protectedSessionStatus: revokedSession.status(),
+    protectedTicketStatus: revokedTicket.status(),
+    realtimeCloseCode: closeCode,
+  });
+
+  const [reauthPage] = await Promise.all([
+    context.waitForEvent("page"),
+    page.getByRole("button", { name: "Sign in in a new tab" }).click(),
+  ]);
+  await communicatorLogin(
+    reauthPage,
+    {
+      commBase: communicator.baseUrl,
+      platformOrigin: platformRuntime.proxyOrigin,
+      platformDatabase: platformRuntime.database,
+    },
+    platformAccount.organizationId,
+    "/conversations/conversation_composition_allowed?identity=identity_composition_human&channel=connection_composition_allowed",
+  );
+  const reauthSession = await inspectCommunicatorSession(reauthPage, {
+    commBase: communicator.baseUrl,
+    bindingId: "binding_composition_human",
+    tenantId: FIXTURE.tenantId,
+    membershipId: FIXTURE.membershipId,
+    identityId: FIXTURE.identityId,
+  });
+  assert.deepEqual(reauthSession, {
+    status: 200,
+    expectedBinding: true,
+    expectedTenant: true,
+    expectedMembership: true,
+    expectedIdentity: true,
+  });
+  await reauthPage.close();
+  await page.bringToFront();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await unauthStatus.waitFor({ state: "detached" });
+  assert.equal(await page.locator("textarea").inputValue(), draft401);
+  record("matching_reauth", {
+    sessionStatus: reauthSession.status,
+    expectedBinding: reauthSession.expectedBinding,
+    draftPreserved: true,
+    messageMutationCount: mutationCount,
+  });
+
+  const draft503 = "draft survives controlled Platform outage";
+  await page.locator("textarea").fill(draft503);
+  const outage = await postJson(
+    `${platformRuntime.proxyOrigin}/__composition/outage`,
+    {},
+  );
+  assert.equal(outage.response.status, 200);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const unavailableStatus = page
+    .locator("div[role=status]")
+    .filter({ hasText: "Platform is temporarily unavailable." })
+    .first();
+  await unavailableStatus.waitFor({ state: "visible" });
+  assert.equal(await page.locator("textarea").inputValue(), draft503);
+  assert.equal(mutationCount, 0);
+  const outageSession = await page.request.get(
+    `${communicator.baseUrl}/api/v1/session`,
+  );
+  assert.equal(outageSession.status(), 503);
+  const recover = await postJson(
+    `${platformRuntime.proxyOrigin}/__composition/recover`,
+    {},
+  );
+  assert.equal(recover.response.status, 200);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await unavailableStatus.waitFor({ state: "detached" });
+  const recoveredSession = await page.request.get(
+    `${communicator.baseUrl}/api/v1/session`,
+  );
+  assert.equal(recoveredSession.status(), 200);
+  assert.equal(await page.locator("textarea").inputValue(), draft503);
+  record("platform_outage_recovery", {
+    outageControlStatus: outage.response.status,
+    unavailableSessionStatus: outageSession.status(),
+    recoveredSessionStatus: recoveredSession.status(),
+    draftPreserved: true,
+    mutationCount,
+  });
+
+  const changedDraft = "draft stays paused across changed context";
+  await page.locator("textarea").fill(changedDraft);
+  const changedPage = await context.newPage();
+  await communicatorLogin(
+    changedPage,
+    {
+      commBase: communicator.baseUrl,
+      platformOrigin: platformRuntime.proxyOrigin,
+      platformDatabase: platformRuntime.database,
+    },
+    alternate.organizationId,
+    "/conversations/conversation_composition_allowed?identity=identity_composition_human&channel=connection_composition_allowed",
+  );
+  const changedSession = await inspectCommunicatorSession(changedPage, {
+    commBase: communicator.baseUrl,
+    bindingId: "binding_composition_alternate",
+    tenantId: "tenant_composition_alternate",
+    membershipId: "membership_composition_alternate",
+    identityId: "identity_composition_alternate",
+  });
+  assert.deepEqual(changedSession, {
+    status: 200,
+    expectedBinding: true,
+    expectedTenant: true,
+    expectedMembership: true,
+    expectedIdentity: true,
+  });
+  await changedPage.close();
+  await page.bringToFront();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const changedStatus = page
+    .locator("div[role=status]")
+    .filter({
+      hasText: "Your renewed login has a different organization or identity.",
+    })
+    .first();
+  await changedStatus.waitFor({ state: "visible" });
+  assert.equal(await page.locator("textarea").inputValue(), changedDraft);
+  assert.equal(mutationCount, 0);
+  await page.getByRole("button", { name: "Review and continue" }).click();
+  await changedStatus.waitFor({ state: "detached" });
+  record("changed_platform_context", {
+    alternateSessionStatus: changedSession.status,
+    expectedAlternateBinding: changedSession.expectedBinding,
+    draftPreserved: true,
+    messageMutationCount: mutationCount,
+    reviewTransitioned: true,
+  });
+
+  await page.getByRole("button", { name: "Log out" }).first().click();
+  await page
+    .locator("div[role=status]")
+    .filter({
+      hasText: "Sign in to read and change protected Communicator data.",
+    })
+    .first()
+    .waitFor({ state: "visible" });
+  const afterLogoutCookies = (
+    await context.cookies(communicator.baseUrl)
+  ).filter((cookie) => cookie.name === "__Host-0000-access");
+  assert.equal(afterLogoutCookies.length, 0);
+  assert.equal(new URL(page.url()).origin, communicator.baseUrl);
+  assert.equal(new URL(page.url()).pathname, "/");
+  record("logout", {
+    accessCookieCount: afterLogoutCookies.length,
+    signInVisible: true,
+    ambientLoginLoop: false,
+  });
+  record("browser_runtime", { pageErrors: browserErrors, failedRequests });
+  await context.close();
+}
+
+async function cleanup() {
+  if (state.browser) await state.browser.close().catch(() => {});
+  if (state.communicator)
+    await stopProcess(state.communicator.child).catch(() => {});
+  if (state.communicator?.logFile)
+    await state.communicator.logFile.close().catch(() => {});
+  if (state.platform) await state.platform.dispose().catch(() => {});
+  if (state.platformProxy) await state.platformProxy.close().catch(() => {});
+  if (state.platformBridge) await state.platformBridge.close().catch(() => {});
+  if (state.tempRoot)
+    await rm(state.tempRoot, { recursive: true, force: true }).catch(() => {});
+}
+
+async function main() {
+  assert.equal(typeof Bun, "object");
+  state.tempRoot = await mkdtemp(
+    join(tmpdir(), "platform-browser-composition-"),
+  );
+  const safeLogPath = join(
+    tmpdir(),
+    `platform-browser-composition-${process.pid}.jsonl`,
+  );
+  const sourceHashes = await hashSources([
+    wrapperPath,
+    join(harnessRoot, "fixture.mjs"),
+    join(harnessRoot, "runner.mjs"),
+    join(communicatorApp, "worker/index.ts"),
+    join(communicatorApp, "worker/auth/browser-routes.ts"),
+    join(communicatorApp, "worker/auth/middleware.ts"),
+    join(communicatorApp, "worker/realtime/handlers.ts"),
+    join(communicatorApp, "worker/projection/tenant-projection.ts"),
+    workerEntry,
+  ]);
+  record("run", {
+    command:
+      "bun run services/platform/scripts/platform-browser-composition/runner.mjs",
+    freshState: true,
+    freePorts: true,
+    provider: "simulated_github_only",
+    sourceHashes,
+  });
+  const platform = await createPlatformRuntime(
+    state.tempRoot,
+    "http://127.0.0.1",
+  );
+  const commPort = await allocateFreePort();
+  const commBase = `http://localhost:${commPort}`;
+  const harnessToken = opaqueSecret("composition_harness_");
+  const client = await provisionTrustedOAuthClient(
+    platform.database,
+    platform.secret,
+    {
+      serviceId: service.serviceId,
+      redirectUri: `${commBase}/auth/callback`,
+      capabilities: service.allowedCapabilities,
+      authMethod: "client_secret_post",
+      purpose: "first_party_browser",
+      clientId: "composition-browser-client",
+      name: "Composition browser proof",
+      refreshEnabled: false,
+    },
+  );
+  const communicator = await createCommunicatorRuntime(
+    state.tempRoot,
+    {
+      port: commPort,
+      clientId: client.clientId,
+      clientSecret: client.clientSecret,
+      harnessToken,
+    },
+    platform,
+  );
+  state.communicator = communicator;
+  record("startup", {
+    platformBase: true,
+    communicatorHealthStatus: 200,
+    platformPortOwned: true,
+    communicatorPortOwned: true,
+    stateDirectoriesOwned: true,
+    actualPlatformEntrypoint: true,
+    actualCommunicatorEntrypoint: true,
+  });
+  await runBrowserComposition(
+    platform,
+    communicator,
+    { harnessToken, commBase, platformOrigin: platform.proxyOrigin },
+    process.env.COMPOSITION_PHASE ?? "full",
+  );
+  await writePrivate(safeLogPath, `${safeLog.join("\n")}\n`);
+  await chmod(safeLogPath, 0o600);
+  record("complete", { assertions: safeLog.length, safeLogPath });
+}
+
+try {
+  await main();
+} catch (error) {
+  state.failed = true;
+  state.failure = error;
+  record("failure", { kind: safeFailure(error) });
+  process.exitCode = 1;
+} finally {
+  await cleanup();
+}
