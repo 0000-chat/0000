@@ -42,6 +42,20 @@ database hook confirms the committed mutation. A sink failure is best effort
 and cannot change the authorization response or mutation result. Timeout and
 later lifecycle completion use the same server correlation when both exist.
 
+The final review fixes are covered by bounded actual checks. The Wrangler
+wrapper now places its temporary policy config beside the service config, so
+`.dev.vars` and default `.wrangler/state` stay service-relative; an isolated
+fixture observes a generated-config `.dev.vars` marker and carries a local D1
+migration/write/read across separate wrapper invocations before cleanup. Direct
+provider unlink emits `platform.provider.unlinked` only after a one-row delete,
+and the concurrent/last-account route check finds one success event with no
+event for the denied operation. OAuth installation revoke emits its lifecycle
+event after the first durable refresh-family phase; an injected later-batch
+failure leaves the family revoked, returns unavailable, and preserves one
+correlated event. Authentication success is emitted only after session creation;
+the account-insertion failure callback remains an error redirect with no success
+event, while the retry creates one confirmed success event.
+
 The standalone Platform fixtures use the same native binding builder through
 `scripts/test-rate-limits.ts`, with an explicit 10,000-request test policy so
 long lifecycle suites do not accidentally exhaust production defaults. The
@@ -61,7 +75,7 @@ policy changes the emitted native budgets and malformed policy fails before
 deployment.
 
 Local checks completed for this implementation include the Platform format
-check, TypeScript typecheck, 15 Worker/D1 files with 71 tests, the focused
+check, TypeScript typecheck, 15 Worker/D1 files with 72 tests, the focused
 safeguard suite, config validation, the standalone native limiter proof, the
 actual two-worker Platform HTTP boundary proof, restart persistence, and the
 existing browser fixture configuration. The actual Platform boundary proof
