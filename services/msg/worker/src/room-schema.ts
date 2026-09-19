@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 7;
+export const CURRENT_ROOM_SCHEMA_VERSION = 8;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -241,18 +241,25 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 7) {
-    ensurePlatformSchemaAtV7(sql);
-    ensureNotificationSchemaAtV7(sql);
+    ensurePlatformSchema(sql);
+    ensureNotificationSchema(sql);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 8) {
+    // Upstream notifications and Platform both shipped schema version 7.
+    // This forward reconciliation is deliberately a new version so an
+    // already-version-7 room cannot skip either side of the merged schema.
+    ensurePlatformSchema(sql);
+    ensureNotificationSchema(sql);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
   throw new Error("The room schema migration is not defined.");
 }
 
-/** Upstream notification releases used the same schema version numbers before
- * Platform ownership was added. Reconcile those durable rows before the
- * notification-only additions run so an upgrade never drops auth state. */
-function ensurePlatformSchemaAtV7(sql: SqlStorage): void {
+/** Reconcile Platform ownership state without promoting any existing guest. */
+function ensurePlatformSchema(sql: SqlStorage): void {
   const stateColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
   if (!stateColumns.some((column) => column.name === "creation_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN creation_guest_id TEXT");
   if (!stateColumns.some((column) => column.name === "owner_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_guest_id TEXT");
@@ -305,7 +312,7 @@ function createVersionFourWebhookTables(sql: SqlStorage): void {
   `);
 }
 
-function ensureNotificationSchemaAtV7(sql: SqlStorage): void {
+function ensureNotificationSchema(sql: SqlStorage): void {
   const stateColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
   if (!stateColumns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
   const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));

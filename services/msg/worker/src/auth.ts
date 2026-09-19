@@ -302,7 +302,7 @@ export function createMsgAuthenticator(
       // A fresh public link keeps the usual read/write participant grant, and
       // any write request still requires both capabilities.
       const needed = input.source === "public" && input.action === "read" && local
-        ? [MSG_READ]
+        ? [...local.capabilities]
         : defaultCapabilities;
       const assertion = { kind: "participant" as const, permissionId: MSG_PERMISSION_IDS[input.source] };
       const grant = local?.grantId
