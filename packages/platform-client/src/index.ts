@@ -606,7 +606,9 @@ function safeReturnPath(value: unknown, origin: string): string | null {
     const resolved = new URL(value, origin);
     if (resolved.origin !== new URL(origin).origin || resolved.hash) return null;
     if (value.startsWith("//")) return null;
-    return value.startsWith("/") ? `${resolved.pathname}${resolved.search}` : null;
+    const normalized = `${resolved.pathname}${resolved.search}`;
+    if (!normalized.startsWith("/") || normalized.startsWith("//")) return null;
+    return value.startsWith("/") ? normalized : null;
   } catch {
     return null;
   }

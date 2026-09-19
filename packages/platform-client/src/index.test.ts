@@ -465,6 +465,31 @@ describe("Platform browser OAuth client", () => {
     expect(calls[1]?.authorization).toBe("Bearer service-verifier-only");
   });
 
+  it("rejects normalized double-slash return paths before storing a transaction", async () => {
+    const fetch = async () => new Response();
+    for (const returnTo of ["/a/..//evil.example", "/.//evil.example"]) {
+      const store = new MemoryBrowserTransactionStore();
+      const client = createPlatformBrowserClient(
+        browserOptions(store, fetch, () => Date.now()),
+      );
+      const started = await client.start({ returnTo });
+      expect(started).toEqual({ status: "invalid_request" });
+      expect(store.size()).toBe(0);
+    }
+
+    const store = new MemoryBrowserTransactionStore();
+    const client = createPlatformBrowserClient(
+      browserOptions(store, fetch, () => Date.now()),
+    );
+    const started = await client.start({
+      returnTo: "/a/../settings?tab=security",
+    });
+    expect(started.status).toBe("started");
+    if (started.status !== "started") return;
+    expect(started.returnTo).toBe("/settings?tab=security");
+    expect(store.size()).toBe(1);
+  });
+
   it("bounds the cookie from the post-verification clock and derives CSRF origin from the redirect", async () => {
     const store = new MemoryBrowserTransactionStore();
     const clockStart = Date.now();

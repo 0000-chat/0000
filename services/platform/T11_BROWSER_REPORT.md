@@ -42,14 +42,16 @@ The passing Chromium run proves:
 - the callback outage is separately classified as `authority_unavailable` and
   preserves its return draft; no browser page errors occur.
 
-The shared-client unit suite passes 18 tests and 140 assertions, including
+The shared-client unit suite passes 19 tests and 147 assertions, including
 malformed, duplicate, mixed and configuration-mismatch callback rejection;
 rejected human, agent-principal, authority, audience, capability, expiry,
 invalid-grant and refresh responses; callback body-delay, redirect and late
 transport regressions; a delayed callback regression for post-verification
-cookie expiry; and the default consumer-origin CSRF rule. The Worker/D1
-acceptance suite passes 10 tests across the OAuth installation and browser
-OAuth fixtures. It proves first-party provisioning constraints, request and
+cookie expiry; the default consumer-origin CSRF rule; and normalized
+double-slash return-path rejection before transaction storage with a
+normalized same-origin path regression. The Worker/D1 acceptance suite passes
+10 tests across the OAuth installation and browser OAuth fixtures. It proves
+first-party provisioning constraints, request and
 purpose binding, selection races and stale-authority rejection, PKCE/audience
 rejection, immutable-purpose enforcement and both directions of request-purpose
 spoof resistance, two-audience and two-organization isolation, provider-client,
