@@ -43,6 +43,9 @@ auth integration at `be5b001`. Parent combined checks pass the full msg package,
 the actual Platform Worker/D1-to-msg Worker/DO boundary with 59 assertions, and
 Platform's 32 tests plus restart. Chromium guest, management, recovery,
 revocation and outage flows pass independently.
+[T09_NOTIFICATIONS_MERGE_REPORT.md](T09_NOTIFICATIONS_MERGE_REPORT.md) records
+the upstream notification merge, forward schema reconciliation and participant
+recovery correction, with combined actual Platform/msg boundary evidence.
 [Msg's claim report](../msg/T10_CLAIM_REPORT.md) records atomic guest-to-organization
 transfer, exact authorized retries, preserved participants and explicit link
 revocation, reviewed and integrated at `c54d884`. Parent checks pass the full
