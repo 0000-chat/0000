@@ -80,5 +80,35 @@ The service config is wrangler.jsonc. The local helper replaces the D1
 placeholder with a validated MSG_D1_DATABASE_ID value and writes a temporary
 config for Wrangler. Keep database IDs and secrets out of tracked files.
 
+Anonymous operation quotas stay owned by msg and use Cloudflare's local
+Workers Rate Limit bindings. The default policy is six creations, 60 reads,
+20 posts, and 10 live connections per 60 seconds, keyed by the validated
+`cf-connecting-ip` value (or the shared `unknown` bucket). A deployment owner
+can provide a complete JSON policy through `MSG_RATE_LIMIT_POLICY_FILE` when
+running the existing `bun run wrangler ...` wrapper. Relative paths resolve
+from this service directory; malformed, partial, unknown, duplicate-namespace,
+or non-positive policies fail configuration rather than falling back to the
+defaults. The period is fixed at 60 seconds.
+
+The accepted shape is one object with exactly `creation`, `reads`, `posts`, and
+`live` entries. Each entry has a finite positive integer `limit` and a distinct
+positive-integer string `namespace_id`; an optional `period` is accepted only
+when it is `60`. Managed and self-host examples are in
+[`docs/examples/msg-rate-limit-policy.managed.json`](docs/examples/msg-rate-limit-policy.managed.json)
+and
+[`docs/examples/msg-rate-limit-policy.self-host.json`](docs/examples/msg-rate-limit-policy.self-host.json).
+Both use the same service-owned parser and binding builder. Supplying a
+different guest control does not change the trusted edge actor used by the
+quota key, so it cannot reset that actor's local allowance.
+
+Cloudflare Rate Limit bindings are location-local and permissive/eventually
+consistent. Namespace IDs share counters across Workers in the same account,
+so operators must choose namespace IDs deliberately. These quotas do not
+promise exact global accounting, exact per-person limits, or protection from a
+client changing its network identity. A missing or failed production binding
+fails closed with the existing metadata-only 429 response and
+`Retry-After: 60`; Platform outages still return 503 when the quota gate
+permits the request.
+
 The migration did not run Wrangler against production. The old source
 repository and its production cutover path remain unchanged.

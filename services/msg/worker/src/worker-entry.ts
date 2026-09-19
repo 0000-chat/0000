@@ -23,12 +23,24 @@ export interface MsgProductionEnvironment extends MsgEnvironment {
   readonly MSG_RATE_LIMIT_LIVE?: MsgRateLimit;
 }
 
+const unavailableRateLimit: MsgRateLimit = {
+  async limit() {
+    throw new Error("The required msg rate-limit binding is unavailable.");
+  },
+};
+
 export default {
   fetch(request: Request, env: MsgProductionEnvironment): Promise<Response> {
+    const rateLimits = {
+      creation: env.MSG_RATE_LIMIT_CREATION ?? unavailableRateLimit,
+      live: env.MSG_RATE_LIMIT_LIVE ?? unavailableRateLimit,
+      posts: env.MSG_RATE_LIMIT_POSTS ?? unavailableRateLimit,
+      reads: env.MSG_RATE_LIMIT_READS ?? unavailableRateLimit,
+    };
     const roomService = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom as RoomNamespace, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : undefined);
     if (!roomService) return createWorker(
       { async create() { throw new Error("The room service is not available."); } },
-      { assets: env.ASSETS },
+      { assets: env.ASSETS, rateLimits },
     ).fetch(request);
     const operations = env.MSG_DB && env.MSG_DATA_ENCRYPTION_KEY_V1
       ? new D1OperationStore(env.MSG_DB, env.MSG_DATA_ENCRYPTION_KEY_V1)
@@ -52,12 +64,7 @@ export default {
       createDisabled: env.MSG_CREATE_DISABLED === "1",
       operations,
       postDisabled: env.MSG_POST_DISABLED === "1",
-      rateLimits: {
-        creation: env.MSG_RATE_LIMIT_CREATION,
-        live: env.MSG_RATE_LIMIT_LIVE,
-        posts: env.MSG_RATE_LIMIT_POSTS,
-        reads: env.MSG_RATE_LIMIT_READS,
-      },
+      rateLimits,
     }).fetch(request);
   },
   scheduled(_event: ScheduledEvent, env: MsgProductionEnvironment, ctx: ExecutionContext): void {

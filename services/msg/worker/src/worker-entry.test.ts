@@ -12,6 +12,14 @@ test("declares and passes all production rate limit bindings at the Worker bound
   }
 });
 
+test("fails closed for a missing production binding while keeping the unit port optional", () => {
+  expect(workerEntry).toContain("const unavailableRateLimit: MsgRateLimit");
+  expect(workerEntry).toContain("env.MSG_RATE_LIMIT_CREATION ?? unavailableRateLimit");
+  expect(workerEntry).toContain("env.MSG_RATE_LIMIT_READS ?? unavailableRateLimit");
+  expect(workerEntry).toContain("env.MSG_RATE_LIMIT_POSTS ?? unavailableRateLimit");
+  expect(workerEntry).toContain("env.MSG_RATE_LIMIT_LIVE ?? unavailableRateLimit");
+});
+
 test("uses the configured canonical public origin instead of the request origin", () => {
   expect(workerEntry).toContain("readonly MSG_PUBLIC_ORIGIN?: string;");
   expect(workerEntry).toContain("env.MSG_PUBLIC_ORIGIN");

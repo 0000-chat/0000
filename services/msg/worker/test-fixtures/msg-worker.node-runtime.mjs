@@ -152,6 +152,7 @@ async function start(configuration) {
       durableObjectsPersist: configuration.persistenceDirectory,
       host: "127.0.0.1",
       modules: true,
+      ratelimits: configuration.ratelimits,
       script: configuration.script,
     });
     if (configuration.d1MigrationPaths?.length) {

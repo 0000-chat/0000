@@ -1,10 +1,17 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import {
   createMsgWranglerConfig,
   normalizeGeneratedTypes,
   validateMsgD1DatabaseId,
 } from "./wrangler-config";
+import {
+  buildMsgMiniflareRateLimits,
+  buildMsgWranglerRateLimits,
+  parseMsgRateLimitPolicyJson,
+  validateMsgRateLimitPolicy,
+} from "./msg-rate-limit-policy";
 
 test("creates a production config only from a validated D1 database id", () => {
   const config = createMsgWranglerConfig("11111111-2222-4333-8444-555555555555");
@@ -37,6 +44,33 @@ test("configures separate one-minute production rate-limit bindings", () => {
     { name: "MSG_RATE_LIMIT_POSTS", namespace_id: "2026080903", simple: { limit: 20, period: 60 } },
     { name: "MSG_RATE_LIMIT_LIVE", namespace_id: "2026080904", simple: { limit: 10, period: 60 } },
   ]);
+});
+
+test("feeds managed and self-host examples through the shared binding builders", () => {
+  for (const [fileName, expectedPosts] of [["managed", 20], ["self-host", 40]] as const) {
+    const policy = parseMsgRateLimitPolicyJson(readFileSync(new URL(`../docs/examples/msg-rate-limit-policy.${fileName}.json`, import.meta.url), "utf8"));
+    const wranglerBindings = buildMsgWranglerRateLimits(policy);
+    const runtimeBindings = buildMsgMiniflareRateLimits(policy);
+    expect(wranglerBindings.find((binding) => binding.name === "MSG_RATE_LIMIT_POSTS")?.simple.limit).toBe(expectedPosts);
+    expect(runtimeBindings.MSG_RATE_LIMIT_POSTS.simple.limit).toBe(expectedPosts);
+    expect(JSON.parse(createMsgWranglerConfig("11111111-2222-4333-8444-555555555555", policy)).ratelimits).toEqual(wranglerBindings);
+  }
+});
+
+test("rejects incomplete, unknown, contradictory, and malformed policy values", () => {
+  const valid = {
+    creation: { limit: 1, namespace_id: "1" },
+    reads: { limit: 2, namespace_id: "2" },
+    posts: { limit: 3, namespace_id: "3" },
+    live: { limit: 4, namespace_id: "4" },
+  };
+  expect(validateMsgRateLimitPolicy(valid)).toEqual(valid);
+  expect(() => validateMsgRateLimitPolicy({ ...valid, live: undefined })).toThrow("live");
+  expect(() => validateMsgRateLimitPolicy({ ...valid, extra: { limit: 1, namespace_id: "5" } })).toThrow("unknown");
+  expect(() => validateMsgRateLimitPolicy({ ...valid, posts: { limit: 1.5, namespace_id: "5" } })).toThrow("positive integer");
+  expect(() => validateMsgRateLimitPolicy({ ...valid, live: { limit: 4, namespace_id: "3" } })).toThrow("distinct");
+  expect(() => validateMsgRateLimitPolicy({ ...valid, live: { limit: 4, namespace_id: "4", period: 10 } })).toThrow("60");
+  expect(() => parseMsgRateLimitPolicyJson("{ malformed")).toThrow("valid JSON");
 });
 
 test("rejects placeholders and malformed D1 database ids", () => {

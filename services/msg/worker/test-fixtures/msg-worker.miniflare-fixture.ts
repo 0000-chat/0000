@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { acquireMiniflareTestLock } from "./miniflare-test-lock";
+import {
+  buildMsgMiniflareRateLimits,
+  type MsgMiniflareRateLimitBinding,
+  type MsgRateLimitPolicy,
+} from "../../scripts/msg-rate-limit-policy";
 
 const appDirectory = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = join(appDirectory, ".miniflare-tests");
@@ -26,6 +31,14 @@ export const SHORT_LIVED_TEST_ROOM_LIMITS = {
   ...TEST_ROOM_LIMITS,
   inactivityTtlMs: 100,
   tombstoneTtlMs: 100,
+};
+
+/** Generous local bindings keep auth/integration fixtures focused on their own behavior. */
+export const TEST_MSG_RATE_LIMIT_POLICY: MsgRateLimitPolicy = {
+  creation: { limit: 100, namespace_id: "913001" },
+  reads: { limit: 1_000, namespace_id: "913002" },
+  posts: { limit: 100, namespace_id: "913003" },
+  live: { limit: 100, namespace_id: "913004" },
 };
 
 export interface MsgMiniflareRuntime {
@@ -56,6 +69,7 @@ interface NodeRuntimeConfiguration {
   d1Persist?: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
+  ratelimits: Readonly<Record<string, MsgMiniflareRateLimitBinding>>;
   script: string;
 }
 
@@ -251,6 +265,7 @@ export async function startMsgMiniflare(
   extraBindings: Record<string, string> = {},
   useTestLimits = true,
   useOperations = false,
+  rateLimitPolicy: MsgRateLimitPolicy = TEST_MSG_RATE_LIMIT_POLICY,
 ): Promise<MsgMiniflareFixture> {
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
@@ -277,6 +292,7 @@ export async function startMsgMiniflare(
         ConversationRoom: { className: "ConversationRoom", useSQLite: true },
       },
       persistenceDirectory,
+      ratelimits: buildMsgMiniflareRateLimits(rateLimitPolicy),
       script,
     });
   } catch (error) {
