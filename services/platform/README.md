@@ -60,10 +60,14 @@ confirmed defect. Limits remain per-location and permissive; private Cloud
 configuration publication remains T15. Communicator integration remains T11.
 [T07_OAUTH_REPORT.md](T07_OAUTH_REPORT.md) records the bounded trusted-client
 refresh rotation, replay protection and installation-control implementation.
-The T07 branch's local checks pass twelve Worker/D1 files and forty-nine tests,
-formatting, typecheck and restart persistence. T07 remains subject to parent
-review and aggregate integration. Provider HTTP remains simulated; these checks
-do not establish external-client adoption.
+T07 is reviewed and integrated at `1d519cd`. Parent combined checks pass twelve
+Worker/D1 files and forty-nine tests, formatting/typecheck, persistence and
+refresh restart probes, Chromium installation controls, and 142 actual
+Platform-to-msg boundary assertions. Native and bounded Grok reviews close the
+refresh and installation-isolation findings. [The runtime report](T07_RUNTIME_ACCEPTANCE_REPORT.md)
+describes the restart/browser evidence. Provider HTTP remains simulated; these
+checks do not establish external-client adoption. Service-principal issuance,
+Communicator human/browser integration, server safeguards and setup remain open.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 

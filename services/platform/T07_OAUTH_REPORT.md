@@ -148,3 +148,22 @@ The failure tests prove the local D1/provider-row fail-closed boundary; they do
 not claim rollback support from an external provider deployment or deployed
 browser adoption from a response-shape test. Those remain review and deployment
 evidence beyond this local Worker/D1 slice.
+
+## Aggregate acceptance
+
+Integrated at `1d519cd` after independent Astra medium Standards and Spec
+reviews and a bounded authenticated Grok 4.6 high review. The final correction
+confines the pinned provider's token cleanup to the prepared installation;
+the actual pre-provider ancestor-replay regression preserves sibling access.
+No remaining finding was identified within the reviewed correction scope.
+
+The parent independently ran the full Platform check on the combined tree:
+twelve Worker/D1 files, forty-nine tests, formatting/typecheck and the generic
+persistence restart probe passed. The separate refresh restart and Chromium
+installation-control probes in [the runtime report](T07_RUNTIME_ACCEPTANCE_REPORT.md)
+passed against the corrected production source. The actual Platform-to-msg
+authentication and claim boundaries passed two tests with 142 assertions.
+
+These are local production-route proofs with simulated external social-provider
+HTTP. They do not close live client acceptance, Communicator adoption, remaining
+Platform safeguards, deployment setup or full MVP acceptance.

@@ -1,8 +1,9 @@
 # Platform authentication MVP
 
-Date: 2026-09-19. Status: agreed MVP design; T01 through T05 reviewed and verified
+Date: 2026-09-20. Status: agreed MVP design; T01 through T05 reviewed and verified
 on the aggregate; T14 reconnect fixture reviewed and verified at `166e54d`;
-T05 verified at `10d31c8`; full MVP not accepted.
+T05 verified at `10d31c8`; T07 refresh and installation controls reviewed and
+verified at `1d519cd`; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -327,26 +328,28 @@ No user/org import, dual-trust period, historical session cutover, full
 apps/0000 integration or offline-sync build is an acceptance gate. Database
 production adoption is tracked separately and cannot be claimed from a fixture.
 
-## Technical validation still required
+## Technical validation and remaining gates
 
 The product decisions above are settled. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
 records the pinned versions and the flows exercised in Workers/D1. The following
-items remain open and must be verified rather than inferred from documentation
-alone:
+items distinguish completed local evidence from remaining acceptance work:
 
-- The pinned OAuth Provider passes a sequential D1 PKCE/code/refresh-reuse
-  probe. Its family invalidation is a sequence of adapter deletes with a
-  concurrent race documented in the pinned source. T06/T07 must add authoritative
-  Platform installation/grant checks and prove concurrent replay and revocation
-  before OAuth acceptance.
-- Isolated consent probe `41cd96f` adds per-request auth construction, public
-  PKCE, signed flow/reference binding and concurrent organization selection;
-  the parent focused Worker/D1 rerun passes three tests. Independent review
-  requires coherent current-authority predicates during activation, exact
-  selection-race outcomes and fail-closed handling of unbound token responses.
-  The code-exchange response bypasses the pinned provider's after hook, so
-  production needs a Worker response wrapper with complete route coverage.
-  This experiment remains outside the aggregate and does not pass T06/T07.
+- T06 code-only OAuth and T07 refresh/installation controls are reviewed and
+  integrated at `86324b0` and `1d519cd`. Platform owns durable installation
+  authority, current membership/grants, pending consumption, retained hashed
+  lineage and guarded publication. The pinned provider's broad user/client
+  cleanup is confined by a request-scoped adapter to the successfully prepared
+  installation, including transaction callbacks. Actual pre-provider ancestor
+  replay now preserves the healthy sibling. Parent combined checks pass twelve
+  Worker/D1 files/forty-nine tests, persistence and refresh restart probes,
+  Chromium installation controls, and 142 Platform-to-msg assertions. Native
+  and bounded Grok review findings are closed. External provider HTTP is
+  simulated; live client acceptance remains separate.
+- The earlier isolated consent probe `41cd96f` is historical feasibility
+  evidence. Integrated T06/T07 now exercise exact organization-selection
+  outcomes, current-authority write guards and production Worker response
+  wrapping for code exchange and refresh. A scaffold or provider hook alone
+  is not the acceptance evidence; see the T06/T07 reports.
 - A real Miniflare runtime restart preserves a bounded guest grant and resource
   fixture in persistent D1. Human login/session and social linking work across
   local Worker requests with simulated provider HTTP. T03's local Worker/D1
