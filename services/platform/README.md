@@ -32,8 +32,7 @@ T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
 [T06_OAUTH_REPORT.md](T06_OAUTH_REPORT.md) records the bounded code-only
-personal-harness OAuth installation flow and its Worker/D1 evidence. T07
-refresh rotation and installation revocation remain open. T06 is reviewed and
+personal-harness OAuth installation flow and its Worker/D1 evidence. T06 is reviewed and
 integrated at `86324b0`; combined checks pass eleven Worker/D1 files, thirty-two
 tests, formatting/typecheck and restart persistence. Independent browser
 approve/deny and trusted CLI rollback checks pass. Final review's login-error
@@ -59,6 +58,10 @@ executed production-entry checks deny all missing or failed action bindings
 before resource calls. Native and bounded adversarial reviews found no remaining
 confirmed defect. Limits remain per-location and permissive; private Cloud
 configuration publication remains T15. Communicator integration remains T11.
+[T07_OAUTH_REPORT.md](T07_OAUTH_REPORT.md) records the bounded trusted-client
+refresh rotation, replay protection and installation-control implementation.
+T07 remains subject to parent review and aggregate integration. Its report
+records the current local evidence; external-client adoption remains separate.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 
@@ -278,15 +281,18 @@ Worker/D1 path; [T05_AGENT_REPORT.md](T05_AGENT_REPORT.md) records its bounded
 worker evidence and limitations, independently reviewed and verified on the
 aggregate at `10d31c8`.
 T06 adds a bounded code-only OAuth installation flow; [T06_OAUTH_REPORT.md](T06_OAUTH_REPORT.md)
-records its evidence and remaining T07 gates. Local Worker tests exercise
+records its evidence. T07 adds explicitly trusted refresh-enabled personal
+harnesses, hash-only rotation lineage, replay fencing and account revoke;
+[T07_OAUTH_REPORT.md](T07_OAUTH_REPORT.md) records its local evidence and
+limits. Local Worker tests exercise
 Better Auth callbacks, sessions, D1 persistence, signup policy, profile,
 organization, human credential, agent and T06 OAuth controls;
 Google/GitHub
 HTTP responses are simulated at the provider boundary. The service and
 protected-resource checks remain fixtures. This is not a deployed identity
 service or a complete shared-auth integration. T06 does not claim a live
-external provider/client or consumer adoption; refresh rotation, installation
-revocation and managed deployment ownership remain later work.
+external provider/client or consumer adoption; managed deployment ownership and
+aggregate T07 acceptance remain later work.
 Database is also a scaffold.
 The message service now uses shared Platform authentication with local resource
 ACLs; Communicator still needs that migration. No

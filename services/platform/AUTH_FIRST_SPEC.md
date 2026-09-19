@@ -373,7 +373,10 @@ alone:
   and T06 now normalizes code-issued access through `/internal/v1/authenticate`
   with an exact Platform installation and provider-row binding. Current
   membership, client, service, catalog and consent are checked without
-  caller-supplied authority. T07 refresh lifecycle remains outstanding.
+  caller-supplied authority. T07 now adds a bounded trusted-client refresh
+  lifecycle with hash-only lineage, replay fencing and account installation
+  revoke; [T07_OAUTH_REPORT.md](T07_OAUTH_REPORT.md) records the local evidence
+  and its limits.
 - T05 exercises organization-owned agent creation, stable identity across two
   service audiences, live grant and agent lifecycle checks, one-time opaque
   credential issue/rotation/revocation and creator-departure administration in
@@ -398,7 +401,9 @@ Worker/D1 files/thirty-two tests plus restart persistence. Native Chromium
 approve/deny navigation, real CLI transaction rollback and failed-login retry
 are independently verified. The bounded adversarial review found no confirmed
 exploitable defect; its login retry regression was corrected and reviewed.
-Refresh issuance remains disabled until T07 acceptance.
+Refresh issuance is enabled only for explicitly provisioned trusted clients with
+the T07 refresh gate; aggregate T07 acceptance and external-client adoption
+remain outstanding.
 This local credential and registration evidence does not establish deployed
 provisioning, live provider behavior or consumer
 adoption. The full Platform authentication MVP remains unimplemented until

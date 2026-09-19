@@ -89,6 +89,22 @@ export interface AccountAgent {
   credentials: AccountAgentCredential[];
 }
 
+export interface AccountOAuthInstallation {
+  id: string;
+  clientId: string;
+  clientName: string;
+  serviceId: string;
+  audience: string;
+  organizationName: string;
+  capabilities: string[];
+  createdAt: number;
+  expiresAt: number;
+  active: boolean;
+  revokedAt: number | null;
+  familyState: string | null;
+  familyExpiresAt: number | null;
+}
+
 export interface AccountView {
   name: string;
   email: string;
@@ -111,6 +127,7 @@ export interface AccountView {
   agentOrganizationId: string | null;
   agentServices: AccountCredentialService[];
   agents: AccountAgent[];
+  oauthInstallations: AccountOAuthInstallation[];
 }
 
 const securityHeaders = {
@@ -464,6 +481,28 @@ function agentManagementMarkup(view: AccountView): string {
   return `<section class="card" aria-labelledby="agent-heading"><h2 id="agent-heading">Organization agents</h2><p class="hint">Agents are organization-owned identities. They keep a stable subject ID, use a separate grant for each service audience, and never inherit a creator's human role.</p>${body}</section>`;
 }
 
+function oauthInstallationMarkup(view: AccountView): string {
+  const installations = view.oauthInstallations
+    .map((installation) => {
+      const status = installation.revokedAt
+        ? "revoked"
+        : installation.active && installation.familyState !== "quarantined"
+          ? "active"
+          : (installation.familyState ?? "pending");
+      return `<li class="management-row" data-oauth-installation-id="${escapeHtml(installation.id)}">
+        <div><strong>${escapeHtml(installation.clientName || installation.clientId)}</strong><span>${escapeHtml(installation.organizationName)} · ${escapeHtml(installation.serviceId)} · ${escapeHtml(installation.audience)}</span><small>${escapeHtml(installation.capabilities.join(", "))} · ${escapeHtml(status)} · created ${escapeHtml(new Date(installation.createdAt).toLocaleString())}</small></div>
+        ${status !== "revoked" ? `<button type="button" class="quiet-button" data-revoke-oauth-installation="${escapeHtml(installation.id)}">Revoke</button>` : ""}
+      </li>`;
+    })
+    .join("");
+  return `<section class="card" aria-labelledby="oauth-installation-heading">
+    <h2 id="oauth-installation-heading">Harness installations</h2>
+    <p class="hint">These entries identify OAuth connections for this account and selected organization. Secrets are never displayed here. Revocation is permanent; reconnecting creates a new installation.</p>
+    <ul class="management-list" id="oauth-installation-list">${installations || `<li class="muted">No OAuth harness installations.</li>`}</ul>
+    <p id="oauth-installation-status" class="status" role="status" aria-live="polite"></p>
+  </section>`;
+}
+
 export function accountPage(view: AccountView): Response {
   const image = safeAvatarUrl(view.image);
   const avatar = image
@@ -553,6 +592,7 @@ export function accountPage(view: AccountView): Response {
         ${defaultOrganization}
       </section>
       ${credentialManagementMarkup(view)}
+      ${oauthInstallationMarkup(view)}
       ${agentManagementMarkup(view)}
       <section class="card" aria-labelledby="invitations-heading">
         <h2 id="invitations-heading">Invitations for you</h2>
@@ -912,6 +952,33 @@ credentialSection?.addEventListener("click", async (event) => {
   }
 });
 
+const oauthInstallationSection = document.querySelector("[aria-labelledby=oauth-installation-heading]");
+oauthInstallationSection?.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element
+    ? event.target.closest("button[data-revoke-oauth-installation]")
+    : null;
+  if (!(target instanceof HTMLButtonElement)) return;
+  const installationId = target.dataset.revokeOauthInstallation;
+  const organizationId = organizationSelect?.value || "";
+  const requestGeneration = credentialViewGeneration;
+  if (!installationId) return;
+  target.disabled = true;
+  const status = document.getElementById("oauth-installation-status");
+  try {
+    await postAccountJson("/api/account/oauth-installations/revoke", {
+      installationId,
+      organizationId,
+    });
+    if (!credentialViewMatches(organizationId, requestGeneration)) return;
+    window.location.reload();
+  } catch (error) {
+    if (!credentialViewMatches(organizationId, requestGeneration)) return;
+    showMessage(status, error instanceof Error ? error.message : "Installation could not be revoked.");
+  } finally {
+    if (credentialViewMatches(organizationId, requestGeneration)) target.disabled = false;
+  }
+});
+
 function agentViewMatches(organizationId, generation) {
   return credentialViewMatches(organizationId, generation);
 }
@@ -1151,6 +1218,13 @@ const organizationSelect = document.getElementById("organization-select");
 organizationSelect?.addEventListener("change", () => {
   credentialViewGeneration += 1;
   const organizationId = organizationSelect.value;
+  document.querySelectorAll(
+    "#credential-issue-form input, #credential-issue-form select, #credential-issue-form button, #oauth-installation-list button, #agent-create-form input, #agent-create-form button, #agent-list input, #agent-list select, #agent-list button",
+  ).forEach((control) => {
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLButtonElement) {
+      control.disabled = true;
+    }
+  });
   const secretPanel = document.getElementById("credential-secret");
   const secretValue = secretPanel?.querySelector("[data-secret-value]");
   if (secretPanel instanceof HTMLElement) secretPanel.hidden = true;

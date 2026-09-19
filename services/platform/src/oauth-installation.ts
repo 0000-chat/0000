@@ -27,6 +27,24 @@ function validOAuthCapabilities(value: unknown): value is string[] {
   return validCapabilities(value) && !value.includes("offline_access");
 }
 
+export function validOAuthScopes(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    new Set(value).size === value.length &&
+    value.every(
+      (entry) =>
+        typeof entry === "string" &&
+        entry.length > 0 &&
+        (entry === "offline_access" || validCapabilities([entry])),
+    )
+  );
+}
+
+function oauthCapabilitiesFromScopes(scopes: string[]): string[] {
+  return scopes.filter((scope) => scope !== "offline_access");
+}
+
 export interface TrustedOAuthClientInput {
   serviceId: string;
   redirectUri: string;
@@ -35,6 +53,7 @@ export interface TrustedOAuthClientInput {
   ownerUserId?: string | null;
   clientId?: string;
   name?: string;
+  refreshEnabled?: boolean;
 }
 
 export interface TrustedOAuthClient {
@@ -45,6 +64,7 @@ export interface TrustedOAuthClient {
   redirectUri: string;
   capabilities: string[];
   authMethod: OAuthClientAuthMethod;
+  refreshEnabled: boolean;
 }
 
 export interface OAuthClientRecord extends TrustedOAuthClient {
@@ -252,6 +272,7 @@ export async function provisionTrustedOAuthClient(
     redirectUri: input.redirectUri,
     capabilities: [...input.capabilities],
     authMethod: input.authMethod,
+    refreshEnabled: registration.refreshEnabled,
   };
 }
 
@@ -272,6 +293,12 @@ export function validateTrustedOAuthClientInput(
   }
   if (!validOAuthCapabilities(input.capabilities)) {
     throw new Error("invalid_capabilities");
+  }
+  if (
+    input.refreshEnabled !== undefined &&
+    typeof input.refreshEnabled !== "boolean"
+  ) {
+    throw new Error("invalid_refresh_flag");
   }
   if (input.clientId && !validClientId(input.clientId)) {
     throw new Error("invalid_client_id");
@@ -297,6 +324,7 @@ export interface TrustedOAuthClientRegistration {
   redirectUri: string;
   capabilities: string[];
   authMethod: OAuthClientAuthMethod;
+  refreshEnabled: boolean;
   ownerUserId: string | null;
   clientName: string;
   now: number;
@@ -343,6 +371,7 @@ export async function prepareTrustedOAuthClientRegistration(
     redirectUri: input.redirectUri,
     capabilities: [...input.capabilities],
     authMethod: input.authMethod,
+    refreshEnabled: input.refreshEnabled === true,
     ownerUserId: input.ownerUserId ?? null,
     clientName: input.name?.trim() || `0000 ${input.serviceId}`,
     now,
@@ -361,6 +390,19 @@ export function trustedOAuthClientStatements(
 ): OAuthClientProvisionStatement[] {
   const capabilities = JSON.stringify(registration.capabilities);
   const catalog = JSON.stringify(registration.catalog);
+  const protocolScopes = JSON.stringify([
+    ...registration.capabilities,
+    ...(registration.refreshEnabled ? ["offline_access"] : []),
+  ]);
+  const resourceScopes = JSON.stringify([
+    ...registration.catalog,
+    ...(registration.refreshEnabled ? ["offline_access"] : []),
+  ]);
+  const grantTypes = JSON.stringify(
+    registration.refreshEnabled
+      ? ["authorization_code", "refresh_token"]
+      : ["authorization_code"],
+  );
   // Every write rechecks the exact service snapshot used to prepare this
   // registration. A service disable or capability change between the read
   // and this batch therefore produces zero writes instead of publishing a
@@ -394,10 +436,14 @@ export function trustedOAuthClientStatements(
       sql: `INSERT INTO oauthResource
        (id, identifier, name, accessTokenTtl, refreshTokenTtl,
         allowedScopes, disabled, createdAt, updatedAt)
-       SELECT ?, ?, ?, ?, NULL, ?, 0, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, 0, ?, ?
        WHERE ${serviceGuard}
        ON CONFLICT(identifier) DO UPDATE SET
          allowedScopes = excluded.allowedScopes,
+         refreshTokenTtl = CASE
+           WHEN excluded.refreshTokenTtl IS NOT NULL THEN excluded.refreshTokenTtl
+           ELSE oauthResource.refreshTokenTtl
+         END,
          disabled = 0,
          updatedAt = excluded.updatedAt
        WHERE ${serviceGuard}`,
@@ -406,7 +452,8 @@ export function trustedOAuthClientStatements(
         registration.resourceId,
         registration.clientName,
         3600,
-        catalog,
+        registration.refreshEnabled ? 30 * 24 * 60 * 60 : null,
+        resourceScopes,
         registration.now,
         registration.now,
         ...serviceGuardValues,
@@ -425,13 +472,13 @@ export function trustedOAuthClientStatements(
         crypto.randomUUID(),
         registration.clientId,
         registration.storedSecret,
-        capabilities,
+        protocolScopes,
         registration.ownerUserId,
         registration.now,
         registration.now,
         registration.clientName,
         JSON.stringify([registration.redirectUri]),
-        JSON.stringify(["authorization_code"]),
+        grantTypes,
         JSON.stringify(["code"]),
         registration.authMethod,
         ...serviceGuardValues,
@@ -452,8 +499,8 @@ export function trustedOAuthClientStatements(
     {
       sql: `INSERT INTO platform_oauth_client
        (client_id, service_id, owner_user_id, redirect_uri, capabilities,
-        active, created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, 1, ?, ?
+        active, refresh_enabled, created_at, updated_at)
+       SELECT ?, ?, ?, ?, ?, 1, ?, ?, ?
        WHERE ${serviceGuard}`,
       values: [
         registration.clientId,
@@ -461,6 +508,7 @@ export function trustedOAuthClientStatements(
         registration.ownerUserId,
         registration.redirectUri,
         capabilities,
+        registration.refreshEnabled ? 1 : 0,
         registration.now,
         registration.now,
         ...serviceGuardValues,
@@ -476,7 +524,7 @@ export async function findOAuthClient(
   const row = await database
     .prepare(
       `SELECT p.client_id, p.service_id, p.owner_user_id, p.redirect_uri,
-              p.capabilities, o.scopes, o.tokenEndpointAuthMethod,
+              p.capabilities, p.refresh_enabled, o.scopes, o.tokenEndpointAuthMethod,
               o.disabled AS client_disabled, s.audience, s.disabled AS service_disabled,
               r.disabled AS resource_disabled, cr.id AS resource_link
        FROM platform_oauth_client AS p
@@ -495,6 +543,7 @@ export async function findOAuthClient(
       owner_user_id: string | null;
       redirect_uri: string;
       capabilities: string;
+      refresh_enabled: number;
       scopes: string | null;
       tokenEndpointAuthMethod: OAuthClientAuthMethod | null;
       client_disabled: number | null;
@@ -510,7 +559,7 @@ export async function findOAuthClient(
     !capabilities ||
     !validOAuthCapabilities(capabilities) ||
     !scopes ||
-    !validOAuthCapabilities(scopes)
+    !validOAuthScopes(scopes)
   ) {
     return null;
   }
@@ -528,6 +577,7 @@ export async function findOAuthClient(
     redirectUri: row.redirect_uri,
     capabilities,
     authMethod: row.tokenEndpointAuthMethod,
+    refreshEnabled: row.refresh_enabled === 1,
     ownerUserId: row.owner_user_id,
     scopes,
   };
@@ -566,7 +616,10 @@ export function validateOAuthQuery(
     binding.resource === client.audience &&
     binding.scopes.every(
       (scope) =>
-        client.capabilities.includes(scope) && client.scopes.includes(scope),
+        client.scopes.includes(scope) &&
+        (scope === "offline_access"
+          ? client.refreshEnabled
+          : client.capabilities.includes(scope)),
     ) &&
     binding.scopes.length > 0
   );
@@ -778,7 +831,7 @@ export async function selectOAuthFlow(
       input.organizationId,
       client.serviceId,
       client.audience,
-      JSON.stringify(binding.scopes),
+      JSON.stringify(oauthCapabilitiesFromScopes(binding.scopes)),
       subjectId,
       grantId,
       now,
@@ -791,7 +844,7 @@ export async function selectOAuthFlow(
       client.serviceId,
       client.serviceId,
       client.audience,
-      JSON.stringify(binding.scopes),
+      JSON.stringify(oauthCapabilitiesFromScopes(binding.scopes)),
       client.clientId,
       client.audience,
     );
@@ -853,7 +906,7 @@ export async function selectOAuthFlow(
       client.audience,
       client.serviceId,
       client.audience,
-      JSON.stringify(binding.scopes),
+      JSON.stringify(oauthCapabilitiesFromScopes(binding.scopes)),
     );
   const results = await database.batch([installation, updated]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
@@ -1274,8 +1327,8 @@ export async function completeInitialOAuthAccess(
     !currentConsentResources ||
     !currentConsentScopes ||
     !validOAuthCapabilities(currentClientCapabilities) ||
-    !validOAuthCapabilities(currentRegisteredScopes) ||
-    !validOAuthCapabilities(currentConsentScopes) ||
+    !validOAuthScopes(currentRegisteredScopes) ||
+    !validOAuthScopes(currentConsentScopes) ||
     resources.length !== 1 ||
     resources[0] !== installation.audience ||
     !currentConsentResources.includes(installation.audience) ||
@@ -1503,6 +1556,136 @@ export async function oauthTokenIsCurrentlyAuthorized(
   database: OAuthDatabase,
   token: string,
 ): Promise<boolean> {
+  const platformHash = await hashOpaque(token);
+  const refreshMarker = await database
+    .prepare(
+      `SELECT oauth_refresh_token_id FROM platform_credential
+       WHERE credential_hash = ? AND oauth_origin = 'better-auth'`,
+    )
+    .bind(platformHash)
+    .first<{ oauth_refresh_token_id: string | null }>();
+  if (refreshMarker?.oauth_refresh_token_id) {
+    const refresh = await database
+      .prepare(
+        `SELECT c.id
+         FROM platform_credential AS c
+         JOIN platform_oauth_refresh_token AS t ON t.id = c.oauth_refresh_token_id
+          AND t.state = 'issued'
+         JOIN platform_oauth_refresh_family AS f ON f.id = t.family_id
+          AND f.state = 'active'
+         AND f.expires_at > ?
+         JOIN platform_oauth_installation AS i ON i.id = c.oauth_installation_id
+          AND i.active = 1 AND i.revoked_at IS NULL
+         JOIN oauthAccessToken AS a ON a.id = c.oauth_provider_row_id
+          AND a.token = c.oauth_provider_token_hash
+          AND a.refreshId = t.provider_refresh_row_id
+          AND a.referenceId = i.id AND a.clientId = i.client_id
+          AND a.userId = i.user_id AND a.revoked IS NULL
+          AND a.expiresAt > ?
+          AND json_array_length(json_extract(a.resources, '$')) = 1
+          AND json_extract(json_extract(a.resources, '$'), '$[0]') = i.audience
+         JOIN oauthRefreshToken AS refresh ON refresh.id = t.provider_refresh_row_id
+          AND refresh.token = t.provider_refresh_token_hash
+          AND refresh.clientId = i.client_id AND refresh.userId = i.user_id
+          AND refresh.referenceId = i.id AND refresh.revoked IS NULL
+          AND refresh.expiresAt > ?
+          AND json_array_length(json_extract(refresh.resources, '$')) = 1
+          AND json_extract(json_extract(refresh.resources, '$'), '$[0]') = i.audience
+         JOIN platform_oauth_client AS pc ON pc.client_id = i.client_id
+          AND pc.service_id = i.service_id AND pc.active = 1
+          AND pc.refresh_enabled = 1
+         JOIN oauthClient AS oc ON oc.clientId = i.client_id AND oc.disabled = 0
+          AND oc.grantTypes LIKE '%refresh_token%'
+         JOIN oauthResource AS resource ON resource.identifier = i.audience
+          AND resource.disabled = 0 AND resource.refreshTokenTtl IS NOT NULL
+          AND resource.refreshTokenTtl > 0
+         JOIN member AS m ON m.id = i.membership_id
+          AND m.userId = i.user_id AND m.organizationId = i.organization_id
+         JOIN "user" AS u ON u.id = i.user_id AND u.disabledAt IS NULL
+         JOIN organization AS org ON org.id = i.organization_id
+          AND org.suspendedAt IS NULL
+         JOIN platform_service AS service ON service.service_id = i.service_id
+          AND service.audience = i.audience AND service.disabled = 0
+         JOIN oauthConsent AS consent ON consent.clientId = i.client_id
+          AND consent.userId = i.user_id AND consent.referenceId = i.id
+          AND json_array_length(json_extract(consent.resources, '$')) = 1
+          AND json_extract(json_extract(consent.resources, '$'), '$[0]') = i.audience
+         WHERE c.credential_hash = ? AND c.oauth_refresh_token_id = ?
+           AND c.oauth_origin = 'better-auth' AND c.revoked_at IS NULL
+           AND c.expires_at > ?
+           AND c.subject_id = f.subject_id AND c.grant_id = f.grant_id
+           AND c.organization_id = f.organization_id
+           AND c.membership_id = f.membership_id AND c.audience = f.audience
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(t.capabilities) AS effective
+               WHERE effective.value = requested.value
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(f.capabilities) AS ceiling
+               WHERE ceiling.value = requested.value
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(pc.capabilities) AS ceiling
+               WHERE ceiling.value = requested.value
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(oc.scopes) AS registered
+               WHERE registered.value = requested.value
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(json_extract(consent.scopes, '$')) AS consented
+               WHERE consented.value = requested.value
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(json_extract(a.scopes, '$')) AS granted
+               WHERE granted.value = requested.value
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(json_extract(refresh.scopes, '$')) AS granted
+               WHERE granted.value = requested.value
+             )
+           )
+           AND a.refreshId = refresh.id
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(c.capabilities) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(service.allowed_capabilities) AS catalog
+               WHERE catalog.value = requested.value
+             )
+           )
+         LIMIT 1`,
+      )
+      .bind(
+        Date.now(),
+        Date.now(),
+        Date.now(),
+        platformHash,
+        refreshMarker.oauth_refresh_token_id,
+        Date.now(),
+      )
+      .first<{ id: string }>();
+    return refresh !== null;
+  }
   const hash = await oauthProviderTokenHash(token);
   const row = await database
     .prepare(
@@ -1584,9 +1767,9 @@ export async function oauthTokenIsCurrentlyAuthorized(
     !binding ||
     !validOAuthCapabilities(installationCapabilities) ||
     !validOAuthCapabilities(providerScopes) ||
-    !validOAuthCapabilities(consentScopes) ||
+    !validOAuthScopes(consentScopes) ||
     !validOAuthCapabilities(clientCapabilities) ||
-    !validOAuthCapabilities(registeredScopes) ||
+    !validOAuthScopes(registeredScopes) ||
     !validOAuthCapabilities(serviceCapabilities)
   ) {
     return false;
@@ -1667,6 +1850,22 @@ export async function oauthMetadata(
       if (capability !== "offline_access") scopes.add(capability);
     }
   }
+  const refreshClient = await database
+    .prepare(
+      `SELECT 1 FROM platform_oauth_client AS p
+       JOIN oauthClient AS c ON c.clientId = p.client_id
+       JOIN platform_service AS s ON s.service_id = p.service_id
+       JOIN oauthResource AS r ON r.identifier = s.audience
+       WHERE p.active = 1 AND p.refresh_enabled = 1
+         AND c.disabled = 0
+         AND c.grantTypes LIKE '%refresh_token%'
+         AND r.disabled = 0 AND r.refreshTokenTtl IS NOT NULL
+         AND r.refreshTokenTtl > 0 AND s.disabled = 0
+       LIMIT 1`,
+    )
+    .first();
+  const refreshSupported = refreshClient !== null;
+  if (refreshSupported) scopes.add("offline_access");
   return {
     issuer,
     authorization_endpoint: `${issuer}/api/auth/oauth2/authorize`,
@@ -1674,7 +1873,9 @@ export async function oauthMetadata(
     introspection_endpoint: `${issuer}/api/auth/oauth2/introspect`,
     introspection_endpoint_auth_methods_supported: ["client_secret_post"],
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: refreshSupported
+      ? ["authorization_code", "refresh_token"]
+      : ["authorization_code"],
     token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
     code_challenge_methods_supported: ["S256"],
     scopes_supported: [...scopes].sort(),

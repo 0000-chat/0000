@@ -34,7 +34,7 @@ function parse(argv: string[]): {
     }
     if (!arg?.startsWith("--")) {
       throw new Error(
-        "Usage: bun scripts/provision-oauth-client.ts [--remote] --service-id ID --redirect-uri URI --capability NAME [--capability NAME] [--public|--confidential] [--owner-user-id ID]",
+        "Usage: bun scripts/provision-oauth-client.ts [--remote] --service-id ID --redirect-uri URI --capability NAME [--capability NAME] [--public|--confidential] [--refresh] [--owner-user-id ID]",
       );
     }
     const key = arg.slice(2);
@@ -43,6 +43,10 @@ function parse(argv: string[]): {
         "auth-method",
         key === "public" ? "none" : "client_secret_post",
       );
+      continue;
+    }
+    if (key === "refresh") {
+      values.set("refresh", "true");
       continue;
     }
     const value = argv[++index];
@@ -167,6 +171,7 @@ const input: TrustedOAuthClientInput = {
   redirectUri,
   capabilities,
   authMethod,
+  refreshEnabled: values.get("refresh") === "true",
   ownerUserId: values.get("owner-user-id") ?? null,
   name: values.get("name"),
 };

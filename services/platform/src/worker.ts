@@ -26,6 +26,7 @@ import {
   type AccountCredential,
   type AccountCredentialService,
   type AccountAgent,
+  type AccountOAuthInstallation,
   type OrganizationDetails,
 } from "./account-ui";
 import {
@@ -83,8 +84,19 @@ import {
   ownedOAuthFlow,
   parseOAuthQuery,
   selectOAuthFlow,
+  validOAuthScopes,
   type OAuthFlow,
 } from "./oauth-installation";
+import {
+  abandonOAuthRefresh,
+  completeInitialOAuthRefresh,
+  completeOAuthRefresh,
+  findOAuthRefreshCredential,
+  listOAuthInstallations,
+  prepareOAuthRefresh,
+  revokeOAuthInstallation,
+  type OAuthRefreshPreparation,
+} from "./oauth-refresh";
 import {
   oauthConsentPage,
   oauthErrorPage,
@@ -234,6 +246,20 @@ async function oauthConfiguredScopes(env: Cloudflare.Env): Promise<string[]> {
       if (capability !== "offline_access") scopes.add(capability);
     }
   }
+  const refresh = await env.IDENTITY_DB.withSession("first-primary")
+    .prepare(
+      `SELECT 1 FROM platform_oauth_client AS p
+       JOIN oauthClient AS c ON c.clientId = p.client_id
+       JOIN platform_service AS s ON s.service_id = p.service_id
+       JOIN oauthResource AS r ON r.identifier = s.audience
+       WHERE p.active = 1 AND p.refresh_enabled = 1
+         AND c.disabled = 0 AND c.grantTypes LIKE '%refresh_token%'
+         AND s.disabled = 0 AND r.disabled = 0
+         AND r.refreshTokenTtl IS NOT NULL AND r.refreshTokenTtl > 0
+       LIMIT 1`,
+    )
+    .first();
+  if (refresh) scopes.add("offline_access");
   return scopes.size > 0 ? [...scopes] : ["resource:read"];
 }
 
@@ -245,6 +271,7 @@ async function oauthRequestState(
   platform: boolean;
   flowId: string | null;
   rawQuery: string | null;
+  refreshEnabled: boolean;
 }> {
   const database = env.IDENTITY_DB.withSession("first-primary");
   if (pathname === "/api/auth/oauth2/authorize" && request.method === "GET") {
@@ -252,7 +279,13 @@ async function oauthRequestState(
     const platform = clientId
       ? await hasPlatformOAuthClient(database, clientId)
       : false;
-    return { platform, flowId: null, rawQuery: null };
+    const client = clientId ? await findOAuthClient(database, clientId) : null;
+    return {
+      platform,
+      flowId: null,
+      rawQuery: null,
+      refreshEnabled: client?.refreshEnabled === true,
+    };
   }
   if (
     (pathname === "/api/auth/oauth2/continue" ||
@@ -290,10 +323,14 @@ async function oauthRequestState(
     const platform = binding
       ? await hasPlatformOAuthClient(database, binding.clientId)
       : false;
+    const client = binding
+      ? await findOAuthClient(database, binding.clientId)
+      : null;
     return {
       platform,
       flowId: flow?.id ?? null,
       rawQuery,
+      refreshEnabled: client?.refreshEnabled === true,
     };
   }
   if (pathname === "/api/auth/oauth2/token" && request.method === "POST") {
@@ -317,7 +354,13 @@ async function oauthRequestState(
     const platform = clientId
       ? await hasPlatformOAuthClient(database, clientId)
       : false;
-    return { platform, flowId: null, rawQuery: null };
+    const client = clientId ? await findOAuthClient(database, clientId) : null;
+    return {
+      platform,
+      flowId: null,
+      rawQuery: null,
+      refreshEnabled: client?.refreshEnabled === true,
+    };
   }
   if (pathname === "/api/auth/oauth2/introspect" && request.method === "POST") {
     let body: Record<string, unknown> | null = null;
@@ -335,16 +378,32 @@ async function oauthRequestState(
     const platform = clientId
       ? await hasPlatformOAuthClient(database, clientId)
       : false;
-    return { platform, flowId: null, rawQuery: null };
+    const client = clientId ? await findOAuthClient(database, clientId) : null;
+    return {
+      platform,
+      flowId: null,
+      rawQuery: null,
+      refreshEnabled: client?.refreshEnabled === true,
+    };
   }
   // Better Auth keeps the signed provider query in its OAuth state while the
   // social callback is running. Passing the request-local production config to
   // callback routes is safe: the post-login hook only participates in an OAuth
   // provider continuation and does not change an ordinary social sign-in.
   if (pathname.startsWith("/api/auth/callback/")) {
-    return { platform: true, flowId: null, rawQuery: null };
+    return {
+      platform: true,
+      flowId: null,
+      rawQuery: null,
+      refreshEnabled: false,
+    };
   }
-  return { platform: false, flowId: null, rawQuery: null };
+  return {
+    platform: false,
+    flowId: null,
+    rawQuery: null,
+    refreshEnabled: false,
+  };
 }
 
 async function oauthPlatformRoute(
@@ -446,6 +505,7 @@ async function oauthPlatformRoute(
     const binding = parseOAuthQuery(flow.oauth_query);
     if (!binding) return oauthErrorPage("OAuth request is malformed", 400);
     const scopes = await oauthConfiguredScopes(env);
+    const client = await findOAuthClient(database, binding.clientId);
     const internal = new Request(
       `${env.PLATFORM_BASE_URL}/api/auth/oauth2/continue`,
       {
@@ -463,7 +523,9 @@ async function oauthPlatformRoute(
     );
     const response = await createAuth(env, {
       oauthPlatform: true,
-      oauthGrantTypes: ["authorization_code"],
+      oauthGrantTypes: client?.refreshEnabled
+        ? ["authorization_code", "refresh_token"]
+        : ["authorization_code"],
       oauthScopes: scopes,
       oauthPostLogin: oauthPostLoginHooks(database, flow.id),
     }).handler(internal);
@@ -880,6 +942,77 @@ async function accountManagementRoute(
       error: "untrusted_origin",
       message: "Use the Platform account page to make this change.",
     });
+  }
+
+  if (
+    pathname === "/api/account/oauth-installations" &&
+    request.method === "GET"
+  ) {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const organizationId = new URL(request.url).searchParams.get(
+      "organizationId",
+    );
+    if (organizationId !== null && !validOrganizationId(organizationId)) {
+      return json(400, { error: "invalid_request" });
+    }
+    const installations = await listOAuthInstallations(
+      env.IDENTITY_DB.withSession("first-primary"),
+      current.user.id,
+      organizationId,
+    );
+    return json(200, { installations });
+  }
+
+  if (
+    pathname === "/api/account/oauth-installations/revoke" &&
+    request.method === "POST"
+  ) {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validCredentialId(body.installationId) ||
+      (body.organizationId !== undefined &&
+        !validOrganizationId(body.organizationId))
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const installation = await database
+      .prepare(
+        `SELECT id, user_id, organization_id
+         FROM platform_oauth_installation WHERE id = ?`,
+      )
+      .bind(body.installationId)
+      .first<{ id: string; user_id: string; organization_id: string }>();
+    if (!installation) return json(404, { error: "installation_not_found" });
+    if (
+      typeof body.organizationId === "string" &&
+      body.organizationId !== installation.organization_id
+    ) {
+      return json(403, { error: "installation_forbidden" });
+    }
+    let allowed = installation.user_id === current.user.id;
+    if (!allowed) {
+      const manager = await database
+        .prepare(
+          `SELECT 1 FROM member
+           JOIN organization ON organization.id = member.organizationId
+           JOIN "user" ON "user".id = member.userId
+           WHERE member.organizationId = ? AND member.userId = ?
+             AND member.role IN ('owner', 'admin')
+             AND organization.suspendedAt IS NULL
+             AND "user".disabledAt IS NULL`,
+        )
+        .bind(installation.organization_id, current.user.id)
+        .first();
+      allowed = manager !== null;
+    }
+    if (!allowed) return json(403, { error: "installation_forbidden" });
+    await revokeOAuthInstallation(database, installation.id, "account_revoked");
+    return json(200, { revoked: true, installationId: installation.id });
   }
 
   if (
@@ -2128,6 +2261,37 @@ async function accountRoute(
     let agentOrganizationId: string | null = null;
     let agentServices: AccountCredentialService[] = [];
     let agents: AccountAgent[] = [];
+    let oauthInstallations: AccountOAuthInstallation[] = [];
+    oauthInstallations = (
+      await listOAuthInstallations(
+        database,
+        current.user.id,
+        selectedOrganization?.organizationId ?? null,
+      )
+    ).map((installation) => ({
+      id: String(installation.id),
+      clientId: String(installation.client_id),
+      clientName: String(installation.client_name ?? installation.client_id),
+      serviceId: String(installation.service_id),
+      audience: String(installation.audience),
+      organizationName: String(installation.organization_name ?? ""),
+      capabilities: parseStringArray(String(installation.capabilities)) ?? [],
+      createdAt: Number(installation.created_at),
+      expiresAt: Number(installation.expires_at),
+      active: Number(installation.active) === 1,
+      revokedAt:
+        installation.revoked_at === null
+          ? null
+          : Number(installation.revoked_at),
+      familyState:
+        installation.family_state === null
+          ? null
+          : String(installation.family_state),
+      familyExpiresAt:
+        installation.family_expires_at === null
+          ? null
+          : Number(installation.family_expires_at),
+    }));
     if (selectedOrganization) {
       const currentAuthority = await getCurrentOrganizationAuthority(
         database,
@@ -2195,6 +2359,7 @@ async function accountRoute(
       agentOrganizationId,
       agentServices,
       agents,
+      oauthInstallations,
       providers: linkedAccounts.map((account) => ({
         id: account.id,
         providerId: account.providerId,
@@ -2367,7 +2532,7 @@ export async function authenticateCredential(
       `SELECT id, kind, subject_id, organization_id, membership_id, grant_id,
               audience, capabilities, resource_ids, expires_at, revoked_at,
               oauth_origin, oauth_installation_id, oauth_provider_row_id,
-              oauth_provider_token_hash
+              oauth_provider_token_hash, oauth_refresh_token_id
        FROM platform_credential WHERE credential_hash = ?`,
     )
     .bind(credentialHash)
@@ -2387,6 +2552,7 @@ export async function authenticateCredential(
       oauth_installation_id: string | null;
       oauth_provider_row_id: string | null;
       oauth_provider_token_hash: string | null;
+      oauth_refresh_token_id: string | null;
     }>();
   if (
     !row ||
@@ -2418,6 +2584,34 @@ export async function authenticateCredential(
       row.expires_at === null
     ) {
       return json(503, { status: "authority_unavailable" });
+    }
+    if (row.oauth_refresh_token_id !== null) {
+      const currentRefresh = await findOAuthRefreshCredential(
+        database,
+        credentialHash,
+        service,
+      );
+      if (!currentRefresh) return json(401, { status: "invalid_credential" });
+      const refreshCapabilities = parseStringArray(currentRefresh.capabilities);
+      const refreshResourceIds = parseStringArray(currentRefresh.resource_ids);
+      if (!refreshCapabilities || !refreshResourceIds) {
+        return json(503, { status: "authority_unavailable" });
+      }
+      return json(200, {
+        status: "authenticated",
+        principal: {
+          version: 1,
+          authority: env.PLATFORM_AUTHORITY_ID,
+          kind: "agent",
+          subjectId: currentRefresh.subject_id,
+          credentialId: currentRefresh.id,
+          organizationId: currentRefresh.organization_id,
+          grantId: currentRefresh.grant_id,
+          audience: currentRefresh.audience,
+          capabilities: refreshCapabilities,
+          expiresAt: new Date(currentRefresh.expires_at).toISOString(),
+        },
+      });
     }
     const currentOAuth = await database
       .prepare(
@@ -2562,9 +2756,9 @@ export async function authenticateCredential(
       !validCapabilities(serviceCapabilities) ||
       !validCapabilities(currentCapabilities) ||
       !validCapabilities(providerScopes) ||
-      !validCapabilities(consentScopes) ||
+      !validOAuthScopes(consentScopes) ||
       !validCapabilities(clientCapabilities) ||
-      !validCapabilities(registeredScopes) ||
+      !validOAuthScopes(registeredScopes) ||
       binding.clientId !== currentOAuth.client_id ||
       binding.redirectUri !== currentOAuth.client_redirect_uri ||
       binding.resource !== currentOAuth.audience ||
@@ -3447,13 +3641,46 @@ export default {
         const denied = await validateAuthRequest(request, env);
         if (denied) return denied;
         const oauthState = await oauthRequestState(request, env, pathname);
+        const body =
+          pathname === "/api/auth/oauth2/token" && request.method === "POST"
+            ? await requestBody(request)
+            : null;
+        if (
+          pathname === "/api/auth/oauth2/token" &&
+          request.method === "POST" &&
+          body === null &&
+          request.headers.get("content-type")?.toLowerCase().includes("json")
+        ) {
+          let jsonBody: unknown = null;
+          try {
+            jsonBody = await request.clone().json();
+          } catch {
+            // Better Auth owns malformed JSON responses for non-refresh requests.
+          }
+          if (isObject(jsonBody) && jsonBody.grant_type === "refresh_token") {
+            return Response.json(
+              {
+                error: "invalid_request",
+                error_description:
+                  "Refresh token requests must use form encoding.",
+              },
+              { status: 400, headers: { "cache-control": "no-store" } },
+            );
+          }
+        }
+        // Non-Platform Better Auth OAuth clients retain the provider's own
+        // lifecycle for the existing provider integration tests. Platform
+        // clients are fenced below before a refresh request reaches the
+        // provider; a code-only Platform client is rejected explicitly.
         if (oauthState.platform) {
           if (
             pathname === "/api/auth/oauth2/token" &&
             request.method === "POST"
           ) {
-            const body = await requestBody(request);
-            if (body?.grant_type === "refresh_token") {
+            if (
+              body?.grant_type === "refresh_token" &&
+              !oauthState.refreshEnabled
+            ) {
               return Response.json(
                 {
                   error: "unsupported_grant_type",
@@ -3469,18 +3696,66 @@ export default {
             pathname === "/api/auth/oauth2/consent" && request.method === "POST"
               ? await normalizeOAuthConsentRequest(request)
               : { request, browserForm: false };
-          const authResponse = await createAuth(env, {
+          const auth = createAuth(env, {
             oauthPlatform: true,
-            oauthGrantTypes: ["authorization_code"],
+            oauthGrantTypes: oauthState.refreshEnabled
+              ? ["authorization_code", "refresh_token"]
+              : ["authorization_code"],
             oauthScopes: scopes,
             oauthPostLogin: oauthPostLoginHooks(
               env.IDENTITY_DB.withSession("first-primary"),
               oauthState.flowId,
             ),
-          }).handler(consentRequest.request);
-          if (pathname === "/api/auth/oauth2/token") {
-            const bound = await completeInitialOAuthAccess(
+          });
+          let refreshPreparation: OAuthRefreshPreparation = {
+            kind: "not_refresh",
+          };
+          if (
+            pathname === "/api/auth/oauth2/token" &&
+            request.method === "POST" &&
+            body?.grant_type === "refresh_token" &&
+            oauthState.refreshEnabled
+          ) {
+            refreshPreparation = await prepareOAuthRefresh(
               env.IDENTITY_DB.withSession("first-primary"),
+              auth,
+              request,
+            );
+            if (refreshPreparation.kind === "response") {
+              return refreshPreparation.response;
+            }
+          }
+          let authResponse: Response;
+          try {
+            authResponse = await auth.handler(consentRequest.request);
+          } catch (error) {
+            if (refreshPreparation.kind === "refresh") {
+              await abandonOAuthRefresh(
+                env.IDENTITY_DB.withSession("first-primary"),
+                refreshPreparation,
+                "provider_refresh_failed",
+              );
+              return json(503, { status: "authority_unavailable" });
+            }
+            throw error;
+          }
+          if (pathname === "/api/auth/oauth2/token") {
+            const database = env.IDENTITY_DB.withSession("first-primary");
+            if (refreshPreparation.kind === "refresh") {
+              return completeOAuthRefresh(
+                database,
+                authResponse,
+                refreshPreparation,
+                body?.client_id as string,
+              );
+            }
+            const initialRefresh = await completeInitialOAuthRefresh(
+              database,
+              authResponse,
+            );
+            if (initialRefresh) return initialRefresh;
+            const bound = await completeInitialOAuthAccess(
+              database,
               authResponse,
             );
             if (bound) return bound;
