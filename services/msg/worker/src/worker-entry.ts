@@ -21,6 +21,9 @@ export interface MsgProductionEnvironment extends MsgEnvironment {
   readonly MSG_RATE_LIMIT_READS?: MsgRateLimit;
   readonly MSG_RATE_LIMIT_POSTS?: MsgRateLimit;
   readonly MSG_RATE_LIMIT_LIVE?: MsgRateLimit;
+  readonly MSG_VAPID_PUBLIC_KEY?: string;
+  readonly MSG_VAPID_PRIVATE_KEY?: string;
+  readonly MSG_VAPID_SUBJECT?: string;
 }
 
 const unavailableRateLimit: MsgRateLimit = {
@@ -58,6 +61,7 @@ export default {
         operatorAllowlist: parseOperatorAllowlist(env.MSG_OPERATOR_ALLOWLIST),
       }, accessPort)
       : unavailableMsgAuthenticator();
+    const pushConfigured = Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT);
     return createWorker(roomService, {
       assets: env.ASSETS,
       auth,
@@ -65,6 +69,8 @@ export default {
       operations,
       postDisabled: env.MSG_POST_DISABLED === "1",
       rateLimits,
+      pushConfigured,
+      pushVapidPublicKey: pushConfigured ? env.MSG_VAPID_PUBLIC_KEY : undefined,
     }).fetch(request);
   },
   scheduled(_event: ScheduledEvent, env: MsgProductionEnvironment, ctx: ExecutionContext): void {

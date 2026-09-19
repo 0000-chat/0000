@@ -38,7 +38,7 @@ test("package metadata builds and allowlists the public CLI files", () => {
 
   expect(manifest.name).toBe("@0000chat/msg");
   expect(manifest.version).toBe("0.3.0");
-  expect(manifest.description).toBe("Read, post to, and wait for messages in a 0000 msg conversation.");
+  expect(manifest.description).toBe("Read, post to, wait for messages, and manage webhooks in a 0000 msg conversation.");
   expect(manifest.files).toEqual(["dist", "README.md", "LICENSE"]);
   expect(manifest.license).toBe("MIT");
   expect(manifest.scripts?.prepack).toBe("bun run build");

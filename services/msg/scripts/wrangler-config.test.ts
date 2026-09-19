@@ -12,6 +12,8 @@ import {
   parseMsgRateLimitPolicyJson,
   validateMsgRateLimitPolicy,
 } from "./msg-rate-limit-policy";
+import { fileURLToPath } from "node:url";
+import { resolveMsgWranglerArguments } from "./wrangler-config";
 
 test("creates a production config only from a validated D1 database id", () => {
   const config = createMsgWranglerConfig("11111111-2222-4333-8444-555555555555");
@@ -100,4 +102,14 @@ test("normalizes only generated Wrangler provenance and trailing whitespace", ()
       "",
     ].join("\n"),
   );
+});
+
+test("resolves Wrangler type output relative to the service despite the monorepo command cwd", () => {
+  const target = fileURLToPath(new URL("../worker/worker-configuration.d.ts", import.meta.url));
+  expect(resolveMsgWranglerArguments(["types", "worker/worker-configuration.d.ts", "--include-runtime=true"])).toEqual([
+    "types",
+    target,
+    "--include-runtime=true",
+  ]);
+  expect(resolveMsgWranglerArguments(["deploy", "--dry-run"])).toEqual(["deploy", "--dry-run"]);
 });
