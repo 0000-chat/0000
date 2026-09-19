@@ -352,74 +352,74 @@ function authorityMatches(
   const bindingScopes = requestedScopes;
   return Boolean(
     row.state === "issued" &&
-    row.family_state === "active" &&
-    row.family_expires_at > Date.now() &&
-    row.installation_active === 1 &&
-    row.installation_revoked_at === null &&
-    row.client_active === 1 &&
-    row.client_disabled === 0 &&
-    row.client_id === client.clientId &&
-    row.service_id === client.serviceId &&
-    client.refreshEnabled &&
-    row.service_disabled === 0 &&
-    row.org_suspended_at === null &&
-    row.user_disabled_at === null &&
-    row.resource_refresh_ttl !== null &&
-    row.resource_refresh_ttl > 0 &&
-    registeredGrantTypes?.includes("refresh_token") &&
-    row.provider_refresh_revoked === null &&
-    row.provider_refresh_expires !== null &&
-    row.provider_refresh_expires > Date.now() &&
-    row.expires_at > Date.now() &&
-    row.audience === client.audience &&
-    familyResources?.length === 1 &&
-    familyResources[0] === client.audience &&
-    providerResources?.length === 1 &&
-    providerResources[0] === client.audience &&
-    providerAccessResources?.length === 1 &&
-    providerAccessResources[0] === client.audience &&
-    consentResources?.length === 1 &&
-    consentResources[0] === client.audience &&
-    providerScopes !== null &&
-    providerAccessScopes !== null &&
-    providerAccessScopes.includes("offline_access") ===
-      providerScopes.includes("offline_access") &&
-    consentScopes !== null &&
-    clientCapabilities !== null &&
-    registeredScopes !== null &&
-    serviceCapabilities !== null &&
-    rowCapabilities !== null &&
-    familyCapabilities !== null &&
-    subset(rowCapabilities, familyCapabilities) &&
-    subset(rowCapabilities, client.capabilities) &&
-    subset(rowCapabilities, clientCapabilities) &&
-    subset(rowCapabilities, serviceCapabilities) &&
-    subset(
-      rowCapabilities,
-      providerScopes.filter((scope) => scope !== "offline_access"),
-    ) &&
-    subset(
-      rowCapabilities,
-      consentScopes.filter((scope) => scope !== "offline_access"),
-    ) &&
-    subset(
-      rowCapabilities,
-      providerAccessScopes.filter((scope) => scope !== "offline_access"),
-    ) &&
-    row.provider_refresh_id === row.provider_refresh_row_id &&
-    row.provider_refresh_token === row.provider_refresh_token_hash &&
-    row.provider_refresh_client_id === row.client_id &&
-    row.provider_refresh_user_id === row.user_id &&
-    row.provider_refresh_reference_id === row.installation_id &&
-    row.provider_access_id === row.provider_access_row_id &&
-    row.provider_access_token.length > 0 &&
-    row.provider_access_client_id === row.client_id &&
-    row.provider_access_user_id === row.user_id &&
-    row.provider_access_reference_id === row.installation_id &&
-    row.provider_access_refresh_id === row.provider_refresh_row_id &&
-    row.provider_access_revoked === null &&
-    (requestedResource === null || requestedResource === client.audience) &&
-    (bindingScopes === null || subset(bindingScopes, providerScopes)),
+      row.family_state === "active" &&
+      row.family_expires_at > Date.now() &&
+      row.installation_active === 1 &&
+      row.installation_revoked_at === null &&
+      row.client_active === 1 &&
+      row.client_disabled === 0 &&
+      row.client_id === client.clientId &&
+      row.service_id === client.serviceId &&
+      client.refreshEnabled &&
+      row.service_disabled === 0 &&
+      row.org_suspended_at === null &&
+      row.user_disabled_at === null &&
+      row.resource_refresh_ttl !== null &&
+      row.resource_refresh_ttl > 0 &&
+      registeredGrantTypes?.includes("refresh_token") &&
+      row.provider_refresh_revoked === null &&
+      row.provider_refresh_expires !== null &&
+      row.provider_refresh_expires > Date.now() &&
+      row.expires_at > Date.now() &&
+      row.audience === client.audience &&
+      familyResources?.length === 1 &&
+      familyResources[0] === client.audience &&
+      providerResources?.length === 1 &&
+      providerResources[0] === client.audience &&
+      providerAccessResources?.length === 1 &&
+      providerAccessResources[0] === client.audience &&
+      consentResources?.length === 1 &&
+      consentResources[0] === client.audience &&
+      providerScopes !== null &&
+      providerAccessScopes !== null &&
+      providerAccessScopes.includes("offline_access") ===
+        providerScopes.includes("offline_access") &&
+      consentScopes !== null &&
+      clientCapabilities !== null &&
+      registeredScopes !== null &&
+      serviceCapabilities !== null &&
+      rowCapabilities !== null &&
+      familyCapabilities !== null &&
+      subset(rowCapabilities, familyCapabilities) &&
+      subset(rowCapabilities, client.capabilities) &&
+      subset(rowCapabilities, clientCapabilities) &&
+      subset(rowCapabilities, serviceCapabilities) &&
+      subset(
+        rowCapabilities,
+        providerScopes.filter((scope) => scope !== "offline_access"),
+      ) &&
+      subset(
+        rowCapabilities,
+        consentScopes.filter((scope) => scope !== "offline_access"),
+      ) &&
+      subset(
+        rowCapabilities,
+        providerAccessScopes.filter((scope) => scope !== "offline_access"),
+      ) &&
+      row.provider_refresh_id === row.provider_refresh_row_id &&
+      row.provider_refresh_token === row.provider_refresh_token_hash &&
+      row.provider_refresh_client_id === row.client_id &&
+      row.provider_refresh_user_id === row.user_id &&
+      row.provider_refresh_reference_id === row.installation_id &&
+      row.provider_access_id === row.provider_access_row_id &&
+      row.provider_access_token.length > 0 &&
+      row.provider_access_client_id === row.client_id &&
+      row.provider_access_user_id === row.user_id &&
+      row.provider_access_reference_id === row.installation_id &&
+      row.provider_access_refresh_id === row.provider_refresh_row_id &&
+      row.provider_access_revoked === null &&
+      (requestedResource === null || requestedResource === client.audience) &&
+      (bindingScopes === null || subset(bindingScopes, providerScopes)),
   );
 }
 

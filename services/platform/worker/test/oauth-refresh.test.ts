@@ -2,12 +2,12 @@ import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPlatformClient } from "@0000/platform-client";
 import { createAuth } from "../../src/auth";
+import platformWorker from "../../src/worker";
 import {
   oauthProviderTokenHash,
   provisionTrustedOAuthClient,
 } from "../../src/oauth-installation";
 import {
-  abandonOAuthRefresh,
   completeOAuthRefresh,
   prepareOAuthRefresh,
 } from "../../src/oauth-refresh";
@@ -91,6 +91,7 @@ async function issueHarnessFlow(input: {
   accessToken: string;
   refreshToken?: string;
   installationId: string;
+  responseBody?: Record<string, unknown> | null;
 }> {
   const verifier = opaqueSecret("t07-public-verifier_");
   const requestedScope = input.scope ?? "resource:read";
@@ -196,12 +197,21 @@ async function issueHarnessFlow(input: {
     body: new URLSearchParams(tokenValues),
   });
   if (input.expectedTokenStatus !== undefined) {
-    expect(token.status, await token.clone().text()).toBe(
-      input.expectedTokenStatus,
-    );
+    const responseText = await token.clone().text();
+    let responseBody: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = JSON.parse(responseText);
+      if (parsed && typeof parsed === "object") {
+        responseBody = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Preserve the status assertion even when an error body is not JSON.
+    }
+    expect(token.status, responseText).toBe(input.expectedTokenStatus);
     return {
       accessToken: "",
       installationId: selectedFlow!.installation_id!,
+      responseBody,
     };
   }
   expect(token.status, await token.clone().text()).toBe(200);
@@ -295,6 +305,29 @@ function afterFirstBatchDatabase(
       return Reflect.get(target, property, receiver);
     },
   }) as unknown as D1DatabaseSession;
+}
+
+function workerRefreshRaceEnv(
+  onCurrentRead: () => Promise<void>,
+): Cloudflare.Env {
+  const wrappedDatabase = new Proxy(testEnv.IDENTITY_DB, {
+    get(target, property, receiver) {
+      if (property === "withSession") {
+        return (constraint: unknown) =>
+          interleavedRefreshDatabase(
+            target.withSession(constraint as never),
+            onCurrentRead,
+          );
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as D1Database;
+  return new Proxy(testEnv, {
+    get(target, property, receiver) {
+      if (property === "IDENTITY_DB") return wrappedDatabase;
+      return Reflect.get(target, property, receiver);
+    },
+  }) as Cloudflare.Env;
 }
 
 describe("T07 production OAuth refresh lineage", () => {
@@ -952,6 +985,12 @@ describe("T07 production OAuth refresh lineage", () => {
       ).run();
     }
     expect(zeroIssued!.accessToken).toBe("");
+    expect(zeroIssued!.responseBody).toMatchObject({
+      status: "authority_unavailable",
+      error: "temporarily_unavailable",
+    });
+    expect(zeroIssued!.responseBody?.access_token).toBeUndefined();
+    expect(zeroIssued!.responseBody?.refresh_token).toBeUndefined();
     const zeroRows = await testEnv.IDENTITY_DB.withSession("first-primary")
       .prepare(
         `SELECT
@@ -1009,6 +1048,12 @@ describe("T07 production OAuth refresh lineage", () => {
       ).run();
     }
     expect(partialIssued!.accessToken).toBe("");
+    expect(partialIssued!.responseBody).toMatchObject({
+      status: "authority_unavailable",
+      error: "temporarily_unavailable",
+    });
+    expect(partialIssued!.responseBody?.access_token).toBeUndefined();
+    expect(partialIssued!.responseBody?.refresh_token).toBeUndefined();
     const partialRows = await testEnv.IDENTITY_DB.withSession("first-primary")
       .prepare(
         `SELECT
@@ -1174,10 +1219,12 @@ describe("T07 production OAuth refresh lineage", () => {
     expect(root).toBeTruthy();
     const triggerName = `t07_abort_provider_${suffix}`;
     const escapedClientId = client.clientId.replaceAll("'", "''");
+    const escapedInstallationId = issued.installationId.replaceAll("'", "''");
     await testEnv.IDENTITY_DB.prepare(
       `CREATE TRIGGER "${triggerName}"
        BEFORE INSERT ON oauthRefreshToken
        WHEN NEW.clientId = '${escapedClientId}'
+        AND NEW.referenceId = '${escapedInstallationId}'
        BEGIN
          SELECT RAISE(ABORT, 't07_provider_refresh_insert_failure');
        END`,
@@ -1185,14 +1232,16 @@ describe("T07 production OAuth refresh lineage", () => {
     let providerTriggerError = "";
     try {
       await testEnv.IDENTITY_DB.prepare(
-        `INSERT INTO oauthRefreshToken (id, token, clientId, userId, scopes)
-         VALUES (?, ?, ?, ?, '[]')`,
+        `INSERT INTO oauthRefreshToken
+           (id, token, clientId, userId, referenceId, scopes)
+         VALUES (?, ?, ?, ?, ?, '[]')`,
       )
         .bind(
           crypto.randomUUID(),
           `t07-provider-trigger-probe-${suffix}`,
           client.clientId,
           user.userId,
+          issued.installationId,
         )
         .run();
     } catch (error) {
@@ -1217,6 +1266,10 @@ describe("T07 production OAuth refresh lineage", () => {
       await testEnv.IDENTITY_DB.prepare(`DROP TRIGGER "${triggerName}"`).run();
     }
     expect(failed!.status).toBe(503);
+    expect((await failed!.json()) as Record<string, unknown>).toMatchObject({
+      status: "authority_unavailable",
+      error: "temporarily_unavailable",
+    });
     const state = await testEnv.IDENTITY_DB.prepare(
       `SELECT f.state AS family_state, i.active,
               t.state AS token_state, COUNT(all_tokens.id) AS token_count
@@ -1241,9 +1294,10 @@ describe("T07 production OAuth refresh lineage", () => {
       token_count: 1,
     });
     const providerRows = await testEnv.IDENTITY_DB.prepare(
-      "SELECT COUNT(*) AS count FROM oauthRefreshToken WHERE clientId = ?",
+      `SELECT COUNT(*) AS count FROM oauthRefreshToken
+       WHERE clientId = ? AND referenceId = ?`,
     )
-      .bind(client.clientId)
+      .bind(client.clientId, issued.installationId)
       .first<{ count: number }>();
     expect(providerRows?.count).toBe(1);
 
@@ -1268,10 +1322,12 @@ describe("T07 production OAuth refresh lineage", () => {
       }>();
     expect(mappingRoot).toBeTruthy();
     const mappingTriggerName = `t07_abort_mapping_${suffix}`;
+    const escapedMappingFamilyId = mappingRoot!.family_id.replaceAll("'", "''");
     await testEnv.IDENTITY_DB.prepare(
       `CREATE TRIGGER "${mappingTriggerName}"
        BEFORE INSERT ON platform_oauth_refresh_token
        WHEN NEW.predecessor_id IS NOT NULL
+        AND NEW.family_id = '${escapedMappingFamilyId}'
        BEGIN
          SELECT RAISE(ABORT, 't07_platform_mapping_insert_failure');
        END`,
@@ -1327,6 +1383,12 @@ describe("T07 production OAuth refresh lineage", () => {
       ).run();
     }
     expect(mappingFailed!.status).toBe(503);
+    expect(
+      (await mappingFailed!.json()) as Record<string, unknown>,
+    ).toMatchObject({
+      status: "authority_unavailable",
+      error: "temporarily_unavailable",
+    });
     const mappingState = await testEnv.IDENTITY_DB.prepare(
       `SELECT f.state AS family_state, i.active,
               t.state AS token_state, COUNT(all_tokens.id) AS token_count
@@ -1434,22 +1496,39 @@ describe("T07 production OAuth refresh lineage", () => {
       access_token: string;
       refresh_token: string;
     };
-    const successorRow = await testEnv.IDENTITY_DB.prepare(
-      `SELECT id FROM platform_oauth_refresh_token
-       WHERE family_id = ? AND sequence = 1`,
-    )
-      .bind(root!.family_id)
-      .first<{ id: string }>();
-    expect(successorRow?.id).toBeTruthy();
-    const pendingNonce = crypto.randomUUID();
-    await testEnv.IDENTITY_DB.prepare(
-      `UPDATE platform_oauth_refresh_family
-       SET state = 'pending', pending_token_id = ?,
-           pending_consumption_nonce = ?, updated_at = ?
-       WHERE id = ? AND state = 'active'`,
-    )
-      .bind(successorRow!.id, pendingNonce, Date.now(), root!.family_id)
-      .run();
+    const sharedClient = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      serviceVerifier: service.verifier,
+      fetch: SELF.fetch,
+    });
+    const authOptions = {
+      oauthPlatform: true,
+      oauthGrantTypes: ["authorization_code", "refresh_token"] as [
+        "authorization_code",
+        "refresh_token",
+      ],
+      oauthScopes: ["resource:read", "offline_access"],
+    };
+    const pendingRequest = () =>
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: successor.refresh_token,
+          resource: service.audience,
+        }),
+      });
+    const preparation = await prepareOAuthRefresh(
+      testEnv.IDENTITY_DB.withSession("first-primary"),
+      createAuth(testEnv, authOptions),
+      pendingRequest(),
+    );
+    expect(preparation.kind).toBe("refresh");
+    if (preparation.kind !== "refresh") return;
     const pending = await testEnv.IDENTITY_DB.prepare(
       `SELECT f.state AS family_state, f.pending_token_id,
               t.state AS token_state, t.consumption_nonce
@@ -1466,10 +1545,35 @@ describe("T07 production OAuth refresh lineage", () => {
       }>();
     expect(pending).toEqual({
       family_state: "pending",
-      pending_token_id: successorRow!.id,
+      pending_token_id: preparation.tokenId,
       token_state: "pending",
-      consumption_nonce: pendingNonce,
+      consumption_nonce: preparation.nonce,
     });
+    expect(
+      (await sharedClient.authenticate(successor.access_token)).status,
+    ).toBe("invalid_credential");
+    const duplicate = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: successor.refresh_token,
+          resource: service.audience,
+        }),
+      },
+    );
+    expect(duplicate.status).toBe(503);
+    const providerResponse = await createAuth(testEnv, authOptions).handler(
+      pendingRequest(),
+    );
+    expect(providerResponse.status).toBe(200);
+    const providerBody = (await providerResponse.clone().json()) as {
+      access_token: string;
+      refresh_token: string;
+    };
     const replay = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -1481,6 +1585,19 @@ describe("T07 production OAuth refresh lineage", () => {
       }),
     });
     expect(replay.status).toBe(400);
+    const lateMapping = await completeOAuthRefresh(
+      testEnv.IDENTITY_DB.withSession("first-primary"),
+      providerResponse,
+      preparation,
+      client.clientId,
+    );
+    expect(lateMapping.status).toBe(503);
+    const lateBody = (await lateMapping.json()) as {
+      access_token?: string;
+      refresh_token?: string;
+    };
+    expect(lateBody.access_token).toBeUndefined();
+    expect(lateBody.refresh_token).toBeUndefined();
     const terminal = await testEnv.IDENTITY_DB.prepare(
       `SELECT f.state AS family_state,
               root.state AS root_state, pending.state AS pending_state
@@ -1502,6 +1619,35 @@ describe("T07 production OAuth refresh lineage", () => {
       root_state: "replayed",
       pending_state: "revoked",
     });
+    const lateProviderRows = await testEnv.IDENTITY_DB.prepare(
+      `SELECT access.revoked AS access_revoked,
+              refresh.revoked AS refresh_revoked
+       FROM oauthRefreshToken AS refresh
+       JOIN oauthAccessToken AS access ON access.refreshId = refresh.id
+       WHERE refresh.token = ? AND access.token = ?`,
+    )
+      .bind(
+        await oauthProviderTokenHash(providerBody.refresh_token),
+        await oauthProviderTokenHash(providerBody.access_token),
+      )
+      .first<{
+        access_revoked: number | null;
+        refresh_revoked: number | null;
+      }>();
+    expect(lateProviderRows).toEqual({
+      access_revoked: expect.any(Number),
+      refresh_revoked: expect.any(Number),
+    });
+    const lateLineage = await testEnv.IDENTITY_DB.prepare(
+      `SELECT COUNT(*) AS count FROM platform_oauth_refresh_token
+       WHERE family_id = ? AND sequence = 2`,
+    )
+      .bind(root!.family_id)
+      .first<{ count: number }>();
+    expect(lateLineage?.count).toBe(0);
+    expect(
+      (await sharedClient.authenticate(successor.access_token)).status,
+    ).toBe("invalid_credential");
     const siblingRefresh = await SELF.fetch(
       "http://localhost/api/auth/oauth2/token",
       {
@@ -1518,7 +1664,6 @@ describe("T07 production OAuth refresh lineage", () => {
     expect(siblingRefresh.status, await siblingRefresh.clone().text()).toBe(
       200,
     );
-    expect(successor.access_token).toBeTruthy();
   });
 
   it("lets one concurrent predecessor consume win the D1 fence", async () => {
@@ -1550,23 +1695,27 @@ describe("T07 production OAuth refresh lineage", () => {
       audience: service.audience,
       offline: true,
     });
+    const root = await testEnv.IDENTITY_DB.prepare(
+      `SELECT f.id AS family_id, t.id AS token_id
+       FROM platform_oauth_refresh_family AS f
+       JOIN platform_oauth_refresh_token AS t
+         ON t.family_id = f.id AND t.sequence = 0
+       WHERE f.installation_id = ?`,
+    )
+      .bind(issued.installationId)
+      .first<{ family_id: string; token_id: string }>();
+    expect(root).toBeTruthy();
     let currentReads = 0;
     let releaseReads!: () => void;
     const readsReady = new Promise<void>((resolve) => {
       releaseReads = resolve;
     });
     const afterRead = async () => {
-      currentReads += 1;
-      if (currentReads === 2) releaseReads();
-      await readsReady;
-    };
-    const authOptions = {
-      oauthPlatform: true,
-      oauthGrantTypes: ["authorization_code", "refresh_token"] as [
-        "authorization_code",
-        "refresh_token",
-      ],
-      oauthScopes: ["resource:read", "offline_access"],
+      if (currentReads < 2) {
+        currentReads += 1;
+        if (currentReads === 2) releaseReads();
+        await readsReady;
+      }
     };
     const request = () =>
       new Request("http://localhost/api/auth/oauth2/token", {
@@ -1579,59 +1728,66 @@ describe("T07 production OAuth refresh lineage", () => {
           resource: service.audience,
         }),
       });
-    const first = prepareOAuthRefresh(
-      interleavedRefreshDatabase(
-        testEnv.IDENTITY_DB.withSession("first-primary"),
-        afterRead,
-      ),
-      createAuth(testEnv, authOptions),
-      request(),
-    );
-    const second = prepareOAuthRefresh(
-      interleavedRefreshDatabase(
-        testEnv.IDENTITY_DB.withSession("first-primary"),
-        afterRead,
-      ),
-      createAuth(testEnv, authOptions),
-      request(),
-    );
-    const [firstResult, secondResult] = await Promise.all([first, second]);
+    const raceEnv = workerRefreshRaceEnv(afterRead);
+    const [firstResponse, secondResponse] = await Promise.all([
+      platformWorker.fetch(request(), raceEnv),
+      platformWorker.fetch(request(), raceEnv),
+    ]);
     expect(currentReads).toBe(2);
-    const preparations = [firstResult, secondResult];
+    const responses = [firstResponse, secondResponse];
     expect(
-      preparations.filter((result) => result.kind === "refresh").length,
-    ).toBe(1);
+      responses.filter((response) => response.status === 200),
+    ).toHaveLength(1);
     expect(
-      preparations.filter(
-        (result) =>
-          result.kind === "response" && result.response.status === 503,
-      ).length,
-    ).toBe(1);
-    const winner = preparations.find(
-      (result): result is Extract<typeof result, { kind: "refresh" }> =>
-        result.kind === "refresh",
+      responses.filter((response) => response.status === 503),
+    ).toHaveLength(1);
+    const winnerResponse = responses.find(
+      (response) => response.status === 200,
     );
-    expect(winner).toBeTruthy();
-    await abandonOAuthRefresh(
-      testEnv.IDENTITY_DB.withSession("first-primary"),
-      winner!,
-      "t07_concurrent_test_cleanup",
-    );
-    const family = await testEnv.IDENTITY_DB.prepare(
-      `SELECT f.state, t.state AS token_state
-       FROM platform_oauth_refresh_family AS f
-       JOIN platform_oauth_refresh_token AS t ON t.id = ? AND t.family_id = f.id
-       WHERE f.id = ?`,
+    const winnerBody = (await winnerResponse!.clone().json()) as {
+      access_token?: string;
+      refresh_token?: string;
+    };
+    expect(winnerBody.access_token).toBeTruthy();
+    expect(winnerBody.refresh_token).toBeTruthy();
+    const loserBody = (await responses
+      .find((response) => response.status === 503)!
+      .clone()
+      .json()) as { access_token?: string; refresh_token?: string };
+    expect(loserBody.access_token).toBeUndefined();
+    expect(loserBody.refresh_token).toBeUndefined();
+    const lineage = await testEnv.IDENTITY_DB.prepare(
+      `SELECT root.state AS root_state,
+              successor.state AS successor_state,
+              successor.predecessor_consumption_nonce
+       FROM platform_oauth_refresh_token AS root
+       JOIN platform_oauth_refresh_token AS successor
+         ON successor.family_id = root.family_id AND successor.sequence = 1
+       WHERE root.id = ? AND root.family_id = ?`,
     )
-      .bind(winner!.tokenId, winner!.familyId)
-      .first<{ state: string; token_state: string }>();
-    expect(family).toEqual({
-      state: "quarantined",
-      token_state: "quarantined",
+      .bind(root!.token_id, root!.family_id)
+      .first<{
+        root_state: string;
+        successor_state: string;
+        predecessor_consumption_nonce: string;
+      }>();
+    expect(lineage).toMatchObject({
+      root_state: "consumed",
+      successor_state: "issued",
     });
+    expect(lineage?.predecessor_consumption_nonce).toBeTruthy();
+    expect(lineage?.predecessor_consumption_nonce).toBe(
+      (
+        await testEnv.IDENTITY_DB.prepare(
+          "SELECT consumption_nonce FROM platform_oauth_refresh_token WHERE id = ?",
+        )
+          .bind(root!.token_id)
+          .first<{ consumption_nonce: string }>()
+      )?.consumption_nonce,
+    );
   });
 
-  it("withholds a mapped successor when authority changes before delivery", async () => {
+  it("withholds a mapped successor when replay wins before delivery", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);
     const service = await registerService(testEnv.IDENTITY_DB, {
       serviceId: `t07-late-authority-service-${suffix}`,
@@ -1698,25 +1854,34 @@ describe("T07 production OAuth refresh lineage", () => {
       request(),
     );
     expect(providerResponse.status).toBe(200);
-    let authorityChanged = false;
+    let replayStatus: number | null = null;
     const completed = await completeOAuthRefresh(
       afterFirstBatchDatabase(
         testEnv.IDENTITY_DB.withSession("first-primary"),
         async () => {
-          authorityChanged = true;
-          const disabled = await testEnv.IDENTITY_DB.prepare(
-            "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
-          )
-            .bind(service.serviceId)
-            .run();
-          expect(disabled.meta.changes).toBe(1);
+          const replay = await SELF.fetch(
+            "http://localhost/api/auth/oauth2/token",
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/x-www-form-urlencoded",
+              },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: client.clientId,
+                refresh_token: issued.refreshToken!,
+                resource: service.audience,
+              }),
+            },
+          );
+          replayStatus = replay.status;
         },
       ),
       providerResponse,
       preparation,
       client.clientId,
     );
-    expect(authorityChanged).toBe(true);
+    expect(replayStatus).toBe(400);
     expect(completed.status).toBe(503);
     expect(
       (await completed.json()) as { access_token?: string },
@@ -1738,13 +1903,8 @@ describe("T07 production OAuth refresh lineage", () => {
     )
       .bind(issued.installationId)
       .first<{ state: string }>();
-    expect(family?.state).toBe("quarantined");
+    expect(family?.state).toBe("revoked");
 
-    await testEnv.IDENTITY_DB.prepare(
-      "UPDATE platform_service SET disabled = 0 WHERE service_id = ?",
-    )
-      .bind(service.serviceId)
-      .run();
     const siblingRefresh = await SELF.fetch(
       "http://localhost/api/auth/oauth2/token",
       {
@@ -2041,6 +2201,89 @@ describe("T07 production OAuth refresh lineage", () => {
       }),
     });
     expect(denied.status).toBe(400);
+  });
+
+  it("rejects authority loss between the joined read and consume CAS", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-read-cas-service-${suffix}`,
+      audience: `https://t07-read-cas-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn();
+    const organization = await organizationId(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-read-cas-client-${suffix}`,
+        redirectUri: `https://t07-read-cas-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    const issued = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    let authorityRead = false;
+    const racedEnv = workerRefreshRaceEnv(async () => {
+      authorityRead = true;
+      const disabled = await testEnv.IDENTITY_DB.prepare(
+        "UPDATE platform_oauth_installation SET active = 0 WHERE id = ?",
+      )
+        .bind(issued.installationId)
+        .run();
+      expect(disabled.meta.changes).toBe(1);
+    });
+    const response = await platformWorker.fetch(
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: issued.refreshToken!,
+          resource: service.audience,
+        }),
+      }),
+      racedEnv,
+    );
+    expect(authorityRead).toBe(true);
+    expect(response.status).toBe(503);
+    const unchanged = await testEnv.IDENTITY_DB.prepare(
+      `SELECT i.active, f.state AS family_state, t.state AS token_state,
+              access.revoked AS access_revoked,
+              refresh.revoked AS refresh_revoked
+       FROM platform_oauth_installation AS i
+       JOIN platform_oauth_refresh_family AS f ON f.installation_id = i.id
+       JOIN platform_oauth_refresh_token AS t
+         ON t.family_id = f.id AND t.sequence = 0
+       JOIN oauthAccessToken AS access ON access.id = t.provider_access_row_id
+       JOIN oauthRefreshToken AS refresh ON refresh.id = t.provider_refresh_row_id
+       WHERE i.id = ?`,
+    )
+      .bind(issued.installationId)
+      .first<{
+        active: number;
+        family_state: string;
+        token_state: string;
+        access_revoked: number | null;
+        refresh_revoked: number | null;
+      }>();
+    expect(unchanged).toEqual({
+      active: 0,
+      family_state: "active",
+      token_state: "issued",
+      access_revoked: null,
+      refresh_revoked: null,
+    });
   });
 
   it("denies refresh after each current-authority change without revoking the issued predecessor", async () => {
