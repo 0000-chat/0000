@@ -206,6 +206,7 @@ test("orders concurrent choosing claims by their ready ticket and UUID", async (
   const { filePath } = await temporaryJar();
   const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
   const goPath = `${filePath}.ticket-go`;
+  const barrierDirectory = `${filePath}.ticket-barriers`;
   const contenders = Array.from({ length: 2 }, (_, index) => {
     const readyPath = `${filePath}.ticket-${index}-ready`;
     const enteredPath = `${filePath}.ticket-${index}-entered`;
@@ -248,6 +249,7 @@ test("orders concurrent choosing claims by their ready ticket and UUID", async (
         T09_COOKIE_GO: goPath,
         T09_COOKIE_ENTERED: entry.enteredPath,
         T09_COOKIE_RELEASE: entry.releasePath,
+        T09_COOKIE_LOCK_BARRIER_DIR: barrierDirectory,
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -260,6 +262,10 @@ test("orders concurrent choosing claims by their ready ticket and UUID", async (
   const children = contenders.map(start);
   await Promise.all(contenders.map(({ readyPath }) => waitForFile(readyPath)));
   await writeFile(goPath, "go");
+  const choosingMarkers = await Promise.all(children.map(({ pid }) => waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${pid}-`) && name.endsWith(".choosing.ready"))));
+  await Promise.all(choosingMarkers.map((marker) => writeFile(join(barrierDirectory, marker.replace(/\.ready$/u, ".go")), "go")));
+  const readyMarkers = await Promise.all(children.map(({ pid }) => waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${pid}-`) && name.endsWith(".ready.ready"))));
+  await Promise.all(readyMarkers.map((marker) => writeFile(join(barrierDirectory, marker.replace(/\.ready$/u, ".go")), "go")));
 
   const firstIndex = await waitForAnyFile(contenders.map(({ enteredPath }) => enteredPath));
   const secondIndex = firstIndex === 0 ? 1 : 0;
@@ -280,8 +286,6 @@ test("waits for a choosing entrant published during ticket selection", async () 
   const barrierDirectory = `${filePath}.barriers`;
   await mkdir(lockDirectory, { mode: 0o700 });
   const entrantOwner = "00000000-0000-4000-8000-000000000000";
-  const entrantClaim = join(lockDirectory, `${process.pid}-${entrantOwner}.claim`);
-  await writeFile(entrantClaim, JSON.stringify({ owner: entrantOwner, pid: process.pid, startedAt: Date.now(), state: "choosing" }), { mode: 0o600 });
 
   const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
   const enteredPath = `${filePath}.entrant-entered`;
@@ -326,6 +330,8 @@ test("waits for a choosing entrant published during ticket selection", async () 
   if (!child.pid) throw new Error("Could not allocate entrant contender process.");
 
   const choosingMarker = await waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${child.pid}-`) && name.endsWith(".choosing.ready"));
+  const entrantClaim = join(lockDirectory, `${process.pid}-${entrantOwner}.claim`);
+  await writeFile(entrantClaim, JSON.stringify({ owner: entrantOwner, pid: process.pid, startedAt: Date.now(), state: "choosing" }), { mode: 0o600 });
   await writeFile(join(barrierDirectory, choosingMarker.replace(/\.ready$/u, ".go")), "go");
   const readyMarker = await waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${child.pid}-`) && name.endsWith(".ready.ready"));
 
@@ -333,10 +339,10 @@ test("waits for a choosing entrant published during ticket selection", async () 
   const replacement = `${entrantClaim}.${entrantOwner}.ready.tmp`;
   writeFileSync(replacement, `${JSON.stringify(readyEntrant)}\n`, { mode: 0o600 });
   renameSync(replacement, entrantClaim);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await writeFile(join(barrierDirectory, readyMarker.replace(/\.ready$/u, ".go")), "go");
+  await waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${child.pid}-`) && name.endsWith(".waiting"));
   expect(existsSync(enteredPath)).toBe(false);
   unlinkSync(entrantClaim);
-  await writeFile(join(barrierDirectory, readyMarker.replace(/\.ready$/u, ".go")), "go");
   await waitForFile(enteredPath);
   await writeFile(releasePath, "release");
   await done;

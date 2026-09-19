@@ -118,7 +118,10 @@ Commands and results on this branch:
   dead-owner reclaimers preserving a replacement owner.
   The choosing-entrant case uses the unset-by-default
   `T09_COOKIE_LOCK_BARRIER_DIR` test-only environment barrier at the actual
-  choosing and ready publications.
+  choosing and ready publications, plus a waiting-path observation marker.
+  As a negative proof, temporarily bypassing `waitForDefinedSnapshot` made
+  that test time out waiting for the observation marker; the source was
+  restored before this commit.
 - `T09_PLAYWRIGHT_MODULE=/path/to/@playwright/test/index.mjs bun
   services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the real
   Chromium bridge against the actual Platform Worker/D1 and msg Worker/DO. It

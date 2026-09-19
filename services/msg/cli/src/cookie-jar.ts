@@ -274,12 +274,18 @@ function waitForDefinedSnapshot(lockDirectoryPath: string, own: FileLock): void 
       }
       if (claim.record.state === "choosing") {
         if (removeDeadClaim(claimPath, claim.record)) snapshot.delete(claimPath);
-        else blocked = true;
+        else {
+          signalTestObservation("waiting", own.claimPath);
+          blocked = true;
+        }
         continue;
       }
       if (claimIsBefore(claim.record, own)) {
         if (removeDeadClaim(claimPath, claim.record)) snapshot.delete(claimPath);
-        else blocked = true;
+        else {
+          signalTestObservation("waiting", own.claimPath);
+          blocked = true;
+        }
       } else snapshot.delete(claimPath);
     }
     if (snapshot.size === 0) {
@@ -370,6 +376,13 @@ function waitForTestBarrier(phase: "choosing" | "ready", claimPath: string): voi
   writeFileSync(`${marker}.ready`, "ready");
   const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
   while (!existsSync(`${marker}.go`)) Atomics.wait(waitBuffer, 0, 0, LOCK_POLL_MS);
+}
+
+function signalTestObservation(phase: "waiting", claimPath: string): void {
+  const directory = process.env.T09_COOKIE_LOCK_BARRIER_DIR;
+  if (!directory) return;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(join(directory, `${basename(claimPath)}.${phase}`), "observed");
 }
 
 function processAlive(pid: number): boolean {
