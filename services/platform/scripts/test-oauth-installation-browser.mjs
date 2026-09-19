@@ -43,6 +43,7 @@ const providerIdentity = {
   email: "t07-browser@example.test",
 };
 const operationTimeoutMs = 20_000;
+const cleanupTimeoutMs = 5_000;
 
 async function within(label, operation, timeoutMs = operationTimeoutMs) {
   let timer;
@@ -58,6 +59,17 @@ async function within(label, operation, timeoutMs = operationTimeoutMs) {
     ]);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function cleanupStep(label, action, state) {
+  try {
+    await within(label, Promise.resolve().then(action), cleanupTimeoutMs);
+  } catch (error) {
+    if (!state.failed) {
+      state.failed = true;
+      state.failure = error;
+    }
   }
 }
 
@@ -242,12 +254,17 @@ async function expectStatus(response, expected, label) {
 }
 
 async function pageJson(page, expression, arg) {
-  return page.evaluate(
-    async ({ expression, arg }) => {
-      const operation = new Function("arg", `return (${expression})(arg);`);
-      return await operation(arg);
-    },
-    { expression, arg },
+  return within(
+    "browser page evaluation",
+    Promise.resolve().then(() =>
+      page.evaluate(
+        async ({ expression, arg }) => {
+          const operation = new Function("arg", `return (${expression})(arg);`);
+          return await operation(arg);
+        },
+        { expression, arg },
+      ),
+    ),
   );
 }
 
@@ -484,18 +501,21 @@ async function accountInstallationJson(page, organizationId) {
   );
 }
 
-const platformPersistence = await within(
-  "browser persistence directory",
-  mkdtemp(join(tmpdir(), "platform-t07-browser-")),
-);
-const workerScript = await buildWorkerScript();
-const bridge = await listenBridge();
+let platformPersistence;
+let workerScript;
+let bridge;
 let platform;
 let browser;
 let failed = false;
 let failure;
 
 try {
+  platformPersistence = await within(
+    "browser persistence directory",
+    mkdtemp(join(tmpdir(), "platform-t07-browser-")),
+  );
+  workerScript = await within("worker build", buildWorkerScript());
+  bridge = await listenBridge();
   platform = createRuntime(workerScript, platformPersistence, bridge.baseUrl);
   bridge.setPlatform(platform);
   await within("browser runtime ready", platform.ready);
@@ -506,12 +526,12 @@ try {
   await applyMigrations(database);
   await registerTestService(database, service);
 
-  const browserContext = await within(
+  browser = await within(
     "Chromium launch",
     chromium.launch({ headless: true }),
-  ).then((instance) => instance.newContext());
-  browser = browserContext.browser();
-  const page = await browserContext.newPage();
+  );
+  const browserContext = await within("Chromium context", browser.newContext());
+  const page = await within("Chromium page", browserContext.newPage());
   page.setDefaultTimeout(operationTimeoutMs);
   page.setDefaultNavigationTimeout(operationTimeoutMs);
   const browserErrors = [];
@@ -579,6 +599,10 @@ try {
     );
     const text = await row.innerText();
     assert.match(text, /T07 Browser Harness/);
+    assert.ok(
+      text.includes(`${providerIdentity.name}'s organization`),
+      "organization name is rendered in installation metadata",
+    );
     assert.match(text, /t07-browser-service/);
     assert.match(text, /https:\/\/t07-browser\.0000\.test/);
     assert.match(text, /resource:read/);
@@ -704,6 +728,11 @@ try {
   ]) {
     if (secret) assert.equal(pageContentAfterRevoke.includes(secret), false);
   }
+  assert.equal(
+    pageContentAfterRevoke.includes("client_secret"),
+    false,
+    "reloaded browser account output does not expose client-secret form fields",
+  );
   assert.equal(browserErrors.length, 0, browserErrors.join("\n"));
 
   console.log(
@@ -732,7 +761,7 @@ try {
       },
       reload: "revoked terminal state retained and revoke control absent",
       secrets:
-        "access, refresh and client-secret values absent from account DOM before and after revoke",
+        "access and refresh values absent from account DOM; public client has no client-secret field",
       pageErrors: 0,
     }),
   );
@@ -740,38 +769,26 @@ try {
   failed = true;
   failure = error;
 } finally {
-  try {
-    await browser?.close();
-  } catch (error) {
-    if (!failed) {
-      failed = true;
-      failure = error;
-    }
+  const cleanupState = { failed, failure };
+  if (browser)
+    await cleanupStep("Chromium close", () => browser.close(), cleanupState);
+  if (platform)
+    await cleanupStep(
+      "browser runtime dispose",
+      () => platform.dispose(),
+      cleanupState,
+    );
+  if (bridge)
+    await cleanupStep("HTTP bridge close", () => bridge.close(), cleanupState);
+  if (platformPersistence) {
+    await cleanupStep(
+      "browser persistence cleanup",
+      () => rm(platformPersistence, { force: true, recursive: true }),
+      cleanupState,
+    );
   }
-  try {
-    await platform?.dispose();
-  } catch (error) {
-    if (!failed) {
-      failed = true;
-      failure = error;
-    }
-  }
-  try {
-    await bridge.close();
-  } catch (error) {
-    if (!failed) {
-      failed = true;
-      failure = error;
-    }
-  }
-  try {
-    await rm(platformPersistence, { force: true, recursive: true });
-  } catch (error) {
-    if (!failed) {
-      failed = true;
-      failure = error;
-    }
-  }
+  failed = cleanupState.failed;
+  failure = cleanupState.failure;
 }
 
 if (failed) throw failure;

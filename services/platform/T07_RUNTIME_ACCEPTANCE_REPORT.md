@@ -31,7 +31,10 @@ The emitted result recorded these assertions:
 
 - The target family and first refresh row start `active`/`issued`, become
   durable `pending`/`pending` after the failed refresh, and remain the same
-  family and state after runtime recreation.
+  family and state after runtime recreation. The temporary failure triggers
+  are dropped before the trigger-free pending retry and runtime recreation;
+  both retries compare the exact family ID, pending token ID, consumption
+  nonce, provider-row bindings/statuses, and refresh lineage.
 - Target access authentication is denied and target refresh remains denied
   before and after recreation.
 - The independent sibling remains authenticated after the target failure and
@@ -58,8 +61,10 @@ Chromium signs in through the real social start and callback routes, retains a
 real browser cookie session, creates two OAuth installations through browser
 navigation and consent forms, and loads the account page. The probe checks
 that the rendered rows expose client name, organization, service, audience,
-capability, and active state without exposing access tokens, refresh tokens,
-or client-secret fields. It then clicks the actual
+capability, and active state without exposing access or refresh token values.
+The public client is provisioned without a client-secret field, and the probe
+checks that no `client_secret` field appears in the account output. It then
+clicks the actual
 `button[data-revoke-oauth-installation]` control for the target installation.
 
 The emitted result recorded these assertions:
@@ -72,8 +77,10 @@ The emitted result recorded these assertions:
   the target returns HTTP `400` with `invalid_grant`.
 - After a full account-page reload, the target remains revoked and has no
   revoke control.
-- Access, refresh, and client-secret values are absent from the account DOM
-  before and after revocation, and Chromium reports zero page errors.
+- Access and refresh values are absent from the account DOM before and after
+  revocation, the public client has no client-secret field, and Chromium
+  reports zero page errors. A confidential-client secret is outside this
+  bounded browser probe.
 
 ## Boundaries
 
@@ -83,7 +90,10 @@ The GitHub adapter returns synthetic provider responses only. The restart
 failure is deliberately injected with temporary D1 triggers so the probe can
 exercise production consume, provider-write, quarantine, and recovery paths
 deterministically. Temporary persistence is removed in `finally` cleanup, and
-all credentials and provider values are synthetic.
+all credentials and provider values are synthetic. Persistence allocation and
+Worker bundling are inside the cleanup scope; page evaluation and each runtime,
+browser, bridge, and persistence cleanup step has a finite deadline so one
+stalled cleanup does not suppress the later cleanup steps.
 
 The owned files are `scripts/test-oauth-refresh-restart.mjs`,
 `scripts/test-oauth-installation-browser.mjs`, and this report. The checkpoint

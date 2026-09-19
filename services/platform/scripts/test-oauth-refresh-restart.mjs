@@ -34,6 +34,7 @@ const providerIdentity = {
 };
 
 const operationTimeoutMs = 20_000;
+const cleanupTimeoutMs = 5_000;
 
 async function within(label, operation, timeoutMs = operationTimeoutMs) {
   let timer;
@@ -49,6 +50,17 @@ async function within(label, operation, timeoutMs = operationTimeoutMs) {
     ]);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function cleanupStep(label, action, state) {
+  try {
+    await within(label, Promise.resolve().then(action), cleanupTimeoutMs);
+  } catch (error) {
+    if (!state.failed) {
+      state.failed = true;
+      state.failure = error;
+    }
   }
 }
 
@@ -387,7 +399,11 @@ async function familyState(database, installation) {
       .prepare(
         `SELECT f.id AS family_id, f.state AS family_state,
                 f.pending_token_id, f.pending_consumption_nonce,
-                i.active AS installation_active, i.revoked_at,
+                f.revoked_at AS family_revoked_at,
+                f.revoked_reason AS family_revoked_reason,
+                f.updated_at AS family_updated_at,
+                i.id AS installation_id, i.active AS installation_active,
+                i.revoked_at,
                 COUNT(t.id) AS token_count,
                 MIN(t.state) AS first_token_state,
                 MAX(t.sequence) AS last_sequence
@@ -401,7 +417,68 @@ async function familyState(database, installation) {
       .first(),
   );
   assert.ok(row?.family_id, `refresh family exists for ${installation}`);
-  return row;
+  const lineage = await within(
+    "refresh lineage lookup",
+    database
+      .prepare(
+        `SELECT t.id, t.provider_refresh_row_id, t.provider_access_row_id,
+                t.predecessor_id, t.predecessor_consumption_nonce,
+                t.sequence, t.state, t.consumption_nonce, t.consumed_at,
+                t.replayed_at, t.revoked_at, t.revoked_reason,
+                t.created_at, t.updated_at,
+                provider_refresh.revoked AS provider_refresh_revoked,
+                provider_refresh.rotatedAt AS provider_refresh_rotated_at,
+                provider_access.revoked AS provider_access_revoked
+         FROM platform_oauth_refresh_token AS t
+         LEFT JOIN oauthRefreshToken AS provider_refresh
+           ON provider_refresh.id = t.provider_refresh_row_id
+         LEFT JOIN oauthAccessToken AS provider_access
+           ON provider_access.id = t.provider_access_row_id
+         WHERE t.family_id = ?
+         ORDER BY t.sequence ASC`,
+      )
+      .bind(row.family_id)
+      .all(),
+  );
+  return { ...row, lineage: lineage.results };
+}
+
+function pendingLineageSnapshot(row) {
+  return {
+    installation_id: row.installation_id,
+    family_id: row.family_id,
+    family_state: row.family_state,
+    pending_token_id: row.pending_token_id,
+    pending_consumption_nonce: row.pending_consumption_nonce,
+    family_revoked_at: row.family_revoked_at,
+    family_revoked_reason: row.family_revoked_reason,
+    family_updated_at: row.family_updated_at,
+    installation_active: Number(row.installation_active),
+    installation_revoked_at: row.revoked_at,
+    token_count: Number(row.token_count),
+    first_token_state: row.first_token_state,
+    last_sequence:
+      row.last_sequence === null ? null : Number(row.last_sequence),
+    lineage: row.lineage.map((token) => ({
+      id: token.id,
+      provider_refresh_row_id: token.provider_refresh_row_id,
+      provider_access_row_id: token.provider_access_row_id,
+      predecessor_id: token.predecessor_id,
+      predecessor_consumption_nonce: token.predecessor_consumption_nonce,
+      sequence: Number(token.sequence),
+      state: token.state,
+      consumption_nonce: token.consumption_nonce,
+      consumed_at: token.consumed_at,
+      replayed_at: token.replayed_at,
+      revoked_at: token.revoked_at,
+      revoked_reason: token.revoked_reason,
+      created_at: token.created_at,
+      updated_at: token.updated_at,
+      provider_refresh_revoked: token.provider_refresh_revoked,
+      provider_refresh_rotated_at: token.provider_refresh_rotated_at,
+      provider_access_revoked: token.provider_access_revoked,
+    })),
+  };
 }
 
 async function addFailureTriggers(database, installation, familyId) {
@@ -429,6 +506,30 @@ async function addFailureTriggers(database, installation, familyId) {
       )
       .run(),
   );
+}
+
+async function dropFailureTriggers(database) {
+  await within(
+    "drop failure triggers",
+    database.batch([
+      database.prepare(
+        "DROP TRIGGER IF EXISTS t07_probe_provider_refresh_failure",
+      ),
+      database.prepare("DROP TRIGGER IF EXISTS t07_probe_quarantine_failure"),
+    ]),
+  );
+  const remaining = await within(
+    "verify failure triggers dropped",
+    database
+      .prepare(
+        `SELECT COUNT(*) AS trigger_count
+         FROM sqlite_master
+         WHERE type = 'trigger'
+           AND name IN ('t07_probe_provider_refresh_failure', 't07_probe_quarantine_failure')`,
+      )
+      .first(),
+  );
+  assert.equal(Number(remaining?.trigger_count), 0);
 }
 
 function sqlString(value) {
@@ -492,17 +593,19 @@ async function logout(fetch, cookie) {
   assert.equal(await session.json(), null, "browser session is revoked");
 }
 
-const persistenceDirectory = await within(
-  "persistence directory",
-  mkdtemp(join(tmpdir(), "platform-t07-restart-")),
-);
-const workerScript = await buildWorkerScript();
+let persistenceDirectory;
+let workerScript;
 let first;
 let second;
 let failed = false;
 let failure;
 
 try {
+  persistenceDirectory = await within(
+    "persistence directory",
+    mkdtemp(join(tmpdir(), "platform-t07-restart-")),
+  );
+  workerScript = await within("worker build", buildWorkerScript());
   first = createRuntime(workerScript, persistenceDirectory);
   await within("first runtime ready", first.ready);
   const firstFetch = (input, init) => first.dispatchFetch(input, init);
@@ -614,6 +717,9 @@ try {
     "invalid_credential",
     "pending target access is denied",
   );
+  const pendingLineageBeforeRetry =
+    pendingLineageSnapshot(pendingBeforeRestart);
+  await dropFailureTriggers(firstDatabase);
   const pendingRefresh = await refresh(firstFetch, {
     ...target,
     client,
@@ -623,6 +729,15 @@ try {
     pendingRefresh.response,
     503,
     "pending target refresh is denied",
+  );
+  const pendingAfterRetry = await familyState(
+    firstDatabase,
+    targetInstallation,
+  );
+  assert.deepEqual(
+    pendingLineageSnapshot(pendingAfterRetry),
+    pendingLineageBeforeRetry,
+    "trigger-free pending retry preserves provider and refresh lineage",
   );
   assert.equal(
     (await beforeClient.authenticate(sibling.accessToken)).status,
@@ -658,6 +773,11 @@ try {
   assert.equal(pendingAfterRestart.family_id, persisted.targetFamilyId);
   assert.equal(pendingAfterRestart.family_state, "pending");
   assert.equal(pendingAfterRestart.first_token_state, "pending");
+  assert.deepEqual(
+    pendingLineageSnapshot(pendingAfterRestart),
+    pendingLineageBeforeRetry,
+    "runtime recreation preserves exact pending provider and refresh lineage",
+  );
   assert.equal(
     (await afterClient.authenticate(persisted.target.accessToken)).status,
     "invalid_credential",
@@ -672,6 +792,15 @@ try {
     pendingAfterRestartRefresh.response,
     503,
     "durable pending target refresh remains denied after restart",
+  );
+  const pendingAfterRestartRetry = await familyState(
+    secondDatabase,
+    persisted.targetInstallation,
+  );
+  assert.deepEqual(
+    pendingLineageSnapshot(pendingAfterRestartRetry),
+    pendingLineageBeforeRetry,
+    "trigger-free post-restart retry preserves provider and refresh lineage",
   );
   assert.equal(
     (await afterClient.authenticate(persisted.sibling.accessToken)).status,
@@ -764,6 +893,11 @@ try {
     "pending",
     "reauthorization does not resurrect old pending family",
   );
+  assert.deepEqual(
+    pendingLineageSnapshot(oldFamilyAfterReauth),
+    pendingLineageBeforeRetry,
+    "reauthorization leaves the old pending provider and refresh lineage unchanged",
+  );
 
   console.log(
     JSON.stringify({
@@ -808,24 +942,23 @@ try {
   failed = true;
   failure = error;
 } finally {
-  for (const runtime of [second, first]) {
-    try {
-      await runtime?.dispose();
-    } catch (error) {
-      if (!failed) {
-        failed = true;
-        failure = error;
-      }
-    }
+  const cleanupState = { failed, failure };
+  for (const [label, runtime] of [
+    ["second runtime dispose", second],
+    ["first runtime dispose", first],
+  ]) {
+    if (runtime)
+      await cleanupStep(label, () => runtime.dispose(), cleanupState);
   }
-  try {
-    await rm(persistenceDirectory, { force: true, recursive: true });
-  } catch (error) {
-    if (!failed) {
-      failed = true;
-      failure = error;
-    }
+  if (persistenceDirectory) {
+    await cleanupStep(
+      "persistence cleanup",
+      () => rm(persistenceDirectory, { force: true, recursive: true }),
+      cleanupState,
+    );
   }
+  failed = cleanupState.failed;
+  failure = cleanupState.failure;
 }
 
 if (failed) throw failure;
