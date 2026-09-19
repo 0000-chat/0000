@@ -28,6 +28,7 @@ export default defineConfig(async () => {
             PLATFORM_BASE_URL: "http://localhost",
             PLATFORM_DEPLOYMENT_MODE: "self-hosted",
             PLATFORM_SIGNUP_POLICY: "open",
+            PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
             ...testSecrets,
             TEST_MIGRATIONS: identityMigrations,
             TEST_FIXTURE_MIGRATIONS: fixtureMigrations,

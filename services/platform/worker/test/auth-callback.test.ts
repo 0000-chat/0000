@@ -522,7 +522,10 @@ describe("Platform shared-auth T01 runtime trace", () => {
         origin: testEnv.PLATFORM_BASE_URL,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ credentialId: issued.credentialId }),
+      body: JSON.stringify({
+        credentialId: issued.credentialId,
+        organizationId: owner.organizationId,
+      }),
     });
     expect(revoke.status).toBe(200);
     expect(

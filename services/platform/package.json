@@ -10,6 +10,7 @@
     "generate:migration": "bun scripts/generate-migration.ts",
     "test": "vitest run --config vitest.worker.config.ts && bun run test:restart",
     "test:restart": "bun scripts/test-restart.mjs",
+    "provision:service": "bun scripts/provision-service.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

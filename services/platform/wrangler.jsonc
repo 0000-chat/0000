@@ -18,6 +18,7 @@
     "PLATFORM_OPERATOR_USER_ID": "",
     "PLATFORM_DEPLOYMENT_MODE": "self-hosted",
     "PLATFORM_SIGNUP_POLICY": "open",
+    "PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS": "90",
     "GOOGLE_CLIENT_ID": "platform-google-client",
     "GITHUB_CLIENT_ID": "platform-t01-probe"
   },

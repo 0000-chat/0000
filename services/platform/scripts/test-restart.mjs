@@ -50,6 +50,7 @@ function createRuntime(script, persistenceDirectory) {
     bindings: {
       PLATFORM_BASE_URL: platformBaseUrl,
       PLATFORM_AUTHORITY_ID: authority,
+      PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
       GITHUB_CLIENT_ID: "platform-t01-probe",
       GITHUB_CLIENT_SECRET: "local-probe-only",
       BETTER_AUTH_SECRET: "local-probe-secret-not-for-deployment",

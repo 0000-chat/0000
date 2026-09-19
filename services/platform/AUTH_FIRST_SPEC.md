@@ -1,7 +1,8 @@
 # Platform authentication MVP
 
 Date: 2026-09-19. Status: agreed MVP design; T01/T02/T03 reviewed and verified
-on the aggregate; full MVP not accepted.
+on the aggregate; T04 implementation has bounded local Worker/D1 evidence on
+its isolated branch; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -10,8 +11,10 @@ Better Auth version and Workers/D1 runtime. [T01_RUNTIME_REPORT.md](T01_RUNTIME_
 records the T01 investigation; [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md)
 records local evidence for the initial account slice. [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md)
 records the organization and lifecycle slice, reviewed and verified on the
-aggregate at `c51d285`. The evidence does not complete the design's acceptance gates or
-establish production authentication.
+aggregate at `c51d285`. [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
+records the bounded human credential, service registration and two-audience
+fixture evidence. The evidence does not complete the design's acceptance gates
+or establish production authentication.
 
 ## MVP outcome and deployment
 
@@ -297,7 +300,10 @@ alone:
   rotation races remain unproven.
 - The versioned principal, verification route, service registration fixture,
   service-verifier bootstrap and guest-grant exchange are candidate T01
-  contracts. Better Auth encrypts stored Google/GitHub access and refresh
+  contracts. T04 now exercises local trusted service registration, human
+  credential lifecycle and two exact service audiences through the shared
+  client and Worker/D1 fixture; [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
+  records the evidence and its local-only limits. Better Auth encrypts stored Google/GitHub access and refresh
   tokens. The pinned callback assigns `idToken` directly, and T02's test
   asserts only that the stored Google access token differs from its synthetic
   raw value. OAuth server access tokens are configured as opaque and hashed,
@@ -311,6 +317,8 @@ T02 login, account and signup-policy behavior is reviewed and verified on the
 aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. T03
 organization, invitation and operator behavior and review fixes are integrated
 and independently verified at `c51d285` with real Worker/D1 route tests and
-Chromium organization flows. The full Platform authentication MVP remains
-unimplemented until every acceptance gate passes. Each report limits its claims
-to the named flows and fixtures.
+Chromium organization flows. T04's local credential and registration evidence
+does not establish deployed provisioning, live provider behavior or consumer
+adoption. The full Platform authentication MVP remains unimplemented until
+every acceptance gate passes. Each report limits its claims to the named flows
+and fixtures.

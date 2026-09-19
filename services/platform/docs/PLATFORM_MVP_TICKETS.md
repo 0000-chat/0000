@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca0e` and `c51d285`; parent Platform and Chromium checks pass on the aggregate. T04 is dispatched to isolated `codex/platform-t04` from acceptance checkpoint `b2e5802`, with a completed parent-owned brief and frozen dependency installation. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
+T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca0e` and `c51d285`; parent Platform and Chromium checks pass on the aggregate. T04 was dispatched from verified `b2e5802` and delivered with bounded Worker/D1, browser and local provisioning evidence in [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md). Native review fixes are confirmed; aggregate verification and the bounded external SQL review remain acceptance gates. The ready-for-agent label does not assert completed dependencies or production adoption. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
 
 ## Existing issue disposition
 
@@ -78,17 +78,17 @@ T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca
 
 ### T04. Register a consumer and use a scoped human API credential
 
-**Readiness:** Dispatched from verified `b2e5802`; T01/T02 dependencies and T03 explicit-organization authority are integrated. Parent brief preparation and frozen dependency installation passed.
+**Readiness:** T01/T02/T03 dependencies are integrated and verified. T04 delivery and native review fixes are being integrated; aggregate checks and the bounded external review must finish before accepting this slice or dispatching dependents.
 
 **Blocked by (contract):** T01 principal, authority, audience, error and service-verifier contract; T02 supplies the human. This ticket defines the bearer source: a human issues a scoped opaque API credential in the Platform account UI.
 
-**Change:** Register one resource fixture and a narrowly scoped service verifier; use shared client/middleware for a live protected request. Include API credential one-time display, 90-day default/configurable expiry, rotation and revocation.
+**Change:** Register resource fixtures and narrowly scoped service verifiers with trusted local tooling; use the shared client/middleware for live protected requests across two exact audiences. Include API credential one-time display, 90-day default/configurable expiry, rotation, revocation and current catalog checks.
 
 **Existing pattern:** Preserve Communicator's strict human/delegated separation; fixture is not production adoption.
 
-**Open decisions:** Resolved from integrated evidence: opaque audience-specific credentials, current membership, verifier-bound shared-client transport and strict failure categories. T04 implements own-human key lifecycle, finite expiry, atomic rotation and deployment-controlled service registration; its two-audience verification remains pending.
+**Open decisions:** Resolved from integrated evidence: opaque audience-specific credentials, current membership, verifier-bound shared-client transport and strict failure categories. Remote deployment, consumer migration and production operator ownership remain later adoption work.
 
-**Verification:** The issued human credential accesses only its fixture audience/actions; wrong audience, expired or revoked credentials deny at the next check. Verifier credentials cannot issue user credentials or enumerate organizations; outage returns 503.
+**Verification:** [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md) records actual Worker/D1 issue/list/rotate/revoke, two-audience shared-client/resource requests, bounded lifetime, one-time secret display, live catalog narrowing/expansion, verifier rotation/disablement, concurrent rotation and rollback failure probes, Chromium UI evidence and local CLI register/update/rotate/disable/conflict checks. Wrong audience, expired, revoked, removed-membership and suspended/disabled authority deny at the next check; verifier credentials cannot issue user credentials or enumerate organizations; authority outage returns 503.
 
 ### T05. Add organization-owned agents across service audiences
 

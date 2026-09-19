@@ -3,11 +3,14 @@
 Start here when working on Platform. This document defines its scope and
 ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
 agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md),
-[T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md), and
-[T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md) record bounded
+[T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md),
+[T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md), and
+[T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md) record bounded
 Worker/D1 evidence. T01, T02 and T03 are reviewed and verified on the aggregate
-branch. T03 aggregate checks passed at `c51d285`. The full MVP is not implemented or accepted, and
-these reports do not establish production readiness or consumer adoption.
+branch. T03 aggregate checks passed at `c51d285`; T04 implementation evidence
+is recorded on its isolated branch pending parent review and integration. The
+full MVP is not implemented or accepted, and these reports do not establish
+production readiness or consumer adoption.
 
 ## Purpose and deployment
 
@@ -72,10 +75,13 @@ access status and sign-out. T03 adds explicit organization selection and
 creation, organization naming, member roles/removal/leave, copyable invitations
 and verified-email acceptance. A separate operator section can suspend or
 restore organizations and disable or restore human accounts when an existing
-user ID is explicitly configured. See the T03 report for the local evidence and
-its review status. Agent identities, OAuth consent and credential controls
-remain later Platform work. Platform does not own product Spaces, threads,
-agent execution or the full product's agent-control experience.
+user ID is explicitly configured. T04 adds personal opaque API credentials
+scoped to the selected organization and registered service audience, with
+one-time issue display, metadata listing, rotation and revocation. See the T03
+and T04 reports for bounded local evidence and review status. Agent identities
+and OAuth consent remain later Platform work. Platform does not own product
+Spaces, threads, agent execution or the full product's agent-control
+experience.
 
 ## Guest identity and resource ownership
 
@@ -177,6 +183,18 @@ acceptance in the account UI without sending email. Membership, invitation and
 operator lifecycle checks remain in Platform's shared identity boundary; see
 the bounded T03 report for implementation and local test evidence.
 
+Personal API credentials use the positive finite Worker variable
+`PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS`; it defaults to `90` days in
+`wrangler.jsonc`. The account form labels requested lifetimes in days. A
+request may shorten the configured maximum, while omitted duration uses the
+maximum; zero, negative, non-finite or larger values are rejected. An invalid
+server configuration makes credential issuance and rotation unavailable.
+Secrets are shown once and are not stored in browser storage or URLs. Operators
+register trusted resource services with the local deployment tool, for example
+`bun run provision:service -- --local register --service-id service-id --audience https://service.example/mcp --capability resource:read`.
+The tool supports metadata updates, verifier rotation and disablement; use
+`--remote` only when an operator intentionally targets a remote D1 database.
+
 Rate limits for Platform login, credential issuance and guest bootstrap belong
 to Platform. Anonymous operation quotas and enforcement belong to each resource
 service. Managed allowances are configured by their actual Cloud owner and must
@@ -197,13 +215,16 @@ human account slice, plus runnable principal/client contracts in
 `packages/contracts` and `packages/platform-client`. T03 adds organization and
 membership administration, invitation acceptance and explicitly configured
 operator lifecycle controls; its implementation and review fixes are integrated
-and verified at `c51d285`. Local Worker tests exercise Better Auth callbacks, sessions, D1
-persistence, signup policy, profile and organization controls and logout;
-Google/GitHub HTTP responses are simulated at the provider boundary. The
-service and protected-resource checks are fixtures. This is not a deployed
-identity service or a complete shared-auth integration. API credential and
-agent UI, production OAuth installation state, service provisioning and
-consumer adoption remain unimplemented. Database is also a scaffold.
+and verified at `c51d285`. T04 adds bounded personal credential lifecycle UI,
+validated local service registration tooling and a two-audience Worker/D1
+fixture; its exact evidence and limits are in `T04_CREDENTIAL_REPORT.md`.
+Local Worker tests exercise Better Auth callbacks, sessions, D1 persistence,
+signup policy, profile, organization and credential controls; Google/GitHub
+HTTP responses are simulated at the provider boundary. The service and
+protected-resource checks remain fixtures. This is not a deployed identity
+service or a complete shared-auth integration. Agent UI, production OAuth
+installation state, consumer adoption and managed deployment ownership remain
+later work. Database is also a scaffold.
 Communicator and the message service still need to move their authentication
 paths to the shared Platform path while leaving resource ACLs local. No
 apps/0000 implementation was found, so its login and offline-sync integration

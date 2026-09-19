@@ -1,4 +1,5 @@
 import { hashOpaque } from "../../../src/platform-state";
+import { registerService } from "../../../src/service-registration";
 
 export interface TestService {
   serviceId: string;
@@ -12,23 +13,15 @@ export async function registerTestService(
   database: D1Database,
   registration: TestService,
 ): Promise<TestService> {
-  await database
-    .prepare(
-      `INSERT INTO platform_service (service_id, audience, verifier_hash, allowed_capabilities, disabled)
-       VALUES (?, ?, ?, ?, 0)
-       ON CONFLICT(service_id) DO UPDATE SET
-         audience = excluded.audience,
-         verifier_hash = excluded.verifier_hash,
-         allowed_capabilities = excluded.allowed_capabilities,
-         disabled = 0`,
-    )
-    .bind(
-      registration.serviceId,
-      registration.audience,
-      await hashOpaque(registration.verifier),
-      JSON.stringify(registration.allowedCapabilities),
-    )
-    .run();
+  await registerService(
+    database,
+    {
+      serviceId: registration.serviceId,
+      audience: registration.audience,
+      capabilities: registration.allowedCapabilities,
+    },
+    registration.verifier,
+  );
   await database
     .prepare(
       `INSERT INTO platform_service_grant_issuer (credential_hash, service_id, capabilities, disabled)

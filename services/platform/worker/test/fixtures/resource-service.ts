@@ -45,15 +45,19 @@ export async function handleResourceRequest(
   }
   const resource = await config.database
     .prepare(
-      "SELECT id, owner_kind, owner_id FROM fixture_resource WHERE id = ?",
+      "SELECT id, owner_kind, owner_id, audience FROM fixture_resource WHERE id = ?",
     )
     .bind(resourceId)
     .first<{
       id: string;
       owner_kind: "organization" | "guest";
       owner_id: string;
+      audience: string | null;
     }>();
   if (!resource) return Response.json({ error: "not_found" }, { status: 404 });
+  if (resource.audience !== null && resource.audience !== config.audience) {
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }
 
   const principal = authentication.principal;
   const ownsResource =
@@ -83,10 +87,17 @@ export async function attestGuestResource(
   grantId: string;
 } | null> {
   const resource = await config.database
-    .prepare("SELECT owner_kind, owner_id FROM fixture_resource WHERE id = ?")
+    .prepare(
+      "SELECT owner_kind, owner_id, audience FROM fixture_resource WHERE id = ?",
+    )
     .bind(input.resourceId)
-    .first<{ owner_kind: string; owner_id: string }>();
-  if (!resource || resource.owner_kind !== "guest") return null;
+    .first<{ owner_kind: string; owner_id: string; audience: string | null }>();
+  if (
+    !resource ||
+    resource.owner_kind !== "guest" ||
+    (resource.audience !== null && resource.audience !== config.audience)
+  )
+    return null;
 
   const response = await config.fetch(
     new URL("/internal/v1/guest-grants", config.platformBaseUrl),

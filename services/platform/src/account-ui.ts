@@ -41,6 +41,26 @@ export interface OrganizationDetails {
   invitations: AccountInvitation[];
 }
 
+export interface AccountCredentialService {
+  id: string;
+  name: string;
+  audience: string;
+  capabilities: string[];
+}
+
+export interface AccountCredential {
+  id: string;
+  name: string;
+  createdAt: number;
+  audience: string;
+  capabilities: string[];
+  expiresAt: number;
+  revokedAt: number | null;
+  revokedReason: string | null;
+  replacedById: string | null;
+  predecessorId: string | null;
+}
+
 export interface AccountView {
   name: string;
   email: string;
@@ -56,6 +76,10 @@ export interface AccountView {
   selectedOrganization: OrganizationDetails | null;
   invitations: AccountInvitation[];
   isOperator: boolean;
+  credentialOrganizationId: string | null;
+  credentialServices: AccountCredentialService[];
+  credentials: AccountCredential[];
+  credentialMaxLifetimeDays: number | null;
 }
 
 const securityHeaders = {
@@ -264,6 +288,72 @@ export function organizationDetailsMarkup(
   </div>`;
 }
 
+function credentialManagementMarkup(view: AccountView): string {
+  const selected = view.selectedOrganization;
+  const organizationId = view.credentialOrganizationId;
+  const available = Boolean(
+    selected &&
+      organizationId &&
+      selected.id === organizationId &&
+      !selected.suspended &&
+      view.credentialMaxLifetimeDays !== null,
+  );
+  const serviceOptions = view.credentialServices
+    .map(
+      (service, index) =>
+        `<option value="${escapeHtml(service.id)}" data-capabilities="${escapeHtml(service.capabilities.join(","))}"${index === 0 ? " selected" : ""}>${escapeHtml(service.name || service.id)} · ${escapeHtml(service.audience)}</option>`,
+    )
+    .join("");
+  const credentials = view.credentials
+    .map((credential) => {
+      const status = credential.revokedAt
+        ? credential.revokedReason === "rotated"
+          ? "rotated"
+          : "revoked"
+        : credential.expiresAt <= Date.now()
+          ? "expired"
+          : "active";
+      const controls =
+        available && status === "active"
+          ? `<div class="row-actions"><button type="button" class="quiet-button" data-rotate-credential="${escapeHtml(credential.id)}">Rotate</button><button type="button" class="quiet-button" data-revoke-credential="${escapeHtml(credential.id)}">Revoke</button></div>`
+          : "";
+      return `<li class="management-row">
+        <div><strong>${escapeHtml(credential.name)}</strong><span>${escapeHtml(credential.audience)}</span><small>${escapeHtml(credential.capabilities.join(", "))} · expires ${escapeHtml(new Date(credential.expiresAt).toLocaleString())} · ${escapeHtml(status)}</small></div>
+        ${controls}
+      </li>`;
+    })
+    .join("");
+  const limitText =
+    view.credentialMaxLifetimeDays === null
+      ? "Credential issuance is unavailable because PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS is invalid."
+      : `Requested lifetime is in days and can only shorten the server maximum of ${view.credentialMaxLifetimeDays} days. Leave it blank to use that maximum.`;
+  const issueForm =
+    available && view.credentialServices.length > 0
+      ? `<form id="credential-issue-form">
+        <input type="hidden" name="organizationId" value="${escapeHtml(organizationId)}">
+        <label for="credential-name">Credential name</label>
+        <input id="credential-name" name="name" type="text" maxlength="100" required placeholder="Personal automation">
+        <label for="credential-service">Resource service</label>
+        <select id="credential-service" name="serviceId" required>${serviceOptions}</select>
+        <fieldset id="credential-capabilities"><legend>Capabilities</legend><p class="hint">Choose the actions this credential may perform for the selected audience.</p><div data-capability-options></div></fieldset>
+        <label for="credential-lifetime">Lifetime in days <span class="optional">optional</span></label>
+        <input id="credential-lifetime" name="lifetimeDays" type="number" min="0.000001" step="any" placeholder="${escapeHtml(String(view.credentialMaxLifetimeDays))}">
+        <p class="hint">${escapeHtml(limitText)}</p>
+        <button type="submit" class="primary-button">Issue credential</button>
+        <p id="credential-issue-status" class="status" role="status" aria-live="polite"></p>
+      </form>`
+      : `<p class="hint">${escapeHtml(selected?.suspended ? "Credential management is unavailable while this organization is suspended." : selected ? "No registered resource service is currently available." : "Choose an active organization to manage personal credentials.")}</p>`;
+  return `<section class="card" aria-labelledby="credential-heading">
+    <h2 id="credential-heading">Personal API credentials</h2>
+    <p class="hint">These credentials belong only to you and the selected organization. Platform displays each secret once; reload and list views cannot recover it.</p>
+    ${issueForm}
+    <div id="credential-secret" class="secret-panel" hidden><strong>Copy this secret now</strong><code data-secret-value></code><p class="hint">It will not be shown again and is never stored in browser storage or a URL.</p></div>
+    <h3>Issued credentials</h3>
+    <ul class="management-list" id="credential-list">${credentials || `<li class="muted">No personal credentials for this organization.</li>`}</ul>
+    <p id="credential-status" class="status" role="status" aria-live="polite"></p>
+  </section>`;
+}
+
 export function accountPage(view: AccountView): Response {
   const image = safeAvatarUrl(view.image);
   const avatar = image
@@ -352,6 +442,7 @@ export function accountPage(view: AccountView): Response {
         <h3>Default organization receipt</h3>
         ${defaultOrganization}
       </section>
+      ${credentialManagementMarkup(view)}
       <section class="card" aria-labelledby="invitations-heading">
         <h2 id="invitations-heading">Invitations for you</h2>
         <ul class="management-list">${pendingInvitations || `<li class="muted">No current invitations for your verified email.</li>`}</ul>
@@ -417,6 +508,7 @@ button:disabled { cursor: wait; opacity: 0.65; }
 .primary-button { margin-top: 8px; }
 label, .field-label { display: block; margin: 16px 0 7px; color: #465875; font-size: 0.9rem; font-weight: 700; }
 input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #c9d4e4; border-radius: 9px; color: #17233a; background: #fff; }
+select { width: 100%; min-height: 44px; padding: 8px 10px; border: 1px solid #c9d4e4; border-radius: 9px; color: #17233a; background: #fff; }
 input:focus, button:focus-visible, a:focus-visible { outline: 3px solid #91b7f4; outline-offset: 2px; }
 .read-only { margin: 0; color: #17233a; }
 .read-only .field-label { margin-top: 0; }
@@ -440,6 +532,14 @@ h3 { margin: 22px 0 12px; font-size: 1rem; }
 .management-row span, .management-row small, .muted { color: #677895; font-size: 0.87rem; overflow-wrap: anywhere; }
 .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .row-actions select { width: auto; min-height: 38px; }
+.secret-panel { display: grid; gap: 8px; margin-top: 18px; padding: 14px; border: 1px solid #9bc6a8; border-radius: 10px; background: #f0fbf2; color: #1f5930; }
+.secret-panel[hidden] { display: none; }
+.secret-panel code { display: block; overflow-wrap: anywhere; padding: 10px; border-radius: 7px; background: #fff; color: #17233a; user-select: all; }
+fieldset { margin: 16px 0 0; padding: 12px; border: 1px solid #dce4f0; border-radius: 9px; }
+legend { padding: 0 5px; color: #465875; font-size: 0.9rem; font-weight: 700; }
+[data-capability-options] { display: grid; gap: 7px; }
+[data-capability-options] label { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 500; }
+[data-capability-options] input { width: auto; min-height: auto; }
 .invitation-link { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; }
 .invitation-link a { color: #2459a8; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
@@ -561,6 +661,106 @@ async function postAccountJson(path, body) {
   }));
 }
 
+const credentialServiceSelect = document.getElementById("credential-service");
+const capabilityOptions = document.querySelector("[data-capability-options]");
+
+function renderCredentialCapabilities() {
+  if (!(credentialServiceSelect instanceof HTMLSelectElement) || !(capabilityOptions instanceof HTMLElement)) return;
+  const selected = credentialServiceSelect.selectedOptions[0];
+  const capabilities = (selected?.dataset.capabilities || "").split(",").filter(Boolean);
+  capabilityOptions.replaceChildren();
+  for (const capability of capabilities) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "capabilities";
+    input.value = capability;
+    input.checked = true;
+    label.append(input, document.createTextNode(capability));
+    capabilityOptions.append(label);
+  }
+}
+
+credentialServiceSelect?.addEventListener("change", renderCredentialCapabilities);
+renderCredentialCapabilities();
+
+function requestedCredentialLifetime(form) {
+  const raw = String(new FormData(form).get("lifetimeDays") || "").trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) throw new Error("Lifetime must be a positive number of days.");
+  return value;
+}
+
+function showIssuedSecret(data, status) {
+  const panel = document.getElementById("credential-secret");
+  const value = panel?.querySelector("[data-secret-value]");
+  if (!(panel instanceof HTMLElement) || !(value instanceof HTMLElement) || typeof data.credential !== "string") {
+    throw new Error("The credential was issued without a displayable secret.");
+  }
+  value.textContent = data.credential;
+  panel.hidden = false;
+  showMessage(status, "Credential issued. Save the secret now; Platform cannot recover it.");
+}
+
+document.getElementById("credential-issue-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const status = document.getElementById("credential-issue-status");
+  const button = form.querySelector("button[type=submit]");
+  const data = new FormData(form);
+  const capabilities = data.getAll("capabilities").map(String);
+  if (!capabilities.length) {
+    showMessage(status, "Choose at least one capability.");
+    return;
+  }
+  if (button) button.disabled = true;
+  showMessage(status, "Issuing credential…");
+  try {
+    const body = {
+      organizationId: data.get("organizationId"),
+      serviceId: data.get("serviceId"),
+      name: data.get("name"),
+      capabilities,
+      lifetimeDays: requestedCredentialLifetime(form),
+    };
+    const result = await postAccountJson("/api/credentials", body);
+    showIssuedSecret(result, status);
+    form.reset();
+    renderCredentialCapabilities();
+    if (button) button.disabled = false;
+  } catch (error) {
+    if (button) button.disabled = false;
+    showMessage(status, error instanceof Error ? error.message : "Credential could not be issued.");
+  }
+});
+
+const credentialSection = document.querySelector("[aria-labelledby=credential-heading]");
+credentialSection?.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target.closest("button[data-rotate-credential], button[data-revoke-credential]") : null;
+  if (!(target instanceof HTMLButtonElement)) return;
+  const form = document.getElementById("credential-issue-form");
+  const organizationId = form?.querySelector("input[name=organizationId]")?.value || organizationSelect?.value || "";
+  const credentialId = target.dataset.rotateCredential || target.dataset.revokeCredential;
+  if (!credentialId || !organizationId) return;
+  const status = document.getElementById("credential-status");
+  target.disabled = true;
+  try {
+    if (target.dataset.rotateCredential) {
+      const body = { organizationId, credentialId, lifetimeDays: form ? requestedCredentialLifetime(form) : undefined };
+      const result = await postAccountJson("/api/credentials/rotate", body);
+      showIssuedSecret(result, status);
+      showMessage(status, "Credential rotated. Save the new secret now; the previous secret is retired.");
+    } else {
+      await postAccountJson("/api/credentials/revoke", { organizationId, credentialId });
+      window.location.reload();
+    }
+  } catch (error) {
+    target.disabled = false;
+    showMessage(status, error instanceof Error ? error.message : "Credential change could not be completed.");
+  }
+});
+
 let organizationDetailsGeneration = 0;
 
 async function loadOrganizationDetails(organizationId) {
@@ -594,8 +794,20 @@ async function loadOrganizationDetails(organizationId) {
 }
 
 const organizationSelect = document.getElementById("organization-select");
-organizationSelect?.addEventListener("change", async () => {
-  await loadOrganizationDetails(organizationSelect.value);
+organizationSelect?.addEventListener("change", () => {
+  const organizationId = organizationSelect.value;
+  const secretPanel = document.getElementById("credential-secret");
+  const secretValue = secretPanel?.querySelector("[data-secret-value]");
+  if (secretPanel instanceof HTMLElement) secretPanel.hidden = true;
+  if (secretValue instanceof HTMLElement) secretValue.textContent = "";
+  document
+    .querySelectorAll("#credential-issue-form input, #credential-issue-form select, #credential-issue-form button, [data-rotate-credential], [data-revoke-credential]")
+    .forEach((control) => {
+      if (control instanceof HTMLButtonElement || control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+        control.disabled = true;
+      }
+    });
+  window.location.assign(accountLocation(organizationId));
 });
 
 const organizationDetails = document.getElementById("organization-details");

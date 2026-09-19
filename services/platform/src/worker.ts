@@ -10,14 +10,26 @@ import {
   safeAvatarUrl,
   type AccountInvitation,
   type AccountOrganization,
+  type AccountCredential,
+  type AccountCredentialService,
   type OrganizationDetails,
 } from "./account-ui";
 import {
+  CredentialRotationConflict,
   ensureDefaultOrganization,
   hashOpaque,
+  listActiveServices,
+  listHumanCredentials,
   issueHumanCredential,
   opaqueSecret,
   parseStringArray,
+  resolveCredentialExpiry,
+  revokeHumanCredential,
+  rotateHumanCredential,
+  parseConfiguredCredentialLifetimeDays,
+  validCapabilities,
+  validServiceAudience,
+  validServiceId,
   type ServiceRegistration,
 } from "./platform-state";
 import {
@@ -297,6 +309,19 @@ function validOrganizationName(value: unknown): value is string {
 }
 
 function validOrganizationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+function validCredentialName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= 100 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function validCredentialId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256;
 }
 
@@ -1057,6 +1082,38 @@ async function accountRoute(
         };
       }
     }
+    const configuredCredentialLifetimeDays =
+      parseConfiguredCredentialLifetimeDays(
+        env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+      );
+    let credentialOrganizationId: string | null = null;
+    let credentialServices: AccountCredentialService[] = [];
+    let credentials: AccountCredential[] = [];
+    if (selectedOrganization && configuredCredentialLifetimeDays !== null) {
+      const currentAuthority = await getCurrentOrganizationAuthority(
+        database,
+        current.user.id,
+        selectedOrganization.organizationId,
+      );
+      if (currentAuthority) {
+        const [services, listedCredentials] = await Promise.all([
+          listActiveServices(database),
+          listHumanCredentials(database, {
+            userId: current.user.id,
+            organizationId: currentAuthority.organizationId,
+            membershipId: currentAuthority.membershipId,
+          }),
+        ]);
+        credentialOrganizationId = currentAuthority.organizationId;
+        credentialServices = services.map((service) => ({
+          id: service.serviceId,
+          name: service.displayName || service.serviceId,
+          audience: service.audience,
+          capabilities: service.allowedCapabilities,
+        }));
+        credentials = listedCredentials;
+      }
+    }
     const accountOrganizations: AccountOrganization[] = organizations.map(
       (entry) => ({
         id: entry.organizationId,
@@ -1080,6 +1137,10 @@ async function accountRoute(
       selectedOrganization: selectedDetails,
       invitations: accountInvitations,
       isOperator: isOperator(env, current.user.id),
+      credentialOrganizationId,
+      credentialServices,
+      credentials,
+      credentialMaxLifetimeDays: configuredCredentialLifetimeDays,
       providers: linkedAccounts.map((account) => ({
         id: account.id,
         providerId: account.providerId,
@@ -1130,15 +1191,43 @@ function serviceFromRow(row: {
   audience: string;
   verifier_hash: string;
   allowed_capabilities: string;
+  display_name?: string;
 }): ServiceRegistration | null {
   const allowedCapabilities = parseStringArray(row.allowed_capabilities);
-  if (!allowedCapabilities) return null;
+  if (
+    !allowedCapabilities ||
+    !validCapabilities(allowedCapabilities) ||
+    !validServiceId(row.service_id) ||
+    !validServiceAudience(row.audience)
+  )
+    return null;
   return {
     serviceId: row.service_id,
     audience: row.audience,
     verifierHash: row.verifier_hash,
     allowedCapabilities,
+    displayName: row.display_name || undefined,
   };
+}
+
+async function findActiveServiceById(
+  database: D1Database | D1DatabaseSession,
+  serviceId: string,
+): Promise<ServiceRegistration | null> {
+  const row = await database
+    .prepare(
+      `SELECT service_id, audience, verifier_hash, allowed_capabilities, display_name
+       FROM platform_service WHERE service_id = ? AND disabled = 0`,
+    )
+    .bind(serviceId)
+    .first<{
+      service_id: string;
+      audience: string;
+      verifier_hash: string;
+      allowed_capabilities: string;
+      display_name: string;
+    }>();
+  return row ? serviceFromRow(row) : null;
 }
 
 async function findServiceByVerifier(
@@ -1151,7 +1240,7 @@ async function findServiceByVerifier(
   const verifierHash = await hashOpaque(match[1]!);
   const row = await database
     .prepare(
-      "SELECT service_id, audience, verifier_hash, allowed_capabilities FROM platform_service WHERE verifier_hash = ? AND disabled = 0",
+      "SELECT service_id, audience, verifier_hash, allowed_capabilities, display_name FROM platform_service WHERE verifier_hash = ? AND disabled = 0",
     )
     .bind(verifierHash)
     .first<{
@@ -1159,6 +1248,7 @@ async function findServiceByVerifier(
       audience: string;
       verifier_hash: string;
       allowed_capabilities: string;
+      display_name: string;
     }>();
   return row ? serviceFromRow(row) : null;
 }
@@ -1172,7 +1262,7 @@ async function findServiceByGrantIssuer(
   if (!match) return null;
   const row = await database
     .prepare(
-      `SELECT s.service_id, s.audience, s.verifier_hash, s.allowed_capabilities, i.capabilities AS issuer_capabilities
+      `SELECT s.service_id, s.audience, s.verifier_hash, s.allowed_capabilities, s.display_name, i.capabilities AS issuer_capabilities
        FROM platform_service_grant_issuer i
        JOIN platform_service s ON s.service_id = i.service_id
        WHERE i.credential_hash = ? AND i.disabled = 0 AND s.disabled = 0`,
@@ -1183,6 +1273,7 @@ async function findServiceByGrantIssuer(
       audience: string;
       verifier_hash: string;
       allowed_capabilities: string;
+      display_name: string;
       issuer_capabilities: string;
     }>();
   if (!row) return null;
@@ -1248,6 +1339,14 @@ async function authenticateCredential(
   const resourceIds = parseStringArray(row.resource_ids);
   if (!capabilities || !resourceIds)
     return json(503, { status: "authority_unavailable" });
+  if (
+    !validCapabilities(capabilities) ||
+    capabilities.some(
+      (capability) => !service.allowedCapabilities.includes(capability),
+    )
+  ) {
+    return json(401, { status: "invalid_credential" });
+  }
 
   if (row.kind === "human") {
     if (!row.organization_id || !row.membership_id) {
@@ -1440,6 +1539,39 @@ async function platformRoute(
     });
     return json(200, { userId: current.user.id, ...organization });
   }
+  if (url.pathname === "/api/credentials" && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const organizationId = url.searchParams.get("organizationId");
+    if (!validOrganizationId(organizationId)) {
+      return json(400, { error: "invalid_request" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const authority = await getCurrentOrganizationAuthority(
+      database,
+      current.user.id,
+      organizationId,
+    );
+    if (!authority) return json(404, { error: "credential_not_found" });
+    const [credentials, services] = await Promise.all([
+      listHumanCredentials(database, {
+        userId: current.user.id,
+        organizationId: authority.organizationId,
+        membershipId: authority.membershipId,
+      }),
+      listActiveServices(database),
+    ]);
+    return json(200, {
+      organizationId: authority.organizationId,
+      credentials,
+      services: services.map((service) => ({
+        id: service.serviceId,
+        name: service.displayName || service.serviceId,
+        audience: service.audience,
+        capabilities: service.allowedCapabilities,
+      })),
+    });
+  }
   if (url.pathname === "/api/credentials" && request.method === "POST") {
     if (!hasTrustedOrigin(request, env))
       return json(403, { error: "untrusted_origin" });
@@ -1450,16 +1582,36 @@ async function platformRoute(
       !body ||
       typeof body.serviceId !== "string" ||
       !validOrganizationId(body.organizationId) ||
-      !Array.isArray(body.capabilities) ||
-      !body.capabilities.every(
-        (item) => typeof item === "string" && item.length > 0,
-      )
+      !validCapabilities(body.capabilities) ||
+      (body.name !== undefined && !validCredentialName(body.name))
     ) {
       return json(400, {
         error: "invalid_request",
-        message: "Choose a service, organization and one or more capabilities.",
+        message:
+          "Choose a service, organization, name and one or more unique capabilities.",
       });
     }
+    const maxLifetimeDays = parseConfiguredCredentialLifetimeDays(
+      env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+    );
+    if (maxLifetimeDays === null) {
+      return json(503, { error: "credential_configuration_unavailable" });
+    }
+    const hasRequestedLifetime = Object.hasOwn(body, "lifetimeDays");
+    if (
+      hasRequestedLifetime &&
+      (typeof body.lifetimeDays !== "number" ||
+        !Number.isFinite(body.lifetimeDays) ||
+        body.lifetimeDays <= 0 ||
+        body.lifetimeDays > maxLifetimeDays)
+    ) {
+      return json(400, { error: "invalid_lifetime" });
+    }
+    const expiresAt = resolveCredentialExpiry(
+      maxLifetimeDays,
+      body.lifetimeDays,
+    );
+    if (expiresAt === null) return json(503, { error: "invalid_lifetime" });
     const authority = await getCurrentOrganizationAuthority(
       env.IDENTITY_DB.withSession("first-primary"),
       current.user.id,
@@ -1472,17 +1624,10 @@ async function platformRoute(
           "Choose an organization where your current membership is active.",
       });
     }
-    const rawService = await env.IDENTITY_DB.prepare(
-      "SELECT service_id, audience, verifier_hash, allowed_capabilities FROM platform_service WHERE service_id = ? AND disabled = 0",
-    )
-      .bind(body.serviceId)
-      .first<{
-        service_id: string;
-        audience: string;
-        verifier_hash: string;
-        allowed_capabilities: string;
-      }>();
-    const service = rawService && serviceFromRow(rawService);
+    const service = await findActiveServiceById(
+      env.IDENTITY_DB.withSession("first-primary"),
+      body.serviceId,
+    );
     if (!service)
       return json(503, { error: "service_registration_unavailable" });
     try {
@@ -1491,9 +1636,17 @@ async function platformRoute(
         userId: authority.userId,
         organizationId: authority.organizationId,
         membershipId: authority.membershipId,
-        capabilities: body.capabilities as string[],
+        capabilities: body.capabilities,
+        name: body.name,
+        expiresAt,
       });
-      return json(201, { ...issued, audience: service.audience });
+      return json(201, {
+        ...issued,
+        audience: service.audience,
+        name: body.name?.trim() || "Personal API credential",
+        capabilities: body.capabilities,
+        organizationId: authority.organizationId,
+      });
     } catch (error) {
       if (error instanceof RangeError)
         return json(403, {
@@ -1504,32 +1657,129 @@ async function platformRoute(
       throw error;
     }
   }
+  if (url.pathname === "/api/credentials/rotate" && request.method === "POST") {
+    if (!hasTrustedOrigin(request, env))
+      return json(403, { error: "untrusted_origin" });
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validCredentialId(body.credentialId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const maxLifetimeDays = parseConfiguredCredentialLifetimeDays(
+      env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+    );
+    if (maxLifetimeDays === null) {
+      return json(503, { error: "credential_configuration_unavailable" });
+    }
+    const hasRequestedLifetime = Object.hasOwn(body, "lifetimeDays");
+    if (
+      hasRequestedLifetime &&
+      (typeof body.lifetimeDays !== "number" ||
+        !Number.isFinite(body.lifetimeDays) ||
+        body.lifetimeDays <= 0 ||
+        body.lifetimeDays > maxLifetimeDays)
+    ) {
+      return json(400, { error: "invalid_lifetime" });
+    }
+    const expiresAt = resolveCredentialExpiry(
+      maxLifetimeDays,
+      body.lifetimeDays,
+    );
+    if (expiresAt === null) return json(503, { error: "invalid_lifetime" });
+    const authority = await getCurrentOrganizationAuthority(
+      env.IDENTITY_DB.withSession("first-primary"),
+      current.user.id,
+      body.organizationId,
+    );
+    if (!authority) return json(404, { error: "credential_not_found" });
+    const old = await env.IDENTITY_DB.withSession("first-primary")
+      .prepare(
+        `SELECT service.service_id, service.audience, service.verifier_hash,
+                service.allowed_capabilities, service.display_name
+         FROM platform_credential AS credential
+         JOIN platform_service AS service ON service.audience = credential.audience
+         WHERE credential.id = ? AND credential.kind = 'human'
+           AND credential.subject_id = ? AND credential.organization_id = ?
+           AND credential.membership_id = ? AND service.disabled = 0`,
+      )
+      .bind(
+        body.credentialId,
+        current.user.id,
+        authority.organizationId,
+        authority.membershipId,
+      )
+      .first<{
+        service_id: string;
+        audience: string;
+        verifier_hash: string;
+        allowed_capabilities: string;
+        display_name: string;
+      }>();
+    const service = old && serviceFromRow(old);
+    if (!service) return json(404, { error: "credential_not_found" });
+    try {
+      const rotated = await rotateHumanCredential(env.IDENTITY_DB, {
+        service,
+        userId: current.user.id,
+        organizationId: authority.organizationId,
+        membershipId: authority.membershipId,
+        credentialId: body.credentialId,
+        expiresAt,
+      });
+      return json(201, {
+        ...rotated,
+        audience: service.audience,
+        organizationId: authority.organizationId,
+      });
+    } catch (error) {
+      if (error instanceof CredentialRotationConflict) {
+        return json(409, {
+          error: "credential_changed",
+          message:
+            "This credential expired, was revoked, or was rotated already.",
+        });
+      }
+      if (error instanceof RangeError) {
+        return json(400, { error: "invalid_lifetime" });
+      }
+      throw error;
+    }
+  }
   if (url.pathname === "/api/credentials/revoke" && request.method === "POST") {
     if (!hasTrustedOrigin(request, env))
       return json(403, { error: "untrusted_origin" });
     const current = await getSession(request, env);
     if (!current) return json(401, { error: "unauthenticated" });
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return json(400, { error: "invalid_request" });
-    }
+    const body = await requestBody(request);
     if (
       !body ||
-      typeof body !== "object" ||
-      !("credentialId" in body) ||
-      typeof body.credentialId !== "string"
+      !validOrganizationId(body.organizationId) ||
+      !validCredentialId(body.credentialId)
     ) {
       return json(400, { error: "invalid_request" });
     }
-    const result = await env.IDENTITY_DB.prepare(
-      "UPDATE platform_credential SET revoked_at = ? WHERE id = ? AND subject_id = ? AND revoked_at IS NULL",
-    )
-      .bind(Date.now(), body.credentialId, current.user.id)
-      .run();
-    return result.meta.changes === 1
-      ? json(200, { revoked: true })
+    const authority = await getCurrentOrganizationAuthority(
+      env.IDENTITY_DB.withSession("first-primary"),
+      current.user.id,
+      body.organizationId,
+    );
+    if (!authority) return json(404, { error: "credential_not_found" });
+    const revoked = await revokeHumanCredential(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        userId: current.user.id,
+        organizationId: authority.organizationId,
+        membershipId: authority.membershipId,
+        credentialId: body.credentialId,
+      },
+    );
+    return revoked
+      ? json(200, { revoked: true, organizationId: authority.organizationId })
       : json(404, { error: "credential_not_found" });
   }
   if (
